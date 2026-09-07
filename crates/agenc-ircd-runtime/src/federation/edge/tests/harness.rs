@@ -46,6 +46,9 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 mod durability;
 mod journal_retry;
+mod ordinary_batch;
+
+pub(crate) use ordinary_batch::committed_ordinary_acknowledgements;
 mod restart;
 
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
@@ -516,6 +519,7 @@ async fn resync_unencodable_projection_cannot_commit_its_delivery_cursor() -> Te
         home_projection: Some(record),
     });
     edge.queued_events.push_back(events::QueuedEvent::Base {
+        encoded_bytes: 1 << 20,
         header: EventHeader {
             network_id: NETWORK,
             target_server_id: EDGE,

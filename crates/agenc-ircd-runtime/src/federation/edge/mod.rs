@@ -15,6 +15,7 @@ mod history;
 mod join_echo;
 mod journal;
 mod journal_retry;
+mod ordinary_batch;
 pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
@@ -24,6 +25,9 @@ mod sync;
 #[cfg(test)]
 #[path = "tests/harness.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::committed_ordinary_acknowledgements;
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -184,6 +188,8 @@ enum PendingCommit {
         coverage: Option<journal::Version>,
         join_echo: Option<Box<join_echo::JoinEcho>>,
     },
+    /// A complete ordinary prefix shares one exclusive storage receipt.
+    OrdinaryBatch(Box<ordinary_batch::Pending>),
     /// The pending snapshot generation is durable; READY follows.
     SnapshotInstalled,
     /// Matching ACTIVE is authorized only after the durable generation swap.
@@ -453,6 +459,11 @@ impl EdgeFederation {
         self.session_bound(context, generation);
     }
 
+    /// Exact transport identity for companion receipt publication ownership.
+    pub(crate) fn current_companion_link_id(&self) -> Option<LinkId> {
+        self.live.as_ref().map(|live| live.link)
+    }
+
     /// The coordinator's recovery epoch and incarnation on the live link.
     #[must_use]
     pub fn coordinator_link_identity(&self) -> Option<([u8; 16], [u8; 16])> {
@@ -697,6 +708,7 @@ impl EdgeFederation {
         if !journal_retry::observe_link(self, session.link) {
             return;
         }
+        ordinary_batch::release_acknowledgements(self);
         self.live = Some(LiveLink {
             link: session.link,
             handle,
@@ -706,6 +718,15 @@ impl EdgeFederation {
         self.phase = Phase::Origins;
         self.note_phase();
         if !journal_retry::link_reestablished(self, context) {
+            return;
+        }
+        self.begin_link_sync(context);
+    }
+
+    // A replacement transport must not negotiate either profile against the
+    // tentative projection or start another checkpoint ahead of its receipt.
+    fn begin_link_sync(&mut self, context: &mut StateCoreContext) {
+        if matches!(self.commit, Some(PendingCommit::OrdinaryBatch(_))) {
             return;
         }
         if fence::needed(self) {
@@ -722,6 +743,7 @@ impl EdgeFederation {
         if !self.link_is(link) {
             return;
         }
+        ordinary_batch::release_acknowledgements(self);
         self.companion.link_closed(link);
         let _cancelled = context.timers_mut().cancel(
             TimerKind::CompanionProfileDeadline,
@@ -767,6 +789,7 @@ impl EdgeFederation {
 
     /// Closes the link after a violation; the supervisor reconnects.
     fn fail_link(&mut self, context: &mut StateCoreContext, _violation: Violation) {
+        ordinary_batch::release_acknowledgements(self);
         self.counters.violations = self.counters.violations.saturating_add(1);
         if let Some(live) = self.live.as_ref() {
             live.handle.close();
@@ -1227,10 +1250,23 @@ impl EdgeFederation {
         request::dispatch_deferred(self, context, generation)
     }
 
+    /// Drains queued events only after complete authenticated index readback.
+    pub(crate) fn index_refreshed(
+        &mut self,
+        context: &mut StateCoreContext,
+    ) -> Vec<EdgeCompletion> {
+        events::drain_queued(self, context)
+    }
+
     /// Finishes the batch that just committed.
     pub fn batch_applied(&mut self, context: &mut StateCoreContext) -> Vec<EdgeCompletion> {
         if matches!(self.commit.as_ref(), Some(PendingCommit::Journal { staged_after, .. })
             if context.head().storage_commit_sequence <= *staged_after)
+        {
+            return Vec::new();
+        }
+        if matches!(self.commit.as_ref(), Some(PendingCommit::OrdinaryBatch(pending))
+            if context.head().storage_commit_sequence <= pending.staged_after)
         {
             return Vec::new();
         }
@@ -1244,6 +1280,9 @@ impl EdgeFederation {
             }
             Some(PendingCommit::HistoryCleanup(cleanup)) => {
                 history::cleanup_committed(self, cleanup)
+            }
+            Some(PendingCommit::OrdinaryBatch(pending)) => {
+                completions.extend(ordinary_batch::committed(self, context, *pending));
             }
             Some(PendingCommit::Event {
                 header,
@@ -1376,6 +1415,18 @@ impl EdgeFederation {
         context: &mut StateCoreContext,
         error: agenc_ircd_storage::StorageError,
     ) {
+        if matches!(self.commit, Some(PendingCommit::OrdinaryBatch(_))) {
+            // Rejection callbacks drain after the old StateCore batch was
+            // removed. A live exclusive batch belongs to a newer receipt.
+            if context.pending_len() != 0 {
+                return;
+            }
+            let pending = self.commit.take();
+            events::restore_projection(self);
+            drop(pending);
+            self.fail_link(context, Violation::Ceiling);
+            return;
+        }
         if matches!(self.commit, Some(PendingCommit::Journal { .. })) {
             self.commit = None;
             journal_retry::rejected(self, context, error);
@@ -1401,6 +1452,7 @@ impl EdgeFederation {
         }
         if let Some(
             PendingCommit::Event { .. }
+            | PendingCommit::OrdinaryBatch(_)
             | PendingCommit::BarrierPart(_)
             | PendingCommit::BarrierFence
             | PendingCommit::BarrierApplied { .. },

@@ -525,6 +525,12 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
             ):
                 # Paused clocks make connection deadline tests deterministic.
                 expected_declaration["features"] = ["test-util"]
+            if (package_name, table_name, dependency_name) == (
+                "agenc-ircd-runtime", "dependencies", "rustix"
+            ):
+                # Durable snapshot deadlines use the pinned Linux monotonic
+                # clock with a separately verified boot/time-namespace identity.
+                expected_declaration["features"] = ["time"]
             if declaration != expected_declaration:
                 raise WorkspaceError(
                     f"{manifest_path} {table_name}.{dependency_name} must inherit the root pin"
@@ -1122,6 +1128,29 @@ def self_test(root: Path) -> int:
         "unreviewed test clock feature",
         lambda: validate_package_manifest(runtime_manifest_path, extra_clock_feature),
         "dev-dependencies.tokio must inherit the root pin",
+    )
+    cases += 1
+
+    for features in ([], ["time", "thread"]):
+        wrong_recovery_clock = copy.deepcopy(runtime_manifest)
+        wrong_recovery_clock["dependencies"]["rustix"] = {  # type: ignore[index]
+            "workspace": True, "features": features
+        }
+        expect_rejection(
+            "unreviewed recovery clock feature set",
+            lambda: validate_package_manifest(runtime_manifest_path, wrong_recovery_clock),
+            "dependencies.rustix must inherit the root pin",
+        )
+        cases += 1
+    config_manifest_path = root / "crates/agenc-ircd-config/Cargo.toml"
+    unrelated_clock = copy.deepcopy(load_toml(config_manifest_path))
+    unrelated_clock["dependencies"]["rustix"] = {  # type: ignore[index]
+        "workspace": True, "features": ["time"]
+    }
+    expect_rejection(
+        "runtime recovery clock feature on another crate",
+        lambda: validate_package_manifest(config_manifest_path, unrelated_clock),
+        "dependencies.rustix must inherit the root pin",
     )
     cases += 1
 

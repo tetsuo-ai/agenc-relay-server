@@ -118,6 +118,9 @@ pub(super) fn activate_origins(edge: &mut EdgeFederation, context: &mut StateCor
 /// Sends FRESUME from the durable cursor, or asks for a snapshot outright
 /// when the installed epoch is not the coordinator's.
 fn resume(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    if matches!(edge.commit, Some(PendingCommit::OrdinaryBatch(_))) {
+        return;
+    }
     let epoch_matches = edge
         .live
         .as_ref()

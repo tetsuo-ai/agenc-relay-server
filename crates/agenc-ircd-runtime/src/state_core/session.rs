@@ -144,6 +144,7 @@ pub struct SessionTable {
     connections: BTreeMap<ConnectionGeneration, ConnectionEntry>,
     users: BTreeMap<UserId, ConnectionGeneration>,
     ceiling: usize,
+    query_usage: super::query_usage::QueryUsageLedger,
 }
 
 impl SessionTable {
@@ -160,6 +161,7 @@ impl SessionTable {
             connections: BTreeMap::new(),
             users: BTreeMap::new(),
             ceiling,
+            query_usage: super::query_usage::QueryUsageLedger::default(),
         }
     }
 
@@ -478,6 +480,12 @@ impl SessionTable {
     /// Sums input-free queue snapshots for every live client sink.
     #[must_use]
     pub fn queue_snapshot(&self) -> ClientQueueSnapshot {
+        self.query_usage.global(self.base_queue_snapshot(), |user| {
+            self.base_query_usage(user).query_snapshots()
+        })
+    }
+
+    pub(super) fn base_queue_snapshot(&self) -> ClientQueueSnapshot {
         let mut queued_bytes = 0_u64;
         let mut capacity_bytes = 0_u64;
         let mut query_snapshots = 0_u64;
@@ -541,10 +549,40 @@ impl SessionTable {
         &self,
         generation: ConnectionGeneration,
     ) -> Option<ClientQueueSnapshot> {
-        self.connections
+        let entry = self
+            .connections
             .get(&generation)
+            .filter(|entry| !entry.sink_gone)?;
+        let base = entry.queue_snapshot();
+        Some(
+            entry
+                .session
+                .map_or(base, |bound| self.query_usage.session(bound.user_id, base)),
+        )
+    }
+
+    pub(super) fn base_query_usage(&self, user: UserId) -> ClientQueueSnapshot {
+        self.users
+            .get(&user)
+            .and_then(|generation| self.connections.get(generation))
             .filter(|entry| !entry.sink_gone)
             .map(ConnectionEntry::queue_snapshot)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn query_reservations(
+        &self,
+        user: UserId,
+        limits: crate::runtime_config::RuntimeResourceLimits,
+        backing: crate::budget::BackingReservationPort,
+    ) -> super::query_usage::QueryReservationPort<'_> {
+        super::query_usage::QueryReservationPort::new(
+            self,
+            &self.query_usage,
+            user,
+            limits,
+            backing,
+        )
     }
 }
 

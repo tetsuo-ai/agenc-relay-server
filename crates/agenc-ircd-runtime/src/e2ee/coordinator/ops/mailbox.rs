@@ -1,8 +1,11 @@
 //! Mailbox operations: binding and Welcome delivery, fetch pages with fresh
 //! tokens, and idempotent acknowledgement (companion Section 11.6).
 
+use crate::state_core::durable::AccountServiceDurableWrite;
 use agenc_ircd_domain::e2ee::limits::WELCOME_RETENTION_SECONDS;
-use agenc_ircd_domain::e2ee::mailbox::{AckOutcome, MailboxKind, Target};
+use agenc_ircd_domain::e2ee::mailbox::{
+    AckOutcome, FetchSelector, MailboxError, MailboxKind, Target,
+};
 use agenc_ircd_domain::e2ee::projection::{EmptyKind, StoreKind};
 use agenc_ircd_e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT;
 use agenc_ircd_e2ee::object::IrcWireObjectKind;
@@ -14,7 +17,8 @@ use agenc_ircd_e2ee::welcome::{WelcomeTarget, verify_delivered_welcome, verify_s
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_storage::TableId;
 use agenc_ircd_storage::e2ee_records::{
-    DeliveryGrant, MAILBOX_ROW_KIND, MailboxKind as RowKind, MailboxRow,
+    MAILBOX_ROW_KIND, MAILBOX_SEQUENCE_ROW_KIND, MailboxKind as RowKind, MailboxRow,
+    MailboxSequenceRow,
 };
 
 use super::super::CompanionCoordinator;
@@ -26,7 +30,7 @@ fn digest(exec: &Exec<'_>, account: &[u8; 24]) -> Result<[u8; 32], Fail> {
         .map_err(|_| E2eeReplyCode::InvalidFragment.into())
 }
 
-fn row_kind(kind: MailboxKind) -> RowKind {
+pub(super) fn row_kind(kind: MailboxKind) -> RowKind {
     match kind {
         MailboxKind::Application => RowKind::Application,
         MailboxKind::Binding => RowKind::Binding,
@@ -76,6 +80,7 @@ fn deliver(
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
+    outcome.writes.push(sequence_write(target, kind, sequence)?);
     outcome.writes.push(state_row(
         TableId::E2eeState,
         MAILBOX_ROW_KIND,
@@ -104,6 +109,32 @@ fn deliver(
     Ok(outcome)
 }
 
+fn sequence_write(
+    target: Target,
+    kind: MailboxKind,
+    sequence: u64,
+) -> Result<AccountServiceDurableWrite, Fail> {
+    let next = sequence
+        .checked_add(1)
+        .ok_or_else(|| Fail::from(E2eeReplyCode::RateLimited))?;
+    let row = MailboxSequenceRow::new(
+        target.account_digest,
+        target.device_id,
+        row_kind(kind),
+        next,
+    )
+    .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    state_row(
+        TableId::E2eeState,
+        MAILBOX_SEQUENCE_ROW_KIND,
+        row.key()
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        row.encode()
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    )
+    .map_err(Fail::from)
+}
+
 /// `deliver_binding`.
 pub fn deliver_binding(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let (account_bytes, device_id) = exec
@@ -114,6 +145,9 @@ pub fn deliver_binding(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     if object.kind() != IrcWireObjectKind::ConversationBinding {
         return Err(E2eeReplyCode::InvalidFragment.into());
     }
+    let conversation = super::mailbox_recovery::binding_conversation(exec.coordinator, object)?;
+    super::recovery::mutation(exec, &conversation)?;
+    super::binding_delivery::admit(exec, &conversation, object, bytes)?;
     let bytes = bytes.to_vec();
     let target = target_device(exec, &account_bytes, device_id)?;
     deliver(
@@ -140,6 +174,7 @@ pub fn deliver_welcome(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             ))
         })?;
     exec.attached_device()?;
+    super::recovery::mutation(exec, &conversation_id)?;
     let (object, bytes) = exec.payload()?;
     let bytes = bytes.to_vec();
     let target = target_device(exec, &account_bytes, device_id)?;
@@ -192,6 +227,7 @@ pub fn deliver_welcome(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                     &conversation_id,
                 ));
             }
+            super::recovery::mutation(exec, &verified.old_conversation_id)?;
             (MailboxKind::StagedReinit, StoreKind::StagedReinit)
         }
         _ => return Err(E2eeReplyCode::InvalidFragment.into()),
@@ -217,8 +253,7 @@ const fn empty_for(kind: MailboxKind) -> EmptyKind {
     }
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler pages the mailbox, mints one token per item, and stages the token rows as one atomic set
-/// `fetch_mailbox`.
+/// `fetch_mailbox`: every continuation reads its original committed cut.
 pub fn fetch_mailbox(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let (selector, cursor) = exec.params().read(|reader| {
         let selector = IrcFederationMailboxKind::from_value(reader.u8()?)?;
@@ -231,95 +266,85 @@ pub fn fetch_mailbox(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         account_digest,
         device_id,
     };
-    let start = cursor.map(|cursor| {
-        u64::from_be_bytes(
-            cursor
-                .get(24..)
-                .and_then(|tail| tail.try_into().ok())
-                .unwrap_or([0; 8]),
-        )
-    });
-    let mut mailboxes = exec.coordinator.state.mailboxes.clone();
-    let mut tokens = Vec::new();
-    let mut failure = false;
-    let page = {
-        let entropy = &mut *exec.entropy;
-        let mut fresh = || {
-            let mut token = [0; 32];
-            if entropy.fill_exact(&mut token).is_err() {
-                failure = true;
-            }
-            tokens.push(token);
-            token
-        };
-        mailboxes
-            .fetch(
-                target,
-                kind,
-                start,
-                session_generation,
-                exec.now,
-                &mut fresh,
-            )
-            .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?
+    let scope = super::mailbox_snapshot::Scope {
+        user: exec
+            .queries
+            .as_ref()
+            .ok_or(E2eeReplyCode::ObjectNotFound)?
+            .user(),
+        origin: super::super::CompanionOriginKey {
+            home_server_id: exec.origin.home_server_id,
+            server_incarnation: exec.origin.server_incarnation,
+            origin_id: exec.origin.origin_id,
+        },
+        origin_generation: exec.origin.generation,
+        target,
+        kind,
+        session_generation,
     };
-    if failure {
-        return Err(E2eeReplyCode::RateLimited.into());
-    }
-    if page.deliveries.is_empty() {
+    let Some(mut prepared) = super::mailbox_snapshot::prepare(exec, scope, cursor)? else {
         return Ok(Outcome::scalar(ResultBody::Empty(empty_for(kind))));
-    }
+    };
+    let mut mailboxes = exec.coordinator.state.mailboxes.clone();
+    let deliveries = grant_page(exec, &mut mailboxes, scope, &prepared.items()?)?;
     let mut outcome = Outcome::scalar(ResultBody::MailboxPage);
-    outcome.snapshot_token = Some(exec.random()?);
-    outcome.next_cursor = page.next.map(|sequence| {
-        let mut cursor = [0; 32];
-        if let Some(tail) = cursor.get_mut(24..) {
-            tail.copy_from_slice(&sequence.to_be_bytes());
-        }
-        cursor
-    });
-    for delivery in &page.deliveries {
-        let bytes = exec
-            .coordinator
-            .state
-            .objects
-            .get(&delivery.object_id)
-            .cloned()
-            .ok_or_else(|| Fail::from(E2eeReplyCode::ObjectNotFound))?;
+    outcome.snapshot_token = Some(prepared.snapshot_token());
+    outcome.next_cursor = prepared.next_cursor;
+    outcome.mailbox_expiry = prepared
+        .replacement
+        .as_ref()
+        .and_then(|store| store.next_expiry());
+    for (index, delivery) in deliveries.iter().enumerate() {
         outcome.responses.push(ResponseObject {
-            bytes,
+            bytes: prepared.object(index)?.to_vec(),
             delivery_token: Some(delivery.token),
             target_device_id: Some(device_id),
         });
-        outcome.writes.push(state_row(
-            TableId::E2eeState,
-            MAILBOX_ROW_KIND,
-            MailboxRow::token_key(&delivery.token)
-                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
-            MailboxRow::Token {
-                account_digest,
-                device_id,
-                kind: row_kind(kind),
-                sequence: delivery.sequence,
-                object_id: delivery.object_id,
-                session_generation,
-                expires_at: exec.now.saturating_add(
-                    agenc_ircd_domain::e2ee::limits::MAILBOX_DELIVERY_TOKEN_TIMEOUT_SECONDS,
-                ),
-            }
-            .encode()
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        outcome.writes.extend(super::mailbox_grant::writes(
+            exec, scope, delivery, &mailboxes,
         )?);
-        let _ = DeliveryGrant {
-            token: delivery.token,
-            session_generation,
-            expires_at: 0,
-        };
     }
+    let replacement = prepared.replacement.take();
     outcome.effects.push(Box::new(move |companion| {
         companion.mailboxes = mailboxes;
+        if let Some(replacement) = replacement {
+            replacement.publish(companion);
+        }
     }));
     Ok(outcome)
+}
+
+fn grant_page(
+    exec: &mut Exec<'_>,
+    mailboxes: &mut agenc_ircd_domain::e2ee::mailbox::Mailboxes,
+    scope: super::mailbox_snapshot::Scope,
+    items: &[(u64, agenc_ircd_domain::e2ee::mailbox::Item)],
+) -> Result<Vec<agenc_ircd_domain::e2ee::mailbox::Delivery>, Fail> {
+    let mut failed = false;
+    let mut fresh = || {
+        let mut token = [0; 32];
+        if exec.entropy.fill_exact(&mut token).is_err() {
+            failed = true;
+        }
+        token
+    };
+    let deliveries = mailboxes
+        .grant_snapshot(
+            FetchSelector {
+                target: scope.target,
+                kind: scope.kind,
+                cursor: None,
+            },
+            items,
+            scope.session_generation,
+            exec.now,
+            &mut fresh,
+        )
+        .map_err(|error| acknowledgement_failure(error, &[0; 32]))?;
+    if failed {
+        return Err(E2eeReplyCode::RateLimited.into());
+    }
+    Ok(deliveries)
 }
 
 /// `acknowledge_mailbox`.
@@ -333,43 +358,72 @@ pub fn acknowledge_mailbox(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         account_digest,
         device_id,
     };
+    let live = exec
+        .coordinator
+        .state
+        .mailboxes
+        .acknowledgement_item(target, token, object_id, session_generation, exec.now)
+        .map_err(|error| acknowledgement_failure(error, &token))?;
+    if let Some((kind, _, item)) = live
+        && !super::mailbox_recovery::admitted(exec.coordinator, target, kind, item)?
+    {
+        return Err(E2eeReplyCode::RouteInvalid.into());
+    }
     let mut mailboxes = exec.coordinator.state.mailboxes.clone();
     let acked = mailboxes
         .acknowledge(target, token, object_id, session_generation, exec.now)
-        .map_err(|error| match error {
-            agenc_ircd_domain::e2ee::mailbox::MailboxError::ObjectMismatch => {
-                Fail::with(E2eeReplyCode::OperationConflict, &token)
-            }
-            _ => Fail::with(E2eeReplyCode::ObjectNotFound, &token),
-        })?;
+        .map_err(|error| acknowledgement_failure(error, &token))?;
     let mut outcome = Outcome::scalar(ResultBody::MailboxAcked(token, object_id));
     if acked == AckOutcome::Acked {
-        outcome.writes.push(state_row(
-            TableId::E2eeState,
-            MAILBOX_ROW_KIND,
-            MailboxRow::ack_key(&account_digest, &device_id, &token)
-                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
-            MailboxRow::Ack {
-                object_id,
-                acknowledged_at: exec.now,
-                retain_until: exec
-                    .now
-                    .saturating_add(agenc_ircd_domain::e2ee::limits::MAILBOX_ACK_RETENTION_SECONDS),
-            }
-            .encode()
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
-        )?);
-        outcome.writes.push(
-            crate::state_core::durable::AccountServiceDurableWrite::delete(
-                TableId::E2eeState,
-                MailboxRow::token_key(&token)
-                    .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
-            )
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
-        );
+        let (kind, sequence, _) = live.ok_or_else(|| Fail::from(E2eeReplyCode::InvalidFragment))?;
+        outcome.writes =
+            acknowledgement_writes(target, token, object_id, (kind, sequence), exec.now)?;
     }
     outcome.effects.push(Box::new(move |companion| {
         companion.mailboxes = mailboxes;
     }));
     Ok(outcome)
+}
+
+fn acknowledgement_writes(
+    target: Target,
+    token: [u8; 32],
+    object_id: [u8; 32],
+    position: (MailboxKind, u64),
+    now: u64,
+) -> Result<Vec<AccountServiceDurableWrite>, Fail> {
+    let (kind, sequence) = position;
+    let item = MailboxRow::item_key(
+        &target.account_digest,
+        &target.device_id,
+        row_kind(kind),
+        sequence,
+    )
+    .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let token_key =
+        MailboxRow::token_key(&token).map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let ack_key = MailboxRow::ack_key(&target.account_digest, &target.device_id, &token)
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let row = MailboxRow::Ack {
+        object_id,
+        acknowledged_at: now,
+        retain_until: now
+            .saturating_add(agenc_ircd_domain::e2ee::limits::MAILBOX_ACK_RETENTION_SECONDS),
+    }
+    .encode()
+    .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    Ok(vec![
+        state_row(TableId::E2eeState, MAILBOX_ROW_KIND, ack_key, row)?,
+        AccountServiceDurableWrite::delete(TableId::E2eeState, item)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        AccountServiceDurableWrite::delete(TableId::E2eeState, token_key)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    ])
+}
+
+fn acknowledgement_failure(error: MailboxError, token: &[u8; 32]) -> Fail {
+    match error {
+        MailboxError::ObjectMismatch => Fail::with(E2eeReplyCode::OperationConflict, token),
+        _ => Fail::with(E2eeReplyCode::ObjectNotFound, token),
+    }
 }

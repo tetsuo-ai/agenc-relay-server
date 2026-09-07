@@ -30,6 +30,12 @@ pub struct MaintenanceStorageConfig {
     pub backup_directory: PathBuf,
     /// Configured source-backup signing key.
     pub backup_signing_private_key_file: PathBuf,
+    /// Public audit verification history required by source admission.
+    pub audit_trust_manifest_file: PathBuf,
+    /// Dedicated signing key used by stopped maintenance audit mutations.
+    pub audit_signing_private_key_file: PathBuf,
+    /// Operator verification records, including disabled historical identities.
+    pub operators: Vec<crate::OperatorConfig>,
     /// Cache bytes used by the offline redb owner.
     pub redb_cache_bytes: usize,
     /// Fixed free-space reserve.
@@ -58,6 +64,12 @@ impl From<&Config> for MaintenanceStorageConfig {
             backup_trust_manifest_file: storage.backup_trust_manifest_file.clone(),
             backup_directory: storage.backup_dir.clone(),
             backup_signing_private_key_file: storage.backup_signing_private_key_file.clone(),
+            audit_trust_manifest_file: config.moderation.audit_trust_manifest_file.clone(),
+            audit_signing_private_key_file: config
+                .moderation
+                .audit_signing_private_key_file
+                .clone(),
+            operators: config.moderation.operators.clone(),
             redb_cache_bytes: DEFAULT_REDB_CACHE_BYTES,
             fixed_reserve_bytes: storage.disk_reserve_bytes,
             reserve_percent: storage.disk_reserve_percent,

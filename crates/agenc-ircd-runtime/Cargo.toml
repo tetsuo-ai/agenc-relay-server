@@ -22,7 +22,7 @@ agenc-ircd-federation-wire.workspace = true
 agenc-ircd-storage.workspace = true
 agenc-ircd-types.workspace = true
 rustls.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["time"] }
 subtle.workspace = true
 tokio.workspace = true
 zeroize.workspace = true

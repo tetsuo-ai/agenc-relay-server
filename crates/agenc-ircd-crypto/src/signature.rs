@@ -29,6 +29,8 @@ pub enum SignatureDomain {
     AdminCommand,
     /// Server audit-event signature over an event hash.
     AdminAuditEvent,
+    /// Server maintenance-event signature over the dedicated event hash.
+    MaintenanceAuditEvent,
     /// Server audit-checkpoint signature over a checkpoint hash.
     AdminAuditCheckpoint,
     /// Offline database-backup signature over the stream digest.
@@ -109,6 +111,7 @@ impl SignatureDomain {
             Self::AdminSession => b"agenc-chat admin session v1",
             Self::AdminCommand => b"agenc-chat admin command v1",
             Self::AdminAuditEvent => b"agenc-chat admin audit signature v1",
+            Self::MaintenanceAuditEvent => b"agenc-chat maintenance audit signature v1",
             Self::AdminAuditCheckpoint => b"agenc-chat admin audit checkpoint signature v1",
             Self::BackupSignature => b"agenc-chat backup signature v1",
             Self::StorageQualificationReport => b"agenc-chat storage qualification report v1",
@@ -183,6 +186,7 @@ impl SignatureDomain {
             | Self::AdminSession
             | Self::AdminCommand
             | Self::AdminAuditEvent
+            | Self::MaintenanceAuditEvent
             | Self::AdminAuditCheckpoint
             | Self::BackupSignature
             | Self::StorageQualificationReport

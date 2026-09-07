@@ -35,8 +35,10 @@ use agenc_ircd_types::ServerId;
 use crate::federation::LinkId;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
+mod delivery_owner;
 pub mod events;
 pub mod execute;
+mod mailbox_restore;
 pub mod ops;
 pub mod request;
 mod startup;
@@ -141,6 +143,12 @@ pub struct CompanionState {
     pub directory: Directory,
     /// Mailboxes.
     pub mailboxes: Mailboxes,
+    /// Process-local cuts; opaque mailbox cursors never survive reconstruction.
+    pub(crate) mailbox_snapshots: ops::mailbox_snapshot::Store,
+    /// Scheduled expiry ownership is independent of candidate snapshot effects.
+    pub(crate) mailbox_expiry_armed: Option<u64>,
+    /// Monotonic receipt time used before publishing a prepared mailbox cut.
+    pub(crate) mailbox_snapshot_now: u64,
     /// Route entitlements per edge.
     pub entitlements: RouteEntitlements,
     /// Companion origins.
@@ -346,6 +354,7 @@ pub struct CompanionCoordinator {
     pub server_id: ServerId,
     /// The local server name for rendered lines.
     pub server_name: String,
+    delivery_identity: Option<delivery_owner::LocalIdentity>,
     signer: Option<SequencerSigner>,
     key_set: Option<SequencerKeySet>,
     current_credential: Option<agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential>,
@@ -401,6 +410,7 @@ impl CompanionCoordinator {
             network_id,
             server_id,
             server_name,
+            delivery_identity: None,
             signer: None,
             key_set: None,
             global_disk_bytes: 0,
@@ -428,9 +438,9 @@ impl CompanionCoordinator {
     }
 
     /// Rebuilds the companion state from the collected rows.
-    pub fn finish_restore(&mut self) {
+    pub fn finish_restore(&mut self) -> Result<(), CompanionFault> {
         let restore = std::mem::take(&mut self.restore);
-        startup::rebuild(self, restore);
+        startup::rebuild(self, restore)
     }
 
     /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.
@@ -531,6 +541,11 @@ impl CompanionCoordinator {
         host: &dyn sync::CompanionHost,
         entropy: &mut dyn agenc_ircd_types::EntropySource,
     ) -> Result<Vec<sync::Action>, CompanionFault> {
+        let sync = self.peers.entry(peer).or_default();
+        if sync.link.is_some_and(|current| current != link) {
+            return Err(CompanionFault::Protocol);
+        }
+        sync.link = Some(link);
         match frame {
             CompanionFrame::Request {
                 correlation,
@@ -543,10 +558,9 @@ impl CompanionCoordinator {
                 fragment,
             } => self.on_payload_fragment(peer, correlation, object_id, fragment, now_millis),
             CompanionFrame::Ack(position) => {
-                events::on_ack(self, peer, position)?;
-                Ok(Vec::new())
+                events::on_ack(self, link, peer, position, host.trusted_ack_unix_seconds())
             }
-            other => self.on_sync_frame(link, peer, other, now_millis, host, entropy),
+            other => self.on_sync_frame(peer, other, now_millis, host, entropy),
         }
     }
 
@@ -784,16 +798,27 @@ impl CompanionCoordinator {
     }
 
     /// Applies the committed batch's effects and hands back what to send.
-    /// `resync_epoch` is the base resync epoch an activation covers.
+    /// The historical base epoch is part of the captured durable owner.
     pub fn batch_applied(
         &mut self,
         resync_epoch: Option<u64>,
     ) -> Result<Option<sync::Committed>, CompanionFault> {
         match self.pending.take() {
             None => Ok(None),
-            Some(sync::PendingWork::Activate { peer, .. }) => self
-                .activate_committed(peer, resync_epoch)
+            Some(sync::PendingWork::Activate { peer, link, owner }) => self
+                .activate_committed(peer, link, owner, resync_epoch)
                 .map(|lines| Some(sync::Committed::Lines(lines))),
+            Some(sync::PendingWork::Snapshot(publication)) => {
+                Ok(Some(sync::Committed::Snapshot(publication)))
+            }
+            Some(sync::PendingWork::Fetch(publication)) => {
+                Ok(Some(sync::Committed::Fetch(publication)))
+            }
+            Some(sync::PendingWork::Acknowledgement(ack)) => {
+                let peer = ack.peer();
+                ack.apply(self)?;
+                Ok(Some(sync::Committed::Acknowledged(peer)))
+            }
             Some(sync::PendingWork::Request(mut pending)) => {
                 for effect in std::mem::take(&mut pending.effects) {
                     effect(&mut self.state);

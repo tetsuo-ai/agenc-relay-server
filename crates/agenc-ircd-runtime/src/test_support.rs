@@ -5,6 +5,8 @@
 //! with deterministic clocks and scripted entropy. Tests reach the live
 //! `StateCoreContext` through `context_mut`.
 
+mod audit;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -516,6 +518,9 @@ impl StateCoreFixture {
                 || crate::state_core::durable::HeadCounters::from_recovered(recovered),
                 |state| state.context().head(),
             ),
+            self.state
+                .as_ref()
+                .map(|state| state.context().backing_reservations()),
         )?;
         Ok(())
     }
@@ -562,7 +567,13 @@ impl StateCoreFixture {
         else {
             return Err("image commit refused".into());
         };
-        edge.restore(&owner.port(), &keys, companion, retained.advance(&receipt))?;
+        edge.restore(
+            &owner.port(),
+            &keys,
+            companion,
+            retained.advance(&receipt),
+            Some(context.backing_reservations()),
+        )?;
         Ok(())
     }
 
@@ -738,7 +749,8 @@ impl StateCoreFixture {
                 let mut coordinator = federation_coordinator(&identity, peers)?;
                 if let Some(setup) = companion {
                     coordinator.set_companion_profile(Some(setup.profile));
-                    coordinator.install_companion_executor(setup.executor);
+                    coordinator
+                        .install_companion_executor(setup.executor, identity.server_incarnation)?;
                 }
                 Box::new(
                     registration_router(&identity, &opaque, key_state, prefix)?

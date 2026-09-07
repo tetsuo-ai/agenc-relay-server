@@ -2,6 +2,9 @@
 
 //! Disposition votes, sign-once slots, and quorum accounting.
 
+#[path = "finality/reinit_domain.rs"]
+mod reinit_domain;
+
 use std::error::Error;
 
 use super::*;

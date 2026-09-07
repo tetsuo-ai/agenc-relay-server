@@ -59,6 +59,45 @@ fn counter_draws_are_unique_and_exhaustion_stops_admission() {
 }
 
 #[test]
+fn borrowed_continuations_preserve_owned_validation_and_exact_arm_binding()
+-> Result<(), CursorRejection> {
+    let mut table = QueryCursorTable::new();
+    table
+        .install_new([1; 32], binding(1, 0), tick(0))
+        .map_err(|_| CursorRejection::Unknown)?;
+    let owned = request();
+    let borrowed = ContinuationRequest {
+        session_id: owned.session_id,
+        user_id: owned.user_id,
+        account: owned.account,
+        query_kind: owned.query_kind,
+        query_arm: owned.query_arm.as_slice(),
+    };
+    assert_eq!(
+        table.check(&[1; 32], &owned, tick(10))?,
+        table.check(&[1; 32], &borrowed, tick(10))?
+    );
+    let wrong = ContinuationRequest {
+        query_arm: [0_u8, 1].as_slice(),
+        ..borrowed
+    };
+    assert_eq!(
+        table.check(&[1; 32], &wrong, tick(10)).err(),
+        Some(CursorRejection::WrongBinding)
+    );
+    assert_eq!(
+        table.check(&[2; 32], &borrowed, tick(10)).err(),
+        Some(CursorRejection::Unknown)
+    );
+    assert_eq!(
+        table.check(&[1; 32], &borrowed, tick(60_000)).err(),
+        Some(CursorRejection::Expired)
+    );
+    assert_eq!(table.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn cursor_table_installs_checks_replaces_and_releases() -> Result<(), CursorRejection> {
     let mut table = QueryCursorTable::new();
     assert!(table.is_empty());

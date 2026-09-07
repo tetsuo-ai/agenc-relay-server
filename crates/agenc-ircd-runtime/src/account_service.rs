@@ -553,6 +553,15 @@ pub(crate) struct AccountTransactionCleanup {
     writes: Vec<AccountServiceDurableWrite>,
 }
 
+/// Converts only reconstruction's cross-validated stale transaction authority.
+pub(crate) fn recovered_transaction_cleanup(
+    cleanup: RecoveredAccountTransactionCleanup,
+) -> Result<AccountTransactionCleanup, RuntimeError> {
+    Ok(AccountTransactionCleanup {
+        writes: TransactionCleanup::recovered(cleanup)?.durable_writes()?,
+    })
+}
+
 impl AccountTransactionCleanup {
     pub(crate) fn into_writes(self) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
         if self.writes.is_empty()

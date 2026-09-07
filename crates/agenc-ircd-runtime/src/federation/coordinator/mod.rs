@@ -175,6 +175,7 @@ enum PendingCommit {
         /// The request header, kept so a refused batch can still answer.
         header: RequestHeader,
         _charge: Option<IngressCharge>,
+        query: Option<query::QueryReceipt>,
     },
     OriginReady {
         peer: ServerId,
@@ -205,6 +206,8 @@ enum PendingCommit {
     CleanupFinished {
         peer: ServerId,
     },
+    /// Startup retirement cannot publish to any live link.
+    CompanionRestore(Box<startup::retirement::Receipt>),
     /// A companion request batch; the executor holds its result.
     Companion {
         peer: ServerId,
@@ -279,6 +282,7 @@ pub struct FederationCoordinator {
     companion: CompanionLinks,
     /// The E2EE executor; `None` on a node without a sequencer.
     companion_exec: Option<CompanionCoordinator>,
+    companion_page_read: Option<companion::page_read::Pending>,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
     barriers: BTreeMap<ServerId, OpenBarrier>,
@@ -364,14 +368,26 @@ impl FederationCoordinator {
             queries,
             counters: CoordinatorCounters::default(),
             companion_exec: None,
+            companion_page_read: None,
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
         }
     }
 
     /// Installs the companion executor before any link exists.
-    pub fn install_companion_executor(&mut self, executor: CompanionCoordinator) {
+    pub fn install_companion_executor(
+        &mut self,
+        mut executor: CompanionCoordinator,
+        incarnation: ServerIncarnation,
+    ) -> Result<(), crate::e2ee::coordinator::CompanionFault> {
+        if executor.network_id != *self.config.network_id.as_bytes()
+            || executor.server_id != self.config.server_id
+        {
+            return Err(crate::e2ee::coordinator::CompanionFault::Protocol);
+        }
+        executor.configure_delivery_identity(incarnation, self.config.recovery_epoch)?;
         self.companion_exec = Some(executor);
+        Ok(())
     }
 
     /// The companion executor, if one is installed.
@@ -1163,6 +1179,7 @@ impl FederationCoordinator {
     #[must_use]
     pub fn owns_storage_read(&self, read_id: StorageReadId) -> bool {
         self.loader.owns(read_id)
+            || companion::page_read::owns(self, read_id)
             || self.replays.contains_key(&read_id)
             || snapshot::owns_read(self, read_id)
             || resume_reconciliation::owns_read(self, read_id)
@@ -1175,7 +1192,12 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
-        if startup::read_completed(self, context, &message) {
+        if companion::page_read::owns(self, message.read_id) {
+            companion::page_read::completed(self, context, message);
+            return;
+        }
+        if self.loader.owns(message.read_id) {
+            startup::read_completed(self, context, message);
             return;
         }
         if resume_reconciliation::owns_read(self, message.read_id) {
@@ -1215,6 +1237,8 @@ impl FederationCoordinator {
             || snapshot::timer_fired(self, context, entry)
             || self.companion_timer_fired(context, entry)
             || companion::snapshot_timer_fired(self, context, entry)
+            || companion::mailbox_timer_fired(self, context, entry)
+            || self.queries.timer_fired(context, entry)
     }
 
     fn settle_request(&mut self, context: &mut StateCoreContext, pending: PendingCommit) -> bool {
@@ -1226,11 +1250,15 @@ impl FederationCoordinator {
             request_object_id,
             result,
             descriptor,
+            query,
             ..
         } = pending
         else {
             return false;
         };
+        // Tuple fields drop in order on every return: destroy encoded result
+        // backing before returning its final-page reservation.
+        let publication = (result, query);
         if self.origins.commit_request(key, request_id).is_err() {
             self.fail_link(context, link, peer, Violation::Origin);
             return false;
@@ -1243,11 +1271,11 @@ impl FederationCoordinator {
             },
         );
         self.counters.requests_committed = self.counters.requests_committed.saturating_add(1);
-        if request::remember_registration(self, context, key.origin, &result).is_err() {
+        if request::remember_registration(self, context, key.origin, &publication.0).is_err() {
             self.fail_link(context, link, peer, Violation::Codec);
             return false;
         }
-        self.send_result(context, link, peer, descriptor, &result);
+        self.send_result(context, link, peer, descriptor, &publication.0);
         self.remote_grant_committed();
         true
     }
@@ -1310,6 +1338,8 @@ impl FederationCoordinator {
             if context.head().storage_commit_sequence <= *staged_after)
             || matches!(self.pending.as_ref(), Some(PendingCommit::ResumeAcknowledged(receipt))
                 if context.head().storage_commit_sequence <= receipt.staged_after)
+            || matches!(self.pending.as_ref(), Some(PendingCommit::CompanionRestore(receipt))
+                if context.head().storage_commit_sequence <= receipt.staged_after)
         {
             None
         } else {
@@ -1367,8 +1397,10 @@ impl FederationCoordinator {
             Some(PendingCommit::Cleanup { peer }) => {
                 authority::cleanup_committed(self, context, peer);
             }
-            Some(PendingCommit::Companion { peer, link }) => {
-                companion::committed(self, context, link, peer, &events);
+            Some(
+                pending @ (PendingCommit::CompanionRestore(_) | PendingCommit::Companion { .. }),
+            ) => {
+                self.companion_receipt(context, pending, &events);
             }
             Some(PendingCommit::SnapshotRows { peer }) => {
                 snapshot::continue_write(self, context, peer)
@@ -1393,8 +1425,33 @@ impl FederationCoordinator {
             }
             Some(PendingCommit::Acknowledged) | None => {}
         }
+        self.deliver_committed_then_continue(context, events);
+    }
+
+    fn deliver_committed_then_continue(
+        &mut self,
+        context: &mut StateCoreContext,
+        events: Vec<crate::state_core::projector::OutboundEvent>,
+    ) {
         self.deliver(context, events);
         self.continue_after_commit(context);
+    }
+
+    fn companion_receipt(
+        &mut self,
+        context: &mut StateCoreContext,
+        pending: PendingCommit,
+        events: &[crate::state_core::projector::OutboundEvent],
+    ) {
+        match pending {
+            PendingCommit::CompanionRestore(receipt) => {
+                startup::retirement::committed(self, context, *receipt)
+            }
+            PendingCommit::Companion { peer, link } => {
+                companion::committed(self, context, link, peer, events)
+            }
+            _ => {}
+        }
     }
 
     fn continue_after_commit(&mut self, context: &mut StateCoreContext) {
@@ -1483,8 +1540,15 @@ impl FederationCoordinator {
                 request_object_id,
                 descriptor,
                 header,
+                result,
+                query,
                 ..
             }) => {
+                // The serialized page must die before its last query permit.
+                drop(result);
+                if let Some(receipt) = query {
+                    self.queries.reject_page(receipt, context.now());
+                }
                 request::rejected(
                     self,
                     context,
@@ -1508,6 +1572,9 @@ impl FederationCoordinator {
                 if self.link_is_live(link, peer) {
                     self.fail_link(context, link, peer, Violation::Ceiling);
                 }
+            }
+            Some(PendingCommit::CompanionRestore(receipt)) => {
+                startup::retirement::rejected(self, context, *receipt, error);
             }
             Some(PendingCommit::Companion { .. }) => {
                 if let Some(executor) = self.companion_exec.as_mut() {

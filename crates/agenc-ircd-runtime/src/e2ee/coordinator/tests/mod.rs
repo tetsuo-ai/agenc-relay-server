@@ -107,6 +107,10 @@ fn origin_key() -> CompanionOriginKey {
 }
 
 struct Harness {
+    query_sessions: crate::state_core::session::SessionTable,
+    query_limits: crate::runtime_config::RuntimeResourceLimits,
+    backing: crate::budget::BackingReservationPort,
+    monotonic_millis: u64,
     coordinator: CompanionCoordinator,
     entropy: Counter,
     sequence: u64,
@@ -115,7 +119,7 @@ struct Harness {
     /// The generation-zero and generation-one policies of `#room`.
     initial_policy: IrcPolicy,
     operational_policy: IrcPolicy,
-    /// Every durable write the handlers staged, in order, for reloads.
+    /// The final logical row image after every successful handler outcome.
     writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
     /// The principal's device seeds, so a reload rebuilds the same policies.
     devices: Vec<u8>,
@@ -143,6 +147,10 @@ impl Harness {
             ServerId::from_bytes(COORDINATOR),
             "coordinator.example".into(),
         );
+        coordinator.configure_delivery_identity(
+            agenc_ircd_types::ServerIncarnation::from_bytes([91; 16]),
+            agenc_ircd_types::RecoveryEpoch::from_bytes([92; 16]),
+        )?;
         let sequencer = key(90);
         let credential = sequencer_credential(&sequencer, 0, (0, 2_000_000), None)?;
         let key_set =
@@ -166,6 +174,12 @@ impl Harness {
             fenced: false,
         });
         Ok(Self {
+            query_sessions: crate::state_core::session::SessionTable::new(),
+            query_limits: crate::runtime_config::RuntimeResourceLimits::HARD_MAX,
+            monotonic_millis: NOW * 1_000,
+            backing: crate::budget::BackingReservationPort::new(crate::sync::Arc::new(
+                crate::budget::MemoryBudget::new(512 * 1024 * 1024),
+            )),
             coordinator,
             entropy: Counter(0),
             sequence: 0,
@@ -199,7 +213,7 @@ impl Harness {
                 .writes
                 .push(Write::put(*table, key.clone(), plaintext.to_vec())?);
         }
-        fresh.coordinator.finish_restore();
+        fresh.coordinator.finish_restore()?;
         fresh.sequence = self.sequence;
         // Companion origins are not durable: the edge re-declares the
         // attached device after a reload, which the harness copies over.
@@ -304,6 +318,13 @@ impl Harness {
         // supplies the binding plan there.
         let plan_binding = |_: ChannelInstanceId, _: &[[u8; 24]]| Ok(None);
         let mut exec = Exec {
+            queries: Some(self.query_sessions.query_reservations(
+                agenc_ircd_types::UserId::from_bytes(ORIGIN),
+                self.query_limits,
+                self.backing.clone(),
+            )),
+            backing: self.backing.clone(),
+            monotonic_millis: self.monotonic_millis,
             coordinator: &self.coordinator,
             home,
             origin: &origin,
@@ -324,25 +345,36 @@ impl Harness {
         if let Some(origin) = self.coordinator.state.origins.get_mut(&origin_key()) {
             origin.next_sequence = self.sequence;
         }
-        Ok(outcome.map(|mut outcome| {
-            for effect in std::mem::take(&mut outcome.effects) {
-                effect(&mut self.coordinator.state);
-            }
+        let mut outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => return Ok(Err(error)),
+        };
+        for effect in std::mem::take(&mut outcome.effects) {
+            effect(&mut self.coordinator.state);
+        }
+        for write in &outcome.writes {
+            self.apply_logical_write(write)?;
+        }
+        Ok(Ok(outcome))
+    }
+
+    fn apply_logical_write(
+        &mut self,
+        write: &crate::state_core::durable::AccountServiceDurableWrite,
+    ) -> TestResult {
+        use crate::state_core::durable::AccountServiceDurableWrite as Write;
+        let (table, key) = match write {
+            Write::Put { table, key, .. } | Write::Delete { table, key } => (table, key),
+        };
+        self.writes.retain(|stored| {
+            !matches!(stored, Write::Put { table: stored_table, key: stored_key, .. }
+                if stored_table == table && stored_key == key)
+        });
+        if let Write::Put { plaintext, .. } = write {
             self.writes
-                .extend(outcome.writes.iter().filter_map(|write| {
-                    use crate::state_core::durable::AccountServiceDurableWrite as Write;
-                    let Write::Put {
-                        table,
-                        key,
-                        plaintext,
-                    } = write
-                    else {
-                        return None;
-                    };
-                    Write::put(*table, key.clone(), plaintext.to_vec()).ok()
-                }));
-            outcome
-        }))
+                .push(Write::put(*table, key.clone(), plaintext.to_vec())?);
+        }
+        Ok(())
     }
 
     fn publish_identity_and_roster(&mut self) -> TestResult {
@@ -919,12 +951,70 @@ fn mailbox_items_are_fetched_with_tokens_and_acknowledged_once() -> TestResult {
         outcome.result,
         ResultBody::MailboxAcked(token, object_id(&binding))
     );
-    assert_eq!(outcome.writes.len(), 2);
+    assert_exact_mailbox_retirement(
+        &harness.account,
+        token,
+        object_id(&binding),
+        &outcome.writes,
+    )?;
     let again = ok(harness.run(Op::AcknowledgeMailbox, &ack, None)?)?;
     assert_eq!(again.result, outcome.result);
     assert!(again.writes.is_empty());
     let empty = ok(harness.run(Op::FetchMailbox, &[2, 0], None)?)?;
     assert_eq!(empty.result, ResultBody::Empty(EmptyKind::Binding));
+    Ok(())
+}
+
+fn assert_exact_mailbox_retirement(
+    account: &[u8; 24],
+    token: [u8; 32],
+    object: [u8; 32],
+    writes: &[crate::state_core::durable::AccountServiceDurableWrite],
+) -> TestResult {
+    use crate::state_core::durable::AccountServiceDurableWrite as Write;
+    use agenc_ircd_storage::e2ee_records::{MAILBOX_ROW_KIND, MailboxKind, MailboxRow};
+    use agenc_ircd_storage::{PersistentRecordValue, TableId};
+    let [
+        Write::Put {
+            table: TableId::E2eeState,
+            key: ack,
+            plaintext,
+        },
+        Write::Delete {
+            table: TableId::E2eeState,
+            key: item,
+        },
+        Write::Delete {
+            table: TableId::E2eeState,
+            key: token_row,
+        },
+    ] = writes
+    else {
+        return Err("ACK must persist evidence and retire exactly its Item and Token".into());
+    };
+    let digest = account_id_digest(&NETWORK, account)?;
+    assert_eq!(
+        ack.as_bytes(),
+        MailboxRow::ack_key(&digest, &DEVICE_ID, &token)?.as_bytes()
+    );
+    assert_eq!(
+        item.as_bytes(),
+        MailboxRow::item_key(&digest, &DEVICE_ID, MailboxKind::Binding, 0)?.as_bytes()
+    );
+    assert_eq!(
+        token_row.as_bytes(),
+        MailboxRow::token_key(&token)?.as_bytes()
+    );
+    let evidence = PersistentRecordValue::decode(TableId::E2eeState, plaintext)?;
+    assert_eq!(evidence.record_kind(), MAILBOX_ROW_KIND);
+    assert_eq!(
+        MailboxRow::decode(evidence.body())?,
+        MailboxRow::Ack {
+            object_id: object,
+            acknowledged_at: NOW,
+            retain_until: NOW + agenc_ircd_domain::e2ee::limits::MAILBOX_ACK_RETENTION_SECONDS,
+        }
+    );
     Ok(())
 }
 

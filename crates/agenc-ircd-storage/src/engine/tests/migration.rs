@@ -1,6 +1,9 @@
 //! Real predecessor/target databases for the first offline schema migration.
 #![forbid(unsafe_code)]
 
+#[path = "migration_v2.rs"]
+mod schema_three;
+
 use std::os::unix::fs::PermissionsExt as _;
 
 use agenc_ircd_crypto::{StorageTable, derive_storage_index};
@@ -228,7 +231,14 @@ fn migration_preserves_continuity_and_initializes_enabled_legacy_history()
     let receipt = execute_migration_command(fixture.request(false)?, &fixture.qualifications)?;
     assert_eq!(receipt.state_generation, 7);
     assert!(receipt.source_backup.is_file());
-    let target = StorageEngine::open(fixture.config("target")?)?;
+    assert!(matches!(
+        StorageEngine::open(fixture.config("target")?),
+        Err(StorageError::UnsupportedVersion)
+    ));
+    let target = StorageEngine::open_construction_target(
+        fixture.config("target")?,
+        crate::construction_schema::ConstructionSchema::Two,
+    )?;
     let _recovered = target.startup_scan()?;
     assert_eq!(target.header.tbs().schema_generation, 2);
     assert_eq!(target.header.tbs().storage_key_generation, 2);
@@ -319,7 +329,10 @@ fn migration_resumes_each_batch_cursor_completion_and_installation_boundary()
             let resumed =
                 execute_migration_command(fixture.request(true)?, &fixture.qualifications)?;
             assert_eq!(resumed.state_generation, 7);
-            let target = StorageEngine::open(fixture.config("target")?)?;
+            let target = StorageEngine::open_construction_target(
+                fixture.config("target")?,
+                crate::construction_schema::ConstructionSchema::Two,
+            )?;
             let state = target.startup_scan()?;
             assert_eq!(state.state_generation(), 7);
             assert_eq!(target.state_meta.tbs().account_service_response_count, 11);

@@ -13,13 +13,13 @@ from typing import NoReturn
 PROFILE_PATH = "conformance/stage-five-storage-profile.toml"
 EXPECTED_MODULES = {
     "backup.rs", "codec.rs", "construction.rs", "construction_directory.rs",
-    "construction_runtime.rs", "control.rs", "domain_records.rs", "engine.rs", "error.rs",
+    "construction_runtime.rs", "construction_schema.rs", "control.rs", "domain_records.rs", "engine.rs", "error.rs",
     "fault.rs", "e2ee_records.rs",
-    "migration.rs", "migration_command.rs",
+    "migration.rs", "migration_command.rs", "migration_profile.rs", "migration_v2.rs",
     "federation_records.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",
     "mutation.rs", "owner.rs", "platform.rs", "qualification.rs", "qualification_workload.rs",
     "records.rs",
-    "recovery.rs", "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs",
+    "recovery.rs", "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs", "source_validation.rs",
 }
 EXPECTED_TASKS = [f"S05-{number:03d}" for number in range(1, 16)]
 QUALIFICATION_TARGETS = (
@@ -76,7 +76,7 @@ def validate_profile(profile: dict[str, object]) -> None:
     database = profile.get("database")
     if not isinstance(database, dict) or database != {
         "engine": "redb", "version": "4.2.0", "database_format": 1,
-        "schema_generation": 2, "table_count": 27, "durability": "Immediate",
+        "schema_generation": 3, "table_count": 27, "durability": "Immediate",
         "two_phase_commit": True, "writer_threads": 1,
         "request_queue_capacity": 2, "handoff_slot_bytes": 58_720_240,
     }:
@@ -170,7 +170,7 @@ def main() -> None:
         if command == "check":
             validate_profile(load_profile(root / PROFILE_PATH))
             validate_sources(root)
-            print("Stage-05 storage profile: ok (26 modules, 2 fuzz targets)")
+            print(f"Stage-05 storage profile: ok ({len(EXPECTED_MODULES)} modules, 2 fuzz targets)")
         else:
             print(f"Stage-05 storage profile self-test: ok ({self_test(root)} rejection cases)")
     except (OSError, StageFiveError, tomllib.TOMLDecodeError) as error:

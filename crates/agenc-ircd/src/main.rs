@@ -2,6 +2,7 @@
 
 //! AgenC daemon and stopped-daemon command entry point.
 
+mod login_index;
 mod migration;
 mod options;
 mod storage_qualify;
@@ -17,12 +18,12 @@ use agenc_ircd_config::{
     load_maintenance_config, probe_host_controls,
 };
 use agenc_ircd_runtime::offline::{
-    InitMode, InitReceipt, InitRequest, create_account_invite, initialize_node, parse_network_id,
-    parse_server_id, render_onboarding, verify_database_header,
+    InitMode, InitReceipt, InitRequest, create_account_invite, execute_stopped_restore,
+    initialize_node, parse_network_id, parse_server_id, render_onboarding, verify_database_header,
 };
 use agenc_ircd_storage::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, StorageEngineLimits,
-    embedded_storage_qualifications, execute_restore_command,
+    embedded_storage_qualifications,
 };
 use options::{OptionSpec, ParsedOptions};
 
@@ -41,7 +42,9 @@ const USAGE: &str = concat!(
     "  print-onboarding --config <file>\n",
     "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n",
     "  storage restore --config <file> --backup <file> [restore options]\n",
-    "  storage migrate --config <file> --target-schema-generation 2 --output-state-directory <new-directory> [--resume]\n",
+    "  storage migrate --config <file> --target-schema-generation <2|3> --output-state-directory <new-directory> [--resume]\n",
+    "  storage login-index-rotate-start --config <file> --new-key-file <file>\n",
+    "  storage login-index-rotate-finish --config <file>\n",
     "  storage qualify --state-dir <new-directory> --scratch-dir <new-directory> --unsigned-report <file> --raw-log <file> [--json <file>]",
 );
 const RESTORE_USAGE: &str = "usage: agenc-ircd storage restore --config <file> --backup <file> \
@@ -314,6 +317,23 @@ fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
 }
 
 fn storage(arguments: &[OsString]) -> Result<(), CliFailure> {
+    match arguments.first().and_then(|value| value.to_str()) {
+        Some("login-index-rotate-start") => {
+            return login_index::run_start(
+                arguments
+                    .get(1..)
+                    .ok_or_else(|| CliFailure::usage(login_index::START_USAGE))?,
+            );
+        }
+        Some("login-index-rotate-finish") => {
+            return login_index::run_finish(
+                arguments
+                    .get(1..)
+                    .ok_or_else(|| CliFailure::usage(login_index::FINISH_USAGE))?,
+            );
+        }
+        _ => {}
+    }
     if arguments.first().and_then(|value| value.to_str()) == Some("migrate") {
         return migration::run(
             arguments
@@ -346,8 +366,9 @@ fn restore(options: RestoreOptions) -> Result<(), Box<dyn std::error::Error>> {
         &config.backup_trust_manifest_file,
     )?);
     let qualifications = embedded_storage_qualifications()?;
-    let receipt = execute_restore_command(
-        restore_request(options, config, trusted_backup_keys),
+    let receipt = execute_stopped_restore(
+        restore_request(options, &config, trusted_backup_keys),
+        &config,
         &qualifications,
     )?;
     print_restore_receipt(&receipt);
@@ -370,20 +391,20 @@ fn restore_trust_keys(entries: Vec<BackupTrustManifestEntry>) -> Vec<RestoreTrus
 
 fn restore_request(
     options: RestoreOptions,
-    config: MaintenanceStorageConfig,
+    config: &MaintenanceStorageConfig,
     trusted_backup_keys: Vec<RestoreTrustKey>,
 ) -> RestoreCommandRequest {
     RestoreCommandRequest {
         network_id: config.network_id,
         server_id: config.server_id,
-        current_state_directory: config.state_directory,
-        current_master_key_file: config.storage_master_key_file,
-        current_rollback_guard_key_file: config.rollback_guard_key_file,
+        current_state_directory: config.state_directory.clone(),
+        current_master_key_file: config.storage_master_key_file.clone(),
+        current_rollback_guard_key_file: config.rollback_guard_key_file.clone(),
         backup_path: options.backup,
         source_master_key_file: options.source_master_key_file,
         source_rollback_guard_key_file: options.source_rollback_guard_key_file,
-        login_index_key_file: config.login_index_key_file,
-        login_index_previous_key_file: config.login_index_previous_key_file,
+        login_index_key_file: config.login_index_key_file.clone(),
+        login_index_previous_key_file: config.login_index_previous_key_file.clone(),
         output_state_directory: options.output_state_directory,
         target_rollback_guard_key_file: options.target_rollback_guard_key_file,
         target_master_key_file: options.target_master_key_file,
@@ -402,6 +423,11 @@ fn restore_request(
 }
 
 fn print_restore_receipt(receipt: &RestoreCommandReceipt) {
+    if receipt.schema_generation == 2 {
+        println!(
+            "restored schema generation 2; run storage migrate --target-schema-generation 3 before serve"
+        );
+    }
     println!(
         "recovery epoch changed: {} -> {}",
         receipt.source_recovery_epoch.to_base64url(),

@@ -18,9 +18,10 @@ release candidate.
 | Federation and client replies | CAP-47 through CAP-60 have focused regression evidence, and all required workspace gates pass. A successful new release capacity run remains required. |
 | Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 now preserves the original refused session through pressure recovery. The uninstrumented campaign later hit an intermittent restart loop; the diagnostic campaign completed. |
 | Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. CAP-14 needs a fresh capacity result after the CAP-51 and CAP-65 shutdown repairs. |
-| Missing implementation | CAP-5 needs stopped login-index rotation commands and their authenticated audit and migration contract. CAP-13 needs bounded ordinary-event batching with complete receipt, rollback, and resource checks. |
-| Companion delivery recovery | CAP-70 records lost retained delivery scope and rows at intact restart. CAP-71 records companion acknowledgements that change memory without owning a durable cursor transition. Production-loader and acknowledgement regressions reproduce both faults; durable repairs remain open. |
-| Declared recovery | CAP-72 now discards obsolete companion delivery, replay, and barrier state and marks typed live routes pending. Eleven focused regressions pass, and reverting the correction produces ten behavioral failures. All required repository gates pass with 2,126 workspace tests. CAP-73 separately records missing pending-route admission and recovery-evidence handling. |
+| Implementation under qualification | CAP-5 stopped rotation commands, live two-account migration, and stale START cleanup pass. Maintenance-aware export and actual rotation in the capacity scenario remain open. CAP-13 batching has focused receipt, rollback, and resource proofs and needs a new capacity run. |
+| Companion delivery recovery | CAP-70 and CAP-71 now restore scoped delivery rows and commit companion acknowledgement transitions before changing replay coverage. Retained acknowledged cross-profile rows also restart with exact bytes. Complete recovery of unfinished combined barriers remains open. CAP-79 still requires the published replay retention bounds. |
+| Declared recovery | CAP-72 discards obsolete companion delivery, replay, and barrier state and marks typed live routes pending. CAP-73 now gates ordinary mutations before signing; terminal-evidence ingestion remains open. CAP-74 persists witnesses and blocks ordinary resume across restart; authenticated witness resolution remains open. |
+| ReInit admission | CAP-86 now rejects outside binding accounts before attempt, activation, or abort signing. Three regressions fail without the checks and pass with them, including valid in-group controls and absent-signer refusal. The remaining device-to-leaf and continuing-member checks need separate evidence. |
 | Physical storage growth | STO-1 remains open. The measured storage batch exceeds both the qualification ceiling and operational reserve; a smaller page size alone does not establish a universal bound. |
 | Release qualification | The release coverage floor, full fuzz and model runs, both native targets, seven-day soak, external E2EE review, and signed decision remain open. |
 
@@ -44,6 +45,30 @@ inventories bind 476 production source files, and the release policy covers
 127 critical regions with its coverage floors unchanged. The strict release
 campaign passes original-session pressure recovery but fails later restart
 synchronization, so this repair does not close capacity qualification.
+
+The resumed schema-3 repair checkpoint passes every required development gate
+on 2026-09-07. The locked all-feature workspace suite reports 2,400 passing
+tests, zero failures, and 21 ignored qualification tests across 120 test
+results. Formatting, all-target Clippy with warnings denied, source check and
+self-test, workspace policy, and coverage-checker self-test all pass. Source
+policy accepts 748 Rust files. Both reviewed inventories bind 617 source files;
+the release policy contains 656 critical regions with its existing coverage
+floors unchanged. This validates policy structure and source identity; no new
+branch-coverage measurement is claimed. Exact commands and logs are recorded
+in `resumed-final-gates.json` in the qualification scratch directory.
+
+The uninstrumented release campaign in `resumed-capacity-64` fails after
+251.19 seconds at the strict post-coordinator-restart readiness check. The
+64-client run reaches reconnect, churn, snapshot queries, OPAQUE login,
+first-attempt disk-pressure recovery, backup, and edge-b loss/return. Both
+edges then repeatedly reconnect and acknowledge the encrypted profile without
+reaching active base federation. The campaign does not reach rekey, its final
+drain, or the required duration. This reproduces the earlier intermittent
+restart loop; no cause or repair is established by this run. The exact daemon
+and test executable hashes remain unchanged throughout, as recorded in
+`resumed-capacity-result.json`. All three daemon logs and worker errors are
+preserved. This campaign still exercises index reconstruction rather than
+actual login-index rotation, which remains separate under CAP-5.
 
 ## Current implementation
 
@@ -769,6 +794,95 @@ construction of Section 23.9, which no command exposes. The campaign's
 `index_transition` scenario exercises login-index reconstruction and
 generation validation across a coordinator restart and re-authenticates the
 campaign account; a genuine key rotation stays an external drill item.
+
+The schema-3 prerequisite now has explicit legacy admission. The schema-two
+command grammar remains separate from current extensions. A streaming runtime
+validator checks original audit signatures, command meanings, chain anchors,
+and matched external-action outcomes before migration creates a backup or
+target. Legacy backup admission verifies both complete signed passes and
+requires their exact stream identity before completing semantic validation.
+Legacy restore preserves schema two and requires a separate validated migration
+before service; fresh, resumed, and already-installed paths require admission.
+
+Fourteen real migration, backup, and restore tests pass. Reversing the restore
+admission and same-stream guards produces four behavioral failures, including
+installation of a source whose validator refused it; ten controls remain green.
+The exact restoration and rebuilt binary match are archived in
+`legacy-restore-admission-reversal` and `legacy-restore-fixed-final`. All 199
+storage unit tests pass. The actual CLI restore-then-migrate test also preserves
+the original signed audit bytes, and both CLI migration tests pass in
+`legacy-restore-query-witness-proof`.
+
+The maintenance codec now has an exact 358-byte signed body and a 454-byte
+event, independently generated start and finish golden vectors, and strict
+operation, scope, key-selector, counter, hash, and signature validation. All
+45 admin and thirty crypto unit tests pass at that checkpoint. The new-key
+loader uses the complete configured purpose inventory in one pass. Reverting
+that shared inventory produces three behavioral failures with two controls
+still passing; all five fixed loader tests pass. These records are archived in
+`cap5-rotation-secrets-reversal-proof` and
+`maintenance-query-pending-second-proof`.
+
+Schema three admits outer Audit kind two, while schema one and two still
+refuse it and AuditCheckpoint remains kind one. The exact signed fixture fails
+against the old registry with InvalidEncoding. Both fixed registry controls
+and all 204 storage unit tests pass in `cap5-audit-kind-fixed-proof`. The red
+proof includes a held-source rebuild in `cap5-audit-kind-red-proof`.
+
+The mixed audit chain and stopped start/finish commands now compile with the
+whole workspace. The driver
+uses the existing exclusive storage startup, typed stale account cleanup,
+complete commit-pinned login-index scans, an atomic key-state and signed audit
+batch, exact durable receipt validation, and sealed readback. Actual CLI
+restart-mapping tests pass, including an exact 257-entry scan and a finish
+refusal that preserves every retained old-generation row. Four tests using the
+actual storage fault injector distinguish start and finish refusal from an
+indeterminate result after the durable commit. All four pass. The sealed
+mixed-chain, receipt, retention, and refusal tests pass fourteen cases.
+
+The corrected signed transport fixture exposes a separate legacy-export
+failure: selecting a valid maintenance event closes the session with no reply
+instead of returning `FAIL AUDIT UNAVAILABLE`. The fixed classification keeps
+unsupported profile selection separate from invalid authenticated source data,
+and completes the full chain and captured-cursor checks before returning that
+classification. All eighteen fixed mixed-audit cases pass, including three
+later invalid-source checks. These results and the
+actual daemon and test binaries are archived in
+`mixed-audit-rotation-startup-fourth-proof`, with all 232 changed source inputs
+held throughout the build.
+
+The actual live rotation drill passes in 33.50 seconds. Two real accounts begin
+on the old generation. One normal authentication moves exactly one index entry,
+and finish refuses without a success reply or durable change while the other
+account remains dormant. Authenticating the second account reduces the old
+count to zero and allows finish. The original OPAQUE rows remain byte-for-byte
+unchanged; both accounts authenticate under the final single key. The exact
+signed maintenance events append to the unchanged historical audit prefix,
+and all three daemons stop cleanly. This result is archived in
+`mixed-audit-rotation-startup-fifth-proof` with the actual daemon hash.
+
+Reversing the CLI command dispatch reproduces both missing-command failures.
+Reversing only mixed event dispatch breaks the valid sealed mixed chain, while
+five legacy source controls and the old administration decoder control pass.
+Stopping the login-index scan after its first page makes the 257-entry case
+fail authenticated reconstruction with StaleState; the empty rotation control
+still passes. These proofs are archived in
+`recovery-audit-command-boundary-red-proof` and `cap5-complete-scan-red-proof`.
+The exact fixed files are restored and the rebuilt daemon and test binaries
+match the prior fixed checkpoint. All 932 runtime unit tests pass in
+`recovery-audit-command-boundary-fixed-proof`.
+
+The complete stale START test now passes after correcting CAP-85's unrelated
+invitation restart rule. It reconstructs three typed cleanup owners, commits
+their exact cleanup receipts, preserves unrelated account, invitation, login,
+and OPAQUE rows, then signs the complete remaining count and reconstructs the
+finished rotation. Bypassing only cleanup leaves the three AuthTransaction
+rows and fails the exact empty-table assertion. All four rotation fault tests
+and four invitation restart controls still pass. The fixed and reversed
+proofs are archived in `invitation-owner-fixed-proof` and
+`stopped-start-cleanup-red-proof`. The maintenance-aware export grammar,
+actual rotation in the capacity scenario, and full repository gates remain
+open.
 
 ### CAP-6: the coordinator refused channel messages whose edge named a trailing channel revision
 
@@ -2132,8 +2246,8 @@ and account-identity mismatch as false evidence.
 
 ### CAP-70: intact companion restart drops retained delivery scope and events
 
-Open. The ordinary daemon restart preserves its stored incarnation and
-recovery epoch. Companion startup collects delivery records but restores only
+Partially repaired. The original ordinary daemon restart preserved its stored
+incarnation and recovery epoch. Companion startup collected delivery records but restored only
 cursor rows, leaving the retained event queue, barrier, and peer synchronization
 state empty. ERESUME then treats the absent in-memory peer scope as initial
 admission and opens a new ESTATE generation, even if no paired base snapshot
@@ -2155,17 +2269,40 @@ event bytes. The behavioral failure takes 0.07 seconds; an earlier fixture
 revision error is not counted as evidence. Exact regression source and its
 frozen executable are retained in `cap70-71-proof` outside the worktree.
 
-The legacy cursor and snapshot records omit the historical scope needed to
-reconstruct empty streams and exact READY retries. The repair therefore needs
-an explicit successor storage format and migration rules. It cannot infer the
-old companion scope from the current base peer. A legitimate paired reset
-remains a separate positive case. The CAP-3 pressure trace does not establish
-this companion failure, and no repair is claimed yet.
+The schema-3 repair retains an authenticated delivery scope, cursor, scoped
+outbox rows, snapshot cut pages, and exact READY and FETCH progress. Production
+loader tests cover intact replay, interrupted snapshots, retained random
+cursors, exact receipt publication, storage refusal, and scope changes.
+
+The interrupted workspace gate exposed a further startup refusal. The loader
+rejected every retained cross-profile row, including rows already covered by
+a committed companion ACK. The resumed regression fails with Storage against
+that predicate. The corrected loader preserves acknowledged rows with their
+exact event bytes and stored cross-profile headers. Its negative control still
+refuses an unacknowledged barrier without a combined durable record. Both cases
+pass in `resumed-acknowledged-barriers-green.log`; the behavioral failure is
+`resumed-acknowledged-barriers-red.log`. The real three-daemon encrypted restart
+also passes in `resumed-workspace-tests-final.log`.
+
+The base loader now separately refuses a retained cross-profile part above its
+durable base cursor, including when a snapshot flag is set. Without this guard,
+a committed companion ACK could leave the unfinished base half eligible for
+ordinary replay. Both unsafe startup cases fail in `resumed-base-barrier-red.log`
+and pass in `resumed-base-barrier-green.log`; a retained part covered by the
+base cursor remains a passing control. These tests run through authenticated
+storage reconstruction.
+
+This correction does not recover unfinished combined barriers. The existing
+DeliveryBarrier codec still needs runtime staging, receipt-dependent updates
+for both halves, and reconstruction against both durable cursors. CAP-70
+remains open until all four base and companion acknowledgement combinations
+have restart and refusal evidence.
 
 ### CAP-71: companion acknowledgement coverage has no durable receipt owner
 
-Open. EACK validates its addressed delivery stream and then changes its
-in-memory acknowledged cursor and replay class. It returns no staged action,
+Partially repaired. The original EACK path validated its addressed delivery
+stream and then changed its in-memory acknowledged cursor and replay class.
+It returned no staged action,
 updates no durable outbox row, and owns no storage receipt. A later event may
 write the cursor incidentally, but an ACK followed by an intact restart can
 recover older coverage. The outer coordinator can also release a combined
@@ -2186,11 +2323,18 @@ transition. The exact source and frozen executable are retained alongside the
 CAP-70 proof. This failure establishes the missing durable owner; it does not
 claim successful rejection or restart recovery.
 
-The repair also requires rejection before submission, successful commit followed
-by restart without an unrelated event, and the four combinations of durable
-base and companion coverage. It must preserve the existing fatal handling of
-indeterminate storage and prohibit snapshot substitution for an unfinished
-barrier. Those tests and the production correction remain in progress.
+The current ordinary companion ACK path stages the scoped cursor and changed
+outbox classes together, then updates memory only after the exact storage
+receipt. Real-storage tests cover refusal, commit followed by restart without
+an unrelated event, original acknowledgement timestamps, and malformed or
+partial acknowledgements. The acknowledged-barrier replay correction under
+CAP-70 preserves those committed companion flags.
+
+CAP-71 remains open for the combined barrier. Both stream endpoints and their
+independent durable coverage must be staged and reconstructed together before
+release. The four combinations of base and companion coverage and refusal at
+each receipt boundary still need implementation and tests. Snapshot replacement
+must remain forbidden while a barrier is unfinished.
 
 ### CAP-72: declared recovery preserves obsolete companion state and live routes
 
@@ -2230,7 +2374,7 @@ These are typed storage regressions, including complete route-state object
 encoding. They do not establish a complete signed encrypted-conversation
 recovery. All required repository gates pass: formatting, Clippy, 2,126 workspace
 tests with no failures and 21 ignored qualification tests, source checks and
-self-tests, workspace policy, and coverage rejection self-tests. Both reviewed
+self-tests, workspace policy, and coverage rejection self-tests. At repair checkpoint `9beaafd`, both reviewed
 inventories bind 478 production source files. The release policy now lists
 134 critical regions with unchanged coverage floors; that inventory update
 is not a new branch-coverage measurement. CAP-73 still requires runtime
@@ -2239,7 +2383,9 @@ recovery can satisfy the complete encrypted recovery contract.
 
 ### CAP-73: pending encrypted routes lack admission and recovery-evidence handling
 
-Open. Startup derives both domain recovery gates from RouteRow.recovery_gate.
+Partially repaired; terminal-evidence ingestion remains open. Startup derives
+both domain recovery gates from RouteRow.recovery_gate. The original code had
+the following admission gaps.
 Several admitted upload handlers do not consult either gate. In particular,
 submit_finalization reads a retained candidate through a map lookup and signs
 a new CommitFinalization certificate. Abort and ReInit-attempt handling have
@@ -2275,6 +2421,421 @@ and source guard. It must preserve byte-identical allowed evidence replay and
 cannot synthesize a successful recovery transition from the current live
 state. The terminal-evidence ingress and its profile compatibility require an
 explicit implementation contract in addition to the early mutation guards.
+
+The current admission repair passes all 18 recovery runtime cases and two
+mailbox scan cases in the second frozen build. Both route and lifecycle gates
+are checked before mutation handlers. The tests cover private object lineage,
+mailbox selection before token allocation, exact retained ACK replay, malformed
+retained metadata, independent conversations, and ReInit successor admission.
+The scan charges every inspected encoded object against the existing account
+mailbox byte ceiling, including excluded and repeated objects. These focused
+results do not close the terminal-evidence lifecycle or replace the required
+reverted-behavior proofs for the additional guards.
+
+### CAP-74: the persistent registry rejects every chain-witness evidence row
+
+Partially repaired; authenticated witness resolution remains open. The edge
+constructs a WitnessRow after detecting a skipped or conflicting
+sequencer position. Its typed codec and key use E2eeState kind 13, but the
+outer persistent record registry accepts only kinds 1 through 12. Consequently,
+record_witness cannot construct the storage write even for a valid witness.
+It still reports the violation and closes the link; the required durable
+evidence is lost before a storage transaction can be staged.
+
+Companion Section 12.5 requires a durable witness/v1 row containing only the
+conversation and expected and observed chain identifiers. The existing tests
+exercise the in-memory witness and its inner codec, so they do not reach this
+outer registry refusal. The regression now fails at the intended persistent
+boundary in `cap74-proof/red.log`: the inner WitnessRow round trip succeeds,
+then PersistentRecordValue::new returns InvalidEncoding. The sealing and
+restart assertions are not reached. Exact test source, registry source, and
+the frozen executable are bound by `cap74-proof/manifest.json` outside the
+worktree. The temporary failing test is parked while the repair proceeds.
+
+The schema-3 integration must admit the closed current record kind and retain
+explicit legacy source-generation rejection. The actual failure-frame staging
+and receipt path also needs a regression; admitting the record alone does not
+prove that a refused or unfinished write is retained correctly.
+
+The current schema-3 envelope admits kinds 13 and 14 while legacy source
+validation rejects either new kind in generations 1 and 2. The previously
+failing witness test now reaches sealing and two storage-owner restarts and
+passes in 0.02 seconds. `cap74-storage-green.log` records that result, with the
+exact source and executable retained in `schema3-storage-first-integrated`.
+The actual failure-frame regression now reaches the exact kind-13 metadata
+write and then fails because the base link closes before its receipt. That
+behavioral result is retained in `cap74-runtime-first-red.log` and
+`cap74-first-runtime-proof`. The first receipt repair retains one bounded
+witness through determinate refusal, reserves a retry timer before consuming
+the witness, and closes only the original link after its committed storage
+head. Five real storage and link tests pass in `cap74-witness-final-green.log`
+from `cap70-scoped-fixed-final`.
+
+The callback correction now captures an exact witness attempt token before
+earlier rejection callbacks can stage successor work. Success uses the owned
+committed head, so a newly pending batch cannot hide the witness receipt. All
+seven receipt cases pass in `legacy-restore-query-witness-proof/witness.log`,
+including successor staging and stale rejection-token replay. Durable recovery
+gating across restart and a proven snapshot resolution path remain open. A
+larger route-cut sequence alone does not prove ancestry to the witnessed head.
+
+### CAP-75: an attached nonparticipant can deliver a valid binding
+
+Fixed in the worktree. The original binding-delivery handler authenticated the
+attached account and
+target device but does not require the sender to be an approved participant
+in the binding. Companion Section 11.4 requires that participant authority.
+Possession of a publicly retrievable binding object does not grant delivery
+authority.
+
+The regression keeps the exact valid binding bytes, establishes a different
+real identity and attachment, and submits delivery from that account. The
+handler admits it, producing the behavioral failure "nonparticipant binding
+delivery was admitted". The exact source and executable are retained in
+`cap13-boundary-fixed`; `cap73-76-boundary-results.log` records the result.
+The repair must verify participant authority without trusting an unverified
+principal list or rejecting an exact previously bound artifact solely because
+its participant roster has since changed. Public object retrieval remains a
+separate operation.
+
+The focused repair now checks the exact retained binding's participant
+authority, or verifies a new binding package against the trusted principal
+rosters before using its participant list. The nonparticipant regression and
+the forged-approval negative pass with a valid participant control. The three
+cases pass in `cap73-76-third-results.log`. Full workspace and release
+qualification of this change remain pending.
+
+### CAP-76: ReInit can overwrite an existing normal successor conversation
+
+Fixed in the worktree. The original ReInit admission checked the predecessor's
+recovery state, but ordinary
+Attempt and Activate requests can name an already occupied successor. The
+activation handler replaces that successor's log and lifecycle before later
+BIND route checks could reject reuse. Checking whether the successor is in
+Normal recovery state does not establish that its identifier is vacant.
+
+Two regressions create separate real bound conversations and use the second
+conversation's actual identifier and group in the first one's otherwise valid
+ReInit request. An absent successor passes the positive controls. The existing
+normal successor is still admitted for Attempt, and Activate replaces its
+retained head. Both behavioral failures are recorded in
+`cap73-76-boundary-results.log` with exact source and executable in
+`cap13-boundary-fixed`. The activation fixture uses actual server sequencing
+and quorum evidence; it is not a complete MLS client ReInit campaign. The
+repair must reject any retained route, conversation, log, or lifecycle at the
+successor identifier before handler signing or mutation.
+
+The admission guard now requires complete absence of the successor from the
+route, conversation, log, and lifecycle maps before handler signing. The two
+behavioral regressions and an empty-successor control pass in
+`cap73-76-third-results.log`. Startup now rejects duplicate successor claims
+before creating inferred anchors and refuses an incompatible occupied target
+without deleting its independent route. Three sealed reconstruction tests pass
+under the corrected ReInit signature domain: occupied target refusal,
+duplicate target refusal in both row orders, and preservation of an advanced
+legitimate successor. Reversing only the startup guard under those corrected
+signatures produces both collision failures and preserves the advanced
+successor control. The old behavior loses the independent occupied route.
+Exact fixed source is restored and all three rebuilt cases pass. These
+results are archived in `recovery-audit-command-boundary-red-proof` and
+`recovery-audit-command-boundary-fixed-proof`.
+
+### CAP-77: acknowledged mailbox items are offered again after reconstruction
+
+Fixed for schema three; legacy ambiguity is refused during migration. The
+original successful mailbox ACK persisted the ACK and token deletion without
+retiring the item row. Startup restores the item, so a later normal fetch
+offers it again. The regression applies every actual ACK Delete to the
+surviving row set before reconstruction, avoiding the fixture's older Put-only
+shortcut. FetchMailbox then returns MailboxPage instead of Empty(Binding), as
+recorded in `cap73-76-boundary-results.log`. Exact source and executable are
+retained in `cap13-boundary-fixed`.
+
+Deleting the item alone would remove the only retained sequence high-water
+evidence when the queue becomes empty. The repair therefore needs a durable
+mailbox sequence owner, atomic item retirement and ACK replay state, and exact
+startup reconciliation. Legacy ACK records do not identify an individual
+consumed sequence when the same object was delivered more than once. Migration
+must not resolve that ambiguity by deleting every matching object or inventing
+a missing historical counter.
+
+The schema-3 repair adds an exact key-bound kind-15 sequence owner, writes the
+owner with delivery, and retires the exact item and token in the same durable
+ACK transition. Startup requires the retained owner and validates every item
+against its exclusive sequence floor. In `cap13-combined-join`, seven runtime
+cases, seven domain mailbox cases, and two owner-codec cases pass. They include
+the original post-ACK reconstruction failure, empty-queue restart, sequence
+exhaustion, missing-owner refusal, and exact ACK replay preserving a later
+duplicate delivery. The logs are `cap77-first-runtime-results.log`,
+`cap77-domain-results.log`, and `cap77-codec-results.log`. Legacy ambiguity and
+the full repository gates remain open.
+
+Two construction regressions then exposed missing checks at the maintenance
+boundary. The declared-recovery selector accepted a kind-15 owner under a
+different account key, and the new migration installed a legacy kind-8 item
+without durable sequence evidence. Both fail behaviorally in
+`cap77-construction-red-proof`, while exact-owner preservation passes. The
+selector now checks the repeated owner identity, and migration refuses legacy
+mailbox state before creating the backup or target. Thirteen recovery
+classification tests and seven real migration tests pass in
+`cap77-construction-fixed-proof`. This refusal prevents installation of an
+unreconstructible target; it does not resolve missing historical evidence or
+authorize deleting legacy deliveries.
+
+### CAP-78: mailbox continuation does not preserve a random immutable snapshot
+
+Fixed in the worktree. Companion Section 11.7 requires random continuation and snapshot tokens bound
+to the original identity, request kind, scope, immutable snapshot, and timeout.
+The current FetchMailbox handler instead reads a live sequence from the final
+eight cursor bytes, ignores the first 24 bytes, and generates another snapshot
+token for every page. A delivery added between pages can enter the old cursor's
+result set. CAP-77's durable sequence owner does not provide this snapshot
+contract.
+
+Three tests use 33 valid participant deliveries to obtain a real continuation.
+They separately check stable snapshot identity, exclusion of a 34th delivery
+inserted after the first page, and refusal of a changed opaque cursor prefix.
+The source evidence and additional required identity, timeout, and restart
+cases are recorded in `cap78-mailbox-cursor-evidence.md` in the qualification
+scratch directory.
+
+All three assertions fail in `cap78-cursor-red.log` from `cap13-guards-fixed`.
+Review then found that the inherited fixture entropy repeats delivery tokens
+within a full page. The fixture now uses separate deterministic entropy and
+asserts that all 32 delivery tokens are distinct. All three original failures
+remain reproducible in `cap78-distinct-cursor-red.log` after that correction.
+
+The repair retains one charged immutable snapshot with random opaque cursors,
+exact mailbox and attachment scope, a fixed expiry, and live recovery checks
+on each page. It reserves timer admission before staging and keeps the armed
+timer outside prepared storage effects. All ten focused tests pass in
+`cap78-cursor-scoped-final.log` from `cap70-scoped-fixed-final`. Shared configured
+query counters and immediate release on exact origin close were added next.
+The shared ledger combines local and mailbox usage for admission, reload
+floors, and statistics. Fifteen cursor tests pass in
+`legacy-restore-query-witness-proof/cursor.log`, including five accounting and
+rollback cases. Three publication regressions also pass in the resumed workspace suite.
+They reject a prepared cut after origin close, prevent revival of a different
+closed origin, and discard a cut that expires before its storage receipt.
+The base federation accounting gap is recorded as CAP-81.
+
+### CAP-79: companion replay discards acknowledged rows below published limits
+
+Open. The coordinator trims acknowledged replay to 4,096 rows, although
+Companion Section 16 publishes limits of 1,000,000 rows, 1 GiB, and 24 hours
+per target. A test retaining 4,097 valid event rows below those bounds actually
+keeps only 4,096. It fails in 0.28 seconds in `cap79-retention-red.log`, with
+the exact executable and source frozen in `cap13-combined-join`.
+
+The repair needs the published bounds, authenticated acknowledgement age,
+and bounded ownership of replay bytes during reconstruction and delivery.
+Raising the row constant alone would leave those obligations unresolved.
+
+### CAP-80: mailbox reconstruction can replace the current delivery grant
+
+Fixed in the worktree. The original renewed mailbox grant left an older Token
+row, and reconstruction
+chooses a grant according to token-key order instead of an exact durable Item
+owner. The Item codec already has a grant field, but the writer leaves it empty
+and startup does not use it. A superseded token can therefore replace the
+current grant after restart.
+
+The regression obtains two real attachments and fetches, retains both token
+rows, and arranges for the old token key to sort after the new one. The current
+grant succeeds against the live state. After reconstructing the exact surviving
+rows, the same current grant fails with ObjectNotFound. The phased failure is
+recorded in `mailbox-stale-token-phased-red.log`, with exact source and executable
+in `cap13-audit-cursor-warm`. It is separate from CAP-78's pagination failures.
+
+The repair must atomically persist the current Item grant, its exact Token,
+and deletion of the superseded Token. Startup must verify object, target,
+mailbox kind, item sequence, attachment generation, and expiry agreement.
+Contradictory retained rows must fail reconstruction rather than selecting
+whichever token happens to sort last. The contract is recorded in
+`cap80-current-grant-contract.md` in the qualification scratch directory.
+
+The repair writes the exact current grant in the Item and Token rows together
+and deletes a superseded token when renewing a grant. Startup requires their
+object ID, scope, attachment, and expiry to agree and rejects missing or
+contradictory rows. All five grant reconstruction cases pass in
+`cap80-grant-scoped-final.log` from `cap70-scoped-fixed-final`; the complete
+recovery admission group passes 46 cases. Full repository gates remain open.
+
+Declared restore also accepted kind-eight records with truncated, extended, or
+wrong-arm mailbox keys because its classifier checked only the outer prefix.
+The classifier now decodes the Item, Token, or Ack arm and validates its exact
+key grammar before selection or transformation. Two actual negative tests fail
+against the original classifier while the valid-row preservation control passes.
+The repair passes all sixteen recovery-classification cases and all 202 storage
+unit tests. Exact sources, binaries, and results are in
+`mailbox-restore-key-red-proof` and `mailbox-restore-key-fixed-proof`.
+
+### CAP-81: base federation queries bypass shared snapshot limits
+
+Fixed in the worktree. The original coordinator's Queries::first_page
+renders and measures the complete reply set before splitting pages and stores
+continuations under a private 4,096-cursor ceiling. The renderer explicitly
+omits snapshot permits, and neither first_page nor finish_query_decision
+performs the configured shared query admission. A per-page wire limit does
+not bound the complete retained allocation or combine it with local and
+companion query usage.
+
+The repair must share per-session and process query accounting, charge the
+retained backing, and release ownership on consumption, expiry, and origin
+retirement. A real StateCore regression that combines local or mailbox usage
+with a new FQUERY is being added before changing this admission path. The
+source and accounting design are recorded in `cap78-query-usage-close-design.md`
+in the qualification scratch directory. The real shared-session regression
+now fails in 0.07 seconds at FQUERY admission while the equivalent local
+reservation is refused. Its exact command and executable are recorded in
+`legacy-restore-query-witness-proof/fquery-exact-red.log` and the proof manifest.
+
+The shared admission repair now reserves backing before full rendering and
+keeps one query lease through page delivery, continuation retention, and the
+request's durable receipt. Exact expiry and stale-receipt checks release only
+the matching owner. Empty B-tree roots retain their backing reservation until
+destruction, and continuation checks borrow the request arm. Seven admission
+and two receipt tests pass, along with all 152 domain tests, in
+`cap74-cap81-cap82-fixed-proof`. Full workspace and release qualification
+remain open.
+
+### CAP-82: snapshot hashing cannot reach the advertised entry ceiling
+
+Fixed in the worktree. A federation snapshot permits 1,000,000 ordered
+route object IDs. Its version-one digest input has 20 fixed bytes and 32 bytes
+per ID, making the maximum canonical input 32,000,020 bytes. The generic
+semantic digest helper refuses inputs over 16,777,215 bytes, so a cut with
+524,288 entries already fails despite remaining within the published entry
+and payload limits.
+
+The repair needs a dedicated streaming adapter over the existing cryptographic
+implementation, preserving the exact domain and canonical framing. It must
+validate the declared count and order, prove equivalence to existing digests,
+and exercise the actual million-entry boundary. Raising the generic input
+ceiling does not provide that bounded ownership. The precise source map is
+recorded in `cap82-snapshot-digest-limit.md` in the qualification scratch
+directory.
+
+An actual one-million-ID regression fails with LimitExceeded against the old
+helper in 0.06 seconds. The fixed E2EE path frames both generations and the
+exact vector length, then streams the ordered IDs through a dedicated bounded
+crypto adapter. The generic semantic hash limit remains unchanged. The adapter
+requires exactly the declared byte count and permits at most 32,000,020 bytes.
+All 120 E2EE and thirty crypto unit tests pass, including the maximum input,
+old digest equivalence, supplied order, chunk boundaries, short and extra input,
+and refusal of an excessive declared count before consuming the iterator.
+Exact held source inputs and executables are in `cap82-e2ee-red-proof` and
+`cap82-hash-fixed-proof`.
+
+Runtime capture now streams the same digest from its charged million-entry
+cut with no additional canonical buffer. Reverting only that runtime adapter
+produces a real memory-ceiling failure while the empty version-one control
+passes. The restored capture suite passes all three cases. A stateful digest
+adapter also supports bounded asynchronous page verification, preserving exact
+declared count and framing across page boundaries. All 121 E2EE tests pass in
+`cap74-cap81-cap82-fixed-proof`; the runtime reversal is archived in
+`cap74-cap82-reversal-proof`. Pending snapshot restart and delivery ownership
+remain separate open work under CAP-70 and CAP-71.
+
+### CAP-83: ReInit votes use the ordinary disposition signature domain
+
+Fixed in the worktree. The original `QuorumLedger::record_reinit` passed
+its canonical bytes through `record_encoded`, which selects
+`SignatureDomain::DispositionVote`. The companion profile requires the
+distinct `ReinitDisposition` domain for this operation. The runtime fixture
+also signs with the ordinary domain, so its positive ReInit tests do not
+exercise the required separation.
+
+The repair needs a correctly signed ReInit quorum acceptance test and an
+ordinary-domain refusal test that also proves refusal consumes no vote slot.
+Ordinary disposition voting must retain its own exact domain and behavior.
+The earlier CAP-76 sealed successor fixture used histories accepted by this
+implementation under its wrong-domain behavior. CAP-76 must also be proved
+with the corrected, profile-valid signatures before closure. No behavioral
+result or production repair was available at the initial finding.
+
+Both exact-domain regressions now fail against the old verifier: a correctly
+signed ReInit vote is refused, while an ordinary-domain vote is accepted. The
+ordinary disposition control passes. The repair passes the registered domain
+explicitly into the private shared verifier and updates the runtime ReInit
+fixture accordingly. All 123 E2EE tests pass. The held-source fixed proof differs
+from the failing proof only in `finality.rs`; both are archived under
+`cap83-quorum-domain-second-red-proof` and `cap83-quorum-domain-fixed-proof`.
+The three sealed successor recovery tests also pass with these corrected
+signatures in `mixed-audit-rotation-startup-fourth-proof`.
+
+### CAP-84: queued companion pages release their memory charge before transmission
+
+Fixed in the worktree. The original snapshot FETCH and first-page publication
+produce a charged `SnapshotPageOutput`. The base companion adapter drains its
+lines through `LinkHandle::try_send`, which increments the queue byte counter
+but stores no memory reservation in the queued `LinkOutbound`. The page owner
+then drops while accepted strings can remain in a stalled writer queue. The
+queue has no separate process memory permit covering those strings.
+
+The correction must transfer shared page backing into each accepted queued
+frame and retain it through the awaited writer or cancellation. Refused frames
+must drop before their owner. The existing reserved ACK path already provides
+the queued reservation and the close/publication latch; the page adapter must
+preserve those contracts. A real stalled-queue regression is being added to
+prove that queued bytes and the process memory charge remain owned until the
+receiver or writer releases them. This finding is limited to the new page
+path. The actual stalled-queue test now fails after publication with queued
+strings still present and a zero memory charge instead of the required 20,480
+bytes. Its replacement-link control passes. The 0.12-second behavioral red,
+all 240 held source inputs, and executable are archived in
+`cap84-queued-page-red-and-stale-start-proof`. The shared backing transfer now
+passes the stalled queue and replacement-link tests, three partial admission
+and queue closure tests, and three actual awaited writer completion, failure,
+and cancellation tests. Two sealed startup-read cancellation tests also pass.
+The fixed workspace build held all 244 changed inputs; these ten focused
+checks are archived in `queued-backing-invitation-checkpoint`. Full repository
+gates and release capacity qualification remain pending.
+
+### CAP-85: storage restart rejects the invitation tombstone its account writer emits
+
+Fixed in the worktree. Successful account creation
+stores a kind-two RegistrationInvite tombstone referencing its Account.
+Runtime reconstruction requires that exact Account reference. Storage startup
+instead rejects every kind-two invitation with any reference, so the canonical
+writer and both reconstruction layers disagree. Removing the reference would
+make the row invalid for the runtime and would not repair the contract.
+
+Four isolated real-storage restart cases now reproduce both sides of the
+mismatch: the canonical Account reference is rejected, and a missing Account
+reference is accepted. Extra ownership and wrong-target controls refuse as
+required. Test-only phase context localizes the stale START failure to the
+same seeded storage reconstruction. The 0.31-second isolated proof and exact
+held sources are archived in `queued-backing-invitation-checkpoint`. The
+validator now requires exact single-Account ownership and preserves generic
+target existence checks and the separate Account, Session, and
+invitation-reservation rules. All four fixed restart cases and the complete
+stale START cleanup and rotation case pass in `invitation-owner-fixed-proof`.
+
+### CAP-86: a ReInit attempt checks attachment without checking old-group membership
+
+The outside-account admission defect is fixed in the worktree. The attempt,
+activation, and abort handlers previously required only a directory-active
+attachment before reaching the signer. Possession of a valid public attempt
+and quorum evidence therefore let a different attached account submit all
+three operations.
+
+Three regressions reproduce successful admission by that outside account,
+using the same payload as an accepted in-group control. The attempt approval
+uses the registered ReinitAttemptAuthorization domain. All three fail
+behaviorally in `resumed-reinit-admission-red.log`. Each handler now requires
+the account to be a principal of the retained old binding before accessing
+the signer. The regressions pass with the signer present and absent, preserve
+all retained conversation, log, and object state on refusal, and stage no
+storage writes. All thirteen ReInit tests pass in
+`resumed-reinit-admission-green.log`.
+
+This is the server's retained-binding account check. It does not establish
+that a particular attached device is an old MLS leaf, that an activation
+submitter continues into the new group, or that a ReInit ACK matches that
+leaf's signer. Those operation-matrix obligations remain open and require a
+validated device-to-leaf admission contract; account membership alone does
+not prove them.
 
 ## Release claims and limits
 

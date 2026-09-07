@@ -59,7 +59,7 @@ pub(super) fn capture(
     {
         return Err(Violation::Consistency);
     }
-    check_generation(pending, header.coordinator_state_generation)?;
+    check_capture_generation(pending, header.coordinator_state_generation)?;
     check_target(pending, &view.membership.channel_id, edge)?;
     let permit = context.reserve_output_backing(ECHO_BACKING_BYTES)?;
     let frame = frames.pop().ok_or(Violation::Consistency)?;
@@ -102,6 +102,13 @@ fn pending_join<'a>(
     Ok(first)
 }
 
+fn check_capture_generation(pending: &PendingRequest, generation: u64) -> Result<(), Violation> {
+    if pending.completion_generation.is_some() || pending.completion_coverage.is_some() {
+        return Err(Violation::Consistency);
+    }
+    check_generation(pending, generation)
+}
+
 fn check_generation(pending: &PendingRequest, generation: u64) -> Result<(), Violation> {
     if let Some(result) = &pending.result {
         check_result_generation(result, generation)?;
@@ -133,6 +140,11 @@ pub(super) fn validate_result(
             ..
         }) => {
             check_result(echo, request, result)?;
+        }
+        Some(super::PendingCommit::OrdinaryBatch(pending)) => {
+            for echo in &pending.echoes {
+                check_result(echo, request, result)?;
+            }
         }
         Some(super::PendingCommit::BarrierApplied { join_echoes, .. }) => {
             for echo in join_echoes {
@@ -188,6 +200,70 @@ fn check_target(
     });
     if !requested {
         return Err(Violation::Consistency);
+    }
+    Ok(())
+}
+
+/// Coalescing durable rows must not hide repeated or excessive tentative JOINs.
+pub(super) fn validate_tentative(
+    edge: &EdgeFederation,
+    tentative: &[JoinEcho],
+    echo: &JoinEcho,
+    completed: &std::collections::BTreeSet<RequestId>,
+) -> Result<(), Violation> {
+    let pending = edge
+        .pending
+        .get(&echo.request)
+        .ok_or(Violation::Consistency)?;
+    if completed.contains(&echo.request) {
+        return Err(Violation::Consistency);
+    }
+    check_capture_generation(pending, echo.state_generation)?;
+    let mut count = pending.join_echoes.len();
+    for prior in tentative
+        .iter()
+        .filter(|prior| prior.request == echo.request)
+    {
+        if prior.channel == echo.channel
+            || prior.state_generation != echo.state_generation
+            || prior.replay_key != echo.replay_key
+        {
+            return Err(Violation::Consistency);
+        }
+        count = count.checked_add(1).ok_or(Violation::Ceiling)?;
+    }
+    if count >= MAX_JOIN_ECHOES {
+        return Err(Violation::Ceiling);
+    }
+    Ok(())
+}
+
+/// An ordinary prefix validates all requester echoes before any row coalescing
+/// or storage admission. Its final marker cannot cover a different mutation.
+pub(super) fn validate_completion(
+    edge: &EdgeFederation,
+    tentative: &[JoinEcho],
+    header: &EventHeader,
+) -> Result<(), Violation> {
+    let correlation = header.correlation.ok_or(Violation::Consistency)?;
+    let pending = edge
+        .pending
+        .get(&correlation.request_id)
+        .ok_or(Violation::Consistency)?;
+    if pending.header.replay_key != correlation.replay_key {
+        return Err(Violation::Consistency);
+    }
+    for echo in pending
+        .join_echoes
+        .iter()
+        .chain(tentative)
+        .filter(|echo| echo.request == correlation.request_id)
+    {
+        if echo.replay_key != correlation.replay_key
+            || echo.state_generation != header.coordinator_state_generation
+        {
+            return Err(Violation::Consistency);
+        }
     }
     Ok(())
 }

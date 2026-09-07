@@ -985,6 +985,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
     exec.attached_device()?;
+    super::route_successor::owner(exec, &old_conversation_id)?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
     let attempt: IrcReInitAttempt = decode(object.body(), MAX_REINIT_OBJECT)?;
@@ -1175,6 +1176,7 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Outcome, Fail> {
     let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
     exec.attached_device()?;
+    super::route_successor::owner(exec, &old_conversation_id)?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
@@ -1465,9 +1467,7 @@ pub fn fetch_object(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .state
         .objects
         .get(&object_id)
-        .filter(|bytes| {
-            CompanionCoordinator::kind_of(bytes).is_some_and(|kind| !kind.is_server_only())
-        })
+        .filter(|bytes| super::recovery_read::permitted(exec, &conversation_id, bytes))
         .cloned();
     page(exec, bytes.into_iter().collect(), EmptyKind::Objects, None)
 }

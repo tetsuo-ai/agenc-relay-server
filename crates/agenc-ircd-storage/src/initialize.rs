@@ -114,7 +114,31 @@ pub fn initialize_storage(
     initialize_storage_inner(config)
 }
 
-/// Creates generation-1 fixtures through the unchanged authenticated seal
+pub(crate) fn initialize_stopped_construction(
+    config: StorageInitializationConfig,
+) -> Result<StorageInitializationOutcome, StorageError> {
+    let schema = crate::construction_schema::ConstructionSchema::from_generation(
+        config.header_tbs.schema_generation,
+    )?;
+    if config.mode != StorageInitializationMode::Construction {
+        return Err(StorageError::UnsupportedVersion);
+    }
+    let record = config
+        .initial_records
+        .iter()
+        .find(|record| record.table == TableId::StorageConstruction)
+        .ok_or(StorageError::InvalidEncoding)?;
+    let marker = crate::StorageConstruction::decode(&record.plaintext)?;
+    marker.identity.validate()?;
+    if marker.identity.target_schema_generation != schema.generation()
+        || marker.identity.target_database_instance_id != config.header_tbs.database_instance_id
+    {
+        return Err(StorageError::StaleState);
+    }
+    initialize_storage_inner(config)
+}
+
+/// Creates generation-one or generation-two fixtures through the authenticated seal
 /// path, for the engine tests and the migration drill. Available only to
 /// tests and behind the `legacy-fixtures` feature; a release build has no
 /// way to construct a legacy database.
@@ -122,7 +146,7 @@ pub fn initialize_storage(
 pub fn initialize_legacy_storage(
     config: StorageInitializationConfig,
 ) -> Result<StorageInitializationOutcome, StorageError> {
-    if config.header_tbs.schema_generation != 1 {
+    if !matches!(config.header_tbs.schema_generation, 1 | 2) {
         return Err(StorageError::UnsupportedVersion);
     }
     initialize_storage_inner(config)

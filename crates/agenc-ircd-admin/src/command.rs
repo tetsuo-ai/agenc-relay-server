@@ -189,8 +189,16 @@ pub enum AdminCommand {
 }
 
 impl AdminCommand {
-    /// Parses one canonical line into the closed registry.
+    /// Parses one canonical line into the current command registry.
     pub fn parse(command: CanonicalCommand<'_>) -> Result<Self, AdminError> {
+        Self::parse_schema_two(command)
+    }
+
+    /// Parses only the original command grammar admitted by storage schema two.
+    ///
+    /// Current registry extensions belong in `parse`; old signed bytes must
+    /// not acquire a new command meaning through a current-parser fallback.
+    pub fn parse_schema_two(command: CanonicalCommand<'_>) -> Result<Self, AdminError> {
         let parameters = command.parameters();
         match (command.verb(), parameters.as_slice()) {
             ("PING", [token]) => Ok(Self::Ping(ping_token(token)?)),

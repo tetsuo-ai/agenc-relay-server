@@ -604,18 +604,40 @@ async fn an_ordinary_resume_never_consumes_an_unrestored_barrier_prefix() -> Tes
         retained_event(1, SECOND)?,
         retained_event(2, SUCCESSOR)?,
     ];
-    let (mut fixture, mut coordinator) = retained_window_fixture(records).await?;
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), records)?;
+    let head = fixture.context_mut()?.head().storage_commit_sequence;
+    let mut coordinator = standalone_coordinator(PEER);
+    coordinator.startup(fixture.context_mut()?);
+    for _ in 0..16 {
+        if coordinator.peers.get(&PEER).ok_or("peer")?.quarantined {
+            break;
+        }
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.next_storage_read(),
+        )
+        .await??;
+        coordinator.storage_read_completed(fixture.context_mut()?, completion);
+    }
+    assert!(!coordinator.loaded());
+    assert!(coordinator.peers.get(&PEER).ok_or("peer")?.quarantined);
     assert!(
         coordinator.barriers.is_empty(),
         "the immutable row is the exclusion boundary"
     );
     let (handle, _queue) = reconnect_with_cursor(&mut fixture, &mut coordinator, 1, SECOND)?;
-    let completion = fixture.next_storage_read().await?;
-    coordinator.storage_read_completed(fixture.context_mut()?, completion);
     assert!(coordinator.peers.get(&PEER).ok_or("peer")?.live.is_none());
     assert_eq!(fixture.context_mut()?.pending_len(), 0);
     assert_eq!(handle.queued_bytes(), 0);
-    assert_unreconciled(&mut fixture, &coordinator)?;
+    assert_eq!(
+        coordinator.peers.get(&PEER).ok_or("peer")?.outbox.cursor,
+        None
+    );
+    assert_eq!(fixture.context_mut()?.head().storage_commit_sequence, head);
+    for sequence in 0..3 {
+        assert!(fixture.stored_row_exists(TableId::EdgeOutbox, outbox_key(PEER, 0, sequence)?)?);
+    }
     Ok(())
 }
 

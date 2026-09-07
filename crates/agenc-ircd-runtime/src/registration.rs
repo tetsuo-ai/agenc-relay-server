@@ -322,9 +322,10 @@ impl RegistrationRouter {
         port: &agenc_ircd_storage::StoragePort,
         keys: &crate::state_core::durable::KeyDeriver,
         head: crate::state_core::durable::HeadCounters,
+        backing: crate::budget::BackingReservationPort,
     ) -> Result<(), crate::RuntimeError> {
         if let Some(edge) = self.edge.as_mut() {
-            edge.restore(port, keys, self.e2ee.as_mut(), head)?;
+            edge.restore(port, keys, self.e2ee.as_mut(), head, Some(backing))?;
         }
         Ok(())
     }
@@ -450,6 +451,17 @@ impl RegistrationRouter {
             .and_then(|record| record.account)
             .and_then(|(account, _)| account.to_text().as_bytes().try_into().ok());
         e2ee.plaintext_refusal(edge, message, account)
+    }
+
+    fn companion_witness_timer(
+        &mut self,
+        context: &mut StateCoreContext,
+        entry: TimerEntry,
+    ) -> bool {
+        self.e2ee
+            .as_mut()
+            .zip(self.edge.as_mut())
+            .is_some_and(|(e2ee, edge)| e2ee.witness_timer_fired(context, edge, entry))
     }
 
     /// Drains the companion frames the edge admitted and applies what the
@@ -3071,6 +3083,13 @@ impl CommandRouter for RegistrationRouter {
             && self.commands.reload_ready()
     }
 
+    fn index_refreshed(&mut self, context: &mut StateCoreContext) {
+        if let Some(edge) = self.edge.as_mut() {
+            let completions = edge.index_refreshed(context);
+            self.apply_edge_completions(context, completions);
+        }
+    }
+
     fn batch_applied(&mut self, context: &mut StateCoreContext, _plan_count: usize) {
         self.finalize_pending_registrations(context);
         if let Some(accounts) = self.accounts.as_mut() {
@@ -3172,6 +3191,10 @@ impl CommandRouter for RegistrationRouter {
         origin: Option<crate::state_core::StagedOrigin>,
         error: agenc_ircd_storage::StorageError,
     ) {
+        let witness_rejection = self
+            .e2ee
+            .as_ref()
+            .and_then(|e2ee| e2ee.witness_rejection(context));
         context.discard_local_join_seeds();
         if let Some(federation) = self.federation.as_mut() {
             federation.batch_rejected_with_error(context, error);
@@ -3184,7 +3207,9 @@ impl CommandRouter for RegistrationRouter {
         if let Some(edge) = self.edge.as_mut() {
             edge.batch_rejected_with_error(context, error);
         }
-        if let Some(e2ee) = self.e2ee.as_mut() {
+        if let Some(e2ee) = self.e2ee.as_mut()
+            && !e2ee.witness_batch_rejected(witness_rejection)
+        {
             e2ee.batch_rejected();
         }
         let generation = origin.as_ref().map(StagedOrigin::generation);
@@ -3231,6 +3256,9 @@ impl CommandRouter for RegistrationRouter {
         if let Some(edge) = self.edge.as_mut()
             && edge.timer_fired(context, entry)
         {
+            return;
+        }
+        if self.companion_witness_timer(context, entry) {
             return;
         }
         let Some(accounts) = self.accounts.as_mut() else {

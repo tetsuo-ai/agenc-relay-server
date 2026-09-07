@@ -184,7 +184,7 @@ fn reload(
         let value = PersistentRecordValue::decode(*table, plaintext)?;
         restored.admit_restored(*table, key, &value);
     }
-    restored.finish_restore();
+    restored.finish_restore()?;
     Ok(restored)
 }
 

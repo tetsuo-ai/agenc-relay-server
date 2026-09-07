@@ -702,6 +702,32 @@ impl RouteEntitlements {
             .collect()
     }
 
+    /// Visits the exact canonical snapshot set without allocating a copy.
+    pub fn snapshot_iter(&self, edge: ServerId) -> impl Iterator<Item = Id> + '_ {
+        let mut channel = self
+            .channel
+            .range((edge, [0; 32])..=(edge, [0xff; 32]))
+            .filter(|(_, entitled)| **entitled)
+            .map(|((_, conversation), _)| *conversation)
+            .peekable();
+        let mut direct = self
+            .direct
+            .range((edge, [0; 32])..=(edge, [0xff; 32]))
+            .filter(|(_, references)| references.total() > 0)
+            .map(|((_, conversation), _)| *conversation)
+            .peekable();
+        std::iter::from_fn(move || match (channel.peek(), direct.peek()) {
+            (Some(left), Some(right)) if left < right => channel.next(),
+            (Some(left), Some(right)) if left == right => {
+                let _same = direct.next();
+                channel.next()
+            }
+            (Some(_), Some(_)) | (None, Some(_)) => direct.next(),
+            (Some(_), None) => channel.next(),
+            (None, None) => None,
+        })
+    }
+
     /// Drops every entry of `edge` (peer fence).
     pub fn fence(&mut self, edge: ServerId) {
         self.channel.retain(|(server, _), _| *server != edge);

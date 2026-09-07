@@ -31,7 +31,7 @@ from release_qualification.signing import DOMAIN, sign_payload
 CLAIMS_PATH = "conformance/release-claims.toml"
 BASELINE_PATH = "conformance/spec-baseline.toml"
 LIMITS_DOCUMENT = "docs/stage-10-qualification.md"
-STORAGE_SCHEMA_GENERATION = 2
+STORAGE_SCHEMA_GENERATION = 3
 COMPILED = {"core-v1": True, "federated-v1": True, "encrypted-v1": True, "history": True, "wss": True}
 FOREIGN_COMMIT = "0" * 40
 WHITESPACE = re.compile(r"\s+")

@@ -39,10 +39,24 @@ pub(crate) fn validate_source_record(
                 return Err(StorageError::UnsupportedVersion);
             }
         }
-    } else if generation != crate::SCHEMA_GENERATION {
+    } else if !matches!(generation, 2 | 3) {
         return Err(StorageError::UnsupportedVersion);
     }
+    if generation <= 2 {
+        validate_legacy_kind(table, plaintext)?;
+    }
     crate::validate_record_plaintext(table, key, schema, plaintext)
+}
+
+fn validate_legacy_kind(table: TableId, plaintext: &[u8]) -> Result<(), StorageError> {
+    if matches!(table, TableId::E2eeState | TableId::Audit) {
+        let value = PersistentRecordValue::decode(table, plaintext)?;
+        let maximum = if table == TableId::E2eeState { 12 } else { 1 };
+        if value.record_kind() > maximum {
+            return Err(StorageError::UnsupportedVersion);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn valid_rule_sources(

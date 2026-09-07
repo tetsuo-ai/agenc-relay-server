@@ -492,9 +492,12 @@ impl StorageOperationIdentity {
             }
             StorageConstructionKind::Migrate
                 if self.source_stream_digest.is_none()
-                    && self.source_schema_generation == 1
-                    && self.target_schema_generation == 2
-                    && self.transform_profile_hash == crate::migration::profile_hash()? =>
+                    && self.transform_profile_hash
+                        == crate::migration_profile::MigrationProfile::select(
+                            self.source_schema_generation,
+                            self.target_schema_generation,
+                        )?
+                        .hash()? =>
             {
                 Ok(())
             }
@@ -808,7 +811,7 @@ fn validate_action(
             Ok(())
         }
         (StorageConstructionKind::Migrate, StorageConstructionAction::MigrateTransform)
-            if crate::migration::valid_rule_sources(sources, target, rule_id) =>
+            if crate::migration_profile::registered_rule_sources(sources, target, rule_id) =>
         {
             Ok(())
         }

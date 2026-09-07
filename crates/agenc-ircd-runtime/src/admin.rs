@@ -52,8 +52,9 @@ use crate::state_core::{
 use crate::sync::Arc;
 use crate::tls::{CLOSE_NOTIFY_GRACE, WRITE_STALL_BUDGET};
 
-pub(crate) use audit::AuditAuthority;
-use audit::PendingStartupActionKind;
+pub use audit::LegacyAuditSourceValidator;
+pub(crate) use audit::{AuditAuthority, PreparedMaintenanceAudit};
+use audit::{AuditExportFailure, PendingStartupActionKind};
 
 /// RFC 9846 exporter label for the remote administrative session binding.
 pub(crate) const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
@@ -1409,7 +1410,7 @@ impl AdminOwner {
         let frozen = match tokio::task::spawn_blocking(move || export.run()).await {
             Ok(Ok(frozen)) => frozen,
             Ok(Err(error)) => {
-                self.output_export_failure(generation, error);
+                self.output_export_job_failure(generation, error);
                 return;
             }
             Err(_) => {
@@ -2378,6 +2379,20 @@ impl AdminOwner {
             | AdminCoreFailure::StorageUnavailable => render_stats_unavailable(selector),
         };
         self.output_line(generation, line);
+    }
+
+    fn output_export_job_failure(
+        &self,
+        generation: ConnectionGeneration,
+        error: AuditExportFailure,
+    ) {
+        match error {
+            AuditExportFailure::UnsupportedProfile => self.output_line(
+                generation,
+                "FAIL AUDIT UNAVAILABLE :Audit export unavailable".to_owned(),
+            ),
+            AuditExportFailure::Source(error) => self.output_export_failure(generation, error),
+        }
     }
 
     fn output_export_failure(&self, generation: ConnectionGeneration, error: crate::RuntimeError) {

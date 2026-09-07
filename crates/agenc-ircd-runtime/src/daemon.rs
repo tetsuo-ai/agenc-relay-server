@@ -1,5 +1,7 @@
 //! Live Stage 06 daemon composition for a standalone coordinator.
 
+pub(crate) mod login_index;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -8,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-use agenc_ircd_admin::{AdminSessionBinding, OperatorRecord, OperatorRegistry};
+use agenc_ircd_admin::{
+    AdminSessionBinding, MaintenanceAuditScope, OperatorRecord, OperatorRegistry,
+};
 use agenc_ircd_auth::{
     AuthError, CHANNEL_KEY_HASH_BYTES as AUTH_CHANNEL_HASH_BYTES,
     CHANNEL_KEY_ITERATIONS as AUTH_CHANNEL_ITERATIONS, CHANNEL_KEY_LANES as AUTH_CHANNEL_LANES,
@@ -474,10 +478,13 @@ impl LiveStorage {
             .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?
             .get();
         let audit = AuditAuthority::reconstruct(
-            AdminSessionBinding {
-                network_id: config.network.network_id,
-                server_id: config.server.server_id,
-            },
+            MaintenanceAuditScope::new(
+                config.network.network_id,
+                config.server.server_id,
+                storage.database_binding().database_instance_id(),
+                storage.database_binding().server_incarnation(),
+                storage.recovery_epoch(),
+            ),
             Ed25519SecretKey::from_bytes(*secrets.audit_signing().expose()),
             &trust,
             owner.port(),
@@ -627,6 +634,7 @@ fn build_live_state(
             &storage.owner.port(),
             &storage.keys,
             storage.reconstruction.head,
+            crate::budget::BackingReservationPort::new(Arc::clone(&budget)),
         )?;
         let limits = operational_limits(config)?;
         let history = crate::state_core::history::HistoryState::load(
@@ -1411,7 +1419,9 @@ fn attach_coordinator_role(
     if let Some(e2ee) = e2ee {
         coordinator.set_companion_profile(Some(e2ee.profile));
         if let Some(executor) = e2ee.executor {
-            coordinator.install_companion_executor(executor);
+            coordinator
+                .install_companion_executor(executor, setup.local.incarnation())
+                .map_err(|_| DaemonError::E2eeCredentials)?;
         }
     }
     Ok(router.with_federation(coordinator))

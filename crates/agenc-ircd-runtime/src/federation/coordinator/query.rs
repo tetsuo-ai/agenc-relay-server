@@ -14,7 +14,7 @@ use agenc_ircd_domain::federation::{
     ContinuationRequest, CursorCounter, QueryCursorBinding, QueryCursorTable,
 };
 use agenc_ircd_domain::{DomainError, QueryPlan};
-use agenc_ircd_federation_wire::{CanonicalEncode, SchemaObject};
+use agenc_ircd_federation_wire::SchemaObject;
 use agenc_ircd_types::{
     AccountId, FederationDirectoryQueryKind, Generation, MonotonicTick, NetworkId, ServerId,
     SessionId, UserId,
@@ -24,12 +24,25 @@ use super::Violation;
 use crate::federation::codec::results::{ResultArm, reply_object};
 use crate::query_pages::{ReplySize, page_count};
 use crate::state_core::StateCoreContext;
+use crate::sync::Arc;
+
+mod backing;
+mod expiry;
+mod shape;
+use backing::DirectoryQueryReservation;
+pub(super) use backing::QueryReceipt;
 
 /// The fixed per-page ceilings (spec 20.4).
 /// Live cursors held at once across every edge.
 const MAX_LIVE_CURSORS: usize = 4_096;
 /// The registered failure code for any cursor problem.
 const QUERY_EXPIRED: &str = "QUERY_EXPIRED";
+
+#[cfg(test)]
+#[path = "tests/query_admission.rs"]
+mod admission;
+#[cfg(test)]
+pub(super) use admission::names_query_fixture;
 
 /// The process-local query cursor state.
 pub(super) struct Queries {
@@ -38,6 +51,9 @@ pub(super) struct Queries {
     counter: CursorCounter,
     cursors: QueryCursorTable,
     retained: BTreeMap<[u8; 32], Retained>,
+    expiry_armed: Option<(MonotonicTick, crate::state_core::timers::TimerGeneration)>,
+    // Empty BTree roots survive removal; both tables must drop before this owner.
+    root_backing: Option<backing::CursorRootReservation>,
 }
 
 /// The frames of a query beyond the pages already answered.
@@ -46,6 +62,10 @@ struct Retained {
     sizes: Vec<ReplySize>,
     terminal_count: usize,
     snapshot_token: [u8; 32],
+    created_at: MonotonicTick,
+    expires_at: MonotonicTick,
+    // Both page and retained allocations are destroyed before this owner.
+    reservation: Option<Arc<DirectoryQueryReservation>>,
 }
 
 /// The identity of one directory query as the edge named it.
@@ -61,6 +81,7 @@ pub(super) struct QueryIdentity {
 pub(super) struct Page {
     pub(super) arm: ResultArm,
     pub(super) replies: Vec<SchemaObject>,
+    pub(super) receipt: Option<QueryReceipt>,
 }
 
 /// The fixed origin of every cursor this process computes.
@@ -77,21 +98,16 @@ impl Queries {
             counter: CursorCounter::default(),
             cursors: QueryCursorTable::new(),
             retained: BTreeMap::new(),
+            expiry_armed: None,
+            root_backing: None,
         }
     }
 
     /// Drops every expired cursor and its retained frames.
     pub(super) fn expire(&mut self, now: MonotonicTick) {
         let _dropped = self.cursors.expire(now);
-        let dead: Vec<[u8; 32]> = self
-            .retained
-            .keys()
-            .filter(|cursor| !self.cursors.contains(cursor))
-            .copied()
-            .collect();
-        for cursor in dead {
-            self.retained.remove(&cursor);
-        }
+        self.retained
+            .retain(|cursor, _| self.cursors.contains(cursor));
     }
 
     /// Returns the number of live cursors.
@@ -111,38 +127,14 @@ impl Queries {
         if self.retained.len() >= MAX_LIVE_CURSORS {
             return Err(DomainError::ServerBusy);
         }
-        let frames =
-            crate::query_render::federated_query_frames(context, identity.user_id, false, plan)
-                .map_err(|_| DomainError::ServerBusy)?;
-        if frames.is_empty() && identity.kind == FederationDirectoryQueryKind::MonitorStatus {
+        let mut retained = render_retained(context, identity, plan)?;
+        if retained.replies.is_empty()
+            && identity.kind == FederationDirectoryQueryKind::MonitorStatus
+        {
             return Ok(Page {
                 arm: ResultArm::NoContent,
                 replies: Vec::new(),
-            });
-        }
-        let mut retained = Retained {
-            replies: Vec::new(),
-            sizes: Vec::new(),
-            terminal_count: frames
-                .iter()
-                .rev()
-                .take_while(|frame| frame.command() == "366")
-                .count(),
-            snapshot_token: [0; 32],
-        };
-        for frame in &frames {
-            let (object, encoded, rendered) = measure(frame)?;
-            retained.replies.push(object);
-            retained.sizes.push(ReplySize {
-                encoded,
-                rendered,
-                names_users: if frame.command() == "353" {
-                    frame
-                        .trailing()
-                        .map_or(0, |text| text.split_ascii_whitespace().count())
-                } else {
-                    0
-                },
+                receipt: None,
             });
         }
         context
@@ -150,13 +142,21 @@ impl Queries {
             .fill_exact(&mut retained.snapshot_token)
             .map_err(|_| DomainError::ServerBusy)?;
         let token = retained.snapshot_token;
+        let owner = Arc::clone(
+            retained
+                .reservation
+                .as_ref()
+                .ok_or(DomainError::InvariantViolation)?,
+        );
         let page = take_page(&mut retained).map_err(|_| DomainError::ServerBusy)?;
         let next_cursor = if retained.replies.is_empty() {
             None
         } else {
+            self.reserve_roots(context)?;
             let binding =
                 self.binding(scope, identity, context.domain().revision().get(), token, 1)?;
             let cursor = self.cursor_of(&binding)?;
+            self.reserve_expiry(context, retained.expires_at)?;
             self.cursors
                 .install_new(cursor, binding, context.now())
                 .map_err(|_| DomainError::InvariantViolation)?;
@@ -170,6 +170,10 @@ impl Queries {
                 next_cursor,
             },
             replies: page,
+            receipt: Some(QueryReceipt {
+                successor: next_cursor,
+                owner,
+            }),
         })
     }
 
@@ -177,7 +181,7 @@ impl Queries {
     /// exactly `failed(QUERY_EXPIRED)`.
     pub(super) fn next_page(
         &mut self,
-        context: &StateCoreContext,
+        context: &mut StateCoreContext,
         scope: &CursorScope,
         identity: &QueryIdentity,
         cursor: [u8; 32],
@@ -187,19 +191,49 @@ impl Queries {
             user_id: identity.user_id,
             account: identity.account,
             query_kind: identity.kind,
-            query_arm: identity.arm.clone(),
+            query_arm: identity.arm.as_slice(),
         };
         let now = context.now();
         let Ok(live) = self.cursors.check(&cursor, &request, now) else {
-            self.retained.remove(&cursor);
             return Ok(expired_page());
         };
         let sequence = live.binding.next_page_sequence;
         let state_generation = live.binding.state_generation;
-        let Some(mut retained) = self.retained.remove(&cursor) else {
+        let Some(retained) = self.retained.remove(&cursor) else {
+            let _released = self.cursors.replace(&cursor, None, now);
             return Ok(expired_page());
         };
+        let owner = retained.reservation.clone();
+        let result = self.continue_retained(
+            context,
+            scope,
+            identity,
+            cursor,
+            (sequence, state_generation),
+            retained,
+        );
+        if result.is_err() {
+            let _released = self.cursors.replace(&cursor, None, now);
+        }
+        drop(owner);
+        result
+    }
+
+    fn continue_retained(
+        &mut self,
+        context: &mut StateCoreContext,
+        scope: &CursorScope,
+        identity: &QueryIdentity,
+        cursor: [u8; 32],
+        progress: (u32, u64),
+        mut retained: Retained,
+    ) -> Result<Page, Violation> {
+        let (sequence, state_generation) = progress;
+        let now = context.now();
+        retained.expires_at =
+            expiry::deadline(retained.created_at, now).map_err(|_| Violation::Ceiling)?;
         let token = retained.snapshot_token;
+        let owner = Arc::clone(retained.reservation.as_ref().ok_or(Violation::Ceiling)?);
         let page = take_page(&mut retained)?;
         let successor = if retained.replies.is_empty() {
             None
@@ -209,6 +243,8 @@ impl Queries {
                 .binding(scope, identity, state_generation, token, next_sequence)
                 .map_err(|_| Violation::Ceiling)?;
             let next = self.cursor_of(&binding).map_err(|_| Violation::Ceiling)?;
+            self.reserve_expiry(context, retained.expires_at)
+                .map_err(|_| Violation::Ceiling)?;
             Some((next, binding))
         };
         let next_cursor = successor.as_ref().map(|(next, _)| *next);
@@ -225,6 +261,10 @@ impl Queries {
                 next_cursor,
             },
             replies: page,
+            receipt: Some(QueryReceipt {
+                successor: next_cursor,
+                owner,
+            }),
         })
     }
 
@@ -294,13 +334,69 @@ fn encode_binding(binding: &QueryCursorBinding) -> Result<Vec<u8>, DomainError> 
     Ok(tbs)
 }
 
+/// Admission precedes the renderer, all nested objects, and entropy use.
+fn render_retained(
+    context: &StateCoreContext,
+    identity: &QueryIdentity,
+    plan: &QueryPlan,
+) -> Result<Retained, DomainError> {
+    let bounds = shape::bounds(context, identity.user_id, plan)?;
+    let reservation = DirectoryQueryReservation::prepare(context, identity, &bounds)?;
+    let frames =
+        crate::query_render::federated_query_frames(context, identity.user_id, false, plan)
+            .map_err(|_| DomainError::ServerBusy)?;
+    if frames.len() > bounds.frames
+        || frames
+            .iter()
+            .any(|frame| frame.middle().len() > bounds.middle_parameters)
+    {
+        return Err(DomainError::InvariantViolation);
+    }
+    let mut retained = Retained {
+        replies: Vec::new(),
+        sizes: Vec::new(),
+        terminal_count: frames
+            .iter()
+            .rev()
+            .take_while(|frame| frame.command() == "366")
+            .count(),
+        snapshot_token: [0; 32],
+        created_at: context.now(),
+        expires_at: expiry::deadline(context.now(), context.now())?,
+        reservation: Some(Arc::clone(&reservation)),
+    };
+    retained
+        .replies
+        .try_reserve_exact(frames.len())
+        .map_err(|_| DomainError::AllocationFailed)?;
+    retained
+        .sizes
+        .try_reserve_exact(frames.len())
+        .map_err(|_| DomainError::AllocationFailed)?;
+    for frame in &frames {
+        let (object, encoded, rendered) = measure(frame)?;
+        retained.replies.push(object);
+        retained.sizes.push(ReplySize {
+            encoded,
+            rendered,
+            names_users: if frame.command() == "353" {
+                frame
+                    .trailing()
+                    .map_or(0, |text| text.split_ascii_whitespace().count())
+            } else {
+                0
+            },
+        });
+    }
+    Ok(retained)
+}
+
 /// Encodes one reply and returns it with its encoded and rendered sizes.
 fn measure(frame: &WireMessage) -> Result<(SchemaObject, usize, usize), DomainError> {
     let object = reply_object(frame).map_err(|_| DomainError::InvalidArgument)?;
     let encoded = object
-        .encode_canonical()
-        .map_err(|_| DomainError::InvalidArgument)?
-        .len();
+        .encoded_len()
+        .map_err(|_| DomainError::InvalidArgument)?;
     let rendered = frame
         .measure()
         .map_err(|_| DomainError::InvalidArgument)?
@@ -327,6 +423,7 @@ fn expired_page() -> Page {
             context: String::new(),
         },
         replies: Vec::new(),
+        receipt: None,
     }
 }
 
@@ -394,6 +491,9 @@ mod tests {
                 .collect(),
             terminal_count: 0,
             snapshot_token: [1; 32],
+            created_at: MonotonicTick::from_ticks(0),
+            expires_at: MonotonicTick::from_ticks(60_000),
+            reservation: None,
         }
     }
 

@@ -1,5 +1,7 @@
 //! Authenticated storage transaction state machine owned by one blocking thread.
 
+mod stopped;
+
 use std::fs::File;
 use std::io::{Seek as _, SeekFrom};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -3230,17 +3232,15 @@ fn validate_recovered_domain_record(
             return Err(StorageError::StaleState);
         }
     }
-    if (
-        matches!(
-            (table, value.record_kind()),
-            (
-                TableId::Account | TableId::RegistrationInvite | TableId::Session,
-                2
-            )
+    let tombstone_references_valid = match (table, value.record_kind()) {
+        (TableId::Account | TableId::Session, 2) => value.references().is_empty(),
+        (TableId::RegistrationInvite, 2) => matches!(
+            value.references(),
+            [reference] if reference.table() == TableId::Account
         ),
-        value.references().is_empty(),
-    ) == (true, false)
-    {
+        _ => true,
+    };
+    if !tombstone_references_valid {
         return Err(StorageError::StaleState);
     }
     Ok(())

@@ -12,7 +12,7 @@ use agenc_ircd_storage::e2ee_records::barrier::{
 };
 use agenc_ircd_storage::e2ee_records::{
     BARRIER_ROW_KIND, DELIVERY_ROW_KIND, DeliveryRow, OBJECT_RECORD_KIND, ObjectRow,
-    ROUTE_ROW_KIND, RouteRow,
+    ROUTE_ROW_KIND, RouteRow, WITNESS_ROW_KIND, WitnessRow,
 };
 use agenc_ircd_storage::federation_records::{
     FederationPeerRecord, PEER_RECORD_KIND, PROJECTION_ENTRY_KIND, ProjectionEntryRecord, peer_key,
@@ -72,7 +72,11 @@ impl EdgeFederation {
         keys: &KeyDeriver,
         mut companion: Option<&mut E2eeEdge>,
         head: HeadCounters,
+        backing: Option<crate::budget::BackingReservationPort>,
     ) -> Result<(), RuntimeError> {
+        if let Some(companion) = companion.as_deref_mut() {
+            companion.restore_witness_backing(backing.ok_or_else(invalid)?)?;
+        }
         let mut restored = Restore::default();
         scan_values(port, keys, TableId::FederationPeer, |key, value| {
             if key == peer_key(self.config.coordinator.server_id())? {
@@ -288,6 +292,12 @@ impl Restore {
         value: PersistentRecordValue,
     ) -> Result<(), RuntimeError> {
         match value.record_kind() {
+            WITNESS_ROW_KIND => {
+                self.charge(value.body().len())?;
+                companion
+                    .ok_or_else(invalid)?
+                    .restore_chain_witness(&key, WitnessRow::decode(value.body())?)?;
+            }
             BARRIER_ROW_KIND => {
                 self.admit_barrier(edge, key, &value)?;
             }

@@ -1541,8 +1541,8 @@ fn numeric_bare(
 
 /// Renders one query for a remote session into reply frames without a
 /// connection: the coordinator packs them into `reply_page` results and the
-/// requesting edge relays them (spec 20.4). Snapshot permits are not taken;
-/// the page ceiling and the cursor table bound the retained frames instead.
+/// requesting edge relays them (spec 20.4). The caller reserves the complete
+/// immutable snapshot and preparation backing before entering this renderer.
 pub(crate) fn federated_query_frames(
     context: &StateCoreContext,
     requester: UserId,

@@ -2,6 +2,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+
+#[path = "mailbox_recovery_keys.rs"]
+mod mailbox_keys;
 use crate::e2ee_records::barrier::{
     BARRIER_RETENTION_SECONDS, BarrierHead, BarrierIdentity, BarrierPart, BarrierReceipt,
     BarrierStage, CrossProfileStream,
@@ -79,6 +82,48 @@ fn recovery_record(row: &RecoveryRow) -> Result<ConstructionSourceRecord, Storag
     )?
     .encode()?;
     Ok(record(TableId::E2eeState, row.key.clone(), plaintext))
+}
+
+#[test]
+fn declared_recovery_preserves_the_exact_mailbox_sequence_owner() -> Result<(), StorageError> {
+    let owner = crate::e2ee_records::MailboxSequenceRow::new(
+        [23; 32],
+        [24; 16],
+        crate::e2ee_records::MailboxKind::Binding,
+        91,
+    )?;
+    let row = RecoveryRow {
+        label: "cap77-restore-owner",
+        kind: crate::e2ee_records::MAILBOX_SEQUENCE_ROW_KIND,
+        key: owner.key()?,
+        body: owner.encode()?,
+    };
+    let restored = recover_selected(&row)?;
+    assert_eq!(restored.body(), row.body);
+    assert_eq!((restored.revision(), restored.generation()), (17, 4));
+    Ok(())
+}
+
+#[test]
+fn declared_recovery_refuses_a_mailbox_owner_under_another_scope() -> Result<(), StorageError> {
+    let owner = crate::e2ee_records::MailboxSequenceRow::new(
+        [23; 32],
+        [24; 16],
+        crate::e2ee_records::MailboxKind::Binding,
+        91,
+    )?;
+    let different = crate::e2ee_records::MailboxSequenceRow::new(
+        [25; 32],
+        [24; 16],
+        crate::e2ee_records::MailboxKind::Binding,
+        91,
+    )?;
+    assert_recovery_binding_refused(&RecoveryRow {
+        label: "cap77-restore-owner-scope",
+        kind: crate::e2ee_records::MAILBOX_SEQUENCE_ROW_KIND,
+        key: different.key()?,
+        body: owner.encode()?,
+    })
 }
 
 // Call the real selector, and remove the scratch database before any expected

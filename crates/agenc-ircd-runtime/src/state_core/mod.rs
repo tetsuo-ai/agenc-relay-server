@@ -12,12 +12,14 @@
 pub(crate) mod admin;
 mod admin_history;
 pub mod durable;
+pub(crate) mod edge_checkpoint;
 pub mod fanout;
 pub(crate) mod history;
 pub mod inbox;
 pub(crate) mod local_join;
 mod pending;
 pub mod projector;
+pub(crate) mod query_usage;
 pub mod reconstruct;
 pub(crate) mod remote_result;
 pub mod session;
@@ -258,6 +260,9 @@ pub trait CommandRouter: Send {
     /// barrier. Routers use this only to retry work that was deferred behind
     /// the single in-flight batch.
     fn batch_applied(&mut self, _context: &mut StateCoreContext, _plan_count: usize) {}
+
+    /// Notifies the router after every pending durable identity is authenticated.
+    fn index_refreshed(&mut self, _context: &mut StateCoreContext) {}
 
     /// A reload signal arrived.
     fn reload_requested(&mut self, _context: &mut StateCoreContext) {}
@@ -826,6 +831,11 @@ impl StateCoreContext {
     ) -> Result<FanoutCommitReport, FanoutRefused> {
         let request = self.fanout_request_to(generation, frames)?;
         self.fanout_now(request)
+    }
+
+    /// Hands an owner only the ability to reserve backing from the existing budget.
+    pub(crate) fn backing_reservations(&self) -> crate::budget::BackingReservationPort {
+        crate::budget::BackingReservationPort::new(Arc::clone(&self.budget))
     }
 
     /// Charges bounded output retained before it can enter a client queue.
@@ -3788,7 +3798,11 @@ impl StateCore {
                 }
             };
         }
+        let batch_readback = matches!(continuation, IndexRefreshContinuation::Batch);
         continuation.complete();
+        if batch_readback {
+            self.router.index_refreshed(&mut self.context);
+        }
         self.maintain_history();
         Ok(())
     }

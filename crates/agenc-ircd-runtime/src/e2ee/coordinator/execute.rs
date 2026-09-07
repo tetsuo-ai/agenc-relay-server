@@ -226,6 +226,13 @@ pub fn run(
         &mut pool,
     );
     let base_plan = outcome.base_plan.take();
+    if let Some(deadline) = outcome.mailbox_expiry {
+        ops::mailbox_snapshot::reserve_expiry(
+            view.context.timers_mut(),
+            deadline,
+            &mut coordinator.state.mailbox_expiry_armed,
+        )?;
+    }
     let base_counts = match &base_plan {
         Some(plan) if plan.resulting_revision().get() == state_generation => Some(
             view.context
@@ -353,6 +360,9 @@ fn execute(
         binding_plan(domain, user_id, channel, principals)
     };
     let mut exec = Exec {
+        queries: user_id.map(|user| context.query_reservations(user)),
+        backing: context.backing_reservations(),
+        monotonic_millis: crate::e2ee::link::tick_millis(context.now()),
         coordinator,
         home,
         origin,
@@ -659,9 +669,9 @@ fn assemble(
         .map(|response| response.bytes.clone())
         .collect();
     for response in &outcome.responses {
-        writes.push(CompanionCoordinator::object_write(&response.bytes)?);
+        super::delivery_owner::append_object(&mut writes, &response.bytes)?;
     }
-    writes.push(CompanionCoordinator::object_write(&result)?);
+    super::delivery_owner::append_object(&mut writes, &result)?;
     let retain_until = now.saturating_add(if outcome.security_mutation {
         SECURITY_MUTATION_REPLAY_SECONDS
     } else {

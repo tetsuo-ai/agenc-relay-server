@@ -2,6 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "stage_five_completion/source_validation.rs"]
+mod source_validation;
+#[path = "stage_five_completion/witness_evidence.rs"]
+mod witness_evidence;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{self, OpenOptions};

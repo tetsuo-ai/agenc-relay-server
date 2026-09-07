@@ -47,6 +47,9 @@ use crate::schema::{MAX_STORED_KEY_BYTES, StoredKey, TableId};
 use crate::{MAX_PROTOCOL_BODY_BYTES, ReadPlan, StorageError};
 
 pub mod barrier;
+pub mod delivery_recovery;
+pub mod mailbox_sequence;
+pub use mailbox_sequence::{MAILBOX_SEQUENCE_ROW_KIND, MailboxSequenceRow};
 pub mod origin;
 
 /// The one live `e2ee_object` arm.
@@ -77,6 +80,8 @@ pub const KEYSET_ROW_KIND: u16 = 11;
 pub const BARRIER_ROW_KIND: u16 = 12;
 /// Edge witness violations of the sequencer record chain (companion 12.5).
 pub const WITNESS_ROW_KIND: u16 = 13;
+/// Complete schema-three coordinator delivery and snapshot ownership.
+pub const DELIVERY_RECOVERY_ROW_KIND: u16 = 14;
 
 /// Version prefix of the original companion body codecs.
 const BODY_VERSION: u16 = 1;
@@ -152,7 +157,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 29] = [
+const PREFIX_KINDS: [(&[u8], u16); 34] = [
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -182,6 +187,20 @@ const PREFIX_KINDS: [(&[u8], u16); 29] = [
     (prefix::BARRIER_HEAD, BARRIER_ROW_KIND),
     (prefix::BARRIER_PART, BARRIER_ROW_KIND),
     (prefix::WITNESS, WITNESS_ROW_KIND),
+    (delivery_recovery::OWNER_PREFIX, DELIVERY_RECOVERY_ROW_KIND),
+    (
+        delivery_recovery::outbox::OUTBOX_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (
+        delivery_recovery::CUT_PAGE_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (
+        delivery_recovery::BARRIER_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (mailbox_sequence::PREFIX, MAILBOX_SEQUENCE_ROW_KIND),
 ];
 
 /// The record kind a table-23 key must carry, from its prefix. `ack/v1/`
@@ -2646,6 +2665,10 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         KEYSET_ROW_KIND => KeySetRow::decode(body).map(|_| ()),
         BARRIER_ROW_KIND => barrier::validate_body(body),
         WITNESS_ROW_KIND => WitnessRow::decode(body).map(|_| ()),
+        DELIVERY_RECOVERY_ROW_KIND => {
+            delivery_recovery::DeliveryRecoveryRow::decode(body).map(|_| ())
+        }
+        MAILBOX_SEQUENCE_ROW_KIND => MailboxSequenceRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),
     }
 }
@@ -2674,9 +2697,11 @@ pub mod fixtures {
         ObjectRow::new(bytes)?.encode()
     }
 
-    /// A valid table-23 body of `kind` (2 to 13).
+    /// A valid table-23 body of `kind` (2 to 14).
     pub fn state_body(kind: u16, seed: u8) -> Result<Vec<u8>, StorageError> {
-        if kind <= DIRECTORY_ROW_KIND {
+        if kind == DELIVERY_RECOVERY_ROW_KIND {
+            delivery_recovery::fixture_body(seed)
+        } else if kind <= DIRECTORY_ROW_KIND {
             structural_body(kind, seed)
         } else {
             operational_body(kind, seed)

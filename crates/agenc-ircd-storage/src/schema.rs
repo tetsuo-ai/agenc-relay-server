@@ -5,7 +5,7 @@ use crate::StorageError;
 /// Database format implemented by this crate.
 pub const DATABASE_FORMAT: u16 = 1;
 /// Schema generation accepted by ordinary service startup.
-pub const SCHEMA_GENERATION: u64 = 2;
+pub const SCHEMA_GENERATION: u64 = 3;
 /// Maximum stored key length.
 pub const MAX_STORED_KEY_BYTES: usize = 4_096;
 /// Maximum integrity-tracked mutations in one manifest.

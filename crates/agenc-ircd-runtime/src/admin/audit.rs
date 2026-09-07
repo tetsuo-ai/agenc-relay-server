@@ -1,11 +1,24 @@
 //! Startup reconstruction and append cursor for the signed admin audit chain.
 
+mod export_failure;
+mod maintenance;
+mod mixed;
+#[cfg(test)]
+#[path = "audit/tests/mixed/mod.rs"]
+mod mixed_tests;
+mod source_validation;
+
+pub(crate) use export_failure::AuditExportFailure;
+pub(crate) use maintenance::PreparedMaintenanceAudit;
+pub use source_validation::LegacyAuditSourceValidator;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_admin::{
     AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEvent, AdminAuditEventTbs,
     AdminAuditPhase, AdminCommand, AdminCommandEvent, AdminSessionBinding, AuditChainCursor,
-    AuditRange, CanonicalCommand, MAX_AUDIT_EXPORT_RECORDS, OperatorRegistry, render_export_batch,
+    AuditEvent, AuditRange, CanonicalCommand, MAX_AUDIT_EXPORT_RECORDS, MaintenanceAuditScope,
+    OperatorRegistry, render_export_batch,
 };
 use agenc_ircd_config::AuditTrustManifestEntry;
 use agenc_ircd_crypto::{Ed25519PublicKey, Ed25519SecretKey, audit_signing_key_id};
@@ -23,6 +36,7 @@ const RANGE_READ_LIMIT: u16 = 4_096;
 
 /// Verified audit authority transferred into the sole `AdminOwner`.
 pub(crate) struct AuditAuthority {
+    scope: MaintenanceAuditScope,
     signing_key: Ed25519SecretKey,
     signing_key_id: [u8; 32],
     signing_not_before: u64,
@@ -136,7 +150,7 @@ impl AuditAuthority {
     /// accepted. Stored keys, envelopes, trust windows, signatures, chains,
     /// checkpoint coverage, and retained intents are all verified here.
     pub(crate) fn reconstruct(
-        binding: AdminSessionBinding,
+        scope: MaintenanceAuditScope,
         signing_key: Ed25519SecretKey,
         trust_entries: &[AuditTrustManifestEntry],
         storage: StoragePort,
@@ -144,6 +158,7 @@ impl AuditAuthority {
         operators: &OperatorRegistry,
         now_unix_seconds: u64,
     ) -> Result<Self, RuntimeError> {
+        let binding = maintenance::session_binding(scope, &keys)?;
         let trust = AuditTrust::new(trust_entries)?;
         let signing_key_id = *audit_signing_key_id(signing_key.public_key().as_bytes())
             .map_err(|_| RuntimeError::InvalidValue)?
@@ -160,8 +175,9 @@ impl AuditAuthority {
         let checkpoints = checkpoint_verifier.finish();
         let retained_first_sequence = checkpoints.cursor.next_sequence;
         let mut event_verifier = EventVerifier::new(binding, &trust, operators, checkpoints.cursor);
-        let event_commit_sequence =
-            scan_events(&storage, &keys, |event| event_verifier.observe(&event))?;
+        let event_commit_sequence = scan_events(&storage, &keys, |event| {
+            event_verifier.observe_event(&event)
+        })?;
         if checkpoint_commit_sequence != event_commit_sequence {
             return Err(RuntimeError::InvalidValue);
         }
@@ -175,6 +191,7 @@ impl AuditAuthority {
         });
 
         Ok(Self {
+            scope,
             signing_key,
             signing_key_id,
             signing_not_before: current.not_before,
@@ -419,6 +436,13 @@ impl AuditAuthority {
             .as_bytes()
             .to_owned();
         Ok(Self {
+            scope: MaintenanceAuditScope::new(
+                agenc_ircd_types::NetworkId::from_bytes([1; 32]),
+                agenc_ircd_types::ServerId::from_bytes([2; 16]),
+                agenc_ircd_types::DatabaseId::from_bytes([4; 16]),
+                agenc_ircd_types::ServerIncarnation::from_bytes([3; 16]),
+                agenc_ircd_types::RecoveryEpoch::from_bytes([5; 16]),
+            ),
             signing_key,
             signing_key_id,
             signing_not_before: 0,
@@ -471,7 +495,7 @@ pub(crate) struct AuditExportJob {
 }
 
 impl AuditExportJob {
-    pub(crate) fn run(self) -> Result<PreparedAuditExport, RuntimeError> {
+    pub(crate) fn run(self) -> Result<PreparedAuditExport, AuditExportFailure> {
         self.source.freeze(
             self.range,
             self.batch_id,
@@ -549,7 +573,7 @@ impl AuditExportSource {
         expected_cursor: AuditChainCursor,
         expected_checkpoint_sequence: u64,
         expected_checkpoint_hash: [u8; 32],
-    ) -> Result<PreparedAuditExport, RuntimeError> {
+    ) -> Result<PreparedAuditExport, AuditExportFailure> {
         let mut selection = ExportSelection::new(range);
         let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
         scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
@@ -560,7 +584,7 @@ impl AuditExportSource {
         if checkpoints.next_sequence != expected_checkpoint_sequence
             || checkpoints.previous_hash != expected_checkpoint_hash
         {
-            return Err(RuntimeError::InvalidValue);
+            return Err(RuntimeError::InvalidValue.into());
         }
         let mut event_verifier = EventVerifier::new(
             self.binding,
@@ -568,13 +592,18 @@ impl AuditExportSource {
             &self.operators,
             checkpoints.cursor,
         );
+        let mut requires_maintenance_profile = false;
         scan_events(&self.storage, &self.keys, |event| {
-            event_verifier.observe(&event)?;
-            selection.consider_event(event)
+            event_verifier.observe_event(&event)?;
+            requires_maintenance_profile |= !selection.consider_mixed(event)?;
+            Ok(())
         })?;
         let events = event_verifier.finish_reconciled()?;
         if events.cursor != expected_cursor {
-            return Err(RuntimeError::InvalidValue);
+            return Err(RuntimeError::InvalidValue.into());
+        }
+        if requires_maintenance_profile {
+            return Err(AuditExportFailure::UnsupportedProfile);
         }
         selection.ensure_bounded()?;
         Ok(PreparedAuditExport {
@@ -621,9 +650,9 @@ impl AuditExportSource {
             checkpoints.cursor,
         );
         scan_events(&self.storage, &self.keys, |event| {
-            event_verifier.observe(&event)?;
+            event_verifier.observe_event(&event)?;
             if let Some(selector) = &mut selector {
-                selector.observe(&event)?;
+                selector.observe_event(&event)?;
             }
             Ok(())
         })?;
@@ -935,27 +964,28 @@ fn scan_checkpoints(
     keys: &KeyDeriver,
     mut visit: impl FnMut(AdminAuditCheckpoint) -> Result<(), RuntimeError>,
 ) -> Result<u64, RuntimeError> {
-    scan_table(storage, keys, TableId::AuditCheckpoint, |sequence, body| {
-        let checkpoint =
-            AdminAuditCheckpoint::decode_exact(body).map_err(|_| RuntimeError::InvalidValue)?;
-        if checkpoint.tbs().checkpoint_sequence != sequence {
-            return Err(RuntimeError::InvalidValue);
-        }
-        visit(checkpoint)
-    })
+    scan_table(
+        storage,
+        keys,
+        TableId::AuditCheckpoint,
+        |sequence, kind, body| {
+            let checkpoint =
+                AdminAuditCheckpoint::decode_exact(body).map_err(|_| RuntimeError::InvalidValue)?;
+            if kind != 1 || checkpoint.tbs().checkpoint_sequence != sequence {
+                return Err(RuntimeError::InvalidValue);
+            }
+            visit(checkpoint)
+        },
+    )
 }
 
 fn scan_events(
     storage: &StoragePort,
     keys: &KeyDeriver,
-    mut visit: impl FnMut(AdminAuditEvent) -> Result<(), RuntimeError>,
+    mut visit: impl FnMut(AuditEvent) -> Result<(), RuntimeError>,
 ) -> Result<u64, RuntimeError> {
-    scan_table(storage, keys, TableId::Audit, |sequence, body| {
-        let event = AdminAuditEvent::decode_exact(body).map_err(|_| RuntimeError::InvalidValue)?;
-        if event.tbs().audit_sequence != sequence {
-            return Err(RuntimeError::InvalidValue);
-        }
-        visit(event)
+    scan_table(storage, keys, TableId::Audit, |sequence, kind, body| {
+        visit(mixed::decode_event(sequence, kind, body)?)
     })
 }
 
@@ -968,7 +998,7 @@ fn scan_table(
     storage: &StoragePort,
     keys: &KeyDeriver,
     table: TableId,
-    visit: impl FnMut(u64, &[u8]) -> Result<(), RuntimeError>,
+    visit: impl FnMut(u64, u16, &[u8]) -> Result<(), RuntimeError>,
 ) -> Result<u64, RuntimeError> {
     scan_table_pages(
         keys,
@@ -983,7 +1013,7 @@ fn scan_table_pages(
     keys: &KeyDeriver,
     table: TableId,
     mut read: impl FnMut(ReadPlan) -> Result<agenc_ircd_storage::ReadResult, RuntimeError>,
-    mut visit: impl FnMut(u64, &[u8]) -> Result<(), RuntimeError>,
+    mut visit: impl FnMut(u64, u16, &[u8]) -> Result<(), RuntimeError>,
 ) -> Result<u64, RuntimeError> {
     let mut start = 0_u64;
     let end = StoredKey::new(vec![0xff; 9])?;
@@ -1027,7 +1057,7 @@ fn scan_table_pages(
             )?;
             let value = PersistentRecordValue::decode(table, plaintext.expose_for_storage_codec())?;
             let expected_revision = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
-            if value.record_kind() != 1
+            if !mixed::permitted_kind(table, value.record_kind())
                 || value.revision() != expected_revision
                 || value.generation() != 0
                 || value.expires_at().is_some()
@@ -1035,7 +1065,7 @@ fn scan_table_pages(
             {
                 return Err(RuntimeError::InvalidValue);
             }
-            visit(sequence, value.body())?;
+            visit(sequence, value.record_kind(), value.body())?;
             last = Some(sequence);
         }
         // A page may stop short of the row limit at the storage byte budget,
@@ -1446,7 +1476,7 @@ mod tests {
                 &keys,
                 TableId::Audit,
                 |_| pages.next().ok_or(RuntimeError::InvalidValue),
-                |_, body| {
+                |_, _, body| {
                     verifier.observe(
                         &AdminAuditEvent::decode_exact(body)
                             .map_err(|_| RuntimeError::InvalidValue)?,
@@ -1487,7 +1517,7 @@ mod tests {
                     records: Vec::new(),
                     truncated: true
                 }),
-                |_, _| Ok(())
+                |_, _, _| Ok(())
             )
             .is_err()
         );

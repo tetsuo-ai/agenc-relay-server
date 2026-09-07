@@ -1,6 +1,11 @@
 //! Bounded, resumable execution of authenticated construction plans.
 
 mod recovery;
+mod restore_source;
+mod stopped;
+
+pub use restore_source::RestoreBackupSourceConfig;
+pub(crate) use restore_source::RestoreSourceAdmission;
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -31,7 +36,6 @@ use crate::{
     StorageFaultSite, StorageMutationBatch, StorageMutationHead, StorageOperationCompletion,
     StorageOperationIdentity, StoragePort, StoredKey, TableId, VerifiedBackup,
     construction_plan_hash, logical_meta_charge, logical_record_charge, validate_record_plaintext,
-    verify_backup,
 };
 
 /// Fixed version-one source logical/backup ceiling.
@@ -2013,9 +2017,10 @@ impl RestoreLoginScan {
 }
 
 impl<R: Read + Seek> RestoreBackupSource<R> {
-    /// Verifies the complete signed stream before admitting it as restore authority.
+    /// Verifies a current-schema signed stream before admitting restore authority.
+    /// Legacy sources require `open_with_legacy_validation` instead.
     pub fn open(
-        mut input: R,
+        input: R,
         source_master_key: StorageMasterKey,
         source_guard_root: RollbackGuardRootKey,
         login_index_key: LoginIndexKey,
@@ -2023,31 +2028,18 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
         trusted_keys: &[BackupTrustKey],
         maximum_bytes: u64,
     ) -> Result<Self, StorageError> {
-        input
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        let verified = verify_backup(
-            &mut input,
-            &source_master_key,
-            &source_guard_root,
-            trusted_keys,
-            maximum_bytes,
-        )?;
-        let source = verified.header.source_header();
-        let binding = DatabaseBinding::new(
-            source.tbs().network_id,
-            source.tbs().server_id,
-            source.tbs().server_incarnation,
-            source.tbs().database_instance_id,
-        );
-        Ok(Self {
+        Self::open_admitted(
             input,
-            source_master_key,
-            login_index_key,
-            previous_login_index_key,
-            binding,
-            verified,
-        })
+            RestoreBackupSourceConfig {
+                source_master_key,
+                source_guard_root,
+                login_index_key,
+                previous_login_index_key,
+                trusted_keys,
+                maximum_bytes,
+            },
+            RestoreSourceAdmission::Current,
+        )
     }
 
     /// Returns the verified signed boundary retained for restore identity construction.
@@ -2634,7 +2626,11 @@ impl ConstructionTarget {
         expected_identity: StorageOperationIdentity,
         output_path_hash: StorageDigest,
     ) -> Result<VerifiedConstructionOutput, StorageError> {
-        let mut engine = StorageEngine::open(config)?;
+        expected_identity.validate()?;
+        let schema = crate::construction_schema::ConstructionSchema::from_generation(
+            expected_identity.target_schema_generation,
+        )?;
+        let mut engine = StorageEngine::open_construction_target(config, schema)?;
         let _capacity = engine.startup_scan()?;
         let completion = engine.resume_completed_construction(expected_identity)?;
         let state = engine.construction_source_state();

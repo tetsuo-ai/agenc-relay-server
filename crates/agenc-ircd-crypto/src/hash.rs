@@ -9,6 +9,9 @@ use zeroize::Zeroizing;
 use crate::CryptoError;
 use crate::secret::SecretBytes;
 
+mod snapshot;
+pub use snapshot::FederationSnapshotHash;
+
 const LOGIN_INDEX_LABEL: &[u8] = b"agenc-chat login index v1";
 const LOGIN_INDEX_KEY_ID_LABEL: &[u8] = b"agenc-chat login index key id v1";
 const FAKE_CREDENTIAL_LABEL: &[u8] = b"agenc-chat fake opaque credential id v1";

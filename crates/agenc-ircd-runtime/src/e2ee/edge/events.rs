@@ -28,7 +28,7 @@ use agenc_ircd_storage::TableId;
 use agenc_ircd_storage::e2ee_records::barrier::{BarrierIdentity, BarrierPart, CrossProfileStream};
 use agenc_ircd_storage::e2ee_records::{
     DELIVERY_ROW_KIND, DeliveryRow, ROUTE_ROW_KIND, RouteLifecycle as RowLifecycle, RouteRow,
-    WITNESS_ROW_KIND, WitnessRow,
+    WitnessRow,
 };
 use agenc_ircd_types::{AccountId, ChannelInstanceId, UserId};
 
@@ -529,28 +529,6 @@ impl E2eeEdge {
         Err(E2eeReplyCode::RouteInvalid.into())
     }
 
-    /// Stages the witness violation row found in the failing frame, if any;
-    /// returns whether the failure was a witness violation. The row is
-    /// evidence, so a refused stage does not stop the link from closing.
-    pub(super) fn record_witness(&mut self, context: &mut StateCoreContext) -> bool {
-        let Some((conversation, row)) = self.witnessed.take() else {
-            return false;
-        };
-        self.counters.chain_violations = self.counters.chain_violations.saturating_add(1);
-        let staged = WitnessRow::key(&conversation)
-            .and_then(|key| Ok((key, row.encode()?)))
-            .map_err(|_| E2eeReplyCode::RateLimited)
-            .and_then(|(key, body)| {
-                state_row(key, WITNESS_ROW_KIND, body).map_err(|refusal| refusal.code)
-            });
-        if let Ok(write) = staged
-            && self.commit.is_none()
-        {
-            let _ = self.stage(context, vec![write], PendingCommit::Witness);
-        }
-        true
-    }
-
     /// Applies one ordinary event: route projection, fanout, coverage, and
     /// the durable cursor batch whose commit sends the EACK.
     // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one event applies its route change, renders its copies, records completion coverage, and stages its cursor batch as one atomic set
@@ -941,6 +919,9 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
     ) -> Vec<ClientOutput> {
+        if self.witness_batch_applied(context, edge) {
+            return Vec::new();
+        }
         let mut outputs = Vec::new();
         match self.commit.take() {
             Some(PendingCommit::Event {
@@ -1165,7 +1146,7 @@ pub(super) fn cursor_write(
     state_row(key, DELIVERY_ROW_KIND, row).map_err(|refusal| refusal.code)
 }
 
-fn state_row(
+pub(super) fn state_row(
     key: agenc_ircd_storage::StoredKey,
     kind: u16,
     body: Vec<u8>,

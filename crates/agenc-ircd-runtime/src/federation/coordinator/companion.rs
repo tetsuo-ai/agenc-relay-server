@@ -3,6 +3,11 @@
 //! against the state core as one batch, snapshot READY records stage their
 //! own batch, and committed lines go out over the live links.
 
+#[cfg(test)]
+#[path = "companion/tests/page_output.rs"]
+mod page_output_tests;
+pub(super) mod page_read;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_domain::federation::{OriginKey, OriginStatus, OriginTable};
@@ -46,6 +51,8 @@ fn code_violation(code: E2eeReplyCode) -> Violation {
 
 /// The base facts the executor mirrors, borrowed from the owner's tables.
 struct HostView<'a> {
+    trusted_ack_unix_seconds: Option<u64>,
+    backing: crate::budget::BackingReservationPort,
     origins: &'a OriginTable,
     peers: &'a BTreeMap<ServerId, PeerState>,
     revision: u64,
@@ -56,6 +63,18 @@ struct HostView<'a> {
 }
 
 impl CompanionHost for HostView<'_> {
+    fn trusted_ack_unix_seconds(&self) -> Option<u64> {
+        self.trusted_ack_unix_seconds
+    }
+    fn reserve_cut_backing(
+        &self,
+        capacity: usize,
+    ) -> Result<crate::budget::MemoryPermit, CompanionFault> {
+        self.backing
+            .reserve(capacity)
+            .map_err(|_| CompanionFault::Ceiling)
+    }
+
     fn live_incarnation(&self, peer: ServerId) -> Option<[u8; 16]> {
         self.peers
             .get(&peer)
@@ -169,6 +188,12 @@ pub(super) fn admitted(
     let now = tick_millis(context.now());
     let revision = context.domain().revision().get();
     let host = HostView {
+        trusted_ack_unix_seconds: context
+            .utc_now()
+            .ok()
+            .filter(|wall| context.drift().accepts_wall(context.now(), *wall))
+            .map(|wall| wall.get()),
+        backing: context.backing_reservations(),
         origins: &coordinator.origins,
         peers: &coordinator.peers,
         revision,
@@ -184,7 +209,6 @@ pub(super) fn admitted(
     for action in actions {
         apply(coordinator, context, link, peer, action)?;
     }
-    companion_acknowledged(coordinator, context, peer);
     Ok(())
 }
 
@@ -308,6 +332,11 @@ fn apply(
             send_lines(coordinator, context, link, peer, lines);
             Ok(())
         }
+        Action::SendPage(output) => {
+            send_page(coordinator, context, link, peer, output);
+            Ok(())
+        }
+        Action::ReadSnapshotPage(request) => page_read::submit(coordinator, context, request),
         Action::Stage { writes, work } => stage(coordinator, context, link, peer, writes, work),
         Action::ScheduleExpiry { at_millis } => {
             let _ = context.timers_mut().schedule(
@@ -341,6 +370,12 @@ fn execute_or_queue(
     run(coordinator, context, link, peer, complete)
 }
 
+/// Raw writes must drop before the work's backing reservations on every refusal.
+struct StagedCompanion {
+    writes: Vec<AccountServiceDurableWrite>,
+    work: PendingWork,
+}
+
 /// Stages one executor batch beside a checkpoint plan.
 fn stage(
     coordinator: &mut FederationCoordinator,
@@ -350,6 +385,7 @@ fn stage(
     writes: Vec<AccountServiceDurableWrite>,
     work: PendingWork,
 ) -> Result<(), Violation> {
+    let staged = StagedCompanion { writes, work };
     if coordinator.pending.is_some() {
         return Err(Violation::Ceiling);
     }
@@ -358,7 +394,8 @@ fn stage(
         .plan_account_service_checkpoint()
         .map_err(|_| Violation::Ceiling)?;
     let revision = plan.resulting_revision().get();
-    let writes = writes
+    let writes = staged
+        .writes
         .into_iter()
         .map(|write| write.at_revision(revision))
         .collect::<Result<Vec<_>, _>>()
@@ -369,7 +406,7 @@ fn stage(
         .stage_durable_with_account_service(plan, fanout, None, 0, writes)
         .map_err(|_| Violation::Ceiling)?;
     if let Some(executor) = coordinator.companion_exec.as_mut() {
-        executor.set_pending(work);
+        executor.set_pending(staged.work);
     }
     coordinator.pending = Some(PendingCommit::Companion { peer, link });
     Ok(())
@@ -501,6 +538,10 @@ pub(super) fn committed(
     let Some(executor) = coordinator.companion_exec.as_mut() else {
         return;
     };
+    executor.state.mailbox_snapshot_now = executor
+        .state
+        .mailbox_snapshot_now
+        .max(tick_millis(context.now()));
     let committed = match executor.batch_applied(epoch) {
         Ok(Some(committed)) => committed,
         Ok(None) => return,
@@ -517,9 +558,14 @@ pub(super) fn committed(
     match committed {
         Committed::Lines(lines) => {
             for (target, line) in lines {
-                send_to_target(coordinator, context, target, None, line);
+                send_lines(coordinator, context, link, target, vec![line]);
             }
         }
+        Committed::Snapshot(publication) => {
+            continue_snapshot(coordinator, context, publication);
+        }
+        Committed::Fetch(publication) => continue_fetch(coordinator, context, publication),
+        Committed::Acknowledged(target) => companion_acknowledged(coordinator, context, target),
         Committed::Request(pending) => {
             let lines = execute::committed_lines(&*executor, &pending);
             let lines = match open_barriers(coordinator, &pending.barriers, events) {
@@ -540,6 +586,7 @@ fn request_committed(
     peer: ServerId,
     lines: Result<Vec<CommittedLine>, E2eeReplyCode>,
 ) {
+    schedule_mailbox_expiry(coordinator, context);
     coordinator.counters.requests_committed =
         coordinator.counters.requests_committed.saturating_add(1);
     let Ok(lines) = lines else {
@@ -563,6 +610,49 @@ fn request_committed(
             ),
         }
     }
+}
+
+fn schedule_mailbox_expiry(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+) {
+    let Some(executor) = coordinator.companion_exec.as_mut() else {
+        return;
+    };
+    let snapshots = &mut executor.state.mailbox_snapshots;
+    snapshots.expire(tick_millis(context.now()));
+    let Some(deadline) = snapshots.next_expiry() else {
+        executor.state.mailbox_expiry_armed = None;
+        context
+            .timers_mut()
+            .cancel(TimerKind::MailboxSnapshotExpiry, TimedId::Global);
+        return;
+    };
+    if crate::e2ee::coordinator::ops::mailbox_snapshot::reserve_expiry(
+        context.timers_mut(),
+        deadline,
+        &mut executor.state.mailbox_expiry_armed,
+    )
+    .is_err()
+    {
+        // A timer refusal cannot invalidate a durable plan or leave unbounded retention.
+        *snapshots = Default::default();
+    }
+}
+
+pub(super) fn mailbox_timer_fired(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    entry: TimerEntry,
+) -> bool {
+    if (entry.kind, entry.id) != (TimerKind::MailboxSnapshotExpiry, TimedId::Global) {
+        return false;
+    }
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor.state.mailbox_expiry_armed = None;
+    }
+    schedule_mailbox_expiry(coordinator, context);
+    true
 }
 
 /// The base origin set of `peer` became ready: the companion READY goes
@@ -650,5 +740,101 @@ pub(super) fn drain_queued(
         if let Err(violation) = run(coordinator, context, queued.link, queued.peer, complete) {
             coordinator.fail_link(context, queued.link, queued.peer, violation);
         }
+    }
+}
+
+/// Reserves the next bounded page only after its predecessor's exact receipt.
+fn continue_snapshot(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    publication: Box<crate::e2ee::coordinator::sync::SnapshotPublication>,
+) {
+    let peer = publication.peer();
+    let link = publication.link();
+    let host = HostView {
+        trusted_ack_unix_seconds: None,
+        backing: context.backing_reservations(),
+        origins: &coordinator.origins,
+        peers: &coordinator.peers,
+        revision: context.domain().revision().get(),
+        peer,
+        held_channels: BTreeSet::new(),
+    };
+    let Some(executor) = coordinator.companion_exec.as_mut() else {
+        return;
+    };
+    let actions =
+        executor.continue_snapshot_publication(*publication, tick_millis(context.now()), &host);
+    let result = actions.map_err(fault_violation).and_then(|actions| {
+        for action in actions {
+            apply(coordinator, context, link, peer, action)?;
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        coordinator.fail_link(context, link, peer, error);
+    }
+}
+
+/// The output lease lives through the final queue transfer or refused-line drop.
+fn send_page(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    mut output: crate::e2ee::coordinator::sync::SnapshotPageOutput,
+) {
+    let backing = output.backing();
+    for line in output.drain() {
+        let Some(live) = coordinator
+            .peers
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .filter(|live| live.link == link)
+        else {
+            return;
+        };
+        if let Err(refusal) = live
+            .handle
+            .try_send_backed(line, std::sync::Arc::clone(&backing))
+        {
+            coordinator.send_failed(context, link, peer, SendFailure::from(refusal));
+            return;
+        }
+    }
+}
+
+fn continue_fetch(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    publication: Box<crate::e2ee::coordinator::sync::FetchPublication>,
+) {
+    let peer = publication.peer();
+    let link = publication.link();
+    let host = HostView {
+        trusted_ack_unix_seconds: None,
+        backing: context.backing_reservations(),
+        origins: &coordinator.origins,
+        peers: &coordinator.peers,
+        revision: context.domain().revision().get(),
+        peer,
+        held_channels: BTreeSet::new(),
+    };
+    let Some(executor) = coordinator.companion_exec.as_mut() else {
+        return;
+    };
+    let result = publication
+        .committed(executor, tick_millis(context.now()), &host)
+        .map_err(fault_violation)
+        .and_then(|actions| {
+            for action in actions {
+                apply(coordinator, context, link, peer, action)?;
+            }
+            Ok(())
+        });
+    if let Err(error) = result
+        && coordinator.link_is_live(link, peer)
+    {
+        coordinator.fail_link(context, link, peer, error);
     }
 }

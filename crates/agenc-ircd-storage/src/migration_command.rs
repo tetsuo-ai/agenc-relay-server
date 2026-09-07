@@ -1,4 +1,10 @@
-//! Stopped, authenticated copy-on-write schema-one to schema-two migration.
+//! Stopped, authenticated copy-on-write immediate-successor migration.
+
+mod admission;
+
+use crate::construction_schema::ConstructionSchema;
+use crate::migration_profile::MigrationProfile;
+use admission::SourceAdmission;
 
 use std::path::{Path, PathBuf};
 
@@ -12,11 +18,10 @@ use zeroize::Zeroizing;
 use crate::{
     BackupDestination, ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor,
     ConstructionLimits, ConstructionPlan, ConstructionSourceDatabase, ConstructionSourceFacts,
-    ConstructionTarget, DatabaseHeader, DatabaseHeaderTbs, InitialStorageRecord,
-    MigrationTransformV1, StateDirectory, StorageConstruction, StorageConstructionCursor,
-    StorageConstructionKind, StorageEngineLimits, StorageError, StorageInitializationConfig,
-    StorageInitializationMode, StorageInitializationOutcome, StorageOpenConfig,
-    StorageOperationIdentity, StorageQualification, StoredKey, TableId,
+    ConstructionTarget, DatabaseHeader, InitialStorageRecord, StateDirectory, StorageConstruction,
+    StorageConstructionCursor, StorageConstructionKind, StorageEngineLimits, StorageError,
+    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
+    StorageOpenConfig, StorageOperationIdentity, StorageQualification, StoredKey, TableId,
 };
 
 /// Exact existing configuration plus the closed migration command arguments.
@@ -43,7 +48,7 @@ pub struct MigrationCommandRequest {
     pub trusted_backup_keys: Vec<crate::RestoreTrustKey>,
     /// Wall time used only for the newly created signed source backup.
     pub created_at: u64,
-    /// The requested immediate successor; exactly two is implemented.
+    /// Literal successor selected by the admitted command profile, two or three.
     pub target_schema_generation: u64,
     /// New output directory, installed by no-replace atomic rename.
     pub output_state_directory: PathBuf,
@@ -78,12 +83,40 @@ pub fn execute_migration_command(
     )
 }
 
+/// Migrates a generation-two source only after its required semantic scan.
+///
+/// Composition must supply a validator for the frozen source command grammar,
+/// audit signatures and complete chain. The scan precedes all backup and target
+/// creation, including on resumed and already-installed invocations.
+pub fn execute_validated_migration_command(
+    request: MigrationCommandRequest,
+    qualifications: &[StorageQualification],
+    validator: &mut dyn crate::SourceRecordValidator,
+) -> Result<MigrationCommandReceipt, StorageError> {
+    execute_migration_inner(
+        request,
+        qualifications,
+        crate::StorageFaultInjector::disabled(),
+        SourceAdmission::SchemaTwo(validator),
+    )
+}
+
 pub(crate) fn execute_migration_with_faults(
     request: MigrationCommandRequest,
     qualifications: &[StorageQualification],
     faults: crate::StorageFaultInjector,
 ) -> Result<MigrationCommandReceipt, StorageError> {
-    if request.target_schema_generation != 2 || request.created_at == 0 {
+    execute_migration_inner(request, qualifications, faults, SourceAdmission::LegacyOne)
+}
+
+fn execute_migration_inner(
+    request: MigrationCommandRequest,
+    qualifications: &[StorageQualification],
+    faults: crate::StorageFaultInjector,
+    mut admission: SourceAdmission<'_>,
+) -> Result<MigrationCommandReceipt, StorageError> {
+    let profile = admission.profile();
+    if request.target_schema_generation != profile.target_generation() || request.created_at == 0 {
         return Err(StorageError::UnsupportedMigration);
     }
     let limits = request.limits.validate()?;
@@ -91,12 +124,13 @@ pub(crate) fn execute_migration_with_faults(
         crate::restore_command::maintenance_backup_trust_keys(&request.trusted_backup_keys)?;
     let mut secrets = Secrets::load(&request)?;
     secrets.faults = faults.clone();
-    let mut source = ConstructionSourceDatabase::open_migration(secrets.config(
-        &request,
-        &request.source_state_directory,
-        qualifications,
-    )?)?;
-    let source_backup = backup_source(&request, &secrets, &mut source)?;
+    let mut source = ConstructionSourceDatabase::open_migration_profile(
+        secrets.config(&request, &request.source_state_directory, qualifications)?,
+        profile,
+    )?;
+    checkpoint_source(&mut source)?;
+    admission.validate(&source)?;
+    let source_backup = backup_source(&request, &secrets, &mut source, profile)?;
     let facts = source.facts()?;
     let directory = ConstructionDirectory::open_with_faults(
         &request.output_state_directory,
@@ -115,6 +149,7 @@ pub(crate) fn execute_migration_with_faults(
     }
     .validate()?;
     let execution = Execution {
+        profile,
         request: &request,
         qualifications,
         secrets,
@@ -181,18 +216,14 @@ fn backup_source(
     request: &MigrationCommandRequest,
     secrets: &Secrets,
     source: &mut ConstructionSourceDatabase,
+    profile: MigrationProfile,
 ) -> Result<PathBuf, StorageError> {
-    source
-        .engine
-        .checkpoint_for_shutdown()
-        .map_err(|error| match error {
-            crate::engine::EngineCommitFailure::Rejected(error) => error,
-            crate::engine::EngineCommitFailure::Indeterminate => StorageError::Unavailable,
-        })?;
     let signing_bytes = crate::restore_command::read_secret_key(&request.backup_signing_key_file)?;
     let id = fresh_id(&[0; 16])?;
     let name = format!(
-        "migration-1-to-2-{}.backup",
+        "migration-{}-to-{}-{}.backup",
+        profile.source_generation(),
+        profile.target_generation(),
         DatabaseId::from_bytes(id).to_base64url()
     );
     source.engine.start_backup(
@@ -219,6 +250,17 @@ fn backup_source(
         return Err(StorageError::StaleState);
     }
     Ok(path)
+}
+
+fn checkpoint_source(source: &mut ConstructionSourceDatabase) -> Result<(), StorageError> {
+    source
+        .engine
+        .checkpoint_for_shutdown()
+        .map_err(|error| match error {
+            crate::engine::EngineCommitFailure::Rejected(error) => error,
+            crate::engine::EngineCommitFailure::Indeterminate => StorageError::Unavailable,
+        })?;
+    Ok(())
 }
 
 fn open_backup(path: &Path) -> Result<std::fs::File, StorageError> {
@@ -257,6 +299,7 @@ fn select_target(
     qualifications: &[StorageQualification],
     source: DatabaseHeader,
 ) -> Result<DatabaseHeader, StorageError> {
+    let schema = ConstructionSchema::from_generation(request.target_schema_generation)?;
     let generation = source
         .tbs()
         .storage_key_generation
@@ -264,19 +307,13 @@ fn select_target(
         .ok_or(StorageError::Overflow)?;
     if request.resume {
         let config = || secrets.config(request, &directory.selected_path(), qualifications);
-        let target = match ConstructionTarget::open(config()?) {
+        let target = match ConstructionTarget::open_stopped(config()?, schema) {
             Ok(target) => target.header(),
-            Err(error) => ConstructionTarget::completed_header(config()?).map_err(|_| error)?,
+            Err(error) => ConstructionTarget::completed_header_stopped(config()?, schema)
+                .map_err(|_| error)?,
         };
-        let expected = DatabaseHeaderTbs::new(
-            source.tbs().network_id,
-            source.tbs().server_id,
-            source.tbs().server_incarnation,
-            target.tbs().database_instance_id,
-            generation,
-            2,
-            source.tbs().recovery_epoch,
-        )?;
+        let expected =
+            schema.header(source.tbs(), target.tbs().database_instance_id, generation)?;
         if target.tbs() != &expected
             || target.tbs().database_instance_id == source.tbs().database_instance_id
         {
@@ -284,19 +321,16 @@ fn select_target(
         }
         return Ok(target);
     }
-    let tbs = DatabaseHeaderTbs::new(
-        source.tbs().network_id,
-        source.tbs().server_id,
-        source.tbs().server_incarnation,
+    let tbs = schema.header(
+        source.tbs(),
         DatabaseId::from_bytes(fresh_id(source.tbs().database_instance_id.as_bytes())?),
         generation,
-        2,
-        source.tbs().recovery_epoch,
     )?;
     Ok(DatabaseHeader::new(tbs, StorageDigest::from_bytes([0; 32])))
 }
 
 struct Execution<'a> {
+    profile: MigrationProfile,
     request: &'a MigrationCommandRequest,
     qualifications: &'a [StorageQualification],
     secrets: Secrets,
@@ -325,7 +359,8 @@ impl Execution<'_> {
         } else {
             self.directory.rebuild_plan_file()?
         };
-        let plan = source.rebuild_migration_plan(
+        let plan = source.rebuild_migration_profile_plan(
+            self.profile,
             file,
             &StorageMasterKey::from_bytes(*self.secrets.master),
             DatabaseBinding::new(
@@ -361,9 +396,9 @@ impl Execution<'_> {
             },
             source_rollback_guard_hash: self.facts.rollback_guard_hash,
             source_stream_digest: None,
-            source_schema_generation: 1,
-            target_schema_generation: 2,
-            transform_profile_hash: crate::migration::profile_hash()?,
+            source_schema_generation: self.profile.source_generation(),
+            target_schema_generation: self.profile.target_generation(),
+            transform_profile_hash: self.profile.hash()?,
             target_database_instance_id: self.target.tbs().database_instance_id,
             source_master_key_id: StorageMasterKey::from_bytes(*self.secrets.master)
                 .source_operation_key_id()?,
@@ -379,26 +414,27 @@ impl Execution<'_> {
     }
 
     fn initialize(&self, marker: &StorageConstruction) -> Result<(), StorageError> {
-        let result = crate::initialize_storage(StorageInitializationConfig {
-            state_directory: StateDirectory::open(
-                &self.directory.selected_path(),
-                self.qualifications,
-            )?,
-            header_tbs: *self.target.tbs(),
-            storage_master_key: StorageMasterKey::from_bytes(*self.secrets.master),
-            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*self.secrets.guard),
-            mode: StorageInitializationMode::Construction,
-            initial_records: vec![InitialStorageRecord::new(
-                TableId::StorageConstruction,
-                StoredKey::new(crate::STORAGE_CONSTRUCTION_KEY.to_vec())?,
-                1,
-                marker.encode()?,
-            )?],
-            account_service_response_count: self.facts.state.account_service_response_count,
-            state_generation: self.facts.state.state_generation,
-            predecessor_guard_hash: self.facts.rollback_guard_hash,
-            limits: self.request.limits,
-        })?;
+        let result =
+            crate::initialize::initialize_stopped_construction(StorageInitializationConfig {
+                state_directory: StateDirectory::open(
+                    &self.directory.selected_path(),
+                    self.qualifications,
+                )?,
+                header_tbs: *self.target.tbs(),
+                storage_master_key: StorageMasterKey::from_bytes(*self.secrets.master),
+                rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*self.secrets.guard),
+                mode: StorageInitializationMode::Construction,
+                initial_records: vec![InitialStorageRecord::new(
+                    TableId::StorageConstruction,
+                    StoredKey::new(crate::STORAGE_CONSTRUCTION_KEY.to_vec())?,
+                    1,
+                    marker.encode()?,
+                )?],
+                account_service_response_count: self.facts.state.account_service_response_count,
+                state_generation: self.facts.state.state_generation,
+                predecessor_guard_hash: self.facts.rollback_guard_hash,
+                limits: self.request.limits,
+            })?;
         if matches!(result, StorageInitializationOutcome::Complete { .. }) {
             Ok(())
         } else {
@@ -421,7 +457,8 @@ impl Execution<'_> {
         if !self.request.resume {
             self.initialize(&initial)?;
         }
-        let mut target = match ConstructionTarget::open(self.config()?) {
+        let schema = ConstructionSchema::from_generation(self.profile.target_generation())?;
+        let mut target = match ConstructionTarget::open_stopped(self.config()?, schema) {
             Ok(target) => target,
             Err(error) if self.request.resume => return self.install_finalized(identity, error),
             Err(error) => return Err(error),
@@ -430,7 +467,7 @@ impl Execution<'_> {
         if self.request.resume && marker.identity != identity {
             return Err(StorageError::ResumeMismatch);
         }
-        let mut transform = MigrationTransformV1::new(self.facts.state.state_generation);
+        let mut transform = self.profile.transformer(self.facts.state.state_generation);
         let preflight = StorageConstruction {
             identity: marker.identity,
             ..initial

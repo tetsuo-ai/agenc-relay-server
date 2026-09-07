@@ -10,6 +10,7 @@
 //! Every parser is total and bounded by the Architecture 22.4 framing limits.
 
 mod audit;
+mod audit_event;
 mod base64;
 mod canonical;
 mod challenge;
@@ -18,6 +19,7 @@ mod command;
 mod confirm;
 mod error;
 mod framing;
+mod maintenance;
 mod operator;
 mod session;
 mod stats;
@@ -28,6 +30,7 @@ pub use audit::{
     AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEvent, AdminAuditEventTbs,
     AdminAuditPhase, AuditChainCursor, MAX_AUDIT_EVENT_BYTES, render_export_batch,
 };
+pub use audit_event::AuditEvent;
 pub use base64::{decode_fixed_base64url, encode_base64url};
 pub use canonical::{CanonicalCommand, MAX_COMMAND_PARAMETERS, parse_canonical_u64};
 pub use challenge::{
@@ -48,6 +51,11 @@ pub use framing::{
     MAX_ADMIN_COMMAND_BYTES, MAX_ADMIN_LINE_BYTES, MAX_ADMIN_OUTPUT_LINE_BYTES,
     MAX_ADMIN_TAG_PREFIX_BYTES, MAX_AUDIT_EXPORT_BYTES, MAX_AUDIT_EXPORT_RECORDS,
     MAX_PRE_AUTH_PINGS,
+};
+pub use maintenance::{
+    MAINTENANCE_AUDIT_EVENT_BYTES, MAINTENANCE_AUDIT_TBS_BYTES, MaintenanceAuditEvent,
+    MaintenanceAuditEventTbs, MaintenanceAuditPosition, MaintenanceAuditScope, MaintenanceKeyState,
+    MaintenanceOperation, MaintenanceTransition,
 };
 pub use operator::{
     MAX_OPERATOR_GIDS, MAX_OPERATOR_RECORDS, MAX_OPERATOR_UIDS, OperatorRecord, OperatorRegistry,

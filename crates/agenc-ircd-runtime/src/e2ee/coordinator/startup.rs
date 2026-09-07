@@ -55,16 +55,15 @@ use agenc_ircd_e2ee::route::PrincipalRosters;
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow;
 use agenc_ircd_storage::e2ee_records::{
-    ATTACH_ROW_KIND, AttachRow, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND, DeliveryRow, DirectoryRow,
+    ATTACH_ROW_KIND, AttachRow, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND, DirectoryRow,
     MAILBOX_ROW_KIND, MailboxKind as RowMailboxKind, MailboxRow, OBJECT_RECORD_KIND, ObjectRow,
     PACKAGE_ROW_KIND, PackageRow, PackageState, ProofKeyParts, ProofRole, REPLAY_ROW_KIND,
     ROUTE_ROW_KIND, ReplayRow, RouteLifecycle as RowLifecycle, RouteRow, SEQUENCER_ROW_KIND,
     SequencerRow,
 };
 use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
-use agenc_ircd_types::{AccountId, ChannelInstanceId, ServerId};
+use agenc_ircd_types::{AccountId, ChannelInstanceId};
 
-use super::events::DeliveryStream;
 use super::{
     CompanionCoordinator, CompanionOriginKey, CompanionState, ConversationState, LockEntry,
     RetainedPolicy, StoredResult,
@@ -110,9 +109,10 @@ pub(super) struct Restore {
     packages: Vec<(StoredKey, PackageRow)>,
     attachments: Vec<(StoredKey, AttachRow)>,
     mailbox: Vec<(StoredKey, MailboxRow)>,
+    mailbox_sequences: super::mailbox_restore::Restore,
     replays: Vec<(StoredKey, ReplayRow)>,
     origin_sequences: Vec<(StoredKey, OriginSequenceRow)>,
-    cursors: Vec<(StoredKey, DeliveryRow)>,
+    pub(super) delivery: super::delivery_owner::restore::Restore,
 }
 
 impl Restore {
@@ -146,7 +146,14 @@ impl Restore {
             DIRECTORY_ROW_KIND => push(&mut self.directory, key, DirectoryRow::decode(body)),
             PACKAGE_ROW_KIND => push(&mut self.packages, key, PackageRow::decode(body)),
             ATTACH_ROW_KIND => push(&mut self.attachments, key, AttachRow::decode(body)),
-            MAILBOX_ROW_KIND => push(&mut self.mailbox, key, MailboxRow::decode(body)),
+            MAILBOX_ROW_KIND => {
+                if let Some(row) = self.mailbox_sequences.admit_mailbox(key, body) {
+                    self.mailbox.push((key.clone(), row));
+                }
+            }
+            agenc_ircd_storage::e2ee_records::MAILBOX_SEQUENCE_ROW_KIND => {
+                self.mailbox_sequences.admit(key, body);
+            }
             REPLAY_ROW_KIND => {
                 if key
                     .as_bytes()
@@ -161,7 +168,10 @@ impl Restore {
                     push(&mut self.replays, key, ReplayRow::decode(body));
                 }
             }
-            DELIVERY_ROW_KIND => push(&mut self.cursors, key, DeliveryRow::decode(body)),
+            DELIVERY_ROW_KIND => self.delivery.admit_outbox(key, body),
+            agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND => {
+                self.delivery.admit_owner(key, value);
+            }
             _ => {}
         }
     }
@@ -424,7 +434,10 @@ impl ObjectIndex {
 }
 
 /// Rebuilds the companion state from the collected rows.
-pub(super) fn rebuild(coordinator: &mut CompanionCoordinator, restore: Restore) {
+pub(super) fn rebuild(
+    coordinator: &mut CompanionCoordinator,
+    restore: Restore,
+) -> Result<(), super::CompanionFault> {
     let network_id = coordinator.network_id;
     let state = &mut coordinator.state;
     for bytes in restore.objects {
@@ -432,10 +445,10 @@ pub(super) fn rebuild(coordinator: &mut CompanionCoordinator, restore: Restore) 
     }
     restore_directory(state, &network_id, restore.directory, restore.attachments);
     restore_packages(state, restore.packages);
-    restore_mailboxes(state, restore.mailbox);
+    restore_mailboxes(state, restore.mailbox)?;
+    restore.mailbox_sequences.apply(&mut state.mailboxes)?;
     restore_replays(state, restore.replays);
     restore_origin_sequences(state, restore.origin_sequences);
-    restore_cursors(state, restore.cursors);
     let index = ObjectIndex::build(state);
     let rows = SequencerRows {
         records: restore.records,
@@ -446,14 +459,18 @@ pub(super) fn rebuild(coordinator: &mut CompanionCoordinator, restore: Restore) 
     for (conversation_id, row) in restore.routes {
         restore_route(state, &network_id, &index, &rows, conversation_id, &row);
     }
-    restore_successors(state, &index);
+    restore_successors(state, &index)?;
+    restore.delivery.apply(coordinator)
 }
 
 /// Activation creates a successor anchor before that conversation has its
 /// own route. Restore these anchors after every existing route has loaded.
-fn restore_successors(state: &mut CompanionState, index: &ObjectIndex) {
+fn restore_successors(
+    state: &mut CompanionState,
+    index: &ObjectIndex,
+) -> Result<(), super::CompanionFault> {
     let mut verified = std::collections::BTreeSet::new();
-    let successors: Vec<_> = state
+    let mut successors: Vec<_> = state
         .logs
         .iter()
         .filter_map(|(old, log)| match log.phase() {
@@ -464,24 +481,41 @@ fn restore_successors(state: &mut CompanionState, index: &ObjectIndex) {
             _ => None,
         })
         .collect();
+    successors.sort_unstable_by_key(|(_, target, _)| *target);
+    if successors
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left.1 == right.1))
+    {
+        return Err(super::CompanionFault::Storage);
+    }
+    // Keep the original predecessor ordering after the allocation-free check.
+    successors.sort_unstable_by_key(|(old, _, _)| *old);
     for (old, conversation_id, activation_id) in successors {
-        state
-            .logs
-            .entry(conversation_id)
-            .or_insert_with(|| SequencerLog::from_activation(conversation_id, activation_id));
-        state
-            .lifecycles
-            .entry(conversation_id)
-            .or_insert_with(Lifecycle::successor);
         if state.conversations.contains_key(&conversation_id) {
-            if restore_successor_binding(state, old, conversation_id).is_some() {
-                verified.insert(conversation_id);
-            } else {
-                discard_route(state, conversation_id);
+            restore_successor_binding(state, old, conversation_id)
+                .ok_or(super::CompanionFault::Storage)?;
+            verified.insert(conversation_id);
+        } else {
+            if state.logs.contains_key(&conversation_id)
+                || state.lifecycles.contains_key(&conversation_id)
+                || state
+                    .routes
+                    .route(&ConversationId(conversation_id))
+                    .is_some()
+            {
+                return Err(super::CompanionFault::Storage);
             }
+            state.logs.insert(
+                conversation_id,
+                SequencerLog::from_activation(conversation_id, activation_id),
+            );
+            state
+                .lifecycles
+                .insert(conversation_id, Lifecycle::successor());
         }
     }
     discard_unanchored_successors(state, index, &verified);
+    Ok(())
 }
 
 /// A missing predecessor or activation invalidates every dependent successor.
@@ -895,7 +929,7 @@ type ItemSlot = (Target, MailboxKind, u64);
 #[derive(Default)]
 struct MailboxRows {
     items: BTreeMap<ItemSlot, Item>,
-    grants: Vec<(ItemSlot, Grant)>,
+    grants: Vec<(ItemSlot, [u8; 32], Grant)>,
     acks: Vec<(Target, [u8; 32], [u8; 32], u64)>,
 }
 
@@ -914,7 +948,7 @@ impl MailboxRows {
             conversation_id,
             inserted_at,
             expires_at,
-            ..
+            grant,
         } = row
         else {
             return;
@@ -933,7 +967,11 @@ impl MailboxRows {
                 conversation_id,
                 inserted_at,
                 expires_at,
-                grant: None,
+                grant: grant.map(|grant| Grant {
+                    token: grant.token,
+                    session_generation: grant.session_generation,
+                    expires_at: grant.expires_at,
+                }),
             },
         );
     }
@@ -946,7 +984,7 @@ impl MailboxRows {
             sequence,
             session_generation,
             expires_at,
-            ..
+            object_id,
         } = row
         else {
             return;
@@ -960,6 +998,7 @@ impl MailboxRows {
         };
         self.grants.push((
             (target, mailbox_kind(kind), sequence),
+            object_id,
             Grant {
                 token,
                 session_generation,
@@ -988,16 +1027,16 @@ impl MailboxRows {
     }
 }
 
-fn restore_mailboxes(state: &mut CompanionState, rows: Vec<(StoredKey, MailboxRow)>) {
+fn restore_mailboxes(
+    state: &mut CompanionState,
+    rows: Vec<(StoredKey, MailboxRow)>,
+) -> Result<(), super::CompanionFault> {
     let mut sorted = MailboxRows::default();
     for (key, row) in rows {
         sorted.admit(&key, row);
     }
-    for (slot, grant) in sorted.grants {
-        if let Some(item) = sorted.items.get_mut(&slot) {
-            item.grant = Some(grant);
-        }
-    }
+    sorted.grants.sort_unstable_by_key(|(slot, _, _)| *slot);
+    validate_mailbox_grants(&sorted)?;
     for ((target, kind, sequence), item) in sorted.items {
         state.mailboxes.restore_item(target, kind, sequence, item);
     }
@@ -1006,6 +1045,37 @@ fn restore_mailboxes(state: &mut CompanionState, rows: Vec<(StoredKey, MailboxRo
             .mailboxes
             .restore_ack(target, token, object_id, retain_until);
     }
+    Ok(())
+}
+
+fn validate_mailbox_grants(rows: &MailboxRows) -> Result<(), super::CompanionFault> {
+    if rows.grants.windows(2).any(|pair| {
+        pair.first()
+            .zip(pair.get(1))
+            .is_some_and(|(left, right)| left.0 == right.0)
+    }) {
+        return Err(super::CompanionFault::Storage);
+    }
+    for (slot, object, grant) in &rows.grants {
+        let valid = rows
+            .items
+            .get(slot)
+            .is_some_and(|item| item.object_id == *object && item.grant == Some(*grant));
+        if !valid {
+            return Err(super::CompanionFault::Storage);
+        }
+    }
+    for (slot, item) in &rows.items {
+        if item.grant.is_some()
+            && rows
+                .grants
+                .binary_search_by_key(slot, |(slot, _, _)| *slot)
+                .is_err()
+        {
+            return Err(super::CompanionFault::Storage);
+        }
+    }
+    Ok(())
 }
 
 fn restore_origin_sequences(state: &mut CompanionState, rows: Vec<(StoredKey, OriginSequenceRow)>) {
@@ -1042,36 +1112,6 @@ fn restore_replays(state: &mut CompanionState, rows: Vec<(StoredKey, ReplayRow)>
             );
         }
         state.replays.insert(parts, row);
-    }
-}
-
-/// Restores the delivery position of every target from its cursor row; the
-/// queued rows are not reloaded, so a reconnecting edge always opens the
-/// next generation with a fresh `ESTATE` scope.
-fn restore_cursors(state: &mut CompanionState, rows: Vec<(StoredKey, DeliveryRow)>) {
-    for (key, row) in rows {
-        let DeliveryRow::Cursor {
-            generation,
-            next_sequence,
-            acked_sequence,
-            acked_event_id,
-            ..
-        } = row
-        else {
-            continue;
-        };
-        let Ok(target) = DeliveryRow::parse_cursor_key(&key) else {
-            continue;
-        };
-        state.streams.insert(
-            ServerId::from_bytes(target),
-            DeliveryStream {
-                generation,
-                next_sequence,
-                acked: (next_sequence > 0).then_some((acked_sequence, acked_event_id)),
-                ..DeliveryStream::default()
-            },
-        );
     }
 }
 

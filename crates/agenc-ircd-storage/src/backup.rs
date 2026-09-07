@@ -1,5 +1,10 @@
 //! Authenticated, bounded, streaming backup format and verification.
 
+mod source_validation;
+
+pub(crate) use source_validation::admit_verified_legacy_backup;
+pub use source_validation::verify_legacy_backup_with_validator;
+
 use std::io::{BufReader, Read, Write};
 
 use agenc_ircd_crypto::{
@@ -737,6 +742,7 @@ pub fn verify_backup<R: Read>(
         source_guard_root,
         trusted_keys,
         maximum_bytes,
+        source_validation::RecordObservation::IntegrityOnly,
     )
 }
 
@@ -746,6 +752,7 @@ fn verify_backup_reader(
     source_guard_root: &RollbackGuardRootKey,
     trusted_keys: &[BackupTrustKey],
     maximum_bytes: u64,
+    observation: source_validation::RecordObservation<'_>,
 ) -> Result<VerifiedBackup, StorageError> {
     if trusted_keys.is_empty() || trusted_keys.len() > MAX_BACKUP_TRUST_KEYS {
         return Err(StorageError::LimitExceeded);
@@ -756,6 +763,7 @@ fn verify_backup_reader(
     let trusted_public_key = trusted_backup_key(&header, trusted_keys)?;
     let mut verification =
         BackupRecordVerification::new(&header, source_master_key, source_guard_root)?;
+    verification.observation = observation;
     let trailer_bytes = read_backup_records(&mut input, &mut hasher, &mut verification)?;
     let prefix_bytes = hasher.bytes_seen();
     let stream_bytes = prefix_bytes
@@ -824,7 +832,8 @@ fn trusted_backup_key(
     Ok(trusted_public_key)
 }
 
-struct BackupRecordVerification<'a> {
+struct BackupRecordVerification<'a, 'observation> {
+    observation: source_validation::RecordObservation<'observation>,
     history_inventory: crate::history_records::HistoryInventory,
     header: &'a BackupHeader,
     source_master_key: &'a StorageMasterKey,
@@ -838,7 +847,7 @@ struct BackupRecordVerification<'a> {
     reconstruction: BackupReconstruction,
 }
 
-impl<'a> BackupRecordVerification<'a> {
+impl<'a, 'observation> BackupRecordVerification<'a, 'observation> {
     fn new(
         header: &'a BackupHeader,
         source_master_key: &'a StorageMasterKey,
@@ -855,6 +864,7 @@ impl<'a> BackupRecordVerification<'a> {
         )?;
         Ok(Self {
             header,
+            observation: source_validation::RecordObservation::IntegrityOnly,
             history_inventory: crate::history_records::HistoryInventory::new(1_073_741_824),
             source_master_key,
             binding: database_binding(source_header),
@@ -891,7 +901,7 @@ impl<'a> BackupRecordVerification<'a> {
             record.stored_key(),
         )?;
         let plaintext = plaintext.expose_for_storage_codec();
-        crate::migration::validate_source_record(
+        let semantic_record = crate::AuthenticatedSourceRecord::checked(
             self.header.source_header().tbs().schema_generation,
             record.table(),
             record.stored_key(),
@@ -911,6 +921,7 @@ impl<'a> BackupRecordVerification<'a> {
         )?;
         self.observe_key_check(record, &sealed, plaintext)?;
         self.observe_state_meta(record, &sealed, plaintext)?;
+        self.observation.observe(semantic_record)?;
         self.logical_database_bytes = self
             .logical_database_bytes
             .checked_add(logical_record_charge(
@@ -1002,7 +1013,7 @@ impl<'a> BackupRecordVerification<'a> {
 fn read_backup_records<R: std::io::BufRead>(
     input: &mut R,
     hasher: &mut BackupStreamHasher,
-    verification: &mut BackupRecordVerification<'_>,
+    verification: &mut BackupRecordVerification<'_, '_>,
 ) -> Result<Vec<u8>, StorageError> {
     loop {
         let mut length_bytes = [0_u8; 4];
@@ -1335,7 +1346,7 @@ mod tests {
         master_key: &'a StorageMasterKey,
         guard_root: &RollbackGuardRootKey,
         stream_bytes: u64,
-    ) -> Result<BackupRecordVerification<'a>, StorageError> {
+    ) -> Result<BackupRecordVerification<'a, 'static>, StorageError> {
         let mut verification = BackupRecordVerification::new(header, master_key, guard_root)?;
         let source = header.source_header();
         let keys = derive_storage_integrity_keys(

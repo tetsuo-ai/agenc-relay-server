@@ -49,6 +49,8 @@ pub enum MailboxError {
     ObjectMismatch,
     /// Arithmetic overflow.
     Overflow,
+    /// The caller could not validate the retained item's admission context.
+    AdmissionRefused,
 }
 
 impl fmt::Display for MailboxError {
@@ -57,6 +59,7 @@ impl fmt::Display for MailboxError {
             Self::TokenInvalid => "the delivery token is invalid",
             Self::ObjectMismatch => "the object does not match the token",
             Self::Overflow => "sequence overflow",
+            Self::AdmissionRefused => "mailbox item admission was refused",
         };
         formatter.write_str(text)
     }
@@ -110,6 +113,17 @@ pub struct Page {
     pub next: Option<u64>,
 }
 
+/// One exact mailbox and inclusive continuation position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FetchSelector {
+    /// Account and device whose items are selected.
+    pub target: Target,
+    /// The selected object kind.
+    pub kind: MailboxKind,
+    /// First sequence to consider, or the beginning of the mailbox.
+    pub cursor: Option<u64>,
+}
+
 /// The outcome of an acknowledgement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AckOutcome {
@@ -148,6 +162,16 @@ impl Mailboxes {
         self.items.len()
     }
 
+    /// Borrows one exact retained item without granting, consuming or expiring it.
+    #[must_use]
+    pub fn retained_item(&self, target: Target, kind: MailboxKind, sequence: u64) -> Option<&Item> {
+        self.items.get(&ItemKey {
+            target,
+            kind,
+            sequence,
+        })
+    }
+
     /// Empty mailboxes.
     #[must_use]
     pub fn new() -> Self {
@@ -179,6 +203,39 @@ impl Mailboxes {
                 retain_until,
             },
         );
+    }
+
+    /// Restores an authenticated exclusive sequence floor without lowering any
+    /// retained item's position. A used scope never has a zero floor.
+    pub fn restore_sequence(
+        &mut self,
+        target: Target,
+        kind: MailboxKind,
+        next_sequence: u64,
+    ) -> Result<(), MailboxError> {
+        let current = self
+            .next_sequence
+            .get(&(target, kind))
+            .copied()
+            .unwrap_or(0);
+        let last = ItemKey {
+            target,
+            kind,
+            sequence: u64::MAX,
+        };
+        let first = ItemKey {
+            sequence: 0,
+            ..last
+        };
+        let last_item = self.items.range(first..=last).next_back();
+        if next_sequence == 0
+            || current > next_sequence
+            || last_item.is_some_and(|(key, _)| key.sequence >= next_sequence)
+        {
+            return Err(MailboxError::AdmissionRefused);
+        }
+        self.next_sequence.insert((target, kind), next_sequence);
+        Ok(())
     }
 
     /// Queues an object for `target`; returns its sequence.
@@ -225,23 +282,30 @@ impl Mailboxes {
         now: u64,
         tokens: &mut dyn FnMut() -> Id,
     ) -> Result<Page, MailboxError> {
-        let start = ItemKey {
-            target,
-            kind,
-            sequence: cursor.unwrap_or(0),
-        };
-        let end = ItemKey {
-            target,
-            kind,
-            sequence: u64::MAX,
-        };
-        let keys: Vec<ItemKey> = self
-            .items
-            .range(start..=end)
-            .filter(|(_, item)| item.expires_at > now)
-            .map(|(key, _)| *key)
-            .take(MAX_BATCH_OBJECTS + 1)
-            .collect();
+        self.fetch_admitted(
+            FetchSelector {
+                target,
+                kind,
+                cursor,
+            },
+            session_generation,
+            now,
+            tokens,
+            &mut |_| Ok(true),
+        )
+    }
+
+    /// Applies the caller's read-only admission check to each selected item
+    /// before issuing any grant. Excluded items remain queued unchanged.
+    pub fn fetch_admitted(
+        &mut self,
+        selector: FetchSelector,
+        session_generation: u64,
+        now: u64,
+        tokens: &mut dyn FnMut() -> Id,
+        admit: &mut dyn FnMut(&Item) -> Result<bool, MailboxError>,
+    ) -> Result<Page, MailboxError> {
+        let keys = self.admitted_keys(selector, now, admit)?;
         let mut page = Page::default();
         for key in keys.iter().take(MAX_BATCH_OBJECTS) {
             let token = self.grant_for(*key, session_generation, now, tokens)?;
@@ -254,6 +318,104 @@ impl Mailboxes {
         }
         page.next = keys.get(MAX_BATCH_OBJECTS).map(|key| key.sequence);
         Ok(page)
+    }
+
+    /// Borrows the live ordered contents before a caller reserves an immutable cut.
+    pub fn snapshot_items(
+        &self,
+        target: Target,
+        kind: MailboxKind,
+        now: u64,
+    ) -> impl Iterator<Item = (u64, &Item)> {
+        let first = ItemKey {
+            target,
+            kind,
+            sequence: 0,
+        };
+        let last = ItemKey {
+            sequence: u64::MAX,
+            ..first
+        };
+        self.items
+            .range(first..=last)
+            .filter_map(move |(key, item)| (item.expires_at > now).then_some((key.sequence, item)))
+    }
+
+    /// Grants only an exact retained snapshot page. Every item is checked before
+    /// the first token changes; a consumed or expired item never reappears.
+    pub fn grant_snapshot(
+        &mut self,
+        selector: FetchSelector,
+        rows: &[(u64, Item)],
+        session_generation: u64,
+        now: u64,
+        tokens: &mut dyn FnMut() -> Id,
+    ) -> Result<Vec<Delivery>, MailboxError> {
+        if rows.len() > MAX_BATCH_OBJECTS {
+            return Err(MailboxError::AdmissionRefused);
+        }
+        for (sequence, expected) in rows {
+            let key = ItemKey {
+                target: selector.target,
+                kind: selector.kind,
+                sequence: *sequence,
+            };
+            let actual = self.items.get(&key).ok_or(MailboxError::TokenInvalid)?;
+            let mut expected = *expected;
+            expected.grant = actual.grant;
+            if expected != *actual || actual.expires_at <= now {
+                return Err(MailboxError::TokenInvalid);
+            }
+        }
+        let mut deliveries = Vec::new();
+        for (sequence, item) in rows {
+            let key = ItemKey {
+                target: selector.target,
+                kind: selector.kind,
+                sequence: *sequence,
+            };
+            let token = self.grant_for(key, session_generation, now, tokens)?;
+            deliveries.push(Delivery {
+                sequence: *sequence,
+                object_id: item.object_id,
+                token,
+            });
+        }
+        Ok(deliveries)
+    }
+
+    fn admitted_keys(
+        &self,
+        selector: FetchSelector,
+        now: u64,
+        admit: &mut dyn FnMut(&Item) -> Result<bool, MailboxError>,
+    ) -> Result<Vec<ItemKey>, MailboxError> {
+        let FetchSelector {
+            target,
+            kind,
+            cursor,
+        } = selector;
+        let start = ItemKey {
+            target,
+            kind,
+            sequence: cursor.unwrap_or(0),
+        };
+        let end = ItemKey {
+            target,
+            kind,
+            sequence: u64::MAX,
+        };
+        let mut keys = Vec::new();
+        for (key, item) in self.items.range(start..=end) {
+            if item.expires_at <= now || !admit(item)? {
+                continue;
+            }
+            keys.push(*key);
+            if keys.len() == MAX_BATCH_OBJECTS + 1 {
+                break;
+            }
+        }
+        Ok(keys)
     }
 
     fn grant_for(
@@ -293,11 +455,58 @@ impl Mailboxes {
         session_generation: u64,
         now: u64,
     ) -> Result<AckOutcome, MailboxError> {
+        let Some(key) =
+            self.acknowledgement_key(target, token, object_id, session_generation, now)?
+        else {
+            return Ok(AckOutcome::Replayed);
+        };
+        self.acks.insert(
+            (target, token),
+            AckRecord {
+                object_id,
+                retain_until: now
+                    .checked_add(MAILBOX_ACK_RETENTION_SECONDS)
+                    .ok_or(MailboxError::Overflow)?,
+            },
+        );
+        self.items.remove(&key);
+        self.tokens.remove(&token);
+        Ok(AckOutcome::Acked)
+    }
+
+    /// Resolves a fully validated live token without consuming it. `None`
+    /// means an exact retained ACK replay, never an absent or expired token.
+    pub fn acknowledgement_item(
+        &self,
+        target: Target,
+        token: Id,
+        object_id: Id,
+        session_generation: u64,
+        now: u64,
+    ) -> Result<Option<(MailboxKind, u64, &Item)>, MailboxError> {
+        let key = self.acknowledgement_key(target, token, object_id, session_generation, now)?;
+        key.map(|key| {
+            self.items
+                .get(&key)
+                .map(|item| (key.kind, key.sequence, item))
+                .ok_or(MailboxError::TokenInvalid)
+        })
+        .transpose()
+    }
+
+    fn acknowledgement_key(
+        &self,
+        target: Target,
+        token: Id,
+        object_id: Id,
+        session_generation: u64,
+        now: u64,
+    ) -> Result<Option<ItemKey>, MailboxError> {
         if let Some(record) = self.acks.get(&(target, token)) {
             if record.object_id != object_id {
                 return Err(MailboxError::ObjectMismatch);
             }
-            return Ok(AckOutcome::Replayed);
+            return Ok(None);
         }
         let key = *self.tokens.get(&token).ok_or(MailboxError::TokenInvalid)?;
         let item = self.items.get(&key).ok_or(MailboxError::TokenInvalid)?;
@@ -312,18 +521,7 @@ impl Mailboxes {
         if item.object_id != object_id {
             return Err(MailboxError::ObjectMismatch);
         }
-        self.acks.insert(
-            (target, token),
-            AckRecord {
-                object_id,
-                retain_until: now
-                    .checked_add(MAILBOX_ACK_RETENTION_SECONDS)
-                    .ok_or(MailboxError::Overflow)?,
-            },
-        );
-        self.items.remove(&key);
-        self.tokens.remove(&token);
-        Ok(AckOutcome::Acked)
+        Ok(Some(key))
     }
 
     /// Invalidates every token of `target` (detach, logout, reconnect); the

@@ -473,9 +473,20 @@ impl AuditChainCursor {
     /// Accepts one event exactly at the cursor and moves past it.
     pub fn advance(self, event: &AdminAuditEvent) -> Result<Self, AdminError> {
         let tbs = event.tbs();
-        if tbs.audit_sequence != self.next_sequence
-            || tbs.previous_event_hash != self.previous_event_hash
-        {
+        self.advance_position(
+            tbs.audit_sequence,
+            tbs.previous_event_hash,
+            event.event_hash(),
+        )
+    }
+
+    pub(crate) fn advance_position(
+        self,
+        sequence: u64,
+        previous_hash: [u8; 32],
+        event_hash: [u8; 32],
+    ) -> Result<Self, AdminError> {
+        if sequence != self.next_sequence || previous_hash != self.previous_event_hash {
             return Err(AdminError::Audit);
         }
         let next_sequence = self
@@ -483,7 +494,7 @@ impl AuditChainCursor {
             .checked_add(1)
             .ok_or(AdminError::Overflow)?;
         Ok(Self {
-            previous_event_hash: event.event_hash(),
+            previous_event_hash: event_hash,
             next_sequence,
         })
     }

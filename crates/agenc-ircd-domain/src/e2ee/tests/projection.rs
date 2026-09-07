@@ -473,3 +473,29 @@ fn barriers_cover_only_two_profile_targets_within_bounds() -> Result<(), PlanErr
     assert!(!PlanError::Overflow.to_string().is_empty());
     Ok(())
 }
+
+#[test]
+fn snapshot_iteration_merges_live_reasons_in_order_without_duplicate_conversations()
+-> Result<(), PlanError> {
+    let mut entitlements = RouteEntitlements::new();
+    for conversation in [[0; 32], [3; 32], [0xff; 32]] {
+        entitlements.set_channel(EDGE_A, conversation, true);
+    }
+    for conversation in [[1; 32], [3; 32], [4; 32]] {
+        entitlements.require_direct(EDGE_A, conversation, EntitlementReason::Event)?;
+    }
+    entitlements.release_direct(EDGE_A, [4; 32], EntitlementReason::Event)?;
+    entitlements.set_channel(EDGE_A, [2; 32], false);
+    entitlements.set_channel(EDGE_B, [2; 32], true);
+    assert_eq!(
+        entitlements.snapshot_iter(EDGE_A).collect::<Vec<_>>(),
+        vec![[0; 32], [1; 32], [3; 32], [0xff; 32]]
+    );
+    assert_eq!(
+        entitlements.snapshot_iter(EDGE_B).collect::<Vec<_>>(),
+        vec![[2; 32]]
+    );
+    entitlements.fence(EDGE_A);
+    assert_eq!(entitlements.snapshot_iter(EDGE_A).next(), None);
+    Ok(())
+}

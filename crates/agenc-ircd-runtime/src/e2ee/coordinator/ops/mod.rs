@@ -14,9 +14,15 @@ use super::events::EventContent;
 use super::request::{Decoded, Outcome};
 use super::{CompanionCoordinator, CompanionOrigin};
 
+mod binding_delivery;
 pub mod directory;
 pub mod mailbox;
+mod mailbox_grant;
+mod mailbox_recovery;
+pub(crate) mod mailbox_snapshot;
 pub mod policy;
+mod recovery;
+mod recovery_read;
 pub mod route;
 pub(super) mod route_successor;
 pub mod sequence;
@@ -61,6 +67,12 @@ pub type PlanBinding<'a> = dyn Fn(
 
 /// What every handler sees.
 pub struct Exec<'a> {
+    /// Shared query ceilings for the authoritative base session.
+    pub(crate) queries: Option<crate::state_core::query_usage::QueryReservationPort<'a>>,
+    /// Reservation-only access to the existing process memory budget.
+    pub(crate) backing: crate::budget::BackingReservationPort,
+    /// Monotonic milliseconds for process-local cursor expiry.
+    pub monotonic_millis: u64,
     /// The coordinator (committed state).
     pub coordinator: &'a CompanionCoordinator,
     /// The home edge.
@@ -246,6 +258,7 @@ pub fn cursor(reader: &mut Reader<'_>) -> Result<Option<[u8; 32]>, agenc_ircd_e2
 
 /// Dispatches one decoded request to its handler.
 pub fn execute(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    recovery::admit(exec)?;
     use IrcFederationOpcode as Op;
     match exec.opcode() {
         Op::ApplicationChannel | Op::ApplicationDirect => route::application(exec),

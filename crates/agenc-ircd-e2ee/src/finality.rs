@@ -164,7 +164,14 @@ impl QuorumLedger {
             terminal_id: tbs.terminal_id,
             reason_code: tbs.reason_code,
         };
-        self.record_encoded(policy, rosters, &tbs.encode()?, terminal, vote)
+        self.record_encoded(
+            policy,
+            rosters,
+            &tbs.encode()?,
+            terminal,
+            vote,
+            SignatureDomain::DispositionVote,
+        )
     }
 
     /// Records one ReInit council vote over `tbs` under the same rules.
@@ -184,7 +191,14 @@ impl QuorumLedger {
             terminal_id: tbs.terminal_id,
             reason_code: tbs.reason_code,
         };
-        self.record_encoded(policy, rosters, &tbs.encode()?, terminal, vote)
+        self.record_encoded(
+            policy,
+            rosters,
+            &tbs.encode()?,
+            terminal,
+            vote,
+            SignatureDomain::ReinitDisposition,
+        )
     }
 
     fn record_encoded(
@@ -194,6 +208,7 @@ impl QuorumLedger {
         encoded_tbs: &[u8],
         terminal: Terminal,
         vote: &IrcFinalityVote,
+        domain: SignatureDomain,
     ) -> Result<(), E2eeError> {
         let signer = (vote.signer_root_fingerprint, vote.signer_device_id);
         let member = policy
@@ -205,11 +220,9 @@ impl QuorumLedger {
         {
             return Err(E2eeError::InvalidValue);
         }
-        certificate.key.verify(
-            SignatureDomain::DispositionVote,
-            encoded_tbs,
-            &vote.device_signature,
-        )?;
+        certificate
+            .key
+            .verify(domain, encoded_tbs, &vote.device_signature)?;
         match self.votes.get(&signer) {
             Some((existing, _)) if *existing != terminal => Err(E2eeError::InvalidValue),
             _ => {

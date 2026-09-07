@@ -54,6 +54,15 @@ mod account_shutdown;
 #[path = "retained_resume.rs"]
 mod retained_resume;
 
+#[path = "ordinary_acks.rs"]
+mod ordinary_acks;
+
+#[path = "startup_cross_profile.rs"]
+mod startup_cross_profile;
+
+#[path = "query_receipt.rs"]
+mod query_receipt;
+
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
 const COORDINATOR: ServerId = ServerId::from_bytes([32; 16]);
 const COORDINATOR_NAME: &str = "server.example";
@@ -2631,6 +2640,7 @@ fn staged_request(peer: ServerId, incarnation: ServerIncarnation) -> PendingComm
     let origin_id = OriginId::from_bytes([77; 16]);
     let request_id = RequestId::from_bytes([78; 16]);
     PendingCommit::Request {
+        query: None,
         staged_after: 0,
         peer,
         link: LinkId::new(1),

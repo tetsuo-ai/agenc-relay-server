@@ -260,6 +260,33 @@ impl SecretSet {
         }
     }
 
+    /// Loads the configured secrets and one proposed login-index key through
+    /// the same file-identity and purpose-separation checks. The configured
+    /// current and previous keys remain the keys used to open storage.
+    pub fn load_for_login_index_start(
+        config: &Config,
+        new_key_file: &Path,
+    ) -> Result<(Self, SecretBytes32), ConfigReport> {
+        let mut sink = IssueSink::default();
+        let mut loader = Loader::default();
+        let required = loader.required_keys(&mut sink, config);
+        let optional = loader.optional_keys(&mut sink, config);
+        let tls_private_keys = loader.tls_keys(&mut sink, config);
+        let new_key = loader.key32(
+            &mut sink,
+            "storage",
+            "new_login_index_key_file",
+            new_key_file,
+        );
+        match (
+            Self::assemble(required, optional, tls_private_keys),
+            new_key,
+        ) {
+            (Some(set), Some(key)) if sink.is_empty() => Ok((set, key)),
+            _ => Err(sink.into_report()),
+        }
+    }
+
     fn assemble(
         required: RequiredKeys,
         optional: OptionalKeys,

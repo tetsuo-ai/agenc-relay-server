@@ -12,15 +12,17 @@ use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
+use crate::construction_runtime::RestoreSourceAdmission;
+use crate::construction_schema::ConstructionSchema;
 use crate::{
     BackupTrustKey, ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor,
     ConstructionLimits, ConstructionPlan, ConstructionSourceDatabase, ConstructionSourceFacts,
     ConstructionTarget, DatabaseHeader, DatabaseHeaderTbs, InitialStorageRecord,
-    RecoveryTransformV1, SCHEMA_GENERATION, StateDirectory, StorageConstruction,
-    StorageConstructionCursor, StorageConstructionKind, StorageEngineLimits, StorageError,
-    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
-    StorageOpenConfig, StorageOperationIdentity, StorageQualification, StoredKey, TableId,
-    initialize_storage,
+    RecoveryTransformV1, RestoreBackupSourceConfig, SourceRecordValidator, StateDirectory,
+    StorageConstruction, StorageConstructionCursor, StorageConstructionKind, StorageEngineLimits,
+    StorageError, StorageInitializationConfig, StorageInitializationMode,
+    StorageInitializationOutcome, StorageOpenConfig, StorageOperationIdentity,
+    StorageQualification, StoredKey, TableId,
 };
 
 const RESTORE_BATCH_RECORDS: usize = 1_000;
@@ -105,6 +107,8 @@ pub struct RestoreCommandRequest {
 /// Durable result of a completed or reverified restore.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RestoreCommandReceipt {
+    /// Schema generation preserved by restore. Legacy output requires explicit migration.
+    pub schema_generation: u64,
     /// Installed output directory.
     pub output_state_directory: PathBuf,
     /// Permanent authenticated restore operation ID.
@@ -130,12 +134,34 @@ pub fn execute_restore_command(
     request: RestoreCommandRequest,
     qualifications: &[StorageQualification],
 ) -> Result<RestoreCommandReceipt, StorageError> {
+    execute_restore_admitted(request, qualifications, RestoreSourceAdmission::Current)
+}
+
+/// Requires complete semantic admission of a schema-two signed source before any output.
+/// A legacy restore preserves schema two and must be migrated separately before service.
+pub fn execute_validated_restore_command(
+    request: RestoreCommandRequest,
+    qualifications: &[StorageQualification],
+    validator: &mut dyn SourceRecordValidator,
+) -> Result<RestoreCommandReceipt, StorageError> {
+    execute_restore_admitted(
+        request,
+        qualifications,
+        RestoreSourceAdmission::WithLegacy(validator),
+    )
+}
+
+fn execute_restore_admitted(
+    request: RestoreCommandRequest,
+    qualifications: &[StorageQualification],
+    admission: RestoreSourceAdmission<'_>,
+) -> Result<RestoreCommandReceipt, StorageError> {
     validate_restore_request(&request)?;
     let limits = request.limits.validate()?;
     let construction_limits = construction_limits(limits)?;
     let secrets = RestoreSecrets::load(&request)?;
     let trusted_keys = trusted_restore_keys(&request)?;
-    let mut source = secrets.open_source(&request, &trusted_keys, limits)?;
+    let mut source = secrets.open_source(&request, &trusted_keys, limits, admission)?;
     let source_facts = source.facts()?;
     let source_header = source_facts.header;
     if (
@@ -151,6 +177,7 @@ pub fn execute_restore_command(
         &secrets.login_index,
         secrets.previous_login_index.as_deref(),
         limits,
+        ConstructionSchema::from_generation(source_header.tbs().schema_generation)?,
     )?;
     if current_facts.is_some_and(|current| !same_restore_boundary(current, source_facts)) {
         return Err(StorageError::StaleState);
@@ -263,18 +290,23 @@ impl RestoreSecrets {
         request: &RestoreCommandRequest,
         trusted_keys: &[BackupTrustKey],
         limits: StorageEngineLimits,
+        admission: RestoreSourceAdmission<'_>,
     ) -> Result<crate::RestoreBackupSource<File>, StorageError> {
         let backup = open_private_regular(&request.backup_path, Mode::RUSR | Mode::WUSR)?;
-        crate::RestoreBackupSource::open(
+        crate::RestoreBackupSource::open_admitted(
             backup,
-            StorageMasterKey::from_bytes(*self.source_master),
-            RollbackGuardRootKey::from_bytes(*self.source_guard),
-            LoginIndexKey::from_bytes(*self.login_index),
-            self.previous_login_index
-                .as_ref()
-                .map(|bytes| LoginIndexKey::from_bytes(**bytes)),
-            trusted_keys,
-            limits.backup_max_bytes,
+            RestoreBackupSourceConfig {
+                source_master_key: StorageMasterKey::from_bytes(*self.source_master),
+                source_guard_root: RollbackGuardRootKey::from_bytes(*self.source_guard),
+                login_index_key: LoginIndexKey::from_bytes(*self.login_index),
+                previous_login_index_key: self
+                    .previous_login_index
+                    .as_ref()
+                    .map(|bytes| LoginIndexKey::from_bytes(**bytes)),
+                trusted_keys,
+                maximum_bytes: limits.backup_max_bytes,
+            },
+            admission,
         )
     }
 }
@@ -383,7 +415,10 @@ impl RestoreExecution<'_> {
                 self.limits,
             )?;
         }
-        let mut target_writer = match ConstructionTarget::open(self.target_config()?) {
+        let mut target_writer = match ConstructionTarget::open_stopped(
+            self.target_config()?,
+            ConstructionSchema::from_generation(self.target.header.tbs().schema_generation)?,
+        ) {
             Ok(target_writer) => target_writer,
             // A construction that was finalized but never renamed into place
             // has no marker row left to reopen; install it from its completion.
@@ -499,6 +534,7 @@ fn read_current_boundary(
     login_key_bytes: &[u8; 32],
     previous_login_key_bytes: Option<&[u8; 32]>,
     limits: StorageEngineLimits,
+    schema: ConstructionSchema,
 ) -> Result<Option<ConstructionSourceFacts>, StorageError> {
     if !current_state_directory_exists(&request.current_state_directory)? {
         return Ok(None);
@@ -506,17 +542,20 @@ fn read_current_boundary(
     let master = read_secret_key(&request.current_master_key_file)?;
     let guard = read_secret_key(&request.current_rollback_guard_key_file)?;
     let state_directory = StateDirectory::open(&request.current_state_directory, qualifications)?;
-    let source = ConstructionSourceDatabase::open(StorageOpenConfig {
-        expected_network_id: request.network_id,
-        expected_server_id: request.server_id,
-        state_directory,
-        storage_master_key: StorageMasterKey::from_bytes(*master),
-        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*guard),
-        login_index_key: LoginIndexKey::from_bytes(*login_key_bytes),
-        previous_login_index_key: previous_login_key_bytes
-            .map(|bytes| LoginIndexKey::from_bytes(*bytes)),
-        limits,
-    })?;
+    let source = ConstructionSourceDatabase::open_restore_boundary(
+        StorageOpenConfig {
+            expected_network_id: request.network_id,
+            expected_server_id: request.server_id,
+            state_directory,
+            storage_master_key: StorageMasterKey::from_bytes(*master),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*guard),
+            login_index_key: LoginIndexKey::from_bytes(*login_key_bytes),
+            previous_login_index_key: previous_login_key_bytes
+                .map(|bytes| LoginIndexKey::from_bytes(*bytes)),
+            limits,
+        },
+        schema,
+    )?;
     Ok(Some(source.facts()?))
 }
 
@@ -554,6 +593,7 @@ fn restore_receipt(
     target: DatabaseHeader,
 ) -> RestoreCommandReceipt {
     RestoreCommandReceipt {
+        schema_generation: target.tbs().schema_generation,
         output_state_directory,
         storage_operation_id,
         source_recovery_epoch: source.header.tbs().recovery_epoch,
@@ -587,6 +627,7 @@ fn select_target_identity(
     previous_login_key_bytes: Option<&[u8; 32]>,
     limits: StorageEngineLimits,
 ) -> Result<TargetIdentity, StorageError> {
+    let schema = ConstructionSchema::from_generation(source_header.tbs().schema_generation)?;
     if request.resume {
         let header = match directory.phase() {
             ConstructionDirectoryPhase::Staging => {
@@ -602,17 +643,18 @@ fn select_target_identity(
                         limits,
                     )
                 };
-                match ConstructionTarget::open(config()?) {
+                match ConstructionTarget::open_stopped(config()?, schema) {
                     Ok(target) => target.header(),
                     // A finalized construction that was never renamed has no
                     // marker row; its completed header is the target identity.
                     Err(open_error) => {
-                        ConstructionTarget::completed_header(config()?).map_err(|_| open_error)?
+                        ConstructionTarget::completed_header_stopped(config()?, schema)
+                            .map_err(|_| open_error)?
                     }
                 }
             }
-            ConstructionDirectoryPhase::Installed => {
-                ConstructionTarget::completed_header(target_open_config(
+            ConstructionDirectoryPhase::Installed => ConstructionTarget::completed_header_stopped(
+                target_open_config(
                     request,
                     directory,
                     qualifications,
@@ -621,8 +663,9 @@ fn select_target_identity(
                     login_key_bytes,
                     previous_login_key_bytes,
                     limits,
-                )?)?
-            }
+                )?,
+                schema,
+            )?,
         };
         validate_target_header(
             header,
@@ -653,15 +696,11 @@ fn select_target_identity(
     let recovery_epoch = RecoveryEpoch::from_bytes(fresh_distinct_16(
         source_header.tbs().recovery_epoch.as_bytes(),
     )?);
-    let tbs = DatabaseHeaderTbs::new(
-        request.network_id,
-        request.server_id,
-        incarnation,
-        database_id,
-        target_generation,
-        SCHEMA_GENERATION,
+    let tbs = DatabaseHeaderTbs {
+        server_incarnation: incarnation,
         recovery_epoch,
-    )?;
+        ..schema.header(source_header.tbs(), database_id, target_generation)?
+    };
     Ok(TargetIdentity {
         header: DatabaseHeader::new(tbs, StorageDigest::from_bytes([0_u8; 32])),
         fresh: true,
@@ -758,23 +797,24 @@ fn initialize_restore_target(
     predecessor_guard_hash: StorageDigest,
     limits: StorageEngineLimits,
 ) -> Result<(), StorageError> {
-    let outcome = initialize_storage(StorageInitializationConfig {
-        state_directory: StateDirectory::open(&directory.selected_path(), qualifications)?,
-        header_tbs: *target.header.tbs(),
-        storage_master_key: StorageMasterKey::from_bytes(*target_master_bytes),
-        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*target_guard_bytes),
-        mode: StorageInitializationMode::Construction,
-        initial_records: vec![InitialStorageRecord::new(
-            TableId::StorageConstruction,
-            StoredKey::new(crate::STORAGE_CONSTRUCTION_KEY.to_vec())?,
-            1,
-            marker.encode()?,
-        )?],
-        account_service_response_count: 0,
-        state_generation: 0,
-        predecessor_guard_hash,
-        limits,
-    })?;
+    let outcome =
+        crate::initialize::initialize_stopped_construction(StorageInitializationConfig {
+            state_directory: StateDirectory::open(&directory.selected_path(), qualifications)?,
+            header_tbs: *target.header.tbs(),
+            storage_master_key: StorageMasterKey::from_bytes(*target_master_bytes),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(*target_guard_bytes),
+            mode: StorageInitializationMode::Construction,
+            initial_records: vec![InitialStorageRecord::new(
+                TableId::StorageConstruction,
+                StoredKey::new(crate::STORAGE_CONSTRUCTION_KEY.to_vec())?,
+                1,
+                marker.encode()?,
+            )?],
+            account_service_response_count: 0,
+            state_generation: 0,
+            predecessor_guard_hash,
+            limits,
+        })?;
     if matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
         Ok(())
     } else {
@@ -1002,16 +1042,30 @@ mod tests {
         let limits = engine_limits();
         let absent = request(true, 1);
         assert_eq!(
-            read_current_boundary(&absent, &[], &[0; 32], None, limits)
-                .map(|facts| facts.is_some()),
+            read_current_boundary(
+                &absent,
+                &[],
+                &[0; 32],
+                None,
+                limits,
+                ConstructionSchema::Three
+            )
+            .map(|facts| facts.is_some()),
             Ok(false)
         );
 
         let mut unreadable_keys = request(true, 1);
         unreadable_keys.current_state_directory = directory.clone();
         assert_eq!(
-            read_current_boundary(&unreadable_keys, &[], &[0; 32], None, limits)
-                .map(|facts| facts.is_some()),
+            read_current_boundary(
+                &unreadable_keys,
+                &[],
+                &[0; 32],
+                None,
+                limits,
+                ConstructionSchema::Three
+            )
+            .map(|facts| facts.is_some()),
             Err(StorageError::FilesystemRejected)
         );
 
@@ -1025,8 +1079,15 @@ mod tests {
         let mut below_file = request(true, 1);
         below_file.current_state_directory = file_path.join("child");
         assert_eq!(
-            read_current_boundary(&below_file, &[], &[0; 32], None, limits)
-                .map(|facts| facts.is_some()),
+            read_current_boundary(
+                &below_file,
+                &[],
+                &[0; 32],
+                None,
+                limits,
+                ConstructionSchema::Three
+            )
+            .map(|facts| facts.is_some()),
             Err(StorageError::FilesystemRejected)
         );
 

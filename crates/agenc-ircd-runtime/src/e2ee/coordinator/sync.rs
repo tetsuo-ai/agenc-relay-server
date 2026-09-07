@@ -3,18 +3,14 @@
 //! and the ESTATE route-state transfer that opens a new delivery generation
 //! (companion 12.5).
 //!
-//! The snapshot cut lives in memory until the edge's READY is recorded;
-//! a coordinator restart mid-transfer therefore fails the edge's next FETCH,
-//! which closes the link and restarts the transfer from a fresh cut.
+//! Immutable pages and their original cut owner survive coordinator restart.
+//! FETCH advances only through a durable owner receipt. Link loss does not
+//! authorize a replacement generation or refresh the token deadline.
 
 use agenc_ircd_crypto::SemanticHashDomain;
-use agenc_ircd_domain::e2ee::limits::MAX_BATCH_OBJECTS;
 use agenc_ircd_e2ee::federation::frames::CompanionFrame;
-use agenc_ircd_e2ee::ids::{account_id_digest, federation_snapshot_digest, semantic_id_of};
-use agenc_ircd_e2ee::limits::{
-    MAX_BATCH_DECODED_BYTES, MAX_FEDERATION_STATE_ENTRIES_PER_EDGE,
-    MAX_FEDERATION_STATE_SNAPSHOT_BYTES_PER_EDGE,
-};
+use agenc_ircd_e2ee::ids::{account_id_digest, semantic_id_of};
+use agenc_ircd_e2ee::limits::MAX_BATCH_DECODED_BYTES;
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::IrcFederationOrigin;
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
@@ -22,18 +18,31 @@ use agenc_ircd_e2ee::wire::assembly::{AssemblyKey, Direction, Sender};
 use agenc_ircd_e2ee::wire::carrier::CarrierCommand;
 use agenc_ircd_e2ee::wire::fragment::{FragmentTag, fragment_object};
 use agenc_ircd_federation_wire::FederationLineText;
-use agenc_ircd_storage::TableId;
-use agenc_ircd_storage::e2ee_records::{DELIVERY_ROW_KIND, DeliveryRow};
+use agenc_ircd_storage::e2ee_records::delivery_recovery::{DeliveryOwner, DeliveryScope};
 use agenc_ircd_types::{EntropySource, ServerId};
 
 use super::events::{self, DeliveryStream};
-use super::request::state_row;
 use super::{
     CompanionCoordinator, CompanionFault, CompanionOrigin, CompanionOriginKey, CompleteRequest,
     PendingCompanion,
 };
 use crate::federation::LinkId;
 use crate::state_core::durable::AccountServiceDurableWrite;
+
+pub use super::delivery_owner::clock::Sample as CutClockSample;
+pub use super::delivery_owner::fetch::Prepared as FetchPublication;
+pub(crate) use super::delivery_owner::fetch::{
+    Output as SnapshotPageOutput, Request as SnapshotPageRequest,
+};
+pub use super::delivery_owner::publication::Publication as SnapshotPublication;
+pub(crate) use super::delivery_owner::retirement::Retirement as RestoredRetirement;
+
+/// Exact page identity supplied by one already decoded FETCH frame.
+pub(super) struct FetchPage {
+    token: [u8; 32],
+    sequence: u32,
+    cursor: [u8; 32],
+}
 
 /// The fixed, nonextendable snapshot token lifetime.
 pub const SNAPSHOT_TOKEN_MILLIS: u64 = 15 * 60 * 1_000;
@@ -56,6 +65,26 @@ pub struct BaseOriginView {
 
 /// The base facts the owner supplies while a companion frame is handled.
 pub trait CompanionHost {
+    /// Current UTC accepted by the existing drift monitor; absence cannot expire replay.
+    fn trusted_ack_unix_seconds(&self) -> Option<u64> {
+        None
+    }
+    /// Samples the absolute clock used only by a pending snapshot token.
+    fn cut_clock_sample(
+        &self,
+    ) -> Result<CutClockSample, agenc_ircd_storage::e2ee_records::delivery_recovery::RetirementReason>
+    {
+        super::delivery_owner::clock::sample()
+    }
+
+    /// Reserves backing against the existing process memory budget before allocation.
+    fn reserve_cut_backing(
+        &self,
+        _capacity: usize,
+    ) -> Result<crate::budget::MemoryPermit, CompanionFault> {
+        Err(CompanionFault::Ceiling)
+    }
+
     /// The incarnation of the live link of `peer`.
     fn live_incarnation(&self, peer: ServerId) -> Option<[u8; 16]>;
     /// The ACKed base origin under `key`.
@@ -80,6 +109,10 @@ pub(crate) enum Action {
     Execute(CompleteRequest),
     /// Sends lines on the peer's link.
     Send(Vec<FederationLineText>),
+    /// Retains output backing until transfer to the authenticated link queue.
+    SendPage(SnapshotPageOutput),
+    /// Reads one exact immutable page under a submitted-result lease.
+    ReadSnapshotPage(SnapshotPageRequest),
     /// Stages one durable batch and marks the pending work.
     Stage {
         /// The rows.
@@ -104,7 +137,15 @@ pub enum PendingWork {
         peer: ServerId,
         /// The link.
         link: LinkId,
+        /// The exact accepted cut and historical scope.
+        owner: DeliveryOwner,
     },
+    /// One immutable page or its final owner awaits the exact receipt.
+    Snapshot(Box<SnapshotPublication>),
+    /// An offered-page boundary and its unpublished output await receipt.
+    Fetch(Box<FetchPublication>),
+    /// A cursor change that only its storage receipt may apply.
+    Acknowledgement(super::delivery_owner::acknowledgement::PreparedAck),
 }
 
 /// What went out of a committed companion batch.
@@ -113,6 +154,12 @@ pub enum Committed {
     Request(Box<PendingCompanion>),
     /// Lines to send, each to its target's live link.
     Lines(Vec<(ServerId, FederationLineText)>),
+    /// Continue a cut only after the preceding page or owner is durable.
+    Snapshot(Box<SnapshotPublication>),
+    /// An offered-page boundary and its unpublished output await receipt.
+    Fetch(Box<FetchPublication>),
+    /// An EACK was recorded durably for this target.
+    Acknowledged(ServerId),
 }
 
 /// One immutable snapshot cut.
@@ -130,22 +177,26 @@ pub struct Cut {
     pub entry_count: u32,
 }
 
-/// One snapshot entry: the conversation and its route state object.
-type Entry = ([u8; 32], Vec<u8>);
-
 /// One ESTATE transfer in progress.
 pub struct Snapshot {
     /// The cut.
     pub cut: Cut,
-    pages: Vec<Vec<Entry>>,
-    cursors: Vec<[u8; 32]>,
-    pages_sent: usize,
-    expires_at_millis: u64,
+    pub(super) scope: DeliveryScope,
+    pub(super) capture: super::delivery_owner::snapshot::Pages,
+    pub(super) pages_sent: usize,
+    pub(super) expires_at_millis: u64,
+    pub(super) deadline: agenc_ircd_storage::e2ee_records::delivery_recovery::PendingDeadline,
+    pub(super) observed: Option<CutClockSample>,
+    pub(super) stored_version: Option<(u64, u64)>,
+    pub(super) retirement:
+        Option<agenc_ircd_storage::e2ee_records::delivery_recovery::RetirementReason>,
 }
 
 /// The synchronization state of one edge.
 #[derive(Default)]
 pub struct PeerSync {
+    /// The authenticated connection allowed to publish this process's replies.
+    pub link: Option<LinkId>,
     /// The incarnation this scope belongs to.
     pub incarnation: Option<[u8; 16]>,
     /// The base resync epoch the last transfer covered.
@@ -164,7 +215,10 @@ pub struct PeerSync {
     pub ready_cut: Option<Cut>,
 }
 
-fn line(server_name: &str, frame: &CompanionFrame) -> Result<FederationLineText, CompanionFault> {
+pub(super) fn line(
+    server_name: &str,
+    frame: &CompanionFrame,
+) -> Result<FederationLineText, CompanionFault> {
     events::line(server_name, frame).map_err(|_| CompanionFault::Protocol)
 }
 
@@ -211,6 +265,9 @@ impl CompanionCoordinator {
                 origin.fenced = true;
             }
         }
+        self.state
+            .mailbox_snapshots
+            .fence_incarnations(home, incarnation);
         let sync = self.peers.entry(peer).or_default();
         sync.origins_reset = true;
         sync.origins_ready = false;
@@ -517,6 +574,9 @@ impl CompanionCoordinator {
             }
             origin.fenced = true;
         }
+        self.state
+            .mailbox_snapshots
+            .close_origin(key, descriptor.origin_generation);
         let ack = line(
             &self.server_name,
             &CompanionFrame::OriginAck {
@@ -548,22 +608,29 @@ impl CompanionCoordinator {
         self.require_self(coordinator_server_id)?;
         require_live(host, peer, incarnation)?;
         let sync = self.peers.entry(peer).or_default();
-        if sync.active || sync.snapshot.is_some() {
+        if sync.active || self.pending.is_some() {
             return Err(CompanionFault::Protocol);
         }
         let same_scope =
             sync.incarnation == Some(incarnation) && self.state.streams.contains_key(&peer);
-        let reset = host.base_resync_epoch(peer) > sync.resync_epoch || sync.transfer_incomplete;
+        if same_scope && host.base_resync_epoch(peer) < sync.resync_epoch {
+            return Err(CompanionFault::Protocol);
+        }
+        let reset = host.base_resync_epoch(peer) > sync.resync_epoch;
         if !same_scope || reset {
-            // A retired generation never restarts: the next one follows
-            // the last stream this coordinator knows for the peer, which a
-            // reload took from the durable cursor row.
-            let generation = self
-                .state
-                .streams
-                .get(&peer)
-                .map_or(0, |stream| stream.generation.saturating_add(1));
+            let generation = if same_scope {
+                self.state
+                    .streams
+                    .get(&peer)
+                    .and_then(|stream| stream.generation.checked_add(1))
+                    .ok_or(CompanionFault::Ceiling)?
+            } else {
+                0
+            };
             return self.begin_snapshot(peer, incarnation, generation, now_millis, host, entropy);
+        }
+        if sync.snapshot.is_some() || sync.transfer_incomplete {
+            return Err(CompanionFault::Protocol);
         }
         let stream = self
             .state
@@ -602,71 +669,48 @@ impl CompanionCoordinator {
         host: &dyn CompanionHost,
         entropy: &mut dyn EntropySource,
     ) -> Result<Vec<Action>, CompanionFault> {
+        let scope = self.delivery_scope(peer, incarnation, host.base_resync_epoch(peer))?;
         self.refresh_entitlements(peer, host);
-        let entries = self.entitled_entries(peer)?;
-        let ids: Vec<[u8; 32]> = entries
-            .iter()
-            .map(|(_, bytes)| *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes())
-            .collect();
+        let capture =
+            super::delivery_owner::capture::Capture::new(&self.state, peer, host, entropy)?;
         let state_generation = host.state_generation();
-        let digest = federation_snapshot_digest(state_generation, delivery_generation, &ids)
-            .map_err(|_| CompanionFault::Protocol)?;
+        let digest = capture.digest(state_generation, delivery_generation, host)?;
         let mut token = [0; 32];
         entropy
             .fill_exact(&mut token)
             .map_err(|_| CompanionFault::Storage)?;
-        let pages: Vec<Vec<Entry>> = if entries.is_empty() {
-            vec![Vec::new()]
-        } else {
-            entries
-                .chunks(MAX_BATCH_OBJECTS)
-                .map(<[Entry]>::to_vec)
-                .collect()
-        };
-        let mut cursors = Vec::with_capacity(pages.len().saturating_sub(1));
-        for _ in 1..pages.len() {
-            let mut cursor = [0; 32];
-            entropy
-                .fill_exact(&mut cursor)
-                .map_err(|_| CompanionFault::Storage)?;
-            cursors.push(cursor);
-        }
         let cut = Cut {
             token,
             state_generation,
             delivery_generation,
             digest,
-            entry_count: u32::try_from(entries.len()).map_err(|_| CompanionFault::Ceiling)?,
+            entry_count: capture.entry_count()?,
         };
-        let expires_at_millis = now_millis.saturating_add(SNAPSHOT_TOKEN_MILLIS);
+        let observed = host
+            .cut_clock_sample()
+            .map_err(|_| CompanionFault::Protocol)?;
+        let deadline = observed.deadline().map_err(|_| CompanionFault::Protocol)?;
         let snapshot = Snapshot {
             cut,
-            pages,
-            cursors,
+            scope,
+            capture: super::delivery_owner::snapshot::Pages::Captured(capture),
             pages_sent: 0,
-            expires_at_millis,
+            expires_at_millis: now_millis
+                .checked_add(SNAPSHOT_TOKEN_MILLIS)
+                .ok_or(CompanionFault::Ceiling)?,
+            deadline,
+            observed: Some(observed),
+            retirement: None,
+            stored_version: None,
         };
-        let page = render_page(&self.server_name, peer, &snapshot, 0)?;
-        self.state.streams.insert(
-            peer,
-            DeliveryStream {
-                generation: delivery_generation,
-                ..DeliveryStream::default()
-            },
-        );
-        let sync = self.peers.entry(peer).or_default();
-        sync.incarnation = Some(incarnation);
-        sync.transfer_incomplete = true;
-        sync.ready_cut = None;
-        let mut snapshot = snapshot;
-        snapshot.pages_sent = 1;
-        sync.snapshot = Some(snapshot);
-        Ok(vec![
-            Action::ScheduleExpiry {
-                at_millis: expires_at_millis,
-            },
-            Action::Send(page),
-        ])
+        let link = self
+            .peers
+            .get(&peer)
+            .and_then(|sync| sync.link)
+            .ok_or(CompanionFault::Protocol)?;
+        let publication =
+            super::delivery_owner::publication::Publication::new(peer, link, snapshot)?;
+        self.continue_snapshot_publication(publication, now_millis, host)
     }
 
     /// The entitled route states of `peer` in canonical conversation order.
@@ -741,64 +785,24 @@ impl CompanionCoordinator {
         })
     }
 
-    fn entitled_entries(&self, peer: ServerId) -> Result<Vec<Entry>, CompanionFault> {
-        let mut entries = Vec::new();
-        let mut bytes_total: u64 = 0;
-        for conversation in self.state.entitlements.snapshot(peer) {
-            let state = self
-                .state
-                .conversations
-                .get(&conversation)
-                .ok_or(CompanionFault::Protocol)?;
-            let bytes = self
-                .state
-                .objects
-                .get(&state.route_object_id)
-                .cloned()
-                .ok_or(CompanionFault::Protocol)?;
-            bytes_total =
-                bytes_total.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-            entries.push((conversation, bytes));
-        }
-        let too_many = u64::try_from(entries.len()).unwrap_or(u64::MAX)
-            > MAX_FEDERATION_STATE_ENTRIES_PER_EDGE;
-        if too_many || bytes_total > MAX_FEDERATION_STATE_SNAPSHOT_BYTES_PER_EDGE {
-            return Err(CompanionFault::Ceiling);
-        }
-        Ok(entries)
-    }
-
     /// ESTATE FETCH: the next page, or the byte-identical last page again.
     pub(super) fn state_fetch(
         &mut self,
         peer: ServerId,
         coordinator_server_id: [u8; 16],
-        token: [u8; 32],
-        next_page_sequence: u32,
-        cursor: [u8; 32],
+        page: FetchPage,
         now_millis: u64,
+        host: &dyn CompanionHost,
     ) -> Result<Vec<Action>, CompanionFault> {
         self.require_self(coordinator_server_id)?;
-        let sync = self.peers.get_mut(&peer).ok_or(CompanionFault::Protocol)?;
-        let snapshot = sync.snapshot.as_mut().ok_or(CompanionFault::Protocol)?;
-        if snapshot.cut.token != token || now_millis >= snapshot.expires_at_millis {
-            return Err(CompanionFault::Protocol);
-        }
-        let requested =
-            usize::try_from(next_page_sequence).map_err(|_| CompanionFault::Protocol)?;
-        let retry = requested.checked_add(1) == Some(snapshot.pages_sent);
-        let advance = requested == snapshot.pages_sent;
-        let expected_cursor = requested
-            .checked_sub(1)
-            .and_then(|previous| snapshot.cursors.get(previous));
-        if !(retry || advance) || expected_cursor != Some(&cursor) {
-            return Err(CompanionFault::Protocol);
-        }
-        let page = render_page(&self.server_name, peer, snapshot, requested)?;
-        if advance {
-            snapshot.pages_sent = requested.saturating_add(1);
-        }
-        Ok(vec![Action::Send(page)])
+        self.prepare_snapshot_fetch(
+            peer,
+            page.token,
+            page.sequence,
+            page.cursor,
+            now_millis,
+            host,
+        )
     }
 
     /// ESTATE READY: the edge staged the exact cut; its READY is recorded
@@ -806,36 +810,48 @@ impl CompanionCoordinator {
     /// by the identical ACTIVE without a new batch.
     pub(super) fn state_ready(
         &mut self,
-        link: LinkId,
         peer: ServerId,
         coordinator_server_id: [u8; 16],
         cut: Cut,
         now_millis: u64,
+        host: &dyn CompanionHost,
     ) -> Result<Vec<Action>, CompanionFault> {
         self.require_self(coordinator_server_id)?;
-        let sync = self.peers.get_mut(&peer).ok_or(CompanionFault::Protocol)?;
-        if sync.ready_cut == Some(cut) {
-            let active = active_line(&self.server_name, peer, &cut)?;
-            return Ok(vec![Action::Send(vec![active])]);
+        if self.pending.is_some() {
+            return Err(CompanionFault::Ceiling);
         }
-        let snapshot = sync.snapshot.as_ref().ok_or(CompanionFault::Protocol)?;
-        let complete = snapshot.pages_sent == snapshot.pages.len();
+        if let Some(actions) = self.repeat_ready(peer, cut, host)? {
+            return Ok(actions);
+        }
+        let sync = self.peers.get_mut(&peer).ok_or(CompanionFault::Protocol)?;
+        let link = sync.link.ok_or(CompanionFault::Protocol)?;
+        let snapshot = sync.snapshot.as_mut().ok_or(CompanionFault::Protocol)?;
+        require_cut_scope(snapshot.scope, peer, host)?;
+        if snapshot.expires_at_millis != 0 && now_millis >= snapshot.expires_at_millis {
+            return Err(CompanionFault::Protocol);
+        }
+        snapshot
+            .observe_at(now_millis, host)
+            .map_err(|_| CompanionFault::Protocol)?;
+        let complete = snapshot.pages_sent == snapshot.capture.page_count();
         if snapshot.cut != cut || !complete || now_millis >= snapshot.expires_at_millis {
             return Err(CompanionFault::Protocol);
         }
-        let expires_at = snapshot.expires_at_millis / 1_000;
         let stream = self
             .state
             .streams
             .get(&peer)
             .ok_or(CompanionFault::Protocol)?;
-        let writes = vec![
-            snapshot_write(peer, &cut, expires_at)?,
-            events::cursor_write(peer, stream).map_err(|_| CompanionFault::Storage)?,
-        ];
+        let owner = super::delivery_owner::ready(
+            snapshot.scope,
+            cut,
+            snapshot.capture.total_object_bytes(),
+            stream,
+        )?;
+        let writes = vec![super::delivery_owner::write(&owner)?];
         Ok(vec![Action::Stage {
             writes,
-            work: PendingWork::Activate { peer, link },
+            work: PendingWork::Activate { peer, link, owner },
         }])
     }
 
@@ -844,23 +860,64 @@ impl CompanionCoordinator {
     pub(super) fn activate_committed(
         &mut self,
         peer: ServerId,
+        link: LinkId,
+        owner: DeliveryOwner,
         host_epoch: Option<u64>,
     ) -> Result<Vec<(ServerId, FederationLineText)>, CompanionFault> {
-        let sync = self.peers.get_mut(&peer).ok_or(CompanionFault::Protocol)?;
-        let snapshot = sync.snapshot.take().ok_or(CompanionFault::Protocol)?;
-        sync.ready_cut = Some(snapshot.cut);
-        sync.active = true;
-        sync.transfer_incomplete = false;
-        if let Some(epoch) = host_epoch {
-            sync.resync_epoch = epoch;
+        self.validate_delivery_scope(owner.scope())?;
+        let stream = self
+            .state
+            .streams
+            .get_mut(&peer)
+            .ok_or(CompanionFault::Storage)?;
+        if super::delivery_owner::cursor(stream)? != *owner.cursor() {
+            return Err(CompanionFault::Storage);
         }
-        let mut lines = vec![(peer, active_line(&self.server_name, peer, &snapshot.cut)?)];
+        let cut = super::delivery_owner::cut(&owner);
+        stream.owner = Some(owner.clone());
+        let sync = self.peers.get_mut(&peer).ok_or(CompanionFault::Protocol)?;
+        sync.snapshot = None;
+        sync.ready_cut = Some(cut);
+        sync.active = sync.link == Some(link)
+            && host_epoch == Some(owner.scope().covered_base_client_resync_epoch());
+        sync.transfer_incomplete = false;
+        sync.incarnation = Some(owner.scope().target_incarnation());
+        sync.resync_epoch = owner.scope().covered_base_client_resync_epoch();
+        if !sync.active {
+            return Ok(Vec::new());
+        }
+        let mut lines = vec![(peer, active_line(&self.server_name, peer, &cut)?)];
         if let Some(stream) = self.state.streams.get(&peer) {
             for line in retransmission(&self.server_name, peer, stream)? {
                 lines.push((peer, line));
             }
         }
         Ok(lines)
+    }
+
+    fn repeat_ready(
+        &mut self,
+        peer: ServerId,
+        cut: Cut,
+        host: &dyn CompanionHost,
+    ) -> Result<Option<Vec<Action>>, CompanionFault> {
+        let sync = self.peers.get_mut(&peer).ok_or(CompanionFault::Protocol)?;
+        if sync.ready_cut != Some(cut) {
+            return Ok(None);
+        }
+        let stream = self
+            .state
+            .streams
+            .get(&peer)
+            .ok_or(CompanionFault::Storage)?;
+        let owner = stream.owner.as_ref().ok_or(CompanionFault::Storage)?;
+        require_cut_scope(*owner.scope(), peer, host)?;
+        let mut lines = vec![active_line(&self.server_name, peer, &cut)?];
+        if !sync.active {
+            lines.extend(retransmission(&self.server_name, peer, stream)?);
+        }
+        sync.active = true;
+        Ok(Some(vec![Action::Send(lines)]))
     }
 
     /// Whether the snapshot of `peer` expired at `now_millis`; an expired
@@ -938,12 +995,12 @@ impl CompanionCoordinator {
         self.peers.get(&peer)
     }
 
-    /// Link loss: delivery pauses, the transfer in progress is dropped, and
-    /// every origin of the peer waits for its re-declaration.
+    /// Link loss pauses delivery and preserves the durable cut and page index.
+    /// Every origin waits for its re-declaration.
     pub(super) fn link_lost(&mut self, peer: ServerId) {
         if let Some(sync) = self.peers.get_mut(&peer) {
             sync.active = false;
-            sync.snapshot = None;
+            sync.link = None;
             sync.origins_reset = false;
             sync.origins_ready = false;
         }
@@ -961,7 +1018,6 @@ impl CompanionCoordinator {
     // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match hands every synchronization frame to its handler with the exact descriptor fields the line carried
     pub(super) fn on_sync_frame(
         &mut self,
-        link: LinkId,
         peer: ServerId,
         frame: CompanionFrame,
         now_millis: u64,
@@ -1036,10 +1092,13 @@ impl CompanionCoordinator {
             } => self.state_fetch(
                 peer,
                 coordinator_server_id,
-                snapshot_token,
-                next_page_sequence,
-                cursor,
+                FetchPage {
+                    token: snapshot_token,
+                    sequence: next_page_sequence,
+                    cursor,
+                },
                 now_millis,
+                host,
             ),
             CompanionFrame::StateCut {
                 active: false,
@@ -1064,7 +1123,6 @@ impl CompanionCoordinator {
                     })
                     .ok_or(CompanionFault::Protocol)?;
                 self.state_ready(
-                    link,
                     peer,
                     server_id,
                     Cut {
@@ -1075,11 +1133,26 @@ impl CompanionCoordinator {
                         entry_count,
                     },
                     now_millis,
+                    host,
                 )
             }
             _ => Err(CompanionFault::Protocol),
         }
     }
+}
+
+pub(super) fn require_cut_scope(
+    scope: DeliveryScope,
+    peer: ServerId,
+    host: &dyn CompanionHost,
+) -> Result<(), CompanionFault> {
+    if scope.target_server_id() != *peer.as_bytes()
+        || host.live_incarnation(peer) != Some(scope.target_incarnation())
+        || host.base_resync_epoch(peer) != scope.covered_base_client_resync_epoch()
+    {
+        return Err(CompanionFault::Protocol);
+    }
+    Ok(())
 }
 
 /// Accepts a declaration over an existing origin: the identical state
@@ -1215,20 +1288,23 @@ fn retransmission(
 }
 
 /// Renders one page: BEGIN, every ENTRY fragment in order, END.
-fn render_page(
+pub(super) fn render_page(
     server_name: &str,
     peer: ServerId,
     snapshot: &Snapshot,
     page_index: usize,
+    state: &super::CompanionState,
 ) -> Result<Vec<FederationLineText>, CompanionFault> {
-    let entries = snapshot
-        .pages
-        .get(page_index)
-        .ok_or(CompanionFault::Protocol)?;
+    let entries = snapshot.capture.page(page_index)?;
     let page_sequence = u32::try_from(page_index).map_err(|_| CompanionFault::Protocol)?;
     let target = *peer.as_bytes();
     let cut = &snapshot.cut;
-    let decoded: usize = entries.iter().map(|(_, bytes)| bytes.len()).sum();
+    let decoded = entries
+        .iter()
+        .try_fold(0_usize, |total, entry| {
+            total.checked_add(state.objects.get(&entry.object)?.len())
+        })
+        .ok_or(CompanionFault::Protocol)?;
     if decoded > MAX_BATCH_DECODED_BYTES {
         return Err(CompanionFault::Ceiling);
     }
@@ -1245,8 +1321,12 @@ fn render_page(
             snapshot_digest: cut.digest,
         },
     )?];
-    for (conversation_id, bytes) in entries {
-        let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+    for entry in entries {
+        let bytes = state
+            .objects
+            .get(&entry.object)
+            .ok_or(CompanionFault::Protocol)?;
+        let object_id = entry.object;
         for fragment in fragment_object(bytes).map_err(|_| CompanionFault::Protocol)? {
             lines.push(line(
                 server_name,
@@ -1254,7 +1334,7 @@ fn render_page(
                     target_server_id: target,
                     snapshot_token: cut.token,
                     page_sequence,
-                    conversation_id: *conversation_id,
+                    conversation_id: entry.conversation,
                     object_id,
                     fragment,
                 },
@@ -1267,27 +1347,8 @@ fn render_page(
             target_server_id: target,
             snapshot_token: cut.token,
             page_sequence,
-            next_cursor: snapshot.cursors.get(page_index).copied(),
+            next_cursor: snapshot.capture.cursor(page_index),
         },
     )?);
     Ok(lines)
-}
-
-fn snapshot_write(
-    peer: ServerId,
-    cut: &Cut,
-    expires_at: u64,
-) -> Result<AccountServiceDurableWrite, CompanionFault> {
-    let body = DeliveryRow::Snapshot {
-        generation: cut.delivery_generation,
-        token: cut.token,
-        entry_count: cut.entry_count,
-        digest: cut.digest,
-        ready: true,
-        expires_at,
-    }
-    .encode()
-    .map_err(|_| CompanionFault::Storage)?;
-    let key = DeliveryRow::snapshot_key(peer.as_bytes()).map_err(|_| CompanionFault::Storage)?;
-    state_row(TableId::E2eeState, DELIVERY_ROW_KIND, key, body).map_err(|_| CompanionFault::Storage)
 }

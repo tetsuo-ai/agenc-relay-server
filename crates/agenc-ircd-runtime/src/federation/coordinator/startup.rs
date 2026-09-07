@@ -5,6 +5,9 @@
 //! projection standing, and peer positions match storage before the first
 //! link is accepted.
 
+mod delivery;
+pub(super) mod retirement;
+
 use agenc_ircd_domain::federation::{
     EdgeLink, EdgePhase, OperationKey, OriginBinding, OriginEntry, OriginKey, OriginPrincipal,
     OriginStatus, RetainedRequest,
@@ -56,6 +59,10 @@ pub(super) struct Loader {
     started: bool,
     failed: bool,
     retry: Option<StoredKey>,
+    pinned_commit: Option<u64>,
+    delivery: delivery::Loader,
+    retirement: retirement::Loader,
+    rebuilt: bool,
 }
 
 impl Loader {
@@ -69,12 +76,16 @@ impl Loader {
 
     /// Reports whether the read belongs to the loader.
     pub(super) fn owns(&self, read_id: StorageReadId) -> bool {
-        self.pending == Some(read_id)
+        self.pending == Some(read_id) || self.delivery.owns(read_id)
     }
 }
 
 /// Starts the reload at the first table.
 pub(super) fn begin(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
+    if coordinator.loader.started {
+        fail_restore(coordinator);
+        return;
+    }
     coordinator.loader = Loader {
         started: true,
         ..Loader::default()
@@ -92,7 +103,7 @@ fn request_page(
     start: Option<StoredKey>,
 ) {
     let Some(table) = TABLES.get(coordinator.loader.position).copied() else {
-        finish(coordinator, context);
+        delivery::advance(coordinator, context);
         return;
     };
     coordinator.loader.retry = start.clone();
@@ -112,10 +123,14 @@ fn request_page(
 /// that has not returned gets one grace interval measured from this boot,
 /// and an expiry interrupted by the restart resumes hiding its sessions.
 fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
-    coordinator.loader.complete = true;
-    if let Some(executor) = coordinator.companion_exec.as_mut() {
-        executor.finish_restore();
+    if rebuild_once(coordinator).is_err() {
+        fail_restore(coordinator);
+        return;
     }
+    if !retirement::advance(coordinator, context) {
+        return;
+    }
+    coordinator.loader.complete = true;
     for peer in coordinator.peers.keys().copied() {
         coordinator.sync_outbox_budget(context, peer);
     }
@@ -123,23 +138,42 @@ fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContex
     coordinator.drain_backlog(context);
 }
 
-/// Consumes one page; returns whether the message belonged to the loader.
+fn rebuild_once(coordinator: &mut FederationCoordinator) -> Result<(), Violation> {
+    if coordinator.loader.rebuilt {
+        return Ok(());
+    }
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor.finish_restore().map_err(|_| Violation::Codec)?;
+    }
+    coordinator.loader.rebuilt = true;
+    Ok(())
+}
+
+/// Consumes a read already matched to the loader by its caller.
 pub(super) fn read_completed(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
-    message: &StorageReadCompletionMessage,
-) -> bool {
-    if coordinator.loader.pending != Some(message.read_id) {
-        return false;
+    message: StorageReadCompletionMessage,
+) {
+    if coordinator.loader.delivery.owns(message.read_id) {
+        delivery::completed(coordinator, context, message);
+        return;
+    }
+    if coordinator.loader.failed || coordinator.loader.pending != Some(message.read_id) {
+        return;
     }
     coordinator.loader.pending = None;
     let Some(table) = TABLES.get(coordinator.loader.position).copied() else {
-        return true;
+        return;
     };
     let Ok(result) = &message.result else {
         request_page(coordinator, context, coordinator.loader.retry.clone());
-        return true;
+        return;
     };
+    if pin_result(coordinator, result.storage_commit_sequence).is_err() {
+        fail_restore(coordinator);
+        return;
+    }
     let mut last = None;
     for record in &result.records {
         if last
@@ -147,7 +181,7 @@ pub(super) fn read_completed(
             .is_some_and(|previous| previous >= &record.key)
         {
             fail_restore(coordinator);
-            return true;
+            return;
         }
         let value = context
             .open_storage_plaintext(table, &record.key, &record.sealed_record)
@@ -160,7 +194,7 @@ pub(super) fn read_completed(
             .and_then(|value| admit(coordinator, context, table, &record.key, &value));
         if accepted.is_err() {
             fail_restore(coordinator);
-            return true;
+            return;
         }
         last = Some(record.key.clone());
     }
@@ -174,7 +208,6 @@ pub(super) fn read_completed(
         coordinator.loader.position = coordinator.loader.position.saturating_add(1);
         request_page(coordinator, context, first_key());
     }
-    true
 }
 
 fn successor(key: &StoredKey) -> Option<StoredKey> {
@@ -241,17 +274,17 @@ fn admit_outbox(
     if parts.projection_generation != state.projection_generation {
         return Ok(());
     }
+    let covered = state
+        .outbox
+        .cursor
+        .is_some_and(|(sequence, _)| parts.delivery_sequence <= sequence);
+    require_ordinary_or_covered(&event.event_object, covered)?;
     let next = parts
         .delivery_sequence
         .checked_add(1)
         .ok_or(Violation::Codec)?;
     state.outbox.reserved_next = state.outbox.reserved_next.max(next);
-    if state
-        .outbox
-        .cursor
-        .is_none_or(|(sequence, _)| parts.delivery_sequence > sequence)
-        && !state.outbox.snapshot_required
-    {
+    if !covered && !state.outbox.snapshot_required {
         let bytes = u64::try_from(event.event_object.len()).map_err(|_| Violation::Ceiling)?;
         state.outbox.unacked.push_back((
             parts.delivery_sequence,
@@ -278,6 +311,23 @@ fn admit_outbox(
         if state.outbox.snapshot_required {
             projector.require_snapshot(parts.target);
         }
+    }
+    Ok(())
+}
+
+fn require_ordinary_or_covered(bytes: &[u8], covered: bool) -> Result<(), Violation> {
+    if covered {
+        return Ok(());
+    }
+    let mut budget = DecodeBudget::new(1 << 20, 4_096);
+    let object = SchemaObject::decode_exact("FederationEvent", bytes, &mut budget)
+        .map_err(|_| Violation::Codec)?;
+    let header = agenc_ircd_federation_wire::EventHeader::from_object(&object)
+        .map_err(|_| Violation::Codec)?;
+    // Until the combined durable barrier is reconstructed, neither ordinary
+    // replay nor snapshot replacement may reopen an uncovered base part.
+    if header.cross_profile.is_some() {
+        return Err(Violation::Codec);
     }
     Ok(())
 }
@@ -674,4 +724,17 @@ pub(super) fn hold_before_loaded(
         return;
     }
     coordinator.backlog.push_back(message);
+}
+
+/// Every startup pass observes the same authenticated storage commit.
+fn pin_result(coordinator: &mut FederationCoordinator, sequence: u64) -> Result<(), Violation> {
+    if coordinator
+        .loader
+        .pinned_commit
+        .is_some_and(|pinned| pinned != sequence)
+    {
+        return Err(Violation::Codec);
+    }
+    coordinator.loader.pinned_commit = Some(sequence);
+    Ok(())
 }

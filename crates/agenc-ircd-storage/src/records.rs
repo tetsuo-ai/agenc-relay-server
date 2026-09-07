@@ -733,8 +733,29 @@ pub fn validate_record_plaintext(
             let value = PersistentRecordValue::decode(table, plaintext)?;
             crate::history_records::validate_binding(stored_key, &value)
         }
+        TableId::E2eeState => validate_companion_plaintext(stored_key, plaintext),
         _ => PersistentRecordValue::decode(table, plaintext).map(|_| ()),
     }
+}
+
+fn validate_companion_plaintext(key: &StoredKey, plaintext: &[u8]) -> Result<(), StorageError> {
+    let value = PersistentRecordValue::decode(TableId::E2eeState, plaintext)?;
+    match value.record_kind() {
+        crate::e2ee_records::DELIVERY_RECOVERY_ROW_KIND => {
+            crate::e2ee_records::delivery_recovery::DeliveryRecoveryRow::decode_at(
+                key,
+                value.body(),
+            )?;
+        }
+        crate::e2ee_records::mailbox_sequence::MAILBOX_SEQUENCE_ROW_KIND => {
+            crate::e2ee_records::mailbox_sequence::MailboxSequenceRow::decode_keyed(
+                key,
+                value.body(),
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Validates an encoded sealed record against the closed table/key/schema inventory.
@@ -878,14 +899,18 @@ const fn record_kind_is_valid(table: TableId, kind: u16) -> bool {
         TableId::EdgeOutbox => 3,
         TableId::EdgeProjection => 3,
         TableId::History => 2,
-        TableId::Audit => 1,
+        TableId::Audit => 2,
         TableId::AuditCheckpoint => 1,
         TableId::E2eeObject => 1,
-        TableId::E2eeState => 12,
+        TableId::E2eeState => 15,
         _ => 0,
     };
     kind != 0 && kind <= maximum
 }
+
+#[cfg(test)]
+#[path = "records/tests/audit.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {

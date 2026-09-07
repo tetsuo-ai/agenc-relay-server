@@ -11,8 +11,9 @@ use agenc_ircd_types::RecoveryEpoch;
 use crate::e2ee_records::barrier::{BarrierHead, BarrierPart};
 use crate::e2ee_records::origin::OriginSequenceRow;
 use crate::e2ee_records::{
-    BARRIER_ROW_KIND, DELIVERY_ROW_KIND, DeliveryRow, RECOVERY_GATE_KIND, REPLAY_ROW_KIND,
-    ROUTE_ROW_KIND, ReplayRow, RouteLifecycle, RouteRow, check_state_key, prefix,
+    BARRIER_ROW_KIND, DELIVERY_RECOVERY_ROW_KIND, DELIVERY_ROW_KIND, DeliveryRow,
+    RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayRow, RouteLifecycle, RouteRow,
+    check_state_key, prefix,
 };
 use crate::{PersistentRecordValue, StorageConstructionAction, StorageError, StoredKey, TableId};
 
@@ -25,6 +26,12 @@ pub(super) fn select_e2ee_restore(
         REPLAY_ROW_KIND => validate_replay_key(key, state.body())?,
         DELIVERY_ROW_KIND => validate_delivery_key(key, state.body())?,
         BARRIER_ROW_KIND => validate_barrier_key(key, state.body())?,
+        DELIVERY_RECOVERY_ROW_KIND => {
+            crate::e2ee_records::delivery_recovery::DeliveryRecoveryRow::decode_at(
+                key,
+                state.body(),
+            )?;
+        }
         _ => return Ok(Some(StorageConstructionAction::RestoreE2eeState)),
     }
     Ok(None)
@@ -46,9 +53,23 @@ pub(super) fn decode_e2ee_restore(
                 return Err(StorageError::StaleState);
             }
         }
+        crate::e2ee_records::MAILBOX_SEQUENCE_ROW_KIND => {
+            crate::e2ee_records::MailboxSequenceRow::decode_keyed(key, state.body())?;
+        }
+        crate::e2ee_records::MAILBOX_ROW_KIND => validate_mailbox_key(key, state.body())?,
         _ => {}
     }
     Ok(state)
+}
+
+fn validate_mailbox_key(key: &StoredKey, body: &[u8]) -> Result<(), StorageError> {
+    use crate::e2ee_records::MailboxRow;
+
+    match MailboxRow::decode(body)? {
+        MailboxRow::Item { .. } => MailboxRow::parse_item_key(key).map(|_| ()),
+        MailboxRow::Token { .. } => MailboxRow::parse_token_key(key).map(|_| ()),
+        MailboxRow::Ack { .. } => MailboxRow::parse_ack_key(key).map(|_| ()),
+    }
 }
 
 fn validate_route_key(key: &StoredKey, body: &[u8]) -> Result<(), StorageError> {
@@ -125,7 +146,9 @@ pub(super) fn e2ee_recovery_body(
             }
             route.encode()
         }
-        REPLAY_ROW_KIND | DELIVERY_ROW_KIND | BARRIER_ROW_KIND => Err(StorageError::StaleState),
+        REPLAY_ROW_KIND | DELIVERY_ROW_KIND | BARRIER_ROW_KIND | DELIVERY_RECOVERY_ROW_KIND => {
+            Err(StorageError::StaleState)
+        }
         _ => Ok(state.body().to_vec()),
     }
 }

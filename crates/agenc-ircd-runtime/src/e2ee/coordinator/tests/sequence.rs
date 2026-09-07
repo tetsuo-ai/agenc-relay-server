@@ -38,6 +38,9 @@ const COMMIT_CONTENT_TYPE: u8 = 3;
 #[path = "restart.rs"]
 mod restart;
 
+#[path = "recovery_pending.rs"]
+mod recovery_pending;
+
 #[test]
 fn finalization_rejects_substituted_receipts_and_acknowledgements() -> TestResult {
     let mut harness = Harness::new()?;
@@ -712,6 +715,7 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
 }
 
 mod reinit {
+    mod admission;
     mod successor;
 
     use agenc_ircd_crypto::SignatureDomain;
@@ -790,7 +794,7 @@ mod reinit {
         Ok(())
     }
 
-    fn attempt(
+    pub(super) fn attempt(
         harness: &Harness,
         conversation: [u8; 32],
         old_state: [u8; 32],
@@ -869,7 +873,7 @@ mod reinit {
         Ok((attempt, bytes))
     }
 
-    fn staged_receipt(
+    pub(super) fn staged_receipt(
         harness: &Harness,
         conversation: [u8; 32],
     ) -> TestResult<IrcReInitAttemptReceipt> {
@@ -898,7 +902,7 @@ mod reinit {
         }
     }
 
-    fn ack(
+    pub(super) fn ack(
         conversation: [u8; 32],
         old_state: [u8; 32],
         attempt_id: [u8; 32],
@@ -1228,7 +1232,7 @@ fn reinit_vote(
         signer_root_fingerprint: root_fingerprint(&harness.principal.root)?,
         signer_device_id: [device; 16],
         signer_device_certificate_id: certificate_id_of(&harness.principal, device)?,
-        device_signature: sign(&key(device), SignatureDomain::DispositionVote, &tbs)?,
+        device_signature: sign(&key(device), SignatureDomain::ReinitDisposition, &tbs)?,
     })
 }
 

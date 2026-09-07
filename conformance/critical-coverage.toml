@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 478
-reviewed_source_sha256 = "07e50c1c6f20a7e0bf53be27bb76567699ac998eb9c9a0ae821448a1cd6dc99c"
+reviewed_source_files = 617
+reviewed_source_sha256 = "b88e25599bfd4e6b6a68aec6f45d3fb86fe4f5f05188711219323abde97b122f"
 deferred = []
 
 [[region]]
@@ -91,8 +91,8 @@ reason = "Every closed upgrade error maps to a fixed public response without ref
 id = "migration-rule-source-target-binding"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/migration.rs"
-source_sha256 = "090df2d7958ed33eadc0080657f7cd0f5a367a277348b9873a9c699583b82aa3"
-start_line = 48
-end_line = 62
+source_sha256 = "3a93e679b6360920ff014ebf8a02955c082a7f1384115317d9b58edbba965cdf"
+start_line = 62
+end_line = 76
 metric = "branches"
 reason = "Only the registered source, target, schema, and exact migration rule tuples may construct records."

@@ -19,6 +19,8 @@ mod sync;
 #[cfg(test)]
 mod tests;
 mod witness_checkpoint;
+mod witness_failure;
+mod witness_recovery;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -161,7 +163,7 @@ pub(crate) enum PendingCommit {
     },
     /// The READY of a snapshot was recorded.
     Ready { delivery_generation: u64 },
-    /// A witness violation row was recorded; the link is already closing.
+    /// A witness violation row awaits its exact durable receipt.
     Witness,
 }
 
@@ -192,6 +194,8 @@ pub struct E2eeEdge {
     /// The record-chain violation the witness found in the current frame,
     /// recorded durably before the link closes.
     witnessed: Option<([u8; 32], agenc_ircd_storage::e2ee_records::WitnessRow)>,
+    witness_failure: witness_failure::WitnessFailure,
+    witness_recovery: witness_recovery::WitnessRecovery,
     queued: VecDeque<(CompanionFrame, Vec<u8>)>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
     channel_names: BTreeMap<ChannelInstanceId, String>,
@@ -245,6 +249,8 @@ impl E2eeEdge {
             conversations: BTreeMap::new(),
             commit: None,
             witnessed: None,
+            witness_failure: witness_failure::WitnessFailure::default(),
+            witness_recovery: witness_recovery::WitnessRecovery::default(),
             queued: VecDeque::new(),
             events_in: BTreeMap::new(),
             channel_names: BTreeMap::new(),
@@ -270,7 +276,7 @@ impl E2eeEdge {
     /// Whether requests and events flow.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.phase == Phase::Active
+        self.phase == Phase::Active && !self.witness_pending() && !self.witness_recovery_pending()
     }
 
     /// The projected route table, for downgrade checks.

@@ -297,6 +297,8 @@ pub struct Outcome {
     pub snapshot_token: Option<[u8; 32]>,
     /// The next cursor for pages.
     pub next_cursor: Option<[u8; 32]>,
+    /// Earliest process-local mailbox cursor deadline, admitted before staging.
+    pub(crate) mailbox_expiry: Option<u64>,
     /// Event contents in plan order (the plan is derived from them).
     pub events: Vec<EventContent>,
     /// Durable rows.
@@ -321,6 +323,7 @@ impl Outcome {
             responses: Vec::new(),
             snapshot_token: None,
             next_cursor: None,
+            mailbox_expiry: None,
             events: Vec::new(),
             writes: Vec::new(),
             effects: Vec::new(),
@@ -337,6 +340,7 @@ impl Outcome {
             responses: Vec::new(),
             snapshot_token: None,
             next_cursor: None,
+            mailbox_expiry: None,
             events: Vec::new(),
             writes: Vec::new(),
             effects: Vec::new(),

@@ -7,6 +7,7 @@ mod codec;
 mod construction;
 mod construction_directory;
 mod construction_runtime;
+mod construction_schema;
 mod control;
 mod domain_records;
 pub mod e2ee_records;
@@ -17,9 +18,13 @@ pub mod federation_records;
 pub mod history_records;
 mod migration;
 pub use migration::MigrationTransformV1;
+mod migration_profile;
+mod migration_v2;
+pub use migration_v2::MigrationTransformV2;
 mod migration_command;
 pub use migration_command::{
     MigrationCommandReceipt, MigrationCommandRequest, execute_migration_command,
+    execute_validated_migration_command,
 };
 mod initialize;
 mod integrity;
@@ -35,11 +40,14 @@ mod redb_store;
 mod restore_command;
 mod schema;
 mod sealed;
+mod source_validation;
+
+pub use source_validation::{AuthenticatedSourceRecord, SourceRecordValidator};
 
 pub use backup::{
     BACKUP_FIXED_STREAM_BYTES, BackupHeader, BackupReceipt, BackupRecord, BackupStreamWriter,
     BackupTrailer, BackupTrustKey, MAX_BACKUP_TRUST_KEYS, VerifiedBackup, backup_stream_bytes,
-    verify_backup,
+    verify_backup, verify_legacy_backup_with_validator,
 };
 pub use construction::{
     MAX_CONSTRUCTION_PLAN_BYTES, STORAGE_CONSTRUCTION_KEY, StorageConstruction,
@@ -57,7 +65,8 @@ pub use construction_runtime::{
     ConstructionTargetWriter, ConstructionTransformer, DatabaseConstructionSourceReader,
     ExactCopyTransformer, MAX_CONSTRUCTION_BATCH_BYTES, MAX_CONSTRUCTION_BATCH_RECORDS,
     MAX_CONSTRUCTION_SOURCE_BYTES, MAX_CONSTRUCTION_TARGET_BYTES, RecoveryTransformV1,
-    RestoreBackupSource, VerifiedConstructionOutput, recovery_transform_prefix,
+    RestoreBackupSource, RestoreBackupSourceConfig, VerifiedConstructionOutput,
+    recovery_transform_prefix,
 };
 pub use control::{
     DATABASE_HEADER_BYTES, DatabaseHeader, DatabaseHeaderTbs, NONCE_RESERVATION_BYTES,
@@ -143,6 +152,7 @@ pub use records::{
 pub use recovery::{RecoveryDisposition, classify_recovery_state};
 pub use restore_command::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, execute_restore_command,
+    execute_validated_restore_command,
 };
 pub use schema::{
     DATABASE_FORMAT, MAX_NONCE_DRAWS, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH,

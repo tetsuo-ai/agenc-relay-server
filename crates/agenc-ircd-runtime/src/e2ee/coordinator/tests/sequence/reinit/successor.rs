@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+mod reconstruction;
+
 use super::*;
 use agenc_ircd_domain::e2ee::ConversationId;
 use agenc_ircd_e2ee::objects::conversation::IrcConversationBindingPackage;
@@ -37,6 +39,10 @@ impl Fixture {
     fn prepare() -> TestResult<Self> {
         let mut harness = Harness::new()?;
         let old = harness.bind_channel()?;
+        Self::prepare_bound(harness, old)
+    }
+
+    fn prepare_bound(mut harness: Harness, old: [u8; 32]) -> TestResult<Self> {
         let reservation = reserve(&mut harness)?;
         let old_state = *harness
             .coordinator

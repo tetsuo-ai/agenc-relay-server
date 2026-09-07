@@ -408,6 +408,31 @@ impl DurableIndex {
         }
     }
 
+    /// Exact sealed byte and row totals of one table, without allocating a copy.
+    pub(crate) fn table_backing(&self, table: TableId) -> Result<(usize, usize), RuntimeError> {
+        self.rows
+            .iter()
+            .filter(|((row_table, _), _)| *row_table == table)
+            .try_fold((0_usize, 0_usize), |(bytes, count), (_, row)| {
+                let IndexedRow::Known(existing) = row else {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                };
+                let size = usize::try_from(existing.sealed_record_bytes())
+                    .map_err(|_| RuntimeError::Overflow)?;
+                Ok((
+                    bytes.checked_add(size).ok_or(RuntimeError::Overflow)?,
+                    count.checked_add(1).ok_or(RuntimeError::Overflow)?,
+                ))
+            })
+    }
+
+    /// Whether a prior receipt still requires authenticated envelope readback.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.rows
+            .values()
+            .any(|row| matches!(row, IndexedRow::Pending { .. }))
+    }
+
     /// Lists the rows whose sealed identity must be read back.
     #[must_use]
     pub fn pending_rows(&self) -> Vec<(TableId, StoredKey)> {
@@ -756,6 +781,38 @@ struct Projection<'a> {
     mutations: Vec<RecordMutation>,
     updates: Vec<IndexUpdate>,
     touched: BTreeSet<(TableId, StoredKey)>,
+}
+
+/// Checks the exact edge checkpoint contents with the same projection and
+/// storage validator used by submission. No transaction or sealing entropy is used.
+pub(super) fn preflight_checkpoint(
+    writes: &[AccountServiceDurableWrite],
+    revision: u64,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<(), RuntimeError> {
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    for write in writes {
+        projection.project_account_service_write(write, revision)?;
+    }
+    StorageMutationBatch::preflight_contents(
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        &mut projection.mutations,
+    )?;
+    Ok(())
 }
 
 /// Projects every plan's logical writes into one owned storage batch.

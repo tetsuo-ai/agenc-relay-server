@@ -30,7 +30,11 @@ impl E2eeEdge {
     }
 
     pub(crate) fn retention_blocked(&self) -> bool {
-        !self.pending.is_empty() || self.commit.is_some() || self.barrier_pending.is_some()
+        !self.pending.is_empty()
+            || self.commit.is_some()
+            || self.barrier_pending.is_some()
+            || self.witness_pending()
+            || self.witness_recovery_pending()
     }
 
     pub(crate) fn restore_delivery(&mut self, row: &DeliveryRow) -> Result<(), RuntimeError> {

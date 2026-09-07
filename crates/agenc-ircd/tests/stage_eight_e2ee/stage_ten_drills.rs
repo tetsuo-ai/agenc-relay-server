@@ -11,6 +11,9 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "stage_ten_drills/index_transition.rs"]
+mod index_transition;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -702,6 +705,15 @@ fn account_login_counting(
     account: AccountId,
     nick: &str,
 ) -> TestResult<(IrcClient, u32)> {
+    account_login_named(fixture, account, nick, DRILL_ACCOUNT_LOGIN)
+}
+
+fn account_login_named(
+    fixture: &NodeFixture,
+    account: AccountId,
+    nick: &str,
+    login: &str,
+) -> TestResult<(IrcClient, u32)> {
     wait_for_account_authority(fixture)?;
     let started = Instant::now();
     let deadline = started + NETWORK_WAIT;
@@ -717,7 +729,7 @@ fn account_login_counting(
             authenticate_live_account_with(
                 &mut client,
                 fixture,
-                DRILL_ACCOUNT_LOGIN,
+                login,
                 ACCOUNT_PASSWORD,
                 fresh_requests(),
                 account,
@@ -1838,38 +1850,9 @@ fn drill_rekey() -> TestResult {
     drill.finish(outcome)
 }
 
-/// A genuine login-index key transition needs the offline rotation the storage
-/// crate implements (`login_index_transition_preflight` and the transition
-/// batch), which no command or runtime path invokes (finding CAP-5). The
-/// drill records that, proves login-index continuity across a coordinator
-/// restart, and does not pass: the requirement stays open.
+/// Rotates the actual login key and proves that a dormant account prevents finish.
 fn run_index_transition(drill: &mut Drill) -> TestResult<bool> {
-    let network = drill_network()?;
-    let _logs = LogGuard {
-        network: &network,
-        directory: drill.stderr_logs.clone(),
-    };
-    let mut nodes = DrillNodes::start(&network, drill)?;
-    let account = seed_state(&network)?;
-    let status = nodes.coordinator.stop()?;
-    if !status.success() {
-        return Err(failure(format!("coordinator exited with {status}")));
-    }
-    nodes.restart(&network, 0)?;
-    let mut client = account_login(&network.edge_b, account, "index-check")?;
-    client.send("QUIT :checked")?;
-    drill.step(
-        "continuity",
-        "login index reconstructed and served after a coordinator restart",
-    );
-    drill.fact("login_index_continuity", true);
-    drill.fact(
-        "key_rotation",
-        "not performed: no stopped command or runtime path starts the offline rotation (CAP-5)",
-    );
-    let clean = nodes.stop_all();
-    drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
-    Ok(false)
+    index_transition::run(drill)
 }
 
 #[test]

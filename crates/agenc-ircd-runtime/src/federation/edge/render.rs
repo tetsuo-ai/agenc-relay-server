@@ -204,6 +204,23 @@ pub(super) fn event_channel_label(edge: &EdgeFederation, event: &ProjectedEvent)
 }
 
 /// Collects one event's local frames for the durable apply reservation.
+pub(super) enum EventRenderRefused {
+    Runtime(RuntimeError),
+    Protocol(super::Violation),
+}
+
+impl From<RuntimeError> for EventRenderRefused {
+    fn from(error: RuntimeError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<super::Violation> for EventRenderRefused {
+    fn from(error: super::Violation) -> Self {
+        Self::Protocol(error)
+    }
+}
+
 pub(super) fn render_event(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -213,6 +230,23 @@ pub(super) fn render_event(
     label: Option<&str>,
     fanout: &mut EventFanout,
 ) -> Result<Option<super::join_echo::JoinEcho>, super::Violation> {
+    render_event_strict(edge, context, header, event, outcome, label, fanout).map_err(|error| {
+        match error {
+            EventRenderRefused::Runtime(error) => error.into(),
+            EventRenderRefused::Protocol(violation) => violation,
+        }
+    })
+}
+
+pub(super) fn render_event_strict(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    header: &agenc_ircd_federation_wire::EventHeader,
+    event: &ProjectedEvent,
+    outcome: &ApplyOutcome,
+    label: Option<&str>,
+    fanout: &mut EventFanout,
+) -> Result<Option<super::join_echo::JoinEcho>, EventRenderRefused> {
     let mut echo = None;
     for user_id in &outcome.local_recipients {
         let Some(generation) = context.sessions().generation_for_user(*user_id) else {
@@ -227,7 +261,7 @@ pub(super) fn render_event(
             super::join_echo::capture(edge, context, header, event, *user_id, &mut frames)?
         {
             if echo.is_some() {
-                return Err(super::Violation::Consistency);
+                return Err(EventRenderRefused::Protocol(super::Violation::Consistency));
             }
             echo = Some(captured);
         }

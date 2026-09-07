@@ -28,9 +28,9 @@ pub use account_hpke::{
 pub use entropy::OsEntropy;
 pub use error::{CryptoError, CryptoWorkerError};
 pub use hash::{
-    Digest32, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, OpaqueFakeCredentialKey,
-    SemanticHashDomain, Sha256Stream, derive_fake_credential_id, derive_login_index,
-    semantic_digest,
+    Digest32, FederationSnapshotHash, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId,
+    OpaqueFakeCredentialKey, SemanticHashDomain, Sha256Stream, derive_fake_credential_id,
+    derive_login_index, semantic_digest,
 };
 pub use signature::{
     Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, sign_canonical,
@@ -49,9 +49,9 @@ pub use storage_integrity::{
     admin_confirmation_token_hash, audit_signing_key_id, authenticate_nonce_reservation,
     authenticate_query_cursor, authenticate_rollback_guard, authenticate_state_meta,
     backup_signing_key_id, database_header_hash, database_key_check, derive_storage_integrity_keys,
-    integrity_checkpoint_hash, integrity_manifest_hash, nonce_reservation_hash,
-    rekey_transform_profile_hash, restore_transform_profile_hash, rollback_guard_hash,
-    sealed_record_id, storage_migration_profile_hash, storage_operation_id,
+    integrity_checkpoint_hash, integrity_manifest_hash, maintenance_audit_event_hash,
+    nonce_reservation_hash, rekey_transform_profile_hash, restore_transform_profile_hash,
+    rollback_guard_hash, sealed_record_id, storage_migration_profile_hash, storage_operation_id,
     storage_operation_key_id, storage_output_path_hash, storage_qualification_component_hash,
     tracked_record_commitment, tracked_state_digest,
 };

@@ -49,7 +49,7 @@ pub struct QueryCursorBinding {
 /// The continuation-independent part of a binding that a continuation must
 /// repeat exactly.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContinuationRequest {
+pub struct ContinuationRequest<Arm = Vec<u8>> {
     /// The requesting session.
     pub session_id: SessionId,
     /// The requesting user.
@@ -59,7 +59,7 @@ pub struct ContinuationRequest {
     /// The query kind.
     pub query_kind: FederationDirectoryQueryKind,
     /// The exact query arm bytes.
-    pub query_arm: Vec<u8>,
+    pub query_arm: Arm,
 }
 
 /// Why a presented cursor is answered with `QUERY_EXPIRED`.
@@ -126,12 +126,12 @@ impl LiveCursor {
             || age >= QUERY_SNAPSHOT_ABSOLUTE_SECONDS.saturating_mul(MILLIS_PER_SECOND)
     }
 
-    fn matches(&self, request: &ContinuationRequest) -> bool {
+    fn matches(&self, request: &ContinuationRequest<impl AsRef<[u8]>>) -> bool {
         self.binding.session_id == request.session_id
             && self.binding.user_id == request.user_id
             && self.binding.account == request.account
             && self.binding.query_kind == request.query_kind
-            && self.binding.query_arm == request.query_arm
+            && self.binding.query_arm.as_slice() == request.query_arm.as_ref()
     }
 }
 
@@ -194,7 +194,7 @@ impl QueryCursorTable {
     pub fn check(
         &self,
         cursor: &[u8; 32],
-        request: &ContinuationRequest,
+        request: &ContinuationRequest<impl AsRef<[u8]>>,
         now: MonotonicTick,
     ) -> Result<&LiveCursor, CursorRejection> {
         let live = self.cursors.get(cursor).ok_or(CursorRejection::Unknown)?;

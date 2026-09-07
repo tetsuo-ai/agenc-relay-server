@@ -30,6 +30,8 @@ const BACKUP_SIGNING_KEY_LABEL: &[u8] = b"agenc-chat backup signing key v1";
 const AUDIT_SIGNING_KEY_LABEL: &[u8] = b"agenc-chat audit signing key v1";
 const ADMIN_CONFIRMATION_TOKEN_LABEL: &[u8] = b"agenc-chat admin confirmation token v1";
 const ADMIN_AUDIT_EVENT_LABEL: &[u8] = b"agenc-chat admin audit event v1";
+const MAINTENANCE_AUDIT_EVENT_LABEL: &[u8] = b"agenc-chat maintenance audit event v1";
+const MAINTENANCE_AUDIT_TBS_BYTES: usize = 358;
 const ADMIN_AUDIT_CHECKPOINT_LABEL: &[u8] = b"agenc-chat admin audit checkpoint v1";
 /// Largest TLS-encoded `AdminAuditEventTBS`: every fixed field plus a full
 /// 4,096-byte canonical command and a 64-byte outcome code with their length
@@ -394,6 +396,15 @@ pub fn admin_audit_event_hash(encoded_tbs: &[u8]) -> Result<StorageDigest, Crypt
         return Err(CryptoError::LimitExceeded);
     }
     labeled_digest(ADMIN_AUDIT_EVENT_LABEL, &[encoded_tbs])
+}
+
+/// Hashes the exact encoding-two, profile-one maintenance TBS under its fixed domain.
+/// The admin codec validates its closed fields; this helper enforces the exact byte size.
+pub fn maintenance_audit_event_hash(encoded_tbs: &[u8]) -> Result<StorageDigest, CryptoError> {
+    if encoded_tbs.len() != MAINTENANCE_AUDIT_TBS_BYTES {
+        return Err(CryptoError::InvalidEncoding);
+    }
+    labeled_digest(MAINTENANCE_AUDIT_EVENT_LABEL, &[encoded_tbs])
 }
 
 /// Hashes one TLS-encoded `AdminAuditCheckpointTBS` from Section 16.4.

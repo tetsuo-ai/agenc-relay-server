@@ -550,15 +550,7 @@ fn run_query(
         let page = coordinator
             .queries
             .next_page(context, &scope, &query.identity, cursor)?;
-        return finish_without_plan(
-            coordinator,
-            context,
-            link,
-            peer,
-            fresh,
-            page.arm,
-            page.replies,
-        );
+        return answer_page(coordinator, context, link, peer, fresh, Ok(page));
     }
     let rebuild =
         |domain: &agenc_ircd_domain::DomainState| convert::rebuild_query(domain, &query.identity);
@@ -592,7 +584,7 @@ fn run_query(
 }
 
 /// Commits a rendered page, or the failure the renderer reported.
-fn answer_page(
+pub(super) fn answer_page(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
@@ -601,17 +593,38 @@ fn answer_page(
     page: Result<super::query::Page, DomainError>,
 ) -> Result<(), Violation> {
     match page {
-        Ok(page) => finish_without_plan(
-            coordinator,
-            context,
-            link,
-            peer,
-            fresh,
-            page.arm,
-            page.replies,
-        ),
+        Ok(page) => {
+            let result = finish_without_plan(
+                coordinator,
+                context,
+                link,
+                peer,
+                fresh,
+                page.arm,
+                page.replies,
+            );
+            settle_query_page(coordinator, context.now(), result, page.receipt)
+        }
         Err(error) => finish_failed(coordinator, context, link, peer, fresh, error),
     }
+}
+
+fn settle_query_page(
+    coordinator: &mut FederationCoordinator,
+    now: agenc_ircd_types::MonotonicTick,
+    result: Result<(), Violation>,
+    receipt: Option<super::query::QueryReceipt>,
+) -> Result<(), Violation> {
+    if result.is_ok()
+        && let Some(PendingCommit::Request { query, .. }) = coordinator.pending.as_mut()
+    {
+        *query = receipt;
+        return Ok(());
+    }
+    if let Some(receipt) = receipt {
+        coordinator.queries.reject_page(receipt, now);
+    }
+    Err(result.err().unwrap_or(Violation::Codec))
 }
 
 // agenc-review: allow owner=runtime reviewed=2026-09-02 reason=a query decision carries its link peer request cursor scope identity and decision to one result boundary
@@ -1116,6 +1129,7 @@ pub(super) fn stage_with_plan_and_writes(
                 descriptor: fresh.descriptor,
                 header: fresh.header,
                 _charge: fresh.charge,
+                query: None,
             });
             Ok(true)
         }
@@ -1246,6 +1260,7 @@ fn fail_without_plan(
         descriptor: fresh.descriptor,
         header: fresh.header,
         _charge: fresh.charge,
+        query: None,
     });
     Ok(())
 }

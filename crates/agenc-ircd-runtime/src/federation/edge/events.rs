@@ -1,5 +1,5 @@
 //! FEVENT application on the edge: replica apply, client rendering, the
-//! durable projection rows, and the cumulative ACK (spec 20.6, B.5, B.7).
+//! durable projection rows, and the ordered event ACK (spec 20.6, B.5, B.7).
 
 use agenc_ircd_domain::federation::{EdgeReplica, ProjectedEvent, ProjectionKey};
 use agenc_ircd_federation_wire::{
@@ -21,8 +21,8 @@ use crate::state_core::durable::AccountServiceDurableWrite;
 
 /// Projection state retained until an ordinary event's storage batch commits.
 pub(super) struct ProjectionBefore {
-    replica: EdgeReplica,
-    nicknames:
+    pub(super) replica: EdgeReplica,
+    pub(super) nicknames:
         std::collections::BTreeMap<agenc_ircd_types::UserId, agenc_ircd_domain::NicknameValue>,
 }
 
@@ -65,7 +65,11 @@ pub(super) fn receive(
             bytes: object.as_slice().to_vec(),
         }
     } else {
-        QueuedEvent::Base { header, projected }
+        QueuedEvent::Base {
+            header,
+            projected,
+            encoded_bytes: object.as_slice().len(),
+        }
     };
     // The edge's own slot or a batch of the encrypted profile in flight
     // holds the event; both profiles drain after every commit.
@@ -87,6 +91,7 @@ pub(super) enum QueuedEvent {
     Base {
         header: EventHeader,
         projected: ProjectedEvent,
+        encoded_bytes: usize,
     },
     /// A base part of a cross-profile barrier, with its exact bytes.
     BarrierPart {
@@ -111,7 +116,9 @@ fn apply_queued(
         }
     }
     match queued {
-        QueuedEvent::Base { header, projected } => apply(edge, context, header, projected),
+        QueuedEvent::Base {
+            header, projected, ..
+        } => apply(edge, context, header, projected),
         QueuedEvent::BarrierPart {
             header,
             projected,
@@ -155,6 +162,10 @@ fn check_header(
 fn next_received_sequence(edge: &EdgeFederation) -> Option<u64> {
     let staged = match edge.commit.as_ref() {
         Some(PendingCommit::Event { header, .. }) => Some(header.delivery_sequence),
+        Some(PendingCommit::OrdinaryBatch(pending)) => pending
+            .receipts
+            .last()
+            .map(|receipt| receipt.header.delivery_sequence),
         _ => edge.cursor.map(|(sequence, _)| sequence),
     };
     let last_received = edge
@@ -175,7 +186,15 @@ pub(super) fn drain_queued(
     context: &mut StateCoreContext,
 ) -> Vec<EdgeCompletion> {
     let mut completions = Vec::new();
-    while edge.commit.is_none() && !context.in_flight() {
+    while edge.commit.is_none() && context.edge_checkpoint_ready() {
+        match super::ordinary_batch::try_stage(edge, context) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(violation) => {
+                edge.fail_link(context, violation);
+                break;
+            }
+        }
         let Some(queued) = edge.queued_events.pop_front() else {
             break;
         };
@@ -332,6 +351,7 @@ pub(super) fn completion_of(
     {
         return Err(Violation::Consistency);
     }
+    super::join_echo::validate_completion(edge, &[], header)?;
     Ok(Some(correlation.request_id))
 }
 
@@ -384,6 +404,11 @@ pub(super) fn staged_completion_generation(
             completion: Some(owner),
             ..
         } if *owner == request_id => Some(header.coordinator_state_generation),
+        PendingCommit::OrdinaryBatch(pending) => pending
+            .receipts
+            .iter()
+            .find(|receipt| receipt.completion == Some(request_id))
+            .map(|receipt| receipt.header.coordinator_state_generation),
         PendingCommit::BarrierApplied { .. } => edge
             .barrier
             .open
