@@ -402,6 +402,17 @@ pub(super) fn transmit(
     if pending.sent || pending.result.is_some() {
         return;
     }
+    // A resync or a client's departure deletes the origin and marks its
+    // in-flight requests sink-gone. The coordinator drops that origin on the
+    // replayed DEL, so replaying the request would only draw Violation::Origin
+    // and loop the link. Such a request is abandoned when the origin retires.
+    if edge
+        .origins
+        .get(&pending.generation)
+        .is_none_or(|origin| origin.deleted)
+    {
+        return;
+    }
     if origin_update_pending(edge, pending) {
         return;
     }

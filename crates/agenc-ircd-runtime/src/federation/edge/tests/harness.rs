@@ -216,6 +216,76 @@ fn resync_empty_snapshot(
     Ok(identity)
 }
 
+/// ACTIVE can arrive while a request the snapshot covers still has its
+/// journal row on the way to storage, as it does while storage refuses
+/// batches under pressure. The activation must wait for the journal and
+/// run once it commits, instead of ending the link, which only draws the
+/// same ACTIVE again on the next link (finding CAP-43).
+#[tokio::test]
+async fn a_retired_origin_abandons_its_unfinished_request_and_does_not_replay_it() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let mut edge = resync_edge();
+    let connection = ConnectionGeneration::new(1);
+    edge.connection_opened(fixture.context_mut()?, connection);
+    request::send_session_open(
+        &mut edge,
+        fixture.context_mut()?,
+        connection,
+        1,
+        "gone",
+        "Gone",
+        [1; 32],
+        None,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    let (request_id, origin_id, generation) = {
+        let origin = edge.origins.get(&connection).ok_or("origin")?;
+        let request_id = edge
+            .pending
+            .values()
+            .next()
+            .ok_or("request")?
+            .header
+            .request_id;
+        (request_id, origin.origin_id, origin.generation)
+    };
+    // The client leaves while the request is still unanswered: the origin is
+    // deleted and the request loses its sink. This is the shape the resync and
+    // disk-pressure churn leaves behind for every closed client.
+    edge.connection_closed(fixture.context_mut()?, connection, "gone");
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    // The coordinator acknowledges the deletion through the real ack path,
+    // which records it and re-journals the retired origin.
+    edge.origin_acked(
+        fixture.context_mut()?,
+        EDGE_INCARNATION,
+        origin_id,
+        generation,
+        None,
+    )
+    .map_err(|e| format!("ack: {e:?}"))?;
+    commit_edge_batches(&mut edge, &mut fixture).await?;
+    journal::retire_origin(&mut edge, connection);
+    assert!(
+        !edge.origins.contains_key(&connection),
+        "the acknowledged deletion must retire the origin"
+    );
+    assert!(
+        !edge.pending.contains_key(&request_id),
+        "the unfinished request under the retired origin must be abandoned"
+    );
+    // A later activation must not replay the abandoned request to the
+    // coordinator, which has dropped the origin and would answer Violation::Origin.
+    edge.phase = Phase::Active;
+    request::resend_pending(&mut edge, fixture.context_mut()?);
+    assert!(
+        !edge.pending.contains_key(&request_id),
+        "the abandoned request must not reappear on a resend"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn resync_snapshot_receipt_survives_link_loss_while_the_last_page_commits() -> TestResult {
     let mut fixture = StateCoreFixture::new(entropy_script())?;

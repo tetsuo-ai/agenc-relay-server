@@ -775,19 +775,41 @@ pub(super) fn snapshot_committed(
 
 /// Retires only a durably acknowledged DEL whose request ownership is settled.
 pub(super) fn retire_origin(edge: &mut EdgeFederation, connection: ConnectionGeneration) {
-    let retired = edge
+    let acknowledged = edge
         .origins
         .get(&connection)
         .is_some_and(|origin| origin.deleted && origin.del_acked)
-        && is_durable(edge, Identity::Origin(connection))
-        && !edge
-            .pending
-            .values()
-            .any(|pending| pending.generation == connection);
-    if retired {
-        edge.origins.remove(&connection);
-        forget_origin(edge, connection);
+        && is_durable(edge, Identity::Origin(connection));
+    if !acknowledged {
+        return;
     }
+    // The coordinator has dropped this origin. Any request still bound to it
+    // that never produced a result can never complete: its sink is gone and a
+    // replay would be refused. Abandon those requests so they neither replay
+    // nor pin the origin against retirement.
+    let abandoned: Vec<RequestId> = edge
+        .pending
+        .iter()
+        .filter(|(_, pending)| pending.generation == connection && pending.result.is_none())
+        .map(|(id, _)| *id)
+        .collect();
+    for id in abandoned {
+        if let Some(pending) = edge.pending.remove(&id) {
+            pending.sink_gone(edge);
+        }
+        forget(edge, id);
+    }
+    // A request that already carries a result still renders on retirement, so
+    // it keeps the origin until its completion drains.
+    if edge
+        .pending
+        .values()
+        .any(|pending| pending.generation == connection)
+    {
+        return;
+    }
+    edge.origins.remove(&connection);
+    forget_origin(edge, connection);
 }
 
 pub(super) fn finish_restore(edge: &mut EdgeFederation) {

@@ -1184,22 +1184,32 @@ client, holds the update unacknowledged, closes the client, and requires
 the DEL to name generation 1 and the link to stay up; it fails without
 the change.
 
-### CAP-43: recovery after a link retirement under disk pressure loops on a phase violation
+### CAP-43: recovery after a link retirement under disk pressure loops on an origin violation
 
-Open. With CAP-42 fixed, the 64-client campaign reaches the disk-pressure
+Fixed. With CAP-42 fixed, the 64-client campaign reaches the disk-pressure
 scenario, the refused marker batch retires edge a's link as CAP-12
-describes, and the edge never recovers: over the next minute it re-links
-44 times, the coordinator answers each resume with a snapshot, and the
-edge fails the link with a phase violation while in the snapshot phase
-while the coordinator fails others with an origin violation, until the
-recovery wait expires with no durable join admitted. The retained
-deleted origins of the closed clients accumulate across the attempts
-(78 at the end), the edge's activation gate stays unsatisfied, and the
-campaign records the scenario as not recovered. The path did recover
-before the resynchronization change, so the fault is in the new ordering
-of resume, snapshot activation, origin reset, and READY under a
-retirement. Evidence: `campaign-diag-10` beside the qualification
-directory (daemon logs and the diagnostic stderr of both nodes).
+describes, and before this fix the edge never recovered: over the next
+minute it re-linked many times and the coordinator failed each fresh link
+with an origin violation, until the recovery wait expired with no durable
+join admitted. The cause was a closed client's unfinished request. When a
+client leaves, or a resync covers its session, the edge marks the
+connection's origin deleted and its in-flight request sink-gone, and
+replays the deletion after the next reset. The coordinator drops the origin
+on that deletion. The edge, once active again, still re-sent the unfinished
+request under the dropped origin, which the coordinator could only answer
+with an origin violation, and the same request pinned the deleted origin
+against retirement, so the deleted origins accumulated and the activation
+gate never cleared. The fix abandons such a request. The edge does not
+transmit a request whose origin is deleted, and origin retirement drops
+every unfinished request bound to the acknowledged deletion before removing
+the origin. The request neither replays nor holds the origin open, the
+deleted origins retire, and the edge admits a durable join inside the
+recovery window. Regression:
+`a_retired_origin_abandons_its_unfinished_request_and_does_not_replay_it`
+in the edge harness, which fails without the retirement change. Evidence:
+the 300-second campaign passes end to end, recording the disk-pressure
+scenario as refused and recovered, then clearing backup, peer loss,
+login-index reconstruction, and rekey.
 
 ## Release claims and limits
 
