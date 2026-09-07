@@ -2914,6 +2914,42 @@ and peer return. `cap88-capacity-64-result.json` records unchanged executables.
 The omitted-row defect is repaired; another cause of the remaining restart
 failure has not yet been established. Capacity qualification remains open.
 
+### CAP-89: completion replay rejects a durably retired request
+
+Durable origin deletion abandons requests without a result once their client
+sink is gone. An older `RequestCompleted` event can still remain in the
+coordinator outbox. The edge's completion validator unconditionally requires
+the request when checking retained JOIN echoes, so replay fails after the
+origin and request have already been retired. The combined barrier writer
+also unconditionally attempts to persist request coverage for that absent
+owner. Sections 20.6 through 20.8 require ordered durable replay; origin
+retirement does not remove the event from the stream.
+
+Three real-storage regressions fail against `e0a7008`: ordinary replay after
+durable DEL acknowledgement, replay in an ordinary batch, and application of
+a restored combined barrier with an absent request. The fix retains generation
+and conflicting-owner checks, then treats an absent request as having no
+completion consumer. Its stream cursor or combined barrier receipt still
+commits before acknowledgement. No request owner, completion marker, or client
+reply is recreated. Existing owners retain the exact result, correlation, and
+JOIN-echo checks. All three regressions and the additional negative control
+pass; `cap89-red.log` and `cap89-green.log` record the runs.
+
+All required gates pass with 2,411 workspace tests, zero failures, and 21
+ignored qualification tests. The focused run passes all 120 edge tests.
+Both source inventories bind 622 files; the release policy now includes 660
+critical regions. `cap89-final-gates.json` records the exact commands and
+results. The production changes are limited to completion ownership and the
+combined barrier's request-coverage selection.
+
+This defect was found while investigating the remaining capacity failure.
+The preceding diagnostic run in `cap88-restart-diagnostic` passed pressure
+recovery and backup, returned edge B, then failed SASL authentication after
+207.93 seconds. Its trace includes coordinator companion-protocol refusals;
+the cause of that authentication failure remains under investigation. The
+run records unchanged binaries and three private stopped-state captures.
+The completion repair does not establish capacity qualification.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

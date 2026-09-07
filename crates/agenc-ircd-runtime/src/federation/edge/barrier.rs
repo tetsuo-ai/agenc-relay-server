@@ -467,7 +467,11 @@ fn apply_complete(
     let mut writes = apply_rows(edge, context, revision, &upserted, &removed)?;
     let mut coverage = Vec::new();
     for (header, projected) in open.base_events.values() {
-        if matches!(projected, ProjectedEvent::RequestCompleted { .. }) {
+        if let ProjectedEvent::RequestCompleted {
+            resulting_state_generation,
+        } = projected
+            && super::events::completion_of(edge, header, *resulting_state_generation)?.is_some()
+        {
             let (version, write) =
                 super::journal::completion_write(edge, header, projected, revision)?;
             coverage.push(version);

@@ -351,6 +351,12 @@ pub(super) fn completion_of(
     {
         return Err(Violation::Consistency);
     }
+    // A durable origin DEL can retire a sink-gone request before its old
+    // completion finishes replaying. The event still advances the durable
+    // stream, but has no request coverage or client reply left to release.
+    if !edge.pending.contains_key(&correlation.request_id) {
+        return Ok(None);
+    }
     super::join_echo::validate_completion(edge, &[], header)?;
     Ok(Some(correlation.request_id))
 }

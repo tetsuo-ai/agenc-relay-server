@@ -7,6 +7,7 @@ use crate::state_core::timers::TimerHeap;
 use agenc_ircd_storage::StorageError;
 
 mod closed_origin;
+mod completion_replay;
 
 #[test]
 fn journal_retry_classifies_only_definite_resource_refusals() {

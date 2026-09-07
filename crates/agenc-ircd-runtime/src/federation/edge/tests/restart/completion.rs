@@ -10,6 +10,9 @@ use agenc_ircd_types::{OriginId, RequestId};
 #[path = "deletion.rs"]
 mod deletion;
 
+#[path = "retired_completion.rs"]
+mod retired_completion;
+
 fn request_fixture() -> TestResult<(RequestHeader, Vec<u8>)> {
     let operation = FederatedOperation::Part {
         session_id: SessionId::from_bytes([21; 16]),

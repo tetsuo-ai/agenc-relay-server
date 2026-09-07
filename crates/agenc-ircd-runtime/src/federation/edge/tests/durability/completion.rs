@@ -10,6 +10,34 @@ use super::*;
 const REQUEST: RequestId = RequestId::from_bytes([41; 16]);
 const EVENT: EventId = EventId::from_bytes([42; 16]);
 
+#[tokio::test]
+async fn an_absent_request_does_not_relax_completion_generation_or_ownership_checks() -> TestResult
+{
+    for conflicting_owner in [false, true] {
+        let mut fixture = StateCoreFixture::new(entropy_script())?;
+        let mut edge = pending_edge()?;
+        let arm_generation = if conflicting_owner { 10 } else { 11 };
+        let (descriptor, object) = completion_object_at(&edge, 10, arm_generation)?;
+        edge.pending
+            .remove(&REQUEST)
+            .ok_or("pending")?
+            .sink_gone(&mut edge);
+        if conflicting_owner {
+            edge.by_completion
+                .insert(EVENT, RequestId::from_bytes([99; 16]));
+        }
+        assert!(matches!(
+            events::receive(&mut edge, fixture.context_mut()?, descriptor, &object),
+            Err(Violation::Consistency)
+        ));
+        assert!(edge.commit.is_none());
+        assert!(edge.cursor.is_none());
+        assert!(edge.pending.is_empty());
+        assert!(edge.applied_completions.is_empty());
+    }
+    Ok(())
+}
+
 fn pending_edge() -> TestResult<EdgeFederation> {
     let mut edge = edge_with_projection()?;
     let header = RequestHeader {
