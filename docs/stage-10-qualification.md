@@ -2874,6 +2874,46 @@ first retry but still fails coordinator-restart synchronization, ending after
 test executable. This closes the reproduced premature-retirement defect only;
 the separate restart loop and capacity qualification remain open.
 
+### CAP-88: membership revision changes are omitted from durable projection rows
+
+The restart loop is localized to a replayed `MessageDelivered` event on edge B.
+The event passes header and sequence validation, then the replica rejects its
+target channel revision. The exact event trace in `cap87-event-diagnostic`
+repeats that refusal at sequence 4029 while the durable cursor remains 4028.
+The final diagnostic campaign fails after 236.50 seconds with unchanged
+executables. `capture-stopped.json` records three private fixture directories
+copied after all daemon processes exited. The earlier startup copies in
+`captured` are explicitly invalid as crash evidence.
+
+The domain replica advances channel and home-session revisions during JOIN,
+PART, KICK, and related events, but its returned row changes omit several of
+those revisions. Runtime storage writes only the returned rows. A restart can
+therefore reload an older channel revision while retaining the committed
+delivery cursor and membership. The next valid channel message then fails the
+revision check on every replay.
+
+Four real-storage regressions fail against `1482e84`. Both single-event and
+batched JOIN receipts reload home-session revision 10 instead of 13, and both
+paths reject the next valid channel message with `Consistency`. The corrected
+revision helpers report their changed rows through the existing event outcome;
+the dispatcher removes superseded upserts and duplicates. All four regressions
+pass. The independent domain reconstruction check covers twelve event cases;
+reverting only the fix identifies nine cases with omitted writes, while the
+three control cases retain complete row changes. Its exact reversal log is
+`cap88-domain-red.log`. The runtime failure and passing logs are `cap88-red.log`
+and `cap88-green.log`; temporary diagnostics are restored to their production
+originals.
+
+All required gates pass with 2,407 workspace tests, zero failures, and 21 ignored
+qualification tests across 120 results. Source policy accepts 751 Rust files;
+both inventories bind 620 source files and the release policy includes 659
+critical regions. Exact commands and results are in `cap88-final-gates.json`.
+The uninstrumented capacity repeat still fails the restart readiness check
+after 250.87 seconds, despite passing first-attempt pressure recovery, backup,
+and peer return. `cap88-capacity-64-result.json` records unchanged executables.
+The omitted-row defect is repaired; another cause of the remaining restart
+failure has not yet been established. Capacity qualification remains open.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

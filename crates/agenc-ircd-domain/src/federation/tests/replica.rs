@@ -23,6 +23,9 @@ type TestResult = Result<(), Box<dyn Error>>;
 const LOCAL: ServerId = ServerId::from_bytes([10; 16]);
 const REMOTE: ServerId = ServerId::from_bytes([11; 16]);
 
+#[path = "replica/durable_changes.rs"]
+mod durable_changes;
+
 fn revision(value: u64) -> Revision {
     Revision::new(value).unwrap_or_else(|_| revision(0))
 }
@@ -535,7 +538,10 @@ fn topic_and_recomputation_events_replace_only_known_memberships() -> TestResult
     let outcome = replica.apply(&recomputed, 4)?;
     assert_eq!(
         outcome.upserted,
-        vec![ProjectionKey::membership(channel, alice.user_id)]
+        vec![
+            ProjectionKey::channel_detail(channel),
+            ProjectionKey::membership(channel, alice.user_id)
+        ]
     );
     assert_eq!(
         replica
@@ -922,8 +928,8 @@ fn mode_changes_validate_prefix_and_list_entries() -> TestResult {
     assert_eq!(
         outcome.upserted,
         vec![
+            ProjectionKey::channel_detail(channel),
             ProjectionKey::membership(channel, alice.user_id),
-            ProjectionKey::channel_detail(channel)
         ]
     );
     assert!(replica.membership(channel, bob.user_id).is_none());

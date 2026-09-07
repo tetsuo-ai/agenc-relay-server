@@ -21,6 +21,7 @@ use crate::state_core::durable::AccountServiceDurableWrite;
 const MUTATION: [u8; 16] = [77; 16];
 
 mod completion;
+mod revisions;
 mod rollback;
 mod upgrade;
 

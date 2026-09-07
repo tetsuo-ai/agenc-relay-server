@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 618
-reviewed_source_sha256 = "e46e7b824f0ce81601f838ba5a64c7029270c51485d08ab66ec474463707611e"
+reviewed_source_files = 620
+reviewed_source_sha256 = "81405a3330458a0d7acc49323f10965aec2343d4265021e033f89fcdbb613335"
 deferred = []
 
 [[region]]
@@ -918,7 +918,7 @@ reason = "Domain state invariants from Section 27 are checked on every durable l
 id = "replica-validate"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/federation/replica.rs"
-source_sha256 = "7d143b7e280f7f813b8198c1ac5a6bc4ccb7030f2eb2f8ba114a5eb6c1bcdcae"
+source_sha256 = "88e5e7a046cabf667be818e473c11443adce520dba78fd061b7d9af1b00564dc"
 start_line = 260
 end_line = 274
 metric = "branches"
@@ -928,7 +928,7 @@ reason = "Edge replica invariants are checked after every applied event and snap
 id = "replica-validate-children"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/federation/replica.rs"
-source_sha256 = "7d143b7e280f7f813b8198c1ac5a6bc4ccb7030f2eb2f8ba114a5eb6c1bcdcae"
+source_sha256 = "88e5e7a046cabf667be818e473c11443adce520dba78fd061b7d9af1b00564dc"
 start_line = 297
 end_line = 304
 metric = "branches"
@@ -938,7 +938,7 @@ reason = "Edge replica invariants are checked after every applied event and snap
 id = "replica-validate-invites"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/federation/replica.rs"
-source_sha256 = "7d143b7e280f7f813b8198c1ac5a6bc4ccb7030f2eb2f8ba114a5eb6c1bcdcae"
+source_sha256 = "88e5e7a046cabf667be818e473c11443adce520dba78fd061b7d9af1b00564dc"
 start_line = 306
 end_line = 317
 metric = "branches"
@@ -6571,3 +6571,33 @@ start_line = 318
 end_line = 333
 metric = "branches"
 reason = "Startup cannot reinterpret an uncovered cross-profile part as ordinary replay or snapshot replacement."
+
+[[region]]
+id = "replica-event-durable-rows"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-domain/src/federation/replica.rs"
+source_sha256 = "88e5e7a046cabf667be818e473c11443adce520dba78fd061b7d9af1b00564dc"
+start_line = 324
+end_line = 720
+metric = "branches"
+reason = "Projected events report each surviving changed row once and exclude rows removed by the same event."
+
+[[region]]
+id = "replica-channel-revision-persistence"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-domain/src/federation/replica.rs"
+source_sha256 = "88e5e7a046cabf667be818e473c11443adce520dba78fd061b7d9af1b00564dc"
+start_line = 955
+end_line = 979
+metric = "branches"
+reason = "A changed channel revision remains part of the durable projection receipt."
+
+[[region]]
+id = "replica-session-revision-persistence"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-domain/src/federation/replica.rs"
+source_sha256 = "88e5e7a046cabf667be818e473c11443adce520dba78fd061b7d9af1b00564dc"
+start_line = 981
+end_line = 1002
+metric = "branches"
+reason = "A changed home-session revision remains part of the durable projection receipt."
