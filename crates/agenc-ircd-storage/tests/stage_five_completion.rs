@@ -2358,7 +2358,7 @@ fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservation
     assert_eq!(transformed_account.revision(), 10);
     assert_eq!(transformed_account.generation(), 5);
 
-    let e2ee_key = StoredKey::new(vec![9, 8, 7])?;
+    let e2ee_key = agenc_ircd_storage::e2ee_records::recovery_gate_key(&[80; 32])?;
     let e2ee_body = E2eeRecoveryGate::new(
         digest(80),
         E2eeRecoveryKind::Normal,
@@ -2614,19 +2614,21 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
             .is_ok()
     );
 
+    let other_e2ee_key = agenc_ircd_storage::e2ee_records::KeySetRow::key()?;
+    let other_e2ee_body = domain_body(TableId::E2eeState, 11, vec![7])?;
     let other_e2ee_plaintext = PersistentRecordValue::new(
         TableId::E2eeState,
-        2,
+        11,
         13,
         0,
         None,
         Vec::new(),
-        domain_body(TableId::E2eeState, 2, vec![7])?,
+        other_e2ee_body.clone(),
     )?
     .encode()?;
     let (other_e2ee_reference, other_e2ee_source) = opened_domain_source(
         TableId::E2eeState,
-        StoredKey::new(vec![7; 3])?,
+        other_e2ee_key.clone(),
         other_e2ee_plaintext,
         238,
     )?;
@@ -2634,19 +2636,19 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
         StorageConstructionKind::Restore,
         vec![other_e2ee_reference],
         TableId::E2eeState,
-        StoredKey::new(vec![7; 3])?,
+        other_e2ee_key,
         1,
         StorageConstructionAction::RestoreE2eeState,
         0,
     )?;
-    assert!(
-        recovery
-            .transform(
-                StorageConstructionKind::Restore,
-                &other_e2ee_entry,
-                &[other_e2ee_source],
-            )
-            .is_ok()
+    let restored_e2ee = recovery.transform(
+        StorageConstructionKind::Restore,
+        &other_e2ee_entry,
+        &[other_e2ee_source],
+    )?;
+    assert_eq!(
+        PersistentRecordValue::decode(TableId::E2eeState, &restored_e2ee)?.body(),
+        other_e2ee_body.as_slice(),
     );
 
     let maximum_account_revision = PersistentRecordValue::new(

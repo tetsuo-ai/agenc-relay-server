@@ -1,5 +1,7 @@
 //! Bounded, resumable execution of authenticated construction plans.
 
+mod recovery;
+
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -2391,7 +2393,7 @@ fn select_restore_record(
             let value = PersistentRecordValue::decode(table, record.plaintext())?;
             (value.record_kind() == 2).then_some(StorageConstructionAction::RestorePeerTombstones)
         }
-        TableId::E2eeState => Some(StorageConstructionAction::RestoreE2eeState),
+        TableId::E2eeState => recovery::select_e2ee_restore(source.key(), record.plaintext())?,
         TableId::KeyCheck
         | TableId::AuthTransaction
         | TableId::Session
@@ -3286,19 +3288,9 @@ fn transform_e2ee_recovery_pending(
     source_rollback_guard_hash: StorageDigest,
 ) -> Result<Vec<u8>, StorageError> {
     let source = exact_source(entry, sources)?;
-    let state = PersistentRecordValue::decode(TableId::E2eeState, source)?;
-    if state.record_kind() != 1 {
-        return rebuild_persistent(
-            &state,
-            TableId::E2eeState,
-            state.record_kind(),
-            state.revision(),
-            state.generation(),
-        );
-    }
-    let body = crate::E2eeRecoveryGate::decode(state.body())?
-        .recover(target_recovery_epoch, source_rollback_guard_hash)
-        .encode()?;
+    let state = recovery::decode_e2ee_restore(entry.target_key(), source)?;
+    let body =
+        recovery::e2ee_recovery_body(&state, target_recovery_epoch, source_rollback_guard_hash)?;
     PersistentRecordValue::new(
         TableId::E2eeState,
         state.record_kind(),
@@ -3411,6 +3403,8 @@ fn recovery_domain_body(
 
 #[cfg(test)]
 mod tests {
+    mod recovery_classification;
+
     use std::fs::{File, OpenOptions};
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -4495,6 +4489,33 @@ mod tests {
         Ok(())
     }
 
+    fn restore_selection_fixture(table: TableId) -> Result<(StoredKey, Vec<u8>), StorageError> {
+        match table {
+            TableId::E2eeState => Ok((
+                crate::e2ee_records::RouteRow::key(&[1; 32])?,
+                PersistentRecordValue::new(
+                    table,
+                    crate::e2ee_records::ROUTE_ROW_KIND,
+                    1,
+                    0,
+                    None,
+                    Vec::new(),
+                    recovery_classification::route_row(
+                        [1; 32],
+                        crate::e2ee_records::RouteLifecycle::Active,
+                    )?
+                    .encode()?,
+                )?
+                .encode()?,
+            )),
+            TableId::LoginIndexKeyState => Ok((
+                StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+                Vec::new(),
+            )),
+            _ => Ok((account_key(table.as_u16() as u8 + 80)?, Vec::new())),
+        }
+    }
+
     #[test]
     fn restore_selection_covers_every_preserve_transform_and_omission_arm()
     -> Result<(), StorageError> {
@@ -4518,13 +4539,9 @@ mod tests {
             TableId::StorageOperation,
             TableId::E2eeState,
         ] {
-            let key = if table == TableId::LoginIndexKeyState {
-                StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?
-            } else {
-                account_key(table.as_u16() as u8 + 80)?
-            };
+            let (key, plaintext) = restore_selection_fixture(table)?;
             let source = backup_source(table, &key, u64::from(table.as_u16()) + 1)?;
-            let record = record(table, StoredKey::new(key.as_bytes().to_vec())?, Vec::new());
+            let record = record(table, StoredKey::new(key.as_bytes().to_vec())?, plaintext);
             assert!(matches!(
                 select_restore_record(&mut builder, &source, &record)?,
                 RestoreSelection::Direct(_)
@@ -5057,16 +5074,13 @@ mod tests {
         let target_epoch = RecoveryEpoch::from_bytes([222; 16]);
         let source_guard = StorageDigest::from_bytes([223; 32]);
         let mut transformer = RecoveryTransformV1::new(target_epoch, source_guard);
-        for (index, state) in [
+        for state in [
             crate::E2eeRecoveryKind::Normal,
             crate::E2eeRecoveryKind::Pending,
             crate::E2eeRecoveryKind::Conflict,
             crate::E2eeRecoveryKind::Closed,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let key = StoredKey::new(vec![224, index as u8, 1])?;
+        ] {
+            let key = crate::e2ee_records::recovery_gate_key(&[227; 32])?;
             let entry = restore_entry(
                 TableId::E2eeState,
                 StoredKey::new(key.as_bytes().to_vec())?,

@@ -13,14 +13,14 @@ release candidate.
 
 | Area | Current evidence and remaining work |
 | --- | --- |
-| Restored account authentication | CAP-9 and CAP-54 repairs pass strict restore and disaster-restore drills with existing and new accounts. CAP-7 still needs the strict release capacity run. |
+| Restored account authentication | CAP-9 and CAP-54 repairs pass strict restore and disaster-restore drills with existing and new accounts. CAP-7 passes post-restart authentication in the diagnostic release campaign; an uninstrumented repeat remains required. |
 | Account deletion and rekey | CAP-11, CAP-57, and CAP-62 through CAP-67 pass the complete strict deletion drill, including exact authenticated rows, both deleted-login refusals, the surviving account, and all final stops. |
 | Federation and client replies | CAP-47 through CAP-60 have focused regression evidence, and all required workspace gates pass. A successful new release capacity run remains required. |
-| Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 still requires proof that the original refused session survives and recovers. |
+| Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 now preserves the original refused session through pressure recovery. The uninstrumented campaign later hit an intermittent restart loop; the diagnostic campaign completed. |
 | Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. CAP-14 needs a fresh capacity result after the CAP-51 and CAP-65 shutdown repairs. |
 | Missing implementation | CAP-5 needs stopped login-index rotation commands and their authenticated audit and migration contract. CAP-13 needs bounded ordinary-event batching with complete receipt, rollback, and resource checks. |
 | Companion delivery recovery | CAP-70 records lost retained delivery scope and rows at intact restart. CAP-71 records companion acknowledgements that change memory without owning a durable cursor transition. Production-loader and acknowledgement regressions reproduce both faults; durable repairs remain open. |
-| Declared recovery | CAP-72 records obsolete companion delivery, replay, and barrier rows copied into the new incarnation, plus typed live routes left outside recovery pending. A typed transform regression is being prepared. |
+| Declared recovery | CAP-72 now discards obsolete companion delivery, replay, and barrier state and marks typed live routes pending. Eleven focused regressions pass, and reverting the correction produces ten behavioral failures. All required repository gates pass with 2,126 workspace tests. CAP-73 separately records missing pending-route admission and recovery-evidence handling. |
 | Physical storage growth | STO-1 remains open. The measured storage batch exceeds both the qualification ceiling and operational reserve; a smaller page size alone does not establish a universal bound. |
 | Release qualification | The release coverage floor, full fuzz and model runs, both native targets, seven-day soak, external E2EE review, and signed decision remain open. |
 
@@ -36,7 +36,8 @@ the release policy names 115 critical regions and retains its 90 percent
 overall and 100 percent critical branch floors. These checks do not replace
 the outstanding coverage measurement or ignored qualification campaigns.
 
-The CAP-3 repair also passes every required development gate. Its workspace
+The CAP-3 repair committed as `e6dd301` also passes every required development
+gate. Its workspace
 run reports 2,115 passing tests, no failures, and 21 ignored qualification
 tests across 118 targets. Source policy accepts 600 Rust files. Both reviewed
 inventories bind 476 production source files, and the release policy covers
@@ -708,6 +709,24 @@ The existing logs lack the rejecting phase and violation, so they do not yet
 identify its cause. Rekey and the strict post-restart authentication check are
 not reached. All required workspace gates pass, and capacity qualification remains open.
 
+The subsequent diagnostic campaign on `e6dd301` passes in 305.81 seconds,
+recorded in `campaign-restart-diagnostic-e6dd301.log` and its `campaign.json`.
+The original pressure session recovers on its first attempt. After the forced
+edge-b restart, its reported cursor exactly equals the durable cursor at 4,278
+with no retained backlog, so direct replay succeeds. Both edges reconcile after
+the later coordinator restart, and the strict existing-account login succeeds.
+Rekey fences the old incarnation once, completes cleanup, and synchronizes.
+The final drain reaches zero on all three nodes in 5.2 seconds, and every daemon
+stops cleanly. The actual workload lasts 300.32 seconds with 64 clients, no
+missed events, and no resource or population violations.
+
+This instrumented run does not reproduce or explain the earlier restart loop.
+Its source and executable hashes are in `cap3-restart-diagnostic/frozen-build.json`;
+all five diagnostic source files and both coverage policies were restored to
+the committed bytes before execution. A successful uninstrumented repeat and
+full candidate qualification remain required. The report also retains the
+substantial busy refusals and latency discussed under CAP-13.
+
 ### CAP-4: a coordinator restart under a client reconnection storm fails closed
 
 Restarting the coordinator while eight clients reconnected through the edges
@@ -829,7 +848,13 @@ CAP-47 identifies a companion-origin replay defect that can repeatedly reject
 the link. Its regression is fixed in the worktree. The capacity engine
 now waits for both edges to report active federation service and then treats
 an explicit SASL failure as a failed campaign. Only transport interruptions
-are retried. A new campaign must establish whether any CAP-7 symptom remains.
+are retried. The diagnostic campaign on `e6dd301` completes both OPAQUE
+checks, including the first strict post-restart login after active federation,
+and reaches rekey with no explicit authentication refusal. Its two samples
+include a 675.57-millisecond median. The earlier uninstrumented run stopped
+before this login because edge-b did not synchronize. The diagnostic result
+therefore establishes a successful current path but does not explain the
+intermittent restart loop or close immutable-candidate qualification.
 
 ### CAP-8: a listener ceiling lowered by reload is not enforced
 
@@ -988,6 +1013,25 @@ campaign records it (`messages_refused`, `refused_by_code`,
 nothing. Batching several events into one durable commit at the edge is the
 remedy and stays open.
 
+The full diagnostic campaign on `e6dd301` completes but reports 5,961
+SERVER_BUSY refusals, including the steady workload after 200 seconds.
+Its message p99 is 59.01 seconds and durable-mutation p99 is 58.91 seconds.
+The campaign records these measurements and its clients account for refusals;
+a passed campaign assertion is not evidence of acceptable interactive latency.
+The earlier steady-state observation above does not describe this current run.
+Bounded batching remains required, with ordered per-event acknowledgements,
+complete rollback, exact completion ownership, and aggregate memory admission.
+
+A real-storage regression now reproduces the missing batching boundary in
+`cap13-ordinary-batch-red.log`. Three ordinary events enter the edge while
+the first receipt is pending. No event or FACK appears before that receipt,
+and only the first event and FACK appear before the second commit. After the
+second real commit, the old path has delivered two events instead of the
+required three, so the test fails in 0.09 seconds. The complete fixture uses
+a bound client sink and a bounded live federation output queue. Exact source,
+executable, and hashes are parked in `cap13-ordinary-batch-proof`; the failing
+test was removed from the repair checkpoint while batching is implemented.
+
 ### CAP-14: a coordinator stopped with an acknowledgement backlog exceeds its shutdown budget
 
 Open. When the campaign stopped the coordinator while it still held sixty to
@@ -1014,6 +1058,15 @@ deletion, clean client EOF, and refusal of the deleted credentials. The record
 name. It stops after 37.05 seconds with coordinator exit status 1 and
 `daemon shutdown exceeded its deadline` on stderr. The later rekey checks do
 not run. This narrows the next shutdown trace to the post-deletion state.
+
+CAP-51 and CAP-65 subsequently repair physical-session checkpoint ordering
+and abandoned virtual authentication carriers. The strict deletion drill now
+passes its formerly blocked coordinator stop, rekey, and final stops in 39.20
+seconds. The diagnostic capacity run on `e6dd301` also stops all three daemons
+cleanly after its explicit final drain. That drained stop does not by itself
+prove every possible stop during recovery with an outstanding acknowledgement
+backlog; the historical failure and current 80-event positive probe remain
+separate evidence.
 
 ### CAP-15: a batch gathered during the index read-back stopped the coordinator as corrupt
 
@@ -2141,25 +2194,87 @@ barrier. Those tests and the production correction remain in progress.
 
 ### CAP-72: declared recovery preserves obsolete companion state and live routes
 
-Open. The restore selector sends every E2eeState row to RestoreE2eeState.
-That transform updates only the legacy kind-1 recovery gate and copies every
+The old restore selector sent every E2eeState row to RestoreE2eeState.
+That transform updated only the legacy kind-1 recovery gate and copied every
 other kind unchanged. Typed route rows use kind 2, replay rows and origin
 floors use kind 9, delivery cursors and outboxes use kind 10, and combined
-barrier records use kind 12. The route's recovery_gate therefore stays false,
-while obsolete stream and barrier ownership survives into the new incarnation.
+barrier records use kind 12. The route's recovery_gate therefore stayed false,
+while obsolete stream and barrier ownership survived into the new incarnation.
 
 Section 23.7 requires every live encrypted route to enter recovery pending
 while preserving its counters and proof head. It also requires discarding old
 base and companion delivery scope, barriers, their parts and receipts, and
-federation request replay roots. The current table-wide selection cannot apply
-those distinct rules. This source finding needs a typed restore regression;
-no executed repair or successful recovery is claimed yet.
+federation request replay roots. Four original regressions in `cap72-red.log`
+reproduced the fault through the actual selector and RecoveryTransformV1.
 
-The correction must select and validate each closed record kind, preserve
-non-federation proof and mailbox state, and apply the route recovery transition
-without changing counters or inventing evidence. Until that repair passes,
-the existing declared-recovery command is not a valid escape route for the
-ambiguous legacy companion scope identified in CAP-70.
+The correction uses a closed typed classifier. It validates each obsolete
+record's key and body before omitting it, including cursor, witnessed cursor,
+outbox, snapshot, replay, origin floor, barrier head, and barrier part records.
+A stale construction plan cannot bypass the classifier and copy those rows.
+Active and closing routes become pending without changing their stored proof
+heads, counters, revision, or generation. Tombstones are not reopened. Existing
+terminal recovery gates keep their terminal state, and retained sequencer,
+mailbox, and key-set bytes remain exact.
+
+Route keys must match the conversation in a complete FederationState object.
+Legacy recovery-gate keys must match their body's conversation. Tests reject
+mismatched identities, truncated keys and route objects, wrong delivery arms,
+and barrier identities. The final eleven-test suite passes in
+`cap72-focused-green.log`. Replacing the classifier and transformer with their
+old behavior produces ten behavioral failures while the preserved-proof
+control still passes in `cap72-final-proof/red.log`. The upgraded fixtures,
+exact reverted and fixed helper bytes, frozen executable, and hashes are
+retained in `cap72-final-proof` outside the worktree.
+
+These are typed storage regressions, including complete route-state object
+encoding. They do not establish a complete signed encrypted-conversation
+recovery. All required repository gates pass: formatting, Clippy, 2,126 workspace
+tests with no failures and 21 ignored qualification tests, source checks and
+self-tests, workspace policy, and coverage rejection self-tests. Both reviewed
+inventories bind 478 production source files. The release policy now lists
+134 critical regions with unchanged coverage floors; that inventory update
+is not a new branch-coverage measurement. CAP-73 still requires runtime
+admission, recovery provenance, and terminal-evidence handling before declared
+recovery can satisfy the complete encrypted recovery contract.
+
+### CAP-73: pending encrypted routes lack admission and recovery-evidence handling
+
+Open. Startup derives both domain recovery gates from RouteRow.recovery_gate.
+Several admitted upload handlers do not consult either gate. In particular,
+submit_finalization reads a retained candidate through a map lookup and signs
+a new CommitFinalization certificate. Abort and ReInit-attempt handling have
+the same missing restriction; policy, authorization, and ACK handling also
+admit new state without the pending-route check. Candidate creation and
+application ciphertext already check their lifecycle, so those checks do not
+protect every mutation path.
+
+Base Section 18.4 and companion Section 13.7.1 prohibit new encrypted authority
+while the restored route is pending. They permit only exact previously signed
+recovery evidence under the specified validation rules. Neither domain
+resolve_recovery method has a runtime caller, and the current loader does not
+consume the legacy per-route recovery record or source-guard provenance to
+establish that evidence boundary. Setting the typed flag under CAP-72 is
+therefore necessary but does not complete encrypted recovery.
+
+Two runtime regressions now reproduce the finalization defect. The fixture
+first verifies a valid finalization on a normal route, then changes only the
+typed recovery flag and reloads the same retained evidence through the real
+startup loader. Both reconstructed gates are Pending. The real operation
+dispatcher still returns new rows for storage, failing
+`cap73-finalization-red.log` in 0.20 seconds. A second case removes the signer
+only after the normal-route control passes. It reaches the signer-dependent
+failure instead of the required early RouteInvalid refusal, failing
+`cap73-signer-order-red.log` in 0.20 seconds. The test does not count internal
+signing calls or claim a subsequent storage commit. Exact source, executable,
+and hashes are parked in `cap73-proof`; the temporary failing test is removed
+from the independent storage repair checkpoint.
+
+The repair must enforce the closed operation policy and implement the
+validated recovery-evidence owner with exact restored heads, target epoch,
+and source guard. It must preserve byte-identical allowed evidence replay and
+cannot synthesize a successful recovery transition from the current live
+state. The terminal-evidence ingress and its profile compatibility require an
+explicit implementation contract in addition to the early mutation guards.
 
 ## Release claims and limits
 

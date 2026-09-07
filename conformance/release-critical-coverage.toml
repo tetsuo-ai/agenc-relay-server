@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 476
-reviewed_source_sha256 = "0a19f05dcb6abfbecf5d22ced36211847d9ace1e4c9b57630569536643cd1d2b"
+reviewed_source_files = 478
+reviewed_source_sha256 = "07e50c1c6f20a7e0bf53be27bb76567699ac998eb9c9a0ae821448a1cd6dc99c"
 deferred = []
 
 [[region]]
@@ -1282,3 +1282,72 @@ start_line = 76
 end_line = 87
 metric = "branches"
 reason = "Stale or duplicate authenticated link notifications cannot reopen a failed retry schedule."
+[[region]]
+id = "storage-declared-recovery-selection"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
+source_sha256 = "ce183cc73dffa746d2d6817651da50a4626a30a6fbb56031efa2c97f5ef1de54"
+start_line = 19
+end_line = 31
+metric = "branches"
+reason = "Declared recovery omits the obsolete companion replay, delivery, and barrier namespace after validating each closed record arm."
+
+[[region]]
+id = "storage-declared-recovery-key-binding"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
+source_sha256 = "ce183cc73dffa746d2d6817651da50a4626a30a6fbb56031efa2c97f5ef1de54"
+start_line = 33
+end_line = 52
+metric = "branches"
+reason = "Recovery transformation requires an exact record-kind key and binds route and legacy gate rows to their conversation."
+
+[[region]]
+id = "storage-declared-recovery-route-identity"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
+source_sha256 = "ce183cc73dffa746d2d6817651da50a4626a30a6fbb56031efa2c97f5ef1de54"
+start_line = 54
+end_line = 70
+metric = "branches"
+reason = "The typed route key must identify the conversation in a complete federation route-state object."
+
+[[region]]
+id = "storage-declared-recovery-replay-key"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
+source_sha256 = "ce183cc73dffa746d2d6817651da50a4626a30a6fbb56031efa2c97f5ef1de54"
+start_line = 72
+end_line = 81
+metric = "branches"
+reason = "Replay and origin-sequence bodies must match their closed key arm before recovery can omit them."
+
+[[region]]
+id = "storage-declared-recovery-delivery-key"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
+source_sha256 = "ce183cc73dffa746d2d6817651da50a4626a30a6fbb56031efa2c97f5ef1de54"
+start_line = 83
+end_line = 96
+metric = "branches"
+reason = "Cursor, outbox, and snapshot bodies must match their exact delivery key shape."
+
+[[region]]
+id = "storage-declared-recovery-barrier-identity"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
+source_sha256 = "ce183cc73dffa746d2d6817651da50a4626a30a6fbb56031efa2c97f5ef1de54"
+start_line = 98
+end_line = 110
+metric = "branches"
+reason = "A barrier head or part key must match the full identity encoded in its body."
+
+[[region]]
+id = "storage-declared-recovery-body"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
+source_sha256 = "ce183cc73dffa746d2d6817651da50a4626a30a6fbb56031efa2c97f5ef1de54"
+start_line = 112
+end_line = 131
+metric = "branches"
+reason = "Live routes enter pending recovery without rewriting their retained heads, terminal gates remain terminal, and stale plans cannot copy obsolete transport state."

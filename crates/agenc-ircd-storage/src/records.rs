@@ -140,6 +140,10 @@ impl E2eeRecoveryGate {
         self.state
     }
 
+    pub(crate) const fn conversation_id(self) -> StorageDigest {
+        self.conversation_id
+    }
+
     /// Returns the lineage epoch bound by this gate.
     #[must_use]
     pub const fn recovery_epoch(self) -> RecoveryEpoch {
