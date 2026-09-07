@@ -4,6 +4,7 @@
 //! transfer, driven through the frame entry point with a fake base host.
 
 mod delivery_restart;
+mod origin_admission;
 
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_e2ee::federation::frames::{CompanionFrame, DeliveryPosition};

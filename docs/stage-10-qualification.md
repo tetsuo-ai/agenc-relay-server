@@ -2950,6 +2950,41 @@ the cause of that authentication failure remains under investigation. The
 run records unchanged binaries and three private stopped-state captures.
 The completion repair does not establish capacity qualification.
 
+### CAP-90: cached companion declarations bypass current origin admission
+
+The diagnostic trace in `cap89-admission-diagnostic` first rejects an EORIGIN
+declaration because its base origin is unavailable. Fragment assembly has
+already cached that object as complete. Each retry then takes the duplicate
+path, which cannot find a matching accepted companion origin and rejects it
+again. A previously accepted cached declaration has the opposite problem:
+the duplicate path can resume it without checking whether its base origin
+remains live at the same generation. Both behaviors violate the current
+base-origin mirroring required by companion Section 12.5.
+
+Five frame-entry regressions fail against `3a58e09`. Three valid retries remain
+stuck after RESET, base-origin availability, or base-generation advancement.
+Two cached declarations incorrectly resume when the base origin is absent or
+has advanced. Admission now checks RESET, live base authority, and the exact
+base generation before assembly or duplicate-cache handling. Object decoding,
+mirrored principal and device validation, predecessor checking, and the bounded
+duplicate cache retain their existing rules. All five regressions and all 155
+focused coordinator tests pass; `cap90-red.log` and `cap90-green.log` record the
+results. Temporary diagnostics have been restored to their production originals.
+
+All required gates pass with 2,416 workspace tests, zero failures, and 21
+ignored qualification tests. Both source inventories bind 623 files, and the
+release policy contains 661 critical regions. Exact commands and results are
+recorded in `cap90-final-gates.json`.
+
+The preceding five-minute diagnostic campaign passes with 64 clients after
+306.37 seconds, including coordinator restart, live login, rekey, and final
+draining. Its companion refusals expose this additional defect despite the
+passing campaign result. `campaign-result.json` records unchanged executables;
+`capture-stopped.json` records three private stopped-state copies. The captured
+event-admission refusal is `Quiescing` during an intentional daemon stop, so
+that trace does not prove the separate hypothesis about a staged batch conflict.
+A production-binary repeat is still required after this repair.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

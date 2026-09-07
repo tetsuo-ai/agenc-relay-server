@@ -316,6 +316,20 @@ impl CompanionCoordinator {
     ) -> Result<Vec<Action>, CompanionFault> {
         self.require_self(descriptor.coordinator_server_id)?;
         require_live(host, peer, descriptor.server_incarnation)?;
+        // These base facts can change while a link resets. Check them before
+        // assembly can cache completion, including on a cached re-declaration.
+        if !self.peers.get(&peer).is_some_and(|sync| sync.origins_reset) {
+            return Err(CompanionFault::Protocol);
+        }
+        let origin_key = CompanionOriginKey {
+            home_server_id: *peer.as_bytes(),
+            server_incarnation: descriptor.server_incarnation,
+            origin_id: descriptor.origin_id,
+        };
+        let base = host
+            .base_origin(&origin_key)
+            .filter(|base| base.generation == descriptor.origin_generation)
+            .ok_or(CompanionFault::Protocol)?;
         let command = CarrierCommand::Federation(IrcWireObjectKind::FederationOrigin);
         let mut route = [0; 32];
         if let Some(head) = route.get_mut(..16) {
@@ -345,14 +359,6 @@ impl CompanionCoordinator {
         if !matches {
             return Err(CompanionFault::Protocol);
         }
-        let origin_key = CompanionOriginKey {
-            home_server_id: origin.home_server_id,
-            server_incarnation: origin.server_incarnation,
-            origin_id: origin.origin_id,
-        };
-        let base = host
-            .base_origin(&origin_key)
-            .ok_or(CompanionFault::Protocol)?;
         let mirrored = self.mirror_origin(&origin, &bytes, &base)?;
         self.accept_origin(origin_key, mirrored, update)?;
         let ack = line(
