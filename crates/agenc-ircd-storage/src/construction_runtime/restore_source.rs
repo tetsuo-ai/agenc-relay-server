@@ -40,7 +40,7 @@ impl RestoreSourceAdmission<'_> {
             verified.header.source_header().tbs().schema_generation,
             self,
         ) {
-            (3, _) => Ok(verified),
+            (3 | 4, _) => Ok(verified),
             (2, Self::WithLegacy(validator)) => crate::backup::admit_verified_legacy_backup(
                 input,
                 verified,
@@ -57,7 +57,7 @@ impl RestoreSourceAdmission<'_> {
 
 impl<R: Read + Seek> RestoreBackupSource<R> {
     /// Requires complete semantic admission for a legacy schema-two backup.
-    /// Current schema-three backups retain the current restore profile.
+    /// Schema-three and schema-four backups retain their original restore profile.
     pub fn open_with_legacy_validation(
         input: R,
         config: RestoreBackupSourceConfig<'_>,

@@ -39,13 +39,38 @@ pub(crate) fn validate_source_record(
                 return Err(StorageError::UnsupportedVersion);
             }
         }
-    } else if !matches!(generation, 2 | 3) {
+    } else if !matches!(generation, 2..=4) {
         return Err(StorageError::UnsupportedVersion);
     }
     if generation <= 2 {
         validate_legacy_kind(table, plaintext)?;
     }
+    if generation == 3 {
+        validate_schema_three_kind(table, key, plaintext)?;
+    }
     crate::validate_record_plaintext(table, key, schema, plaintext)
+}
+
+// This source profile stays closed when current storage gains new body versions.
+fn validate_schema_three_kind(
+    table: TableId,
+    key: &StoredKey,
+    plaintext: &[u8],
+) -> Result<(), StorageError> {
+    if !matches!(table, TableId::E2eeState | TableId::Audit) {
+        return Ok(());
+    }
+    let value = PersistentRecordValue::decode(table, plaintext)?;
+    let maximum = if table == TableId::E2eeState { 15 } else { 2 };
+    if value.record_kind() > maximum {
+        return Err(StorageError::UnsupportedVersion);
+    }
+    if table == TableId::E2eeState
+        && value.record_kind() == crate::e2ee_records::DELIVERY_RECOVERY_ROW_KIND
+    {
+        crate::e2ee_records::delivery_recovery::DeliveryRecoveryRow::decode_at(key, value.body())?;
+    }
+    Ok(())
 }
 
 fn validate_legacy_kind(table: TableId, plaintext: &[u8]) -> Result<(), StorageError> {

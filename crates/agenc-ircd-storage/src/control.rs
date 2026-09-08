@@ -110,7 +110,7 @@ impl DatabaseHeaderTbs {
         };
         // Neutral control decoding serves authenticated backup and migration readers.
         // The engine separately requires the exact generation for its open mode.
-        if value.storage_key_generation == 0 || !matches!(value.schema_generation, 1..=3) {
+        if value.storage_key_generation == 0 || !matches!(value.schema_generation, 1..=4) {
             return Err(StorageError::UnsupportedVersion);
         }
         Ok(value)
@@ -385,7 +385,7 @@ pub struct RollbackGuardTbs {
 impl RollbackGuardTbs {
     fn encode(&self) -> Result<Vec<u8>, StorageError> {
         if self.storage_key_generation == 0
-            || !matches!(self.schema_generation, 1..=3)
+            || !matches!(self.schema_generation, 1..=4)
             || self.nonce_draw_high_water > MAX_NONCE_DRAWS
             || self.nonce_reservation_start > self.nonce_draw_high_water
         {

@@ -7,6 +7,7 @@ use crate::StorageError;
 pub(crate) enum ConstructionSchema {
     Two,
     Three,
+    Four,
 }
 
 impl ConstructionSchema {
@@ -14,6 +15,7 @@ impl ConstructionSchema {
         match generation {
             2 => Ok(Self::Two),
             3 => Ok(Self::Three),
+            4 => Ok(Self::Four),
             _ => Err(StorageError::UnsupportedVersion),
         }
     }
@@ -22,6 +24,7 @@ impl ConstructionSchema {
         match self {
             Self::Two => 2,
             Self::Three => 3,
+            Self::Four => 4,
         }
     }
 

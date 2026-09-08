@@ -10,7 +10,7 @@ mod source_validation;
 
 pub(crate) use export_failure::AuditExportFailure;
 pub(crate) use maintenance::PreparedMaintenanceAudit;
-pub use source_validation::LegacyAuditSourceValidator;
+pub use source_validation::{LegacyAuditSourceValidator, SchemaThreeAuditSourceValidator};
 
 use std::collections::{BTreeMap, BTreeSet};
 

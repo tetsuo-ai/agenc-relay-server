@@ -1,4 +1,4 @@
-//! The schema-three migration always supplies the reviewed audit source policy.
+//! Each successor migration supplies its exact predecessor audit source policy.
 #![forbid(unsafe_code)]
 
 use agenc_ircd_admin::{AdminSessionBinding, OperatorRecord, OperatorRegistry};
@@ -24,6 +24,23 @@ pub fn execute_schema_three_migration(
         return Err(OfflineError::InvalidRequest);
     }
     let mut validator = legacy_audit_source_validator(config)?;
+    execute_validated_migration_command(request, qualifications, &mut validator)
+        .map_err(|_| OfflineError::Storage)
+}
+
+/// Runs the explicit schema-three-to-four profile with complete mixed audit admission.
+pub fn execute_schema_four_migration(
+    request: MigrationCommandRequest,
+    config: &MaintenanceStorageConfig,
+    qualifications: &[StorageQualification],
+) -> Result<MigrationCommandReceipt, OfflineError> {
+    if request.target_schema_generation != 4
+        || request.network_id != config.network_id
+        || request.server_id != config.server_id
+    {
+        return Err(OfflineError::InvalidRequest);
+    }
+    let mut validator = legacy_audit_source_validator(config)?.into_schema_three_validator();
     execute_validated_migration_command(request, qualifications, &mut validator)
         .map_err(|_| OfflineError::Storage)
 }

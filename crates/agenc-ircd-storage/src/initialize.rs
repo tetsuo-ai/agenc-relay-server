@@ -138,7 +138,7 @@ pub(crate) fn initialize_stopped_construction(
     initialize_storage_inner(config)
 }
 
-/// Creates generation-one or generation-two fixtures through the authenticated seal
+/// Creates generation-one through generation-three fixtures through the authenticated seal
 /// path, for the engine tests and the migration drill. Available only to
 /// tests and behind the `legacy-fixtures` feature; a release build has no
 /// way to construct a legacy database.
@@ -146,7 +146,7 @@ pub(crate) fn initialize_stopped_construction(
 pub fn initialize_legacy_storage(
     config: StorageInitializationConfig,
 ) -> Result<StorageInitializationOutcome, StorageError> {
-    if !matches!(config.header_tbs.schema_generation, 1 | 2) {
+    if !matches!(config.header_tbs.schema_generation, 1..=3) {
         return Err(StorageError::UnsupportedVersion);
     }
     initialize_storage_inner(config)

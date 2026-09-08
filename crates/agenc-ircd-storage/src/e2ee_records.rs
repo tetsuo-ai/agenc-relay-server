@@ -157,7 +157,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 34] = [
+const PREFIX_KINDS: [(&[u8], u16); 36] = [
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -188,6 +188,14 @@ const PREFIX_KINDS: [(&[u8], u16); 34] = [
     (prefix::BARRIER_PART, BARRIER_ROW_KIND),
     (prefix::WITNESS, WITNESS_ROW_KIND),
     (delivery_recovery::OWNER_PREFIX, DELIVERY_RECOVERY_ROW_KIND),
+    (
+        delivery_recovery::outbox::replay::REPLAY_OWNER_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (
+        delivery_recovery::outbox::replay::ACK_RANGE_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
     (
         delivery_recovery::outbox::OUTBOX_PREFIX,
         DELIVERY_RECOVERY_ROW_KIND,
@@ -2665,9 +2673,7 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         KEYSET_ROW_KIND => KeySetRow::decode(body).map(|_| ()),
         BARRIER_ROW_KIND => barrier::validate_body(body),
         WITNESS_ROW_KIND => WitnessRow::decode(body).map(|_| ()),
-        DELIVERY_RECOVERY_ROW_KIND => {
-            delivery_recovery::DeliveryRecoveryRow::decode(body).map(|_| ())
-        }
+        DELIVERY_RECOVERY_ROW_KIND => delivery_recovery::validate_body(body),
         MAILBOX_SEQUENCE_ROW_KIND => MailboxSequenceRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),
     }

@@ -55,6 +55,30 @@ const PROTOCOL_ENVELOPE_BYTES: usize =
     crate::MAX_DOMAIN_RECORD_BODY_BYTES - crate::MAX_PROTOCOL_BODY_BYTES;
 const MAX_WRAPPED_BODY_BYTES: usize = MAX_PAGE_BODY_BYTES + PROTOCOL_ENVELOPE_BYTES;
 
+/// Validates an explicitly selected delivery body version without a fallback decoder.
+pub fn validate_body(body: &[u8]) -> Result<(), StorageError> {
+    let version = body
+        .get(PROTOCOL_ENVELOPE_BYTES..PROTOCOL_ENVELOPE_BYTES + 2)
+        .ok_or(StorageError::InvalidEncoding)?;
+    match version {
+        [0, 1] => DeliveryRecoveryRow::decode(body).map(|_| ()),
+        [0, 2] => outbox::replay::ReplayLedgerRow::decode(body).map(|_| ()),
+        _ => Err(StorageError::UnsupportedVersion),
+    }
+}
+
+/// Binds a delivery record to the key namespace of its exact body version.
+pub fn validate_at(key: &StoredKey, body: &[u8]) -> Result<(), StorageError> {
+    use outbox::replay::{ACK_RANGE_PREFIX, REPLAY_OWNER_PREFIX, ReplayLedgerRow};
+    if key.as_bytes().starts_with(REPLAY_OWNER_PREFIX)
+        || key.as_bytes().starts_with(ACK_RANGE_PREFIX)
+    {
+        ReplayLedgerRow::decode_at(key, body).map(|_| ())
+    } else {
+        DeliveryRecoveryRow::decode_at(key, body).map(|_| ())
+    }
+}
+
 /// A closed durable owner record; constructors do not grant runtime authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryRecoveryRow {

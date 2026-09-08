@@ -2731,6 +2731,34 @@ The repair needs the published bounds, authenticated acknowledgement age,
 and bounded ownership of replay bytes during reconstruction and delivery.
 Raising the row constant alone would leave those obligations unresolved.
 
+A second regression commits the ACK through the actual storage owner. It
+starts with 4,097 sealed outbox rows, including 4,096 already acknowledged
+rows, and observes only 4,096 after the next committed ACK. The failing run
+and exact inputs are in `cap79-durable-retention-red-proof`; it seeds the
+previous ACK history instead of executing 4,096 earlier transactions. Its
+runtime test source is preserved in `cap79-pending-runtime-regression` while
+the separate format and migration checkpoint is validated. CAP-79 remains
+open; this test is not a passing or withdrawn result.
+
+The [generation-4 storage contract](storage-schema-generation-4.md) adds
+versioned replay-owner and acknowledgement-range codecs plus an explicit
+3-to-4 stopped migration. This lets a later ACK implementation commit a
+logical retention cutoff without rewriting an arbitrarily large prefix.
+Generation-3 source admission remains pinned to the original delivery codec.
+Both earlier migration registries remain unchanged. Eight codec/admission
+cases, three real storage migration cases, and three CLI cases pass, including
+2-to-3-to-4 migration, legacy restore, mixed-signature preservation, installed
+resume, and refusal before output creation. All eight checkpoint gates
+pass: 2,463 tests pass, none fail, and 21 qualification tests remain ignored.
+The source inventory covers 647 files; the release catalog contains 746
+critical regions, with unchanged coverage floors and no new measurement.
+The first full suite also passes, but its source-policy check rejects one
+constructor's complexity. Splitting suffix validation resolves that failure;
+`cap79-schema-four-pre-decomposition-gates.json` preserves the earlier run.
+The final logs and exact inputs are in `cap79-schema-four-final-proof`.
+Live retention, paged reconstruction, charged object reads, and bounded
+physical cleanup are still required.
+
 ### CAP-80: mailbox reconstruction can replace the current delivery grant
 
 Fixed in the worktree. The original renewed mailbox grant left an older Token

@@ -8,6 +8,7 @@ use crate::e2ee_records::barrier::{MAX_PART_COUNT, MIN_PART_COUNT};
 use crate::{ReadPlan, StorageError, StoredKey};
 
 mod acknowledgement;
+pub mod replay;
 #[cfg(test)]
 mod tests;
 

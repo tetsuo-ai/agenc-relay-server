@@ -42,7 +42,7 @@ const USAGE: &str = concat!(
     "  print-onboarding --config <file>\n",
     "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n",
     "  storage restore --config <file> --backup <file> [restore options]\n",
-    "  storage migrate --config <file> --target-schema-generation <2|3> --output-state-directory <new-directory> [--resume]\n",
+    "  storage migrate --config <file> --target-schema-generation <2|3|4> --output-state-directory <new-directory> [--resume]\n",
     "  storage login-index-rotate-start --config <file> --new-key-file <file>\n",
     "  storage login-index-rotate-finish --config <file>\n",
     "  storage qualify --state-dir <new-directory> --scratch-dir <new-directory> --unsigned-report <file> --raw-log <file> [--json <file>]",

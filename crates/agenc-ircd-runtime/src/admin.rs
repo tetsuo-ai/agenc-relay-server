@@ -52,9 +52,9 @@ use crate::state_core::{
 use crate::sync::Arc;
 use crate::tls::{CLOSE_NOTIFY_GRACE, WRITE_STALL_BUDGET};
 
-pub use audit::LegacyAuditSourceValidator;
 pub(crate) use audit::{AuditAuthority, PreparedMaintenanceAudit};
 use audit::{AuditExportFailure, PendingStartupActionKind};
+pub use audit::{LegacyAuditSourceValidator, SchemaThreeAuditSourceValidator};
 
 /// RFC 9846 exporter label for the remote administrative session binding.
 pub(crate) const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";

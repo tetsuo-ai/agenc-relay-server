@@ -742,10 +742,7 @@ fn validate_companion_plaintext(key: &StoredKey, plaintext: &[u8]) -> Result<(),
     let value = PersistentRecordValue::decode(TableId::E2eeState, plaintext)?;
     match value.record_kind() {
         crate::e2ee_records::DELIVERY_RECOVERY_ROW_KIND => {
-            crate::e2ee_records::delivery_recovery::DeliveryRecoveryRow::decode_at(
-                key,
-                value.body(),
-            )?;
+            crate::e2ee_records::delivery_recovery::validate_at(key, value.body())?;
         }
         crate::e2ee_records::mailbox_sequence::MAILBOX_SEQUENCE_ROW_KIND => {
             crate::e2ee_records::mailbox_sequence::MailboxSequenceRow::decode_keyed(

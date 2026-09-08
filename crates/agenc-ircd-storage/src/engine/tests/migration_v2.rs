@@ -9,6 +9,9 @@ use crate::{AuthenticatedSourceRecord, ConstructionSourceFacts, SourceRecordVali
 #[path = "migration_backup.rs"]
 mod backup_admission;
 
+#[path = "migration_v3.rs"]
+mod schema_four;
+
 #[derive(Default)]
 struct SourceTranscript {
     begins: u64,
@@ -215,7 +218,10 @@ fn schema_three_migration_preserves_existing_history_and_revalidates_installed_r
     )?;
     assert!(validator.finished);
     assert_eq!(validator.begins, 1);
-    let target = StorageEngine::open(fixture.config("target")?)?;
+    let target = StorageEngine::open_construction_target(
+        fixture.config("target")?,
+        crate::construction_schema::ConstructionSchema::Three,
+    )?;
     target.startup_scan()?;
     assert_eq!(target.header.tbs().schema_generation, 3);
     assert_eq!(target.header.tbs().storage_key_generation, 2);

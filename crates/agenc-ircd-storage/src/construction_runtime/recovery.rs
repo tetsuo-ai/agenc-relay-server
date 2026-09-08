@@ -27,10 +27,7 @@ pub(super) fn select_e2ee_restore(
         DELIVERY_ROW_KIND => validate_delivery_key(key, state.body())?,
         BARRIER_ROW_KIND => validate_barrier_key(key, state.body())?,
         DELIVERY_RECOVERY_ROW_KIND => {
-            crate::e2ee_records::delivery_recovery::DeliveryRecoveryRow::decode_at(
-                key,
-                state.body(),
-            )?;
+            crate::e2ee_records::delivery_recovery::validate_at(key, state.body())?;
         }
         _ => return Ok(Some(StorageConstructionAction::RestoreE2eeState)),
     }

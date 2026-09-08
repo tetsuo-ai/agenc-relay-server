@@ -7,6 +7,9 @@ use agenc_ircd_storage::{
 
 use super::*;
 
+mod schema_three;
+pub use schema_three::SchemaThreeAuditSourceValidator;
+
 #[cfg(test)]
 mod tests;
 

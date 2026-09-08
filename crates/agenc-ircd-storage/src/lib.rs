@@ -21,6 +21,8 @@ pub use migration::MigrationTransformV1;
 mod migration_profile;
 mod migration_v2;
 pub use migration_v2::MigrationTransformV2;
+mod migration_v3;
+pub use migration_v3::MigrationTransformV3;
 mod migration_command;
 pub use migration_command::{
     MigrationCommandReceipt, MigrationCommandRequest, execute_migration_command,

@@ -48,7 +48,7 @@ pub struct MigrationCommandRequest {
     pub trusted_backup_keys: Vec<crate::RestoreTrustKey>,
     /// Wall time used only for the newly created signed source backup.
     pub created_at: u64,
-    /// Literal successor selected by the admitted command profile, two or three.
+    /// Literal successor selected by the admitted command profile, two, three, or four.
     pub target_schema_generation: u64,
     /// New output directory, installed by no-replace atomic rename.
     pub output_state_directory: PathBuf,
@@ -83,7 +83,7 @@ pub fn execute_migration_command(
     )
 }
 
-/// Migrates a generation-two source only after its required semantic scan.
+/// Migrates a generation-two or generation-three source after its required semantic scan.
 ///
 /// Composition must supply a validator for the frozen source command grammar,
 /// audit signatures and complete chain. The scan precedes all backup and target
@@ -93,11 +93,16 @@ pub fn execute_validated_migration_command(
     qualifications: &[StorageQualification],
     validator: &mut dyn crate::SourceRecordValidator,
 ) -> Result<MigrationCommandReceipt, StorageError> {
+    let admission = match request.target_schema_generation {
+        3 => SourceAdmission::SchemaTwo(validator),
+        4 => SourceAdmission::SchemaThree(validator),
+        _ => return Err(StorageError::UnsupportedMigration),
+    };
     execute_migration_inner(
         request,
         qualifications,
         crate::StorageFaultInjector::disabled(),
-        SourceAdmission::SchemaTwo(validator),
+        admission,
     )
 }
 

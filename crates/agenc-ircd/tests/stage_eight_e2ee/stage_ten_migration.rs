@@ -9,6 +9,9 @@ use agenc_ircd_storage::{ReadPlan, SealedRecord, StorageOpenConfig, StorageOwner
 
 use super::*;
 
+#[path = "stage_ten_migration/schema_four.rs"]
+mod schema_four;
+
 #[derive(Clone, Copy, Debug)]
 enum AuditCase {
     Legacy,
@@ -113,8 +116,6 @@ fn initial_records(fixture: &NodeFixture, audit: &[u8]) -> TestResult<Vec<Initia
 }
 
 fn legacy_source(fixture: &NodeFixture, case: AuditCase) -> TestResult<Vec<u8>> {
-    let source = fixture.data_dir.join("legacy-source");
-    create_directory(&source, 0o700)?;
     let audit = PersistentRecordValue::new(
         TableId::Audit,
         1,
@@ -125,6 +126,17 @@ fn legacy_source(fixture: &NodeFixture, case: AuditCase) -> TestResult<Vec<u8>> 
         audit_body(fixture, case)?,
     )?
     .encode()?;
+    initialize_source(fixture, 2, initial_records(fixture, &audit)?)?;
+    Ok(audit)
+}
+
+fn initialize_source(
+    fixture: &NodeFixture,
+    generation: u64,
+    records: Vec<InitialStorageRecord>,
+) -> TestResult {
+    let source = fixture.data_dir.join("legacy-source");
+    create_directory(&source, 0o700)?;
     let result = agenc_ircd_storage::initialize_legacy_storage(StorageInitializationConfig {
         state_directory: StateDirectory::open(&source, &embedded_storage_qualifications()?)?,
         header_tbs: DatabaseHeaderTbs {
@@ -133,7 +145,7 @@ fn legacy_source(fixture: &NodeFixture, case: AuditCase) -> TestResult<Vec<u8>> 
             server_incarnation: ServerIncarnation::from_bytes([fixture.seed.wrapping_add(1); 16]),
             database_instance_id: DatabaseId::from_bytes([fixture.seed.wrapping_add(6); 16]),
             storage_key_generation: 1,
-            schema_generation: 2,
+            schema_generation: generation,
             recovery_epoch: RecoveryEpoch::from_bytes([fixture.seed.wrapping_add(2); 16]),
         },
         storage_master_key: StorageMasterKey::from_bytes([fixture.seed.wrapping_add(7); 32]),
@@ -141,7 +153,7 @@ fn legacy_source(fixture: &NodeFixture, case: AuditCase) -> TestResult<Vec<u8>> 
             [fixture.seed.wrapping_add(8); 32],
         ),
         mode: StorageInitializationMode::Live,
-        initial_records: initial_records(fixture, &audit)?,
+        initial_records: records,
         account_service_response_count: 0,
         state_generation: 1,
         predecessor_guard_hash: StorageDigest::from_bytes([0; 32]),
@@ -161,7 +173,7 @@ fn legacy_source(fixture: &NodeFixture, case: AuditCase) -> TestResult<Vec<u8>> 
         &format!("state_dir = \"{}\"", protected_path_text(&source)?),
     )?;
     fs::write(&fixture.config_path, config)?;
-    Ok(audit)
+    Ok(())
 }
 
 fn migrate(fixture: &NodeFixture, target: &Path, resume: bool) -> TestResult<std::process::Output> {
@@ -251,13 +263,16 @@ fn schema_three_cli_requires_signed_legacy_audit_admission_before_outputs() -> T
                 "{case:?}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert_eq!(target_audit(fixture, &target)?, original);
             let resumed = migrate(fixture, &target, true)?;
             assert!(
                 resumed.status.success(),
                 "{}",
                 String::from_utf8_lossy(&resumed.stderr)
             );
+            let config = agenc_ircd_config::load_maintenance_config(&fixture.config_path)?;
+            let current =
+                schema_four::extend_to_current(fixture, &target, &config.rollback_guard_key_file)?;
+            assert_eq!(target_audit(fixture, &current)?, original);
         } else {
             assert!(
                 !output.status.success(),
@@ -382,10 +397,11 @@ fn legacy_restore_roundtrip_preserves_original_signatures_through_explicit_migra
     point_at_restored_source(fixture, &restored, &guard)?;
     let target = fixture.data_dir.join("restored-and-migrated");
     require_success(&migrate(fixture, &target, false)?);
+    require_success(&migrate(fixture, &target, true)?);
+    let current = schema_four::extend_to_current(fixture, &target, &guard)?;
     assert_eq!(
-        target_audit_with_guard(fixture, &target, [39; 32])?,
+        target_audit_with_guard(fixture, &current, [39; 32])?,
         original
     );
-    require_success(&migrate(fixture, &target, true)?);
     Ok(())
 }

@@ -57,7 +57,7 @@ impl ConstructionSourceDatabase {
             );
         }
         let facts = self.facts()?;
-        if facts.header.tbs().schema_generation != 2
+        if facts.header.tbs().schema_generation != profile.source_generation()
             || facts.header.tbs().storage_key_generation.checked_add(1) != Some(target_generation)
             || !self
                 .engine
@@ -73,12 +73,7 @@ impl ConstructionSourceDatabase {
         )?;
         self.engine
             .visit_construction_source_records(|source, record| {
-                validate_source(
-                    source.table(),
-                    source.key(),
-                    source.record_schema(),
-                    record.plaintext(),
-                )?;
+                profile.validate_copy_source(&source, record.plaintext())?;
                 let key = crate::construction_runtime::rekey_target_stored_key(
                     &source,
                     &record,
@@ -90,6 +85,7 @@ impl ConstructionSourceDatabase {
                     target_generation,
                 )?;
                 let table = source.table();
+                let rule = profile.copy_rule(table)?;
                 builder.push(StorageConstructionPlanEntry::new(
                     StorageConstructionKind::Migrate,
                     vec![source],
@@ -97,7 +93,7 @@ impl ConstructionSourceDatabase {
                     key,
                     1,
                     StorageConstructionAction::MigrateTransform,
-                    COPY_RULE_BASE + table.as_u16(),
+                    rule,
                 )?)
             })?;
         builder.finish()

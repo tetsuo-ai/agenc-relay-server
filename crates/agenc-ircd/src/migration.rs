@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agenc_ircd_config::{load_backup_trust_manifest, load_maintenance_config};
-use agenc_ircd_runtime::offline::execute_schema_three_migration;
+use agenc_ircd_runtime::offline::{execute_schema_four_migration, execute_schema_three_migration};
 use agenc_ircd_storage::{
     MigrationCommandRequest, RestoreTrustKey, StorageEngineLimits, embedded_storage_qualifications,
     execute_migration_command,
@@ -14,7 +14,7 @@ use agenc_ircd_storage::{
 use crate::options::{OptionSpec, ParsedOptions};
 use crate::{CliFailure, EXIT_USAGE};
 
-pub(crate) const USAGE: &str = "usage: agenc-ircd storage migrate --config <file> --target-schema-generation <2|3> --output-state-directory <new-directory> [--resume]";
+pub(crate) const USAGE: &str = "usage: agenc-ircd storage migrate --config <file> --target-schema-generation <2|3|4> --output-state-directory <new-directory> [--resume]";
 const SPECS: &[OptionSpec] = &[
     OptionSpec::value("--config"),
     OptionSpec::value("--target-schema-generation"),
@@ -35,6 +35,7 @@ impl Options {
         let target_generation = match parsed.required_text("--target-schema-generation")?.as_str() {
             "2" => 2,
             "3" => 3,
+            "4" => 4,
             _ => return Err(()),
         };
         Ok(Self {
@@ -94,6 +95,7 @@ fn execute(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let receipt = match options.target_generation {
         2 => execute_migration_command(request, &qualifications)?,
         3 => execute_schema_three_migration(request, &config, &qualifications)?,
+        4 => execute_schema_four_migration(request, &config, &qualifications)?,
         _ => return Err("unsupported migration target".into()),
     };
     println!(
@@ -133,7 +135,8 @@ mod tests {
         };
         assert!(!Options::parse(&args("2"))?.resume);
         assert_eq!(Options::parse(&args("3"))?.target_generation, 3);
-        for invalid in ["1", "4", "02", "03", "+2", "+3", "0"] {
+        assert_eq!(Options::parse(&args("4"))?.target_generation, 4);
+        for invalid in ["1", "5", "02", "03", "04", "+2", "+3", "+4", "0"] {
             assert!(Options::parse(&args(invalid)).is_err());
         }
         let mut duplicate = args("2");
