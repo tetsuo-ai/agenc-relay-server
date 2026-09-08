@@ -9,6 +9,7 @@
 
 mod accounts;
 mod authority;
+mod barriers;
 mod companion;
 mod convert;
 mod grace;
@@ -212,6 +213,8 @@ enum PendingCommit {
     Companion {
         peer: ServerId,
         link: LinkId,
+        resume: bool,
+        barrier: Option<Box<barriers::Prepared>>,
     },
     SnapshotRows {
         peer: ServerId,
@@ -220,9 +223,11 @@ enum PendingCommit {
         peer: ServerId,
     },
     DeliveryAcknowledged {
+        resume: Option<LinkId>,
         peer: ServerId,
         delivery_sequence: u64,
         event_id: EventId,
+        barrier: Option<Box<barriers::Prepared>>,
     },
     ResumeAcknowledged(resume_reconciliation::ChunkReceipt),
     OutboxRequired {
@@ -290,19 +295,7 @@ pub struct FederationCoordinator {
 }
 
 /// One cross-profile barrier awaiting both cumulative acknowledgements.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OpenBarrier {
-    /// The per-target mutation identity.
-    pub(super) mutation_id: [u8; 16],
-    /// The last base delivery sequence of the barrier.
-    pub(super) base_last: u64,
-    /// Whether the base stream acknowledged through `base_last`.
-    pub(super) base_acked: bool,
-    /// The last companion delivery sequence of the barrier.
-    pub(super) companion_last: u64,
-    /// Whether the companion stream acknowledged through `companion_last`.
-    pub(super) companion_acked: bool,
-}
+pub(super) type OpenBarrier = agenc_ircd_storage::e2ee_records::delivery_recovery::DeliveryBarrier;
 
 impl FederationCoordinator {
     /// Creates a coordinator that knows the configured edges and holds no
@@ -926,13 +919,20 @@ impl FederationCoordinator {
         delivery_sequence: u64,
         event_id: EventId,
     ) -> Result<(), Violation> {
+        let barrier = barriers::prepare(
+            self,
+            peer,
+            barriers::Side::Base,
+            delivery_sequence,
+            *event_id.as_bytes(),
+        )?;
         // Inside an open barrier the edge acknowledges the last base part
         // cumulatively; elsewhere the ACK advances by exactly one.
         let barrier_last = self
             .barriers
             .get(&peer)
-            .filter(|barrier| !barrier.base_acked)
-            .map(|barrier| barrier.base_last);
+            .filter(|barrier| !barrier.base_acked())
+            .map(|barrier| barrier.base().last());
         let state = self.peers.get(&peer).ok_or(Violation::Misaddressed)?;
         if state.reconciliation.is_some() {
             return Err(Violation::Phase);
@@ -975,15 +975,20 @@ impl FederationCoordinator {
             )
             .map_err(|_| Violation::Ceiling)?,
         );
+        if let Some(update) = &barrier {
+            writes.push(update.write(plan.resulting_revision().get())?);
+        }
         let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
             .map_err(|_| Violation::Ceiling)?;
         context
             .stage_durable_with_account_service(plan, fanout, None, 0, writes)
             .map_err(|_| Violation::Ceiling)?;
         self.pending = Some(PendingCommit::DeliveryAcknowledged {
+            resume: None,
             peer,
             delivery_sequence,
             event_id,
+            barrier,
         });
         Ok(())
     }
@@ -995,7 +1000,12 @@ impl FederationCoordinator {
         peer: ServerId,
         delivery_sequence: u64,
         event_id: EventId,
+        barrier: Option<Box<barriers::Prepared>>,
     ) {
+        if barrier.is_some_and(|update| update.apply(self).is_err()) {
+            startup::fail_restore(self);
+            return;
+        }
         let Some(state) = self.peers.get_mut(&peer) else {
             return;
         };
@@ -1007,13 +1017,7 @@ impl FederationCoordinator {
             state.outbox.unacked_bytes = state.outbox.unacked_bytes.saturating_sub(bytes);
         }
         state.outbox.cursor = Some((delivery_sequence, event_id));
-        let barrier_last = self.barriers.get(&peer).map(|barrier| barrier.base_last);
-        if barrier_last == Some(delivery_sequence) {
-            if let Some(barrier) = self.barriers.get_mut(&peer) {
-                barrier.base_acked = true;
-            }
-            companion::try_close_barrier(self, context, peer);
-        }
+        companion::try_close_barrier(self, context, peer);
     }
 
     /// Stages rows that carry no domain mutation behind a checkpoint plan,
@@ -1143,6 +1147,7 @@ impl FederationCoordinator {
                     bytes: state.outbox.unacked_bytes,
                     max_objects: self.config.outbox_objects_per_edge,
                     max_bytes: self.config.outbox_bytes_per_edge,
+                    barrier_open: self.barriers.contains_key(&peer),
                 },
             );
         }
@@ -1408,12 +1413,8 @@ impl FederationCoordinator {
             Some(PendingCommit::SnapshotReady { peer }) => {
                 snapshot::ready_committed(self, context, peer)
             }
-            Some(PendingCommit::DeliveryAcknowledged {
-                peer,
-                delivery_sequence,
-                event_id,
-            }) => {
-                self.acknowledgement_committed(context, peer, delivery_sequence, event_id);
+            Some(pending @ PendingCommit::DeliveryAcknowledged { .. }) => {
+                self.delivery_ack_receipt(context, pending)
             }
             Some(PendingCommit::ResumeAcknowledged(receipt)) => {
                 resume_reconciliation::committed(self, context, receipt);
@@ -1426,6 +1427,23 @@ impl FederationCoordinator {
             Some(PendingCommit::Acknowledged) | None => {}
         }
         self.deliver_committed_then_continue(context, events);
+    }
+
+    fn delivery_ack_receipt(&mut self, context: &mut StateCoreContext, pending: PendingCommit) {
+        let PendingCommit::DeliveryAcknowledged {
+            resume,
+            peer,
+            delivery_sequence,
+            event_id,
+            barrier,
+        } = pending
+        else {
+            return;
+        };
+        self.acknowledgement_committed(context, peer, delivery_sequence, event_id, barrier);
+        if let Some(link) = resume {
+            snapshot::barrier_resume_committed(self, context, peer, link);
+        }
     }
 
     fn deliver_committed_then_continue(
@@ -1447,9 +1465,12 @@ impl FederationCoordinator {
             PendingCommit::CompanionRestore(receipt) => {
                 startup::retirement::committed(self, context, *receipt)
             }
-            PendingCommit::Companion { peer, link } => {
-                companion::committed(self, context, link, peer, events)
-            }
+            PendingCommit::Companion {
+                peer,
+                link,
+                barrier,
+                resume,
+            } => companion::committed(self, context, link, peer, events, barrier, resume),
             _ => {}
         }
     }
@@ -1628,7 +1649,7 @@ impl FederationCoordinator {
                 || self
                     .barriers
                     .get(&event.target)
-                    .is_some_and(|barrier| event.delivery_sequence > barrier.base_last)
+                    .is_some_and(|barrier| event.delivery_sequence > barrier.base().last())
             {
                 continue;
             }

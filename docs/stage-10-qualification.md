@@ -19,7 +19,7 @@ release candidate.
 | Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 preserves the original refused session through pressure recovery. CAP-87 removes premature origin retirement after a pending or refused journal write; both regressions and all 100 edge tests pass. The uninstrumented 64-client campaign at `b735700` passes original-session pressure recovery. |
 | Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. The 64-client campaign at `b735700` also returns all clients to its resource envelope and stops all three daemons cleanly. |
 | Implementation under qualification | CAP-5 stopped rotation commands, live two-account migration, and stale START cleanup pass. Actual rotation passes the 64-client, five-minute capacity campaign in `cap91-rotation-final`. Maintenance-aware export remains open. CAP-13 batching passes the 64-client campaign at `b735700`; CAP-91 adds two controlled gathering-checkpoint regressions. |
-| Companion delivery recovery | CAP-70 and CAP-71 now restore scoped delivery rows and commit companion acknowledgement transitions before changing replay coverage. Retained acknowledged cross-profile rows also restart with exact bytes. Complete recovery of unfinished combined barriers remains open. CAP-79 still requires the published replay retention bounds. |
+| Companion delivery recovery | CAP-70 and CAP-71 now persist and reconstruct both endpoints of unfinished combined barriers. Real-storage tests cover both ACK orders, refused writes, lost publication callbacks, and final-ACK resume. CAP-79 still requires the published replay retention bounds. |
 | Declared recovery | CAP-72 discards obsolete companion delivery, replay, and barrier state and marks typed live routes pending. CAP-73 now gates ordinary mutations before signing; terminal-evidence ingestion remains open. CAP-74 persists witnesses and blocks ordinary resume across restart; authenticated witness resolution remains open. |
 | ReInit admission | CAP-86 now rejects outside binding accounts before attempt, activation, or abort signing. Three regressions fail without the checks and pass with them, including valid in-group controls and absent-signer refusal. The remaining device-to-leaf and continuing-member checks need separate evidence. |
 | Physical storage growth | STO-1 remains open. The measured storage batch exceeds both the qualification ceiling and operational reserve; a smaller page size alone does not establish a universal bound. |
@@ -2331,11 +2331,29 @@ and pass in `resumed-base-barrier-green.log`; a retained part covered by the
 base cursor remains a passing control. These tests run through authenticated
 storage reconstruction.
 
-This correction does not recover unfinished combined barriers. The existing
-DeliveryBarrier codec still needs runtime staging, receipt-dependent updates
-for both halves, and reconstruction against both durable cursors. CAP-70
-remains open until all four base and companion acknowledgement combinations
-have restart and refusal evidence.
+The combined-barrier repair now writes the validated DeliveryBarrier with
+both streams' event rows. The final base event carries that exact prepared
+record through the mutation receipt. A coalesced batch cannot reconstruct its
+endpoints by collecting unrelated events for the same target. Admission refuses
+a second combined barrier for a target whose earlier gate remains open.
+
+Startup reads companion owner and gate metadata before the base outbox at one
+pinned storage commit. It checks both complete part sequences, mutation and
+state generation, delivery generations, final event identities, historical
+scope, and independently committed cursor coverage. The base peer may be Ready
+or Suspended in that unchanged scope. Missing parts or companion bytes,
+contradictory coverage, changed scope, and snapshot replacement remain errors.
+
+The original companion reconstruction test fails for all three unfinished
+coverage states and passes for the completed state in
+`cap70-combined-owner-red.log`. Those tests use an explicit codec fixture for
+the base endpoint. The new full coordinator tests separately use the real
+storage owner and both event streams. They cover both ACK orders, restart
+after each half, and restart after storage commit without the old coordinator's
+publication callback. Replay on either profile stops at the gate, including
+when later ordinary rows share the same base read page. Outbox overflow refuses
+the new mutation while a gate is open; it cannot replace that gate with a
+snapshot. These component tests do not qualify a Stage 10 release.
 
 ### CAP-71: companion acknowledgement coverage has no durable receipt owner
 
@@ -2369,11 +2387,20 @@ an unrelated event, original acknowledgement timestamps, and malformed or
 partial acknowledgements. The acknowledged-barrier replay correction under
 CAP-70 preserves those committed companion flags.
 
-CAP-71 remains open for the combined barrier. Both stream endpoints and their
-independent durable coverage must be staged and reconstructed together before
-release. The four combinations of base and companion coverage and refusal at
-each receipt boundary still need implementation and tests. Snapshot replacement
-must remain forbidden while a barrier is unfinished.
+Each final ACK now stages its gate flag with that stream's cursor and outbox
+changes. A prepared update owns the exact prior gate. Memory changes only when
+its transaction receipt is handled; determinate refusal leaves both owners
+unchanged. The second ACK deletes the durable gate in its transaction and
+releases later events after the receipt. The companion replay hold remains
+active after its own ACK while the base half is outstanding.
+
+A reconnect presenting the exact final endpoint of an unfinished barrier can
+stage the missing ACK. Neither FRESUME OK nor ERESUME OK is emitted before that
+transaction's receipt. Partial endpoints and wrong final identities remain
+invalid. Real-storage tests cover both final-ACK resume paths, both completion
+orders, refusal at either half, all four restart states, and loss of the
+in-memory callback after a successful storage commit. The published replay
+retention obligation remains separate under CAP-79.
 
 ### CAP-72: declared recovery preserves obsolete companion state and live routes
 
@@ -3087,6 +3114,58 @@ by the owning test after it has waited for every daemon to exit and before
 fixture cleanup. Campaign exit codes, unchanged executable hashes, metrics,
 daemon logs, and the controlled storage-owner regression tests remain usable.
 This correction changes evidence claims, with no runtime change.
+
+### CAP-93: replay and overflow bypass an unfinished combined barrier
+
+The combined-barrier review found three paths that did not apply the existing
+per-target gate. A base resend checked the barrier endpoint before requesting
+a page, but the page's upper bound could extend past that endpoint. It then
+published every returned row. Companion resume replay rendered every
+unacknowledged row without checking the outer gate. Outbox overflow refused
+snapshot fallback only when the current mutation itself opened a barrier;
+a later ordinary mutation could request replacement of an earlier open gate.
+
+Base Section 20.8 requires later events on both profiles to wait for both
+final acknowledgements. The repair clips base read pages to the held endpoint,
+keeps a companion replay hold until both ACK receipts complete, and includes
+the existing gate in the projector's outbox budget. Overflow under that gate
+refuses the new mutation without writing a snapshot fence.
+
+The real-storage replay test retains two barrier parts and a later ordinary
+row on each profile. Both initial replays publish only the barrier parts.
+The first ACK and the second storage commit publish no later events; handling
+the second receipt releases exactly the later row on each stream. Removing
+only the base page bound reproduces one failure in `cap70-red-base-page`.
+Removing only the companion hold reproduces one failure in
+`cap70-red-companion-replay`. The outbox planning test independently proves
+that the former overflow behavior writes a snapshot fence, in
+`cap70-red-outbox-overflow-behavior`. Each directory retains the exact reversed
+source, executable, hashes, and test log. All fixed source is restored.
+
+The first overflow reversal in `cap70-red-outbox-overflow` failed to compile
+because it left the new gate field unused. No regression ran in that attempt;
+its copied executable belonged to the preceding replay test. Its proof is
+marked invalid and accompanied by `INVALID-BUILD-FAILURE.txt`. Only the later
+behavioral reversal counts as evidence. These tests qualify the repair's
+component behavior, not release capacity or cryptographic review.
+
+The final checkpoint passes formatting, all-target/all-feature workspace
+Clippy, 2,433 workspace tests with no failures and 21 ignored qualification
+tests, source policy and its self-test, workspace policy, and coverage-checker
+self-tests. `cap70-final-gates.json` records the commands and results. Both
+source inventories bind 632 Rust files at
+`140416a123ebcdefec70d2362dab74ccb3921c946c6f9fdac97330395df88da5`.
+The release policy now includes 688 critical regions, including 27 additional
+barrier construction, recovery, and receipt regions. Coverage floors remain
+unchanged; this binding is not a new branch-coverage measurement.
+
+An earlier gate passed the same 2,433 tests but failed source policy because
+the new overflow test was outside a `tests/` directory. That run remains in
+`cap70-first-gates`. The test now resides in `outbox/tests/mod.rs` and the full
+final gate passes. The later event-record boxing and barrier-key admission
+changes also passed complete gates before the final checkpoint. Exact source
+inputs, the final runtime test executable, and hashes are retained in
+`cap70-final-proof`.
 
 ## Release claims and limits
 

@@ -36,6 +36,7 @@ fn a_mismatched_proposed_generation_fails_before_touching_the_stream() -> TestRe
     };
     coordinator.state.streams.insert(peer, before.clone());
     let candidate = PreparedAck {
+        resume: false,
         peer,
         link: LinkId::new(1),
         position: DeliveryPosition {

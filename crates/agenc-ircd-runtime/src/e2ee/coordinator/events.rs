@@ -70,6 +70,8 @@ pub struct DeliveryStream {
     /// The first and last sequence of an open cross-profile barrier; the
     /// edge acknowledges the last one cumulatively.
     pub barrier: Option<(u64, u64)>,
+    /// Later copies remain held until both profiles acknowledge their endpoints.
+    pub(crate) hold_after: Option<u64>,
 }
 
 impl DeliveryStream {

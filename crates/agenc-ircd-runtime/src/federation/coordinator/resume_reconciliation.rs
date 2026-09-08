@@ -99,7 +99,7 @@ pub(super) fn begin(
     if coordinator
         .barriers
         .get(&peer)
-        .is_some_and(|barrier| delivery_sequence > barrier.base_last)
+        .is_some_and(|barrier| delivery_sequence > barrier.base().last())
     {
         return Err(Violation::Acknowledgement);
     }
@@ -564,7 +564,13 @@ pub(super) fn committed(
         fail(coordinator, context, target, Violation::Acknowledgement);
         return;
     }
-    coordinator.acknowledgement_committed(context, target.peer, receipt.sequence, receipt.event_id);
+    coordinator.acknowledgement_committed(
+        context,
+        target.peer,
+        receipt.sequence,
+        receipt.event_id,
+        None,
+    );
     if !applicable(coordinator, target) {
         cancel_target(coordinator, context, target);
         return;

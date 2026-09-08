@@ -166,6 +166,9 @@ pub struct CompanionState {
     pub results: BTreeMap<[u8; 32], StoredResult>,
     /// Per-conversation retained state the sequencer needs between records.
     pub conversations: BTreeMap<[u8; 32], ConversationState>,
+    /// Gates awaiting the outer owner's independent base-stream validation.
+    pub(crate) restored_barriers:
+        BTreeMap<ServerId, agenc_ircd_storage::e2ee_records::delivery_recovery::DeliveryBarrier>,
     /// Delivery streams per target edge.
     pub streams: BTreeMap<ServerId, events::DeliveryStream>,
     /// Verified root and roster heads by account digest.

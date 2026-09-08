@@ -15,6 +15,7 @@ use agenc_ircd_e2ee::limits::S2S_IDEMPOTENCY_RETENTION_SECONDS;
 use agenc_ircd_e2ee::wire::fragment::fragment_object;
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_federation_wire::CanonicalEncode;
+use agenc_ircd_storage::e2ee_records::delivery_recovery::{BarrierEndpoint, DeliveryScope};
 use agenc_ircd_types::{ChannelInstanceId, OriginId, ServerId, ServerIncarnation, UserId};
 
 use super::ConversationState;
@@ -116,8 +117,12 @@ pub struct BarrierPlanned {
     pub base_parts: u16,
     /// Base plus companion parts.
     pub part_count: u16,
-    /// The last companion delivery sequence of the barrier.
-    pub companion_last: u64,
+    /// The transaction's shared state generation.
+    pub state_generation: u64,
+    /// The full accepted companion delivery scope.
+    pub companion_scope: DeliveryScope,
+    /// The complete companion endpoint, including its final event identity.
+    pub companion: BarrierEndpoint,
 }
 
 /// The base origin principal the companion origin mirrors.
@@ -274,6 +279,8 @@ pub fn run(
                             CrossProfileAssignment {
                                 mutation_id: barrier.mutation_id,
                                 part_count: barrier.part_count,
+                                companion_scope: barrier.companion_scope,
+                                companion: barrier.companion,
                             },
                         )
                     })
@@ -537,6 +544,46 @@ struct BarrierInputs<'a> {
     entropy: &'a mut dyn agenc_ircd_types::EntropySource,
 }
 
+fn complete_barriers(
+    assignments: &BTreeMap<ServerId, BarrierAssignment>,
+    sequenced: &events::Sequenced,
+    state_generation: u64,
+) -> Result<Vec<BarrierPlanned>, E2eeReplyCode> {
+    assignments
+        .iter()
+        .map(|(target, assignment)| {
+            let (_, stream) = sequenced
+                .streams
+                .iter()
+                .find(|(peer, _)| peer == target)
+                .ok_or(E2eeReplyCode::Syncing)?;
+            let owner = stream.owner.as_ref().ok_or(E2eeReplyCode::Syncing)?;
+            let (first, last) = stream.barrier.ok_or(E2eeReplyCode::Syncing)?;
+            let copy = sequenced
+                .copies
+                .iter()
+                .find(|copy| copy.target == *target && copy.row.sequence == last)
+                .ok_or(E2eeReplyCode::Syncing)?;
+            if sequenced.barrier_last.get(target) != Some(&last)
+                || copy.generation != stream.generation
+                || last >= stream.next_sequence
+            {
+                return Err(E2eeReplyCode::Syncing);
+            }
+            Ok(BarrierPlanned {
+                target: *target,
+                mutation_id: assignment.mutation_id,
+                base_parts: assignment.base_parts,
+                part_count: assignment.part_count,
+                state_generation,
+                companion_scope: *owner.scope(),
+                companion: BarrierEndpoint::new(stream.generation, first, last, copy.row.event_id)
+                    .map_err(|_| E2eeReplyCode::Syncing)?,
+            })
+        })
+        .collect()
+}
+
 /// Plans one barrier per target that receives both base and companion
 /// events, sampling its mutation identity (spec 20.8).
 fn plan_barrier_assignments(
@@ -634,21 +681,7 @@ fn assemble(
         barrier_inputs.entropy,
         &assignments,
     )?;
-    let barriers: Vec<BarrierPlanned> = assignments
-        .iter()
-        .filter_map(|(target, assignment)| {
-            sequenced
-                .barrier_last
-                .get(target)
-                .map(|last| BarrierPlanned {
-                    target: *target,
-                    mutation_id: assignment.mutation_id,
-                    base_parts: assignment.base_parts,
-                    part_count: assignment.part_count,
-                    companion_last: *last,
-                })
-        })
-        .collect();
+    let barriers = complete_barriers(&assignments, &sequenced, state_generation)?;
     let (copies, mut writes, streams) = (sequenced.copies, sequenced.writes, sequenced.streams);
     let completion_event_id = copies
         .iter()

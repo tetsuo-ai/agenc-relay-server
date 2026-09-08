@@ -18,12 +18,21 @@ pub struct PreparedAck {
     peer: ServerId,
     link: LinkId,
     position: DeliveryPosition,
+    resume: bool,
     expected: DeliveryOwner,
     proposed: DeliveryCursor,
     acknowledgement: Acknowledgement,
 }
 
 impl PreparedAck {
+    pub(crate) const fn resumes(&self) -> bool {
+        self.resume
+    }
+
+    pub(crate) const fn position(&self) -> DeliveryPosition {
+        self.position
+    }
+
     pub(crate) const fn peer(&self) -> ServerId {
         self.peer
     }
@@ -123,6 +132,7 @@ pub(crate) fn prepare(
             peer,
             link,
             position,
+            resume: false,
             expected: owner.clone(),
             proposed: cursor,
             acknowledgement,
@@ -226,3 +236,71 @@ fn writes(
 #[cfg(test)]
 #[path = "acknowledgement/tests/reconstruction.rs"]
 mod reconstruction_tests;
+
+/// The caller has checked the historical resume scope and exact barrier endpoint.
+pub(crate) fn prepare_resume(
+    coordinator: &CompanionCoordinator,
+    peer: ServerId,
+    position: DeliveryPosition,
+    trusted_ack_unix_seconds: Option<u64>,
+) -> Result<Vec<Action>, CompanionFault> {
+    if coordinator.pending.is_some() {
+        return Err(CompanionFault::Ceiling);
+    }
+    let sync = coordinator
+        .peers
+        .get(&peer)
+        .ok_or(CompanionFault::Protocol)?;
+    let link = sync.link.ok_or(CompanionFault::Protocol)?;
+    if sync.active {
+        return Err(CompanionFault::Protocol);
+    }
+    let stream = coordinator
+        .state
+        .streams
+        .get(&peer)
+        .ok_or(CompanionFault::Protocol)?;
+    let owner = stream.owner.as_ref().ok_or(CompanionFault::Storage)?;
+    coordinator.validate_delivery_scope(owner.scope())?;
+    if owner.phase() != CutPhase::Ready
+        || super::cursor(stream)? != *owner.cursor()
+        || position.server_id != *coordinator.server_id.as_bytes()
+        || position.delivery_generation != stream.generation
+        || stream
+            .barrier
+            .is_none_or(|(_, last)| last != position.delivery_sequence)
+    {
+        return Err(CompanionFault::Protocol);
+    }
+    validate_coverage(stream, position)?;
+    let proposed = DeliveryCursor::new(
+        stream.generation,
+        stream.next_sequence,
+        LastAcknowledged::At {
+            sequence: position.delivery_sequence,
+            event_id: position.event_id,
+        },
+    )
+    .map_err(|_| CompanionFault::Protocol)?;
+    let updated = DeliveryOwner::new(*owner.scope(), proposed, *owner.cut(), owner.phase())
+        .map_err(|_| CompanionFault::Storage)?;
+    let acknowledgement = Acknowledgement::received_at(trusted_ack_unix_seconds);
+    let writes = writes(
+        stream,
+        position.delivery_sequence,
+        &updated,
+        acknowledgement,
+    )?;
+    Ok(vec![Action::Stage {
+        writes,
+        work: PendingWork::Acknowledgement(PreparedAck {
+            peer,
+            link,
+            position,
+            resume: true,
+            expected: owner.clone(),
+            proposed,
+            acknowledgement,
+        }),
+    }])
+}

@@ -1,6 +1,7 @@
 //! Exact reconstruction of accepted scopes and retained delivery bytes.
 #![forbid(unsafe_code)]
 
+mod barriers;
 mod pending;
 
 use std::collections::BTreeMap;
@@ -13,7 +14,7 @@ use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_ircd_storage::StoredKey;
 use agenc_ircd_storage::e2ee_records::CrossProfileTuple;
 use agenc_ircd_storage::e2ee_records::delivery_recovery::{
-    CutPhase, DeliveryOwner, DeliveryRecoveryRow, LastAcknowledged, ScopedOutbox,
+    CutPhase, DeliveryBarrier, DeliveryOwner, DeliveryRecoveryRow, LastAcknowledged, ScopedOutbox,
 };
 use agenc_ircd_types::ServerId;
 
@@ -27,6 +28,7 @@ pub(crate) struct Restore {
     versions: BTreeMap<ServerId, (u64, u64)>,
     rows: BTreeMap<StoredKey, ScopedOutbox>,
     counts: BTreeMap<ServerId, u64>,
+    barriers: BTreeMap<ServerId, DeliveryBarrier>,
     failed: bool,
     pending: pending::Pending,
 }
@@ -50,6 +52,14 @@ impl Restore {
                     .versions
                     .insert(peer, (value.revision(), value.generation()))
                     .is_some();
+            }
+            Ok(DeliveryRecoveryRow::Barrier(gate)) => {
+                let peer = ServerId::from_bytes(gate.scope().target_server_id());
+                if self.barriers.len() >= crate::federation::MAX_FEDERATION_PEERS {
+                    self.failed = true;
+                    return;
+                }
+                self.failed |= self.barriers.insert(peer, gate).is_some();
             }
             Ok(DeliveryRecoveryRow::CutPage(_)) => {}
             Ok(DeliveryRecoveryRow::Outbox(row)) => self.admit_scoped_outbox(key, row),
@@ -81,6 +91,7 @@ impl Restore {
         if self.failed {
             return Err(CompanionFault::Storage);
         }
+        barriers::validate_owners(&self.barriers, &self.owners)?;
         for (peer, owner) in self.owners {
             coordinator.validate_delivery_scope(owner.scope())?;
             if matches!(owner.phase(), CutPhase::Pending { .. }) {
@@ -107,8 +118,11 @@ impl Restore {
             );
         }
         for (_, row) in self.rows {
-            restore_row(coordinator, row)?;
+            let peer = ServerId::from_bytes(row.scope().target_server_id());
+            restore_row(coordinator, row, self.barriers.get(&peer))?;
         }
+        barriers::install(&mut coordinator.state.streams, &self.barriers)?;
+        coordinator.state.restored_barriers = self.barriers;
         for (peer, stream) in &coordinator.state.streams {
             validate_complete(stream)?;
             let owner = stream.owner.as_ref().ok_or(CompanionFault::Storage)?;
@@ -168,6 +182,7 @@ impl Restore {
 fn restore_row(
     coordinator: &mut CompanionCoordinator,
     row: ScopedOutbox,
+    gate: Option<&DeliveryBarrier>,
 ) -> Result<(), CompanionFault> {
     let peer = ServerId::from_bytes(row.scope().target_server_id());
     let generation = row.generation();
@@ -184,7 +199,7 @@ fn restore_row(
     if generation != stream.generation || sequence >= stream.next_sequence {
         return Err(CompanionFault::Storage);
     }
-    let restored = decode_row(&coordinator.state.objects, owner, sequence, row)?;
+    let restored = decode_row(&coordinator.state.objects, owner, sequence, row, gate)?;
     if stream.acked.is_some_and(|(acked, _)| sequence <= acked) != restored.acked() {
         return Err(CompanionFault::Storage);
     }
@@ -208,6 +223,7 @@ fn decode_row(
     owner: &DeliveryOwner,
     sequence: u64,
     row: ScopedOutbox,
+    gate: Option<&DeliveryBarrier>,
 ) -> Result<StreamRow, CompanionFault> {
     let event_id = row.event_id();
     let event_object_id = row.event_object_id();
@@ -225,11 +241,7 @@ fn decode_row(
     if cross_profile(&event)? != stored_cross {
         return Err(CompanionFault::Storage);
     }
-    // A covered row remains exact replay evidence. An unfinished transaction
-    // requires its combined durable gate before either stream can resume.
-    if stored_cross.is_some() && !row.acknowledgement().is_acknowledged() {
-        return Err(CompanionFault::Storage);
-    }
+    barriers::validate_event(gate, &event, row.acknowledgement().is_acknowledged())?;
     let payload = payload(
         objects,
         row.payload_object_id(),
@@ -359,6 +371,11 @@ fn optional<const N: usize>(bytes: &[u8]) -> Result<Option<[u8; N]>, CompanionFa
 }
 
 impl CompanionCoordinator {
+    /// Borrows metadata during the pinned base-outbox scan; it grants no delivery authority.
+    pub(crate) fn restored_delivery_barrier(&self, peer: ServerId) -> Option<&DeliveryBarrier> {
+        self.restore.delivery.barriers.get(&peer)
+    }
+
     /// Called only after the complete state-table owner collection pass.
     pub(crate) fn next_restored_delivery_page(
         &mut self,

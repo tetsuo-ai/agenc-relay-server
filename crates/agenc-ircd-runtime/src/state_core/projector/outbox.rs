@@ -1,5 +1,8 @@
 //! Per-generation retention limits enforced inside the projecting transaction.
 
+#[cfg(test)]
+mod tests;
+
 use agenc_ircd_storage::TableId;
 use agenc_ircd_storage::federation_records::{
     FederationPeerRecord, PEER_RECORD_KIND, PeerPhase, peer_key,
@@ -19,6 +22,7 @@ pub(crate) struct OutboxBudget {
     pub(crate) bytes: u64,
     pub(crate) max_objects: u64,
     pub(crate) max_bytes: u64,
+    pub(crate) barrier_open: bool,
 }
 
 impl FederationProjector {
@@ -64,7 +68,7 @@ impl FederationProjector {
             return Ok(true);
         }
         // A snapshot cannot replace a partial cross-profile barrier.
-        if assignment.is_some() {
+        if assignment.is_some() || budget.barrier_open {
             return Err(RuntimeError::LimitExceeded);
         }
         let mut record = budget.peer.clone();

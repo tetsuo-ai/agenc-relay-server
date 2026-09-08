@@ -643,8 +643,22 @@ impl CompanionCoordinator {
             .streams
             .get(&peer)
             .ok_or(CompanionFault::Protocol)?;
-        if stream.generation != delivery_generation || stream.acked != last {
+        if stream.generation != delivery_generation {
             return Err(CompanionFault::Protocol);
+        }
+        if stream.acked != last {
+            let (sequence, event_id) = last.ok_or(CompanionFault::Protocol)?;
+            return super::delivery_owner::acknowledgement::prepare_resume(
+                self,
+                peer,
+                agenc_ircd_e2ee::federation::frames::DeliveryPosition {
+                    server_id: coordinator_server_id,
+                    delivery_generation,
+                    delivery_sequence: sequence,
+                    event_id,
+                },
+                host.trusted_ack_unix_seconds(),
+            );
         }
         let next = stream
             .acked
@@ -675,6 +689,14 @@ impl CompanionCoordinator {
         host: &dyn CompanionHost,
         entropy: &mut dyn EntropySource,
     ) -> Result<Vec<Action>, CompanionFault> {
+        if self
+            .state
+            .streams
+            .get(&peer)
+            .is_some_and(|stream| stream.hold_after.is_some())
+        {
+            return Err(CompanionFault::Protocol);
+        }
         let scope = self.delivery_scope(peer, incarnation, host.base_resync_epoch(peer))?;
         self.refresh_entitlements(peer, host);
         let capture =
@@ -1281,7 +1303,12 @@ fn retransmission(
     stream: &DeliveryStream,
 ) -> Result<Vec<FederationLineText>, CompanionFault> {
     let mut lines = Vec::new();
-    for row in stream.unacked_rows() {
+    for row in stream
+        .rows
+        .iter()
+        .filter(|row| !row.acked())
+        .take_while(|row| stream.hold_after.is_none_or(|last| row.sequence <= last))
+    {
         let copy = events::CopyToSend {
             target: peer,
             row: row.clone(),
@@ -1357,4 +1384,46 @@ pub(super) fn render_page(
         },
     )?);
     Ok(lines)
+}
+
+impl CompanionCoordinator {
+    /// A resumed final ACK may activate only its still-current link after commit.
+    pub(crate) fn resume_ack_committed(
+        &mut self,
+        peer: ServerId,
+        link: crate::federation::LinkId,
+    ) -> Result<Vec<FederationLineText>, CompanionFault> {
+        let sync = self.peers.get(&peer).ok_or(CompanionFault::Protocol)?;
+        if sync.link != Some(link) {
+            return Ok(Vec::new());
+        }
+        if sync.active {
+            return Err(CompanionFault::Protocol);
+        }
+        let stream = self
+            .state
+            .streams
+            .get(&peer)
+            .ok_or(CompanionFault::Storage)?;
+        let owner = stream.owner.as_ref().ok_or(CompanionFault::Storage)?;
+        let next = stream
+            .acked
+            .and_then(|(last, _)| last.checked_add(1))
+            .ok_or(CompanionFault::Storage)?;
+        let mut lines = vec![line(
+            &self.server_name,
+            &CompanionFrame::ResumeOk {
+                target_server_id: *peer.as_bytes(),
+                server_incarnation: owner.scope().target_incarnation(),
+                delivery_generation: stream.generation,
+                next_delivery_sequence: next,
+            },
+        )?];
+        lines.extend(retransmission(&self.server_name, peer, stream)?);
+        self.peers
+            .get_mut(&peer)
+            .ok_or(CompanionFault::Protocol)?
+            .active = true;
+        Ok(lines)
+    }
 }

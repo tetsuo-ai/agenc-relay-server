@@ -82,6 +82,9 @@ pub(super) fn resume(
     let same_generation = retained_resume_scope(state, generation)?;
     let retained = same_generation && cursor_retained(state, cursor);
     if !retained {
+        if same_generation && stage_barrier_resume(coordinator, context, peer, link, cursor)? {
+            return Ok(());
+        }
         if same_generation
             && super::resume_reconciliation::begin(
                 coordinator,
@@ -168,7 +171,7 @@ pub(super) fn continue_resend(
     // A replay stops at the last part of an open cross-profile barrier;
     // the release replays the rest (spec 20.8).
     let reserved = coordinator.barriers.get(&peer).map_or(reserved, |barrier| {
-        reserved.min(barrier.base_last.saturating_add(1))
+        reserved.min(barrier.base().last().saturating_add(1))
     });
     let Some(state) = coordinator.peers.get_mut(&peer) else {
         return;
@@ -187,7 +190,8 @@ pub(super) fn continue_resend(
     let last = resend
         .next
         .saturating_add(u64::from(RESEND_PAGE_ROWS))
-        .saturating_sub(1);
+        .saturating_sub(1)
+        .min(reserved.saturating_sub(1));
     let plan = outbox_range(peer, state.projection_generation, resend.next, last)
         .ok()
         .and_then(|(start, end)| {
@@ -465,6 +469,9 @@ fn begin_snapshot(
     link: LinkId,
     peer: ServerId,
 ) -> Result<(), Violation> {
+    if coordinator.barriers.contains_key(&peer) {
+        return Err(Violation::Acknowledgement);
+    }
     let generation = coordinator
         .peers
         .get(&peer)
@@ -1077,5 +1084,68 @@ fn expire(
     state.snapshot = None;
     if state.live.as_ref().is_some_and(|live| live.link == link) {
         coordinator.fail_link(context, link, peer, Violation::Phase);
+    }
+}
+
+/// A final base cursor recovered from the edge uses the ordinary atomic ACK owner.
+fn stage_barrier_resume(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+    link: LinkId,
+    cursor: DeliveryCursor,
+) -> Result<bool, Violation> {
+    let Some(gate) = coordinator
+        .barriers
+        .get(&peer)
+        .filter(|gate| !gate.base_acked())
+    else {
+        return Ok(false);
+    };
+    let DeliveryCursor::At {
+        delivery_sequence,
+        event_id,
+    } = cursor
+    else {
+        return Ok(false);
+    };
+    if delivery_sequence < gate.base().first() {
+        return Ok(false);
+    }
+    coordinator.acknowledge(context, peer, delivery_sequence, event_id)?;
+    let Some(PendingCommit::DeliveryAcknowledged { resume, .. }) = coordinator.pending.as_mut()
+    else {
+        return Err(Violation::Codec);
+    };
+    *resume = Some(link);
+    Ok(true)
+}
+
+pub(super) fn barrier_resume_committed(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+    link: LinkId,
+) {
+    if !coordinator.link_is_live(link, peer) || !coordinator.loaded() {
+        return;
+    }
+    let Some(state) = coordinator.peers.get(&peer) else {
+        return;
+    };
+    let Some(next) = state
+        .outbox
+        .cursor
+        .and_then(|(sequence, _)| sequence.checked_add(1))
+    else {
+        return;
+    };
+    let frame = FederationFrame::ResumeOk {
+        edge_server_id: peer,
+        projection_generation: state.projection_generation,
+        next_delivery_sequence: next,
+    };
+    if coordinator.send_frame(context, link, peer, &frame) {
+        start_resend(coordinator, context, peer, next);
     }
 }

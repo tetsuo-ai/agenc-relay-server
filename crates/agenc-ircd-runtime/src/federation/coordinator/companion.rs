@@ -17,7 +17,8 @@ use agenc_ircd_federation_wire::FederationLineText;
 use agenc_ircd_storage::federation_records::PeerPhase;
 use agenc_ircd_types::{MonotonicTick, OriginId, ServerId, ServerIncarnation};
 
-use super::{FederationCoordinator, OpenBarrier, PeerState, PendingCommit, SendFailure, Violation};
+use super::barriers;
+use super::{FederationCoordinator, PeerState, PendingCommit, SendFailure, Violation};
 use crate::e2ee::coordinator::execute::{
     self, BarrierPlanned, BaseView, CommittedLine, OriginFacts, Staged,
 };
@@ -212,28 +213,6 @@ pub(super) fn admitted(
     Ok(())
 }
 
-/// Marks the companion half of an open barrier acknowledged once the
-/// stream's cumulative ACK reached its last part, and releases the barrier
-/// when the base half is acknowledged too.
-fn companion_acknowledged(
-    coordinator: &mut FederationCoordinator,
-    context: &mut StateCoreContext,
-    peer: ServerId,
-) {
-    let acked = coordinator
-        .companion_exec
-        .as_ref()
-        .and_then(|executor| executor.acked_through(peer));
-    let Some(barrier) = coordinator.barriers.get_mut(&peer) else {
-        return;
-    };
-    if barrier.companion_acked || acked.is_none_or(|acked| acked < barrier.companion_last) {
-        return;
-    }
-    barrier.companion_acked = true;
-    try_close_barrier(coordinator, context, peer);
-}
-
 /// Closes a barrier once both streams acknowledged it: the base outbox
 /// replays from the row after the barrier and the companion stream resends
 /// its later rows.
@@ -242,13 +221,20 @@ pub(super) fn try_close_barrier(
     context: &mut StateCoreContext,
     peer: ServerId,
 ) {
-    let Some(barrier) = coordinator.barriers.get(&peer).copied() else {
+    let Some(barrier) = coordinator.barriers.get(&peer).cloned() else {
         return;
     };
-    if !(barrier.base_acked && barrier.companion_acked) {
+    if !(barrier.base_acked() && barrier.companion_acked()) {
         return;
     }
     coordinator.barriers.remove(&peer);
+    if let Some(stream) = coordinator
+        .companion_exec
+        .as_mut()
+        .and_then(|executor| executor.state.streams.get_mut(&peer))
+    {
+        stream.hold_after = None;
+    }
     let resumable = coordinator
         .peers
         .get(&peer)
@@ -258,14 +244,14 @@ pub(super) fn try_close_barrier(
             coordinator,
             context,
             peer,
-            barrier.base_last.saturating_add(1),
+            barrier.base().last().saturating_add(1),
         );
     }
     let lines = coordinator
         .companion_exec
         .as_ref()
         .filter(|executor| executor.delivering(peer))
-        .map(|executor| executor.retransmit_after(peer, barrier.companion_last));
+        .map(|executor| executor.retransmit_after(peer, barrier.companion().last()));
     let Some(target_link) = coordinator
         .peers
         .get(&peer)
@@ -286,37 +272,49 @@ pub(super) fn try_close_barrier(
     }
 }
 
-/// Records the barriers a committed batch opened, reading each target's
-/// last base part from the batch's outbound events.
+/// Adopts only the exact gate carried by the committed projection.
 fn open_barriers(
     coordinator: &mut FederationCoordinator,
     planned: &[BarrierPlanned],
     events: &[OutboundEvent],
 ) -> Result<(), CompanionFault> {
-    for barrier in planned {
-        let sequences: Vec<u64> = events
+    for planned in planned {
+        let mut gates = events
             .iter()
-            .filter(|event| event.target == barrier.target)
-            .map(|event| event.delivery_sequence)
-            .collect();
-        let base_last = sequences.iter().copied().max();
-        let consistent = sequences.len() == usize::from(barrier.base_parts)
-            && !coordinator.barriers.contains_key(&barrier.target);
-        let (true, Some(base_last)) = (consistent, base_last) else {
+            .filter(|event| event.target == planned.target)
+            .filter_map(|event| event.combined_barrier.as_deref())
+            .filter(|gate| gate.mutation_id() == planned.mutation_id);
+        let gate = gates.next().ok_or(CompanionFault::Storage)?;
+        if gates.next().is_some()
+            || coordinator.barriers.contains_key(&planned.target)
+            || !matches_planned(gate, planned)
+        {
             return Err(CompanionFault::Storage);
-        };
-        coordinator.barriers.insert(
-            barrier.target,
-            OpenBarrier {
-                mutation_id: barrier.mutation_id,
-                base_last,
-                base_acked: false,
-                companion_last: barrier.companion_last,
-                companion_acked: false,
-            },
-        );
+        }
+        let stream = coordinator
+            .companion_exec
+            .as_mut()
+            .and_then(|executor| executor.state.streams.get_mut(&planned.target))
+            .ok_or(CompanionFault::Storage)?;
+        stream.hold_after = Some(gate.companion().last());
+        coordinator.barriers.insert(planned.target, gate.clone());
     }
     Ok(())
+}
+
+fn matches_planned(gate: &super::OpenBarrier, planned: &BarrierPlanned) -> bool {
+    gate.scope() == &planned.companion_scope
+        && gate.companion() == &planned.companion
+        && gate.state_generation() == planned.state_generation
+        && gate.part_count() == planned.part_count
+        && gate
+            .base()
+            .last()
+            .checked_sub(gate.base().first())
+            .and_then(|n| n.checked_add(1))
+            == Some(u64::from(planned.base_parts))
+        && !gate.base_acked()
+        && !gate.companion_acked()
 }
 
 fn apply(
@@ -389,17 +387,40 @@ fn stage(
     if coordinator.pending.is_some() {
         return Err(Violation::Ceiling);
     }
+    let resume = matches!(&staged.work, PendingWork::Acknowledgement(ack) if ack.resumes());
+    let barrier = match &staged.work {
+        PendingWork::Acknowledgement(ack) => {
+            let position = ack.position();
+            if ack.peer() != peer {
+                return Err(Violation::Codec);
+            }
+            barriers::prepare(
+                coordinator,
+                peer,
+                barriers::Side::Companion,
+                position.delivery_sequence,
+                position.event_id,
+            )?
+        }
+        _ => None,
+    };
+    if resume && barrier.is_none() {
+        return Err(Violation::Acknowledgement);
+    }
     let plan = context
         .domain()
         .plan_account_service_checkpoint()
         .map_err(|_| Violation::Ceiling)?;
     let revision = plan.resulting_revision().get();
-    let writes = staged
+    let mut writes = staged
         .writes
         .into_iter()
         .map(|write| write.at_revision(revision))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Violation::Ceiling)?;
+    if let Some(update) = &barrier {
+        writes.push(update.write(revision)?);
+    }
     let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
         .map_err(|_| Violation::Ceiling)?;
     context
@@ -408,7 +429,12 @@ fn stage(
     if let Some(executor) = coordinator.companion_exec.as_mut() {
         executor.set_pending(staged.work);
     }
-    coordinator.pending = Some(PendingCommit::Companion { peer, link });
+    coordinator.pending = Some(PendingCommit::Companion {
+        peer,
+        link,
+        barrier,
+        resume,
+    });
     Ok(())
 }
 
@@ -427,16 +453,19 @@ fn run(
             .and_then(|entry| entry.principal.session)
             .map(|(_, user_id)| user_id),
     };
+    let open = &coordinator.barriers;
     let peer_states = &coordinator.peers;
     let config = &coordinator.config;
     let base_capacity = Box::new(move |target: ServerId, count: usize, bytes: u64| {
-        peer_states.get(&target).is_none_or(|state| {
-            let objects = u64::try_from(state.outbox.unacked.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
-            objects <= config.outbox_objects_per_edge
-                && state.outbox.unacked_bytes.saturating_add(bytes) <= config.outbox_bytes_per_edge
-        })
+        !open.contains_key(&target)
+            && peer_states.get(&target).is_none_or(|state| {
+                let objects = u64::try_from(state.outbox.unacked.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+                objects <= config.outbox_objects_per_edge
+                    && state.outbox.unacked_bytes.saturating_add(bytes)
+                        <= config.outbox_bytes_per_edge
+            })
     });
     let Some(executor) = coordinator.companion_exec.as_mut() else {
         return Err(Violation::Companion(CompanionViolation::Unsupported));
@@ -450,7 +479,12 @@ fn run(
         execute::run(executor, view, link, peer, complete, &facts_for).map_err(code_violation)?;
     match staged {
         Staged::Batch => {
-            coordinator.pending = Some(PendingCommit::Companion { peer, link });
+            coordinator.pending = Some(PendingCommit::Companion {
+                peer,
+                link,
+                barrier: None,
+                resume: false,
+            });
             Ok(())
         }
         Staged::Replay(lines) => {
@@ -500,7 +534,7 @@ fn send_to_target(
         .barriers
         .get(&target)
         .zip(sequence)
-        .is_some_and(|(barrier, sequence)| sequence > barrier.companion_last);
+        .is_some_and(|(barrier, sequence)| sequence > barrier.companion().last());
     let delivering = coordinator
         .companion_exec
         .as_ref()
@@ -530,6 +564,8 @@ pub(super) fn committed(
     link: LinkId,
     peer: ServerId,
     events: &[OutboundEvent],
+    barrier: Option<Box<barriers::Prepared>>,
+    resume: bool,
 ) {
     let epoch = coordinator
         .peers
@@ -555,6 +591,12 @@ pub(super) fn committed(
             return;
         }
     };
+    if (barrier.is_some() || resume)
+        && !matches!(committed, Committed::Acknowledged(target) if target == peer)
+    {
+        super::startup::fail_restore(coordinator);
+        return;
+    }
     match committed {
         Committed::Lines(lines) => {
             for (target, line) in lines {
@@ -565,16 +607,47 @@ pub(super) fn committed(
             continue_snapshot(coordinator, context, publication);
         }
         Committed::Fetch(publication) => continue_fetch(coordinator, context, publication),
-        Committed::Acknowledged(target) => companion_acknowledged(coordinator, context, target),
+        Committed::Acknowledged(target) => {
+            committed_ack(coordinator, context, link, target, barrier, resume)
+        }
         Committed::Request(pending) => {
             let lines = execute::committed_lines(&*executor, &pending);
-            let lines = match open_barriers(coordinator, &pending.barriers, events) {
-                Ok(()) => lines,
-                Err(_) => Err(E2eeReplyCode::RateLimited),
-            };
+            if open_barriers(coordinator, &pending.barriers, events).is_err() {
+                super::startup::fail_restore(coordinator);
+                return;
+            }
             request_committed(coordinator, context, link, peer, lines);
         }
     }
+}
+
+fn committed_ack(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    target: ServerId,
+    barrier: Option<Box<barriers::Prepared>>,
+    resume: bool,
+) {
+    if barrier.is_some_and(|update| update.apply(coordinator).is_err()) {
+        super::startup::fail_restore(coordinator);
+        return;
+    }
+    if resume {
+        let lines = coordinator
+            .companion_exec
+            .as_mut()
+            .ok_or(CompanionFault::Storage)
+            .and_then(|executor| executor.resume_ack_committed(target, link));
+        match lines {
+            Ok(lines) => send_lines(coordinator, context, link, target, lines),
+            Err(_) => {
+                super::startup::fail_restore(coordinator);
+                return;
+            }
+        }
+    }
+    try_close_barrier(coordinator, context, target);
 }
 
 /// Answers the requester and delivers the event copies of one committed

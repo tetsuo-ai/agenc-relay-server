@@ -17,6 +17,9 @@ use agenc_ircd_federation_wire::{
     CanonicalEncode, CrossProfilePart, EventHeader, ProjectionEntryHeader, ProjectionPrimaryKey,
     RequestCorrelation, federation_object_id,
 };
+use agenc_ircd_storage::e2ee_records::delivery_recovery::{
+    BarrierEndpoint, DeliveryBarrier, DeliveryScope,
+};
 use agenc_ircd_storage::federation_records::{
     OUTBOX_EVENT_KIND, OutboxEventRecord, PROJECTION_ENTRY_KIND, ProjectionEntryRecord, outbox_key,
     projection_entry_key,
@@ -24,6 +27,7 @@ use agenc_ircd_storage::federation_records::{
 use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_ircd_types::{EntropySource, EventId, NetworkId, ServerId};
 
+pub(crate) mod barrier;
 mod outbox;
 pub(crate) use outbox::OutboxBudget;
 
@@ -46,6 +50,8 @@ pub struct OutboundEvent {
     pub object_id: FederationHash32,
     /// The complete canonical `FederationEvent` bytes.
     pub encoded: Vec<u8>,
+    /// The exact gate committed with this final base part, before publication.
+    pub(crate) combined_barrier: Option<Box<DeliveryBarrier>>,
 }
 
 /// The federated request one staged plan answers.
@@ -86,6 +92,10 @@ pub struct CrossProfileAssignment {
     pub mutation_id: [u8; 16],
     /// Base plus companion parts.
     pub part_count: u16,
+    /// The full accepted companion delivery scope of the same transaction.
+    pub companion_scope: DeliveryScope,
+    /// The exact companion parts already prepared beside this base projection.
+    pub companion: BarrierEndpoint,
 }
 
 /// The delivery position one event is reserved at.
@@ -227,6 +237,17 @@ impl FederationProjector {
                 assignment,
                 index,
             )?;
+        }
+        for (target, assignment) in cross_profile {
+            let gate = barrier::attach(
+                self.network_id,
+                self.server_id,
+                *target,
+                assignment,
+                output.state_generation,
+                &mut output.events,
+            )?;
+            output.writes.push(barrier::write(&gate, row_revision)?);
         }
         Ok(Some((
             output.writes,
@@ -423,6 +444,7 @@ impl FederationProjector {
             event_id,
             object_id: federation_object_id(&bytes),
             encoded: bytes,
+            combined_barrier: None,
         })
     }
 

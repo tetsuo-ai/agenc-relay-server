@@ -57,6 +57,7 @@ mod retained_resume;
 #[path = "ordinary_acks.rs"]
 mod ordinary_acks;
 
+mod combined_barriers;
 #[path = "startup_cross_profile.rs"]
 mod startup_cross_profile;
 
@@ -1507,6 +1508,7 @@ async fn resync_outbox_overflow_retires_active_and_resuming_links() -> TestResul
                 event_id: agenc_ircd_types::EventId::from_bytes([61; 16]),
                 object_id: FederationHash32::from_bytes([62; 32]),
                 encoded: vec![1; 128],
+                combined_barrier: None,
             }],
         );
         let state = coordinator.peers.get(&peer).ok_or("peer")?;
@@ -1543,6 +1545,7 @@ async fn resync_overflow_stops_further_outbox_reservations() -> TestResult {
             event_id: agenc_ircd_types::EventId::from_bytes([61; 16]),
             object_id: FederationHash32::from_bytes([62; 32]),
             encoded: vec![1; 128],
+            combined_barrier: None,
         }],
     );
     let domain = agenc_ircd_domain::DomainState::new()?;

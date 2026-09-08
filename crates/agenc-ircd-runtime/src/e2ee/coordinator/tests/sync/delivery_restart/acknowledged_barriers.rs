@@ -3,7 +3,7 @@
 
 use super::*;
 
-async fn acknowledge_copy(fixture: &mut RestartFixture, index: usize) -> TestResult {
+pub(super) async fn acknowledge_copy(fixture: &mut RestartFixture, index: usize) -> TestResult {
     let copy = fixture.copies.get(index).ok_or("copy")?;
     let position = DeliveryPosition {
         server_id: *fixture.storage.identity.server_id.as_bytes(),
@@ -24,7 +24,7 @@ async fn acknowledge_copy(fixture: &mut RestartFixture, index: usize) -> TestRes
     Ok(())
 }
 
-async fn append_barrier(fixture: &mut RestartFixture) -> TestResult {
+pub(super) async fn append_barrier(fixture: &mut RestartFixture) -> TestResult {
     let plan = EventPlan::order(
         [7, 8]
             .into_iter()

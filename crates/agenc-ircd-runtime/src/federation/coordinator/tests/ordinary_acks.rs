@@ -137,7 +137,7 @@ async fn commit_ordered_acknowledgements(
     for (index, identity) in expected.into_iter().enumerate() {
         assert!(
             matches!(coordinator.pending, Some(PendingCommit::DeliveryAcknowledged {
-            peer: PEER, delivery_sequence, event_id,
+            peer: PEER, delivery_sequence, event_id, barrier: None, resume: None,
         }) if (delivery_sequence, event_id) == identity)
         );
         assert_eq!(core.context_mut()?.pending_len(), 1);

@@ -5,6 +5,7 @@
 //! projection standing, and peer positions match storage before the first
 //! link is accepted.
 
+mod barriers;
 mod delivery;
 pub(super) mod retirement;
 
@@ -45,9 +46,9 @@ const TABLES: [TableId; 7] = [
     TableId::FederationOrigin,
     TableId::RequestResult,
     TableId::EdgeProjection,
-    TableId::EdgeOutbox,
     TableId::E2eeObject,
     TableId::E2eeState,
+    TableId::EdgeOutbox,
 ];
 
 /// The reload state machine.
@@ -145,6 +146,7 @@ fn rebuild_once(coordinator: &mut FederationCoordinator) -> Result<(), Violation
     if let Some(executor) = coordinator.companion_exec.as_mut() {
         executor.finish_restore().map_err(|_| Violation::Codec)?;
     }
+    barriers::finish(coordinator)?;
     coordinator.loader.rebuilt = true;
     Ok(())
 }
@@ -249,6 +251,9 @@ fn admit(
         (TableId::EdgeOutbox, agenc_ircd_storage::federation_records::OUTBOX_EVENT_KIND) => {
             admit_outbox(coordinator, context, key, value)
         }
+        (TableId::E2eeState, agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND) => {
+            barriers::admit(coordinator, key, value)
+        }
         (TableId::E2eeObject | TableId::E2eeState, _) => {
             if let Some(executor) = coordinator.companion_exec.as_mut() {
                 executor.admit_restored(table, key, value);
@@ -278,7 +283,15 @@ fn admit_outbox(
         .outbox
         .cursor
         .is_some_and(|(sequence, _)| parts.delivery_sequence <= sequence);
-    require_ordinary_or_covered(&event.event_object, covered)?;
+    let gate = coordinator
+        .companion_exec
+        .as_ref()
+        .and_then(|executor| executor.restored_delivery_barrier(parts.target));
+    if let Some(gate) = gate {
+        barriers::validate_event(gate, &event.event_object, covered)?;
+    } else {
+        require_ordinary_or_covered(&event.event_object, covered)?;
+    }
     let next = parts
         .delivery_sequence
         .checked_add(1)
@@ -675,7 +688,9 @@ fn retain_history_result(context: &mut StateCoreContext, value: &PersistentRecor
             .is_ok()
 }
 
-fn fail_restore(coordinator: &mut FederationCoordinator) {
+pub(super) fn fail_restore(coordinator: &mut FederationCoordinator) {
+    coordinator.loader.started = true;
+    coordinator.loader.complete = false;
     coordinator.loader.failed = true;
     coordinator.loader.pending = None;
     coordinator.counters.violations = coordinator.counters.violations.saturating_add(1);

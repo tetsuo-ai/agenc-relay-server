@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod acknowledged_barriers;
+mod combined_owner;
 mod pending_publication;
 mod pending_recovery;
 mod scoped_outbox;
