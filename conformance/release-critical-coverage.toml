@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 781
-reviewed_source_sha256 = "a5c38a2b671c0a372e11ab9a9d7df67c714b858077f17d24f25c788ee6616702"
+reviewed_source_files = 783
+reviewed_source_sha256 = "4004a032e865192a76d9233ccee90b2f51aa882480a9f1a68e1a09b8fd60fa01"
 deferred = []
 
 [[region]]
@@ -11021,3 +11021,103 @@ start_line = 51
 end_line = 58
 metric = "regions"
 reason = "Finalization, abort and both ReInit terminal signatures retain the exact credential ID on their authenticated receipt; another continuous or same-public-key credential grants no permission to sign that terminal."
+
+[[region]]
+id = "cap73-initial-authority-001-authenticate-initial-authority"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority.rs"
+source_sha256 = "03b076900487c2a4b5d77e8b840ffd1981440042d39bc9a045be6ef513edf414"
+start_line = 123
+end_line = 168
+metric = "regions"
+reason = "Initial recovery authority uses an independent source binding pin and one shared bounded decoder; the result grants no terminal or recovery authority."
+
+[[region]]
+id = "cap73-initial-authority-002-decode-object"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority.rs"
+source_sha256 = "03b076900487c2a4b5d77e8b840ffd1981440042d39bc9a045be6ef513edf414"
+start_line = 170
+end_line = 177
+metric = "regions"
+reason = "Initial recovery authority uses an independent source binding pin and one shared bounded decoder; the result grants no terminal or recovery authority."
+
+[[region]]
+id = "cap73-initial-authority-003-binding"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 26
+end_line = 41
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."
+
+[[region]]
+id = "cap73-initial-authority-004-principals"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 43
+end_line = 73
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."
+
+[[region]]
+id = "cap73-initial-authority-005-principal-pin"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 75
+end_line = 89
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."
+
+[[region]]
+id = "cap73-initial-authority-006-core"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 91
+end_line = 105
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."
+
+[[region]]
+id = "cap73-initial-authority-007-bootstrap"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 107
+end_line = 138
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."
+
+[[region]]
+id = "cap73-initial-authority-008-controller-roots"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 140
+end_line = 153
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."
+
+[[region]]
+id = "cap73-initial-authority-009-sequencer"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 155
+end_line = 186
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."
+
+[[region]]
+id = "cap73-initial-authority-010-credential-shape"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/initial_authority/anchors.rs"
+source_sha256 = "431f28ef8f1462502f923cacdb16d9eab66b6f9d7c837ea58af7d9d5d6d60b9a"
+start_line = 188
+end_line = 197
+metric = "regions"
+reason = "Exact initial binding pins constrain roots, rosters, controller and creator identity, context core, sequencer role and canonical initial time before authority is returned."

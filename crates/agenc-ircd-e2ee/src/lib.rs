@@ -77,6 +77,7 @@ pub mod federation;
 pub mod finality;
 pub mod identity;
 pub mod ids;
+pub mod initial_authority;
 pub mod limits;
 pub mod mls_outer;
 pub mod object;

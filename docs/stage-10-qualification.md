@@ -4285,3 +4285,52 @@ inputs, logs and executed binaries are retained in
 Per-conversation credential selection for new candidates and ReInit attempts,
 overlap key ownership, historical context authority and complete recovery remain
 open. No wire or storage format changes and no recovery gate is cleared.
+
+### CAP-73 public initial authority for historical recovery
+
+The new `authenticate_initial_authority` API compares a generation-zero binding
+to an independently supplied source binding ID before using any of its pins.
+It revalidates the exact root identities, complete rosters, binding approvals,
+root locks, context core, initial policy and sequencer credential. The initial
+controller roots must resolve through the binding's rosters; the one-device
+bootstrap council must name a planned device under the same account. Active
+device keys must be distinct across all those rosters. Root, roster and
+sequencer validity use the committed initial time, without a current clock.
+
+The frozen binding pin directly establishes initial authority for the named
+objects. Earlier directory and sequencer continuity chains are not proved by
+this API. A newer signed roster or continuous sequencer successor cannot replace
+the pinned object. The required operational policy ID is returned as a future
+constraint; its body, bootstrap activation and later context adoption remain
+unverified. Replacement bindings and recreated semantic incarnations are
+refused because they need preceding terminal evidence.
+
+Nineteen integration tests pass with real root, enrollment, certificate,
+roster, binding, lock and policy signatures. They cover complete substitute
+authorities, exact source IDs, missing and extra evidence, wrong account and
+controller assignments, shared authorization keys, historical roster pins,
+credential identity and time boundaries, malformed encodings and a shared
+decode budget. Three development tests exposed missing creator-account,
+controller-roster and cross-root key checks in the new implementation; their
+failing sources, logs and binaries are retained separately. These failures were
+not present at the base commit, which had no initial-authority API. Two test
+setup compile failures and the initial decomposition-check failure are also
+retained. Required-capabilities bytes are bound as an opaque core field; no
+MLS engine, leaf-membership proof or complete group lifecycle is exercised.
+
+All eight checkpoint checks pass. The locked all-feature workspace run passes
+2,825 tests with no failures and 22 default-ignored tests across 122 result
+groups in 193.66 seconds. Source policy accepts 923 Rust files. Both inventories
+cover 783 source files with hash
+`4004a032e865192a76d9233ccee90b2f51aa882480a9f1a68e1a09b8fd60fa01`.
+The release catalog contains 1,111 critical regions, including ten new initial
+authority checks. Coverage measurements and thresholds are unchanged. Exact
+inputs, logs and executed binaries are retained in
+`cap73-initial-authority-final-proof`. The shared test builders are a development
+dependency only; production crate boundaries and external package pins are
+unchanged.
+
+This public-only API has no runtime or maintenance caller. It accepts no full
+MLS context or private topic, grants no terminal capability and clears no
+recovery gate. Complete historical ancestry, context transitions, finality,
+evidence ingestion and atomic Closed or Conflict installation remain open.
