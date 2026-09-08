@@ -46,3 +46,13 @@ pub(super) fn at_time(coordinator: &CompanionCoordinator, time: u64) -> Option<&
     let credential = coordinator.key_set()?.credential(&signer.credential_id)?;
     credential.covers(ValidationTime(time)).then_some(signer)
 }
+
+/// A terminal stays with the credential on its previously authenticated receipt.
+pub(super) fn for_receipt(
+    coordinator: &CompanionCoordinator,
+    credential_id: [u8; 32],
+) -> Option<&SequencerSigner> {
+    coordinator
+        .signer()
+        .filter(|signer| signer.credential_id == credential_id)
+}

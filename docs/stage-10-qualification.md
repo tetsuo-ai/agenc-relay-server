@@ -4245,3 +4245,43 @@ inputs, logs and executed binaries are retained in
 Per-conversation context key transitions, retained old signers, terminal
 records after a key switch and historical recovery authority remain open.
 This repair changes no wire or storage format and clears no recovery gate.
+
+### CAP-101 terminal records after a sequencer key switch
+
+Finalization, abort and both ReInit terminal handlers previously selected the
+installed signer independently of the credential on their retained receipt.
+Four regressions reproduce terminal acceptance after switching to the
+continuous successor key. Each first completes a control terminal and verifies
+its original-key signature. The failing executions, test sources and exact
+runtime executable are retained in `cap101-terminal-key-red`.
+
+All four terminal signatures now require the exact credential ID on the
+previously authenticated receipt. An unavailable credential returns Syncing
+before a terminal is installed. Restoring that credential permits the same
+terminal request to complete. The check does not use current wall time or
+select a replacement credential from continuity alone.
+
+The four expanded tests cover six refusal-and-retry cases apiece: a successor
+key, a different credential sharing the original public key, and no signer,
+each before and after reconstruction. They check unchanged logs, conversation
+state and writes on refusal, then verify the completed certificate's credential
+and registered signature domain. Binding approvals, sequencer continuity,
+controller signatures and finality votes are real. MLS ciphertext, leaf
+signatures and staged ReInit context digests remain synthetic fixtures; this
+does not prove a complete MLS lifecycle. Reconstruction here replays saved
+logical rows through the normal reconstruction path.
+
+All eight checkpoint checks pass. The locked all-feature workspace run passes
+2,806 tests with no failures and 22 default-ignored tests across 121 result
+groups in 171.97 seconds. The runtime suite passes 1,305 tests with one ignored
+test. Source policy accepts 919 Rust files. Both inventories cover 781 source
+files with hash
+`a5c38a2b671c0a372e11ab9a9d7df67c714b858077f17d24f25c788ee6616702`.
+The release catalog contains 1,101 critical regions, including the new receipt
+credential guard. Coverage thresholds and measurements are unchanged. Exact
+inputs, logs and executed binaries are retained in
+`cap101-terminal-key-final-proof`.
+
+Per-conversation credential selection for new candidates and ReInit attempts,
+overlap key ownership, historical context authority and complete recovery remain
+open. No wire or storage format changes and no recovery gate is cleared.

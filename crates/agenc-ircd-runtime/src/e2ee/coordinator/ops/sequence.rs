@@ -688,10 +688,11 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let signer = super::super::sequencer_signing::for_receipt(
+        exec.coordinator,
+        request.proof.receipt.tbs.sequencer_key_id,
+    )
+    .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let tbs = IrcCommitFinalizationTbs {
         profile_version: 1,
         network_id: exec.coordinator.network_id,
@@ -869,10 +870,11 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let signer = super::super::sequencer_signing::for_receipt(
+        exec.coordinator,
+        request.receipt.tbs.sequencer_key_id,
+    )
+    .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let candidate_id = core.candidate_id;
     let tbs = IrcCommitAbortTbs {
         profile_version: 1,
@@ -1143,10 +1145,6 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let (attempt_id, quorum, terminal, terminal_id, new_conversation, record) = if activate {
         let mut request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
         super::terminal_proof::reinit_attempt(
@@ -1156,6 +1154,11 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             &request.attempt,
         )?;
         super::terminal_proof::reinit_activation(&request)?;
+        let signer = super::super::sequencer_signing::for_receipt(
+            exec.coordinator,
+            request.receipt.tbs.sequencer_key_id,
+        )
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
         let core = request.core.clone();
         let core = &core;
         if core.old_conversation_id != old_conversation_id {
@@ -1215,6 +1218,11 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             &request.receipt,
             &request.attempt,
         )?;
+        let signer = super::super::sequencer_signing::for_receipt(
+            exec.coordinator,
+            request.receipt.tbs.sequencer_key_id,
+        )
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
         let core = request.core.clone();
         let core = &core;
         if core.profile_version != 1

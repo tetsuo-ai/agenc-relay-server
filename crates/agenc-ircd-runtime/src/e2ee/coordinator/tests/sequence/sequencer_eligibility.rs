@@ -7,6 +7,7 @@ use agenc_ircd_e2ee::sequencer::SequencerKeySet;
 use super::super::support::sequencer_credential;
 
 mod installation;
+mod terminal;
 use super::*;
 
 fn install_interval(harness: &mut Harness, interval: (u64, u64)) -> TestResult<[u8; 32]> {
