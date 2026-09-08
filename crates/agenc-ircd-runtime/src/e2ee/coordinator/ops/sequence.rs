@@ -347,10 +347,9 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             _ => Fail::with(E2eeReplyCode::RateLimited, &conversation_id),
         }
     })?;
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let signer =
+        super::super::sequencer_signing::at_time(exec.coordinator, envelope.aad.validation_time)
+            .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let commit_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let tbs = IrcCandidateReceiptTbs {
         profile_version: 1,

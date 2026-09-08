@@ -3603,7 +3603,7 @@ fn companion_setup() -> TestResult<crate::test_support::CompanionSetup> {
         key_set.set_generation,
         &base64url_encode(&key_set.digest),
     )?;
-    executor.install_sequencer(sequencer, key_set, credential);
+    executor.install_sequencer(sequencer, key_set, credential)?;
     Ok(crate::test_support::CompanionSetup {
         profile: crate::e2ee::link::CompanionProfile { local: tuple },
         executor,

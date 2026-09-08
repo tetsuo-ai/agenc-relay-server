@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 776
-reviewed_source_sha256 = "c9a2077818cfbf2a06c3864973f8ea72f33eb279ad5c2c775b8a14afe06ea537"
+reviewed_source_files = 779
+reviewed_source_sha256 = "f6c393f57a88157872fff74e3be492ac8a51ae78d249f0a32f6f90d9dffc34e1"
 deferred = []
 
 [[region]]
@@ -3436,9 +3436,9 @@ reason = "Cloned reservation-only handles share the existing Arc budget; checked
 id = "companion-daemon-attach-coordinator-role"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/daemon.rs"
-source_sha256 = "687d3bc4c56e218558c090929d2edf2d1add524b92f4afb16167dea00c36fdb6"
-start_line = 1388
-end_line = 1428
+source_sha256 = "b15fb616509aeaea9167e87f1c09cb5d10597aedebeca27df948d808c84cba29"
+start_line = 1390
+end_line = 1430
 metric = "regions"
 reason = "Composition passes validated persistent local incarnation to companion installation before serving."
 
@@ -4346,9 +4346,9 @@ reason = "Delegate EACK to receipt-owned validation with existing trusted wall-c
 id = "companion-mod-companioncoordinator-set-pending"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
-start_line = 854
-end_line = 856
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 855
+end_line = 857
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4356,9 +4356,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-applied"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
-start_line = 860
-end_line = 887
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 861
+end_line = 888
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4366,9 +4366,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-rejected"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
-start_line = 890
-end_line = 892
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 891
+end_line = 893
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -9066,9 +9066,9 @@ reason = "Both replay readers block concurrent companion execution and retain ty
 id = "cap97-recent-001-replay-recent"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
-start_line = 707
-end_line = 749
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 708
+end_line = 750
 metric = "regions"
 reason = "The recent-fragment replay shortcut must resolve every response in original descriptor order before rendering any output; one absent body refuses the whole replay."
 
@@ -9426,9 +9426,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-012-fetch-object"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
-start_line = 1419
-end_line = 1452
+source_sha256 = "d1c696f0c0db4ae38ffdb4c050885ed707dd1ad2d39ed69c4ee07f62a84e18d6"
+start_line = 1418
+end_line = 1451
 metric = "regions"
 reason = "Fresh lookups check the attached device and retained log before reads and apply current conversation recovery authorization to resolved bodies."
 
@@ -9606,9 +9606,9 @@ reason = "Metadata is sealed before selective body loading and cannot change the
 id = "cap79-selective-013-select-restored-objects"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
-start_line = 973
-end_line = 978
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 974
+end_line = 979
 metric = "regions"
 reason = "The composed loader explicitly selects objects only after collecting complete mailbox metadata."
 
@@ -10366,9 +10366,9 @@ reason = "Recovery capture errors remain fatal, metadata precedes object selecti
 id = "cap73-declared-gates-011-admit-restored-with-backing"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
-start_line = 466
-end_line = 480
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 467
+end_line = 481
 metric = "regions"
 reason = "The storage startup adapter supplies memory backing before declared recovery metadata is captured."
 
@@ -10736,9 +10736,9 @@ reason = "Startup supplies the process budget and prepares every retained result
 id = "cap79-result-memory-009-finish-restore-with-backing"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
-start_line = 489
-end_line = 495
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 490
+end_line = 496
 metric = "regions"
 reason = "The composed reconstruction path supplies existing process backing to every retained-result admission."
 
@@ -10826,9 +10826,9 @@ reason = "Every embedded ACK matches its finalization core or ReInit attempt bef
 id = "cap99-ack-context-009-submit-commit-ack"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
-start_line = 511
-end_line = 575
+source_sha256 = "d1c696f0c0db4ae38ffdb4c050885ed707dd1ad2d39ed69c4ee07f62a84e18d6"
+start_line = 510
+end_line = 574
 metric = "regions"
 reason = "Standalone ACK handlers validate current public context before any durable object, proof slot or event can be staged."
 
@@ -10836,9 +10836,9 @@ reason = "Standalone ACK handlers validate current public context before any dur
 id = "cap99-ack-context-010-submit-reinit-ack"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
-start_line = 1075
-end_line = 1136
+source_sha256 = "d1c696f0c0db4ae38ffdb4c050885ed707dd1ad2d39ed69c4ee07f62a84e18d6"
+start_line = 1074
+end_line = 1135
 metric = "regions"
 reason = "Standalone ACK handlers validate current public context before any durable object, proof slot or event can be staged."
 
@@ -10896,9 +10896,9 @@ reason = "The current old policy and original ReInit state authorize the attempt
 id = "cap100-reinit-authority-006-submit-reinit-attempt"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
-start_line = 959
-end_line = 1071
+source_sha256 = "d1c696f0c0db4ae38ffdb4c050885ed707dd1ad2d39ed69c4ee07f62a84e18d6"
+start_line = 958
+end_line = 1070
 metric = "regions"
 reason = "The attempt handler verifies public controller authority before any receipt signature or staged state mutation."
 
@@ -10981,3 +10981,33 @@ start_line = 120
 end_line = 153
 metric = "regions"
 reason = "Terminal IDs hash the registered core and repeat the exact outer context; ReInit receipt identity requires the exact separately referenced attempt and matching signed slot fields."
+
+[[region]]
+id = "cap101-sequencer-eligibility-001-selected-credential"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sequencer_signing.rs"
+source_sha256 = "6ddb054d833c45f31b1a2f3ac34ae2842085e23652a12457a9dea6e6c31f1194"
+start_line = 15
+end_line = 41
+metric = "regions"
+reason = "The secret, exact selected credential and verified metadata agree before installation; candidate receipt eligibility uses canonical Commit time, including both validity endpoints."
+
+[[region]]
+id = "cap101-sequencer-eligibility-002-at-time"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sequencer_signing.rs"
+source_sha256 = "6ddb054d833c45f31b1a2f3ac34ae2842085e23652a12457a9dea6e6c31f1194"
+start_line = 44
+end_line = 48
+metric = "regions"
+reason = "The secret, exact selected credential and verified metadata agree before installation; candidate receipt eligibility uses canonical Commit time, including both validity endpoints."
+
+[[region]]
+id = "cap101-sequencer-eligibility-003-install-sequencer"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
+source_sha256 = "bcbe6476ba016b047a1347d018feac6ae9a367a0e7d9f90d7010be99bd8a5183"
+start_line = 542
+end_line = 554
+metric = "regions"
+reason = "An invalid selected credential cannot replace any installed signing or advertised material."

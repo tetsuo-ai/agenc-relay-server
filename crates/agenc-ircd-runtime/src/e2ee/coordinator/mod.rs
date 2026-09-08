@@ -57,6 +57,7 @@ pub(crate) mod request_expiry;
 mod resident;
 pub(crate) mod response_read;
 pub mod results;
+mod sequencer_signing;
 mod startup;
 pub mod sync;
 #[cfg(test)]
@@ -543,13 +544,13 @@ impl CompanionCoordinator {
         key: Ed25519SecretKey,
         key_set: SequencerKeySet,
         current: agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential,
-    ) {
-        let credential_id = key_set
-            .current()
-            .map_or([0; 32], |credential| credential.credential_id);
+    ) -> Result<(), E2eeError> {
+        let credential_id =
+            sequencer_signing::selected_credential(&self.network_id, &key, &key_set, &current)?;
         self.signer = Some(SequencerSigner { key, credential_id });
         self.key_set = Some(key_set);
         self.current_credential = Some(current);
+        Ok(())
     }
 
     /// The raw current sequencer credential.

@@ -1358,7 +1358,9 @@ fn e2ee_setup(
                 config.server.server_id,
                 config.server.name.as_str().to_owned(),
             );
-            executor.install_sequencer(key, key_set, current);
+            executor
+                .install_sequencer(key, key_set, current)
+                .map_err(|_| DaemonError::E2eeCredentials)?;
             executor.set_global_disk_bytes(config.e2ee.global_disk_bytes);
             Some(executor)
         }
@@ -4574,6 +4576,52 @@ mod tests {
             e2ee_setup(&other, None),
             Err(DaemonError::E2eeCredentials)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn sequencer_eligibility_setup_preserves_selected_credential_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::e2ee::coordinator::tests::support::{key, sequencer_credential_in};
+        use agenc_ircd_crypto::{SemanticHashDomain, SignatureDomain};
+        use agenc_ircd_e2ee::ids::semantic_id_of;
+        use agenc_ircd_e2ee::sequencer::SequencerCredentialsFile;
+        use agenc_ircd_e2ee::tls::{TlsEncode, TlsVec};
+        let directory = crate::test_support::TestDirectory::create()?;
+        let path = directory.0.join("sequencer-overlap.bin");
+        let mut config = public_config()?;
+        config.federation.enabled = true;
+        config.e2ee.enabled = true;
+        config.e2ee.sequencer_credentials_file = Some(path.clone());
+        let network = *config.network.network_id.as_bytes();
+        let old = sequencer_credential_in(network, &key(90), 0, (0, 1_000), None)?;
+        let next =
+            sequencer_credential_in(network, &key(91), 1, (100, 2_000), Some((&key(90), &old)))?;
+        let document = SequencerCredentialsFile {
+            set_generation: 1,
+            credentials: TlsVec::new(vec![old.clone(), next.clone()])?,
+        };
+        std::fs::write(&path, document.encode()?)?;
+        for (seed, credential) in [(90, old), (91, next)] {
+            let setup = e2ee_setup(&config, Some(&[seed; 32]))?.ok_or("setup")?;
+            assert_eq!(setup.profile.local.key_set_generation, 1);
+            let executor = setup.executor.ok_or("executor")?;
+            let signer = executor.signer().ok_or("signer")?;
+            let expected = semantic_id_of(SemanticHashDomain::SequencerKey, &credential.tbs)?;
+            assert_eq!(signer.credential_id, expected);
+            assert_eq!(executor.current_credential(), Some(&credential));
+            let signature = signer.sign(SignatureDomain::Reservation, &credential.tbs)?;
+            executor
+                .key_set()
+                .and_then(|set| set.credential(&expected))
+                .ok_or("credential")?
+                .key
+                .verify(
+                    SignatureDomain::Reservation,
+                    &credential.tbs.encode()?,
+                    &signature,
+                )?;
+        }
         Ok(())
     }
 

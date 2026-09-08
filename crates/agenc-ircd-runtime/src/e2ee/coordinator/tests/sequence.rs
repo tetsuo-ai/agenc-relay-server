@@ -44,6 +44,8 @@ mod recovery_pending;
 #[path = "ack_context.rs"]
 mod ack_context;
 
+mod sequencer_eligibility;
+
 #[test]
 fn finalization_rejects_substituted_receipts_and_acknowledgements() -> TestResult {
     let mut harness = Harness::new()?;

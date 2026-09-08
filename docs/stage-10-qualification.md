@@ -4202,3 +4202,46 @@ The release catalog contains 1,097 critical regions, including eight new
 record-authentication regions. Coverage thresholds are unchanged and no new
 coverage measurement is claimed. Exact inputs, check logs and executed binaries
 are retained in `cap73-record-authentication-final-proof`.
+
+### CAP-101 sequencer credential selection and candidate validity time
+
+Startup accepts a private key matching either credential in the advertised
+overlap set. Installation previously labeled every signature with the first
+credential ID, including signatures made by the successor key. Candidate
+signing also omitted the check that the credential covers the Commit's
+canonical AAD validation time. Four regressions fail against the preceding
+implementation and one endpoint control passes. The failed tests and exact
+executable are retained in `cap101-sequencer-eligibility-red`. One failure is
+the direct installation API accepting an incompatible private key; startup
+already rejected a private key absent from the credentials file.
+
+Installation now selects the exact supplied credential by its semantic ID and
+checks its network, profile, secret/public key, signer role, interval,
+generation and predecessor against the verified key set. Every check finishes
+before any installed state changes. The three existing callers propagate an
+installation error. Candidate receipt signing requires the selected credential
+to cover the Commit's canonical time, including both interval endpoints. The
+server's informational signing time does not replace that input.
+
+Thirteen focused tests pass, including daemon startup with both overlap keys,
+invalid installation on empty and populated coordinators, substituted verified
+metadata and distinct credentials sharing one public key. Candidate bindings
+have real device approvals and root-binding locks over the selected credential.
+MLS ciphertext and the context digest are synthetic public-envelope fixtures;
+these tests do not establish a complete MLS lifecycle. Two initial test-code
+compile errors are archived separately from the behavioral failures.
+
+All eight checkpoint checks pass. The locked all-feature workspace run passes
+2,802 tests with no failures and 22 default-ignored tests across 121 result
+groups in 173.81 seconds. The runtime suite passes 1,301 tests with one ignored
+test. Source policy accepts 917 Rust files. Both inventories cover 779 source
+files with hash
+`f6c393f57a88157872fff74e3be492ac8a51ae78d249f0a32f6f90d9dffc34e1`.
+The release catalog contains 1,100 critical regions, including three new
+signer-selection regions. No coverage threshold or measurement changes. Exact
+inputs, logs and executed binaries are retained in
+`cap101-sequencer-eligibility-final-proof`.
+
+Per-conversation context key transitions, retained old signers, terminal
+records after a key switch and historical recovery authority remain open.
+This repair changes no wire or storage format and clears no recovery gate.

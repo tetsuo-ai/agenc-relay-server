@@ -154,7 +154,7 @@ impl Harness {
         let credential = sequencer_credential(&sequencer, 0, (0, 2_000_000), None)?;
         let key_set =
             SequencerKeySet::verify(&NETWORK, std::slice::from_ref(&credential), 0, None)?;
-        coordinator.install_sequencer(sequencer, key_set, credential);
+        coordinator.install_sequencer(sequencer, key_set, credential)?;
         coordinator.restore_origin(CompanionOrigin {
             home_server_id: HOME,
             server_incarnation: INCARNATION,
