@@ -451,6 +451,17 @@ fn run(
     peer: ServerId,
     complete: CompleteRequest,
 ) -> Result<(), Violation> {
+    run_with_object(coordinator, context, link, peer, complete, None)
+}
+
+pub(super) fn run_with_object(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    complete: CompleteRequest,
+    resolved: Option<&crate::e2ee::coordinator::object_read::Resolved>,
+) -> Result<(), Violation> {
     let peers: Vec<ServerId> = coordinator.peers.keys().copied().collect();
     let origins = &coordinator.origins;
     let facts_for = |key: OriginKey| OriginFacts {
@@ -481,9 +492,23 @@ fn run(
         peers,
         base_capacity,
     };
-    let staged =
-        execute::run(executor, view, link, peer, complete, &facts_for).map_err(code_violation)?;
+    let staged = match resolved {
+        Some(resolved) => execute::run_with_object(
+            executor,
+            view,
+            link,
+            peer,
+            complete,
+            &facts_for,
+            Some(resolved),
+        ),
+        None => execute::run(executor, view, link, peer, complete, &facts_for),
+    }
+    .map_err(code_violation)?;
     match staged {
+        Staged::ReadObject(request) => {
+            super::object_read::submit(coordinator, context, link, peer, request)
+        }
         Staged::ReadResponses(identity) => {
             super::response_read::submit(coordinator, context, link, peer, identity)
         }
@@ -682,7 +707,7 @@ fn request_committed(
     };
     for committed in lines {
         match committed.sequence {
-            None => send_lines(coordinator, context, link, peer, vec![committed.line]),
+            None => send_response(coordinator, context, link, peer, committed),
             Some(sequence) => send_to_target(
                 coordinator,
                 context,
@@ -691,6 +716,30 @@ fn request_committed(
                 committed.line,
             ),
         }
+    }
+}
+
+fn send_response(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    committed: CommittedLine,
+) {
+    let Some(backing) = committed.backing else {
+        send_lines(coordinator, context, link, peer, vec![committed.line]);
+        return;
+    };
+    let Some(live) = coordinator
+        .peers
+        .get(&peer)
+        .and_then(|state| state.live.as_ref())
+        .filter(|live| live.link == link)
+    else {
+        return;
+    };
+    if let Err(refusal) = live.handle.try_send_backed(committed.line, backing) {
+        coordinator.send_failed(context, link, peer, SendFailure::from(refusal));
     }
 }
 

@@ -67,6 +67,8 @@ pub type PlanBinding<'a> = dyn Fn(
 
 /// What every handler sees.
 pub struct Exec<'a> {
+    /// A runtime lookup either needs storage or carries one exact completed read.
+    pub(crate) object_source: super::object_read::Source<'a>,
     /// Shared query ceilings for the authoritative base session.
     pub(crate) queries: Option<crate::state_core::query_usage::QueryReservationPort<'a>>,
     /// Reservation-only access to the existing process memory budget.
@@ -256,11 +258,29 @@ pub fn cursor(reader: &mut Reader<'_>) -> Result<Option<[u8; 32]>, agenc_ircd_e2
         .map_err(|_| agenc_ircd_e2ee::E2eeError::InvalidValue)
 }
 
+/// A handler either completes privately or requests one authenticated storage lookup.
+pub enum Prepared {
+    /// The ordinary result and its effects may now be staged.
+    Complete(Box<Outcome>),
+    /// Nothing may be staged before this object lookup completes.
+    Read(super::object_read::Request),
+}
+
+#[cfg(test)]
+impl Prepared {
+    pub(crate) fn complete(self) -> Result<Outcome, Fail> {
+        match self {
+            Self::Complete(outcome) => Ok(*outcome),
+            Self::Read(_) => Err(E2eeReplyCode::RateLimited.into()),
+        }
+    }
+}
+
 /// Dispatches one decoded request to its handler.
-pub fn execute(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+pub fn execute(exec: &mut Exec<'_>) -> Result<Prepared, Fail> {
     recovery::admit(exec)?;
     use IrcFederationOpcode as Op;
-    match exec.opcode() {
+    let outcome = match exec.opcode() {
         Op::ApplicationChannel | Op::ApplicationDirect => route::application(exec),
         Op::ReserveChannel | Op::ReserveDirect => route::reserve(exec),
         Op::BindGroup => route::bind(exec),
@@ -275,7 +295,7 @@ pub fn execute(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         Op::SubmitReinitAck => sequence::submit_reinit_ack(exec),
         Op::SubmitReinitActivate => sequence::submit_reinit_terminal(exec, true),
         Op::SubmitReinitAbort => sequence::submit_reinit_terminal(exec, false),
-        Op::FetchObject => sequence::fetch_object(exec),
+        Op::FetchObject => return sequence::fetch_object(exec),
         Op::FetchAuthorizations => sequence::fetch_authorizations(exec),
         Op::FetchAcks => sequence::fetch_acks(exec),
         Op::FetchReceipts => sequence::fetch_receipts(exec),
@@ -299,5 +319,6 @@ pub fn execute(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         Op::FetchMailbox => mailbox::fetch_mailbox(exec),
         Op::AcknowledgeMailbox => mailbox::acknowledge_mailbox(exec),
         Op::SubmitPolicy => policy::submit_policy(exec),
-    }
+    }?;
+    Ok(Prepared::Complete(Box::new(outcome)))
 }

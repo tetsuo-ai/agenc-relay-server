@@ -36,6 +36,7 @@ use crate::federation::LinkId;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
 mod delivery_owner;
+pub(crate) mod object_read;
 pub(crate) use delivery_owner::acknowledgement::read::{
     Job as AckReadJob, Request as AckReadRequest,
 };
@@ -316,6 +317,8 @@ pub struct PendingCompanion {
     pub effects: Vec<Effect>,
     /// The cross-profile barriers the batch opens.
     pub barriers: Vec<execute::BarrierPlanned>,
+    /// A cold response keeps its input, staging, and output backing through publication.
+    pub(crate) object_backing: Option<std::sync::Arc<crate::budget::MemoryPermit>>,
 }
 
 /// A request waiting behind an in-flight batch.

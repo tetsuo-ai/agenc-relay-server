@@ -1456,20 +1456,39 @@ fn page(
 }
 
 /// `fetch_object`.
-pub fn fetch_object(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+pub fn fetch_object(exec: &mut Exec<'_>) -> Result<super::Prepared, Fail> {
     let (conversation_id, object_id) = exec
         .params()
         .read(|reader| Ok((reader.fixed::<32>()?, reader.fixed::<32>()?)))?;
     exec.attached_device()?;
     log(exec, &conversation_id)?;
-    let bytes = exec
-        .coordinator
-        .state
-        .objects
-        .get(&object_id)
+    let request = super::super::object_read::Request {
+        conversation_id,
+        object_id,
+    };
+    let bytes = match exec.object_source {
+        super::super::object_read::Source::Resolved(resolved) => resolved
+            .lookup(request)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        super::super::object_read::Source::Unread => {
+            let Some(bytes) = exec.coordinator.state.objects.get(&object_id) else {
+                return Ok(super::Prepared::Read(request));
+            };
+            Some(bytes.as_slice())
+        }
+        #[cfg(test)]
+        super::super::object_read::Source::CompleteMemory => exec
+            .coordinator
+            .state
+            .objects
+            .get(&object_id)
+            .map(Vec::as_slice),
+    };
+    let bytes = bytes
         .filter(|bytes| super::recovery_read::permitted(exec, &conversation_id, bytes))
-        .cloned();
+        .map(<[u8]>::to_vec);
     page(exec, bytes.into_iter().collect(), EmptyKind::Objects, None)
+        .map(|outcome| super::Prepared::Complete(Box::new(outcome)))
 }
 
 /// A page of retained proof objects sorted by their accumulator key.

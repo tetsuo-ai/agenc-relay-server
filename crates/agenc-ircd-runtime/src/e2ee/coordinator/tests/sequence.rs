@@ -1801,3 +1801,7 @@ fn a_reloaded_coordinator_completes_a_quorum_it_had_begun() -> TestResult {
     assert_certificate_votes(&reloaded, &outcome.result, expected)?;
     Ok(())
 }
+
+pub(super) fn fresh_fetch_fixture() -> TestResult<super::FreshFetchFixture> {
+    recovery_pending::fresh_fetch_fixture()
+}

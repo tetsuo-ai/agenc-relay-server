@@ -48,6 +48,7 @@ fn retained_page() -> TestResult<(CompanionCoordinator, Decoded, Vec<Vec<u8>>)> 
         outcome,
         1,
         500,
+        None,
         BarrierInputs {
             backing: backing(),
             base_counts: None,

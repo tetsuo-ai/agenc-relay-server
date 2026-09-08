@@ -2890,8 +2890,51 @@ Coverage floors remain unchanged, with no new measurement. Exact inputs,
 logs, and workspace executables are preserved in
 `cap79-cold-response-final-proof`.
 
-CAP-79 still needs fresh cold-object fetches and selective object
-reconstruction. Cleanup does not delete shared object bodies whose
+Fresh `FetchObject` requests now read retained bodies absent from memory.
+The original regression commits and reads back a valid private Commit object,
+evicts its memory copy, then observes an empty fetch. That failure takes
+0.20 seconds, with a passing inline fetch before eviction, and is preserved
+with its two exact test inputs and executable in
+`cap79-fresh-object-red-proof`. The authority fixture uses verified handler
+effects; it does not claim a daemon TLS exchange or an MLS client round trip.
+
+The dispatcher distinguishes a completed outcome from a required storage read.
+It keeps the original request without staging a result or advancing the origin
+sequence. One exact object lookup captures the storage commit, authenticated
+link, incarnation, base recovery epoch, and synchronization readiness. Completion
+validates the sealed row and requested hash, then repeats request classification,
+attachment checks, and current recovery authorization. Only a successful,
+complete read with no row becomes an empty result. A read failure never does.
+The fetched body stays out of the memory cache. Its reservation covers decoding,
+response copies, wrapped writes, pending effects, and rendered output through
+the storage receipt and link queue. Ordinary cached requests retain their
+existing behavior.
+
+All 16 fresh-fetch and decoder cases pass in 1.50 seconds. Thirteen exercise
+the root storage adapter, two check decoded values, and the original regression
+checks the inner dispatcher against a real stored body. The root fixture
+completes actual delivery synchronization receipts and supplies verified
+attachment and log state from the handler fixture. Its empty base projection
+supplies no channel membership or MLS leaf proof. Cases cover exact cold replay
+after a fresh receipt, confirmed absence, changed attachment and recovery state,
+malformed completions, changed commits, wrong read IDs, replacement links,
+changed base epochs, shutdown with queued work, refused memory before I/O and
+after decoding, rejected writes, and stalled output. Invalid kind/body values
+are refused by the storage-value codec before reaching the reader; wrong keys
+and hashes are checked after decoding. Negative cases alter returned records
+or fixture state, without corrupting a live database.
+
+Both inventories now cover 712 source files, and the release catalog has 951
+critical regions, including 20 additions and 41 source rebindings. Coverage
+floors remain unchanged, with no new measurement. All eight checkpoint gates
+pass: 2,565 tests pass, none fail, and 21 qualification tests remain ignored.
+The runtime suite has 1,108 passes. Source policy covers 845 Rust files. Exact
+inputs, logs, and workspace executables are in `cap79-fresh-object-final-proof`.
+The first checkpoint attempt stopped at Clippy's enum-size check; boxing the
+completed dispatch outcome resolves it. Its earlier log remains archived.
+
+CAP-79 still needs selective object reconstruction. Cleanup does not delete
+shared object bodies whose
 independent retention requirements remain unresolved. Every surviving body
 still counts against the disk ceiling, and the global object collector
 continues to refuse capacity loss under CAP-95.

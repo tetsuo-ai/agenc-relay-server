@@ -195,6 +195,7 @@ fn evaluate_complete_with_queries(
     let member = |_: ChannelInstanceId| true;
     let plan_binding = |_: ChannelInstanceId, _: &[[u8; 24]]| Ok(None);
     let mut exec = Exec {
+        object_source: crate::e2ee::coordinator::object_read::Source::CompleteMemory,
         queries: Some(queries),
         backing: harness.backing.clone(),
         monotonic_millis: harness.monotonic_millis,
@@ -213,7 +214,7 @@ fn evaluate_complete_with_queries(
         state_generation: super::super::STATE_GENERATION,
         source_view: Vec::new(),
     };
-    Ok(ops::execute(&mut exec))
+    Ok(ops::execute(&mut exec).and_then(ops::Prepared::complete))
 }
 
 #[test]
@@ -460,4 +461,43 @@ fn assert_pending_finalization_refused(with_signer: bool) -> TestResult {
     ));
     assert_eq!(retained_state(&restored)?, before);
     Ok(())
+}
+
+pub(super) fn fresh_fetch_fixture() -> TestResult<super::super::FreshFetchFixture> {
+    let (mut harness, conversation, _) = finalization_fixture()?;
+    let object_id = harness
+        .coordinator
+        .state
+        .logs
+        .get(&conversation)
+        .and_then(|log| log.candidate())
+        .ok_or("candidate")?
+        .commit_object_id;
+    let bytes = harness
+        .coordinator
+        .state
+        .objects
+        .remove(&object_id)
+        .ok_or("Commit body")?;
+    harness.coordinator.state.object_bytes = harness
+        .coordinator
+        .state
+        .object_bytes
+        .checked_sub(bytes.len())
+        .ok_or("resident accounting")?;
+    let mut parameters = conversation.to_vec();
+    parameters.extend_from_slice(&object_id);
+    let complete = harness.request(Op::FetchObject, &parameters, None)?;
+    // Supply verified request authority without carrying the handler fixture's
+    // simulated delivery streams or local database identity into the actor.
+    harness.coordinator.state.streams.clear();
+    harness.coordinator.peers.clear();
+    harness.coordinator.delivery_identity = None;
+    Ok(super::super::FreshFetchFixture {
+        executor: harness.coordinator,
+        complete,
+        conversation,
+        object_id,
+        bytes,
+    })
 }

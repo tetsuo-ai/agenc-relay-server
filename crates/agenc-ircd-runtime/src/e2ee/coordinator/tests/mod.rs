@@ -320,6 +320,7 @@ impl Harness {
         // supplies the binding plan there.
         let plan_binding = |_: ChannelInstanceId, _: &[[u8; 24]]| Ok(None);
         let mut exec = Exec {
+            object_source: super::object_read::Source::CompleteMemory,
             queries: Some(self.query_sessions.query_reservations(
                 agenc_ircd_types::UserId::from_bytes(ORIGIN),
                 self.query_limits,
@@ -342,7 +343,7 @@ impl Harness {
             state_generation: STATE_GENERATION,
             source_view: Vec::new(),
         };
-        let outcome = ops::execute(&mut exec);
+        let outcome = ops::execute(&mut exec).and_then(ops::Prepared::complete);
         self.sequence += 1;
         if let Some(origin) = self.coordinator.state.origins.get_mut(&origin_key()) {
             origin.next_sequence = self.sequence;
@@ -1067,4 +1068,17 @@ fn replay_rows_answer_exact_duplicates_and_refuse_conflicts() -> TestResult {
         Classified::Violation
     );
     Ok(())
+}
+
+/// A valid attached-origin Commit fixture for the root storage actor tests.
+pub(crate) struct FreshFetchFixture {
+    pub(crate) executor: CompanionCoordinator,
+    pub(crate) complete: CompleteRequest,
+    pub(crate) conversation: [u8; 32],
+    pub(crate) object_id: [u8; 32],
+    pub(crate) bytes: Vec<u8>,
+}
+
+pub(crate) fn fresh_fetch_fixture() -> TestResult<FreshFetchFixture> {
+    sequence::fresh_fetch_fixture()
 }

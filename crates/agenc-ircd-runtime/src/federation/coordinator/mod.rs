@@ -14,6 +14,7 @@ mod companion;
 mod convert;
 mod grace;
 mod history;
+mod object_read;
 mod origin;
 mod query;
 mod replay_maintenance;
@@ -293,6 +294,7 @@ pub struct FederationCoordinator {
     companion_page_read: Option<companion::page_read::Pending>,
     companion_ack_read: Option<Box<companion::ack_read::Pending>>,
     companion_response_read: Option<Box<response_read::Pending>>,
+    companion_object_read: Option<Box<object_read::Pending>>,
     replay_maintenance: replay_maintenance::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
@@ -306,6 +308,7 @@ pub(super) type OpenBarrier = agenc_ircd_storage::e2ee_records::delivery_recover
 impl FederationCoordinator {
     /// Creates a coordinator that knows the configured edges and holds no
     /// live link.
+    // agenc-review: focus owner=runtime reviewed=2026-09-08 reason=one constructor initializes every peer and coordinator owner field with no live or pending work
     #[must_use]
     pub fn new(
         config: CoordinatorConfig,
@@ -370,6 +373,7 @@ impl FederationCoordinator {
             companion_page_read: None,
             companion_ack_read: None,
             companion_response_read: None,
+            companion_object_read: None,
             replay_maintenance: replay_maintenance::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
@@ -1195,6 +1199,7 @@ impl FederationCoordinator {
     pub fn owns_storage_read(&self, read_id: StorageReadId) -> bool {
         self.loader.owns(read_id)
             || response_read::owns(self, read_id)
+            || object_read::owns(self, read_id)
             || self.replay_maintenance.owns(read_id)
             || companion::ack_read::owns(self, read_id)
             || companion::page_read::owns(self, read_id)
@@ -1210,6 +1215,10 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
+        if object_read::owns(self, message.read_id) {
+            object_read::completed(self, context, message);
+            return;
+        }
         if response_read::owns(self, message.read_id) {
             response_read::completed(self, context, message);
             return;
@@ -1557,6 +1566,7 @@ impl FederationCoordinator {
     fn replay_io_busy(&self) -> bool {
         self.companion_ack_read.is_some()
             || self.companion_response_read.is_some()
+            || self.companion_object_read.is_some()
             || self.replay_maintenance.busy()
     }
 

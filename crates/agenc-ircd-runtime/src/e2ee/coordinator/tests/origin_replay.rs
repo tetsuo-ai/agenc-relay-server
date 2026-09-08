@@ -161,6 +161,7 @@ fn batch(coordinator: &CompanionCoordinator, request: &Decoded) -> TestResult<As
         Outcome::scalar(request::ResultBody::Empty(EmptyKind::Identity)),
         1,
         500,
+        None,
         BarrierInputs {
             backing: backing(),
             base_counts: None,
@@ -245,6 +246,7 @@ fn legacy_history_after_partial_expiry(generation: u64) -> TestResult<CompanionC
         outcome,
         1,
         500,
+        None,
         BarrierInputs {
             backing: backing(),
             base_counts: None,

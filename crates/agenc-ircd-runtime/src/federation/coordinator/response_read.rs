@@ -68,7 +68,7 @@ pub(super) fn submit(
     advance(coordinator, context, job, plan, commit, link, base_epoch)
 }
 
-fn validate_link(
+pub(super) fn validate_link(
     coordinator: &FederationCoordinator,
     context: &StateCoreContext,
     link: LinkId,

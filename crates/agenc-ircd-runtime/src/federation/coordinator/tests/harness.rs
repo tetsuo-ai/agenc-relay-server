@@ -58,6 +58,7 @@ mod retained_resume;
 mod ordinary_acks;
 
 mod combined_barriers;
+mod object_reads;
 mod response_reads;
 #[path = "startup_cross_profile.rs"]
 mod startup_cross_profile;
