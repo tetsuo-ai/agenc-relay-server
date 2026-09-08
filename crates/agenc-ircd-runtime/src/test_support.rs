@@ -497,6 +497,30 @@ fn edge_router(
 }
 
 impl StateCoreFixture {
+    /// Stops the storage owner and reconstructs a registration core from the same directory.
+    pub(crate) fn restart_registration_storage(&mut self, entropy: Vec<u8>) -> TestResult {
+        drop(self.state.take());
+        drop(self.storage_receivers.take());
+        drop(self.crypto_completions.take());
+        let owner = self.owner.take().ok_or("storage owner")?;
+        owner.shutdown()?;
+        let qualification = signed_test_qualification(StateDirectory::probe(&self._directory.0)?)?;
+        let mut owner = open_test_storage(&self.identity, &self._directory, &qualification)?;
+        let router = registration_router(
+            &self.identity,
+            &self.opaque,
+            self.key_state,
+            "server.example",
+        )?;
+        let (state, storage_receivers, crypto_completions) =
+            compose_test_state(&mut owner, entropy, Box::new(router), true)?;
+        self.owner = Some(owner);
+        self.state = Some(state);
+        self.storage_receivers = Some(storage_receivers);
+        self.crypto_completions = Some(crypto_completions);
+        Ok(())
+    }
+
     /// Exercises the daemon's authenticated edge reload against this fixture's storage.
     pub(crate) fn restore_edge_state(
         &self,
