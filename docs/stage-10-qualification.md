@@ -2805,10 +2805,54 @@ cover 683 files. The release catalog contains 848 critical regions, including
 102 additions, with unchanged coverage floors and no new measurement. The
 final logs, source inputs, and actual workspace executables are preserved in
 `cap79-live-ack-final-proof`.
-CAP-79 still needs physical cleanup after the durable cutoff, age-only
-maintenance, cold object and complete result delivery, and selective object
-reconstruction. The global object collector continues to refuse capacity loss
-under CAP-95.
+The next maintenance unit adds idle expiry and physical metadata cleanup.
+Its first actual-storage regression fails in 0.19 seconds because offline
+history never schedules expiry without another ACK. The exact inputs and
+executable are in `cap79-idle-expiry-red-proof`; that test drives idle progress,
+while a separate passing case consumes the startup timer from the real timer
+heap. After expiry is implemented, a second regression fails in 0.09 seconds:
+the committed cutoff leaves two outbox references and one ACK range without
+scheduling deletion. Its 15 dirty source inputs and executable are preserved
+in `cap79-physical-cleanup-red-proof`.
+
+Startup now arms maintenance for the encrypted profile. Expiry binds the
+complete reconstructed delivery owner, accepted time, recovery scope, and
+one storage commit. It publishes a new retention floor only on the exact
+receipt and preserves the ACK cursor. Unknown acknowledgement age or an
+untrusted current clock prevents age-based removal. An open combined barrier
+protects its replay evidence from idle maintenance.
+
+Physical cleanup follows an already persisted floor. Each transaction deletes
+at most 128 obsolete outbox references or ACK ranges. It validates metadata
+keys, grammar, scope, order, and the captured owner before staging deletes.
+An interval overlapping the floor remains intact, as does the unacknowledged
+tail. Cleanup can use the committed floor when the current wall clock is
+unavailable. It keeps raw and decoding reservations until the matching read
+completion and retries refused work from a timer. A charged marker suppresses
+repeat scans of a fully cleaned floor; restart resumes from physical storage.
+
+All 14 targeted maintenance tests pass in 0.41 seconds. They cover startup
+timers, receipt loss, refused transactions, changed owners and recovery epochs,
+mixed storage commits, bad page ordering, truncated empty pages, clock failures,
+and open barriers. The 132-row fixture deletes only 128 rows in its first batch,
+restarts, removes one more obsolete row, and preserves an overlapping ACK
+range, two retained ACK rows, the unacknowledged tail, and an object body whose
+reference was removed. This fixture seeds its historical journal; it does not
+execute 131 prior ACK transactions.
+
+All eight maintenance checkpoint gates pass: 2,531 tests pass, none fail,
+and 21 qualification tests remain ignored. The runtime suite has 1,074 passes.
+Source policy covers 829 Rust files; both reviewed inventories cover 696
+source files. The release catalog contains 905 critical regions, including
+57 additions, with unchanged coverage floors and no new measurement. The
+exact staged inputs, logs, and workspace executables are preserved in
+`cap79-maintenance-final-proof`.
+
+CAP-79 still needs cold object and complete result delivery and selective
+object reconstruction. Cleanup does not delete shared object bodies whose
+independent retention requirements remain unresolved. Every surviving body
+still counts against the disk ceiling, and the global object collector
+continues to refuse capacity loss under CAP-95.
 
 ### CAP-80: mailbox reconstruction can replace the current delivery grant
 

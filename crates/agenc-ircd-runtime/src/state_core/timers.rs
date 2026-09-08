@@ -79,6 +79,8 @@ pub enum TimerKind {
     CompanionProfileDeadline,
     /// A companion ESTATE snapshot token lifetime.
     CompanionSnapshotExpiry,
+    /// Bounded offline companion replay expiry and storage-refusal retry.
+    CompanionReplayMaintenance,
     /// The reserved retry wake for an edge's pending witness metadata.
     CompanionWitnessRetry,
     /// Expiry of process-local mailbox cursors and their immutable backing.

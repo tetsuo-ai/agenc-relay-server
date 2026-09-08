@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod ack_read;
+mod maintenance;
 mod replay;
 mod resume_prefix;
 

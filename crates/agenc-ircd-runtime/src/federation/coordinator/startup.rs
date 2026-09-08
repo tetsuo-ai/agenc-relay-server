@@ -138,6 +138,7 @@ fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContex
         coordinator.sync_outbox_budget(context, peer);
     }
     grace::restored(coordinator, context);
+    super::replay_maintenance::restored(coordinator, context);
     coordinator.drain_backlog(context);
 }
 

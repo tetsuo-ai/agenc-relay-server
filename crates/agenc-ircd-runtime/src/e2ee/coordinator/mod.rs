@@ -40,6 +40,11 @@ pub(crate) use delivery_owner::acknowledgement::read::{
     Job as AckReadJob, Request as AckReadRequest,
 };
 pub(crate) use delivery_owner::restore::replay::Request as ReplayRestoreRequest;
+pub(crate) use delivery_owner::retention::cleanup as replay_cleanup;
+pub(crate) use delivery_owner::retention::maintenance::{
+    Candidate as ReplayMaintenanceCandidate, Job as ReplayMaintenanceJob,
+    Prepared as PreparedReplayMaintenance,
+};
 pub mod events;
 pub mod execute;
 mod mailbox_restore;

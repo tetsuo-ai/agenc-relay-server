@@ -356,16 +356,14 @@ fn execute_or_queue(
     peer: ServerId,
     complete: CompleteRequest,
 ) -> Result<(), Violation> {
+    let replay_busy = coordinator.replay_io_busy();
     let Some(executor) = coordinator.companion_exec.as_mut() else {
         return Err(Violation::Companion(CompanionViolation::Unsupported));
     };
     if !executor.accepting_requests(peer) {
         return Err(Violation::Companion(CompanionViolation::Request));
     }
-    if coordinator.pending.is_some()
-        || coordinator.companion_ack_read.is_some()
-        || executor.has_pending()
-    {
+    if coordinator.pending.is_some() || replay_busy || executor.has_pending() {
         return executor
             .enqueue(link, peer, complete)
             .map_err(fault_violation);
@@ -799,7 +797,7 @@ pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
 ) {
-    while coordinator.pending.is_none() && coordinator.companion_ack_read.is_none() {
+    while coordinator.pending.is_none() && !coordinator.replay_io_busy() {
         let Some(queued) = coordinator
             .companion_exec
             .as_mut()

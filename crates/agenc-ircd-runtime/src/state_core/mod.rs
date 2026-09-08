@@ -5513,4 +5513,17 @@ impl StateCoreContext {
         self.wall = Box::new(agenc_ircd_testkit::DeterministicWallClock::at(seconds));
         self.drift = DriftMonitor::new(self.now(), UtcSecond::from_unix_seconds(seconds));
     }
+
+    /// Advances a fixture's timer clock without changing its wall-clock trust anchor.
+    pub(crate) fn set_monotonic_for_test(&mut self, ticks: u64) {
+        self.monotonic = Box::new(agenc_ircd_testkit::DeterministicMonotonicClock::at(ticks));
+    }
+
+    /// Replaces a fixture wall reading without resetting drift detection.
+    pub(crate) fn set_untrusted_wall_for_test(&mut self, seconds: Option<u64>) {
+        self.wall = Box::new(seconds.map_or_else(
+            || agenc_ircd_testkit::DeterministicWallClock::unavailable_at(0),
+            agenc_ircd_testkit::DeterministicWallClock::at,
+        ));
+    }
 }

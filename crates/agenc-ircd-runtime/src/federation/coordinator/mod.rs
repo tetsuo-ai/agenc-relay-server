@@ -16,6 +16,7 @@ mod grace;
 mod history;
 mod origin;
 mod query;
+mod replay_maintenance;
 mod request;
 mod resume_reconciliation;
 mod snapshot;
@@ -209,6 +210,7 @@ enum PendingCommit {
     },
     /// Startup retirement cannot publish to any live link.
     CompanionRestore(Box<startup::retirement::Receipt>),
+    CompanionReplayMaintenance(Box<replay_maintenance::Receipt>),
     /// A companion request batch; the executor holds its result.
     Companion {
         peer: ServerId,
@@ -289,6 +291,7 @@ pub struct FederationCoordinator {
     companion_exec: Option<CompanionCoordinator>,
     companion_page_read: Option<companion::page_read::Pending>,
     companion_ack_read: Option<Box<companion::ack_read::Pending>>,
+    replay_maintenance: replay_maintenance::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
     barriers: BTreeMap<ServerId, OpenBarrier>,
@@ -364,6 +367,7 @@ impl FederationCoordinator {
             companion_exec: None,
             companion_page_read: None,
             companion_ack_read: None,
+            replay_maintenance: replay_maintenance::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
         }
@@ -479,7 +483,7 @@ impl FederationCoordinator {
     #[must_use]
     pub fn reload_ready(&self) -> bool {
         self.pending.is_none()
-            && self.companion_ack_read.is_none()
+            && !self.replay_io_busy()
             && self.crypto.is_none()
             && self.replays.is_empty()
             && !self.history.busy()
@@ -504,7 +508,7 @@ impl FederationCoordinator {
         if !self.peers.contains_key(&peer) {
             return;
         }
-        if (self.pending.is_some() || self.companion_ack_read.is_some())
+        if (self.pending.is_some() || self.replay_io_busy())
             && matches!(
                 event,
                 LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_)
@@ -1187,6 +1191,7 @@ impl FederationCoordinator {
     #[must_use]
     pub fn owns_storage_read(&self, read_id: StorageReadId) -> bool {
         self.loader.owns(read_id)
+            || self.replay_maintenance.owns(read_id)
             || companion::ack_read::owns(self, read_id)
             || companion::page_read::owns(self, read_id)
             || self.replays.contains_key(&read_id)
@@ -1201,6 +1206,10 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
+        if self.replay_maintenance.owns(message.read_id) {
+            replay_maintenance::completed(self, context, message);
+            return;
+        }
         if companion::ack_read::owns(self, message.read_id) {
             companion::ack_read::completed(self, context, message);
             return;
@@ -1246,6 +1255,7 @@ impl FederationCoordinator {
         entry: crate::state_core::timers::TimerEntry,
     ) -> bool {
         grace::timer_fired(self, context, entry)
+            || replay_maintenance::timer_fired(self, context, entry)
             || resume_reconciliation::timer_fired(self, context, entry)
             || snapshot::timer_fired(self, context, entry)
             || self.companion_timer_fired(context, entry)
@@ -1353,6 +1363,8 @@ impl FederationCoordinator {
                 if context.head().storage_commit_sequence <= receipt.staged_after)
             || matches!(self.pending.as_ref(), Some(PendingCommit::CompanionRestore(receipt))
                 if context.head().storage_commit_sequence <= receipt.staged_after)
+            || matches!(self.pending.as_ref(), Some(PendingCommit::CompanionReplayMaintenance(receipt))
+                if context.head().storage_commit_sequence <= receipt.staged_after)
         {
             None
         } else {
@@ -1366,6 +1378,9 @@ impl FederationCoordinator {
         self.settle_remote_results(context);
         let pending = self.take_pending_for_receipt(context);
         match pending {
+            Some(PendingCommit::CompanionReplayMaintenance(receipt)) => {
+                replay_maintenance::committed(self, context, *receipt);
+            }
             Some(PendingCommit::History(prepared)) => history::committed(self, context, *prepared),
             Some(PendingCommit::HistoryCleanup(cleanup)) => {
                 history::cleanup_committed(self, context, cleanup)
@@ -1496,7 +1511,7 @@ impl FederationCoordinator {
         if context.in_flight()
             || context.pending_len() != 0
             || self.loader.blocks_admission()
-            || self.companion_ack_read.is_some()
+            || self.replay_io_busy()
         {
             return;
         }
@@ -1528,6 +1543,11 @@ impl FederationCoordinator {
             }
             self.continue_delivery_work(context, peer);
         }
+        replay_maintenance::advance(self, context);
+    }
+
+    fn replay_io_busy(&self) -> bool {
+        self.companion_ack_read.is_some() || self.replay_maintenance.busy()
     }
 
     fn continue_delivery_work(&mut self, context: &mut StateCoreContext, peer: ServerId) {
@@ -1560,7 +1580,20 @@ impl FederationCoordinator {
     ) {
         context.reject_remote_account_results();
         self.remote_grant_rejected();
+        self.reject_pending_batch(context, error);
+        request::drain_queued(self, context);
+        self.drain_backlog(context);
+    }
+
+    fn reject_pending_batch(
+        &mut self,
+        context: &mut StateCoreContext,
+        error: agenc_ircd_storage::StorageError,
+    ) {
         match self.pending.take() {
+            Some(PendingCommit::CompanionReplayMaintenance(receipt)) => {
+                replay_maintenance::rejected(self, context, *receipt);
+            }
             Some(PendingCommit::ResumeAcknowledged(receipt)) => {
                 resume_reconciliation::rejected(self, context, receipt, error);
             }
@@ -1602,9 +1635,7 @@ impl FederationCoordinator {
             Some(PendingCommit::OriginAck { peer, link, .. })
             | Some(PendingCommit::OriginReady { peer, link })
             | Some(PendingCommit::OriginExpired { peer, link, .. }) => {
-                if self.link_is_live(link, peer) {
-                    self.fail_link(context, link, peer, Violation::Ceiling);
-                }
+                self.reject_origin_acknowledgement(context, link, peer)
             }
             Some(PendingCommit::CompanionRestore(receipt)) => {
                 startup::retirement::rejected(self, context, *receipt, error);
@@ -1629,21 +1660,27 @@ impl FederationCoordinator {
             }
             _ => {}
         }
-        request::drain_queued(self, context);
-        self.drain_backlog(context);
     }
 
     /// Replays backlogged link traffic in arrival order until a replayed
     /// item stages the next batch.
     fn drain_backlog(&mut self, context: &mut StateCoreContext) {
-        while self.pending.is_none()
-            && self.companion_ack_read.is_none()
-            && !self.loader.blocks_admission()
-        {
+        while self.pending.is_none() && !self.replay_io_busy() && !self.loader.blocks_admission() {
             let Some(message) = self.backlog.pop_front() else {
                 break;
             };
             self.inbound(context, message);
+        }
+    }
+
+    fn reject_origin_acknowledgement(
+        &mut self,
+        context: &mut StateCoreContext,
+        link: LinkId,
+        peer: ServerId,
+    ) {
+        if self.link_is_live(link, peer) {
+            self.fail_link(context, link, peer, Violation::Ceiling);
         }
     }
 

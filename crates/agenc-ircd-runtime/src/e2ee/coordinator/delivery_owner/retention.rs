@@ -2,8 +2,10 @@
 #![forbid(unsafe_code)]
 
 mod append;
+pub(crate) mod cleanup;
 mod inventory;
 mod legacy;
+pub(crate) mod maintenance;
 pub(in crate::e2ee::coordinator) mod prefix;
 pub(super) mod recovery;
 mod row;
@@ -73,7 +75,6 @@ impl Draft {
     }
 
     /// Age-only maintenance preserves the last ACK and creates no new ACK range.
-    #[cfg(test)]
     pub(super) fn maintenance(
         current: &DeliveryOwner,
         previous: ReplayOwner,
