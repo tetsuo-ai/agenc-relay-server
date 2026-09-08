@@ -1,6 +1,7 @@
 //! These row fixtures check admission and ownership, not MLS message semantics.
 #![forbid(unsafe_code)]
 use super::*;
+mod retirement;
 use crate::budget::MemoryBudget;
 use agenc_ircd_e2ee::{ObjectId, object::IrcWireObject, tls::TlsEncode};
 use agenc_ircd_storage::e2ee_records::{MAILBOX_ROW_KIND, MailboxKind, MailboxRow};

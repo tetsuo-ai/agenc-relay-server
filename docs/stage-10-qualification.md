@@ -3012,8 +3012,47 @@ remain unchanged, without a new measurement. All eight checkpoint gates pass:
 runtime suite has 1,136 passes. Source policy covers 858 Rust files. Exact
 inputs, logs, and workspace executables are in `cap79-resident-final-proof`.
 
-CAP-79 still needs retirement of live resident bodies and independent shared-body
-retention. Cleanup does not delete shared object bodies whose
+Mailbox ACK retirement has a separate executed failure in
+`cap79-mailbox-retirement-red-proof`. An admitted application envelope with an
+exact seeded mailbox grant passes the normal attachment and ACK checks. Its
+last item disappears, but the payload remains resident. The case fails in
+0.14 seconds and passes after retirement. The fixture applies handler effects
+and retains logical write rows; it does not claim an actual storage receipt or
+MLS decryption. Its two test inputs and executable are archived.
+
+A committed ACK now releases the memory copy of an Application, Welcome, or
+StagedReInit body only after its last retained mailbox item is removed. Other
+targets and expired-but-unremoved items still protect the body. Binding,
+Commit, and other control objects remain resident. The body drops before its
+memory reservation. Stored objects remain unchanged, so retained responses
+can continue to read them through the charged storage adapter.
+
+Review found an admission-order failure: a full resident counter refuses an
+ACK's smaller result before releasing its larger payload. The introduced
+integration case fails in 0.00 seconds; eight exact changed source inputs and
+the executable are in `cap79-mailbox-retirement-headroom-red-proof`. It uses
+small valid outer object rows and a modeled full counter, without claiming a
+256 MiB load or complete result semantics. Admission now credits one exact
+sole-item deletion when its body kind agrees and no new item references that
+body. Old bytes and their charge remain owned until the receipt. Multiple item
+deletions receive no credit. Shared references, unrelated deletes, new
+references, and control bodies cannot fund a result.
+
+Twelve new tests pass in the 13-case retirement filter, which also includes one
+existing history test. They cover the last ACK, shared bodies, discarded
+unapplied effects, repeated ACKs, protected binding objects, all three payload
+kinds, conservative reference and counter guards, and net capacity across
+rejection and publication. Five cases run mailbox handlers; the others test
+the row-admission and memory boundaries. Both inventories cover 729 source
+files, and the release catalog has 981 critical regions, including five
+additions and 19 source rebindings. Coverage floors remain unchanged, without
+a new measurement. All eight checkpoint gates pass: 2,605 tests pass, none
+fail, and 21 qualification tests remain ignored. The runtime suite has 1,148
+passes. Source policy covers 862 Rust files. Exact inputs, logs, and workspace
+executables are in `cap79-mailbox-retirement-final-proof`.
+
+CAP-79 still needs durable expiry of resident mailbox items and independent
+shared-body retention. Cleanup does not delete shared object bodies whose
 independent retention requirements remain unresolved. Every surviving body
 still counts against the disk ceiling, and the global object collector
 continues to refuse capacity loss under CAP-95.

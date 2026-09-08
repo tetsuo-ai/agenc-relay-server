@@ -156,6 +156,33 @@ pub struct Mailboxes {
 }
 
 impl Mailboxes {
+    /// Returns the object's ID only when this exact item owns its last mailbox reference.
+    #[must_use]
+    pub fn last_object_reference(
+        &self,
+        target: Target,
+        kind: MailboxKind,
+        sequence: u64,
+    ) -> Option<Id> {
+        let key = ItemKey {
+            target,
+            kind,
+            sequence,
+        };
+        let id = self.items.get(&key)?.object_id;
+        (!self
+            .items
+            .iter()
+            .any(|(other, item)| *other != key && item.object_id == id))
+        .then_some(id)
+    }
+
+    /// Any retained item keeps its object referenced until that item is removed.
+    #[must_use]
+    pub fn references_object(&self, object_id: &Id) -> bool {
+        self.items.values().any(|item| item.object_id == *object_id)
+    }
+
     /// The number of undelivered or unacknowledged items.
     #[must_use]
     pub fn item_count(&self) -> usize {

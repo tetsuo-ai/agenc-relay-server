@@ -1,6 +1,7 @@
 //! One request admits every resident body before staging; only its receipt publishes them.
 #![forbid(unsafe_code)]
 
+mod retirement;
 mod rows;
 #[cfg(test)]
 mod tests;
@@ -17,12 +18,17 @@ use std::collections::BTreeMap;
 pub(super) struct Prepared {
     objects: BTreeMap<[u8; 32], Vec<u8>>,
     total: usize,
+    retired: Option<[u8; 32]>,
     memory: BTreeMap<[u8; 32], MemoryPermit>,
 }
 
 impl Prepared {
     /// The owner allows one pending request and publishes these bodies before its effects.
     pub(super) fn apply(mut self, state: &mut CompanionState) {
+        if let Some(id) = self.retired {
+            drop(state.objects.remove(&id));
+            state.object_memory.remove(&id);
+        }
         state.objects.append(&mut self.objects);
         state.object_memory.append(&mut self.memory);
         state.object_bytes = self.total;
@@ -94,9 +100,11 @@ pub(super) fn prepare(
         .reserve(metadata_bytes)
         .map_err(|_| Code::RateLimited)?;
     let required = rows::required(writes, backing)?;
+    let retirement = retirement::credit(state, writes, &required);
     let mut prepared = Prepared {
         objects: BTreeMap::new(),
-        total: state.object_bytes,
+        total: retirement.map_or(state.object_bytes, |(_, remaining)| remaining),
+        retired: retirement.map(|(id, _)| id),
         memory: BTreeMap::new(),
     };
     for write in writes {
@@ -115,4 +123,25 @@ fn is_payload(kind: Kind) -> bool {
         kind,
         Kind::ApplicationMls | Kind::WelcomeMls | Kind::StagedReinit | Kind::FederationEvent
     )
+}
+
+/// Mailbox retirement releases only the memory copy; stored bodies have independent owners.
+pub(super) fn retire_payload(state: &mut CompanionState, id: &[u8; 32]) {
+    if state.mailboxes.references_object(id) {
+        return;
+    }
+    let Some(bytes) = state.objects.get(id) else {
+        return;
+    };
+    let Ok((Kind::ApplicationMls | Kind::WelcomeMls | Kind::StagedReinit, _)) =
+        agenc_ircd_e2ee::object::IrcWireObject::peek(bytes)
+    else {
+        return;
+    };
+    let Some(total) = state.object_bytes.checked_sub(bytes.len()) else {
+        return;
+    };
+    drop(state.objects.remove(id));
+    state.object_memory.remove(id);
+    state.object_bytes = total;
 }

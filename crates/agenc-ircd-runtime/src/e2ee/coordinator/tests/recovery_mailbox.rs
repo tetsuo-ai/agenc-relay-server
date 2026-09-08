@@ -30,6 +30,9 @@ mod mailbox_grant_restart;
 #[path = "cold_object_reads.rs"]
 mod cold_object_reads;
 
+#[path = "mailbox_retirement.rs"]
+mod mailbox_retirement;
+
 fn deliver_binding(fixture: &mut Harness, bytes: &[u8]) -> TestResult {
     let mut parameters = account_param(&fixture.account);
     parameters.extend_from_slice(&DEVICE_ID);

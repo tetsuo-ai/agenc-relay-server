@@ -379,6 +379,7 @@ pub fn acknowledge_mailbox(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     outcome.effects.push(Box::new(move |companion| {
         companion.mailboxes = mailboxes;
+        super::super::resident::retire_payload(companion, &object_id);
     }));
     Ok(outcome)
 }
