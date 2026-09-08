@@ -12,6 +12,7 @@ use agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow;
 
 mod cases;
 mod fixture;
+mod result_memory;
 use fixture::Fixture;
 
 #[tokio::test]

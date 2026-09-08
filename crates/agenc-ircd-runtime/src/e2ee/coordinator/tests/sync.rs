@@ -19,7 +19,7 @@ use agenc_ircd_types::ServerId;
 use agenc_ircd_storage::e2ee_records::{ReplayKey, ReplayRow};
 
 use super::super::sync::{Action, BaseOriginView, Committed, CompanionHost, Cut, PendingWork};
-use super::super::{CompanionFault, CompanionOriginKey, StoredResult};
+use super::super::{CompanionFault, CompanionOriginKey};
 use super::{Counter, HOME, Harness, INCARNATION, NETWORK, ORIGIN, TestResult, object_id, wire};
 use crate::federation::LinkId;
 use crate::federation::link::{ParsedLine, parse_line};
@@ -898,13 +898,8 @@ fn a_retransmitted_request_replays_its_stored_result() -> TestResult {
         IrcWireObjectKind::FederationResult,
         &origin_object(0, [0; 32], None, None)?.0,
     )?;
-    sync.harness.coordinator.state.results.insert(
-        request_object,
-        StoredResult {
-            result,
-            responses: Vec::new(),
-        },
-    );
+    super::super::results::Prepared::capture(&result, std::iter::empty(), &sync.harness.backing)?
+        .apply(&mut sync.harness.coordinator.state.results, request_object);
     let mut replay = Vec::new();
     for frame in fragments {
         replay.extend(sync.frame(frame)?);

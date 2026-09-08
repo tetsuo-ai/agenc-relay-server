@@ -56,6 +56,7 @@ pub mod request;
 pub(crate) mod request_expiry;
 mod resident;
 pub(crate) mod response_read;
+pub mod results;
 mod startup;
 pub mod sync;
 #[cfg(test)]
@@ -180,7 +181,7 @@ pub struct CompanionState {
     /// Exact declared recovery provenance retains its memory owner after startup.
     pub(crate) recovery_gates: recovery_gates::Gates,
     /// Retained results and responses by request object identifier.
-    pub results: BTreeMap<[u8; 32], StoredResult>,
+    pub results: results::Store,
     /// Per-conversation retained state the sequencer needs between records.
     pub conversations: BTreeMap<[u8; 32], ConversationState>,
     /// Gates awaiting the outer owner's independent base-stream validation.
@@ -489,7 +490,7 @@ impl CompanionCoordinator {
         &mut self,
         backing: crate::budget::BackingReservationPort,
     ) -> Result<(), CompanionFault> {
-        self.restore.delivery.set_backing(backing);
+        self.restore.set_backing(backing);
         self.finish_restore()
     }
 

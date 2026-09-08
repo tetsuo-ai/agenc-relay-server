@@ -71,7 +71,7 @@ use agenc_ircd_types::{AccountId, ChannelInstanceId};
 
 use super::{
     CompanionCoordinator, CompanionOriginKey, CompanionState, ConversationState, LockEntry,
-    RetainedPolicy, StoredResult,
+    RetainedPolicy,
 };
 
 const CANDIDATE_RECORD: u16 = 1;
@@ -104,6 +104,7 @@ struct PolicyRow {
 /// The durable rows collected during the reload.
 #[derive(Default)]
 pub(super) struct Restore {
+    backing: Option<crate::budget::BackingReservationPort>,
     objects: objects::Restore,
     gates: super::recovery_gates::Gates,
     routes: BTreeMap<[u8; 32], RouteRow>,
@@ -122,6 +123,11 @@ pub(super) struct Restore {
 }
 
 impl Restore {
+    pub(super) fn set_backing(&mut self, backing: crate::budget::BackingReservationPort) {
+        self.delivery.set_backing(backing.clone());
+        self.backing = Some(backing);
+    }
+
     /// Collects one row of an E2EE table.
     pub(super) fn admit(&mut self, table: TableId, key: &StoredKey, value: &PersistentRecordValue) {
         match table {
@@ -468,7 +474,7 @@ pub(super) fn rebuild(
     restore_packages(state, restore.packages);
     restore_mailboxes(state, restore.mailbox)?;
     restore.mailbox_sequences.apply(&mut state.mailboxes)?;
-    restore_replays(state, restore.replays);
+    restore_replays(state, restore.replays, restore.backing.as_ref())?;
     restore_origin_sequences(state, restore.origin_sequences);
     let index = ObjectIndex::build(state);
     let rows = SequencerRows {
@@ -1116,25 +1122,36 @@ fn restore_origin_sequences(state: &mut CompanionState, rows: Vec<(StoredKey, Or
     }
 }
 
-fn restore_replays(state: &mut CompanionState, rows: Vec<(StoredKey, ReplayRow)>) {
+fn restore_replays(
+    state: &mut CompanionState,
+    rows: Vec<(StoredKey, ReplayRow)>,
+    backing: Option<&crate::budget::BackingReservationPort>,
+) -> Result<(), super::CompanionFault> {
+    let mut prepared = super::results::Store::default();
+    for (key, row) in &rows {
+        if ReplayRow::parse_key(key).is_err() {
+            continue;
+        }
+        let result = row
+            .result_object_id
+            .and_then(|object_id| state.objects.get(&object_id));
+        if let Some(result) = result {
+            super::results::Prepared::capture(
+                result,
+                row.response_object_ids.iter().copied(),
+                backing.ok_or(super::CompanionFault::Ceiling)?,
+            )?
+            .apply(&mut prepared, row.request_object_id);
+        }
+    }
     for (key, row) in rows {
         let Ok(parts) = ReplayRow::parse_key(&key) else {
             continue;
         };
-        let result = row
-            .result_object_id
-            .and_then(|object_id| state.objects.get(&object_id).cloned());
-        if let Some(result) = result {
-            state.results.insert(
-                row.request_object_id,
-                StoredResult {
-                    result,
-                    responses: row.response_object_ids.clone(),
-                },
-            );
-        }
         state.replays.insert(parts, row);
     }
+    state.results.append(&mut prepared);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

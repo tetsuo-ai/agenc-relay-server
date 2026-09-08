@@ -56,13 +56,12 @@ impl Fixture {
             }
         }
         commit(&mut core, writes).await?;
-        executor.state.results.insert(
-            decoded.request_object_id,
-            StoredResult {
-                result,
-                responses: row.response_object_ids.clone(),
-            },
-        );
+        crate::e2ee::coordinator::results::Prepared::capture(
+            &result,
+            row.response_object_ids.iter().copied(),
+            &core.context_mut()?.backing_reservations(),
+        )?
+        .apply(&mut executor.state.results, decoded.request_object_id);
         executor.state.replays.insert(key, row);
         coordinator.install_companion_executor(executor, core.identity.server_incarnation)?;
         let (handle, queue) = link_queue(1 << 20);

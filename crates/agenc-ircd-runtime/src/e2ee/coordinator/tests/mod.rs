@@ -34,9 +34,7 @@ use support::{
 
 use super::ops::{self, Exec, Fail};
 use super::request::{self, Classified, Outcome, ResultBody};
-use super::{
-    CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteRequest, StoredResult,
-};
+use super::{CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteRequest};
 
 mod barrier;
 mod live_payloads;
@@ -1056,13 +1054,8 @@ fn replay_rows_answer_exact_duplicates_and_refuse_conflicts() -> TestResult {
             retain_until: NOW + 60,
         },
     );
-    state.results.insert(
-        decoded.request_object_id,
-        StoredResult {
-            result: vec![1, 2, 3],
-            responses: vec![[2; 32]],
-        },
-    );
+    super::results::Prepared::capture(&[1, 2, 3], [[2; 32]].into_iter(), &harness.backing)?
+        .apply(&mut state.results, decoded.request_object_id);
     state.objects.insert([2; 32], vec![9, 9]);
     assert_eq!(
         request::classify(&state, HOME, &decoded),

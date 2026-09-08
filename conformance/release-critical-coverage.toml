@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 763
-reviewed_source_sha256 = "93747a17dca00476604ff52a5d125b04f2e29ff8fef8e1e68b851e984298f0eb"
+reviewed_source_files = 766
+reviewed_source_sha256 = "245662262a4a32d4a7017c7961ebd0b64cd6823c78b8941e8d79f0db66d78f26"
 deferred = []
 
 [[region]]
@@ -2326,9 +2326,9 @@ reason = "Persist the exact current Item grant and Token together; delete a diff
 id = "cap80-startup-mailboxrows-admit-item"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 967
-end_line = 999
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 973
+end_line = 1005
 metric = "regions"
 reason = "Retain the Item grant as persisted; reconstruction cannot discard its current token binding."
 
@@ -2336,9 +2336,9 @@ reason = "Retain the Item grant as persisted; reconstruction cannot discard its 
 id = "cap80-startup-mailboxrows-admit-token"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 1001
-end_line = 1030
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 1007
+end_line = 1036
 metric = "regions"
 reason = "Retain Token object identity and full grant; no key-order winner."
 
@@ -2346,9 +2346,9 @@ reason = "Retain Token object identity and full grant; no key-order winner."
 id = "cap80-startup-validate-mailbox-grants"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 1073
-end_line = 1101
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 1079
+end_line = 1107
 metric = "regions"
 reason = "Reject duplicate grants per item, orphans, missing tokens and any object/token/session/expiry contradiction."
 
@@ -2356,9 +2356,9 @@ reason = "Reject duplicate grants per item, orphans, missing tokens and any obje
 id = "cap80-startup-restore-mailboxes"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 1052
-end_line = 1071
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 1058
+end_line = 1077
 metric = "regions"
 reason = "Validate every cross-row grant relation before applying any reconstructed mailbox."
 
@@ -2956,9 +2956,9 @@ reason = "Verify the exact typed-call-selected signature domain and historical c
 id = "cap76-startup-rebuild"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 454
-end_line = 486
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 460
+end_line = 492
 metric = "regions"
 reason = "Propagate successor authority contradictions before delivery restoration or outer loader admission; startup cannot publish a partially accepted lineage."
 
@@ -2966,9 +2966,9 @@ reason = "Propagate successor authority contradictions before delivery restorati
 id = "cap76-startup-restore-successors"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 490
-end_line = 541
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 496
+end_line = 547
 metric = "regions"
 reason = "Reject duplicate target ownership before choosing an anchor; occupied or partial targets require exact compatible lineage and cannot be discarded or overwritten."
 
@@ -2976,9 +2976,9 @@ reason = "Reject duplicate target ownership before choosing an anchor; occupied 
 id = "cap76-startup-restore-successor-binding"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 589
-end_line = 626
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 595
+end_line = 632
 metric = "regions"
 reason = "Verify exact retained activation/binding and preserve a valid successor later head, recovery gate, removal state and route index."
 
@@ -4346,9 +4346,9 @@ reason = "Delegate EACK to receipt-owned validation with existing trusted wall-c
 id = "companion-mod-companioncoordinator-set-pending"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "fb0e3542bf75cc25704b6fd681527b742b9cf41c1fd62bfc434ffaf7e39a15de"
-start_line = 853
-end_line = 855
+source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
+start_line = 854
+end_line = 856
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4356,9 +4356,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-applied"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "fb0e3542bf75cc25704b6fd681527b742b9cf41c1fd62bfc434ffaf7e39a15de"
-start_line = 859
-end_line = 886
+source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
+start_line = 860
+end_line = 887
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4366,9 +4366,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-rejected"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "fb0e3542bf75cc25704b6fd681527b742b9cf41c1fd62bfc434ffaf7e39a15de"
-start_line = 889
-end_line = 891
+source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
+start_line = 890
+end_line = 892
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4376,9 +4376,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-startup-restore-admit-state"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 138
-end_line = 183
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 144
+end_line = 189
 metric = "regions"
 reason = "Dispatch exact kind14 rows to historical delivery restore and apply only after semantic reconstruction and authoritative page validation. Preserve unrelated mailbox/successor reconstruction."
 
@@ -6826,9 +6826,9 @@ reason = "Combined barrier construction, recovery, and receipt decisions require
 id = "s10-cap70-endpoint-complete-barriers"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "3c1fd6393a445e40c75b23c738e70d3d0caffd67d620e79978e18289ad961c18"
-start_line = 602
-end_line = 640
+source_sha256 = "b8a9fb5bc00da700c65df7244d3c6b505ba0b6af922e5aa7ad328f83eae34ed4"
+start_line = 601
+end_line = 639
 metric = "branches"
 reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
 
@@ -9066,9 +9066,9 @@ reason = "Both replay readers block concurrent companion execution and retain ty
 id = "cap97-recent-001-replay-recent"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "fb0e3542bf75cc25704b6fd681527b742b9cf41c1fd62bfc434ffaf7e39a15de"
-start_line = 706
-end_line = 748
+source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
+start_line = 707
+end_line = 749
 metric = "regions"
 reason = "The recent-fragment replay shortcut must resolve every response in original descriptor order before rendering any output; one absent body refuses the whole replay."
 
@@ -9366,9 +9366,9 @@ reason = "An exact fresh lookup distinguishes confirmed absence from failed stor
 id = "cap79-fresh-object-005-run"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "3c1fd6393a445e40c75b23c738e70d3d0caffd67d620e79978e18289ad961c18"
-start_line = 172
-end_line = 181
+source_sha256 = "b8a9fb5bc00da700c65df7244d3c6b505ba0b6af922e5aa7ad328f83eae34ed4"
+start_line = 171
+end_line = 180
 metric = "regions"
 reason = "Fresh object completion repeats request classification and current authority before staging; uncached bodies remain charged through effects and receipt-owned output."
 
@@ -9376,9 +9376,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-006-run-with-object"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "3c1fd6393a445e40c75b23c738e70d3d0caffd67d620e79978e18289ad961c18"
-start_line = 184
-end_line = 360
+source_sha256 = "b8a9fb5bc00da700c65df7244d3c6b505ba0b6af922e5aa7ad328f83eae34ed4"
+start_line = 183
+end_line = 359
 metric = "regions"
 reason = "Fresh object completion repeats request classification and current authority before staging; uncached bodies remain charged through effects and receipt-owned output."
 
@@ -9386,9 +9386,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-007-execute"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "3c1fd6393a445e40c75b23c738e70d3d0caffd67d620e79978e18289ad961c18"
-start_line = 364
-end_line = 436
+source_sha256 = "b8a9fb5bc00da700c65df7244d3c6b505ba0b6af922e5aa7ad328f83eae34ed4"
+start_line = 363
+end_line = 435
 metric = "regions"
 reason = "Fresh object completion repeats request classification and current authority before staging; uncached bodies remain charged through effects and receipt-owned output."
 
@@ -9396,9 +9396,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-008-assemble"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "3c1fd6393a445e40c75b23c738e70d3d0caffd67d620e79978e18289ad961c18"
-start_line = 683
-end_line = 840
+source_sha256 = "b8a9fb5bc00da700c65df7244d3c6b505ba0b6af922e5aa7ad328f83eae34ed4"
+start_line = 682
+end_line = 837
 metric = "regions"
 reason = "Fresh object completion repeats request classification and current authority before staging; uncached bodies remain charged through effects and receipt-owned output."
 
@@ -9406,9 +9406,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-009-committed-lines"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "3c1fd6393a445e40c75b23c738e70d3d0caffd67d620e79978e18289ad961c18"
-start_line = 978
-end_line = 1008
+source_sha256 = "b8a9fb5bc00da700c65df7244d3c6b505ba0b6af922e5aa7ad328f83eae34ed4"
+start_line = 975
+end_line = 1005
 metric = "regions"
 reason = "Fresh object completion repeats request classification and current authority before staging; uncached bodies remain charged through effects and receipt-owned output."
 
@@ -9416,9 +9416,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-010-attached-origin-edges"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "3c1fd6393a445e40c75b23c738e70d3d0caffd67d620e79978e18289ad961c18"
-start_line = 438
-end_line = 449
+source_sha256 = "b8a9fb5bc00da700c65df7244d3c6b505ba0b6af922e5aa7ad328f83eae34ed4"
+start_line = 437
+end_line = 448
 metric = "regions"
 reason = "Fresh object completion repeats request classification and current authority before staging; uncached bodies remain charged through effects and receipt-owned output."
 
@@ -9596,9 +9596,9 @@ reason = "Complete mailbox metadata determines required object kinds; shared bod
 id = "cap79-selective-012-select-objects"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 1924
-end_line = 1929
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 1941
+end_line = 1946
 metric = "regions"
 reason = "Metadata is sealed before selective body loading and cannot change the required set afterward."
 
@@ -9606,9 +9606,9 @@ reason = "Metadata is sealed before selective body loading and cannot change the
 id = "cap79-selective-013-select-restored-objects"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "fb0e3542bf75cc25704b6fd681527b742b9cf41c1fd62bfc434ffaf7e39a15de"
-start_line = 972
-end_line = 977
+source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
+start_line = 973
+end_line = 978
 metric = "regions"
 reason = "The composed loader explicitly selects objects only after collecting complete mailbox metadata."
 
@@ -10356,9 +10356,9 @@ reason = "Declared recovery rows require exact route and epoch bindings, owned m
 id = "cap73-declared-gates-008-admit-gate"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "4253422f6433bd6d289cf9e85e877890a32cc193ca105b32be417c66882f3551"
-start_line = 185
-end_line = 194
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 191
+end_line = 200
 metric = "regions"
 reason = "Recovery capture errors remain fatal, metadata precedes object selection, and declared owners are installed after successor validation."
 
@@ -10366,9 +10366,9 @@ reason = "Recovery capture errors remain fatal, metadata precedes object selecti
 id = "cap73-declared-gates-011-admit-restored-with-backing"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "fb0e3542bf75cc25704b6fd681527b742b9cf41c1fd62bfc434ffaf7e39a15de"
-start_line = 465
-end_line = 479
+source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
+start_line = 466
+end_line = 480
 metric = "regions"
 reason = "The storage startup adapter supplies memory backing before declared recovery metadata is captured."
 
@@ -10671,3 +10671,73 @@ start_line = 46
 end_line = 105
 metric = "regions"
 reason = "Live Normal declarations require the current daemon epoch, refuse blocked routes, reserve their owned memory before staging and apply with the route receipt."
+
+[[region]]
+id = "cap79-result-memory-001-capture"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/results.rs"
+source_sha256 = "d1fa4d08745183955c7b2864b75fd09fb9d2848d4c2f801864784eb33e87188f"
+start_line = 20
+end_line = 46
+metric = "regions"
+reason = "Persistent replay copies reserve bounded vectors and map ownership before allocation and retain their permit through commit, replacement, rebuild and last-owner retirement."
+
+[[region]]
+id = "cap79-result-memory-002-apply"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/results.rs"
+source_sha256 = "d1fa4d08745183955c7b2864b75fd09fb9d2848d4c2f801864784eb33e87188f"
+start_line = 48
+end_line = 50
+metric = "regions"
+reason = "Persistent replay copies reserve bounded vectors and map ownership before allocation and retain their permit through commit, replacement, rebuild and last-owner retirement."
+
+[[region]]
+id = "cap79-result-memory-003-remove"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/results.rs"
+source_sha256 = "d1fa4d08745183955c7b2864b75fd09fb9d2848d4c2f801864784eb33e87188f"
+start_line = 89
+end_line = 91
+metric = "regions"
+reason = "Persistent replay copies reserve bounded vectors and map ownership before allocation and retain their permit through commit, replacement, rebuild and last-owner retirement."
+
+[[region]]
+id = "cap79-result-memory-004-append"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/results.rs"
+source_sha256 = "d1fa4d08745183955c7b2864b75fd09fb9d2848d4c2f801864784eb33e87188f"
+start_line = 93
+end_line = 95
+metric = "regions"
+reason = "Persistent replay copies reserve bounded vectors and map ownership before allocation and retain their permit through commit, replacement, rebuild and last-owner retirement."
+
+[[region]]
+id = "cap79-result-memory-005-set-backing"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 126
+end_line = 129
+metric = "regions"
+reason = "Startup supplies the process budget and prepares every retained result owner before installing the complete map; refusal releases partial results."
+
+[[region]]
+id = "cap79-result-memory-006-restore-replays"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
+source_sha256 = "fef40d50130130281f4ba0eb66236a988cb9d1dc3c6fc4cad0c72886a4bf6be8"
+start_line = 1125
+end_line = 1155
+metric = "regions"
+reason = "Startup supplies the process budget and prepares every retained result owner before installing the complete map; refusal releases partial results."
+
+[[region]]
+id = "cap79-result-memory-009-finish-restore-with-backing"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
+source_sha256 = "8b0127498aa4d6ebb736aa7cad8179c2adf0d2f6cc8e43f7de1494c519b6e399"
+start_line = 489
+end_line = 495
+metric = "regions"
+reason = "The composed reconstruction path supplies existing process backing to every retained-result admission."

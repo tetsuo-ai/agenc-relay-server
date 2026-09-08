@@ -3330,6 +3330,39 @@ independent retention requirements remain unresolved. Every surviving body
 still counts against the disk ceiling, and the global object collector
 continues to refuse capacity loss under CAP-95.
 
+The retained-result memory follow-up proves that startup makes a second
+persistent copy outside the object-body charge. Three canonical sealed replay
+results occupy another 507 bytes while the isolated budget charges exactly
+12,288 bytes for their object owners. The regression fails in 0.09 seconds;
+`cap79-result-memory-red-proof` retains five exact inputs, the runtime binary
+and log. Live assembly has the same uncharged copy. The repair gives every
+stored result its own permit, reserved before copying and retained until the
+last replay owner expires. Startup prepares the complete result map before
+installing it. This does not change physical shared-body retention.
+
+Six new tests pass in the 1,215-test runtime suite. They cover sealed startup,
+refusal after partial result preparation, abandoned assembly, committed
+ownership, replacement overlap, vector limits and release on removal or drop.
+The existing real-storage fetch test now checks the separate result-copy
+charge after its receipt and exact return to the initial budget after output
+and coordinator destruction. Temporary replay-read copies retain their
+existing independent reservations. Result-store mutation is private except
+for explicit corruption access compiled only in tests.
+
+The first runtime run passes 1,207 tests and fails three fixture expectations:
+two old reload cases omit backing, and one receipt case counts only the object
+copy. Exact inputs and executable are retained in
+`cap79-result-memory-fixture-failures-proof`. The reload helper now supplies
+backing and the receipt case measures both allocations. All eight final
+checks pass with 2,698 workspace tests, no failures and 22 default-ignored tests
+in 184.37 seconds; Clippy passes in 6.91 seconds. Source policy covers 901 Rust
+files. Both inventories bind 766 source files to
+`245662262a4a32d4a7017c7961ebd0b64cd6823c78b8941e8d79f0db66d78f26`.
+The release catalog has 1,073 critical regions, including seven newly reviewed
+regions; 23 existing bindings follow changed source files. No coverage
+measurement or threshold changes. Exact changed inputs, logs and executed
+binaries are retained in `cap79-result-memory-final-proof`.
+
 ### CAP-80: mailbox reconstruction can replace the current delivery grant
 
 Fixed in the worktree. The original renewed mailbox grant left an older Token

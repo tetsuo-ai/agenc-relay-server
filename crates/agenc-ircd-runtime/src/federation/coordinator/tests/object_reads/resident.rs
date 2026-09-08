@@ -17,11 +17,9 @@ async fn a_result_is_private_until_its_receipt_and_keeps_exact_resident_backing(
     assert!(budget.charged() > baseline);
     f.commit_pending().await?;
     let state = &f.executor()?.state;
-    let result = &state
-        .results
-        .get(&request)
-        .ok_or("committed result")?
-        .result;
+    let replay = state.results.get(&request).ok_or("committed result")?;
+    let result = &replay.result;
+    let replay_bytes = u64::try_from(result.capacity() + replay.responses.capacity() * 32)?;
     let id = ObjectId::compute(result);
     let retained = state
         .object_memory
@@ -32,7 +30,7 @@ async fn a_result_is_private_until_its_receipt_and_keeps_exact_resident_backing(
     assert_eq!(state.objects.len(), before + 1);
     assert!(!state.objects.contains_key(&f.object_id));
     assert_eq!(f.output().await?, vec![f.bytes.clone()]);
-    assert_eq!(budget.charged(), baseline + retained);
+    assert!(budget.charged() >= baseline + retained + replay_bytes);
     drop(f.coordinator);
     assert_eq!(budget.charged(), baseline);
     Ok(())

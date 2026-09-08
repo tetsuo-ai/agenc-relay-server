@@ -7,8 +7,8 @@ mod validation;
 
 use super::*;
 use crate::bridge::{StorageReadCompletionMessage, StorageReadId};
+use crate::e2ee::coordinator::CompanionCoordinator;
 use crate::e2ee::coordinator::request::{self, Decoded, Outcome, ResponseObject, ResultBody};
-use crate::e2ee::coordinator::{CompanionCoordinator, StoredResult};
 use agenc_ircd_e2ee::ObjectId;
 use agenc_ircd_e2ee::federation::frames::Correlation;
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};

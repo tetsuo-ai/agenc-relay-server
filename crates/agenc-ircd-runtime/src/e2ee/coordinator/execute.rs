@@ -24,7 +24,6 @@ use super::ops::{self, Exec, Fail};
 use super::request::{self, Classified, Decoded, Outcome, ResponseObject};
 use super::{
     CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteRequest, PendingCompanion,
-    StoredResult,
 };
 use crate::federation::LinkId;
 use crate::federation::codec::source_view_object;
@@ -808,20 +807,18 @@ fn assemble(
     let mut effects = outcome.effects;
     effects.insert(0, Box::new(move |state| resident.apply(state)));
     let request_object_id = decoded.request_object_id;
-    let stored = StoredResult {
-        result: result.clone(),
-        responses: outcome
-            .responses
-            .iter()
-            .map(|response: &ResponseObject| {
-                *agenc_ircd_e2ee::ObjectId::compute(&response.bytes).as_bytes()
-            })
-            .collect(),
-    };
+    let stored = super::results::Prepared::capture(
+        &result,
+        outcome.responses.iter().map(|response: &ResponseObject| {
+            *agenc_ircd_e2ee::ObjectId::compute(&response.bytes).as_bytes()
+        }),
+        &barrier_inputs.backing,
+    )
+    .map_err(|_| E2eeReplyCode::RateLimited)?;
     effects.push(Box::new(move |state| {
         state.replays.insert(key, row);
         state.origin_sequences.insert(origin_key, sequence);
-        state.results.insert(request_object_id, stored);
+        stored.apply(&mut state.results, request_object_id);
         if let Some(origin) = state.origins.get_mut(&origin_key) {
             origin.next_sequence = sequence.next_sequence;
         }
