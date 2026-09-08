@@ -1,6 +1,9 @@
 //! Section 16.4 signed audit events, checkpoints, the retained chain, and the
 //! `AUDIT EXPORT` batch framing (spec 2318-2416, 4521-4541).
 
+mod export;
+pub use export::{AuditExportProfile, render_export_batch_with_profile};
+
 use agenc_ircd_crypto::{
     CryptoError, Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain,
     admin_audit_checkpoint_hash, admin_audit_event_hash, sign_canonical, verify_canonical,
@@ -511,38 +514,13 @@ pub fn render_export_batch(
     checkpoints: &[AdminAuditCheckpoint],
     events: &[AdminAuditEvent],
 ) -> Result<Vec<String>, AdminError> {
-    let records = checkpoints
-        .len()
-        .checked_add(events.len())
-        .ok_or(AdminError::Overflow)?;
-    if records > MAX_AUDIT_EXPORT_RECORDS {
-        return Err(AdminError::Limit);
-    }
-    check_checkpoint_order(range, checkpoints)?;
-    check_event_order(range, events)?;
-    check_export_coverage(range, checkpoints, events)?;
-    let id = encode_base64url(batch_id);
-    let mut lines = Vec::with_capacity(records.saturating_add(2));
-    lines.push(format!(
-        "BATCH +{id} agenc.ag/audit {} {} {} {}",
-        range.from(),
-        range.to(),
-        events.len(),
-        checkpoints.len()
-    ));
-    for checkpoint in checkpoints {
-        let token = encode_base64url(&checkpoint.encode()?);
-        lines.push(format!(
-            "@batch={id} NOTE AUDIT CHECKPOINT {token} :Audit checkpoint"
-        ));
-    }
-    for event in events {
-        let token = encode_base64url(&event.encode()?);
-        lines.push(format!("@batch={id} NOTE AUDIT EVENT {token} :Audit event"));
-    }
-    lines.push(format!("BATCH -{id}"));
-    check_export_bytes(&lines)?;
-    Ok(lines)
+    export::render(
+        batch_id,
+        range,
+        checkpoints,
+        events.iter().map(export::EventRef::Admin),
+        AuditExportProfile::Legacy,
+    )
 }
 
 fn check_checkpoint_order(
@@ -565,10 +543,12 @@ fn check_checkpoint_order(
     Ok(())
 }
 
-fn check_event_order(range: AuditRange, events: &[AdminAuditEvent]) -> Result<(), AdminError> {
+fn check_event_order(
+    range: AuditRange,
+    events: impl Iterator<Item = u64>,
+) -> Result<(), AdminError> {
     let mut previous: Option<u64> = None;
-    for event in events {
-        let sequence = event.tbs().audit_sequence;
+    for sequence in events {
         if !range.contains(sequence) || previous.is_some_and(|last| sequence <= last) {
             return Err(AdminError::Audit);
         }
@@ -580,7 +560,7 @@ fn check_event_order(range: AuditRange, events: &[AdminAuditEvent]) -> Result<()
 fn check_export_coverage(
     range: AuditRange,
     checkpoints: &[AdminAuditCheckpoint],
-    events: &[AdminAuditEvent],
+    events: impl ExactSizeIterator<Item = u64>,
 ) -> Result<(), AdminError> {
     let records = checkpoints
         .len()
@@ -594,10 +574,7 @@ fn check_export_coverage(
             tbs.deleted_last_sequence.min(range.to()),
         ));
     }
-    spans.extend(events.iter().map(|event| {
-        let sequence = event.tbs().audit_sequence;
-        (sequence, sequence)
-    }));
+    spans.extend(events.map(|sequence| (sequence, sequence)));
     spans.sort_unstable();
 
     let Some((first_start, first_end)) = spans.first().copied() else {

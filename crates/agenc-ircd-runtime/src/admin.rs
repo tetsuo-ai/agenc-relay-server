@@ -1289,7 +1289,7 @@ impl AdminOwner {
                 self.process_action(generation, &event, AdminProcessAction::Die, token)
                     .await;
             }
-            AdminCommand::AuditExport(range) => {
+            AdminCommand::AuditExport(range) | AdminCommand::AuditExportMaintenance(range) => {
                 self.audit_export(generation, &event, *range, token).await;
             }
             AdminCommand::BackupCreate(_) => {
@@ -1381,6 +1381,31 @@ impl AdminOwner {
         }
     }
 
+    fn prepare_audit_export_job(
+        &mut self,
+        generation: ConnectionGeneration,
+        event: &AdminCommandEvent,
+        range: agenc_ircd_admin::AuditRange,
+    ) -> Option<audit::AuditExportJob> {
+        let mut batch_id = [0_u8; 16];
+        if self.entropy.fill_exact(&mut batch_id).is_err() {
+            self.output_storage_unavailable(generation, "AUDIT");
+            return None;
+        }
+        let profile = if matches!(event.command, AdminCommand::AuditExportMaintenance(_)) {
+            agenc_ircd_admin::AuditExportProfile::MaintenanceV1
+        } else {
+            agenc_ircd_admin::AuditExportProfile::Legacy
+        };
+        match self.audit.prepare_export(range, batch_id) {
+            Ok(job) => Some(job.with_profile(profile)),
+            Err(error) => {
+                self.output_export_failure(generation, error);
+                None
+            }
+        }
+    }
+
     async fn audit_export(
         &mut self,
         generation: ConnectionGeneration,
@@ -1395,17 +1420,8 @@ impl AdminOwner {
             );
             return;
         };
-        let mut batch_id = [0_u8; 16];
-        if self.entropy.fill_exact(&mut batch_id).is_err() {
-            self.output_storage_unavailable(generation, "AUDIT");
+        let Some(export) = self.prepare_audit_export_job(generation, event, range) else {
             return;
-        }
-        let export = match self.audit.prepare_export(range, batch_id) {
-            Ok(job) => job,
-            Err(error) => {
-                self.output_export_failure(generation, error);
-                return;
-            }
         };
         let frozen = match tokio::task::spawn_blocking(move || export.run()).await {
             Ok(Ok(frozen)) => frozen,
@@ -2316,6 +2332,7 @@ impl AdminOwner {
             }
             AdminCommand::Stats(_)
             | AdminCommand::AuditExport(_)
+            | AdminCommand::AuditExportMaintenance(_)
             | AdminCommand::Ping(_)
             | AdminCommand::Pong(_)
             | AdminCommand::Quit
@@ -2500,7 +2517,8 @@ const fn audit_phase_is_valid(command: &AdminCommand, phase: AdminAuditPhase) ->
         | AdminCommand::Info
         | AdminCommand::Links
         | AdminCommand::Stats(_)
-        | AdminCommand::AuditExport(_) => matches!(phase, AdminAuditPhase::Observed),
+        | AdminCommand::AuditExport(_)
+        | AdminCommand::AuditExportMaintenance(_) => matches!(phase, AdminAuditPhase::Observed),
         AdminCommand::Rehash(_)
         | AdminCommand::Kill { .. }
         | AdminCommand::BackupCreate(_)
@@ -4339,7 +4357,8 @@ mod tests {
                 external.clone(),
             ),
             ("BACKUP CREATE :policy action".to_owned(), external),
-            ("AUDIT EXPORT 0 10".to_owned(), observed),
+            ("AUDIT EXPORT 0 10".to_owned(), observed.clone()),
+            ("AUDIT EXPORT 0 10 maintenance-v1".to_owned(), observed),
             ("RESTART :policy action".to_owned(), terminal.clone()),
             ("DIE :policy action".to_owned(), terminal),
         ];

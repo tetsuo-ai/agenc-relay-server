@@ -18,7 +18,7 @@ release candidate.
 | Federation and client replies | CAP-47 through CAP-60 have focused regression evidence and passing workspace gates. The uninstrumented 64-client campaign at `b735700` passes all eight scenarios. |
 | Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 preserves the original refused session through pressure recovery. CAP-87 removes premature origin retirement after a pending or refused journal write; both regressions and all 100 edge tests pass. The uninstrumented 64-client campaign at `b735700` passes original-session pressure recovery. |
 | Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. The 64-client campaign at `b735700` also returns all clients to its resource envelope and stops all three daemons cleanly. |
-| Implementation under qualification | CAP-5 stopped rotation commands, live two-account migration, and stale START cleanup pass. Actual rotation passes the 64-client, five-minute capacity campaign in `cap91-rotation-final`. Maintenance-aware export remains open. CAP-13 batching passes the 64-client campaign at `b735700`; CAP-91 adds two controlled gathering-checkpoint regressions. |
+| Implementation under qualification | CAP-5 stopped rotation commands, live two-account migration, and stale START cleanup pass. Actual rotation passes the 64-client, five-minute capacity campaign in `cap91-rotation-final`. The explicit maintenance export profile passes signed transport, actual storage, and full repository gates. CAP-13 batching passes the 64-client campaign at `b735700`; CAP-91 adds two controlled gathering-checkpoint regressions. |
 | Companion delivery recovery | CAP-70 and CAP-71 now persist and reconstruct both endpoints of unfinished combined barriers. Real-storage tests cover both ACK orders, refused writes, lost publication callbacks, and final-ACK resume. CAP-79 still requires the published replay retention bounds. |
 | Declared recovery | CAP-72 discards obsolete companion delivery, replay, and barrier state and marks typed live routes pending. CAP-73 now gates ordinary mutations before signing; terminal-evidence ingestion remains open. CAP-74 persists witnesses and blocks ordinary resume across restart; authenticated witness resolution remains open. |
 | ReInit admission | CAP-86 now rejects outside binding accounts before attempt, activation, or abort signing. Three regressions fail without the checks and pass with them, including valid in-group controls and absent-signer refusal. The remaining device-to-leaf and continuing-member checks need separate evidence. |
@@ -922,6 +922,40 @@ it does not establish an unrestricted throughput or latency claim.
 `cap91-rotation-final` binds the exact unchanged release executables and all
 nine modified or new source inputs. Its copied databases are excluded from
 evidence under CAP-92.
+
+The explicit `AUDIT EXPORT <from> <to> maintenance-v1` profile now renders the
+shared chain with distinct maintenance record labels and the
+`agenc.ag/audit-maintenance-v1` batch type. The original event and checkpoint
+bytes are preserved. The profile remains bound to the signed command through
+complete source verification, range selection, observed-event rendering, and
+its storage receipt. Legacy export behavior and frozen schema-two admission
+remain covered by their existing controls. The exact extension is documented
+in `docs/admin-audit-maintenance-v1.md`.
+
+The signed transport regression fails at checkpoint `8f14b85` because the new
+command cannot reach its observed audit submission; its actual executed binary
+and inputs are in `cap5-export-red-proof`. The fixed refused-commit test emits
+only STORAGE_UNAVAILABLE. A separate successful transport test runs the actual
+StateCore and storage owner, returns byte-identical historical admin and
+maintenance records plus its committed observed event, and reconstructs the
+advanced cursor from sealed storage. Profile, permission, range, checkpoint,
+record-limit, unselected-tail signature, and captured-cursor controls also pass.
+All 69 admin-focused runtime tests pass. Final repository gates pass 2,443
+tests with no failures and 21 ignored qualification tests, formatting,
+all-target/all-feature workspace Clippy, source check and self-test, workspace
+policy, and coverage-checker self-tests. Requirement and pinned-spec checks
+also pass. Both inventories bind 636 source files at
+`f827bddd83f136ae786e0d54b46db632a21c9503e0516dc8da0725b7071bcaca`;
+the release policy binds 709 regions with unchanged coverage floors.
+`cap5-export-final-proof` retains the exact inputs, executed runtime binary,
+command logs, and hashes. These are development checks, not a new coverage
+measurement or release qualification.
+
+The first gate stops at unchecked indexing in two new tests; those accesses
+now use checked lookups. The next gate passes all tests but requests source
+review of the expanded export handler. Job preparation is now a focused helper.
+Both failed gate records remain in `cap5-export-first-gates` and
+`cap5-export-before-decomposition-gates`; the final complete run passes.
 
 ### CAP-6: the coordinator refused channel messages whose edge named a trailing channel revision
 

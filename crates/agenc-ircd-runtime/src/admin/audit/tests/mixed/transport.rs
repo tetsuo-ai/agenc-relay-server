@@ -145,3 +145,5 @@ async fn signed_legacy_export_returns_only_unavailable_without_requesting_an_obs
     assert_eq!(fixture.authority(&core)?.cursor, expected_cursor);
     Ok(())
 }
+
+mod maintenance_export;

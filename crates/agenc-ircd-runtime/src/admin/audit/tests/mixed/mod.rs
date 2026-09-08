@@ -3,6 +3,7 @@
 #![cfg(test)]
 
 mod chain;
+mod export_profile;
 mod export_refusal;
 mod receipt;
 mod refusal;

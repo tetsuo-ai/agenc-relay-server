@@ -55,10 +55,11 @@ impl ExportSelection {
         if !self.range.contains(event.audit_sequence()) {
             return Ok(true);
         }
-        match event {
-            AuditEvent::Admin(event) => self.push_event(event).map(|()| true),
-            AuditEvent::Maintenance(_) => Ok(false),
+        if self.profile == AuditExportProfile::Legacy && matches!(event, AuditEvent::Maintenance(_))
+        {
+            return Ok(false);
         }
+        self.push_event(event).map(|()| true)
     }
 }
 

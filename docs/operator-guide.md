@@ -132,6 +132,12 @@ Use the local Unix admin socket for routine operation. Each operator still prove
 
 `REHASH` validates a complete replacement configuration before activation. Identity, storage-key, listener-purpose, wire-limit, OPAQUE, E2EE, HPKE, and onion-identity changes require a stopped restart or their named transition procedure. A rejected reload leaves the active configuration unchanged.
 
+To export stopped login-index rotation events together with ordinary admin
+events, sign `AUDIT EXPORT <from> <to> maintenance-v1` on the authenticated admin
+connection. The [maintenance export profile](admin-audit-maintenance-v1.md)
+defines the exact batch, record labels, historical verification, and limits.
+The operator needs the `audit` permission.
+
 ## Qualify storage growth on a host
 
 `agenc-ircd storage qualify` measures the production storage engine on the

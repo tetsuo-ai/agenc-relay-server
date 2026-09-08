@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 633
-reviewed_source_sha256 = "64ec554fa8e8aedf638f80c61c4e2eebf1b7f63b36f8a5c9c156dbb53b297549"
+reviewed_source_files = 636
+reviewed_source_sha256 = "f827bddd83f136ae786e0d54b46db632a21c9503e0516dc8da0725b7071bcaca"
 deferred = []
 
 [[region]]
@@ -858,9 +858,9 @@ reason = "Migration composes the construction ledger and the resume rules."
 id = "audit-scan-table-pages"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 1012
-end_line = 1085
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 1056
+end_line = 1129
 metric = "branches"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -868,9 +868,9 @@ reason = "The signed audit scan must refuse every gap, order, and signature fail
 id = "audit-verify-checkpoints"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 1096
-end_line = 1111
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 1140
+end_line = 1155
 metric = "regions"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -878,9 +878,9 @@ reason = "The signed audit scan must refuse every gap, order, and signature fail
 id = "audit-verify-events"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 1182
-end_line = 1195
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 1226
+end_line = 1239
 metric = "regions"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -888,9 +888,9 @@ reason = "The signed audit scan must refuse every gap, order, and signature fail
 id = "audit-verify-export-coverage"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 865
-end_line = 904
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 909
+end_line = 948
 metric = "branches"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -1586,9 +1586,9 @@ reason = "Both event variants supply their actual sequence, previous hash and ev
 id = "cap5-audit-auditchaincursor-advance-position"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-admin/src/audit.rs"
-source_sha256 = "2db5670479d6efa714dee1ef2bee6e0e4b8ab65ff8859234932fc04ea640ebc4"
-start_line = 483
-end_line = 500
+source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
+start_line = 486
+end_line = 503
 metric = "branches"
 reason = "Advance only exact next sequence and previous hash, using checked successor arithmetic and preserving the actual event hash."
 
@@ -1596,7 +1596,7 @@ reason = "Advance only exact next sequence and previous hash, using checked succ
 id = "cap5-mixed-decode-event"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "0df108b03c00c9d812cf6f68959f153a1a4163f8014106be127fa93fe1789c27"
+source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
 start_line = 6
 end_line = 16
 metric = "branches"
@@ -1606,7 +1606,7 @@ reason = "Audit rows allow only outer kind 1/2, checkpoint rows only kind 1; bod
 id = "cap5-mixed-permitted-kind"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "0df108b03c00c9d812cf6f68959f153a1a4163f8014106be127fa93fe1789c27"
+source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
 start_line = 18
 end_line = 23
 metric = "branches"
@@ -1616,7 +1616,7 @@ reason = "Audit rows allow only outer kind 1/2, checkpoint rows only kind 1; bod
 id = "cap5-mixed-eventverifier-observe-event"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "0df108b03c00c9d812cf6f68959f153a1a4163f8014106be127fa93fe1789c27"
+source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
 start_line = 26
 end_line = 48
 metric = "branches"
@@ -1626,9 +1626,9 @@ reason = "Maintenance requires the selected historical key interval and strict n
 id = "cap5-mixed-exportselection-consider-mixed"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "0df108b03c00c9d812cf6f68959f153a1a4163f8014106be127fa93fe1789c27"
+source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
 start_line = 54
-end_line = 62
+end_line = 63
 metric = "branches"
 reason = "In-range maintenance is explicitly unsupported by legacy export; out-of-range bodies remain subject to the caller complete scan, and no selected maintenance body is silently omitted."
 
@@ -1636,9 +1636,9 @@ reason = "In-range maintenance is explicitly unsupported by legacy export; out-o
 id = "cap5-mixed-retentionselector-observe-event"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "0df108b03c00c9d812cf6f68959f153a1a4163f8014106be127fa93fe1789c27"
-start_line = 66
-end_line = 84
+source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
+start_line = 67
+end_line = 85
 metric = "branches"
 reason = "Mixed retention selects a bounded expired prefix with exact final sequence/hash; it cannot cross a pending operator intent or a nonexpired event."
 
@@ -1706,7 +1706,7 @@ reason = "Consume the prepared owner once; update the cursor only after receipt 
 id = "cap5-audit-auditauthority-reconstruct"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
 start_line = 152
 end_line = 209
 metric = "branches"
@@ -1716,7 +1716,7 @@ reason = "Reconstruct authenticated checkpoint and mixed event chains at the sam
 id = "cap5-audit-auditauthority-is-reconciled"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
 start_line = 211
 end_line = 215
 metric = "branches"
@@ -1726,7 +1726,7 @@ reason = "Maintenance or live administrative admission requires valid current ke
 id = "cap5-audit-auditauthority-base-authority-is-valid"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
 start_line = 217
 end_line = 225
 metric = "branches"
@@ -1736,9 +1736,9 @@ reason = "Maintenance or live administrative admission requires valid current ke
 id = "cap5-audit-audittrust-new"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 919
-end_line = 947
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 963
+end_line = 991
 metric = "branches"
 reason = "Reject malformed or duplicate trust entries and wrong derived key IDs; historical event creation time must be in the selected key half-open trust interval, without requiring globally increasing timestamps."
 
@@ -1746,9 +1746,9 @@ reason = "Reject malformed or duplicate trust entries and wrong derived key IDs;
 id = "cap5-audit-audittrust-trusted"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 953
-end_line = 959
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 997
+end_line = 1003
 metric = "branches"
 reason = "Reject malformed or duplicate trust entries and wrong derived key IDs; historical event creation time must be in the selected key half-open trust interval, without requiring globally increasing timestamps."
 
@@ -1756,9 +1756,9 @@ reason = "Reject malformed or duplicate trust entries and wrong derived key IDs;
 id = "cap5-audit-auditexportsource-freeze"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 569
-end_line = 618
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 591
+end_line = 607
 metric = "branches"
 reason = "Complete authenticated checkpoint and mixed-event scans, unmatched-intent reconciliation and exact captured cursors before classifying UnsupportedProfile; no prepared export exists on refusal."
 
@@ -1766,9 +1766,9 @@ reason = "Complete authenticated checkpoint and mixed-event scans, unmatched-int
 id = "cap5-admin-adminowner-audit-export"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin.rs"
-source_sha256 = "44acc709b11ef348a94a5b2805a9bcd355a069fcef7857c2b87c054c865404a1"
-start_line = 1384
-end_line = 1458
+source_sha256 = "57ffb2e3b512f0b6ea39d12b9949c284444acbb504d76c0843ed84d82fa2cefe"
+start_line = 1409
+end_line = 1474
 metric = "branches"
 reason = "Unsupported legacy export returns exact FAIL AUDIT UNAVAILABLE before Observed audit commit or BATCH output; source verification failures retain their distinct closed refusal path."
 
@@ -1776,9 +1776,9 @@ reason = "Unsupported legacy export returns exact FAIL AUDIT UNAVAILABLE before 
 id = "cap5-admin-adminowner-output-export-job-failure"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin.rs"
-source_sha256 = "44acc709b11ef348a94a5b2805a9bcd355a069fcef7857c2b87c054c865404a1"
-start_line = 2384
-end_line = 2396
+source_sha256 = "57ffb2e3b512f0b6ea39d12b9949c284444acbb504d76c0843ed84d82fa2cefe"
+start_line = 2401
+end_line = 2413
 metric = "branches"
 reason = "Unsupported legacy export returns exact FAIL AUDIT UNAVAILABLE before Observed audit commit or BATCH output; source verification failures retain their distinct closed refusal path."
 
@@ -1786,9 +1786,9 @@ reason = "Unsupported legacy export returns exact FAIL AUDIT UNAVAILABLE before 
 id = "cap5-audit-auditauthority-prepare-retention"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 323
-end_line = 342
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 324
+end_line = 343
 metric = "branches"
 reason = "Reconciled retention owns exact current event/checkpoint cursors; validate the signed checkpoint against the selected prefix before advancing retained-first state; preserve legacy checkpoint bytes."
 
@@ -1796,9 +1796,9 @@ reason = "Reconciled retention owns exact current event/checkpoint cursors; vali
 id = "cap5-audit-auditauthority-sign-retention"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 344
-end_line = 360
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 345
+end_line = 361
 metric = "branches"
 reason = "Reconciled retention owns exact current event/checkpoint cursors; validate the signed checkpoint against the selected prefix before advancing retained-first state; preserve legacy checkpoint bytes."
 
@@ -1806,9 +1806,9 @@ reason = "Reconciled retention owns exact current event/checkpoint cursors; vali
 id = "cap5-audit-auditauthority-commit-retention"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 362
-end_line = 384
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 363
+end_line = 385
 metric = "branches"
 reason = "Reconciled retention owns exact current event/checkpoint cursors; validate the signed checkpoint against the selected prefix before advancing retained-first state; preserve legacy checkpoint bytes."
 
@@ -1816,9 +1816,9 @@ reason = "Reconciled retention owns exact current event/checkpoint cursors; vali
 id = "cap5-audit-auditexportsource-retention-tbs"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "edcc06f3dbb80082367fa5fc264d9bfe66ca52a26058067f0b87a17dc7d43c00"
-start_line = 623
-end_line = 693
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 665
+end_line = 735
 metric = "branches"
 reason = "Verify the complete mixed source at one commit, select a bounded expired prefix without splitting intent/outcome, and bind exact checkpoint coverage, prior checkpoint hash and current event cursor."
 
@@ -6921,3 +6921,183 @@ start_line = 180
 end_line = 204
 metric = "branches"
 reason = "Final barrier resume coverage and its receipt-owned cursor update require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-export-batch-type"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit/export.rs"
+source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
+start_line = 17
+end_line = 22
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-export-sequence"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit/export.rs"
+source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
+start_line = 32
+end_line = 37
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-export-render-0"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit/export.rs"
+source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
+start_line = 39
+end_line = 55
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-export-render-1"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit/export.rs"
+source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
+start_line = 87
+end_line = 126
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-export-from"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit/export.rs"
+source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
+start_line = 59
+end_line = 64
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-export-render-export-batch-with-profile"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit/export.rs"
+source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
+start_line = 71
+end_line = 85
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-audit-render-export-batch"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit.rs"
+source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
+start_line = 511
+end_line = 524
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-audit-check-event-order"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit.rs"
+source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
+start_line = 546
+end_line = 558
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-audit-check-export-coverage"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/audit.rs"
+source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
+start_line = 560
+end_line = 595
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-command-parse"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/command.rs"
+source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
+start_line = 195
+end_line = 203
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-command-verb"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/command.rs"
+source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
+start_line = 272
+end_line = 295
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-command-required-permission"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/command.rs"
+source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
+start_line = 300
+end_line = 326
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-command-is-read-only"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-admin/src/command.rs"
+source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
+start_line = 344
+end_line = 356
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-audit-with-profile"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 500
+end_line = 503
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-audit-finish-with-observed"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 540
+end_line = 579
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-audit-freeze-with-profile"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 609
+end_line = 660
+metric = "branches"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-job-prepare-audit-export-job"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/admin.rs"
+source_sha256 = "57ffb2e3b512f0b6ea39d12b9949c284444acbb504d76c0843ed84d82fa2cefe"
+start_line = 1384
+end_line = 1407
+metric = "branches"
+reason = "Audit export profile selection and frozen-job admission require complete branch evidence before release."
+
+[[region]]
+id = "cap5-export-job-run"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
+source_sha256 = "d9c791e756c1c090f8fc558749a0666ac79bcd8dc6f762246878d1e0a3679371"
+start_line = 505
+end_line = 523
+metric = "branches"
+reason = "Audit export profile selection and frozen-job admission require complete branch evidence before release."

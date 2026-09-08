@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use agenc_ircd_admin::{
     AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEvent, AdminAuditEventTbs,
     AdminAuditPhase, AdminCommand, AdminCommandEvent, AdminSessionBinding, AuditChainCursor,
-    AuditEvent, AuditRange, CanonicalCommand, MAX_AUDIT_EXPORT_RECORDS, MaintenanceAuditScope,
-    OperatorRegistry, render_export_batch,
+    AuditEvent, AuditExportProfile, AuditRange, CanonicalCommand, MAX_AUDIT_EXPORT_RECORDS,
+    MaintenanceAuditScope, OperatorRegistry, render_export_batch_with_profile,
 };
 use agenc_ircd_config::AuditTrustManifestEntry;
 use agenc_ircd_crypto::{Ed25519PublicKey, Ed25519SecretKey, audit_signing_key_id};
@@ -311,6 +311,7 @@ impl AuditAuthority {
         }
         let source = self.export.as_ref().ok_or(RuntimeError::InvalidValue)?;
         Ok(AuditExportJob {
+            profile: AuditExportProfile::Legacy,
             source: Arc::clone(source),
             range,
             batch_id,
@@ -486,6 +487,7 @@ impl AuditRetentionJob {
 }
 
 pub(crate) struct AuditExportJob {
+    profile: AuditExportProfile,
     source: Arc<AuditExportSource>,
     range: AuditRange,
     batch_id: [u8; 16],
@@ -495,13 +497,28 @@ pub(crate) struct AuditExportJob {
 }
 
 impl AuditExportJob {
+    pub(crate) fn with_profile(mut self, profile: AuditExportProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
     pub(crate) fn run(self) -> Result<PreparedAuditExport, AuditExportFailure> {
-        self.source.freeze(
+        if self.profile == AuditExportProfile::Legacy {
+            return self.source.freeze(
+                self.range,
+                self.batch_id,
+                self.expected_cursor,
+                self.expected_checkpoint_sequence,
+                self.expected_checkpoint_hash,
+            );
+        }
+        self.source.freeze_with_profile(
             self.range,
             self.batch_id,
             self.expected_cursor,
             self.expected_checkpoint_sequence,
             self.expected_checkpoint_hash,
+            self.profile,
         )
     }
 }
@@ -528,7 +545,11 @@ impl PreparedAuditExport {
             return Err(RuntimeError::InvalidValue);
         }
         match parse_event_command(observed)? {
-            AdminCommand::AuditExport(range) if range == self.range => {}
+            AdminCommand::AuditExport(range)
+                if range == self.range && self.selection.profile == AuditExportProfile::Legacy => {}
+            AdminCommand::AuditExportMaintenance(range)
+                if range == self.range
+                    && self.selection.profile == AuditExportProfile::MaintenanceV1 => {}
             _ => return Err(RuntimeError::InvalidValue),
         }
         let mut verifier = EventVerifier::new(
@@ -547,11 +568,12 @@ impl PreparedAuditExport {
             &self.selection.checkpoints,
             &self.selection.events,
         )?;
-        render_export_batch(
+        render_export_batch_with_profile(
             &self.batch_id,
             self.range,
             &self.selection.checkpoints,
             &self.selection.events,
+            self.selection.profile,
         )
         .map_err(|_| RuntimeError::InvalidValue)
     }
@@ -574,7 +596,27 @@ impl AuditExportSource {
         expected_checkpoint_sequence: u64,
         expected_checkpoint_hash: [u8; 32],
     ) -> Result<PreparedAuditExport, AuditExportFailure> {
+        self.freeze_with_profile(
+            range,
+            batch_id,
+            expected_cursor,
+            expected_checkpoint_sequence,
+            expected_checkpoint_hash,
+            AuditExportProfile::Legacy,
+        )
+    }
+
+    fn freeze_with_profile(
+        &self,
+        range: AuditRange,
+        batch_id: [u8; 16],
+        expected_cursor: AuditChainCursor,
+        expected_checkpoint_sequence: u64,
+        expected_checkpoint_hash: [u8; 32],
+        profile: AuditExportProfile,
+    ) -> Result<PreparedAuditExport, AuditExportFailure> {
         let mut selection = ExportSelection::new(range);
+        selection.profile = profile;
         let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
         scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
             checkpoint_verifier.observe(&checkpoint)?;
@@ -694,15 +736,17 @@ impl AuditExportSource {
 }
 
 struct ExportSelection {
+    profile: AuditExportProfile,
     range: AuditRange,
     checkpoints: Vec<AdminAuditCheckpoint>,
-    events: Vec<AdminAuditEvent>,
+    events: Vec<AuditEvent>,
     overflowed: bool,
 }
 
 impl ExportSelection {
     const fn new(range: AuditRange) -> Self {
         Self {
+            profile: AuditExportProfile::Legacy,
             range,
             checkpoints: Vec::new(),
             events: Vec::new(),
@@ -725,7 +769,7 @@ impl ExportSelection {
 
     fn consider_event(&mut self, event: AdminAuditEvent) -> Result<(), RuntimeError> {
         if self.range.contains(event.tbs().audit_sequence) {
-            self.push_event(event)?;
+            self.push_event(AuditEvent::Admin(event))?;
         }
         Ok(())
     }
@@ -741,7 +785,7 @@ impl ExportSelection {
         Ok(())
     }
 
-    fn push_event(&mut self, event: AdminAuditEvent) -> Result<(), RuntimeError> {
+    fn push_event(&mut self, event: AuditEvent) -> Result<(), RuntimeError> {
         if !self.reserve_record()? {
             return Ok(());
         }
@@ -866,7 +910,7 @@ fn verify_export_coverage(
     range: AuditRange,
     next_sequence: u64,
     checkpoints: &[AdminAuditCheckpoint],
-    events: &[AdminAuditEvent],
+    events: &[AuditEvent],
 ) -> Result<(), RuntimeError> {
     if range.from() >= next_sequence {
         return (checkpoints.is_empty() && events.is_empty())
@@ -886,7 +930,7 @@ fn verify_export_coverage(
         )
     }));
     intervals.extend(events.iter().map(|event| {
-        let sequence = event.tbs().audit_sequence;
+        let sequence = event.audit_sequence();
         (sequence, sequence)
     }));
     intervals.sort_unstable();
@@ -2533,6 +2577,7 @@ mod tests {
         )?;
         assert!(select_expired_prefix(&[invalid_intent], CREATED_AT + 1).is_err());
 
+        let observed = AuditEvent::Admin(observed);
         let range = AuditRange::new(0, 0).map_err(|_| RuntimeError::InvalidValue)?;
         assert!(verify_export_coverage(range, 0, &[], &[]).is_ok());
         assert!(verify_export_coverage(range, 0, &[], std::slice::from_ref(&observed)).is_err());
@@ -2569,7 +2614,10 @@ mod tests {
             b"MOTD",
         )?;
         let full = AuditRange::new(0, 5).map_err(|_| RuntimeError::InvalidValue)?;
-        assert!(verify_export_coverage(full, 6, &[checkpoint], &[event_five]).is_ok());
+        assert!(
+            verify_export_coverage(full, 6, &[checkpoint], &[AuditEvent::Admin(event_five)])
+                .is_ok()
+        );
         assert!(verify_export_coverage(full, 6, &[checkpoint], &[]).is_err());
 
         let disjoint = AuditRange::new(5, 5).map_err(|_| RuntimeError::InvalidValue)?;
