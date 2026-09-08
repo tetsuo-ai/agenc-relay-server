@@ -4,14 +4,20 @@
 //! objects, the directory (root chains re-verified, rosters and
 //! capabilities re-verified without their retired predecessors), the
 //! KeyPackage stock and claims, mailboxes, replay rows, and finally every
-//! route with its sequencer log, lifecycle, and per-conversation facts.
+//! route with its sequencer log, lifecycle, and per-conversation facts,
+//! followed by the scoped delivery streams and unfinished barriers.
 //!
 //! Not restored, by design or deferral: route reservations (short-lived and
-//! not reconstructible without the owner's Account ID), delivery streams
-//! (a reconnecting edge opens a fresh `ESTATE` scope), companion origins
+//! not reconstructible without the owner's Account ID), companion origins
 //! (edges re-declare them), and the context digest carried on `BIND`.
 
 use std::collections::BTreeMap;
+
+mod objects;
+
+#[cfg(test)]
+#[path = "tests/startup_objects.rs"]
+mod object_tests;
 
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_domain::e2ee::directory::{
@@ -56,10 +62,9 @@ use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow;
 use agenc_ircd_storage::e2ee_records::{
     ATTACH_ROW_KIND, AttachRow, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND, DirectoryRow,
-    MAILBOX_ROW_KIND, MailboxKind as RowMailboxKind, MailboxRow, OBJECT_RECORD_KIND, ObjectRow,
-    PACKAGE_ROW_KIND, PackageRow, PackageState, ProofKeyParts, ProofRole, REPLAY_ROW_KIND,
-    ROUTE_ROW_KIND, ReplayRow, RouteLifecycle as RowLifecycle, RouteRow, SEQUENCER_ROW_KIND,
-    SequencerRow,
+    MAILBOX_ROW_KIND, MailboxKind as RowMailboxKind, MailboxRow, PACKAGE_ROW_KIND, PackageRow,
+    PackageState, ProofKeyParts, ProofRole, REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayRow,
+    RouteLifecycle as RowLifecycle, RouteRow, SEQUENCER_ROW_KIND, SequencerRow,
 };
 use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_ircd_types::{AccountId, ChannelInstanceId};
@@ -99,7 +104,7 @@ struct PolicyRow {
 /// The durable rows collected during the reload.
 #[derive(Default)]
 pub(super) struct Restore {
-    objects: Vec<Vec<u8>>,
+    objects: objects::Restore,
     routes: BTreeMap<[u8; 32], RouteRow>,
     records: BTreeMap<([u8; 32], u64), RecordRow>,
     candidates: BTreeMap<([u8; 32], u64), CandidateRow>,
@@ -119,19 +124,14 @@ impl Restore {
     /// Collects one row of an E2EE table.
     pub(super) fn admit(&mut self, table: TableId, key: &StoredKey, value: &PersistentRecordValue) {
         match table {
-            TableId::E2eeObject => self.admit_object(value),
+            TableId::E2eeObject => self.admit_object(key, value),
             TableId::E2eeState => self.admit_state(key, value),
             _ => {}
         }
     }
 
-    fn admit_object(&mut self, value: &PersistentRecordValue) {
-        if value.record_kind() != OBJECT_RECORD_KIND {
-            return;
-        }
-        if let Ok(row) = ObjectRow::decode(value.body()) {
-            self.objects.push(row.bytes);
-        }
+    fn admit_object(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
+        self.objects.admit(key, value);
     }
 
     fn admit_state(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
@@ -440,9 +440,7 @@ pub(super) fn rebuild(
 ) -> Result<(), super::CompanionFault> {
     let network_id = coordinator.network_id;
     let state = &mut coordinator.state;
-    for bytes in restore.objects {
-        let _ = CompanionCoordinator::retain_object(state, bytes);
-    }
+    restore.objects.apply(state)?;
     restore_directory(state, &network_id, restore.directory, restore.attachments);
     restore_packages(state, restore.packages);
     restore_mailboxes(state, restore.mailbox)?;

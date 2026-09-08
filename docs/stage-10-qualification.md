@@ -3273,3 +3273,37 @@ authenticate an identity out of band. Transparency observation does not
 grant Verified status. A compromised client can read its plaintext, and
 authorized recipients can disclose messages. Tor testing cannot establish
 protection against every traffic-analysis adversary.
+
+### CAP-95: startup reports success after dropping retained object bodies
+
+The CAP-79 retention review found that companion startup collects all object
+bodies, then ignores refusals from the 256 MiB object cache. A direct startup
+regression supplies 65 distinct, valid storage object envelopes of 4 MiB each.
+Startup reports success with an incomplete cache. The control with two smaller
+objects passes. The behavioral red has one failure and one pass in 9.55 seconds;
+its source, log, and actual executable are frozen in
+`cap95-startup-object-red-proof`. This exercises the startup API and storage
+envelope codecs; it is not a stopped-daemon database capture. Earlier test
+compilation failures are not behavioral evidence.
+
+The repair validates each object against its exact storage key, bounds collected
+object body bytes before dependency reconstruction, and retains a failed
+collection state after any refusal. It releases the collected bodies on failure.
+Before publishing any objects, reconstruction checks the combined capacity of
+existing and restored objects. Duplicate objects count once, and the bodies
+move into the object map without another complete copy. The 256 MiB limit is
+unchanged. This byte bound does not claim to measure allocator overhead or
+provide charged asynchronous replay reads. CAP-79's disk-backed retention and
+paged reconstruction work remain open.
+
+The checkpoint passes formatting, all-target/all-feature workspace Clippy with
+warnings denied, the complete all-feature workspace suite (2,448 passed, zero
+failed, 21 ignored, 120 result groups), source policy and its self-test,
+workspace policy, coverage-policy self-test, and diff checks. All 1,003 runtime
+tests pass, including the five object startup cases. The source inventory now
+contains 638 files with SHA-256
+`179a6042ca1cf0fd1e3fcf7962dfb6a20d0126d22e88bad5a399b9cd592d2340`.
+Three new release critical regions bind object collection and publication.
+Both policies validate with their existing floors; this is not a coverage
+measurement or Stage 10 qualification. Final logs and exact inputs are frozen
+in `cap95-startup-final-proof`.

@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 636
-reviewed_source_sha256 = "f827bddd83f136ae786e0d54b46db632a21c9503e0516dc8da0725b7071bcaca"
+reviewed_source_files = 638
+reviewed_source_sha256 = "179a6042ca1cf0fd1e3fcf7962dfb6a20d0126d22e88bad5a399b9cd592d2340"
 deferred = []
 
 [[region]]
@@ -2326,9 +2326,9 @@ reason = "Persist the exact current Item grant and Token together; delete a diff
 id = "cap80-startup-mailboxrows-admit-item"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
-start_line = 945
-end_line = 977
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
+start_line = 943
+end_line = 975
 metric = "regions"
 reason = "Retain the Item grant as persisted; reconstruction cannot discard its current token binding."
 
@@ -2336,9 +2336,9 @@ reason = "Retain the Item grant as persisted; reconstruction cannot discard its 
 id = "cap80-startup-mailboxrows-admit-token"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
-start_line = 979
-end_line = 1008
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
+start_line = 977
+end_line = 1006
 metric = "regions"
 reason = "Retain Token object identity and full grant; no key-order winner."
 
@@ -2346,9 +2346,9 @@ reason = "Retain Token object identity and full grant; no key-order winner."
 id = "cap80-startup-validate-mailbox-grants"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
-start_line = 1051
-end_line = 1079
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
+start_line = 1049
+end_line = 1077
 metric = "regions"
 reason = "Reject duplicate grants per item, orphans, missing tokens and any object/token/session/expiry contradiction."
 
@@ -2356,9 +2356,9 @@ reason = "Reject duplicate grants per item, orphans, missing tokens and any obje
 id = "cap80-startup-restore-mailboxes"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
-start_line = 1030
-end_line = 1049
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
+start_line = 1028
+end_line = 1047
 metric = "regions"
 reason = "Validate every cross-row grant relation before applying any reconstructed mailbox."
 
@@ -2956,9 +2956,9 @@ reason = "Verify the exact typed-call-selected signature domain and historical c
 id = "cap76-startup-rebuild"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
 start_line = 437
-end_line = 464
+end_line = 462
 metric = "regions"
 reason = "Propagate successor authority contradictions before delivery restoration or outer loader admission; startup cannot publish a partially accepted lineage."
 
@@ -2966,9 +2966,9 @@ reason = "Propagate successor authority contradictions before delivery restorati
 id = "cap76-startup-restore-successors"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
-start_line = 468
-end_line = 519
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
+start_line = 466
+end_line = 517
 metric = "regions"
 reason = "Reject duplicate target ownership before choosing an anchor; occupied or partial targets require exact compatible lineage and cannot be discarded or overwritten."
 
@@ -2976,9 +2976,9 @@ reason = "Reject duplicate target ownership before choosing an anchor; occupied 
 id = "cap76-startup-restore-successor-binding"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
-start_line = 567
-end_line = 604
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
+start_line = 565
+end_line = 602
 metric = "regions"
 reason = "Verify exact retained activation/binding and preserve a valid successor later head, recovery gate, removal state and route index."
 
@@ -4376,7 +4376,7 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-startup-restore-admit-state"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "d0374205cdfad73b718a52d5d563f315e4eabfa0c6245650df6700799276199d"
+source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
 start_line = 137
 end_line = 177
 metric = "regions"
@@ -7101,3 +7101,33 @@ start_line = 505
 end_line = 523
 metric = "branches"
 reason = "Audit export profile selection and frozen-job admission require complete branch evidence before release."
+
+[[region]]
+id = "cap95-startup-objects-admit"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
+source_sha256 = "634e7c129a5f6fe04fb596b2803990fa716449c32dbefe860b5eff033574666b"
+start_line = 19
+end_line = 28
+metric = "regions"
+reason = "Validate exact object keys, refuse incomplete collection, and preflight the combined object capacity before publishing restored dependencies."
+
+[[region]]
+id = "cap95-startup-objects-collect"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
+source_sha256 = "634e7c129a5f6fe04fb596b2803990fa716449c32dbefe860b5eff033574666b"
+start_line = 30
+end_line = 63
+metric = "regions"
+reason = "Validate exact object keys, refuse incomplete collection, and preflight the combined object capacity before publishing restored dependencies."
+
+[[region]]
+id = "cap95-startup-objects-apply"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
+source_sha256 = "634e7c129a5f6fe04fb596b2803990fa716449c32dbefe860b5eff033574666b"
+start_line = 65
+end_line = 87
+metric = "regions"
+reason = "Validate exact object keys, refuse incomplete collection, and preflight the combined object capacity before publishing restored dependencies."
