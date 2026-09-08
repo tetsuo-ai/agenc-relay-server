@@ -1,6 +1,8 @@
 //! Bounded, resumable execution of authenticated construction plans.
 
 mod recovery;
+mod recovery_plan;
+mod recovery_provenance;
 mod restore_source;
 mod stopped;
 
@@ -207,6 +209,7 @@ impl ConstructionPlanBuilder {
             .set_durability(Durability::Immediate)
             .map_err(|_| StorageError::DatabaseRejected)?;
         transaction.set_two_phase_commit(true);
+        recovery_plan::reset(&transaction)?;
         {
             let mut ordered = transaction
                 .open_table(CONSTRUCTION_PLAN_TABLE)
@@ -270,7 +273,11 @@ impl ConstructionPlanBuilder {
             .encoded_bytes
             .checked_add(u64::try_from(encoded.len()).map_err(|_| StorageError::Overflow)?)
             .ok_or(StorageError::Overflow)?;
-        if self.encoded_bytes > self.maximum_bytes {
+        let combined_bytes = self
+            .encoded_bytes
+            .checked_add(recovery_plan::pending_bytes(&self.transaction)?)
+            .ok_or(StorageError::Overflow)?;
+        if combined_bytes > self.maximum_bytes {
             return Err(StorageError::LimitExceeded);
         }
         let target = construction_plan_target_key(&entry)?;
@@ -586,6 +593,7 @@ impl ConstructionPlanBuilder {
 
     /// Durably commits and independently re-reads the complete scratch plan.
     pub fn finish(self) -> Result<ConstructionPlan, StorageError> {
+        recovery_plan::require_consumed(&self.transaction)?;
         if self
             .expected_entries
             .is_some_and(|expected| self.entry_count != expected)
@@ -2308,6 +2316,11 @@ fn push_restore_record(
             RestoreSelection::Direct(_) => Err(StorageError::InvalidEncoding),
         };
     };
+    if action == StorageConstructionAction::RestoreE2eeState
+        && recovery_plan::push(builder, &source, record)?
+    {
+        return Ok(());
+    }
     let target_key = rekey_target_stored_key(
         &source,
         record,
@@ -3283,6 +3296,18 @@ fn transform_e2ee_recovery_pending(
     target_recovery_epoch: RecoveryEpoch,
     source_rollback_guard_hash: StorageDigest,
 ) -> Result<Vec<u8>, StorageError> {
+    if entry
+        .target_key()
+        .as_bytes()
+        .starts_with(crate::e2ee_records::prefix::RECOVERY)
+    {
+        return recovery_provenance::transform(
+            entry,
+            sources,
+            target_recovery_epoch,
+            source_rollback_guard_hash,
+        );
+    }
     let source = exact_source(entry, sources)?;
     let state = recovery::decode_e2ee_restore(entry.target_key(), source)?;
     let body =
@@ -5077,10 +5102,30 @@ mod tests {
             crate::E2eeRecoveryKind::Closed,
         ] {
             let key = crate::e2ee_records::recovery_gate_key(&[227; 32])?;
-            let entry = restore_entry(
+            let mut route = recovery_classification::route_row(
+                [227; 32],
+                if state == crate::E2eeRecoveryKind::Closed {
+                    crate::e2ee_records::RouteLifecycle::Tombstone
+                } else {
+                    crate::e2ee_records::RouteLifecycle::Active
+                },
+            )?;
+            route.recovery_gate = matches!(
+                state,
+                crate::E2eeRecoveryKind::Pending | crate::E2eeRecoveryKind::Conflict
+            );
+            let route_key = crate::e2ee_records::RouteRow::key(&[227; 32])?;
+            let entry = StorageConstructionPlanEntry::new(
+                StorageConstructionKind::Restore,
+                vec![
+                    backup_source(TableId::E2eeState, &key, 1)?,
+                    backup_source(TableId::E2eeState, &route_key, 2)?,
+                ],
                 TableId::E2eeState,
                 StoredKey::new(key.as_bytes().to_vec())?,
+                1,
                 StorageConstructionAction::RestoreE2eeState,
+                0,
             )?;
             let original_epoch = RecoveryEpoch::from_bytes([225; 16]);
             let original_guard = StorageDigest::from_bytes([226; 32]);
@@ -5088,9 +5133,9 @@ mod tests {
                 StorageDigest::from_bytes([227; 32]),
                 state,
                 original_epoch,
-                StorageDigest::from_bytes([228; 32]),
-                StorageDigest::from_bytes([229; 32]),
-                StorageDigest::from_bytes([230; 32]),
+                StorageDigest::from_bytes(route.binding_id),
+                StorageDigest::from_bytes(route.accepted_state_id),
+                StorageDigest::from_bytes(route.sequencer_head_id),
                 original_guard,
             );
             let plaintext = PersistentRecordValue::new(
@@ -5106,7 +5151,23 @@ mod tests {
             let transformed = transformer.transform(
                 StorageConstructionKind::Restore,
                 &entry,
-                &[record(TableId::E2eeState, key, plaintext)],
+                &[
+                    record(TableId::E2eeState, key, plaintext),
+                    record(
+                        TableId::E2eeState,
+                        route_key,
+                        PersistentRecordValue::new(
+                            TableId::E2eeState,
+                            crate::e2ee_records::ROUTE_ROW_KIND,
+                            1,
+                            0,
+                            None,
+                            Vec::new(),
+                            route.encode()?,
+                        )?
+                        .encode()?,
+                    ),
+                ],
             )?;
             let value = PersistentRecordValue::decode(TableId::E2eeState, &transformed)?;
             let recovered = crate::E2eeRecoveryGate::decode(value.body())?;

@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "mailbox_recovery_keys.rs"]
 mod mailbox_keys;
+#[path = "recovery_provenance.rs"]
+mod provenance;
 use crate::e2ee_records::barrier::{
     BARRIER_RETENTION_SECONDS, BarrierHead, BarrierIdentity, BarrierPart, BarrierReceipt,
     BarrierStage, CrossProfileStream,

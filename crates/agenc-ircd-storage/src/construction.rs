@@ -806,7 +806,13 @@ fn validate_action(
             Ok(())
         }
         (StorageConstructionKind::Restore, StorageConstructionAction::RestoreE2eeState)
-            if rule_id == 0 && one_same_table && target == TableId::E2eeState =>
+            if rule_id == 0
+                && target == TableId::E2eeState
+                && (one_same_table
+                    || (sources.len() == 2
+                        && sources
+                            .iter()
+                            .all(|source| source.table == TableId::E2eeState))) =>
         {
             Ok(())
         }

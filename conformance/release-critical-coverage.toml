@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 756
-reviewed_source_sha256 = "152d1173e974d1437df636a7e618648478045923d3a6437f0e290bc3e0e146ed"
+reviewed_source_files = 760
+reviewed_source_sha256 = "2e3cc8f004bdafac63261c365c6ace2d2853343b8d982d408ac7cab2c1b79d0f"
 deferred = []
 
 [[region]]
@@ -5666,9 +5666,9 @@ reason = "The explicit legacy restore command requires a semantic validator and 
 id = "storage-profile-construction-runtime-validate-restore-copy-sourc"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
-source_sha256 = "deaeb3649f719c91a9ff8db7360a411632c1bd7f339d4a2bb27f96f3cebdbce8"
-start_line = 3044
-end_line = 3078
+source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
+start_line = 3057
+end_line = 3091
 metric = "regions"
 reason = "Restored preserved rows obey the closed table and original semantic payload grammar; only explicit reconstruction actions may transform authority."
 
@@ -10451,3 +10451,203 @@ start_line = 880
 end_line = 990
 metric = "regions"
 reason = "A close stages route and tombstone effects only after public authority and exact terminal validation."
+
+[[region]]
+id = "cap73-restore-provenance-001-pending-bytes"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 12
+end_line = 20
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-002-reset"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 22
+end_line = 28
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-003-require-consumed"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 30
+end_line = 41
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-004-push"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 43
+end_line = 67
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-005-index-gate"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 69
+end_line = 101
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-006-take-gate"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 103
+end_line = 136
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-007-push-route"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 138
+end_line = 172
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-008-copy-source"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_plan.rs"
+source_sha256 = "ace11bb318f3ec52161d5172e7f62c08b4ec9d0849e5c94654d934970e0b15b7"
+start_line = 174
+end_line = 185
+metric = "regions"
+reason = "Restore planning pairs fixed-size gate sources with their route, charges the index with output entries, rejects orphan or duplicate declarations and clears reused scratch state."
+
+[[region]]
+id = "cap73-restore-provenance-009-transform"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_provenance.rs"
+source_sha256 = "42b5d2ddd5c5fe8ae448e5f1219b6739bebde85d498dd2a65d72291859636c5a"
+start_line = 15
+end_line = 53
+metric = "regions"
+reason = "Recovery declarations require exact paired source descriptors and route identity, preserve terminal provenance and pending guards, and derive normal source heads from the authenticated route."
+
+[[region]]
+id = "cap73-restore-provenance-010-paired-sources"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_provenance.rs"
+source_sha256 = "42b5d2ddd5c5fe8ae448e5f1219b6739bebde85d498dd2a65d72291859636c5a"
+start_line = 55
+end_line = 81
+metric = "regions"
+reason = "Recovery declarations require exact paired source descriptors and route identity, preserve terminal provenance and pending guards, and derive normal source heads from the authenticated route."
+
+[[region]]
+id = "cap73-restore-provenance-011-source-value"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_provenance.rs"
+source_sha256 = "42b5d2ddd5c5fe8ae448e5f1219b6739bebde85d498dd2a65d72291859636c5a"
+start_line = 83
+end_line = 98
+metric = "regions"
+reason = "Recovery declarations require exact paired source descriptors and route identity, preserve terminal provenance and pending guards, and derive normal source heads from the authenticated route."
+
+[[region]]
+id = "cap73-restore-provenance-012-restore-gate"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_provenance.rs"
+source_sha256 = "42b5d2ddd5c5fe8ae448e5f1219b6739bebde85d498dd2a65d72291859636c5a"
+start_line = 100
+end_line = 132
+metric = "regions"
+reason = "Recovery declarations require exact paired source descriptors and route identity, preserve terminal provenance and pending guards, and derive normal source heads from the authenticated route."
+
+[[region]]
+id = "cap73-restore-provenance-013-restore-declared"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_provenance.rs"
+source_sha256 = "42b5d2ddd5c5fe8ae448e5f1219b6739bebde85d498dd2a65d72291859636c5a"
+start_line = 134
+end_line = 161
+metric = "regions"
+reason = "Recovery declarations require exact paired source descriptors and route identity, preserve terminal provenance and pending guards, and derive normal source heads from the authenticated route."
+
+[[region]]
+id = "cap73-restore-provenance-014-matches-pending-heads"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime/recovery_provenance.rs"
+source_sha256 = "42b5d2ddd5c5fe8ae448e5f1219b6739bebde85d498dd2a65d72291859636c5a"
+start_line = 163
+end_line = 168
+metric = "regions"
+reason = "Recovery declarations require exact paired source descriptors and route identity, preserve terminal provenance and pending guards, and derive normal source heads from the authenticated route."
+
+[[region]]
+id = "cap73-restore-provenance-015-start-inner"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
+source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
+start_line = 192
+end_line = 260
+metric = "regions"
+reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
+
+[[region]]
+id = "cap73-restore-provenance-016-push"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
+source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
+start_line = 263
+end_line = 302
+metric = "regions"
+reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
+
+[[region]]
+id = "cap73-restore-provenance-017-finish"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
+source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
+start_line = 595
+end_line = 662
+metric = "regions"
+reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
+
+[[region]]
+id = "cap73-restore-provenance-018-push-restore-record"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
+source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
+start_line = 2303
+end_line = 2344
+metric = "regions"
+reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
+
+[[region]]
+id = "cap73-restore-provenance-019-transform-e2ee-recovery-pending"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
+source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
+start_line = 3293
+end_line = 3325
+metric = "regions"
+reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
+
+[[region]]
+id = "cap73-restore-provenance-020-validate-action"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/construction.rs"
+source_sha256 = "4dc3f9d13c97f139ebe2e4d5780e2e8b31badd3fe6850a19b1dff5c53a2df48e"
+start_line = 765
+end_line = 826
+metric = "regions"
+reason = "The construction action matrix admits one or two E2EE-state sources only for the registered restore action and preserves other kind, table and rule constraints."

@@ -2531,6 +2531,52 @@ mailbox byte ceiling, including excluded and repeated objects. These focused
 results do not close the terminal-evidence lifecycle or replace the required
 reverted-behavior proofs for the additional guards.
 
+The next restore-provenance review finds that the one-source transform copies
+heads from a Normal gate even when the authenticated RouteRow has advanced.
+The resulting Pending declaration then disagrees with the restored route and
+startup refuses it. A normal live source route without a gate produces no
+declared source-guard record. The repair must bind a gate to the RouteRow from
+the same backup, preserve terminal declarations and retain the blocked state
+of an already-pending legacy route with no trustworthy declaration. New
+planner/transformer tests now reproduce three failures in 0.01 seconds: stale
+Normal heads survive, a normal source route gets no declaration, and an orphan
+gate forms a plan. Matching Pending, terminal Closed and ambiguous legacy
+Pending controls pass. The first attempt stopped at a test formatting trait
+error. The corrected inputs and executable are frozen in
+`cap73-restore-provenance-red-proof`; the three failures do not by themselves
+prove backup signature verification or daemon startup.
+
+The restore planner now pairs each declared gate with its route source in a
+bounded scratch index. The index and output entries share the plan byte limit,
+and unfinished or duplicate declarations refuse the plan. Normal source heads
+come from the paired route. Pending heads and guard state must agree; Closed
+and Conflict retain their original provenance. A normal source route without
+a declaration receives one. An already-pending legacy route without a
+declaration stays blocked without an invented source guard. Existing terminal
+route metadata remains terminal; this is not new endpoint close validation.
+
+All fourteen planner and transform cases pass, including scratch-file reuse.
+The signed-backup integration case passes seven source-state variants in 0.77
+seconds: it creates the backup,
+stops storage, verifies the backup, executes and resumes restore, then reads
+the installed records through authenticated storage validation. The new
+declarations name the exact signed backup guard, target epoch and source route
+heads. The route wire bytes remain unchanged. These typed route fixtures do
+not claim an MLS endpoint lifecycle or composed-daemon recovery-evidence
+validation. The old standalone-gate transformer tests now supply paired route
+sources. All eight checkpoint gates pass: formatting, all-target all-feature
+Clippy, locked all-feature workspace tests, source policy and its self-test,
+workspace policy, coverage-policy self-test and diff checks. The workspace
+passes 2,684 tests with no failures and 22 default-ignored tests in 183.54
+seconds, including 229 storage unit tests and 1,201 runtime tests. Both catalogs
+cover 760 source files with hash
+`2e3cc8f004bdafac63261c365c6ace2d2853343b8d982d408ac7cab2c1b79d0f`.
+The release catalog has 1,064 regions, including twenty reviewed restore
+regions. This adds no coverage measurement and changes no threshold.
+`cap73-restore-provenance-final-proof` retains exact inputs, check logs and
+five executed binaries. Normal-row live persistence and complete terminal
+recovery-evidence ingestion remain open.
+
 The declared kind-one recovery regression proves that the original companion
 loader ignores the entire row, including the restored
 binding, accepted state, sequencer head, recovery epoch and source guard.
