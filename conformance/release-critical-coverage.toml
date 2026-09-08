@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 751
-reviewed_source_sha256 = "5cbb0a6f763da924c434b8a74082ecf02aed9f4fc72f1137d27623f2ce16b124"
+reviewed_source_files = 756
+reviewed_source_sha256 = "152d1173e974d1437df636a7e618648478045923d3a6437f0e290bc3e0e146ed"
 deferred = []
 
 [[region]]
@@ -2066,9 +2066,9 @@ reason = "Check the requested conversation and any reserved predecessor."
 id = "cap73-mod-execute"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/mod.rs"
-source_sha256 = "24e5ad1665520fd7b6d8dbf101a822895426c85548694ae910d6dbde09970fa6"
-start_line = 280
-end_line = 324
+source_sha256 = "2d96e8fa8b3573b36dfc24c2e29534b876755b66cd8b7b1398e2d550be4baa34"
+start_line = 281
+end_line = 325
 metric = "regions"
 reason = "Call recovery::admit before dispatch to all signing, counter and delivery handlers."
 
@@ -9686,7 +9686,7 @@ reason = "Table read buffers remain charged through their exact completion and a
 id = "cap79-selective-021-application"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/route.rs"
-source_sha256 = "812c0297f7b37634b8660a0d8e900a331a769ac75e83321a65580411cc091317"
+source_sha256 = "da05f7b4e95de0411dd49531f587e20bba123729aaeb772d88890a1c955a1816"
 start_line = 133
 end_line = 205
 metric = "regions"
@@ -10381,3 +10381,73 @@ start_line = 162
 end_line = 166
 metric = "regions"
 reason = "A Pending declaration binds all three authenticated restored heads to the retained route row."
+
+[[region]]
+id = "cap98-close-authority-001-verify-close-approvals"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/close.rs"
+source_sha256 = "2593ccb966ca6704ef323a5e2a7b12e503d93fdfd12294ccf10a1c4245f9983c"
+start_line = 21
+end_line = 62
+metric = "regions"
+reason = "Close approvals require canonical signer identity, the last finalized policy threshold, authorized certificates and distinct roots and public keys."
+
+[[region]]
+id = "cap98-close-authority-002-verify"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/close_authority.rs"
+source_sha256 = "ce238f39e1079560c6768e302b3557708727a7ce6c0277480324e8a785d24172"
+start_line = 18
+end_line = 79
+metric = "regions"
+reason = "Close admission reserves bounded verification memory and requires the current accepted closing transition, its exact intent, and authenticated controller approvals."
+
+[[region]]
+id = "cap98-close-authority-003-work-capacity"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/close_authority.rs"
+source_sha256 = "ce238f39e1079560c6768e302b3557708727a7ce6c0277480324e8a785d24172"
+start_line = 81
+end_line = 92
+metric = "regions"
+reason = "Close admission reserves bounded verification memory and requires the current accepted closing transition, its exact intent, and authenticated controller approvals."
+
+[[region]]
+id = "cap98-close-authority-004-decode-terminal"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/close_authority.rs"
+source_sha256 = "ce238f39e1079560c6768e302b3557708727a7ce6c0277480324e8a785d24172"
+start_line = 94
+end_line = 102
+metric = "regions"
+reason = "Close admission reserves bounded verification memory and requires the current accepted closing transition, its exact intent, and authenticated controller approvals."
+
+[[region]]
+id = "cap98-close-authority-005-verify-terminal"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/close_authority.rs"
+source_sha256 = "ce238f39e1079560c6768e302b3557708727a7ce6c0277480324e8a785d24172"
+start_line = 104
+end_line = 131
+metric = "regions"
+reason = "Close admission reserves bounded verification memory and requires the current accepted closing transition, its exact intent, and authenticated controller approvals."
+
+[[region]]
+id = "cap98-close-authority-006-authorization-matches-core"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/close_authority.rs"
+source_sha256 = "ce238f39e1079560c6768e302b3557708727a7ce6c0277480324e8a785d24172"
+start_line = 133
+end_line = 146
+metric = "regions"
+reason = "Close admission reserves bounded verification memory and requires the current accepted closing transition, its exact intent, and authenticated controller approvals."
+
+[[region]]
+id = "cap98-close-authority-007-close"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/route.rs"
+source_sha256 = "da05f7b4e95de0411dd49531f587e20bba123729aaeb772d88890a1c955a1816"
+start_line = 880
+end_line = 990
+metric = "regions"
+reason = "A close stages route and tombstone effects only after public authority and exact terminal validation."

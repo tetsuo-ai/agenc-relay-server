@@ -28,6 +28,9 @@ mod reinit_endpoints;
 #[path = "recovery_gate_rows.rs"]
 mod declared_gates;
 
+#[path = "close_authorization.rs"]
+mod close_authorization;
+
 #[test]
 fn a_pending_restored_route_cannot_sign_a_new_finalization() -> TestResult {
     assert_pending_finalization_refused(true)

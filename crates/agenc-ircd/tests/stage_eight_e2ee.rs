@@ -95,6 +95,8 @@ const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "stage_eight_e2ee/close_authority.rs"]
+mod close_authority;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
 mod stage_ten_capacity;
 #[path = "stage_eight_e2ee/stage_ten_drills.rs"]
@@ -2735,29 +2737,7 @@ fn close_conversation(
     bound: &BoundConversation,
     terminal: [u8; 32],
 ) -> TestResult<[u8; 32]> {
-    let intent = IrcCloseIntent {
-        reason_code: 1,
-        validation_time: VALIDATION_TIME + 1,
-    };
-    let tbs = IrcCloseAuthorizationTbs {
-        profile_version: 1,
-        network_id: *NETWORK_ID.as_bytes(),
-        conversation_id: bound.conversation,
-        binding_id: bound.binding_id,
-        authorizing_terminal_id: terminal,
-        close_intent_id: semantic_id_of(SemanticHashDomain::CloseIntentId, &intent)?,
-        close_intent: intent,
-    };
-    let approval = builders::commit_approval(
-        &principal.keys,
-        principal.device,
-        &tbs,
-        SignatureDomain::CloseAuthorization,
-    )?;
-    let close = IrcCloseAuthorization {
-        tbs,
-        approvals: TlsVec::new(vec![approval])?,
-    };
+    let close = close_authority::authorization(principal, bound, terminal)?;
     let close_id = e2ee::route::close_authorization_id(&close)?;
     let object = wire_object(IrcWireObjectKind::CloseAuthorization, &close)?;
     let conversation = base64url_encode(&bound.conversation);
@@ -3070,7 +3050,13 @@ fn exercise_encrypted_network(network: &Network, coordinator: &mut DaemonProcess
     // the broadcast, encrypted traffic is refused, and plaintext stays refused.
     let close_id = step(
         "close",
-        close_conversation(&mut alice, &mut alice_keys, &bound, finalization_id),
+        close_authority::close_after_public_transition(
+            &mut alice,
+            &mut alice_keys,
+            &bob_keys,
+            &bound,
+            (1, finalization_id),
+        ),
     )?;
     let broadcast = step(
         "close broadcast",
@@ -3373,8 +3359,8 @@ mod real_clients {
     }
 
     /// What a certified Commit leaves behind.
-    struct Certified {
-        finalization_id: [u8; 32],
+    pub(super) struct Certified {
+        pub(super) finalization_id: [u8; 32],
         record_id: [u8; 32],
     }
 
@@ -3383,7 +3369,7 @@ mod real_clients {
     /// `old_policy_id` (companion 12.1 to 12.4).
     // agenc-review: allow owner=tests reviewed=2026-09-04 reason=one certification names the client the binder its co-voters the conversation the commit the prior position both policies and the rule together
     #[allow(clippy::too_many_arguments)]
-    fn certify_commit(
+    pub(super) fn certify_commit(
         client: &mut IrcClient,
         binder: &mut Principal,
         co_voters: &[&Principal],
@@ -3391,12 +3377,15 @@ mod real_clients {
         commit: &[u8],
         prior: (u64, [u8; 32]),
         policies: ([u8; 32], [u8; 32]),
-        rule: IrcCommitAuthorizationRule,
+        transition: close_authority::CertificationTransition,
     ) -> TestResult<Certified> {
         let network = *NETWORK_ID.as_bytes();
         let conversation = bound.conversation;
         let (prior_epoch, prior_state_id) = prior;
         let (old_policy_id, resulting_policy_id) = policies;
+        let (rule, actions, target) = transition.fields();
+        let canonical_validation_time =
+            close_authority::candidate_validation_time(bound, &prior_state_id, commit)?;
         let commit = raw_object(IrcWireObjectKind::CommitMls, commit.to_vec())?;
         let commit_object_id = *e2ee::ObjectId::compute(&commit).as_bytes();
         let conversation_token = base64url_encode(&conversation);
@@ -3430,19 +3419,14 @@ mod real_clients {
                 prior_state_id,
                 candidate_id,
                 commit_object_id,
-                canonical_validation_time: VALIDATION_TIME,
+                canonical_validation_time,
                 old_policy_id,
                 authorization_rule: rule,
-                action_bits: match rule {
-                    IrcCommitAuthorizationRule::BootstrapActivation => {
-                        action_bits::POLICY | action_bits::BOOTSTRAP
-                    }
-                    _ => action_bits::ADD_LEAF,
-                },
+                action_bits: actions,
                 resulting_policy_id,
                 resulting_group_context_digest: [1; 32],
                 resulting_ratchet_tree_digest: [2; 32],
-                transition_target_digest: [0; 32],
+                transition_target_digest: target,
             },
             &[(&binder.keys, binder.device)],
         )?;
@@ -3909,7 +3893,7 @@ mod real_clients {
                 &activation.commit().to_bytes()?,
                 (0, genesis),
                 (initial_policy_id, operational_policy_id),
-                IrcCommitAuthorizationRule::BootstrapActivation,
+                close_authority::CertificationTransition::Bootstrap,
             ),
         )?;
         group.merge_pending_commit(&creator.provider)?;
@@ -3964,7 +3948,7 @@ mod real_clients {
                 &commit.to_bytes()?,
                 (1, activated.finalization_id),
                 (operational_policy_id, operational_policy_id),
-                IrcCommitAuthorizationRule::ControlledTransition,
+                close_authority::CertificationTransition::Add,
             ),
         )?;
         group.merge_pending_commit(&creator.provider)?;
@@ -4085,10 +4069,17 @@ mod real_clients {
         assert_eq!(trust.state(), TrustState::VerifiedEncrypted);
         assert!(trust.state().permits_sending());
 
-        // The channel closes under the finalization that added bob.
+        // The server's public close checks use a separate synthetic closing
+        // candidate. The MLS exchange above does not validate that lifecycle.
         step(
             "close after real traffic",
-            close_conversation(&mut alice, &mut alice_keys, &bound, added.finalization_id),
+            close_authority::close_after_public_transition(
+                &mut alice,
+                &mut alice_keys,
+                &bob_keys,
+                &bound,
+                (2, added.finalization_id),
+            ),
         )?;
 
         let recorded = recorded_lifecycle()?;

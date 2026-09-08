@@ -3878,3 +3878,66 @@ and the release catalog contains 906 critical regions with unchanged floors
 and no new coverage measurement. Exact inputs, workspace executables, and
 passing logs are in `cap97-final-proof`. Charged reads for bodies absent
 from memory remain part of CAP-79.
+
+### CAP-98 Close admission does not validate controller authority or closing intent
+
+Source review finds that CloseGroup checks the attached sender, current binding
+and presence of an authorizing proof identifier. The close-ID helper validates
+structural fields and approval ordering, without verifying signatures. The
+handler does not require the retained finalization to authorize the exact
+active-to-closing intent. Companion Sections 9.3 and 11.5 require that intent
+binding and approvals meeting the last finalized policy's controller rule.
+
+The first fixture attempt failed before handler execution because its typed
+approval vector was empty. The corrected run has two passing controls and
+four behavioral failures in 0.09 seconds, frozen with its exact inputs and
+executable in `cap98-close-authority-red-proof`. The authorized-close control
+publishes and activates the operational policy, then finalizes a closing
+transition with real controller signatures, receipt bindings and council
+votes. Separate cases corrupt a close signature, use a correctly signed approval
+from an unrelated root, substitute an ordinary finalization, or change the
+close intent while signing the new close request correctly. All four are
+wrongly accepted. The existing codec rejects the empty-approval control. Ciphertext and MLS leaf acknowledgements remain
+synthetic; these are server public-authorization checks, without claiming
+endpoint MLS validation or a storage transaction.
+
+The handler now binds the request reason, network, conversation and binding to
+the current accepted terminal. Its retained finalization must carry the exact
+closing action and intent, current policy and epoch, and matching public
+core and authorization hashes. The E2EE validator checks controller authority,
+certificate identity, registered signature labels, threshold and distinct roots
+and public keys. Proof decoding and roster copies hold a bounded temporary
+memory reservation; refusal returns E2EE_RATE_LIMITED without close effects.
+
+All eleven handler cases and five public-validator cases pass. They include
+reconstruction before close, preservation of the tombstone after another
+reconstruction, correctly signed context substitutions, missing or changed
+proof ownership, memory refusal, controller thresholds, duplicate roots or
+keys, certificate changes and signature-label changes. The alternate-roster
+key-count test calls the validator directly and does not claim a runtime
+roster-chain transition.
+
+The first full workspace run found two daemon fixtures that closed under a
+bootstrap or member-add finalization. Both now refuse those requests, sequence
+a separate closing candidate with controller signatures and both council
+votes, refuse a close signature made under the wrong label, and then accept
+the authorized close. The two daemon tests pass in 23.82 seconds. Their closing
+candidate and leaf acknowledgements remain synthetic, including after the
+real openmls and mls-rs application exchange. These checks prove public close
+admission over TLS; they do not prove endpoint validation of a committed MLS
+closing lifecycle. The first fixture revision also exposed a regressing test
+validation timestamp; the corrected candidate preserves the validation floor,
+and certification reads its time from the candidate AAD.
+
+All eight checkpoint gates pass: formatting, all-target all-feature Clippy,
+the locked all-feature workspace tests, source policy and its self-test,
+workspace policy, the coverage-policy self-test and diff checks. The workspace
+run passes 2,669 tests with no failures and 22 default-ignored tests in 164.03
+seconds; the runtime suite passes 1,201 tests with one ignored capacity test.
+Both coverage inventories cover 756 source files with hash
+`152d1173e974d1437df636a7e618648478045923d3a6437f0e290bc3e0e146ed`.
+The release catalog has 1,044 regions, including seven reviewed close-authority
+regions. This checkpoint adds no coverage measurement and changes no threshold.
+Exact inputs, check logs and five executed binaries are retained in
+`cap98-close-authority-final-proof`. Full recovery-chain validation and Stage 10
+production qualification remain open.

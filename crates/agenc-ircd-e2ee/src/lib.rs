@@ -34,6 +34,7 @@
 //! - [`sequencer`]: sequencer credential chains and the federation key set.
 //! - [`authorization`]: candidate-specific commit authorizations, the action
 //!   bit table, and approval envelopes.
+//! - [`close`]: controller approvals under the last finalized policy.
 //! - [`finality`]: disposition votes, sign-once slots, and quorum ledgers.
 //! - [`context`]: the required MLS context extension and the context core.
 //! - [`envelope`]: application and Commit outer objects and the padding
@@ -68,6 +69,7 @@
 //! ```
 
 pub mod authorization;
+pub mod close;
 pub mod context;
 pub mod envelope;
 pub mod error;

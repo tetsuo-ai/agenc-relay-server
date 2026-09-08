@@ -15,6 +15,7 @@ use super::request::{Decoded, Outcome};
 use super::{CompanionCoordinator, CompanionOrigin};
 
 mod binding_delivery;
+mod close_authority;
 pub mod directory;
 pub mod mailbox;
 mod mailbox_grant;
