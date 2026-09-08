@@ -63,11 +63,19 @@ impl PreparedAck {
         {
             return Err(CompanionFault::Storage);
         }
-        stream.acknowledge(
-            self.position.delivery_sequence,
-            self.position.event_id,
-            self.acknowledgement,
-        )?;
+        if self.resume {
+            stream.acknowledge_barrier_resume(
+                self.position.delivery_sequence,
+                self.position.event_id,
+                self.acknowledgement,
+            )?;
+        } else {
+            stream.acknowledge(
+                self.position.delivery_sequence,
+                self.position.event_id,
+                self.acknowledgement,
+            )?;
+        }
         stream.owner = Some(proposed);
         Ok(())
     }
@@ -272,7 +280,7 @@ pub(crate) fn prepare_resume(
     {
         return Err(CompanionFault::Protocol);
     }
-    validate_coverage(stream, position)?;
+    stream.validate_barrier_resume(position.delivery_sequence, position.event_id)?;
     let proposed = DeliveryCursor::new(
         stream.generation,
         stream.next_sequence,

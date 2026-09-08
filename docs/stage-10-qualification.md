@@ -3167,6 +3167,46 @@ changes also passed complete gates before the final checkpoint. Exact source
 inputs, the final runtime test executable, and hashes are retained in
 `cap70-final-proof`.
 
+### CAP-94: final barrier resume rejects a lost ordinary acknowledgement prefix
+
+The coordinator rejects an exact final companion resume when acknowledgements
+for ordinary events before that barrier were also lost. Both the staging
+validator and the receipt application require the next expected sequence to
+have reached the barrier's first part. A valid reconnect therefore fails even
+when the coordinator retains every ordinary and barrier row in order.
+
+The real-storage regression first commits ordinary companion sequences 0 and 1,
+then a combined mutation with companion parts 2 and 3. It commits the base ACK
+and reconstructs the coordinator from sealed storage. Companion ERESUME at the
+exact final sequence and event ID fails against checkpoint `4d2f230` with
+`Companion(Request)`. `cap94-red-proof` retains that behavioral failure, the
+actual executed test binary, source inputs, and hashes.
+
+The repair gives final barrier resume a separate coverage validator. It checks
+every retained unacknowledged row from the durable cursor through the exact
+barrier endpoint, then commits those acknowledgements with the gate update.
+The receipt repeats coverage validation before publishing the cursor. Ordinary
+EACK continues to require the next ordinary event or the current barrier end.
+No new wire or persistent record format is introduced.
+
+The full coordinator test confirms that neither staging nor the storage commit
+alone sends ERESUME OK. After the receipt, the gate is deleted; another restart
+recovers cursor 3 and next sequence 4 with all four rows acknowledged. Refusal
+cases cover an inconsistent in-memory prefix, a partial endpoint, a wrong event
+ID, a wrong delivery generation, and an ordinary EACK that skips the prefix.
+The inconsistent-prefix case injects an in-memory defect after valid startup;
+it does not claim that the startup loader accepted a missing durable row.
+
+The final checkpoint passes formatting, all-target/all-feature workspace
+Clippy, 2,436 workspace tests with no failures and 21 ignored qualification
+tests, source policy and its self-test, workspace policy, and coverage-checker
+self-tests. Both inventories bind 633 source files at
+`64ec554fa8e8aedf638f80c61c4e2eebf1b7f63b36f8a5c9c156dbb53b297549`.
+The release policy binds 691 critical regions with unchanged floors. This is
+source review and test evidence, not a new branch-coverage measurement.
+`cap94-final-proof` retains the exact inputs, workspace runtime executable,
+command logs, and hashes.
+
 ## Release claims and limits
 
 The signing command requires an explicit Ed25519 signing key and matching

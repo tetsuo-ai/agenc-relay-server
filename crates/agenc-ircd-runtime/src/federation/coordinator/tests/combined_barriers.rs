@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod replay;
+mod resume_prefix;
 
 use super::*;
 use crate::e2ee::coordinator::events::{self, DeliveryStream, EventContent};
@@ -26,6 +27,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> TestResult<Self> {
+        Box::pin(Self::seed(false)).await
+    }
+
+    async fn seed(prefix: bool) -> TestResult<Self> {
         let mut core = StateCoreFixture::with_registration_router(entropy_script())?;
         let mut coordinator = standalone_coordinator(PEER);
         coordinator.install_companion_executor(
@@ -94,6 +99,37 @@ impl Fixture {
                 payload: None,
             })
             .collect::<Vec<_>>();
+        if prefix {
+            let ordinary = events::sequence_copies(
+                executor,
+                &plan,
+                &contents,
+                1,
+                core.context_mut()?.entropy_mut(),
+                &std::collections::BTreeMap::new(),
+            )
+            .map_err(|e| format!("ordinary sequence: {e:?}"))?;
+            let context = core.context_mut()?;
+            let checkpoint = context.domain().plan_account_service_checkpoint()?;
+            let revision = checkpoint.resulting_revision().get();
+            let writes = ordinary
+                .writes
+                .into_iter()
+                .map(|write| write.at_revision(revision))
+                .collect::<Result<Vec<_>, _>>()?;
+            context
+                .stage_durable_with_account_service(
+                    checkpoint,
+                    crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+                    None,
+                    0,
+                    writes,
+                )
+                .map_err(|e| format!("prefix stage: {e:?}"))?;
+            core.commit_staged_batch().await?;
+            executor.state.streams.extend(ordinary.streams);
+        }
+        let state_generation = if prefix { 2 } else { 1 };
         let assignments = std::collections::BTreeMap::from([(
             PEER,
             events::BarrierAssignment {
@@ -106,17 +142,23 @@ impl Fixture {
             executor,
             &plan,
             &contents,
-            1,
+            state_generation,
             core.context_mut()?.entropy_mut(),
             &assignments,
         )
         .map_err(|e| format!("sequence: {e:?}"))?;
+        let first = sequenced.copies.first().ok_or("companion first")?;
         let last = sequenced.copies.last().ok_or("companion final")?;
         let assignment = CrossProfileAssignment {
             mutation_id: MUTATION,
             part_count: 4,
             companion_scope: scope,
-            companion: BarrierEndpoint::new(0, 0, 1, last.row.event_id)?,
+            companion: BarrierEndpoint::new(
+                0,
+                first.row.sequence,
+                last.row.sequence,
+                last.row.event_id,
+            )?,
         };
         let mut writes = sequenced.writes;
         let mut outbound = Vec::new();
@@ -129,7 +171,7 @@ impl Fixture {
                 network_id: NETWORK,
                 target_server_id: PEER,
                 projection_generation: 0,
-                coordinator_state_generation: 1,
+                coordinator_state_generation: state_generation,
                 delivery_sequence: sequence,
                 event_id: agenc_ircd_types::EventId::from_bytes([u8::try_from(sequence)? + 61; 16]),
                 event_kind: event.kind(),
@@ -147,7 +189,7 @@ impl Fixture {
                 event_id: *header.event_id.as_bytes(),
                 event_object_id: *object_id.as_bytes(),
                 event_object: bytes.clone(),
-                coordinator_state_generation: 1,
+                coordinator_state_generation: state_generation,
                 acknowledged: false,
                 completion_replay_key: None,
             };
@@ -175,14 +217,21 @@ impl Fixture {
                 combined_barrier: None,
             });
         }
-        let gate = barrier::attach(NETWORK, COORDINATOR, PEER, &assignment, 1, &mut outbound)?;
-        writes.push(barrier::write(&gate, 1)?);
+        let gate = barrier::attach(
+            NETWORK,
+            COORDINATOR,
+            PEER,
+            &assignment,
+            state_generation,
+            &mut outbound,
+        )?;
+        writes.push(barrier::write(&gate, state_generation)?);
         let state = coordinator.peers.get_mut(&PEER).ok_or("peer")?;
         state.incarnation = Some(INCARNATION);
         state.phase = PeerPhase::Ready;
         state.projection_generation = 0;
         state.outbox.reserved_next = 2;
-        writes.push(coordinator.peer_row_at(PEER, 1, None)?);
+        writes.push(coordinator.peer_row_at(PEER, state_generation, None)?);
         let mut fixture = Self {
             core,
             coordinator,

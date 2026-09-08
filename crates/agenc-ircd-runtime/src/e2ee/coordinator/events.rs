@@ -126,6 +126,63 @@ impl DeliveryStream {
         if sequence != expected && !within_barrier {
             return Err(CompanionFault::Protocol);
         }
+        self.record_acknowledgement(sequence, event_id, acknowledgement);
+        Ok(())
+    }
+
+    /// A resume may recover a lost ordinary prefix only through the exact gate end.
+    pub(super) fn validate_barrier_resume(
+        &self,
+        sequence: u64,
+        event_id: [u8; 16],
+    ) -> Result<(), CompanionFault> {
+        if self.barrier.is_none_or(|(_, last)| sequence != last) {
+            return Err(CompanionFault::Protocol);
+        }
+        let mut expected = self
+            .acked
+            .map_or(Some(0), |(acked, _)| acked.checked_add(1))
+            .ok_or(CompanionFault::Protocol)?;
+        for row in self
+            .rows
+            .iter()
+            .filter(|row| !row.acked() && row.sequence <= sequence)
+        {
+            if row.sequence != expected {
+                return Err(CompanionFault::Protocol);
+            }
+            if row.sequence == sequence {
+                return if row.event_id == event_id {
+                    Ok(())
+                } else {
+                    Err(CompanionFault::Protocol)
+                };
+            }
+            expected = expected.checked_add(1).ok_or(CompanionFault::Protocol)?;
+        }
+        Err(CompanionFault::Protocol)
+    }
+
+    pub(super) fn acknowledge_barrier_resume(
+        &mut self,
+        sequence: u64,
+        event_id: [u8; 16],
+        acknowledgement: Acknowledgement,
+    ) -> Result<(), CompanionFault> {
+        if !acknowledgement.is_acknowledged() {
+            return Err(CompanionFault::Protocol);
+        }
+        self.validate_barrier_resume(sequence, event_id)?;
+        self.record_acknowledgement(sequence, event_id, acknowledgement);
+        Ok(())
+    }
+
+    fn record_acknowledgement(
+        &mut self,
+        sequence: u64,
+        event_id: [u8; 16],
+        acknowledgement: Acknowledgement,
+    ) {
         for row in self
             .rows
             .iter_mut()
@@ -144,7 +201,6 @@ impl DeliveryStream {
                 break;
             }
         }
-        Ok(())
     }
 
     /// Unacknowledged rows in order, for retransmission.
