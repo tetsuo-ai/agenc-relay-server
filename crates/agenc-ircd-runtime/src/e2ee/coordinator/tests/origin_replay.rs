@@ -2,6 +2,9 @@
 
 //! Durable request assembly and restart without retained replay results.
 
+#[path = "origin_replay/response_completeness.rs"]
+mod response_completeness;
+
 use agenc_ircd_domain::e2ee::projection::EmptyKind;
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::{

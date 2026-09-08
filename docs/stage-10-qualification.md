@@ -3307,3 +3307,39 @@ Three new release critical regions bind object collection and publication.
 Both policies validate with their existing floors; this is not a coverage
 measurement or Stage 10 qualification. Final logs and exact inputs are frozen
 in `cap95-startup-final-proof`.
+
+### CAP-96: duplicate requests can replay an incomplete response set
+
+The CAP-79 object-read review found that request classification uses
+`filter_map` to gather retained response bodies. When a body is missing from
+the object cache, the result remains unchanged while the returned response
+list becomes shorter. The sender would assign new consecutive indices to the
+surviving objects, contradicting the original result descriptors.
+
+The regression builds a three-object capability page with signed objects
+through the production result assembler and applies its receipt effects. A
+complete replay preserves the exact bytes and order. After removal of the
+first response body, classification still accepts the replay. The behavioral
+red has one failure and one passing control in 0.01 seconds, frozen with exact
+source and executable in `cap96-response-red-proof`. This test uses in-memory
+receipt effects, not a real storage commit. The earlier module compilation
+failure and invalid singleton-result fixture are excluded from that evidence.
+
+Classification now refuses the complete replay if any required response is
+missing. It constructs the response list privately and returns it only when
+every lookup succeeds. Empty results remain replayable. Tests remove the
+first, middle, and final response separately and preserve a complete-response
+control. This prevents incomplete publication while CAP-79's charged disk-read
+path remains open; it does not supply missing bodies from storage.
+
+All eight checkpoint gates pass: formatting, all-target/all-feature workspace
+Clippy with warnings denied, all-feature workspace tests (2,451 passed, zero
+failed, 21 ignored, 120 result groups), source policy and its self-test,
+workspace policy, coverage-policy self-test, and diff checks. The runtime
+suite passes all 1,006 tests. Both critical-coverage policies validate with
+unchanged floors, and the release inventory adds the replay classification
+decision. The source inventory has 639 files with SHA-256
+`9eb1467863bea8d1cf2e1dd69ee9423875505056990faa5472f82d6c10c0df69`.
+Exact inputs, the actual workspace test executable, and passing logs are
+frozen in `cap96-response-final-proof`. This is a development checkpoint, not
+a coverage measurement or Stage 10 qualification.

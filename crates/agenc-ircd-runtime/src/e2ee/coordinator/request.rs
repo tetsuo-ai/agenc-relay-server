@@ -473,11 +473,14 @@ pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Cl
         let Some(stored) = state.results.get(&decoded.request_object_id) else {
             return Classified::Violation;
         };
-        let responses = stored
+        let Some(responses) = stored
             .responses
             .iter()
-            .filter_map(|id| state.objects.get(id).cloned())
-            .collect();
+            .map(|id| state.objects.get(id).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Classified::Violation;
+        };
         return Classified::Replay(stored.result.clone(), responses);
     }
     let origin_key = CompanionOriginKey {
