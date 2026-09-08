@@ -281,7 +281,7 @@ impl Prepared {
 pub fn execute(exec: &mut Exec<'_>) -> Result<Prepared, Fail> {
     recovery::admit(exec)?;
     use IrcFederationOpcode as Op;
-    let outcome = match exec.opcode() {
+    let mut outcome = match exec.opcode() {
         Op::ApplicationChannel | Op::ApplicationDirect => route::application(exec),
         Op::ReserveChannel | Op::ReserveDirect => route::reserve(exec),
         Op::BindGroup => route::bind(exec),
@@ -321,5 +321,6 @@ pub fn execute(exec: &mut Exec<'_>) -> Result<Prepared, Fail> {
         Op::AcknowledgeMailbox => mailbox::acknowledge_mailbox(exec),
         Op::SubmitPolicy => policy::submit_policy(exec),
     }?;
+    super::recovery_gates::normal::prepare(exec, &mut outcome)?;
     Ok(Prepared::Complete(Box::new(outcome)))
 }

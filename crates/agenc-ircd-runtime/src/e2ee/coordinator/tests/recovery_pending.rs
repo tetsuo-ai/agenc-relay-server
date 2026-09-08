@@ -28,6 +28,9 @@ mod reinit_endpoints;
 #[path = "recovery_gate_rows.rs"]
 mod declared_gates;
 
+#[path = "recovery_normal.rs"]
+mod normal_gates;
+
 #[path = "close_authorization.rs"]
 mod close_authorization;
 
@@ -66,6 +69,14 @@ fn finalization_fixture() -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
 /// Models CAP72's typed-row output without calling the production transformer,
 /// so this admission regression cannot fail merely because CAP72 is absent.
 fn restored_pending(harness: &mut Harness, conversation: [u8; 32]) -> TestResult<Harness> {
+    // This fixture deliberately represents a legacy restored route without a
+    // declaration. Declared recovery fixtures add their exact provenance later.
+    let gate_key = agenc_ircd_storage::e2ee_records::recovery_gate_key(&conversation)?;
+    harness.writes.retain(|write| {
+        !write
+            .encoded_record()
+            .is_some_and(|(table, key, _)| table == TableId::E2eeState && key == &gate_key)
+    });
     let route_key = RouteRow::key(&conversation)?;
     let mut changed = 0_usize;
     for write in &mut harness.writes {

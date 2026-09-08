@@ -264,7 +264,12 @@ async fn reconstruct(
                 &record.sealed_record,
             )?;
             let value = PersistentRecordValue::decode(table, plaintext.expose_for_storage_codec())?;
-            fresh.coordinator.admit_restored(table, &record.key, &value);
+            fresh.coordinator.admit_restored_with_backing(
+                table,
+                &record.key,
+                &value,
+                &storage.context_mut()?.backing_reservations(),
+            );
         }
     }
     let result = fresh

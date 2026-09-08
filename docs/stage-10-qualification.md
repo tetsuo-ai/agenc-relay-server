@@ -2574,8 +2574,53 @@ cover 760 source files with hash
 The release catalog has 1,064 regions, including twenty reviewed restore
 regions. This adds no coverage measurement and changes no threshold.
 `cap73-restore-provenance-final-proof` retains exact inputs, check logs and
-five executed binaries. Normal-row live persistence and complete terminal
-recovery-evidence ingestion remain open.
+five executed binaries. That checkpoint left Normal-row live persistence and
+complete terminal recovery-evidence ingestion open.
+
+The live Normal follow-up reproduces two missing-record failures: a successful
+BIND has no durable declaration, and its private outcome contains none. Both
+fail in 0.06 seconds; `cap73-normal-red-proof` retains the four exact inputs,
+runtime executable and log. An earlier missing test import is only a compile
+failure. The dispatcher now prepares a Normal declaration for each newly
+written ordinary route that lacks one. This includes successor BIND and the
+next head mutation of a legacy Normal route. The declaration uses the current
+daemon epoch, creation heads and a zero source-guard hash because no restore
+has occurred. It retains its owned memory only when the route's commit effect
+applies. Missing identity, insufficient backing or a blocked route refuses the
+private outcome. Existing Normal heads can advance without rewriting this
+declaration; restore derives current heads from the authenticated source route.
+An ordinary close retains Normal metadata with its tombstone. It does not
+invent a restored terminal proof or downgrade an existing blocked gate.
+
+Eight new tests pass in the 1,209-test runtime suite. They cover durable and
+private declarations, memory ownership and refusal, absent daemon identity,
+head advancement, legacy Normal admission and actual storage shutdown/reopen.
+The storage case verifies both callback delivery and callback loss, exact
+commit advancement, sealed readback and reconstruction of matching route and
+gate heads. It drives the real handler and StateCore storage transaction;
+callback application is explicit in the fixture. It does not claim a full
+federation dispatch or terminal MLS recovery-evidence chain. Existing tests
+cover successor BIND and ordinary close with the new declarations.
+
+The first full runtime run passes 1,203 tests and exposes six fixture failures,
+retained in `cap73-normal-fixture-failures-proof`. Two incomplete-history tests
+now expect startup refusal because their declared gates cannot outlive routes
+that fail reconstruction. The sealed successor helper now reserves backing
+when admitting records. The new storage fixture installs its database identity
+before binding a route. All six cases pass after those corrections.
+Normal live persistence is implemented; complete terminal recovery-evidence
+ingestion remains open.
+
+All eight checkpoint checks pass with 2,692 workspace tests, no failures and
+22 default-ignored tests in 180.42 seconds. Clippy first found two unnecessary
+map lookups in new tests; those are corrected and its final run passes in
+5.41 seconds. Source policy checks 898 Rust files. Both coverage catalogs bind
+763 source files to
+`93747a17dca00476604ff52a5d125b04f2e29ff8fef8e1e68b851e984298f0eb`;
+the release catalog has 1,066 critical regions, including the two new Normal
+preparation functions. Sixteen existing region bindings follow changed source
+files. No coverage measurement or threshold changes. The exact changed inputs,
+check logs and executed binaries are retained in `cap73-normal-final-proof`.
 
 The declared kind-one recovery regression proves that the original companion
 loader ignores the entire row, including the restored

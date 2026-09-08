@@ -505,7 +505,7 @@ pub struct RouteRow {
     pub close_id: Option<[u8; HASH_BYTES]>,
     /// The predecessor close identifier for a recreated route.
     pub predecessor_close_id: Option<[u8; HASH_BYTES]>,
-    /// Whether a kind-1 recovery gate row exists for this conversation.
+    /// Whether restored recovery blocks ordinary mutations of this route.
     pub recovery_gate: bool,
     /// Retained object bytes charged to this conversation.
     pub stored_bytes: u64,

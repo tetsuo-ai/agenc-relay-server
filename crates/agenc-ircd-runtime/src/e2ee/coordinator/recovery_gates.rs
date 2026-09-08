@@ -11,6 +11,8 @@ use agenc_ircd_storage::{E2eeRecoveryGate, E2eeRecoveryKind, PersistentRecordVal
 use agenc_ircd_types::RecoveryEpoch;
 use std::collections::BTreeMap;
 
+pub(super) mod normal;
+
 #[cfg(test)]
 #[path = "tests/recovery_gate_validation.rs"]
 mod tests;

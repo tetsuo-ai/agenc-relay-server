@@ -355,21 +355,8 @@ fn successor_reload_rejects_missing_activation_evidence() -> TestResult {
     let key = agenc_ircd_storage::e2ee_records::object_key(&object)?;
     fixture.harness.writes.retain(|write| !matches!(write,
         Write::Put { table: agenc_ircd_storage::TableId::E2eeObject, key: present, .. } if *present == key));
-    let restored = fixture.harness.reloaded()?;
-    assert!(
-        !restored
-            .coordinator
-            .state
-            .conversations
-            .contains_key(&fixture.new)
-    );
-    assert!(
-        restored
-            .coordinator
-            .state
-            .routes
-            .route(&ConversationId(fixture.new))
-            .is_none()
-    );
+    // Both bound routes now declare their recovery epoch; missing activation
+    // evidence refuses the whole reconstruction before either gate is installed.
+    assert!(fixture.harness.reloaded().is_err());
     Ok(())
 }
