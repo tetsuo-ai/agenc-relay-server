@@ -720,6 +720,7 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
 mod reinit {
     mod ack_context;
     mod admission;
+    mod attempt_authority;
     mod successor;
 
     use agenc_ircd_crypto::SignatureDomain;
@@ -828,9 +829,9 @@ mod reinit {
             &harness.principal,
             DEVICE,
             &authorization_tbs,
-            SignatureDomain::CommitAuthorization,
+            SignatureDomain::ReinitAttemptAuthorization,
         )?;
-        let attempt = IrcReInitAttempt {
+        let mut attempt = IrcReInitAttempt {
             tbs: IrcReInitAttemptTbs {
                 profile_version: 1,
                 network_id: NETWORK,
@@ -873,6 +874,7 @@ mod reinit {
             },
             creator_old_leaf_signature: Opaque::new(vec![16; 64])?,
         };
+        attempt_authority::authorize_attempt(harness, &mut attempt)?;
         let bytes = wire(IrcWireObjectKind::ReinitAttempt, &attempt)?;
         Ok((attempt, bytes))
     }

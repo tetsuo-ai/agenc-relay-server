@@ -83,6 +83,7 @@ pub mod object;
 pub mod objects;
 pub mod policy;
 pub mod profile;
+pub mod reinit_authorization;
 pub mod route;
 pub mod sequencer;
 pub mod signature;

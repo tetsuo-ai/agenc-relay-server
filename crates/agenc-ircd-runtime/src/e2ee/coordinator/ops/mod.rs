@@ -25,6 +25,7 @@ pub(crate) mod mailbox_snapshot;
 pub mod policy;
 mod recovery;
 mod recovery_read;
+mod reinit_authority;
 pub mod route;
 pub(super) mod route_successor;
 pub mod sequence;

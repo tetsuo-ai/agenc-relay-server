@@ -4112,3 +4112,54 @@ The release catalog has 1,083 critical regions, including ten reviewed ACK
 regions. This checkpoint adds no coverage measurement and changes no threshold.
 Exact changed inputs, check logs and five executed binaries are retained in
 `cap99-ack-context-final-proof`. Stage 10 production qualification remains open.
+
+
+### CAP-100 ReInit attempts bypass public controller authorization
+
+The ReInit attempt handler signed a receipt without verifying its controller
+proofs. On source commit `1aea3a3395b42233405c8841dd960d942bf0765f`, all 26
+behavioral regressions accept bad authorization signatures, substituted
+controller roots or certificates, duplicate approvals, changed repeated fields,
+or an initial Commit or KeyPackage plan different from the authorized hash.
+Each case accepts a normal control first. Exact inputs and the executed runtime
+binary are retained in `cap100-reinit-authority-red-proof`; the run has no
+passes and 26 failures in 0.15 seconds.
+
+The public validator now checks all 17 repeated authorization fields, the
+authorization ID, the KeyPackage-plan ID and the complete initial Commit digest.
+Canonical approvals must use the ReInit attempt authorization signature domain,
+name certificates in the retained active roster, carry policy authority and
+meet the current old policy's threshold. Repeated controller roots and keys
+cannot count twice. The runtime reserves bounded work memory before cloning
+rosters or encoding public hash inputs. Validation precedes receipt signing,
+including when the sequencer signing key is absent.
+
+The first full runtime run then exposed an independent state substitution:
+when the old log was already in the ReInit phase, a fully controller-signed
+attempt could name a different old ReInit state. That run passes 1,287 tests,
+fails one and ignores one capacity test in 10.86 seconds. Its ten changed Rust
+inputs and executed binary are retained in `cap100-reinit-state-red-proof`.
+The runtime now requires the attempt's old state to equal the log's original
+accepted state. This test opens the domain ReInit phase directly; it does not
+claim a complete MLS ReInit or an abort/restart lifecycle.
+
+Thirty-two new tests cover public substitutions, signing-key absence, distinct
+controller thresholds, canonical ordering, shared keys, missing devices,
+removed policy authority, refused work memory and the original-state check.
+Existing ReInit fixtures now sign the correct authorization domain and rebind
+hashes after changing a plan or initial Commit. Their MLS Commit bodies and
+creator leaf signatures remain synthetic. This repair does not establish old
+MLS membership, validate the target tree or prove continuing-member finality
+eligibility; those obligations remain under CAP-86. No wire or storage format
+changes.
+
+All eight checkpoint checks pass. The locked all-feature workspace run passes
+2,771 tests with no failures and 22 default-ignored tests across 120 result
+groups in 180.68 seconds. The runtime suite passes 1,288 tests with one ignored
+capacity test. Both inventories cover 773 source files with hash
+`877545710b151f64d68648cdd8710621669f7deb9c57f2335b9f6214ddb0b352`.
+The release catalog has 1,089 critical regions, including six reviewed ReInit
+regions. No coverage threshold or measurement changes. Exact changed inputs,
+check logs and five executed binaries are retained in
+`cap100-reinit-authority-final-proof`. Stage 10 production qualification remains
+open.

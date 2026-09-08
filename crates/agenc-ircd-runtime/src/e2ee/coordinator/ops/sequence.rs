@@ -987,6 +987,7 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     if slot.attempt_sequence != tbs.attempt_sequence {
         return Err(Fail::with(E2eeReplyCode::EpochStale, &old_conversation_id));
     }
+    super::reinit_authority::verify(exec, &attempt)?;
     let attempt_id = CompanionCoordinator::id_of(SemanticHashDomain::ReinitAttemptId, tbs)?;
     let attempt_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let signer = exec

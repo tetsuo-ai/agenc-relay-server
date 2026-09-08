@@ -77,7 +77,7 @@ impl Fixture {
             &harness.principal,
             DEVICE,
             &attempt.authorization.tbs,
-            SignatureDomain::CommitAuthorization,
+            SignatureDomain::ReinitAttemptAuthorization,
         )?])?;
         attempt.tbs.attempt_authorization_id = semantic_id_of(
             SemanticHashDomain::ReinitAttemptAuthorizationId,

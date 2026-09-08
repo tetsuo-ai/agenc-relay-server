@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 769
-reviewed_source_sha256 = "8140f666dc04531ccd721ec8842bc717ee65e818664815d24c60779a723242dc"
+reviewed_source_files = 773
+reviewed_source_sha256 = "877545710b151f64d68648cdd8710621669f7deb9c57f2335b9f6214ddb0b352"
 deferred = []
 
 [[region]]
@@ -2066,9 +2066,9 @@ reason = "Check the requested conversation and any reserved predecessor."
 id = "cap73-mod-execute"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/mod.rs"
-source_sha256 = "1e48a906647c3ede4665b1d108aa3c3fbe56730a527ef255d514115833b82fd1"
-start_line = 282
-end_line = 327
+source_sha256 = "2822a2920011a26b3a6c74948ba949c949ec37bebd51b7f795f2bcfb93d1bbc4"
+start_line = 283
+end_line = 328
 metric = "regions"
 reason = "Call recovery::admit before dispatch to all signing, counter and delivery handlers."
 
@@ -9426,9 +9426,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-012-fetch-object"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "e8474ddd6faf09157dce24e7549f2c717461abcc1163ebeedac68b1a914e076e"
-start_line = 1418
-end_line = 1451
+source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
+start_line = 1419
+end_line = 1452
 metric = "regions"
 reason = "Fresh lookups check the attached device and retained log before reads and apply current conversation recovery authorization to resolved bodies."
 
@@ -10826,7 +10826,7 @@ reason = "Every embedded ACK matches its finalization core or ReInit attempt bef
 id = "cap99-ack-context-009-submit-commit-ack"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "e8474ddd6faf09157dce24e7549f2c717461abcc1163ebeedac68b1a914e076e"
+source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
 start_line = 511
 end_line = 575
 metric = "regions"
@@ -10836,8 +10836,68 @@ reason = "Standalone ACK handlers validate current public context before any dur
 id = "cap99-ack-context-010-submit-reinit-ack"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "e8474ddd6faf09157dce24e7549f2c717461abcc1163ebeedac68b1a914e076e"
-start_line = 1074
-end_line = 1135
+source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
+start_line = 1075
+end_line = 1136
 metric = "regions"
 reason = "Standalone ACK handlers validate current public context before any durable object, proof slot or event can be staged."
+
+[[region]]
+id = "cap100-reinit-authority-001-verify-reinit-attempt-authorization"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/reinit_authorization.rs"
+source_sha256 = "220d37e2e9ef96923c028240f3fe08a0e44b8775245abaa73956166941b97fb0"
+start_line = 14
+end_line = 60
+metric = "regions"
+reason = "ReInit attempts bind every repeated controller field, initial Commit and KeyPackage plan hash, distinct active controller roots and keys, and the exact signature domain."
+
+[[region]]
+id = "cap100-reinit-authority-002-check-public-links"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/reinit_authorization.rs"
+source_sha256 = "220d37e2e9ef96923c028240f3fe08a0e44b8775245abaa73956166941b97fb0"
+start_line = 62
+end_line = 80
+metric = "regions"
+reason = "ReInit attempts bind every repeated controller field, initial Commit and KeyPackage plan hash, distinct active controller roots and keys, and the exact signature domain."
+
+[[region]]
+id = "cap100-reinit-authority-003-expected-authorization"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/reinit_authorization.rs"
+source_sha256 = "220d37e2e9ef96923c028240f3fe08a0e44b8775245abaa73956166941b97fb0"
+start_line = 82
+end_line = 103
+metric = "regions"
+reason = "ReInit attempts bind every repeated controller field, initial Commit and KeyPackage plan hash, distinct active controller roots and keys, and the exact signature domain."
+
+[[region]]
+id = "cap100-reinit-authority-004-verify"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/reinit_authority.rs"
+source_sha256 = "6547fa82b35c0f91350ecd3558dad4ae38e65e1615b76f522b8d30cc4666cd09"
+start_line = 9
+end_line = 39
+metric = "regions"
+reason = "The current old policy and original ReInit state authorize the attempt before receipt signing; roster and encoding work reserves bounded process memory."
+
+[[region]]
+id = "cap100-reinit-authority-005-work-capacity"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/reinit_authority.rs"
+source_sha256 = "6547fa82b35c0f91350ecd3558dad4ae38e65e1615b76f522b8d30cc4666cd09"
+start_line = 41
+end_line = 50
+metric = "regions"
+reason = "The current old policy and original ReInit state authorize the attempt before receipt signing; roster and encoding work reserves bounded process memory."
+
+[[region]]
+id = "cap100-reinit-authority-006-submit-reinit-attempt"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
+source_sha256 = "ff9737cbf63c6426922487c3d8b2030e4b27b49b24c74f8a0e04da09a5dea46f"
+start_line = 959
+end_line = 1071
+metric = "regions"
+reason = "The attempt handler verifies public controller authority before any receipt signature or staged state mutation."

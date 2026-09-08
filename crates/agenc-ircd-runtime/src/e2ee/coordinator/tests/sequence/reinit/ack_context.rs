@@ -296,6 +296,7 @@ fn retained_attempt_case(initial_bytes: usize) -> TestResult<(Harness, [u8; 32],
     let (mut attempt, _) = attempt(&harness, conversation, old_state, 0)?;
     // This is a public-object allocation case; the MLS body remains synthetic.
     attempt.initial_commit_bytes = Opaque::new(vec![15; initial_bytes])?;
+    super::attempt_authority::authorize_attempt(&harness, &mut attempt)?;
     let bytes = wire(IrcWireObjectKind::ReinitAttempt, &attempt)?;
     ok(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
     let receipt = staged_receipt(&harness, conversation)?;
@@ -374,6 +375,7 @@ fn reinit_ack_accepts_a_reserved_welcome_ref_and_refuses_an_unknown_ref() -> Tes
     joiner.device_id = [88; 16];
     joiner.key_package_ref = Opaque::new(vec![88; 32])?;
     attempt.key_package_plan.entries = TlsVec::new(vec![creator, joiner])?;
+    super::attempt_authority::authorize_attempt(&harness, &mut attempt)?;
     let bytes = wire(IrcWireObjectKind::ReinitAttempt, &attempt)?;
     ok(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
     let receipt = staged_receipt(&harness, conversation)?;
