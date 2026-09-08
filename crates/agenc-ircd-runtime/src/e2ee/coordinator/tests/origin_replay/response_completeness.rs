@@ -117,3 +117,96 @@ fn empty_replay_has_no_required_response_objects() -> TestResult {
     assert!(responses.is_empty());
     Ok(())
 }
+
+fn recent_correlation(decoded: &Decoded) -> Correlation {
+    Correlation {
+        peer_server_id: COORDINATOR,
+        server_incarnation: decoded.request.server_incarnation,
+        origin_id: decoded.request.origin_id,
+        origin_generation: decoded.request.origin_generation,
+        operation_sequence: decoded.request.operation_sequence,
+        request_id: decoded.request.request_id,
+    }
+}
+
+#[test]
+fn recent_fragment_replay_refuses_every_missing_response_before_emitting_lines() -> TestResult {
+    for missing in 0..3 {
+        let (mut coordinator, decoded, responses) = retained_page()?;
+        let bytes = responses.get(missing).ok_or("response")?;
+        let id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+        assert!(coordinator.state.objects.remove(&id).is_some());
+        let result = coordinator.replay_recent(
+            ServerId::from_bytes(HOME),
+            &recent_correlation(&decoded),
+            decoded.request_object_id,
+        );
+        assert!(
+            result.is_err(),
+            "recent-fragment replay emitted a partial result with response {missing} absent"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_fragment_replay_preserves_all_three_response_indices_and_object_ids() -> TestResult {
+    use crate::federation::link::{ParsedLine, parse_line};
+    let (coordinator, decoded, responses) = retained_page()?;
+    let actions = coordinator.replay_recent(
+        ServerId::from_bytes(HOME),
+        &recent_correlation(&decoded),
+        decoded.request_object_id,
+    )?;
+    let [super::super::super::sync::Action::Send(lines)] = actions.as_slice() else {
+        return Err("recent replay did not return lines".into());
+    };
+    let mut returned = BTreeMap::new();
+    for line in lines {
+        if let ParsedLine::Companion(CompanionFrame::Response {
+            response_index,
+            object_id,
+            ..
+        }) = parse_line(
+            line.as_str().strip_suffix("\r\n").ok_or("line ending")?,
+            "coordinator.example",
+        )
+        .map_err(|e| format!("line: {e:?}"))?
+        {
+            assert!(
+                returned
+                    .insert(response_index, object_id)
+                    .is_none_or(|previous| previous == object_id)
+            );
+        }
+    }
+    assert_eq!(returned.len(), 3);
+    for (index, response) in responses.iter().enumerate() {
+        assert_eq!(
+            returned.get(&u16::try_from(index)?),
+            Some(agenc_ircd_e2ee::ObjectId::compute(response).as_bytes())
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn recent_fragment_replay_accepts_a_result_with_no_required_response_objects() -> TestResult {
+    let mut coordinator = coordinator();
+    declare(&mut coordinator, 0)?;
+    let decoded = decoded(0, 0)?;
+    for effect in batch(&coordinator, &decoded)?.effects {
+        effect(&mut coordinator.state);
+    }
+    let actions = coordinator.replay_recent(
+        ServerId::from_bytes(HOME),
+        &recent_correlation(&decoded),
+        decoded.request_object_id,
+    )?;
+    let [super::super::super::sync::Action::Send(lines)] = actions.as_slice() else {
+        return Err("empty-result replay did not return lines".into());
+    };
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| line.as_str().contains(" ERESULT ")));
+    Ok(())
+}

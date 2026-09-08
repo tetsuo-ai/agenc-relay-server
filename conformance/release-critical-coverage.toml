@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 696
-reviewed_source_sha256 = "dc8adecd9da82b6faa33a3cdc624148c56ba40333d283cf5de223ab32775da21"
+reviewed_source_sha256 = "740dc26c97aa6f36f73dcd5d483dca4da0578084e656a9480248b8c9fbd3dc38"
 deferred = []
 
 [[region]]
@@ -4346,9 +4346,9 @@ reason = "Delegate EACK to receipt-owned validation with existing trusted wall-c
 id = "companion-mod-companioncoordinator-set-pending"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "1eb5306e48ee5063485cccd1e03c816518810c5f422274aef248445cc9fad023"
-start_line = 817
-end_line = 819
+source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
+start_line = 818
+end_line = 820
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4356,9 +4356,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-applied"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "1eb5306e48ee5063485cccd1e03c816518810c5f422274aef248445cc9fad023"
-start_line = 823
-end_line = 850
+source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
+start_line = 824
+end_line = 851
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4366,9 +4366,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-rejected"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "1eb5306e48ee5063485cccd1e03c816518810c5f422274aef248445cc9fad023"
-start_line = 853
-end_line = 855
+source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
+start_line = 854
+end_line = 856
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -9061,3 +9061,13 @@ start_line = 1676
 end_line = 1685
 metric = "regions"
 reason = "Both replay readers block concurrent companion execution and retain typed commit ownership; rejection follows the exact original request or maintenance receipt."
+
+[[region]]
+id = "cap97-recent-001-replay-recent"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
+source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
+start_line = 677
+end_line = 713
+metric = "regions"
+reason = "The recent-fragment replay shortcut must resolve every response in original descriptor order before rendering any output; one absent body refuses the whole replay."

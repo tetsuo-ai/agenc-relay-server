@@ -3466,3 +3466,30 @@ decision. The source inventory has 639 files with SHA-256
 Exact inputs, the actual workspace test executable, and passing logs are
 frozen in `cap96-response-final-proof`. This is a development checkpoint, not
 a coverage measurement or Stage 10 qualification.
+
+### CAP-97: recent-fragment replay bypasses response completeness
+
+The follow-up object-read review found another response lookup in
+`CompanionCoordinator::replay_recent`. When the assembler reports a request
+object as recently completed, this shortcut renders the retained result
+without passing through the classification repaired under CAP-96. It still
+skips missing response bodies and assigns new indices to the survivors.
+
+The regression uses the same three signed capability objects and production
+result assembly as CAP-96, then calls the shortcut directly. Removing the
+first response still returns output. A passing control parses the rendered
+responses and verifies all three original indices and object IDs. The run
+reports one failure and one pass in 0.00 seconds. Exact inputs and executable
+are in `cap97-recent-fragment-red-proof`. This test applies in-memory receipt
+effects; it does not claim a storage commit or exercise fragment-cache timing.
+
+The shortcut now requires the complete response set before rendering any
+lines. Tests remove the first, middle, and final response separately, verify
+a complete response set, and preserve results with no response objects.
+All three targeted cases pass in 0.01 seconds. All eight checkpoint gates
+pass with 2,534 tests, no failures, and 21 ignored qualification tests. The
+runtime suite has 1,077 passes. Both inventories cover 696 source files,
+and the release catalog contains 906 critical regions with unchanged floors
+and no new coverage measurement. Exact inputs, workspace executables, and
+passing logs are in `cap97-final-proof`. Charged reads for bodies absent
+from memory remain part of CAP-79.

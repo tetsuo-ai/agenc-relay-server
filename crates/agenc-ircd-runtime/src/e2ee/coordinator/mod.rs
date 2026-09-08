@@ -701,11 +701,12 @@ impl CompanionCoordinator {
             .results
             .get(&row.request_object_id)
             .ok_or(CompanionFault::Protocol)?;
-        let responses: Vec<Vec<u8>> = stored
+        let responses = stored
             .responses
             .iter()
-            .filter_map(|id| self.state.objects.get(id).cloned())
-            .collect();
+            .map(|id| self.state.objects.get(id).cloned())
+            .collect::<Option<Vec<_>>>()
+            .ok_or(CompanionFault::Protocol)?;
         let lines = execute::replay_lines(self, correlation, home, &stored.result, &responses)
             .map_err(|_| CompanionFault::Protocol)?;
         Ok(vec![sync::Action::Send(lines)])
