@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 773
-reviewed_source_sha256 = "877545710b151f64d68648cdd8710621669f7deb9c57f2335b9f6214ddb0b352"
+reviewed_source_files = 776
+reviewed_source_sha256 = "c9a2077818cfbf2a06c3864973f8ea72f33eb279ad5c2c775b8a14afe06ea537"
 deferred = []
 
 [[region]]
@@ -10901,3 +10901,83 @@ start_line = 959
 end_line = 1071
 metric = "regions"
 reason = "The attempt handler verifies public controller authority before any receipt signature or staged state mutation."
+
+[[region]]
+id = "cap73-record-authentication-001-authenticate-record"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication.rs"
+source_sha256 = "666cc52a769494f9811a16209e75c45de267b09f5c8c6ff811fdd5378abb4394"
+start_line = 67
+end_line = 83
+metric = "regions"
+reason = "Historical records require the complete bounded wire object, the caller-established chain position and credential, and the recomputed semantic identity; authentication grants no finality or recovery permission."
+
+[[region]]
+id = "cap73-record-authentication-002-authenticate"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication/fields.rs"
+source_sha256 = "4204a2bad33213a7911c2834441ecd5068d9ce4b0dcf99ea6b5a1d10f0778c81"
+start_line = 20
+end_line = 35
+metric = "regions"
+reason = "All six outer record contexts and registered sequencer signature domains are exact; a current or continuous successor key cannot replace the credential committed for this position."
+
+[[region]]
+id = "cap73-record-authentication-003-fields"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication/fields.rs"
+source_sha256 = "4204a2bad33213a7911c2834441ecd5068d9ce4b0dcf99ea6b5a1d10f0778c81"
+start_line = 37
+end_line = 46
+metric = "regions"
+reason = "All six outer record contexts and registered sequencer signature domains are exact; a current or continuous successor key cannot replace the credential committed for this position."
+
+[[region]]
+id = "cap73-record-authentication-004-verify"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication/identity.rs"
+source_sha256 = "e8a70fb656f9b0b84201b46619d4156e03ed77ed0d9086e16cec589aa9ca134c"
+start_line = 12
+end_line = 28
+metric = "regions"
+reason = "Terminal IDs hash the registered core and repeat the exact outer context; ReInit receipt identity requires the exact separately referenced attempt and matching signed slot fields."
+
+[[region]]
+id = "cap73-record-authentication-005-terminal-or-candidate"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication/identity.rs"
+source_sha256 = "e8a70fb656f9b0b84201b46619d4156e03ed77ed0d9086e16cec589aa9ca134c"
+start_line = 30
+end_line = 97
+metric = "regions"
+reason = "Terminal IDs hash the registered core and repeat the exact outer context; ReInit receipt identity requires the exact separately referenced attempt and matching signed slot fields."
+
+[[region]]
+id = "cap73-record-authentication-006-asserted"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication/identity.rs"
+source_sha256 = "e8a70fb656f9b0b84201b46619d4156e03ed77ed0d9086e16cec589aa9ca134c"
+start_line = 99
+end_line = 104
+metric = "regions"
+reason = "Terminal IDs hash the registered core and repeat the exact outer context; ReInit receipt identity requires the exact separately referenced attempt and matching signed slot fields."
+
+[[region]]
+id = "cap73-record-authentication-007-context"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication/identity.rs"
+source_sha256 = "e8a70fb656f9b0b84201b46619d4156e03ed77ed0d9086e16cec589aa9ca134c"
+start_line = 106
+end_line = 118
+metric = "regions"
+reason = "Terminal IDs hash the registered core and repeat the exact outer context; ReInit receipt identity requires the exact separately referenced attempt and matching signed slot fields."
+
+[[region]]
+id = "cap73-record-authentication-008-attempt"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/record_authentication/identity.rs"
+source_sha256 = "e8a70fb656f9b0b84201b46619d4156e03ed77ed0d9086e16cec589aa9ca134c"
+start_line = 120
+end_line = 153
+metric = "regions"
+reason = "Terminal IDs hash the registered core and repeat the exact outer context; ReInit receipt identity requires the exact separately referenced attempt and matching signed slot fields."

@@ -4163,3 +4163,42 @@ regions. No coverage threshold or measurement changes. Exact changed inputs,
 check logs and five executed binaries are retained in
 `cap100-reinit-authority-final-proof`. Stage 10 production qualification remains
 open.
+
+### CAP-73 historical record authentication
+
+The new public verifier authenticates one complete sequencer record against an
+independently established network, conversation, sequence, predecessor and
+historical credential. Each of the six record arms uses its registered
+signature domain. Terminal IDs are recomputed from their registered cores,
+whose context must match the outer certificate. An attempt receipt requires
+the exact referenced ReInit attempt object and its recomputed semantic ID.
+Informational sequencing time cannot select a credential. A continuous key
+rotation does not authorize its successor at an older position.
+
+Eighteen integration tests cover correct signatures, all incorrect record
+signature domains, substituted positions and credentials, false terminal IDs,
+changed core and attempt fields, missing or unused evidence, malformed wire
+objects, decode exhaustion and a maximum-size initial Commit. Alternative
+signed proof wrappers retain one semantic ID and distinct transport IDs. The
+outer signatures and credential rotation are real; the nested MLS bodies,
+controller approvals and votes are synthetic. These tests establish record
+authentication, without claiming a valid MLS lifecycle or terminal recovery.
+
+This API has no installed runtime or maintenance caller. It cannot close a
+route, clear a witness or construct a terminal recovery result. Complete
+historical authority, chain traversal, finality validation, evidence ingestion
+and atomic gate installation remain open under CAP-73 and CAP-74. No wire or
+storage format changes. There is no old-behavior regression claim for this new
+API. Initial validation caught an unused test import, an oversized function
+and a non-idempotent formatting pattern; each was corrected before the final
+checks.
+
+All eight checkpoint checks pass. The locked all-feature workspace run passes
+2,789 tests with no failures and 22 default-ignored tests across 121 result
+groups in 183.27 seconds. Source policy accepts 914 Rust files. Both inventories
+cover 776 source files with hash
+`c9a2077818cfbf2a06c3864973f8ea72f33eb279ad5c2c775b8a14afe06ea537`.
+The release catalog contains 1,097 critical regions, including eight new
+record-authentication regions. Coverage thresholds are unchanged and no new
+coverage measurement is claimed. Exact inputs, check logs and executed binaries
+are retained in `cap73-record-authentication-final-proof`.
