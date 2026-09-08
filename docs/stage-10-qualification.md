@@ -13,12 +13,12 @@ release candidate.
 
 | Area | Current evidence and remaining work |
 | --- | --- |
-| Restored account authentication | CAP-9 and CAP-54 repairs pass strict restore and disaster-restore drills with existing and new accounts. CAP-7 passes post-restart authentication in the diagnostic release campaign; an uninstrumented repeat remains required. |
+| Restored account authentication | CAP-9 and CAP-54 repairs pass strict restore and disaster-restore drills with existing and new accounts. CAP-7 passes post-restart authentication in the uninstrumented 64-client campaign at `b735700`. |
 | Account deletion and rekey | CAP-11, CAP-57, and CAP-62 through CAP-67 pass the complete strict deletion drill, including exact authenticated rows, both deleted-login refusals, the surviving account, and all final stops. |
-| Federation and client replies | CAP-47 through CAP-60 have focused regression evidence, and all required workspace gates pass. A successful new release capacity run remains required. |
-| Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 preserves the original refused session through pressure recovery. CAP-87 removes premature origin retirement after a pending or refused journal write; both regressions and all 100 edge tests pass. A new uninstrumented capacity run remains required. |
-| Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. CAP-14 needs a fresh capacity result after the CAP-51 and CAP-65 shutdown repairs. |
-| Implementation under qualification | CAP-5 stopped rotation commands, live two-account migration, and stale START cleanup pass. Maintenance-aware export and actual rotation in the capacity scenario remain open. CAP-13 batching has focused receipt, rollback, and resource proofs and needs a new capacity run. |
+| Federation and client replies | CAP-47 through CAP-60 have focused regression evidence and passing workspace gates. The uninstrumented 64-client campaign at `b735700` passes all eight scenarios. |
+| Disk pressure | CAP-44 and CAP-45 fix reset cleanup and durable request reconstruction. CAP-3 preserves the original refused session through pressure recovery. CAP-87 removes premature origin retirement after a pending or refused journal write; both regressions and all 100 edge tests pass. The uninstrumented 64-client campaign at `b735700` passes original-session pressure recovery. |
+| Reconnect and shutdown load | The current CAP-4 release probe survives the unpaced reconnect wave, admits eight fresh clients after recovery, and stops all three daemons cleanly. The 64-client campaign at `b735700` also returns all clients to its resource envelope and stops all three daemons cleanly. |
+| Implementation under qualification | CAP-5 stopped rotation commands, live two-account migration, and stale START cleanup pass. Actual rotation passes the 64-client, five-minute capacity campaign in `cap91-rotation-final`. Maintenance-aware export remains open. CAP-13 batching passes the 64-client campaign at `b735700`; CAP-91 adds two controlled gathering-checkpoint regressions. |
 | Companion delivery recovery | CAP-70 and CAP-71 now restore scoped delivery rows and commit companion acknowledgement transitions before changing replay coverage. Retained acknowledged cross-profile rows also restart with exact bytes. Complete recovery of unfinished combined barriers remains open. CAP-79 still requires the published replay retention bounds. |
 | Declared recovery | CAP-72 discards obsolete companion delivery, replay, and barrier state and marks typed live routes pending. CAP-73 now gates ordinary mutations before signing; terminal-evidence ingestion remains open. CAP-74 persists witnesses and blocks ordinary resume across restart; authenticated witness resolution remains open. |
 | ReInit admission | CAP-86 now rejects outside binding accounts before attempt, activation, or abort signing. Three regressions fail without the checks and pass with them, including valid in-group controls and absent-signer refusal. The remaining device-to-leaf and continuing-member checks need separate evidence. |
@@ -880,9 +880,48 @@ finished rotation. Bypassing only cleanup leaves the three AuthTransaction
 rows and fails the exact empty-table assertion. All four rotation fault tests
 and four invitation restart controls still pass. The fixed and reversed
 proofs are archived in `invitation-owner-fixed-proof` and
-`stopped-start-cleanup-red-proof`. The maintenance-aware export grammar,
-actual rotation in the capacity scenario, and full repository gates remain
-open.
+`stopped-start-cleanup-red-proof`. Full repository gates subsequently pass
+at the resumed repair checkpoint. The maintenance-aware export grammar
+remains open.
+
+The capacity scenario now runs the actual stopped start and finish commands.
+It opens authenticated stopped state before the transition, verifies the new
+key generation and exact start receipt, migrates the existing account through
+live OPAQUE authentication, and requires the previous-generation count to
+reach zero. After finish it checks the exact stable key state and receipt,
+removes the previous key mapping, and requires another live login before
+counting the scenario. Fresh private keys come from the host entropy source;
+the campaign log contains only generation and commit numbers.
+
+The restart-only scenario fails the new generation check with actual 1 and
+required 2 in `cap5-capacity-rotation-red`. Its assertion bypassed worker stop
+during panic cleanup, so the verified test process needed SIGTERM after all
+daemons had stopped. The recorded exit is -15, with unchanged executables;
+this is a behavioral red with forced cleanup, not a completed campaign.
+The implemented scenario returns operational evidence failures through the
+controller's normal error path so its worker stop runs.
+
+The first implemented capacity run reaches rotation start, then fails because
+its reopened-commit assertion omits the command's final shutdown checkpoint.
+The existing two-account drill already checks that the reopened commit is one
+past the rotation receipt. The corrected scenario uses that exact relation.
+`cap91-production-rotation` preserves this 211.06-second failed run, unchanged
+executables, and daemon logs. Its database copies are invalid live captures
+under CAP-92. This run does not prove a runtime rotation failure or a passing
+capacity result.
+
+The corrected uninstrumented campaign passes in 306.62 seconds with 64 clients
+and a measured workload duration of 300.35 seconds. All eight scenario counters
+reach one. The login-index generation advances from 1 to 2; its start receipt
+is commit 18873 and finish receipt is commit 19183. Both required live logins
+pass, followed by the existing rekey scenario. All clients return to the
+resource envelope, with zero missed events, envelope violations, population
+shortfalls, or sample failures, and all three daemons stop cleanly. The run
+also records 56 worker errors and 6,171 message refusals during its workload;
+it does not establish an unrestricted throughput or latency claim.
+`cap91-rotation-final` binds the exact unchanged release executables and all
+nine modified or new source inputs. Its copied databases are excluded from
+evidence under CAP-92.
 
 ### CAP-6: the coordinator refused channel messages whose edge named a trailing channel revision
 
@@ -2881,9 +2920,10 @@ The event passes header and sequence validation, then the replica rejects its
 target channel revision. The exact event trace in `cap87-event-diagnostic`
 repeats that refusal at sequence 4029 while the durable cursor remains 4028.
 The final diagnostic campaign fails after 236.50 seconds with unchanged
-executables. `capture-stopped.json` records three private fixture directories
-copied after all daemon processes exited. The earlier startup copies in
-`captured` are explicitly invalid as crash evidence.
+executables. The private fixture copies in both `captured` and
+`captured-stopped` are invalid live copies, as corrected under CAP-92.
+The event trace and controlled real-storage regressions remain the evidence
+for this repair.
 
 The domain replica advances channel and home-session revisions during JOIN,
 PART, KICK, and related events, but its returned row changes omit several of
@@ -2947,8 +2987,9 @@ The preceding diagnostic run in `cap88-restart-diagnostic` passed pressure
 recovery and backup, returned edge B, then failed SASL authentication after
 207.93 seconds. Its trace includes coordinator companion-protocol refusals;
 the cause of that authentication failure remains under investigation. The
-run records unchanged binaries and three private stopped-state captures.
-The completion repair does not establish capacity qualification.
+run records unchanged binaries and daemon logs. Its private database copies
+are invalid live captures under CAP-92. The completion repair alone does not
+establish capacity qualification.
 
 ### CAP-90: cached companion declarations bypass current origin admission
 
@@ -2980,10 +3021,72 @@ The preceding five-minute diagnostic campaign passes with 64 clients after
 306.37 seconds, including coordinator restart, live login, rekey, and final
 draining. Its companion refusals expose this additional defect despite the
 passing campaign result. `campaign-result.json` records unchanged executables;
-`capture-stopped.json` records three private stopped-state copies. The captured
+its claimed stopped-state copies are invalid under CAP-92. The recorded
 event-admission refusal is `Quiescing` during an intentional daemon stop, so
 that trace does not prove the separate hypothesis about a staged batch conflict.
-A production-binary repeat is still required after this repair.
+The uninstrumented repeat passes at exact source commit
+`b735700ada3a65fa3dc4a2016d81a59defe408ca` in 305.96 seconds. Its
+64-client workload runs for 300.48 seconds, completes all eight scenarios,
+records no missed events, envelope violations, population shortfalls, or
+sample failures, and stops all three daemons cleanly. There are 31 worker
+errors during the disruption scenarios. The scenario named index transition
+still tests reconstruction in this run. `cap90-production-repeat` preserves
+the unchanged daemon and test executable hashes and full campaign logs. Its
+claimed stopped-state copies are invalid under CAP-92. This result covers
+that exact source; later changes need their own campaign.
+
+### CAP-91: incoming events collide with an unsubmitted checkpoint
+
+The edge event entry path tests only whether a storage batch is in flight.
+A different owner can already hold a gathering or exclusive checkpoint that
+has not been submitted. The event then attempts an incompatible checkpoint,
+receives Busy, and reports a Ceiling violation for valid federation traffic.
+
+Two real-storage regressions reproduce the defect with ordinary gathering and
+exclusive checkpoints. Both fail at event admission in `cap91-red.log`. The
+entry path now uses the same complete checkpoint-readiness predicate as its
+queue drain. The bounded queue holds the event until the other owner's
+receipt. Only the event's own subsequent receipt advances its cursor, emits
+its client message, and sends its exact acknowledgement. The tests verify
+both commit sequences, no early publication, and an active link throughout.
+All 122 edge tests pass in `cap91-green.log`.
+
+This defect is established by those two controlled regressions. The earlier
+capacity trace's Quiescing result during shutdown is a different condition.
+
+All required gates pass with 2,418 workspace tests, zero failures, and 21
+ignored qualification tests across 120 results. Source policy accepts 756
+Rust files. Both reviewed inventories bind 624 source files; the release
+policy contains 661 critical regions with unchanged coverage floors. Exact
+commands and logs are recorded in `cap91-final-gates.json`.
+
+The first full gate attempt fails the native storage workload at an unstable
+free-space boundary. Its exact log is retained in `cap91-first-gates` and
+`cap91-filesystem-boundary-failure.log`. The unchanged isolated test then
+passes, followed by the complete gate run. Its measured allocation remains
+above the qualification ceiling under STO-1; the passing test proves correct
+measurement and refusal to sign that result, not acceptable storage growth.
+
+### CAP-92: the scratch capture helper mistakes unreadable processes for exited daemons
+
+The external `capture-next-stopped.py` helper ignores PermissionError while
+reading `/proc/<pid>/exe`. The daemon disables dumpability. An empty list from
+that scan therefore does not establish that all daemons have exited.
+
+All six supposed stopped captures occur near peer return, about 120 to 122
+seconds into their campaigns, before later live operations and final shutdown.
+The affected archives are `cap87-event-diagnostic`, `cap88-restart-diagnostic`,
+`cap89-admission-diagnostic`, `cap90-production-repeat`,
+`cap91-production-rotation`, and `cap91-rotation-final`. Each now has an
+`INVALID-LIVE-COPY.txt` notice and a `capture-stopped.invalid.json` withdrawal
+bound to the original manifest hash. The original records remain available
+for audit. None of these copied databases is valid crash-recovery evidence.
+
+The helper is retired and refuses to run. A future capture must be performed
+by the owning test after it has waited for every daemon to exit and before
+fixture cleanup. Campaign exit codes, unchanged executable hashes, metrics,
+daemon logs, and the controlled storage-owner regression tests remain usable.
+This correction changes evidence claims, with no runtime change.
 
 ## Release claims and limits
 

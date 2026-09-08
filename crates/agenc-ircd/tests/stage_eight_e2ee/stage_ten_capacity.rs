@@ -32,6 +32,9 @@ use rustix::fs::{FallocateFlags, fallocate};
 
 use super::*;
 
+#[path = "stage_ten_capacity/index_transition.rs"]
+mod index_transition;
+
 #[path = "../support/admin_client.rs"]
 pub(super) mod admin_client;
 
@@ -1618,34 +1621,11 @@ impl Campaign<'_> {
         Ok(())
     }
 
-    /// Exercises the coordinator's login-index reconstruction and generation
-    /// validation across a restart, then re-authenticates the campaign account
-    /// so the reconstructed index serves a live OPAQUE login. A genuine
-    /// login-index key transition (Section 23.9 start/finalize) re-encrypts
-    /// every login record under a new key through a construction that no
-    /// stopped command exposes; that key rotation stays an external drill item
-    /// (finding CAP-5). This scenario proves the login index survives a
-    /// restart intact, which the transition builds on.
+    /// Rotates the stopped coordinator's login-index key, migrates the
+    /// existing account through live authentication, and verifies the exact
+    /// committed state before and after finishing the transition.
     fn scenario_index_transition(&mut self) -> TestResult {
-        self.shared.maintenance.store(true, Ordering::Relaxed);
-        let before_a = links_established(&self.network.edge_a);
-        let before_b = links_established(&self.network.edge_b);
-        let status = self.nodes.coordinator.stop()?;
-        if !status.success() {
-            return Err(failure(format!("coordinator exited with {status}")));
-        }
-        self.nodes
-            .restart_coordinator(&self.network.coordinator.config_path)?;
-        self.wait_relinks(before_a, before_b)?;
-        // The reconstructed index must serve a live login before the client
-        // population returns, so the login does not queue behind the
-        // per-address registration rate of the resume wave.
-        let mut client = self.opaque_login(1)?;
-        client.send("QUIT :login-index reconstruction complete")?;
-        self.shared.maintenance.store(false, Ordering::Relaxed);
-        self.note("login-index reconstruction across a coordinator restart");
-        self.scenarios.index_transition += 1;
-        Ok(())
+        index_transition::run(self)
     }
 
     fn scenario_peer_loss(&mut self) -> TestResult {

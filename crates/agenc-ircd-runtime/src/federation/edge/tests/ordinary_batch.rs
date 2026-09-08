@@ -2,6 +2,7 @@
 
 //! Ordinary events queued behind storage must retain their publication boundary.
 
+mod admission;
 mod barrier;
 mod join;
 mod projection;

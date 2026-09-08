@@ -71,9 +71,9 @@ pub(super) fn receive(
             encoded_bytes: object.as_slice().len(),
         }
     };
-    // The edge's own slot or a batch of the encrypted profile in flight
-    // holds the event; both profiles drain after every commit.
-    if edge.commit.is_some() || context.in_flight() {
+    // A checkpoint owned by either profile holds the event, including the
+    // gather window before submission. Both profiles drain after each receipt.
+    if edge.commit.is_some() || !context.edge_checkpoint_ready() {
         if edge.queued_events.len() >= MAX_QUEUED_EVENTS {
             return Err(Violation::Ceiling);
         }
