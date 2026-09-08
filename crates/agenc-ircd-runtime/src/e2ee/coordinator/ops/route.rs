@@ -201,10 +201,6 @@ pub fn application(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let retained = bytes.to_vec();
-    outcome.effects.push(Box::new(move |state| {
-        let _ = CompanionCoordinator::retain_object(state, retained);
-    }));
     Ok(outcome)
 }
 

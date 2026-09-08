@@ -192,6 +192,8 @@ pub struct CompanionState {
     pub challenges: BTreeMap<([u8; 32], [u8; 16]), [u8; 32]>,
     /// Binding lock object identifiers by account digest, root, and sequence.
     pub binding_locks: BTreeMap<([u8; 32], [u8; 32]), LockChain>,
+    /// Restored object bytes drop before their backing reservations.
+    pub(crate) object_memory: BTreeMap<[u8; 32], crate::budget::MemoryPermit>,
 }
 
 /// The root binding locks of one (account, root fingerprint) by sequence.
@@ -938,5 +940,15 @@ impl CorrelationExt for Correlation {
             head.copy_from_slice(&self.request_id);
         }
         route
+    }
+}
+
+impl CompanionCoordinator {
+    /// Seals complete mailbox metadata before the composed loader reads object bodies.
+    pub(crate) fn select_restored_objects(
+        &mut self,
+        backing: crate::budget::BackingReservationPort,
+    ) -> Result<(), CompanionFault> {
+        self.restore.select_objects(backing)
     }
 }

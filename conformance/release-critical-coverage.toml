@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 712
-reviewed_source_sha256 = "87a075a2b362a3aceb0800f55f0497753f7b5785829709cdcdfb20e82a321df9"
+reviewed_source_files = 720
+reviewed_source_sha256 = "2a746437a196b928730eac9a9e8c922ee63d5ae2cc9abe75ef303353e75f3164"
 deferred = []
 
 [[region]]
@@ -2326,9 +2326,9 @@ reason = "Persist the exact current Item grant and Token together; delete a diff
 id = "cap80-startup-mailboxrows-admit-item"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
-start_line = 943
-end_line = 975
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 947
+end_line = 979
 metric = "regions"
 reason = "Retain the Item grant as persisted; reconstruction cannot discard its current token binding."
 
@@ -2336,9 +2336,9 @@ reason = "Retain the Item grant as persisted; reconstruction cannot discard its 
 id = "cap80-startup-mailboxrows-admit-token"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
-start_line = 977
-end_line = 1006
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 981
+end_line = 1010
 metric = "regions"
 reason = "Retain Token object identity and full grant; no key-order winner."
 
@@ -2346,9 +2346,9 @@ reason = "Retain Token object identity and full grant; no key-order winner."
 id = "cap80-startup-validate-mailbox-grants"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
-start_line = 1049
-end_line = 1077
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 1053
+end_line = 1081
 metric = "regions"
 reason = "Reject duplicate grants per item, orphans, missing tokens and any object/token/session/expiry contradiction."
 
@@ -2356,9 +2356,9 @@ reason = "Reject duplicate grants per item, orphans, missing tokens and any obje
 id = "cap80-startup-restore-mailboxes"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
-start_line = 1028
-end_line = 1047
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 1032
+end_line = 1051
 metric = "regions"
 reason = "Validate every cross-row grant relation before applying any reconstructed mailbox."
 
@@ -2956,9 +2956,9 @@ reason = "Verify the exact typed-call-selected signature domain and historical c
 id = "cap76-startup-rebuild"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
-start_line = 437
-end_line = 462
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 441
+end_line = 466
 metric = "regions"
 reason = "Propagate successor authority contradictions before delivery restoration or outer loader admission; startup cannot publish a partially accepted lineage."
 
@@ -2966,9 +2966,9 @@ reason = "Propagate successor authority contradictions before delivery restorati
 id = "cap76-startup-restore-successors"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
-start_line = 466
-end_line = 517
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 470
+end_line = 521
 metric = "regions"
 reason = "Reject duplicate target ownership before choosing an anchor; occupied or partial targets require exact compatible lineage and cannot be discarded or overwritten."
 
@@ -2976,9 +2976,9 @@ reason = "Reject duplicate target ownership before choosing an anchor; occupied 
 id = "cap76-startup-restore-successor-binding"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
-start_line = 565
-end_line = 602
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 569
+end_line = 606
 metric = "regions"
 reason = "Verify exact retained activation/binding and preserve a valid successor later head, recovery gate, removal state and route index."
 
@@ -4346,9 +4346,9 @@ reason = "Delegate EACK to receipt-owned validation with existing trusted wall-c
 id = "companion-mod-companioncoordinator-set-pending"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "7b5ebf9509c141fdaef1f9a5fdf81376f0cee33ddc44414de536860cddcd6db4"
-start_line = 828
-end_line = 830
+source_sha256 = "c1a8067961cdcbee362add7e16870152b33c128c99c05c5937640cc1e3b1ec6b"
+start_line = 830
+end_line = 832
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4356,9 +4356,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-applied"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "7b5ebf9509c141fdaef1f9a5fdf81376f0cee33ddc44414de536860cddcd6db4"
-start_line = 834
-end_line = 861
+source_sha256 = "c1a8067961cdcbee362add7e16870152b33c128c99c05c5937640cc1e3b1ec6b"
+start_line = 836
+end_line = 863
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4366,9 +4366,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-rejected"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "7b5ebf9509c141fdaef1f9a5fdf81376f0cee33ddc44414de536860cddcd6db4"
-start_line = 864
-end_line = 866
+source_sha256 = "c1a8067961cdcbee362add7e16870152b33c128c99c05c5937640cc1e3b1ec6b"
+start_line = 866
+end_line = 868
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4376,9 +4376,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-startup-restore-admit-state"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
-source_sha256 = "32ef630dbfe88d9f2d8e92fcb9690345130f6562f7588e35520c9e4ac16985bb"
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
 start_line = 137
-end_line = 177
+end_line = 181
 metric = "regions"
 reason = "Dispatch exact kind14 rows to historical delivery restore and apply only after semantic reconstruction and authoritative page validation. Preserve unrelated mailbox/successor reconstruction."
 
@@ -4626,9 +4626,9 @@ reason = "Install authenticated local incarnation/recovery epoch before acceptin
 id = "companion-startup-loader-owns"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 81
-end_line = 83
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 83
+end_line = 91
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -4636,9 +4636,9 @@ reason = "Startup admission remains blocked through pinned owner/page/retirement
 id = "companion-startup-begin"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 87
-end_line = 97
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 95
+end_line = 105
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -4646,9 +4646,9 @@ reason = "Startup admission remains blocked through pinned owner/page/retirement
 id = "companion-startup-finish"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 128
-end_line = 143
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 138
+end_line = 153
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -4656,9 +4656,9 @@ reason = "Startup admission remains blocked through pinned owner/page/retirement
 id = "companion-startup-rebuild-once"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 145
-end_line = 160
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 155
+end_line = 170
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -4666,9 +4666,9 @@ reason = "Startup admission remains blocked through pinned owner/page/retirement
 id = "companion-startup-read-completed"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 163
-end_line = 177
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 173
+end_line = 187
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -4676,9 +4676,9 @@ reason = "Startup admission remains blocked through pinned owner/page/retirement
 id = "companion-startup-fail-restore"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 711
-end_line = 728
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 673
+end_line = 690
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -4686,9 +4686,9 @@ reason = "Startup admission remains blocked through pinned owner/page/retirement
 id = "companion-startup-hold-before-loaded"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 741
-end_line = 762
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 703
+end_line = 724
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -4696,9 +4696,9 @@ reason = "Startup admission remains blocked through pinned owner/page/retirement
 id = "companion-startup-pin-result"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 765
-end_line = 775
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 727
+end_line = 737
 metric = "regions"
 reason = "Startup admission remains blocked through pinned owner/page/retirement completion. Repeated startup cannot replace a submitted owner; failed child read remains routable and is discarded without decoder or authority progress."
 
@@ -6566,9 +6566,9 @@ reason = "ReInit authority requires the attached account to belong to the retain
 id = "base-restart-unfinished-cross-profile-part"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
-source_sha256 = "ea6523112971a64aeec02a36e2a8ba0c9d0a4769d8f54844b0dbeb3883122b45"
-start_line = 351
-end_line = 366
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 313
+end_line = 328
 metric = "branches"
 reason = "Startup cannot reinterpret an uncovered cross-profile part as ordinary replay or snapshot replacement."
 
@@ -7106,9 +7106,9 @@ reason = "Audit export profile selection and frozen-job admission require comple
 id = "cap95-startup-objects-admit"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
-source_sha256 = "634e7c129a5f6fe04fb596b2803990fa716449c32dbefe860b5eff033574666b"
-start_line = 19
-end_line = 28
+source_sha256 = "4f7f77a20505e2b684c275d5a7050b15ede4eda122bf2d5efd44b3da608a4563"
+start_line = 24
+end_line = 34
 metric = "regions"
 reason = "Validate exact object keys, refuse incomplete collection, and preflight the combined object capacity before publishing restored dependencies."
 
@@ -7116,9 +7116,9 @@ reason = "Validate exact object keys, refuse incomplete collection, and prefligh
 id = "cap95-startup-objects-collect"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
-source_sha256 = "634e7c129a5f6fe04fb596b2803990fa716449c32dbefe860b5eff033574666b"
-start_line = 30
-end_line = 63
+source_sha256 = "4f7f77a20505e2b684c275d5a7050b15ede4eda122bf2d5efd44b3da608a4563"
+start_line = 36
+end_line = 78
 metric = "regions"
 reason = "Validate exact object keys, refuse incomplete collection, and preflight the combined object capacity before publishing restored dependencies."
 
@@ -7126,9 +7126,9 @@ reason = "Validate exact object keys, refuse incomplete collection, and prefligh
 id = "cap95-startup-objects-apply"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
-source_sha256 = "634e7c129a5f6fe04fb596b2803990fa716449c32dbefe860b5eff033574666b"
-start_line = 65
-end_line = 87
+source_sha256 = "4f7f77a20505e2b684c275d5a7050b15ede4eda122bf2d5efd44b3da608a4563"
+start_line = 80
+end_line = 106
 metric = "regions"
 reason = "Validate exact object keys, refuse incomplete collection, and preflight the combined object capacity before publishing restored dependencies."
 
@@ -9066,9 +9066,9 @@ reason = "Both replay readers block concurrent companion execution and retain ty
 id = "cap97-recent-001-replay-recent"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "7b5ebf9509c141fdaef1f9a5fdf81376f0cee33ddc44414de536860cddcd6db4"
-start_line = 681
-end_line = 723
+source_sha256 = "c1a8067961cdcbee362add7e16870152b33c128c99c05c5937640cc1e3b1ec6b"
+start_line = 683
+end_line = 725
 metric = "regions"
 reason = "The recent-fragment replay shortcut must resolve every response in original descriptor order before rendering any output; one absent body refuses the whole replay."
 
@@ -9521,3 +9521,173 @@ start_line = 722
 end_line = 744
 metric = "regions"
 reason = "Cold responses become publishable only after a storage receipt and remain charged until the exact link releases its queued lines."
+
+[[region]]
+id = "cap79-selective-004-select"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
+source_sha256 = "4f7f77a20505e2b684c275d5a7050b15ede4eda122bf2d5efd44b3da608a4563"
+start_line = 110
+end_line = 120
+metric = "regions"
+reason = "Selected startup validates every object row, refuses late metadata or missing required bodies, and transfers retained byte ownership only after complete collection."
+
+[[region]]
+id = "cap79-selective-005-selected"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
+source_sha256 = "4f7f77a20505e2b684c275d5a7050b15ede4eda122bf2d5efd44b3da608a4563"
+start_line = 121
+end_line = 123
+metric = "regions"
+reason = "Selected startup validates every object row, refuses late metadata or missing required bodies, and transfers retained byte ownership only after complete collection."
+
+[[region]]
+id = "cap79-selective-006-poison"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects.rs"
+source_sha256 = "4f7f77a20505e2b684c275d5a7050b15ede4eda122bf2d5efd44b3da608a4563"
+start_line = 124
+end_line = 126
+metric = "regions"
+reason = "Selected startup validates every object row, refuses late metadata or missing required bodies, and transfers retained byte ownership only after complete collection."
+
+[[region]]
+id = "cap79-selective-007-new"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects/selection.rs"
+source_sha256 = "9e6fdd272bc97e2101e9fd0df851a1ba9db4a4e85db4316048dd6f18ac02d66e"
+start_line = 16
+end_line = 52
+metric = "regions"
+reason = "Complete mailbox metadata determines required object kinds; shared body identities, backing capacity, and existing or loaded body hashes remain bound before publication."
+
+[[region]]
+id = "cap79-selective-008-retain"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects/selection.rs"
+source_sha256 = "9e6fdd272bc97e2101e9fd0df851a1ba9db4a4e85db4316048dd6f18ac02d66e"
+start_line = 53
+end_line = 65
+metric = "regions"
+reason = "Complete mailbox metadata determines required object kinds; shared body identities, backing capacity, and existing or loaded body hashes remain bound before publication."
+
+[[region]]
+id = "cap79-selective-009-reserve"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects/selection.rs"
+source_sha256 = "9e6fdd272bc97e2101e9fd0df851a1ba9db4a4e85db4316048dd6f18ac02d66e"
+start_line = 66
+end_line = 71
+metric = "regions"
+reason = "Complete mailbox metadata determines required object kinds; shared body identities, backing capacity, and existing or loaded body hashes remain bound before publication."
+
+[[region]]
+id = "cap79-selective-010-complete"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup/objects/selection.rs"
+source_sha256 = "9e6fdd272bc97e2101e9fd0df851a1ba9db4a4e85db4316048dd6f18ac02d66e"
+start_line = 72
+end_line = 89
+metric = "regions"
+reason = "Complete mailbox metadata determines required object kinds; shared body identities, backing capacity, and existing or loaded body hashes remain bound before publication."
+
+[[region]]
+id = "cap79-selective-012-select-objects"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
+source_sha256 = "342752c1ac9a6b82df83604448b5f182eff4eb12f57861a6e3a3710b8acf5aa6"
+start_line = 1904
+end_line = 1909
+metric = "regions"
+reason = "Metadata is sealed before selective body loading and cannot change the required set afterward."
+
+[[region]]
+id = "cap79-selective-013-select-restored-objects"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
+source_sha256 = "c1a8067961cdcbee362add7e16870152b33c128c99c05c5937640cc1e3b1ec6b"
+start_line = 948
+end_line = 953
+metric = "regions"
+reason = "The composed loader explicitly selects objects only after collecting complete mailbox metadata."
+
+[[region]]
+id = "cap79-selective-014-request-page"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 111
+end_line = 133
+metric = "regions"
+reason = "Metadata precedes object rows and each page has an exact read owner that preserves the startup scope."
+
+[[region]]
+id = "cap79-selective-015-complete-table"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 189
+end_line = 195
+metric = "regions"
+reason = "Metadata precedes object rows and each page has an exact read owner that preserves the startup scope."
+
+[[region]]
+id = "cap79-selective-016-select-objects"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup.rs"
+source_sha256 = "65297e171b92f97726690ee4cf492b68db4b20a88f1831f1ea3b2e2bbd5b9b7b"
+start_line = 739
+end_line = 753
+metric = "regions"
+reason = "Metadata precedes object rows and each page has an exact read owner that preserves the startup scope."
+
+[[region]]
+id = "cap79-selective-017-prepare"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup/table_io.rs"
+source_sha256 = "c82d994bafcfab178476cc3f057008bd2300c91fe8c9b07faef3df01fa5e4f1d"
+start_line = 31
+end_line = 58
+metric = "regions"
+reason = "Table read buffers remain charged through their exact completion and are released before retry; wrong rows, changed commits, and cancellation cannot publish partial startup state."
+
+[[region]]
+id = "cap79-selective-018-completed"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup/table_io.rs"
+source_sha256 = "c82d994bafcfab178476cc3f057008bd2300c91fe8c9b07faef3df01fa5e4f1d"
+start_line = 60
+end_line = 92
+metric = "regions"
+reason = "Table read buffers remain charged through their exact completion and are released before retry; wrong rows, changed commits, and cancellation cannot publish partial startup state."
+
+[[region]]
+id = "cap79-selective-019-admit"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup/table_io.rs"
+source_sha256 = "c82d994bafcfab178476cc3f057008bd2300c91fe8c9b07faef3df01fa5e4f1d"
+start_line = 94
+end_line = 137
+metric = "regions"
+reason = "Table read buffers remain charged through their exact completion and are released before retry; wrong rows, changed commits, and cancellation cannot publish partial startup state."
+
+[[region]]
+id = "cap79-selective-020-validate-row"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/startup/table_io.rs"
+source_sha256 = "c82d994bafcfab178476cc3f057008bd2300c91fe8c9b07faef3df01fa5e4f1d"
+start_line = 139
+end_line = 154
+metric = "regions"
+reason = "Table read buffers remain charged through their exact completion and are released before retry; wrong rows, changed commits, and cancellation cannot publish partial startup state."
+
+[[region]]
+id = "cap79-selective-021-application"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/route.rs"
+source_sha256 = "04aa96e9114429580d9e662e1819cb6b783f028df3b607a1bcd8d7b2479158a6"
+start_line = 133
+end_line = 205
+metric = "regions"
+reason = "Application admission preserves its route and attachment checks, stores its object, and assigns payload bytes to delivery without creating a second global cache copy."

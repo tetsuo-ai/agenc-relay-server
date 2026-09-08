@@ -1,6 +1,9 @@
 //! Complete object collection refuses capacity loss before dependency rebuild.
 #![forbid(unsafe_code)]
 
+mod selection;
+
+use crate::budget::{BackingReservationPort, MemoryPermit};
 use std::collections::BTreeMap;
 
 use agenc_ircd_storage::e2ee_records::{OBJECT_RECORD_KIND, ObjectRow};
@@ -13,6 +16,8 @@ pub(super) struct Restore {
     values: BTreeMap<[u8; 32], Vec<u8>>,
     bytes: usize,
     failed: bool,
+    selection: Option<selection::Selection>,
+    memory: BTreeMap<[u8; 32], MemoryPermit>,
 }
 
 impl Restore {
@@ -24,6 +29,7 @@ impl Restore {
             self.failed = true;
             self.values.clear();
             self.bytes = 0;
+            self.memory.clear();
         }
     }
 
@@ -43,6 +49,11 @@ impl Restore {
             .as_bytes()
             .try_into()
             .map_err(|_| CompanionFault::Storage)?;
+        if let Some(selection) = &self.selection
+            && !selection.retain(&id, row.kind().map_err(|_| CompanionFault::Storage)?)?
+        {
+            return Ok(());
+        }
         if let Some(previous) = self.values.get(&id) {
             return if previous == &row.bytes {
                 Ok(())
@@ -57,6 +68,10 @@ impl Restore {
         if total > MAX_RETAINED_OBJECT_BYTES {
             return Err(CompanionFault::Ceiling);
         }
+        if let Some(selection) = &self.selection {
+            let memory = selection.reserve(row.bytes.capacity())?;
+            self.memory.insert(id, memory);
+        }
         self.values.insert(id, row.bytes);
         self.bytes = total;
         Ok(())
@@ -65,6 +80,9 @@ impl Restore {
     pub(super) fn apply(mut self, state: &mut CompanionState) -> Result<(), CompanionFault> {
         if self.failed {
             return Err(CompanionFault::Storage);
+        }
+        if let Some(selection) = &self.selection {
+            selection.complete(&state.objects, &self.values)?;
         }
         let mut total = state.object_bytes;
         for (id, bytes) in &self.values {
@@ -82,7 +100,32 @@ impl Restore {
             return Err(CompanionFault::Ceiling);
         }
         state.objects.append(&mut self.values);
+        state.object_memory.append(&mut self.memory);
         state.object_bytes = total;
         Ok(())
     }
 }
+
+impl Restore {
+    pub(super) fn select(
+        &mut self,
+        rows: &[(StoredKey, agenc_ircd_storage::e2ee_records::MailboxRow)],
+        backing: BackingReservationPort,
+    ) -> Result<(), CompanionFault> {
+        if self.failed || self.selection.is_some() || !self.values.is_empty() {
+            return Err(CompanionFault::Storage);
+        }
+        self.selection = Some(selection::Selection::new(rows, backing)?);
+        Ok(())
+    }
+    pub(super) fn selected(&self) -> bool {
+        self.selection.is_some()
+    }
+    pub(super) fn poison(&mut self) {
+        self.failed = true;
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/selective_objects.rs"]
+mod tests;

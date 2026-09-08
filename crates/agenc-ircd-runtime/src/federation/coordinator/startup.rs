@@ -9,6 +9,7 @@ mod barriers;
 mod delivery;
 mod replay;
 pub(super) mod retirement;
+mod table_io;
 
 use agenc_ircd_domain::federation::{
     EdgeLink, EdgePhase, OperationKey, OriginBinding, OriginEntry, OriginKey, OriginPrincipal,
@@ -39,16 +40,15 @@ const REPLAY_KEY_BYTES: usize = 16 + 16 + 16 + 8 + 8;
 const ENTRY_DECODE_BYTES: usize = 16_384;
 const ENTRY_DECODE_VALUES: usize = 256;
 
-/// The tables reloaded, in order. The E2EE object table precedes the
-/// state table so every retained object is present when a state row that
-/// names it is admitted.
+/// The tables reloaded, in order. Complete E2EE metadata selects resident
+/// mailbox bodies before the object scan; scoped delivery reads its own bodies.
 const TABLES: [TableId; 7] = [
     TableId::FederationPeer,
     TableId::FederationOrigin,
     TableId::RequestResult,
     TableId::EdgeProjection,
-    TableId::E2eeObject,
     TableId::E2eeState,
+    TableId::E2eeObject,
     TableId::EdgeOutbox,
 ];
 
@@ -66,6 +66,8 @@ pub(super) struct Loader {
     replay: replay::Loader,
     retirement: retirement::Loader,
     rebuilt: bool,
+    objects_selected: bool,
+    table_read: Option<Box<table_io::Pending>>,
 }
 
 impl Loader {
@@ -79,7 +81,13 @@ impl Loader {
 
     /// Reports whether the read belongs to the loader.
     pub(super) fn owns(&self, read_id: StorageReadId) -> bool {
-        self.pending == Some(read_id) || self.delivery.owns(read_id) || self.replay.owns(read_id)
+        self.pending == Some(read_id)
+            || self
+                .table_read
+                .as_ref()
+                .is_some_and(|pending| pending.id == read_id)
+            || self.delivery.owns(read_id)
+            || self.replay.owns(read_id)
     }
 }
 
@@ -110,15 +118,17 @@ fn request_page(
         return;
     };
     coordinator.loader.retry = start.clone();
-    let plan = start
-        .zip(StoredKey::new(vec![0xff; MAX_STORED_KEY_BYTES]).ok())
-        .and_then(|(start, end)| ReadPlan::range(table, start, end, PAGE_ROWS).ok());
-    let Some(plan) = plan else {
+    if table == TableId::E2eeObject && select_objects(coordinator, context).is_err() {
+        fail_restore(coordinator);
+        return;
+    }
+    let Some(start) = start else {
         fail_restore(coordinator);
         return;
     };
-    if let Ok(read_id) = context.submit_storage_read(plan) {
-        coordinator.loader.pending = Some(read_id);
+    if let Ok(pending) = table_io::prepare(context, table, start) {
+        coordinator.loader.pending = Some(pending.id);
+        coordinator.loader.table_read = Some(pending);
     }
 }
 
@@ -181,55 +191,7 @@ fn complete_table(
     context: &mut StateCoreContext,
     message: StorageReadCompletionMessage,
 ) {
-    if coordinator.loader.failed || coordinator.loader.pending != Some(message.read_id) {
-        return;
-    }
-    coordinator.loader.pending = None;
-    let Some(table) = TABLES.get(coordinator.loader.position).copied() else {
-        return;
-    };
-    let Ok(result) = &message.result else {
-        request_page(coordinator, context, coordinator.loader.retry.clone());
-        return;
-    };
-    if pin_result(coordinator, result.storage_commit_sequence).is_err() {
-        fail_restore(coordinator);
-        return;
-    }
-    let mut last = None;
-    for record in &result.records {
-        if last
-            .as_ref()
-            .is_some_and(|previous| previous >= &record.key)
-        {
-            fail_restore(coordinator);
-            return;
-        }
-        let value = context
-            .open_storage_plaintext(table, &record.key, &record.sealed_record)
-            .and_then(|opened| {
-                PersistentRecordValue::decode(table, opened.expose_for_storage_codec())
-                    .map_err(crate::RuntimeError::from)
-            });
-        let accepted = value
-            .map_err(|_| Violation::Codec)
-            .and_then(|value| admit(coordinator, context, table, &record.key, &value));
-        if accepted.is_err() {
-            fail_restore(coordinator);
-            return;
-        }
-        last = Some(record.key.clone());
-    }
-    if result.truncated {
-        if let Some(next) = last.and_then(|key| successor(&key)) {
-            request_page(coordinator, context, Some(next));
-        } else {
-            fail_restore(coordinator);
-        }
-    } else {
-        coordinator.loader.position = coordinator.loader.position.saturating_add(1);
-        request_page(coordinator, context, first_key());
-    }
+    table_io::completed(coordinator, context, message);
 }
 
 fn successor(key: &StoredKey) -> Option<StoredKey> {
@@ -771,5 +733,21 @@ fn pin_result(coordinator: &mut FederationCoordinator, sequence: u64) -> Result<
         return Err(Violation::Codec);
     }
     coordinator.loader.pinned_commit = Some(sequence);
+    Ok(())
+}
+
+fn select_objects(
+    coordinator: &mut FederationCoordinator,
+    context: &StateCoreContext,
+) -> Result<(), Violation> {
+    if coordinator.loader.objects_selected {
+        return Ok(());
+    }
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor
+            .select_restored_objects(context.backing_reservations())
+            .map_err(|_| Violation::Ceiling)?;
+    }
+    coordinator.loader.objects_selected = true;
     Ok(())
 }

@@ -39,6 +39,7 @@ use super::{
 };
 
 mod barrier;
+mod live_payloads;
 mod sequence;
 pub(crate) mod support;
 mod sync;

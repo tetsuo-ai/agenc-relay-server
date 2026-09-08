@@ -62,6 +62,7 @@ mod object_reads;
 mod response_reads;
 #[path = "startup_cross_profile.rs"]
 mod startup_cross_profile;
+mod startup_payloads;
 
 #[path = "query_receipt.rs"]
 mod query_receipt;

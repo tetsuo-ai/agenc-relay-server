@@ -2933,8 +2933,55 @@ inputs, logs, and workspace executables are in `cap79-fresh-object-final-proof`.
 The first checkpoint attempt stopped at Clippy's enum-size check; boxing the
 completed dispatch outcome resolves it. Its earlier log remains archived.
 
-CAP-79 still needs selective object reconstruction. Cleanup does not delete
-shared object bodies whose
+Composed startup now reads E2EE metadata before object bodies. It seals the
+mailbox item references, then validates every object row while retaining
+application, Welcome, and StagedReInit bodies only when a mailbox needs them.
+Scoped delivery loads its own event and payload bodies. Historical Commit,
+binding, policy, roster, and other control bodies remain available for
+authorization reconstruction. Required bodies bind their hash and expected
+kind; a missing body or late metadata refuses startup. Retained startup bodies
+carry memory reservations into the companion state. The existing unordered
+full-collection API still enforces CAP-95's complete 256 MiB bound.
+
+Every ordinary startup table read now owns its raw and decoding reservations
+through its exact completion, including shutdown and repeated startup calls.
+The reader binds table, key range, row count, ordering, byte bounds, and storage
+commit. It releases the completed buffers before reserving the next read.
+Live application delivery also stops adding a global payload copy; its stored
+object and complete event payloads retain their existing ownership. Mailbox
+delivery continues to retain the body it needs.
+
+The startup failure in `cap79-selective-startup-red-proof` verifies an application
+envelope, commits it through the storage owner, observes identical authenticated
+readback during composed startup, then finds an unnecessary global memory copy.
+It fails in 0.08 seconds and passes after selection. Nine startup-actor cases
+pass in 0.47 seconds, covering mailbox retention, absent or mismatched required
+bodies, late metadata, malformed unselected rows, exact read ownership, shutdown,
+retry, and memory refusal. Seven collector cases separately test shared references,
+required kinds, existing bodies, and byte ownership. Their small body fixtures
+validate outer envelopes, without claiming MLS decryption. The existing 26 startup
+cases, including the 4,097-row replay recovery and CAP-95 collector bounds, also
+pass with the initial wiring.
+
+The live application effect has a separate failure in
+`cap79-live-payload-red-proof`: a valid application grows the global cache by
+527 bytes after the handler has assigned its complete payload to delivery.
+It fails in 0.06 seconds and passes after removing that effect. This fixture
+manually activates the bootstrap lifecycle and applies handler effects; it does
+not claim an actual receipt, sequenced event, or network exchange. Its 14 exact
+source inputs include the ongoing startup changes.
+
+Both inventories cover 720 source files, and the release catalog has 968
+critical regions, including 17 additions and 24 source rebindings. Coverage
+floors remain unchanged, with no new measurement. All eight checkpoint gates
+pass: 2,582 tests pass, none fail, and 21 qualification tests remain ignored.
+The runtime suite has 1,125 passes. Source policy covers 853 Rust files. Exact
+inputs, logs, and workspace executables are in `cap79-selective-final-proof`.
+These small fixtures do not qualify startup above the former global object-cache
+capacity or establish the physical storage ceiling.
+
+CAP-79 still needs admission and retirement for live resident bodies, plus
+independent shared-body retention. Cleanup does not delete shared object bodies whose
 independent retention requirements remain unresolved. Every surviving body
 still counts against the disk ceiling, and the global object collector
 continues to refuse capacity loss under CAP-95.

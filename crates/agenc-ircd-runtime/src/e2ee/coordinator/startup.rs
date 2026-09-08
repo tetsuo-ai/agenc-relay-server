@@ -135,6 +135,10 @@ impl Restore {
     }
 
     fn admit_state(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
+        if self.objects.selected() {
+            self.objects.poison();
+            return;
+        }
         let body = value.body();
         match value.record_kind() {
             ROUTE_ROW_KIND => {
@@ -1894,4 +1898,13 @@ fn restore_route(
     state.lifecycles.insert(conversation_id, lifecycle);
     state.conversations.insert(conversation_id, conversation);
     Some(())
+}
+
+impl Restore {
+    pub(super) fn select_objects(
+        &mut self,
+        backing: crate::budget::BackingReservationPort,
+    ) -> Result<(), super::CompanionFault> {
+        self.objects.select(&self.mailbox, backing)
+    }
 }
