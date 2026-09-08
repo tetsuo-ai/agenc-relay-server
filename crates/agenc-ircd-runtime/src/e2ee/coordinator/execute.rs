@@ -93,6 +93,8 @@ pub enum Staged {
     Batch,
     /// An exact replay; the lines to resend immediately.
     Replay(Vec<agenc_ircd_federation_wire::FederationLineText>),
+    /// A retained response set needs exact object reads before any output.
+    ReadResponses(super::response_read::Identity),
 }
 
 /// Everything the owner supplies about the base state for one execution.
@@ -190,7 +192,18 @@ pub fn run(
                 &responses,
             )?));
         }
-        Classified::Violation => return Err(E2eeReplyCode::OperationConflict),
+        Classified::Violation => {
+            let identity = super::response_read::Identity {
+                peer,
+                correlation: complete.correlation,
+                request_object_id: decoded.request_object_id,
+            };
+            return if identity.missing(coordinator) {
+                Ok(Staged::ReadResponses(identity))
+            } else {
+                Err(E2eeReplyCode::OperationConflict)
+            };
+        }
     }
     let origin_key = CompanionOriginKey {
         home_server_id: home,

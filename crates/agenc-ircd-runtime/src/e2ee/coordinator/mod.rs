@@ -50,6 +50,7 @@ pub mod execute;
 mod mailbox_restore;
 pub mod ops;
 pub mod request;
+pub(crate) mod response_read;
 mod startup;
 pub mod sync;
 #[cfg(test)]
@@ -705,8 +706,14 @@ impl CompanionCoordinator {
             .responses
             .iter()
             .map(|id| self.state.objects.get(id).cloned())
-            .collect::<Option<Vec<_>>>()
-            .ok_or(CompanionFault::Protocol)?;
+            .collect::<Option<Vec<_>>>();
+        let Some(responses) = responses else {
+            return Ok(vec![sync::Action::ReadResponses(response_read::Identity {
+                peer,
+                correlation: *correlation,
+                request_object_id: object_id,
+            })]);
+        };
         let lines = execute::replay_lines(self, correlation, home, &stored.result, &responses)
             .map_err(|_| CompanionFault::Protocol)?;
         Ok(vec![sync::Action::Send(lines)])

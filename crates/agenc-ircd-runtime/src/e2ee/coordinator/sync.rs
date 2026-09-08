@@ -115,6 +115,8 @@ pub(crate) enum Action {
     ReadSnapshotPage(SnapshotPageRequest),
     /// Reads a bounded retained prefix before proposing a journal ACK.
     ReadAcknowledgement(Box<super::AckReadRequest>),
+    /// Reads all required response bodies before replaying a retained result.
+    ReadResponses(super::response_read::Identity),
     /// Stages one durable batch and marks the pending work.
     Stage {
         /// The rows.

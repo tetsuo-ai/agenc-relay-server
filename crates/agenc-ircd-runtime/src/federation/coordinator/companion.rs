@@ -34,7 +34,7 @@ use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::projector::OutboundEvent;
 use crate::state_core::timers::{TimedId, TimerEntry, TimerKind};
 
-fn fault_violation(fault: CompanionFault) -> Violation {
+pub(super) fn fault_violation(fault: CompanionFault) -> Violation {
     match fault {
         CompanionFault::Protocol | CompanionFault::Assembly(_) => {
             Violation::Companion(CompanionViolation::Request)
@@ -337,6 +337,9 @@ pub(super) fn apply(
         }
         Action::ReadSnapshotPage(request) => page_read::submit(coordinator, context, request),
         Action::ReadAcknowledgement(request) => ack_read::submit(coordinator, context, *request),
+        Action::ReadResponses(identity) => {
+            super::response_read::submit(coordinator, context, link, peer, identity)
+        }
         Action::Stage { writes, work } => stage(coordinator, context, link, peer, writes, work),
         Action::ScheduleExpiry { at_millis } => {
             let _ = context.timers_mut().schedule(
@@ -481,6 +484,9 @@ fn run(
     let staged =
         execute::run(executor, view, link, peer, complete, &facts_for).map_err(code_violation)?;
     match staged {
+        Staged::ReadResponses(identity) => {
+            super::response_read::submit(coordinator, context, link, peer, identity)
+        }
         Staged::Batch => {
             coordinator.pending = Some(PendingCommit::Companion {
                 peer,

@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 696
-reviewed_source_sha256 = "740dc26c97aa6f36f73dcd5d483dca4da0578084e656a9480248b8c9fbd3dc38"
+reviewed_source_files = 704
+reviewed_source_sha256 = "9c32a43223a67bc3e4ed72149c9df505bdfcc4336e7d1f20f77deaa655cf6d8d"
 deferred = []
 
 [[region]]
@@ -1157,9 +1157,9 @@ reason = "Each held requester echo must correspond to exactly one accepted JOIN 
 id = "runtime-coordinator-result-receipt-ownership"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 1357
-end_line = 1373
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 1365
+end_line = 1381
 metric = "branches"
 reason = "A result staged by an account callback cannot settle under the preceding storage receipt."
 
@@ -2526,9 +2526,9 @@ reason = "A cut cannot be staged without its bounded expiry timer reservation."
 id = "cap78-sync-origin-reset"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 250
-end_line = 282
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 252
+end_line = 284
 metric = "regions"
 reason = "Only authenticated incarnation transition fences older mailbox cuts; same-incarnation reset retains them."
 
@@ -2536,9 +2536,9 @@ reason = "Only authenticated incarnation transition fences older mailbox cuts; s
 id = "cap78-sync-origin-del"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 560
-end_line = 599
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 562
+end_line = 601
 metric = "regions"
 reason = "Validate live incarnation, generation and sequence before releasing that exact origin cut."
 
@@ -2546,9 +2546,9 @@ reason = "Validate live incarnation, generation and sequence before releasing th
 id = "cap78-companion-committed"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 564
-end_line = 625
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 570
+end_line = 631
 metric = "regions"
 reason = "Advance mailbox publication time from the actual receipt clock before applying deferred store effects."
 
@@ -2556,9 +2556,9 @@ reason = "Advance mailbox publication time from the actual receipt clock before 
 id = "cap78-companion-schedule-mailbox-expiry"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 691
-end_line = 717
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 697
+end_line = 723
 metric = "regions"
 reason = "Expire using current time and keep or rearm the earliest bounded mailbox expiry."
 
@@ -2566,9 +2566,9 @@ reason = "Expire using current time and keep or rearm the earliest bounded mailb
 id = "cap78-companion-mailbox-timer-fired"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 719
-end_line = 732
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 725
+end_line = 738
 metric = "regions"
 reason = "Dispatch the owned mailbox timer and release expired immutable cuts."
 
@@ -2906,9 +2906,9 @@ reason = "Attach the reservation only to the newly staged request, or retire its
 id = "cap81-mod-federationcoordinator-settle-request"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 1267
-end_line = 1304
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 1275
+end_line = 1312
 metric = "regions"
 reason = "Keep encoded page result charged through durable replay settlement and output publication."
 
@@ -2916,9 +2916,9 @@ reason = "Keep encoded page result charged through durable replay settlement and
 id = "cap81-mod-federationcoordinator-batch-rejected-with-error"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 1576
-end_line = 1586
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 1586
+end_line = 1596
 metric = "regions"
 reason = "Definite rejection drops encoded result bytes before the exact query owner and inaccessible cursor; no sequence/coverage advancement."
 
@@ -4346,9 +4346,9 @@ reason = "Delegate EACK to receipt-owned validation with existing trusted wall-c
 id = "companion-mod-companioncoordinator-set-pending"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
-start_line = 818
-end_line = 820
+source_sha256 = "59f1417ecbcaa49b288a3d4b87fa4c4ee860a979fdf092e4eb617fd5890c13ec"
+start_line = 825
+end_line = 827
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4356,9 +4356,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-applied"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
-start_line = 824
-end_line = 851
+source_sha256 = "59f1417ecbcaa49b288a3d4b87fa4c4ee860a979fdf092e4eb617fd5890c13ec"
+start_line = 831
+end_line = 858
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4366,9 +4366,9 @@ reason = "Exactly one pending companion owner; successful receipt moves its prec
 id = "companion-mod-companioncoordinator-batch-rejected"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
-start_line = 854
-end_line = 856
+source_sha256 = "59f1417ecbcaa49b288a3d4b87fa4c4ee860a979fdf092e4eb617fd5890c13ec"
+start_line = 861
+end_line = 863
 metric = "regions"
 reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
 
@@ -4386,9 +4386,9 @@ reason = "Dispatch exact kind14 rows to historical delivery restore and apply on
 id = "companion-sync-companioncoordinator-resume"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 605
-end_line = 682
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 607
+end_line = 684
 metric = "regions"
 reason = "Exact historical Ready scope/cursor may replay; new incarnation starts generation zero and same-scope base reset uses checked next generation. Bind every new cut to original live incarnation/base epoch."
 
@@ -4396,9 +4396,9 @@ reason = "Exact historical Ready scope/cursor may replay; new incarnation starts
 id = "companion-sync-companioncoordinator-begin-snapshot"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 685
-end_line = 744
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 687
+end_line = 746
 metric = "regions"
 reason = "Exact historical Ready scope/cursor may replay; new incarnation starts generation zero and same-scope base reset uses checked next generation. Bind every new cut to original live incarnation/base epoch."
 
@@ -4406,9 +4406,9 @@ reason = "Exact historical Ready scope/cursor may replay; new incarnation starts
 id = "companion-sync-companioncoordinator-state-fetch"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 819
-end_line = 836
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 821
+end_line = 838
 metric = "regions"
 reason = "Require exact token/generation/count/digest and immutable page cursor. FETCH delegates to durable offered-page preparation; Ready follows its Owner receipt and exact repeated Ready returns terminal ACTIVE."
 
@@ -4416,9 +4416,9 @@ reason = "Require exact token/generation/count/digest and immutable page cursor.
 id = "companion-sync-companioncoordinator-state-ready"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 841
-end_line = 886
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 843
+end_line = 888
 metric = "regions"
 reason = "Require exact token/generation/count/digest and immutable page cursor. FETCH delegates to durable offered-page preparation; Ready follows its Owner receipt and exact repeated Ready returns terminal ACTIVE."
 
@@ -4426,9 +4426,9 @@ reason = "Require exact token/generation/count/digest and immutable page cursor.
 id = "companion-sync-companioncoordinator-activate-committed"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 890
-end_line = 926
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 892
+end_line = 928
 metric = "regions"
 reason = "Require exact token/generation/count/digest and immutable page cursor. FETCH delegates to durable offered-page preparation; Ready follows its Owner receipt and exact repeated Ready returns terminal ACTIVE."
 
@@ -4436,9 +4436,9 @@ reason = "Require exact token/generation/count/digest and immutable page cursor.
 id = "companion-sync-companioncoordinator-repeat-ready"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 928
-end_line = 951
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 930
+end_line = 953
 metric = "regions"
 reason = "Require exact token/generation/count/digest and immutable page cursor. FETCH delegates to durable offered-page preparation; Ready follows its Owner receipt and exact repeated Ready returns terminal ACTIVE."
 
@@ -4446,9 +4446,9 @@ reason = "Require exact token/generation/count/digest and immutable page cursor.
 id = "companion-sync-companioncoordinator-snapshot-expired"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 955
-end_line = 967
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 957
+end_line = 969
 metric = "regions"
 reason = "Inactive/incomplete peers cannot issue normal requests; retained retransmission follows sequence and origin requirements. Link loss retains the committed Snapshot."
 
@@ -4456,9 +4456,9 @@ reason = "Inactive/incomplete peers cannot issue normal requests; retained retra
 id = "companion-sync-companioncoordinator-retransmit-after"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 981
-end_line = 1005
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 983
+end_line = 1007
 metric = "regions"
 reason = "Inactive/incomplete peers cannot issue normal requests; retained retransmission follows sequence and origin requirements. Link loss retains the committed Snapshot."
 
@@ -4466,9 +4466,9 @@ reason = "Inactive/incomplete peers cannot issue normal requests; retained retra
 id = "companion-sync-companioncoordinator-accepting-requests"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 1016
-end_line = 1020
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 1018
+end_line = 1022
 metric = "regions"
 reason = "Inactive/incomplete peers cannot issue normal requests; retained retransmission follows sequence and origin requirements. Link loss retains the committed Snapshot."
 
@@ -4476,9 +4476,9 @@ reason = "Inactive/incomplete peers cannot issue normal requests; retained retra
 id = "companion-sync-companioncoordinator-link-lost"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 1030
-end_line = 1043
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 1032
+end_line = 1045
 metric = "regions"
 reason = "Inactive/incomplete peers cannot issue normal requests; retained retransmission follows sequence and origin requirements. Link loss retains the committed Snapshot."
 
@@ -4486,9 +4486,9 @@ reason = "Inactive/incomplete peers cannot issue normal requests; retained retra
 id = "companion-sync-require-cut-scope"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 1174
-end_line = 1186
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 1176
+end_line = 1188
 metric = "regions"
 reason = "Exact historical Ready scope/cursor may replay; new incarnation starts generation zero and same-scope base reset uses checked next generation. Bind every new cut to original live incarnation/base epoch."
 
@@ -4496,9 +4496,9 @@ reason = "Exact historical Ready scope/cursor may replay; new incarnation starts
 id = "companion-sync-render-page"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 1326
-end_line = 1389
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 1328
+end_line = 1391
 metric = "regions"
 reason = "Require exact token/generation/count/digest and immutable page cursor. FETCH delegates to durable offered-page preparation; Ready follows its Owner receipt and exact repeated Ready returns terminal ACTIVE."
 
@@ -4506,7 +4506,7 @@ reason = "Require exact token/generation/count/digest and immutable page cursor.
 id = "companion-companion-companionhost-reserve-cut-backing"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
 start_line = 71
 end_line = 78
 metric = "regions"
@@ -4516,9 +4516,9 @@ reason = "Use the existing trusted wall-clock monitor for ACK time and exact sha
 id = "companion-companion-apply"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
 start_line = 321
-end_line = 350
+end_line = 353
 metric = "regions"
 reason = "Route only receipt-owned companion continuation; obtain fresh host facts; exact captured link receives publication or closure."
 
@@ -4526,9 +4526,9 @@ reason = "Route only receipt-owned companion continuation; obtain fresh host fac
 id = "companion-companion-stage"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 381
-end_line = 442
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 384
+end_line = 445
 metric = "regions"
 reason = "Initial infallible writes-before-work bundle keeps plaintext allocations charged on pending refusal, checkpoint-plan failure and later staging errors."
 
@@ -4536,9 +4536,9 @@ reason = "Initial infallible writes-before-work bundle keeps plaintext allocatio
 id = "companion-companion-snapshot-timer-fired"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 767
-end_line = 793
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 773
+end_line = 799
 metric = "regions"
 reason = "Existing timer dispatch selects the companion peer expiry path."
 
@@ -4546,9 +4546,9 @@ reason = "Existing timer dispatch selects the companion peer expiry path."
 id = "companion-companion-continue-snapshot"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 823
-end_line = 853
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 829
+end_line = 859
 metric = "regions"
 reason = "Route only receipt-owned companion continuation; obtain fresh host facts; exact captured link receives publication or closure."
 
@@ -4556,9 +4556,9 @@ reason = "Route only receipt-owned companion continuation; obtain fresh host fac
 id = "companion-companion-send-page"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 856
-end_line = 881
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 862
+end_line = 887
 metric = "regions"
 reason = "Preserve write-before-work ownership through stage refusal; apply only matching private publications. Each SendPage line rechecks exact live LinkId and transfers shared backing to queue ownership."
 
@@ -4566,9 +4566,9 @@ reason = "Preserve write-before-work ownership through stage refusal; apply only
 id = "companion-companion-continue-fetch"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 883
-end_line = 916
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 889
+end_line = 922
 metric = "regions"
 reason = "Preserve write-before-work ownership through stage refusal; apply only matching private publications. Each SendPage line rechecks exact live LinkId and transfers shared backing to queue ownership."
 
@@ -4616,9 +4616,9 @@ reason = "Exact live page read retains maximum raw and decoded leases from befor
 id = "companion-mod-federationcoordinator-install-companion-executor"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 377
-end_line = 390
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 380
+end_line = 393
 metric = "regions"
 reason = "Install authenticated local incarnation/recovery epoch before accepting configured companion delivery; reject partially configured executor."
 
@@ -4886,7 +4886,7 @@ reason = "CAP84: infallible line-before-backing bundle precedes refusals. Existi
 id = "companion-mod-statecorecontext-backing-reservations"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "2ed1120d124acac4f2cd1e14ba6573cf990ea2292b4fc7683ecf6e9d29033da3"
+source_sha256 = "8a00e120a0f76f88ebb42367394b79644b0824039e3fe887128e0c29c2ada300"
 start_line = 837
 end_line = 839
 metric = "regions"
@@ -6546,7 +6546,7 @@ reason = "Route post-readback edge completions through the existing exact connec
 id = "cap13-mod-complete-index-refresh"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "2ed1120d124acac4f2cd1e14ba6573cf990ea2292b4fc7683ecf6e9d29033da3"
+source_sha256 = "8a00e120a0f76f88ebb42367394b79644b0824039e3fe887128e0c29c2ada300"
 start_line = 3766
 end_line = 3808
 metric = "regions"
@@ -6616,9 +6616,9 @@ reason = "Joint barrier receipts persist completion coverage only for retained r
 id = "cap90-current-base-origin-admission"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 310
-end_line = 377
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 312
+end_line = 379
 metric = "branches"
 reason = "Current RESET and base-origin generation must authorize both first assembly and cached origin replay."
 
@@ -6826,9 +6826,9 @@ reason = "Combined barrier construction, recovery, and receipt decisions require
 id = "s10-cap70-endpoint-complete-barriers"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/execute.rs"
-source_sha256 = "25273f12e646210434f10f92f32c5439a7811e00b80bc27284abba8d6090f6f8"
-start_line = 549
-end_line = 587
+source_sha256 = "1fbbe3d86d5d5f0f2da4a78289aedd2a7bebb35bffa86f5021ec002cf62ed38e"
+start_line = 562
+end_line = 600
 metric = "branches"
 reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
 
@@ -6836,9 +6836,9 @@ reason = "Combined barrier construction, recovery, and receipt decisions require
 id = "s10-cap70-companion-resume-resume-ack-committed"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs"
-source_sha256 = "0a2c12728da94735c7f00c70e55d03954f8893739df6d359574d9bc90123bf8b"
-start_line = 1393
-end_line = 1430
+source_sha256 = "7fa93ba9dd1f24b4e105330160651fd7de04eff20bbb80091fd4cfb4f1b0013f"
+start_line = 1395
+end_line = 1432
 metric = "branches"
 reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
 
@@ -6866,7 +6866,7 @@ reason = "Combined barrier construction, recovery, and receipt decisions require
 id = "s10-cap70-receipt-matches-planned"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
 start_line = 306
 end_line = 319
 metric = "branches"
@@ -6876,9 +6876,9 @@ reason = "Combined barrier construction, recovery, and receipt decisions require
 id = "s10-cap70-receipt-committed-ack"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs"
-source_sha256 = "e13791256b6925c53ed960b3ba4e9d4f6984992256f16c873a6c15d56c8bf29d"
-start_line = 627
-end_line = 654
+source_sha256 = "4cdb23fc8301d3a656f6f970c77857ffd6a5b3eae9d595bda45176bd6a45584b"
+start_line = 633
+end_line = 660
 metric = "branches"
 reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
 
@@ -6886,9 +6886,9 @@ reason = "Combined barrier construction, recovery, and receipt decisions require
 id = "s10-cap70-base-ack-delivery-ack-receipt"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 1455
-end_line = 1470
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 1463
+end_line = 1478
 metric = "branches"
 reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
 
@@ -9036,9 +9036,9 @@ reason = "The closed maintenance job union preserves each expiry or cleanup auth
 id = "cap79-maintenance-055-replay-io-busy"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 1549
-end_line = 1551
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 1557
+end_line = 1561
 metric = "regions"
 reason = "Both replay readers block concurrent companion execution and retain typed commit ownership; rejection follows the exact original request or maintenance receipt."
 
@@ -9046,9 +9046,9 @@ reason = "Both replay readers block concurrent companion execution and retain ty
 id = "cap79-maintenance-056-reject-pending-batch"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 1588
-end_line = 1663
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 1598
+end_line = 1673
 metric = "regions"
 reason = "Both replay readers block concurrent companion execution and retain typed commit ownership; rejection follows the exact original request or maintenance receipt."
 
@@ -9056,9 +9056,9 @@ reason = "Both replay readers block concurrent companion execution and retain ty
 id = "cap79-maintenance-057-reject-origin-acknowledgement"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs"
-source_sha256 = "e7ec2d98b1a713eb73cd5b244e2424fa71978899ee998e27fbbdf56b300cd0f8"
-start_line = 1676
-end_line = 1685
+source_sha256 = "41b05d4e670f53bee4c4e79888f1d0e846330aae7b6711da02243cb5ced7886d"
+start_line = 1686
+end_line = 1695
 metric = "regions"
 reason = "Both replay readers block concurrent companion execution and retain typed commit ownership; rejection follows the exact original request or maintenance receipt."
 
@@ -9066,8 +9066,258 @@ reason = "Both replay readers block concurrent companion execution and retain ty
 id = "cap97-recent-001-replay-recent"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
-source_sha256 = "89a762735df62399945623740806a107d3e2159e8eda08f121a800c525e5c558"
-start_line = 677
-end_line = 713
+source_sha256 = "59f1417ecbcaa49b288a3d4b87fa4c4ee860a979fdf092e4eb617fd5890c13ec"
+start_line = 678
+end_line = 720
 metric = "regions"
 reason = "The recent-fragment replay shortcut must resolve every response in original descriptor order before rendering any output; one absent body refuses the whole replay."
+
+[[region]]
+id = "cap79-response-001-missing"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 31
+end_line = 50
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-002-key"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 51
+end_line = 59
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-003-capture"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 71
+end_line = 103
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-004-validate"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 109
+end_line = 123
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-005-begin"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 125
+end_line = 160
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-006-next"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 177
+end_line = 188
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-007-admit"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 190
+end_line = 205
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-008-body"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 207
+end_line = 231
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-009-finish"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 233
+end_line = 254
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-010-backing"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 263
+end_line = 265
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-011-drain"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read.rs"
+source_sha256 = "5442053cb2329a131f234df69834a645072f3510e1c51b0b26d00e42ada63d1b"
+start_line = 266
+end_line = 268
+metric = "regions"
+reason = "A retained reply binds original metadata, every ordered body, one commit, sticky failure, and charged output before publication."
+
+[[region]]
+id = "cap79-response-012-validate"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read/metadata.rs"
+source_sha256 = "ee80fcef5422fb9d4fef26b9e742666cc9864d4204e7e913a932bbf3afc22873"
+start_line = 10
+end_line = 31
+metric = "regions"
+reason = "Retained result identity, object hash, response count, descriptor index, body identity, kind, and size must agree before any read."
+
+[[region]]
+id = "cap79-response-013-validate-row"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read/metadata.rs"
+source_sha256 = "ee80fcef5422fb9d4fef26b9e742666cc9864d4204e7e913a932bbf3afc22873"
+start_line = 33
+end_line = 46
+metric = "regions"
+reason = "Retained result identity, object hash, response count, descriptor index, body identity, kind, and size must agree before any read."
+
+[[region]]
+id = "cap79-response-014-validate-descriptors"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read/metadata.rs"
+source_sha256 = "ee80fcef5422fb9d4fef26b9e742666cc9864d4204e7e913a932bbf3afc22873"
+start_line = 48
+end_line = 71
+metric = "regions"
+reason = "Retained result identity, object hash, response count, descriptor index, body identity, kind, and size must agree before any read."
+
+[[region]]
+id = "cap79-response-015-validate-identity"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read/metadata.rs"
+source_sha256 = "ee80fcef5422fb9d4fef26b9e742666cc9864d4204e7e913a932bbf3afc22873"
+start_line = 73
+end_line = 88
+metric = "regions"
+reason = "Retained result identity, object hash, response count, descriptor index, body identity, kind, and size must agree before any read."
+
+[[region]]
+id = "cap79-response-016-validate-origin"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/response_read/metadata.rs"
+source_sha256 = "ee80fcef5422fb9d4fef26b9e742666cc9864d4204e7e913a932bbf3afc22873"
+start_line = 90
+end_line = 103
+metric = "regions"
+reason = "Retained result identity, object hash, response count, descriptor index, body identity, kind, and size must agree before any read."
+
+[[region]]
+id = "cap79-response-017-owns"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read.rs"
+source_sha256 = "a4a3e316c1be6b64850dd98ecb3307450f4bad5fe220b62638b9dfbeec191508"
+start_line = 27
+end_line = 32
+metric = "regions"
+reason = "The current authenticated link, incarnation, recovery epoch, synchronization state and storage commit control every read and output publication."
+
+[[region]]
+id = "cap79-response-018-submit"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read.rs"
+source_sha256 = "a4a3e316c1be6b64850dd98ecb3307450f4bad5fe220b62638b9dfbeec191508"
+start_line = 34
+end_line = 69
+metric = "regions"
+reason = "The current authenticated link, incarnation, recovery epoch, synchronization state and storage commit control every read and output publication."
+
+[[region]]
+id = "cap79-response-019-validate-link"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read.rs"
+source_sha256 = "a4a3e316c1be6b64850dd98ecb3307450f4bad5fe220b62638b9dfbeec191508"
+start_line = 71
+end_line = 101
+metric = "regions"
+reason = "The current authenticated link, incarnation, recovery epoch, synchronization state and storage commit control every read and output publication."
+
+[[region]]
+id = "cap79-response-020-validate-sync"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read.rs"
+source_sha256 = "a4a3e316c1be6b64850dd98ecb3307450f4bad5fe220b62638b9dfbeec191508"
+start_line = 103
+end_line = 122
+metric = "regions"
+reason = "The current authenticated link, incarnation, recovery epoch, synchronization state and storage commit control every read and output publication."
+
+[[region]]
+id = "cap79-response-021-advance"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read.rs"
+source_sha256 = "a4a3e316c1be6b64850dd98ecb3307450f4bad5fe220b62638b9dfbeec191508"
+start_line = 124
+end_line = 155
+metric = "regions"
+reason = "The current authenticated link, incarnation, recovery epoch, synchronization state and storage commit control every read and output publication."
+
+[[region]]
+id = "cap79-response-022-send"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read.rs"
+source_sha256 = "a4a3e316c1be6b64850dd98ecb3307450f4bad5fe220b62638b9dfbeec191508"
+start_line = 157
+end_line = 182
+metric = "regions"
+reason = "The current authenticated link, incarnation, recovery epoch, synchronization state and storage commit control every read and output publication."
+
+[[region]]
+id = "cap79-response-023-prepare"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read/io.rs"
+source_sha256 = "09aeb1204b6fc3a5d0affd6914f821322d3b27d7ef67a02e01e46221b901a4db"
+start_line = 16
+end_line = 42
+metric = "regions"
+reason = "One read identifier owns raw and decoding reservations through completion or cancellation; malformed rows and shutdown cannot publish or resume queued work."
+
+[[region]]
+id = "cap79-response-024-completed"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read/io.rs"
+source_sha256 = "09aeb1204b6fc3a5d0affd6914f821322d3b27d7ef67a02e01e46221b901a4db"
+start_line = 44
+end_line = 82
+metric = "regions"
+reason = "One read identifier owns raw and decoding reservations through completion or cancellation; malformed rows and shutdown cannot publish or resume queued work."
+
+[[region]]
+id = "cap79-response-025-admit"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/response_read/io.rs"
+source_sha256 = "09aeb1204b6fc3a5d0affd6914f821322d3b27d7ef67a02e01e46221b901a4db"
+start_line = 84
+end_line = 137
+metric = "regions"
+reason = "One read identifier owns raw and decoding reservations through completion or cancellation; malformed rows and shutdown cannot publish or resume queued work."

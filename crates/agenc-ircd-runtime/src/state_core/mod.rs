@@ -5508,6 +5508,16 @@ impl StateCoreContext {
 
 #[cfg(test)]
 impl StateCoreContext {
+    /// Observes reservation ownership in asynchronous read and writer fixtures.
+    pub(crate) fn backing_budget_for_test(&self) -> Arc<MemoryBudget> {
+        Arc::clone(&self.budget)
+    }
+
+    /// Marks the same termination boundary used by the owner loop.
+    pub(crate) fn quiesce_for_test(&mut self) {
+        self.quiescing = true;
+    }
+
     /// Installs a trusted deterministic wall clock for retention boundary tests.
     pub(crate) fn set_wall_for_test(&mut self, seconds: u64) {
         self.wall = Box::new(agenc_ircd_testkit::DeterministicWallClock::at(seconds));

@@ -2848,8 +2848,50 @@ source files. The release catalog contains 905 critical regions, including
 exact staged inputs, logs, and workspace executables are preserved in
 `cap79-maintenance-final-proof`.
 
-CAP-79 still needs cold object and complete result delivery and selective
-object reconstruction. Cleanup does not delete shared object bodies whose
+Retained result delivery now reads response bodies that are absent from
+memory. The initial regression commits three signed capability bodies through
+the actual storage owner, evicts one memory copy, and fails in 0.08 seconds
+when the recent-fragment shortcut cannot continue. Its exact test source,
+executable, and log are preserved in `cap79-cold-response-red-proof`. That
+initial fixture applies replay metadata through in-memory receipt effects;
+the later coordinator fixtures also commit the result and replay records.
+
+Both complete duplicate requests and recently assembled requests can start
+the reader. Before issuing storage work, it binds the original result hash,
+request tuple, and every response descriptor in order. It reads one exact
+object key at a time, including repeated IDs, at one captured storage commit.
+A missing body, wrong key, hash, kind, size, or changed metadata refuses the
+entire reply before rendering. The coordinator rechecks the authenticated
+link, incarnation, recovery epoch, and origin/delivery readiness on completion.
+Reload and queued requests wait for the read. Shutdown cancels publication
+without running the queued requests, and a replacement link remains untouched.
+Raw results, decoding buffers, retained bodies, and rendered output keep
+their memory reservations until their owner releases them. A stalled writer
+retains the output reservation until its queue drains or drops.
+
+All 14 coordinator and decoder-boundary cases pass in 0.80 seconds. The
+coordinator fixtures complete an empty delivery snapshot and origin reset
+before replay. They cover both assembler entry paths, missing first/middle/last
+disk bodies, malformed read completions, changed commit and replay metadata,
+lost synchronization readiness, replacement links, shutdown, refused memory,
+queued requests, duplicate response IDs, and stalled output. The tests alter
+selected returned records or in-memory metadata for negative cases; they do
+not claim a network TLS exchange or corrupt a live database. A separate inner
+reader regression reads all three sealed bodies and compares the rendered
+reply with the complete in-memory response.
+
+All eight response-reader checkpoint gates pass: 2,549 tests pass, none fail,
+and 21 qualification tests remain ignored. The runtime suite has 1,092 passes.
+The total includes one nested clock-test process whose output interleaves
+with its parent; its result tuple and parent status both report success.
+Source policy covers 837 Rust files. Both inventories cover 704 source files,
+and the release catalog has 931 critical regions, including 25 additions.
+Coverage floors remain unchanged, with no new measurement. Exact inputs,
+logs, and workspace executables are preserved in
+`cap79-cold-response-final-proof`.
+
+CAP-79 still needs fresh cold-object fetches and selective object
+reconstruction. Cleanup does not delete shared object bodies whose
 independent retention requirements remain unresolved. Every surviving body
 still counts against the disk ceiling, and the global object collector
 continues to refuse capacity loss under CAP-95.

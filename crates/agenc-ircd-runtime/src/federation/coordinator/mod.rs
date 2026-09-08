@@ -18,6 +18,7 @@ mod origin;
 mod query;
 mod replay_maintenance;
 mod request;
+mod response_read;
 mod resume_reconciliation;
 mod snapshot;
 mod startup;
@@ -291,6 +292,7 @@ pub struct FederationCoordinator {
     companion_exec: Option<CompanionCoordinator>,
     companion_page_read: Option<companion::page_read::Pending>,
     companion_ack_read: Option<Box<companion::ack_read::Pending>>,
+    companion_response_read: Option<Box<response_read::Pending>>,
     replay_maintenance: replay_maintenance::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
@@ -367,6 +369,7 @@ impl FederationCoordinator {
             companion_exec: None,
             companion_page_read: None,
             companion_ack_read: None,
+            companion_response_read: None,
             replay_maintenance: replay_maintenance::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
@@ -1191,6 +1194,7 @@ impl FederationCoordinator {
     #[must_use]
     pub fn owns_storage_read(&self, read_id: StorageReadId) -> bool {
         self.loader.owns(read_id)
+            || response_read::owns(self, read_id)
             || self.replay_maintenance.owns(read_id)
             || companion::ack_read::owns(self, read_id)
             || companion::page_read::owns(self, read_id)
@@ -1206,6 +1210,10 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
+        if response_read::owns(self, message.read_id) {
+            response_read::completed(self, context, message);
+            return;
+        }
         if self.replay_maintenance.owns(message.read_id) {
             replay_maintenance::completed(self, context, message);
             return;
@@ -1547,7 +1555,9 @@ impl FederationCoordinator {
     }
 
     fn replay_io_busy(&self) -> bool {
-        self.companion_ack_read.is_some() || self.replay_maintenance.busy()
+        self.companion_ack_read.is_some()
+            || self.companion_response_read.is_some()
+            || self.replay_maintenance.busy()
     }
 
     fn continue_delivery_work(&mut self, context: &mut StateCoreContext, peer: ServerId) {
