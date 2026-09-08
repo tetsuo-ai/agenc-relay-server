@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 766
-reviewed_source_sha256 = "245662262a4a32d4a7017c7961ebd0b64cd6823c78b8941e8d79f0db66d78f26"
+reviewed_source_files = 769
+reviewed_source_sha256 = "8140f666dc04531ccd721ec8842bc717ee65e818664815d24c60779a723242dc"
 deferred = []
 
 [[region]]
@@ -2066,9 +2066,9 @@ reason = "Check the requested conversation and any reserved predecessor."
 id = "cap73-mod-execute"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/mod.rs"
-source_sha256 = "4ed427f8336a79855a6269e81e111c360799834cb202e656d48d2883609338cc"
-start_line = 281
-end_line = 326
+source_sha256 = "1e48a906647c3ede4665b1d108aa3c3fbe56730a527ef255d514115833b82fd1"
+start_line = 282
+end_line = 327
 metric = "regions"
 reason = "Call recovery::admit before dispatch to all signing, counter and delivery handlers."
 
@@ -9426,9 +9426,9 @@ reason = "Fresh object completion repeats request classification and current aut
 id = "cap79-fresh-object-012-fetch-object"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
-source_sha256 = "9150815d195e00817484adcc4647eecc2cdeaf1c511a3a82f4315cbeec49172e"
-start_line = 1427
-end_line = 1460
+source_sha256 = "e8474ddd6faf09157dce24e7549f2c717461abcc1163ebeedac68b1a914e076e"
+start_line = 1418
+end_line = 1451
 metric = "regions"
 reason = "Fresh lookups check the attached device and retained log before reads and apply current conversation recovery authorization to resolved bodies."
 
@@ -10741,3 +10741,103 @@ start_line = 489
 end_line = 495
 metric = "regions"
 reason = "The composed reconstruction path supplies existing process backing to every retained-result admission."
+
+[[region]]
+id = "cap99-ack-context-001-commit-submission"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/ack_context.rs"
+source_sha256 = "f0ca41a6767c299dc9371809ebd5c9b124447298f42cff5db9ab4f83bd3c65f3"
+start_line = 14
+end_line = 33
+metric = "regions"
+reason = "ACK public fields match the current candidate or exact retained attempt and terminal core; retained object decoding owns bounded memory before copying."
+
+[[region]]
+id = "cap99-ack-context-002-commit-finalization"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/ack_context.rs"
+source_sha256 = "f0ca41a6767c299dc9371809ebd5c9b124447298f42cff5db9ab4f83bd3c65f3"
+start_line = 35
+end_line = 65
+metric = "regions"
+reason = "ACK public fields match the current candidate or exact retained attempt and terminal core; retained object decoding owns bounded memory before copying."
+
+[[region]]
+id = "cap99-ack-context-003-reinit-submission"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/ack_context.rs"
+source_sha256 = "f0ca41a6767c299dc9371809ebd5c9b124447298f42cff5db9ab4f83bd3c65f3"
+start_line = 67
+end_line = 145
+metric = "regions"
+reason = "ACK public fields match the current candidate or exact retained attempt and terminal core; retained object decoding owns bounded memory before copying."
+
+[[region]]
+id = "cap99-ack-context-004-with-retained"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/ack_context.rs"
+source_sha256 = "f0ca41a6767c299dc9371809ebd5c9b124447298f42cff5db9ab4f83bd3c65f3"
+start_line = 148
+end_line = 177
+metric = "regions"
+reason = "ACK public fields match the current candidate or exact retained attempt and terminal core; retained object decoding owns bounded memory before copying."
+
+[[region]]
+id = "cap99-ack-context-005-reinit-attempt"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/ack_context.rs"
+source_sha256 = "f0ca41a6767c299dc9371809ebd5c9b124447298f42cff5db9ab4f83bd3c65f3"
+start_line = 179
+end_line = 216
+metric = "regions"
+reason = "ACK public fields match the current candidate or exact retained attempt and terminal core; retained object decoding owns bounded memory before copying."
+
+[[region]]
+id = "cap99-ack-context-006-reinit-role"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/ack_context.rs"
+source_sha256 = "f0ca41a6767c299dc9371809ebd5c9b124447298f42cff5db9ab4f83bd3c65f3"
+start_line = 218
+end_line = 237
+metric = "regions"
+reason = "ACK public fields match the current candidate or exact retained attempt and terminal core; retained object decoding owns bounded memory before copying."
+
+[[region]]
+id = "cap99-ack-context-007-finalization"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/terminal_proof.rs"
+source_sha256 = "80ef556fc4e721b9e663b75025b49edc4efab05731cbaedb92746e18b2a5f468"
+start_line = 38
+end_line = 67
+metric = "regions"
+reason = "Every embedded ACK matches its finalization core or ReInit attempt before council votes can change state."
+
+[[region]]
+id = "cap99-ack-context-008-reinit-activation"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/terminal_proof.rs"
+source_sha256 = "80ef556fc4e721b9e663b75025b49edc4efab05731cbaedb92746e18b2a5f468"
+start_line = 103
+end_line = 161
+metric = "regions"
+reason = "Every embedded ACK matches its finalization core or ReInit attempt before council votes can change state."
+
+[[region]]
+id = "cap99-ack-context-009-submit-commit-ack"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
+source_sha256 = "e8474ddd6faf09157dce24e7549f2c717461abcc1163ebeedac68b1a914e076e"
+start_line = 511
+end_line = 575
+metric = "regions"
+reason = "Standalone ACK handlers validate current public context before any durable object, proof slot or event can be staged."
+
+[[region]]
+id = "cap99-ack-context-010-submit-reinit-ack"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs"
+source_sha256 = "e8474ddd6faf09157dce24e7549f2c717461abcc1163ebeedac68b1a914e076e"
+start_line = 1074
+end_line = 1135
+metric = "regions"
+reason = "Standalone ACK handlers validate current public context before any durable object, proof slot or event can be staged."

@@ -14,6 +14,7 @@ use super::events::EventContent;
 use super::request::{Decoded, Outcome};
 use super::{CompanionCoordinator, CompanionOrigin};
 
+mod ack_context;
 mod binding_delivery;
 mod close_authority;
 pub mod directory;

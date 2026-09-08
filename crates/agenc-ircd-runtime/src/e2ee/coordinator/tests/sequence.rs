@@ -41,6 +41,9 @@ mod restart;
 #[path = "recovery_pending.rs"]
 mod recovery_pending;
 
+#[path = "ack_context.rs"]
+mod ack_context;
+
 #[test]
 fn finalization_rejects_substituted_receipts_and_acknowledgements() -> TestResult {
     let mut harness = Harness::new()?;
@@ -715,6 +718,7 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
 }
 
 mod reinit {
+    mod ack_context;
     mod admission;
     mod successor;
 

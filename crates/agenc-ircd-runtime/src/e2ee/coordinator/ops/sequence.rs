@@ -521,11 +521,7 @@ pub fn submit_commit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 && slot.commit_object_id == ack.tbs.commit_object_id
         })
         .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
-    if ack.tbs.conversation_id != conversation_id
-        || ack.tbs.prior_epoch != slot.position.prior_epoch
-    {
-        return Err(Fail::with(E2eeReplyCode::EpochStale, &conversation_id));
-    }
+    super::ack_context::commit_submission(exec, &conversation_id, &ack.tbs, slot)?;
     let candidate_id = slot.candidate_id;
     let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let leaf = ack.tbs.old_leaf_index;
@@ -1085,12 +1081,7 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .reinit_attempt()
         .filter(|slot| slot.attempt_id == ack.tbs.reinit_attempt_id)
         .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
-    if ack.tbs.old_conversation_id != old_conversation_id {
-        return Err(Fail::with(
-            E2eeReplyCode::RouteInvalid,
-            &old_conversation_id,
-        ));
-    }
+    super::ack_context::reinit_submission(exec, &old_conversation_id, &ack.tbs, slot)?;
     let attempt_id = slot.attempt_id;
     let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let leaf = ack.tbs.old_leaf_index;

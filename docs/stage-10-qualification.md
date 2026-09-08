@@ -4065,3 +4065,50 @@ regions. This checkpoint adds no coverage measurement and changes no threshold.
 Exact inputs, check logs and five executed binaries are retained in
 `cap98-close-authority-final-proof`. Full recovery-chain validation and Stage 10
 production qualification remain open.
+
+
+### CAP-99 ACKs accept inconsistent public context
+
+Commit and ReInit ACK handlers accepted substituted profile, network and epoch
+fields. ReInit also accepted a different successor, staged result or creator.
+Finalization and activation accepted inconsistent embedded ACKs after their
+set digests and council votes were recomputed. Against source commit
+`883260b0bdcfa9eaa8514b7ac0a4a1d3008473e1`, all 37 regression cases fail in
+0.15 seconds. Each case first accepts its normal control. The exact five
+inputs and executed runtime binary are retained in
+`cap99-ack-context-expanded-red-proof`; the earlier six-case failure remains
+in `cap99-ack-context-red-proof`.
+
+Standalone Commit ACKs now match the current candidate's profile, network,
+conversation and adjacent epochs. Finalization compares every embedded ACK's
+public identity and result fields with the finalization core. Standalone
+Commit result digests have no independently authenticated reference until a
+terminal request supplies its voted result; an arbitrary first submitted ACK
+does not establish that reference.
+
+ReInit ACKs now name the exact retained attempt receipt and object. The checks
+cover the old and new conversations, old state, attempt, all four result
+fields, creator identity fields, and the role's KeyPackageRef shape. A Welcome
+ACK must name a non-creator plan entry's reserved ref. Both standalone and
+embedded ACKs use the same public comparison. Retained-object reads reserve
+memory before decoding and keep that reservation through validation. The
+maximum 3,145,728-byte initial Commit succeeds with enough memory; three
+smaller budgets refuse without writes or retained temporary reservations.
+Missing retained attempts and invalid package references also fail closed.
+
+These fixtures sign changed ACK fields with a deterministic key and sign
+terminal votes under the fixture council. They do not prove that the ACK key
+belongs to an authenticated old MLS leaf. Creator and Welcome fixtures use
+synthetic MLS bodies. Old-to-new leaf identity, coverage, and continuing-member
+vote admission remain open under CAP-86. No wire or storage format changes.
+
+All eight checkpoint checks pass. The locked all-feature workspace run passes
+2,739 tests with no failures and 22 default-ignored tests across 120 result
+groups in 178.18 seconds. The runtime suite passes 1,256 tests, including 41
+new ACK cases, with one ignored capacity test. Both inventories cover 769
+source files with hash
+`8140f666dc04531ccd721ec8842bc717ee65e818664815d24c60779a723242dc`.
+The release catalog has 1,083 critical regions, including ten reviewed ACK
+regions. This checkpoint adds no coverage measurement and changes no threshold.
+Exact changed inputs, check logs and five executed binaries are retained in
+`cap99-ack-context-final-proof`. Stage 10 production qualification remains open.
