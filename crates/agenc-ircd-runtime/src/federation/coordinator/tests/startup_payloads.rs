@@ -3,6 +3,7 @@
 mod expiry;
 mod helpers;
 mod io;
+mod request_expiry;
 mod selection;
 use super::*;
 use crate::e2ee::coordinator::CompanionCoordinator;

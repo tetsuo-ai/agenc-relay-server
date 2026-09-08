@@ -1905,6 +1905,6 @@ impl Restore {
         &mut self,
         backing: crate::budget::BackingReservationPort,
     ) -> Result<(), super::CompanionFault> {
-        self.objects.select(&self.mailbox, backing)
+        self.objects.select(&self.mailbox, &self.replays, backing)
     }
 }

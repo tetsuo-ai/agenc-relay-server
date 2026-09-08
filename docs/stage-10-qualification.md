@@ -3101,6 +3101,48 @@ pass, none fail, and 21 qualification tests remain ignored. The runtime suite
 has 1,157 passes and source policy covers 869 Rust files. Exact inputs, logs,
 and workspace executables are in `cap79-mailbox-expiry-final-proof`.
 
+The retained-request follow-up reproduces a missing idle cleanup path at
+`ad6cf20cdccf7afbbc3299eb146d3a5cbbf34d13`. A validated FetchIdentity request
+and encoded empty result are paired with a replay row whose deadline uses the
+published 24-hour retention and an explicit durable next-sequence floor of
+one. StateCore commits the records, composed startup restores the result and
+replay row, and idle maintenance stages no expiry. The test fails in 0.08
+seconds; `cap79-request-expiry-red-proof` preserves its exact inputs,
+executable and log. This proves sealed storage, startup and idle maintenance,
+without claiming an authenticated handler invocation or TLS session. The
+first attempt had fixture type errors and is not behavioral evidence.
+A second test omits the replay owner and proves startup still warmed the
+orphaned result. Both failures are frozen in
+`cap79-request-expiry-startup-red-proof` before the production changes.
+
+Idle maintenance now inspects at most 128 replay rows per page. A completed
+row is eligible only after its nonzero retained deadline and only when an
+independent durable origin sequence floor covers its operation. Pending rows
+and rows without that floor remain. Capture validates the complete result
+identity and bounded response descriptors. The exact replay metadata and
+origin floor must still match when the storage receipt publishes cleanup.
+The receipt removes the replay row and releases unreferenced result copies
+and their resident backing; the origin floor and stored object bodies remain.
+Startup warms a result only while a retained replay row owns it.
+
+Ten storage-owner tests pass. They cover early and lost publication,
+determinate refusal and retry, a 130-request partial cleanup followed by
+restart, persisted seven-day retention, changed metadata, missing ownership,
+clock and memory refusal, quiescing, and exhausted timers. The seven-day case
+uses persisted security-retention metadata; it does not invoke a security
+mutation handler. Corruption cases that modify in-memory state are reported
+as such. Captured metadata and write plans own memory reservations. Existing
+reference checks may scan all retained rows; the 128-row limit bounds page
+selection and mutation, without establishing a new total CPU bound.
+
+Both reviewed inventories bind 744 source files and the release catalog has
+1,027 critical regions. Sixty-seven existing regions were rebound, including
+the moved receipt-sequence helper, and twenty regions were added. No coverage
+measurement or threshold change is claimed. All eight checkpoint gates pass:
+2,630 tests pass, none fail, and 21 qualification tests remain ignored. The
+runtime suite has 1,167 passes and source policy covers 877 Rust files.
+`cap79-request-expiry-final-proof` preserves exact inputs, logs and executables.
+
 CAP-79 still needs independent shared-body retention and larger-capacity
 qualification. Cleanup does not delete shared object bodies whose
 independent retention requirements remain unresolved. Every surviving body

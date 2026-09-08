@@ -4,21 +4,25 @@ use crate::budget::{BackingReservationPort, MemoryPermit};
 use crate::e2ee::coordinator::CompanionFault;
 use agenc_ircd_e2ee::object::IrcWireObjectKind as Kind;
 use agenc_ircd_storage::StoredKey;
-use agenc_ircd_storage::e2ee_records::{MailboxKind, MailboxRow};
-use std::collections::BTreeMap;
+use agenc_ircd_storage::e2ee_records::{MailboxKind, MailboxRow, ReplayRow};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Selection {
     required: BTreeMap<[u8; 32], Kind>,
+    results: BTreeSet<[u8; 32]>,
     backing: BackingReservationPort,
     _metadata: MemoryPermit,
 }
 impl Selection {
     pub(super) fn new(
         rows: &[(StoredKey, MailboxRow)],
+        replays: &[(StoredKey, ReplayRow)],
         backing: BackingReservationPort,
     ) -> Result<Self, CompanionFault> {
         let bytes = rows
             .len()
+            .checked_add(replays.len())
+            .ok_or(CompanionFault::Ceiling)?
             .checked_mul(128)
             .and_then(|n| n.checked_add(8192))
             .ok_or(CompanionFault::Ceiling)?;
@@ -46,6 +50,10 @@ impl Selection {
         }
         Ok(Self {
             required,
+            results: replays
+                .iter()
+                .filter_map(|(_, row)| row.result_object_id)
+                .collect(),
             backing,
             _metadata: metadata,
         })
@@ -57,6 +65,9 @@ impl Selection {
             } else {
                 Err(CompanionFault::Storage)
             };
+        }
+        if kind == Kind::FederationResult {
+            return Ok(self.results.contains(id));
         }
         Ok(!matches!(
             kind,

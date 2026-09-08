@@ -15,11 +15,13 @@ mod convert;
 mod grace;
 mod history;
 mod mailbox_expiry;
+mod maintenance;
 mod object_read;
 mod origin;
 mod query;
 mod replay_maintenance;
 mod request;
+mod request_expiry;
 mod response_read;
 mod resume_reconciliation;
 mod snapshot;
@@ -215,6 +217,7 @@ enum PendingCommit {
     CompanionRestore(Box<startup::retirement::Receipt>),
     CompanionReplayMaintenance(Box<replay_maintenance::Receipt>),
     CompanionMailboxExpiry(Box<mailbox_expiry::Receipt>),
+    CompanionRequestExpiry(Box<request_expiry::Receipt>),
     /// A companion request batch; the executor holds its result.
     Companion {
         peer: ServerId,
@@ -299,6 +302,7 @@ pub struct FederationCoordinator {
     companion_object_read: Option<Box<object_read::Pending>>,
     replay_maintenance: replay_maintenance::Worker,
     mailbox_expiry: mailbox_expiry::Worker,
+    request_expiry: request_expiry::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
     barriers: BTreeMap<ServerId, OpenBarrier>,
@@ -379,6 +383,7 @@ impl FederationCoordinator {
             companion_object_read: None,
             replay_maintenance: replay_maintenance::Worker::default(),
             mailbox_expiry: mailbox_expiry::Worker::default(),
+            request_expiry: request_expiry::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
         }
@@ -1278,6 +1283,7 @@ impl FederationCoordinator {
         grace::timer_fired(self, context, entry)
             || replay_maintenance::timer_fired(self, context, entry)
             || mailbox_expiry::timer_fired(self, context, entry)
+            || request_expiry::timer_fired(self, context, entry)
             || resume_reconciliation::timer_fired(self, context, entry)
             || snapshot::timer_fired(self, context, entry)
             || self.companion_timer_fired(context, entry)
@@ -1396,20 +1402,30 @@ impl FederationCoordinator {
         let events = context.take_outbound_events();
         self.settle_remote_results(context);
         let pending = self.take_pending_for_receipt(context);
+        if self.apply_pending_receipt(context, pending, &events) {
+            self.deliver_committed_then_continue(context, events);
+        }
+    }
+
+    fn apply_pending_receipt(
+        &mut self,
+        context: &mut StateCoreContext,
+        pending: Option<PendingCommit>,
+        events: &[crate::state_core::projector::OutboundEvent],
+    ) -> bool {
         match pending {
-            Some(PendingCommit::CompanionMailboxExpiry(receipt)) => {
-                mailbox_expiry::committed(self, context, *receipt);
-            }
-            Some(PendingCommit::CompanionReplayMaintenance(receipt)) => {
-                replay_maintenance::committed(self, context, *receipt);
-            }
+            Some(
+                pending @ (PendingCommit::CompanionRequestExpiry(_)
+                | PendingCommit::CompanionMailboxExpiry(_)
+                | PendingCommit::CompanionReplayMaintenance(_)),
+            ) => maintenance::committed(self, context, pending),
             Some(PendingCommit::History(prepared)) => history::committed(self, context, *prepared),
             Some(PendingCommit::HistoryCleanup(cleanup)) => {
                 history::cleanup_committed(self, context, cleanup)
             }
             Some(pending @ PendingCommit::Request { .. }) => {
                 if !self.settle_request(context, pending) {
-                    return;
+                    return false;
                 }
             }
             Some(PendingCommit::OriginAck {
@@ -1450,7 +1466,7 @@ impl FederationCoordinator {
             Some(
                 pending @ (PendingCommit::CompanionRestore(_) | PendingCommit::Companion { .. }),
             ) => {
-                self.companion_receipt(context, pending, &events);
+                self.companion_receipt(context, pending, events);
             }
             Some(PendingCommit::SnapshotRows { peer }) => {
                 snapshot::continue_write(self, context, peer)
@@ -1471,7 +1487,7 @@ impl FederationCoordinator {
             }
             Some(PendingCommit::Acknowledged) | None => {}
         }
-        self.deliver_committed_then_continue(context, events);
+        true
     }
 
     fn delivery_ack_receipt(&mut self, context: &mut StateCoreContext, pending: PendingCommit) {
@@ -1567,6 +1583,7 @@ impl FederationCoordinator {
         }
         replay_maintenance::advance(self, context);
         mailbox_expiry::advance(self, context);
+        request_expiry::advance(self, context);
     }
 
     fn replay_io_busy(&self) -> bool {
@@ -1617,12 +1634,11 @@ impl FederationCoordinator {
         error: agenc_ircd_storage::StorageError,
     ) {
         match self.pending.take() {
-            Some(PendingCommit::CompanionMailboxExpiry(receipt)) => {
-                mailbox_expiry::rejected(self, context, *receipt);
-            }
-            Some(PendingCommit::CompanionReplayMaintenance(receipt)) => {
-                replay_maintenance::rejected(self, context, *receipt);
-            }
+            Some(
+                pending @ (PendingCommit::CompanionRequestExpiry(_)
+                | PendingCommit::CompanionMailboxExpiry(_)
+                | PendingCommit::CompanionReplayMaintenance(_)),
+            ) => maintenance::rejected(self, context, pending),
             Some(PendingCommit::ResumeAcknowledged(receipt)) => {
                 resume_reconciliation::rejected(self, context, receipt, error);
             }

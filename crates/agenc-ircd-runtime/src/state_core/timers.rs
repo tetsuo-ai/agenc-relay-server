@@ -83,6 +83,8 @@ pub enum TimerKind {
     CompanionReplayMaintenance,
     /// Bounded durable mailbox expiry, including idle nodes without federation peers.
     CompanionMailboxMaintenance,
+    /// Bounded expiry of completed companion request results and replay metadata.
+    CompanionRequestMaintenance,
     /// The reserved retry wake for an edge's pending witness metadata.
     CompanionWitnessRetry,
     /// Expiry of process-local mailbox cursors and their immutable backing.

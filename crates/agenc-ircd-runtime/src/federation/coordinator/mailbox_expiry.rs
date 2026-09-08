@@ -13,19 +13,6 @@ use agenc_ircd_types::MonotonicTick;
 const RETRY_MILLIS: u64 = 1_000;
 const IDLE_MILLIS: u64 = 60_000;
 
-impl PendingCommit {
-    pub(super) fn staged_after(&self) -> Option<u64> {
-        match self {
-            Self::Request { staged_after, .. } => Some(*staged_after),
-            Self::ResumeAcknowledged(receipt) => Some(receipt.staged_after),
-            Self::CompanionRestore(receipt) => Some(receipt.staged_after),
-            Self::CompanionReplayMaintenance(receipt) => Some(receipt.staged_after),
-            Self::CompanionMailboxExpiry(receipt) => Some(receipt.staged_after),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Default)]
 pub(super) struct Worker {
     cursor: Cursor,

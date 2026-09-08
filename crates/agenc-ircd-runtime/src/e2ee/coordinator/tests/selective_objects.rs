@@ -57,7 +57,7 @@ fn selected_mailbox_payloads_and_control_objects_keep_their_backing_after_restor
         bodies.push(object);
     }
     let mut restore = Restore::default();
-    restore.select(&rows, backing)?;
+    restore.select(&rows, &[], backing)?;
     for (key, value, _) in &bodies {
         restore.admit(key, value);
     }
@@ -95,14 +95,14 @@ fn shared_mailbox_payload_is_retained_once_and_conflicting_kinds_are_refused() -
         item(MailboxKind::Welcome, &bytes, 2)?,
     ];
     let mut restore = Restore::default();
-    restore.select(&rows, backing.clone())?;
+    restore.select(&rows, &[], backing.clone())?;
     restore.admit(&key, &value);
     let mut state = CompanionState::default();
     restore.apply(&mut state)?;
     assert_eq!(state.objects.len(), 1);
     assert_eq!(state.object_memory.len(), 1);
     rows.push(item(MailboxKind::Application, &bytes, 3)?);
-    assert!(Restore::default().select(&rows, backing).is_err());
+    assert!(Restore::default().select(&rows, &[], backing).is_err());
     Ok(())
 }
 
@@ -113,7 +113,7 @@ fn missing_or_wrong_kind_required_bodies_refuse_before_publishing() -> TestResul
         let (key, value, bytes) = body(Kind::ApplicationMls, 8)?;
         let rows = vec![item(MailboxKind::Welcome, &bytes, 1)?];
         let mut restore = Restore::default();
-        restore.select(&rows, backing)?;
+        restore.select(&rows, &[], backing)?;
         if !missing {
             restore.admit(&key, &value);
         }
@@ -129,7 +129,7 @@ fn missing_or_wrong_kind_required_bodies_refuse_before_publishing() -> TestResul
 fn a_malformed_unselected_row_poisoning_cannot_be_hidden_by_later_valid_rows() -> TestResult {
     let (budget, backing) = pool(1 << 20);
     let mut restore = Restore::default();
-    restore.select(&[], backing)?;
+    restore.select(&[], &[], backing)?;
     let (_, value, _) = body(Kind::ApplicationMls, 9)?;
     restore.admit(&StoredKey::new(vec![99; 32])?, &value);
     let (key, value, _) = body(Kind::CommitMls, 10)?;
@@ -145,12 +145,12 @@ fn a_malformed_unselected_row_poisoning_cannot_be_hidden_by_later_valid_rows() -
 fn selection_cannot_start_twice_or_after_object_collection() -> TestResult {
     let (_, backing) = pool(1 << 20);
     let mut restore = Restore::default();
-    restore.select(&[], backing.clone())?;
-    assert!(restore.select(&[], backing.clone()).is_err());
+    restore.select(&[], &[], backing.clone())?;
+    assert!(restore.select(&[], &[], backing.clone()).is_err());
     let mut full = Restore::default();
     let (key, value, _) = body(Kind::CommitMls, 11)?;
     full.admit(&key, &value);
-    assert!(full.select(&[], backing).is_err());
+    assert!(full.select(&[], &[], backing).is_err());
     Ok(())
 }
 
@@ -163,7 +163,7 @@ fn required_existing_objects_cannot_bypass_kind_or_hash_checks() -> TestResult {
         .objects
         .insert(*ObjectId::compute(&bytes).as_bytes(), bytes.clone());
     let mut restore = Restore::default();
-    restore.select(&[item(MailboxKind::Welcome, &bytes, 1)?], backing)?;
+    restore.select(&[item(MailboxKind::Welcome, &bytes, 1)?], &[], backing)?;
     assert!(restore.apply(&mut state).is_err());
     Ok(())
 }
@@ -172,7 +172,7 @@ fn required_existing_objects_cannot_bypass_kind_or_hash_checks() -> TestResult {
 fn failed_body_reservation_releases_the_private_selection_and_bodies() -> TestResult {
     let (budget, backing) = pool(16_384);
     let mut restore = Restore::default();
-    restore.select(&[], backing)?;
+    restore.select(&[], &[], backing)?;
     let bytes = IrcWireObject::new(Kind::CommitMls, vec![1; 16_000])?.encode()?;
     let row = ObjectRow::new(bytes)?;
     let value = PersistentRecordValue::new(

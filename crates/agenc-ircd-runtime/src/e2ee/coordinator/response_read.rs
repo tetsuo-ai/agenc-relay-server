@@ -19,6 +19,34 @@ const MAX_RESPONSES: usize = 32;
 const METADATA_BYTES: usize = 65_536;
 const MAX_RESULT_BYTES: usize = 8_192;
 
+/// Validates a retained result before maintenance captures its identity without cloning its body.
+pub(crate) fn validate_retained(
+    coordinator: &CompanionCoordinator,
+    key: ReplayKey,
+    row: &ReplayRow,
+    stored: &StoredResult,
+) -> Result<(), CompanionFault> {
+    if stored.result.len() > MAX_RESULT_BYTES
+        || stored.responses.len() > MAX_RESPONSES
+        || row.response_object_ids.len() > MAX_RESPONSES
+    {
+        return Err(CompanionFault::Storage);
+    }
+    let identity = Identity {
+        peer: ServerId::from_bytes(key.home_server_id),
+        correlation: Correlation {
+            peer_server_id: key.home_server_id,
+            server_incarnation: key.server_incarnation,
+            origin_id: key.origin_id,
+            origin_generation: key.origin_generation,
+            operation_sequence: key.operation_sequence,
+            request_id: row.request_id,
+        },
+        request_object_id: row.request_object_id,
+    };
+    metadata::validate(coordinator, identity, row, stored).map(|_| ())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// The authenticated peer and original request tuple of one retained reply.
 pub struct Identity {

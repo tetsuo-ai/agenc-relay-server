@@ -150,6 +150,7 @@ fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContex
     grace::restored(coordinator, context);
     super::replay_maintenance::restored(coordinator, context);
     super::mailbox_expiry::restored(coordinator, context);
+    super::request_expiry::restored(coordinator, context);
     coordinator.drain_backlog(context);
 }
 

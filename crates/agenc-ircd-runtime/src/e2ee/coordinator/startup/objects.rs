@@ -110,12 +110,13 @@ impl Restore {
     pub(super) fn select(
         &mut self,
         rows: &[(StoredKey, agenc_ircd_storage::e2ee_records::MailboxRow)],
+        replays: &[(StoredKey, agenc_ircd_storage::e2ee_records::ReplayRow)],
         backing: BackingReservationPort,
     ) -> Result<(), CompanionFault> {
         if self.failed || self.selection.is_some() || !self.values.is_empty() {
             return Err(CompanionFault::Storage);
         }
-        self.selection = Some(selection::Selection::new(rows, backing)?);
+        self.selection = Some(selection::Selection::new(rows, replays, backing)?);
         Ok(())
     }
     pub(super) fn selected(&self) -> bool {
