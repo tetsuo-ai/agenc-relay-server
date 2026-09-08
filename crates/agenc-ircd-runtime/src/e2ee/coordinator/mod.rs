@@ -48,6 +48,7 @@ pub(crate) use delivery_owner::retention::maintenance::{
 };
 pub mod events;
 pub mod execute;
+pub(crate) mod mailbox_expiry;
 mod mailbox_restore;
 pub mod ops;
 pub mod request;

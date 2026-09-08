@@ -3051,8 +3051,58 @@ fail, and 21 qualification tests remain ignored. The runtime suite has 1,148
 passes. Source policy covers 862 Rust files. Exact inputs, logs, and workspace
 executables are in `cap79-mailbox-retirement-final-proof`.
 
-CAP-79 still needs durable expiry of resident mailbox items and independent
-shared-body retention. Cleanup does not delete shared object bodies whose
+The durable-expiry follow-up reproduces three failures at source checkpoint
+`23ecb6c34de1e13dd87a3a4ebb60713407b22094`. A valid application envelope and
+matching conversation metadata are committed through StateCore and restored by
+the composed no-peer coordinator. Its actual idle timer stages no cleanup:
+one test fails in 0.08 seconds. `cap79-mailbox-expiry-red-proof` preserves the
+exact test inputs, runtime executable, and log. This fixture proves storage,
+startup and timer behavior; it does not claim a device membership proof or MLS
+decryption.
+
+Two domain tests fail before cleanup: ACK lookup replays a retained result at
+its expiry boundary, and consumes an expired item whose delivery grant is
+still live. `cap79-mailbox-expiry-admission-red-proof` preserves both tests and
+the exact domain executable. An earlier module-path compiler error is not
+behavioral evidence. ACK lookup now enforces both retention boundaries before
+cleanup. Idle maintenance selects at most 128 Item or ACK metadata rows per
+page, including unexpired rows, and reserves memory before capturing the page
+or constructing its writes. Expired grants clear the exact Item grant and
+Token row; expired items and ACKs are deleted. Sequence high-water rows remain.
+
+Only the matching storage commit and domain revision publish the captured
+page. Every changed Item, token index and ACK must still match before any
+memory mutation. A rejected write keeps the cursor at the same position, and
+a restart begins another safe scan. Unknown or regressed wall time and a
+quiescing owner cannot stage expiry. An admitted deletion follows its receipt
+even if the wall clock later changes. The existing retention sweep provides a
+fallback when timer admission fails; no connected peer or client request is
+required.
+
+After publication, the existing last-reference check releases only payload
+memory and its reservation. Shared mailbox references and stored object
+bodies remain. The selection page is bounded; the inherited last-reference
+check still examines retained mailbox references. No new claim about its
+worst-case CPU cost is made here.
+
+Nine storage-owner tests and six domain tests pass, including all three
+original failures. A 130-item dataset commits its first 128 deletions, loses
+the publication callback, restarts with the two remaining items, and preserves
+the exclusive sequence floor of 130 after cleanup. Other tests cover exact
+sealed readback, grant and ACK expiry, shared bodies, rejected writes, memory
+refusal, timer exhaustion, changed captured metadata, and clock and shutdown
+boundaries. An initial memory-fixture allocation error and Clippy's oversized
+enum diagnostic were corrected without policy waivers.
+
+Both inventories cover 736 source files and the release catalog contains
+1,007 critical regions. This is a source review update, without a new coverage
+measurement or a lower floor. All eight checkpoint gates pass: 2,620 tests
+pass, none fail, and 21 qualification tests remain ignored. The runtime suite
+has 1,157 passes and source policy covers 869 Rust files. Exact inputs, logs,
+and workspace executables are in `cap79-mailbox-expiry-final-proof`.
+
+CAP-79 still needs independent shared-body retention and larger-capacity
+qualification. Cleanup does not delete shared object bodies whose
 independent retention requirements remain unresolved. Every surviving body
 still counts against the disk ceiling, and the global object collector
 continues to refuse capacity loss under CAP-95.

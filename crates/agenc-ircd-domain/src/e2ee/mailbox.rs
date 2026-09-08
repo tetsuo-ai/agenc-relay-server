@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+pub mod expiry;
+
 use super::limits::{
     MAILBOX_ACK_RETENTION_SECONDS, MAILBOX_DELIVERY_TOKEN_TIMEOUT_SECONDS, MAX_BATCH_OBJECTS,
 };
@@ -530,6 +532,9 @@ impl Mailboxes {
         now: u64,
     ) -> Result<Option<ItemKey>, MailboxError> {
         if let Some(record) = self.acks.get(&(target, token)) {
+            if record.retain_until <= now {
+                return Err(MailboxError::TokenInvalid);
+            }
             if record.object_id != object_id {
                 return Err(MailboxError::ObjectMismatch);
             }
@@ -539,6 +544,7 @@ impl Mailboxes {
         let item = self.items.get(&key).ok_or(MailboxError::TokenInvalid)?;
         let grant = item.grant.ok_or(MailboxError::TokenInvalid)?;
         let valid = key.target == target
+            && item.expires_at > now
             && grant.token == token
             && grant.session_generation == session_generation
             && grant.expires_at > now;

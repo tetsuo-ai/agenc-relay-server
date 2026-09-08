@@ -2,6 +2,9 @@
 
 //! Device mailboxes.
 
+#[path = "mailbox/expiry.rs"]
+mod expiry;
+
 use super::*;
 
 const TARGET: Target = Target {

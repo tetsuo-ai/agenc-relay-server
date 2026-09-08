@@ -1,5 +1,6 @@
 //! Stored application ciphertext needs no global memory copy when no mailbox retains it.
 #![forbid(unsafe_code)]
+mod expiry;
 mod helpers;
 mod io;
 mod selection;

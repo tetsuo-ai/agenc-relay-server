@@ -14,6 +14,7 @@ mod companion;
 mod convert;
 mod grace;
 mod history;
+mod mailbox_expiry;
 mod object_read;
 mod origin;
 mod query;
@@ -213,6 +214,7 @@ enum PendingCommit {
     /// Startup retirement cannot publish to any live link.
     CompanionRestore(Box<startup::retirement::Receipt>),
     CompanionReplayMaintenance(Box<replay_maintenance::Receipt>),
+    CompanionMailboxExpiry(Box<mailbox_expiry::Receipt>),
     /// A companion request batch; the executor holds its result.
     Companion {
         peer: ServerId,
@@ -296,6 +298,7 @@ pub struct FederationCoordinator {
     companion_response_read: Option<Box<response_read::Pending>>,
     companion_object_read: Option<Box<object_read::Pending>>,
     replay_maintenance: replay_maintenance::Worker,
+    mailbox_expiry: mailbox_expiry::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
     barriers: BTreeMap<ServerId, OpenBarrier>,
@@ -375,6 +378,7 @@ impl FederationCoordinator {
             companion_response_read: None,
             companion_object_read: None,
             replay_maintenance: replay_maintenance::Worker::default(),
+            mailbox_expiry: mailbox_expiry::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
         }
@@ -1273,6 +1277,7 @@ impl FederationCoordinator {
     ) -> bool {
         grace::timer_fired(self, context, entry)
             || replay_maintenance::timer_fired(self, context, entry)
+            || mailbox_expiry::timer_fired(self, context, entry)
             || resume_reconciliation::timer_fired(self, context, entry)
             || snapshot::timer_fired(self, context, entry)
             || self.companion_timer_fired(context, entry)
@@ -1374,14 +1379,11 @@ impl FederationCoordinator {
     fn take_pending_for_receipt(&mut self, context: &StateCoreContext) -> Option<PendingCommit> {
         // Account completion runs earlier in the router's callback and can
         // stage a new outer result. That result does not belong to this receipt.
-        if matches!(self.pending.as_ref(), Some(PendingCommit::Request { staged_after, .. })
-            if context.head().storage_commit_sequence <= *staged_after)
-            || matches!(self.pending.as_ref(), Some(PendingCommit::ResumeAcknowledged(receipt))
-                if context.head().storage_commit_sequence <= receipt.staged_after)
-            || matches!(self.pending.as_ref(), Some(PendingCommit::CompanionRestore(receipt))
-                if context.head().storage_commit_sequence <= receipt.staged_after)
-            || matches!(self.pending.as_ref(), Some(PendingCommit::CompanionReplayMaintenance(receipt))
-                if context.head().storage_commit_sequence <= receipt.staged_after)
+        if self
+            .pending
+            .as_ref()
+            .and_then(PendingCommit::staged_after)
+            .is_some_and(|commit| context.head().storage_commit_sequence <= commit)
         {
             None
         } else {
@@ -1395,6 +1397,9 @@ impl FederationCoordinator {
         self.settle_remote_results(context);
         let pending = self.take_pending_for_receipt(context);
         match pending {
+            Some(PendingCommit::CompanionMailboxExpiry(receipt)) => {
+                mailbox_expiry::committed(self, context, *receipt);
+            }
             Some(PendingCommit::CompanionReplayMaintenance(receipt)) => {
                 replay_maintenance::committed(self, context, *receipt);
             }
@@ -1561,6 +1566,7 @@ impl FederationCoordinator {
             self.continue_delivery_work(context, peer);
         }
         replay_maintenance::advance(self, context);
+        mailbox_expiry::advance(self, context);
     }
 
     fn replay_io_busy(&self) -> bool {
@@ -1611,6 +1617,9 @@ impl FederationCoordinator {
         error: agenc_ircd_storage::StorageError,
     ) {
         match self.pending.take() {
+            Some(PendingCommit::CompanionMailboxExpiry(receipt)) => {
+                mailbox_expiry::rejected(self, context, *receipt);
+            }
             Some(PendingCommit::CompanionReplayMaintenance(receipt)) => {
                 replay_maintenance::rejected(self, context, *receipt);
             }
