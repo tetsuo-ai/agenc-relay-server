@@ -25,6 +25,9 @@ mod mailbox;
 #[path = "recovery_reinit.rs"]
 mod reinit_endpoints;
 
+#[path = "recovery_gate_rows.rs"]
+mod declared_gates;
+
 #[test]
 fn a_pending_restored_route_cannot_sign_a_new_finalization() -> TestResult {
     assert_pending_finalization_refused(true)

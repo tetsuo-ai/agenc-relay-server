@@ -4,6 +4,7 @@ mod capacity;
 mod expiry;
 mod helpers;
 mod io;
+mod recovery_gates;
 mod request_expiry;
 mod selection;
 use super::*;

@@ -51,6 +51,7 @@ pub mod execute;
 pub(crate) mod mailbox_expiry;
 mod mailbox_restore;
 pub mod ops;
+mod recovery_gates;
 pub mod request;
 pub(crate) mod request_expiry;
 mod resident;
@@ -176,6 +177,8 @@ pub struct CompanionState {
     /// Durable next-sequence floors, independent of replay result retention.
     pub origin_sequences:
         BTreeMap<CompanionOriginKey, agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow>,
+    /// Exact declared recovery provenance retains its memory owner after startup.
+    pub(crate) recovery_gates: recovery_gates::Gates,
     /// Retained results and responses by request object identifier.
     pub results: BTreeMap<[u8; 32], StoredResult>,
     /// Per-conversation retained state the sequencer needs between records.
@@ -456,6 +459,23 @@ impl CompanionCoordinator {
         value: &agenc_ircd_storage::PersistentRecordValue,
     ) {
         self.restore.admit(table, key, value);
+    }
+
+    /// Supplies backing before a declared recovery row allocates retained metadata.
+    pub(crate) fn admit_restored_with_backing(
+        &mut self,
+        table: agenc_ircd_storage::TableId,
+        key: &agenc_ircd_storage::StoredKey,
+        value: &agenc_ircd_storage::PersistentRecordValue,
+        backing: &crate::budget::BackingReservationPort,
+    ) {
+        if table == agenc_ircd_storage::TableId::E2eeState
+            && value.record_kind() == agenc_ircd_storage::e2ee_records::RECOVERY_GATE_KIND
+        {
+            self.restore.admit_gate(key, value, backing);
+        } else {
+            self.admit_restored(table, key, value);
+        }
     }
 
     /// Rebuilds the companion state from the collected rows.

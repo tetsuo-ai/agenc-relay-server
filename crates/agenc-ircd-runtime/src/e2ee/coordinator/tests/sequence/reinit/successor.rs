@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod declared_recovery;
 mod reconstruction;
 
 use super::*;

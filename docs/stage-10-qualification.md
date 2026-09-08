@@ -2496,11 +2496,10 @@ protect every mutation path.
 
 Base Section 18.4 and companion Section 13.7.1 prohibit new encrypted authority
 while the restored route is pending. They permit only exact previously signed
-recovery evidence under the specified validation rules. Neither domain
-resolve_recovery method has a runtime caller, and the current loader does not
-consume the legacy per-route recovery record or source-guard provenance to
-establish that evidence boundary. Setting the typed flag under CAP-72 is
-therefore necessary but does not complete encrypted recovery.
+recovery evidence under the specified validation rules. Before these repairs,
+neither domain resolve_recovery method had a runtime caller, and the loader
+ignored per-route recovery records and source-guard provenance. Setting the
+typed flag under CAP-72 did not complete encrypted recovery.
 
 Two runtime regressions now reproduce the finalization defect. The fixture
 first verifies a valid finalization on a normal route, then changes only the
@@ -2531,6 +2530,61 @@ The scan charges every inspected encoded object against the existing account
 mailbox byte ceiling, including excluded and repeated objects. These focused
 results do not close the terminal-evidence lifecycle or replace the required
 reverted-behavior proofs for the additional guards.
+
+The declared kind-one recovery regression proves that the original companion
+loader ignores the entire row, including the restored
+binding, accepted state, sequencer head, recovery epoch and source guard.
+New direct reconstruction cases pair a valid retained candidate and normal
+finalization control with the typed Pending route and a declared recovery
+gate. The matching declaration must preserve both Pending guards; separate
+changes to each restored head or epoch must refuse reconstruction. All four
+contradictory declarations are wrongly accepted; the matching control passes.
+The run records four failures and one pass in 0.27 seconds, with exact inputs
+and executable frozen in `cap73-declared-gates-red-proof`. The first attempt
+had an incorrect fixture import and is not behavioral evidence. This fixture
+tests the real companion collector, without claiming a signed backup or
+storage-owner restart.
+
+Declared recovery rows now reserve memory before capture and retain their
+exact source guard, epoch and heads until coordinator destruction. Invalid
+keys, missing backing, refused memory and late metadata make reconstruction
+fail even if valid rows arrive later. Pending declarations require the exact
+route heads, current recovery epoch and Pending flag. Normal declarations
+require the current epoch and normal flag; ordinary live heads may advance.
+Closed and Conflict declarations preserve their original source epoch and
+blocked guards. Closed requires a tombstone and close identifier.
+This validates retained terminal metadata, without establishing a new signed
+terminal chain. Legacy typed Pending routes remain blocked without an invented
+source guard.
+
+Recovery installation follows successor validation and requires the route,
+log, lifecycle and conversation to remain present. The new lifecycle transition
+preserves pending joins, bootstrap state and pending removals. An introduced
+ordering regression discarded a successor after installing its recovery row;
+the exact failing run is frozen in `cap73-declared-successor-order-red-proof`.
+An introduced Normal-head equality check rejected a valid finalized route on
+restart; its failing run is frozen in `cap73-declared-normal-heads-red-proof`.
+Both cases now pass.
+
+All 23 new recovery tests pass within the runtime suite's 1,190 passes, zero
+failures and one explicitly ignored capacity test. This includes storage-owner
+shutdown and reopen for all four orphan gate kinds, with exact sealed readback,
+composed startup refusal, unchanged storage commit and released memory. That
+case does not construct a signed backup or a valid closed conversation. The
+original four Pending-head/epoch failures and both introduced regressions
+remain archived. All eight checkpoint gates pass with 2,653 workspace tests,
+zero failures and 22 default-ignored tests. Both inventories cover 751 source
+files. The release catalog contains 1,037 critical regions, including ten new
+regions and 42 existing-region rebindings. Coverage thresholds are unchanged;
+this catalog update is not a new coverage measurement. The first gate attempt
+found three unchecked vector accesses in a new test, and the second passed
+the workspace suite before the source policy required predicate decomposition.
+Both attempts are archived; checked accesses and a focused head-comparison
+helper pass the final gates.
+
+Normal-row persistence, binding declared restore to the authentic current
+source heads, terminal-evidence ingestion and historical authority validation
+remain open. The new startup checks do not qualify those paths.
 
 ### CAP-74: the persistent registry rejects every chain-witness evidence row
 

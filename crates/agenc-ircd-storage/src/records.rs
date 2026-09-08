@@ -140,8 +140,28 @@ impl E2eeRecoveryGate {
         self.state
     }
 
-    pub(crate) const fn conversation_id(self) -> StorageDigest {
+    /// Returns the exact conversation whose recovery state is recorded.
+    #[must_use]
+    pub const fn conversation_id(self) -> StorageDigest {
         self.conversation_id
+    }
+
+    /// Returns the binding authenticated by the restored source.
+    #[must_use]
+    pub const fn restored_binding_id(self) -> StorageDigest {
+        self.restored_binding_id
+    }
+
+    /// Returns the accepted state authenticated by the restored source.
+    #[must_use]
+    pub const fn restored_accepted_state_id(self) -> StorageDigest {
+        self.restored_accepted_state_id
+    }
+
+    /// Returns the sequencer head authenticated by the restored source.
+    #[must_use]
+    pub const fn restored_sequencer_head_id(self) -> StorageDigest {
+        self.restored_sequencer_head_id
     }
 
     /// Returns the lineage epoch bound by this gate.

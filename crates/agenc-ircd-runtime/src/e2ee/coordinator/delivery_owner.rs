@@ -30,6 +30,12 @@ pub(super) struct LocalIdentity {
     recovery_epoch: RecoveryEpoch,
 }
 
+impl LocalIdentity {
+    pub(super) const fn recovery_epoch(self) -> RecoveryEpoch {
+        self.recovery_epoch
+    }
+}
+
 impl CompanionCoordinator {
     /// Binds durable delivery to the authenticated local database identity.
     pub fn configure_delivery_identity(

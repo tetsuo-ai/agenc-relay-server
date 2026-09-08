@@ -209,7 +209,9 @@ impl Harness {
                 continue;
             };
             let value = agenc_ircd_storage::PersistentRecordValue::decode(*table, plaintext)?;
-            fresh.coordinator.admit_restored(*table, key, &value);
+            fresh
+                .coordinator
+                .admit_restored_with_backing(*table, key, &value, &fresh.backing);
             fresh
                 .writes
                 .push(Write::put(*table, key.clone(), plaintext.to_vec())?);

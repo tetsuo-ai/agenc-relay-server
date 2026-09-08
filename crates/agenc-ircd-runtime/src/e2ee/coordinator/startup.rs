@@ -105,6 +105,7 @@ struct PolicyRow {
 #[derive(Default)]
 pub(super) struct Restore {
     objects: objects::Restore,
+    gates: super::recovery_gates::Gates,
     routes: BTreeMap<[u8; 32], RouteRow>,
     records: BTreeMap<([u8; 32], u64), RecordRow>,
     candidates: BTreeMap<([u8; 32], u64), CandidateRow>,
@@ -141,6 +142,7 @@ impl Restore {
         }
         let body = value.body();
         match value.record_kind() {
+            agenc_ircd_storage::e2ee_records::RECOVERY_GATE_KIND => self.objects.poison(),
             ROUTE_ROW_KIND => {
                 if let (Ok(id), Ok(row)) = (RouteRow::parse_key(key), RouteRow::decode(body)) {
                     self.routes.insert(id, row);
@@ -177,6 +179,17 @@ impl Restore {
                 self.delivery.admit_owner(key, value);
             }
             _ => {}
+        }
+    }
+
+    pub(super) fn admit_gate(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        backing: &crate::budget::BackingReservationPort,
+    ) {
+        if self.objects.selected() || self.gates.admit(key, value, backing).is_err() {
+            self.objects.poison();
         }
     }
 
@@ -442,6 +455,12 @@ pub(super) fn rebuild(
     coordinator: &mut CompanionCoordinator,
     restore: Restore,
 ) -> Result<(), super::CompanionFault> {
+    restore.gates.validate(
+        &restore.routes,
+        coordinator
+            .delivery_identity
+            .map(super::delivery_owner::LocalIdentity::recovery_epoch),
+    )?;
     let network_id = coordinator.network_id;
     let state = &mut coordinator.state;
     restore.objects.apply(state)?;
@@ -462,6 +481,7 @@ pub(super) fn rebuild(
         restore_route(state, &network_id, &index, &rows, conversation_id, &row);
     }
     restore_successors(state, &index)?;
+    restore.gates.install(state)?;
     restore.delivery.apply(coordinator)
 }
 

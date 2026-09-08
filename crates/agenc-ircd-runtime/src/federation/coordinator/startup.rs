@@ -240,7 +240,12 @@ fn admit(
         }
         (TableId::E2eeObject | TableId::E2eeState, _) => {
             if let Some(executor) = coordinator.companion_exec.as_mut() {
-                executor.admit_restored(table, key, value);
+                executor.admit_restored_with_backing(
+                    table,
+                    key,
+                    value,
+                    &context.backing_reservations(),
+                );
             }
             Ok(())
         }
