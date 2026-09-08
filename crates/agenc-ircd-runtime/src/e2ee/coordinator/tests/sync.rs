@@ -642,10 +642,10 @@ fn resume_opens_a_transfer_for_a_new_scope_then_replays_the_exact_cursor() -> Te
         stream.rows.push_back(super::super::events::StreamRow {
             sequence,
             event_id: [u8::try_from(sequence)? + 1; 16],
-            event: wire(
+            event: super::super::events::SharedBytes::for_fixture(wire(
                 IrcWireObjectKind::FederationOrigin,
                 &origin_object(0, [0; 32], None, None)?.0,
-            )?,
+            )?)?,
             payload: None,
             acknowledgement: agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement::Unacknowledged,
         });

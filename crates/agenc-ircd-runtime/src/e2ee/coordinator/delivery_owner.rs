@@ -8,6 +8,7 @@ pub(super) mod fetch;
 pub(super) mod pages;
 pub(super) mod publication;
 pub(super) mod restore;
+pub(super) mod retention;
 pub(crate) mod retirement;
 pub(super) mod snapshot;
 

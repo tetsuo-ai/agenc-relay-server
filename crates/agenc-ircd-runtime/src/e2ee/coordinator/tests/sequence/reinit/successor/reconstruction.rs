@@ -267,7 +267,9 @@ async fn reconstruct(
             fresh.coordinator.admit_restored(table, &record.key, &value);
         }
     }
-    let result = fresh.coordinator.finish_restore();
+    let result = fresh
+        .coordinator
+        .finish_restore_with_backing(storage.context_mut()?.backing_reservations());
     Ok((fresh.coordinator, result))
 }
 

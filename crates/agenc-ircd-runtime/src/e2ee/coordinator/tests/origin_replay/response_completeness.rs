@@ -49,6 +49,7 @@ fn retained_page() -> TestResult<(CompanionCoordinator, Decoded, Vec<Vec<u8>>)> 
         1,
         500,
         BarrierInputs {
+            backing: backing(),
             base_counts: None,
             base_capacity: &|_, _, _| true,
             entropy: &mut Entropy,

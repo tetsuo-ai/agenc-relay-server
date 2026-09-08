@@ -7,6 +7,7 @@
 
 mod barriers;
 mod delivery;
+mod replay;
 pub(super) mod retirement;
 
 use agenc_ircd_domain::federation::{
@@ -62,6 +63,7 @@ pub(super) struct Loader {
     retry: Option<StoredKey>,
     pinned_commit: Option<u64>,
     delivery: delivery::Loader,
+    replay: replay::Loader,
     retirement: retirement::Loader,
     rebuilt: bool,
 }
@@ -77,7 +79,7 @@ impl Loader {
 
     /// Reports whether the read belongs to the loader.
     pub(super) fn owns(&self, read_id: StorageReadId) -> bool {
-        self.pending == Some(read_id) || self.delivery.owns(read_id)
+        self.pending == Some(read_id) || self.delivery.owns(read_id) || self.replay.owns(read_id)
     }
 }
 
@@ -124,7 +126,7 @@ fn request_page(
 /// that has not returned gets one grace interval measured from this boot,
 /// and an expiry interrupted by the restart resumes hiding its sessions.
 fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
-    if rebuild_once(coordinator).is_err() {
+    if rebuild_once(coordinator, context).is_err() {
         fail_restore(coordinator);
         return;
     }
@@ -139,12 +141,17 @@ fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContex
     coordinator.drain_backlog(context);
 }
 
-fn rebuild_once(coordinator: &mut FederationCoordinator) -> Result<(), Violation> {
+fn rebuild_once(
+    coordinator: &mut FederationCoordinator,
+    context: &StateCoreContext,
+) -> Result<(), Violation> {
     if coordinator.loader.rebuilt {
         return Ok(());
     }
     if let Some(executor) = coordinator.companion_exec.as_mut() {
-        executor.finish_restore().map_err(|_| Violation::Codec)?;
+        executor
+            .finish_restore_with_backing(context.backing_reservations())
+            .map_err(|_| Violation::Codec)?;
     }
     barriers::finish(coordinator)?;
     coordinator.loader.rebuilt = true;
@@ -157,10 +164,22 @@ pub(super) fn read_completed(
     context: &mut StateCoreContext,
     message: StorageReadCompletionMessage,
 ) {
+    if coordinator.loader.replay.owns(message.read_id) {
+        replay::completed(coordinator, context, message);
+        return;
+    }
     if coordinator.loader.delivery.owns(message.read_id) {
         delivery::completed(coordinator, context, message);
         return;
     }
+    complete_table(coordinator, context, message);
+}
+
+fn complete_table(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    message: StorageReadCompletionMessage,
+) {
     if coordinator.loader.failed || coordinator.loader.pending != Some(message.read_id) {
         return;
     }

@@ -36,6 +36,10 @@ use crate::federation::LinkId;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
 mod delivery_owner;
+pub(crate) use delivery_owner::acknowledgement::read::{
+    Job as AckReadJob, Request as AckReadRequest,
+};
+pub(crate) use delivery_owner::restore::replay::Request as ReplayRestoreRequest;
 pub mod events;
 pub mod execute;
 mod mailbox_restore;
@@ -444,6 +448,15 @@ impl CompanionCoordinator {
     pub fn finish_restore(&mut self) -> Result<(), CompanionFault> {
         let restore = std::mem::take(&mut self.restore);
         startup::rebuild(self, restore)
+    }
+
+    /// The composed storage adapter supplies the existing process memory budget.
+    pub(crate) fn finish_restore_with_backing(
+        &mut self,
+        backing: crate::budget::BackingReservationPort,
+    ) -> Result<(), CompanionFault> {
+        self.restore.delivery.set_backing(backing);
+        self.finish_restore()
     }
 
     /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.

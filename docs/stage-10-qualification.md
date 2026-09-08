@@ -2721,7 +2721,7 @@ The base federation accounting gap is recorded as CAP-81.
 
 ### CAP-79: companion replay discards acknowledged rows below published limits
 
-Open. The coordinator trims acknowledged replay to 4,096 rows, although
+Open. The original coordinator trimmed acknowledged replay to 4,096 rows, although
 Companion Section 16 publishes limits of 1,000,000 rows, 1 GiB, and 24 hours
 per target. A test retaining 4,097 valid event rows below those bounds actually
 keeps only 4,096. It fails in 0.28 seconds in `cap79-retention-red.log`, with
@@ -2736,9 +2736,9 @@ starts with 4,097 sealed outbox rows, including 4,096 already acknowledged
 rows, and observes only 4,096 after the next committed ACK. The failing run
 and exact inputs are in `cap79-durable-retention-red-proof`; it seeds the
 previous ACK history instead of executing 4,096 earlier transactions. Its
-runtime test source is preserved in `cap79-pending-runtime-regression` while
-the separate format and migration checkpoint is validated. CAP-79 remains
-open; this test is not a passing or withdrawn result.
+original runtime test source is preserved in `cap79-pending-runtime-regression`.
+The test was temporarily excluded during the separate format and migration
+checkpoint; the current adapted regression is back in the compiled suite.
 
 The [generation-4 storage contract](storage-schema-generation-4.md) adds
 versioned replay-owner and acknowledgement-range codecs plus an explicit
@@ -2756,8 +2756,59 @@ The first full suite also passes, but its source-policy check rejects one
 constructor's complexity. Splitting suffix validation resolves that failure;
 `cap79-schema-four-pre-decomposition-gates.json` preserves the earlier run.
 The final logs and exact inputs are in `cap79-schema-four-final-proof`.
-Live retention, paged reconstruction, charged object reads, and bounded
-physical cleanup are still required.
+The working runtime now writes an ACK as three records: the delivery owner,
+replay owner, and one acknowledgement range. Receipt application checks the
+prior owner and replay state before publishing the cursor and retention
+metadata. Legacy replay metadata comes from complete sealed-storage recovery.
+The adapted regression seeds and reconstructs 4,096 legacy ACKs, commits the
+next ACK through the storage owner, and preserves all 4,097 physical references.
+Their original per-row fields remain unchanged; the journal covers the new ACK.
+Composed startup validates all 4,097 bodies and restores their effective ACKs
+while keeping 4,096 in the cache. The test passes in 8.08 seconds; its 51 source
+inputs, log, and executable are frozen in `cap79-durable-retention-journal-proof`.
+
+Startup uses charged metadata pages and body batches, validates every retained
+body, and keeps recovered streams private until their jobs finish. Composed
+tests also refuse an absent body outside the cache. Actual sealed-read tests
+verify that cancellation and repeated startup retain read reservations until
+the matching completion is discarded.
+
+The live ACK adapter now reads an unavailable retention prefix through bounded
+sealed metadata pages. Each request keeps the accepted ACK time and exact
+source owner, replay inventory, link, and recovery scope. The reader requires
+one storage commit and stops at the first retained head. It cannot remove an
+open barrier part. Reload waits for the read, and peer traffic stays queued
+until the read or subsequent receipt finishes. Cancellation keeps ownership
+until the matching result is discarded and cannot fail a replacement link.
+Five actual-storage adapter tests cover expiry with paired barrier receipts,
+refused writes, cancellation, a commit change between pages, and a persisted
+cutoff that discards open barrier proof. The last case exposed a failure after
+stream installation in the first integrated reader. The private job now
+rejects the cutoff before returning a recovered stream. The separate
+4,097-row prefix test crosses cold history in 35 metadata reads without
+reloading bodies or publishing an ACK.
+
+The live cache now keeps at most 4,096 acknowledged rows and 16 MiB of complete
+event-plus-payload bytes. Eviction releases shared body reservations and keeps
+the unacknowledged tail. The bookkeeping regression fails with five 4 MiB
+acknowledged payloads before the byte bound is applied; its 61 dirty source
+inputs, log, and executable are in `cap79-live-hot-bytes-red-proof`. This test
+constructs cache rows and does not claim object-codec or storage validation.
+An acknowledged barrier can use the complete validated replay inventory when
+its bodies are cold; missing inventory, a different generation, or a cutoff
+inside the barrier still fails. Unacknowledged parts remain resident.
+
+All eight runtime checkpoint gates pass: 2,517 tests pass, none fail, and
+21 qualification tests remain ignored. The runtime unit suite contains 1,060
+passing tests. Source policy covers 816 Rust files; both reviewed inventories
+cover 683 files. The release catalog contains 848 critical regions, including
+102 additions, with unchanged coverage floors and no new measurement. The
+final logs, source inputs, and actual workspace executables are preserved in
+`cap79-live-ack-final-proof`.
+CAP-79 still needs physical cleanup after the durable cutoff, age-only
+maintenance, cold object and complete result delivery, and selective object
+reconstruction. The global object collector continues to refuse capacity loss
+under CAP-95.
 
 ### CAP-80: mailbox reconstruction can replace the current delivery grant
 

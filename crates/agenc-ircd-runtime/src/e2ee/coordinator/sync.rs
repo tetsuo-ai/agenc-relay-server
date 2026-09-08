@@ -113,6 +113,8 @@ pub(crate) enum Action {
     SendPage(SnapshotPageOutput),
     /// Reads one exact immutable page under a submitted-result lease.
     ReadSnapshotPage(SnapshotPageRequest),
+    /// Reads a bounded retained prefix before proposing a journal ACK.
+    ReadAcknowledgement(Box<super::AckReadRequest>),
     /// Stages one durable batch and marks the pending work.
     Stage {
         /// The rows.

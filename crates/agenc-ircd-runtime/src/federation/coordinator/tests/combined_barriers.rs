@@ -1,6 +1,7 @@
 //! Both streams and ACK transitions pass through the actual storage owner.
 #![forbid(unsafe_code)]
 
+mod ack_read;
 mod replay;
 mod resume_prefix;
 
@@ -99,6 +100,7 @@ impl Fixture {
                 payload: None,
             })
             .collect::<Vec<_>>();
+        let backing = core.context_mut()?.backing_reservations();
         if prefix {
             let ordinary = events::sequence_copies(
                 executor,
@@ -107,6 +109,7 @@ impl Fixture {
                 1,
                 core.context_mut()?.entropy_mut(),
                 &std::collections::BTreeMap::new(),
+                &backing,
             )
             .map_err(|e| format!("ordinary sequence: {e:?}"))?;
             let context = core.context_mut()?;
@@ -145,6 +148,7 @@ impl Fixture {
             state_generation,
             core.context_mut()?.entropy_mut(),
             &assignments,
+            &backing,
         )
         .map_err(|e| format!("sequence: {e:?}"))?;
         let first = sequenced.copies.first().ok_or("companion first")?;

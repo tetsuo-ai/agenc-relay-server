@@ -288,6 +288,7 @@ pub struct FederationCoordinator {
     /// The E2EE executor; `None` on a node without a sequencer.
     companion_exec: Option<CompanionCoordinator>,
     companion_page_read: Option<companion::page_read::Pending>,
+    companion_ack_read: Option<Box<companion::ack_read::Pending>>,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
     barriers: BTreeMap<ServerId, OpenBarrier>,
@@ -362,6 +363,7 @@ impl FederationCoordinator {
             counters: CoordinatorCounters::default(),
             companion_exec: None,
             companion_page_read: None,
+            companion_ack_read: None,
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
         }
@@ -477,6 +479,7 @@ impl FederationCoordinator {
     #[must_use]
     pub fn reload_ready(&self) -> bool {
         self.pending.is_none()
+            && self.companion_ack_read.is_none()
             && self.crypto.is_none()
             && self.replays.is_empty()
             && !self.history.busy()
@@ -501,7 +504,7 @@ impl FederationCoordinator {
         if !self.peers.contains_key(&peer) {
             return;
         }
-        if self.pending.is_some()
+        if (self.pending.is_some() || self.companion_ack_read.is_some())
             && matches!(
                 event,
                 LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_)
@@ -1184,6 +1187,7 @@ impl FederationCoordinator {
     #[must_use]
     pub fn owns_storage_read(&self, read_id: StorageReadId) -> bool {
         self.loader.owns(read_id)
+            || companion::ack_read::owns(self, read_id)
             || companion::page_read::owns(self, read_id)
             || self.replays.contains_key(&read_id)
             || snapshot::owns_read(self, read_id)
@@ -1197,6 +1201,10 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
+        if companion::ack_read::owns(self, message.read_id) {
+            companion::ack_read::completed(self, context, message);
+            return;
+        }
         if companion::page_read::owns(self, message.read_id) {
             companion::page_read::completed(self, context, message);
             return;
@@ -1485,7 +1493,11 @@ impl FederationCoordinator {
     /// Resumes bounded background work that waits for a free batch slot:
     /// pending snapshot rows and expiry cleanup.
     fn continue_background(&mut self, context: &mut StateCoreContext) {
-        if context.in_flight() || context.pending_len() != 0 || self.loader.blocks_admission() {
+        if context.in_flight()
+            || context.pending_len() != 0
+            || self.loader.blocks_admission()
+            || self.companion_ack_read.is_some()
+        {
             return;
         }
         let peers: Vec<ServerId> = self.peers.keys().copied().collect();
@@ -1624,7 +1636,10 @@ impl FederationCoordinator {
     /// Replays backlogged link traffic in arrival order until a replayed
     /// item stages the next batch.
     fn drain_backlog(&mut self, context: &mut StateCoreContext) {
-        while self.pending.is_none() && !self.loader.blocks_admission() {
+        while self.pending.is_none()
+            && self.companion_ack_read.is_none()
+            && !self.loader.blocks_admission()
+        {
             let Some(message) = self.backlog.pop_front() else {
                 break;
             };

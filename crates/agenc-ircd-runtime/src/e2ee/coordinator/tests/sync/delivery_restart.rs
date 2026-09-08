@@ -5,6 +5,9 @@ mod acknowledged_barriers;
 mod combined_owner;
 mod pending_publication;
 mod pending_recovery;
+mod replay_job;
+mod replay_startup;
+mod retention;
 mod scoped_outbox;
 
 use std::collections::BTreeMap;
@@ -158,6 +161,7 @@ impl RestartFixture {
             41,
             &mut self.entropy,
             &BTreeMap::new(),
+            &self.storage.context_mut()?.backing_reservations(),
         )
         .map_err(|error| format!("sequence: {error:?}"))?;
         self.commit(sequenced.writes).await?;
@@ -201,7 +205,8 @@ impl RestartFixture {
                 restored.admit_restored(*table, &record.key, &value);
             }
         }
-        restored.finish_restore()?;
+        replay_startup::recover(self, &mut restored).await?;
+        restored.finish_restore_with_backing(self.storage.context_mut()?.backing_reservations())?;
         self.coordinator = restored;
         Ok(())
     }
@@ -740,6 +745,7 @@ async fn shared_event_payload_and_response_storage_puts_are_exactly_deduplicated
         41,
         &mut fixture.entropy,
         &BTreeMap::new(),
+        &fixture.storage.context_mut()?.backing_reservations(),
     )
     .map_err(|error| format!("sequence: {error:?}"))?;
     super::super::super::delivery_owner::append_object(&mut sequenced.writes, &bytes)
@@ -762,7 +768,7 @@ async fn shared_event_payload_and_response_storage_puts_are_exactly_deduplicated
             .and_then(|stream| stream.rows.back())
             .ok_or("retained copy")?;
         assert_eq!(
-            row.payload.as_ref().map(|(_, bytes)| bytes.as_slice()),
+            row.payload.as_ref().map(|(_, bytes)| &**bytes),
             Some(bytes.as_slice())
         );
     }

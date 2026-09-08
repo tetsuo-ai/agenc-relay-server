@@ -125,7 +125,10 @@ async fn reconstruct(fixture: &mut RestartFixture) -> TestResult<CompanionCoordi
                 assert_eq!(position, pinned);
                 restored.inventory_restored_delivery_page(&key, &value)?;
             }
-            restored.finish_restore()?;
+            super::replay_startup::recover(fixture, &mut restored).await?;
+            restored.finish_restore_with_backing(
+                fixture.storage.context_mut()?.backing_reservations(),
+            )?;
             return Ok(restored);
         };
         let (position, value) = read_value(fixture, TableId::E2eeState, &key).await?;

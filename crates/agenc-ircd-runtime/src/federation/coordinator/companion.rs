@@ -3,6 +3,7 @@
 //! against the state core as one batch, snapshot READY records stage their
 //! own batch, and committed lines go out over the live links.
 
+pub(super) mod ack_read;
 #[cfg(test)]
 #[path = "companion/tests/page_output.rs"]
 mod page_output_tests;
@@ -317,7 +318,7 @@ fn matches_planned(gate: &super::OpenBarrier, planned: &BarrierPlanned) -> bool 
         && !gate.companion_acked()
 }
 
-fn apply(
+pub(super) fn apply(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
@@ -335,6 +336,7 @@ fn apply(
             Ok(())
         }
         Action::ReadSnapshotPage(request) => page_read::submit(coordinator, context, request),
+        Action::ReadAcknowledgement(request) => ack_read::submit(coordinator, context, *request),
         Action::Stage { writes, work } => stage(coordinator, context, link, peer, writes, work),
         Action::ScheduleExpiry { at_millis } => {
             let _ = context.timers_mut().schedule(
@@ -360,7 +362,10 @@ fn execute_or_queue(
     if !executor.accepting_requests(peer) {
         return Err(Violation::Companion(CompanionViolation::Request));
     }
-    if coordinator.pending.is_some() || executor.has_pending() {
+    if coordinator.pending.is_some()
+        || coordinator.companion_ack_read.is_some()
+        || executor.has_pending()
+    {
         return executor
             .enqueue(link, peer, complete)
             .map_err(fault_violation);
@@ -794,7 +799,7 @@ pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
 ) {
-    while coordinator.pending.is_none() {
+    while coordinator.pending.is_none() && coordinator.companion_ack_read.is_none() {
         let Some(queued) = coordinator
             .companion_exec
             .as_mut()

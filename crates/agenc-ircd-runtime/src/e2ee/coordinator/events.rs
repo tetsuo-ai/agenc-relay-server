@@ -5,6 +5,13 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+#[cfg(test)]
+#[path = "events/cache/tests/mod.rs"]
+mod cache_tests;
+mod row_storage;
+mod shared_bytes;
+pub use shared_bytes::SharedBytes;
+
 use agenc_ircd_domain::e2ee::limits::{
     MAX_UNACKED_E2EE_EVENT_BYTES_PER_EDGE, MAX_UNACKED_E2EE_EVENTS_PER_EDGE,
 };
@@ -26,8 +33,9 @@ use agenc_ircd_types::ServerId;
 use super::{CompanionCoordinator, CompanionFault};
 use crate::state_core::durable::AccountServiceDurableWrite;
 
-/// ACKed rows retained for replay per edge.
+/// Acknowledged bodies retained in each edge's hot cache; durable history has separate limits.
 pub const MAX_ACKED_REPLAY_ROWS: usize = 4_096;
+pub(super) const MAX_ACKED_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// One queued event row of a delivery stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,9 +45,9 @@ pub struct StreamRow {
     /// Event identity.
     pub event_id: [u8; 16],
     /// The encoded `federation_event` wire object.
-    pub event: Vec<u8>,
+    pub event: SharedBytes,
     /// The referenced payload object identifier and bytes, if any.
-    pub payload: Option<([u8; 32], Vec<u8>)>,
+    pub payload: Option<([u8; 32], SharedBytes)>,
     /// Durable ACK state and original accepted retention-time metadata.
     pub acknowledgement: Acknowledgement,
 }
@@ -53,7 +61,7 @@ impl StreamRow {
 }
 
 /// The delivery stream of one target edge.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct DeliveryStream {
     /// Exact durable scope and cursor; absent only before READY is committed.
     pub owner: Option<DeliveryOwner>,
@@ -72,6 +80,10 @@ pub struct DeliveryStream {
     pub barrier: Option<(u64, u64)>,
     /// Later copies remain held until both profiles acknowledge their endpoints.
     pub(crate) hold_after: Option<u64>,
+    /// Complete durable replay inventory; cached bodies may cover only its tail.
+    pub(crate) replay: Option<super::delivery_owner::restore::replay::State>,
+    // Rows and their body handles must drop before their container reservation.
+    pub(crate) row_backing: Option<row_storage::Backing>,
 }
 
 impl DeliveryStream {
@@ -194,12 +206,29 @@ impl DeliveryStream {
         if self.barrier.is_some_and(|(_, last)| sequence >= last) {
             self.barrier = None;
         }
-        while self.rows.iter().filter(|row| row.acked()).count() > MAX_ACKED_REPLAY_ROWS {
-            if self.rows.front().is_some_and(|row| row.acked()) {
-                self.rows.pop_front();
-            } else {
+        self.trim_acknowledged_cache();
+    }
+
+    fn trim_acknowledged_cache(&mut self) {
+        let mut bytes = 0_u64;
+        let mut first = None;
+        for (count, row) in self.rows.iter().rev().filter(|row| row.acked()).enumerate() {
+            let row_bytes = row
+                .event
+                .len()
+                .saturating_add(row.payload.as_ref().map_or(0, |(_, body)| body.len()));
+            bytes = bytes.saturating_add(u64::try_from(row_bytes).unwrap_or(u64::MAX));
+            if count >= MAX_ACKED_REPLAY_ROWS || bytes > MAX_ACKED_CACHE_BYTES {
                 break;
             }
+            first = Some(row.sequence);
+        }
+        while self
+            .rows
+            .front()
+            .is_some_and(|row| row.acked() && first.is_none_or(|first| row.sequence < first))
+        {
+            self.rows.pop_front();
         }
     }
 
@@ -310,6 +339,7 @@ pub(crate) fn sequence_copies(
     state_generation: u64,
     entropy: &mut dyn agenc_ircd_types::EntropySource,
     barriers: &BTreeMap<ServerId, BarrierAssignment>,
+    backing: &crate::budget::BackingReservationPort,
 ) -> Result<Sequenced, E2eeReplyCode> {
     let mut copies = Vec::new();
     let mut writes = Vec::new();
@@ -327,12 +357,26 @@ pub(crate) fn sequence_copies(
         {
             Some((_, stream)) => stream,
             None => {
-                let stream = coordinator
+                let additional = plan
+                    .events()
+                    .iter()
+                    .filter(|event| event.target == planned.target)
+                    .count();
+                if coordinator
                     .state
                     .streams
                     .get(&planned.target)
-                    .cloned()
-                    .unwrap_or_default();
+                    .is_some_and(|stream| {
+                        stream.would_block(u64::try_from(additional).unwrap_or(u64::MAX), 0)
+                    })
+                {
+                    return Err(E2eeReplyCode::Syncing);
+                }
+                let stream = match coordinator.state.streams.get(&planned.target) {
+                    Some(stream) => stream.try_clone(additional, backing),
+                    None => DeliveryStream::with_row_capacity(additional, backing),
+                }
+                .map_err(|_| E2eeReplyCode::RateLimited)?;
                 streams.push((planned.target, stream));
                 streams
                     .last_mut()
@@ -388,8 +432,13 @@ pub(crate) fn sequence_copies(
         let row = StreamRow {
             sequence,
             event_id,
-            event: event.clone(),
-            payload: payload_id.zip(content.payload.clone()),
+            event: SharedBytes::from_owned(event, backing)
+                .map_err(|_| E2eeReplyCode::RateLimited)?,
+            payload: payload_id
+                .zip(content.payload.as_ref())
+                .map(|(id, bytes)| SharedBytes::copy_from(bytes, backing).map(|bytes| (id, bytes)))
+                .transpose()
+                .map_err(|_| E2eeReplyCode::RateLimited)?,
             acknowledgement: Acknowledgement::Unacknowledged,
         };
         writes.push(outbox_write(

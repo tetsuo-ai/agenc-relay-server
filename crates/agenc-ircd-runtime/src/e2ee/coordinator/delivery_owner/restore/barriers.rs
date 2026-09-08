@@ -3,6 +3,9 @@
 
 use super::{CompanionFault, DeliveryBarrier, DeliveryStream, IrcFederationEvent};
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn validate_event(
     gate: Option<&DeliveryBarrier>,
     event: &IrcFederationEvent,
@@ -67,9 +70,8 @@ pub(super) fn validate_complete(
     gate: &DeliveryBarrier,
 ) -> Result<(), CompanionFault> {
     let endpoint = gate.companion();
-    if gate.companion_acked() && stream.acked != Some((endpoint.last(), endpoint.final_event_id()))
-    {
-        return Err(CompanionFault::Storage);
+    if gate.companion_acked() {
+        return validate_acknowledged_inventory(stream, gate);
     }
     let mut next = endpoint.first();
     for row in stream
@@ -85,6 +87,26 @@ pub(super) fn validate_complete(
     if endpoint.last().checked_add(1) != Some(next) {
         return Err(CompanionFault::Storage);
     }
+    Ok(())
+}
+
+fn validate_acknowledged_inventory(
+    stream: &DeliveryStream,
+    gate: &DeliveryBarrier,
+) -> Result<(), CompanionFault> {
+    let owner = stream.owner.as_ref().ok_or(CompanionFault::Storage)?;
+    let replay = stream.replay.ok_or(CompanionFault::Storage)?;
+    gate.validate_for(owner, gate.base().generation())
+        .map_err(|_| CompanionFault::Storage)?;
+    super::super::retention::validate_previous(owner, Some(replay.owner))?;
+    let endpoint = gate.companion();
+    if stream.acked != Some((endpoint.last(), endpoint.final_event_id()))
+        || replay.owner.fields().first_retained > endpoint.first()
+    {
+        return Err(CompanionFault::Storage);
+    }
+    // ReplayState is installed only after complete body validation or the exact ACK receipt.
+    // A logical retention scan cannot cross an open barrier's first part.
     Ok(())
 }
 

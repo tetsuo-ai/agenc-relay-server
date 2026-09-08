@@ -1,15 +1,18 @@
 //! EACK validation and the private transition owned by its storage receipt.
 #![forbid(unsafe_code)]
 
+pub(crate) mod read;
+
 use agenc_ircd_e2ee::federation::frames::DeliveryPosition;
 use agenc_ircd_storage::e2ee_records::delivery_recovery::{
-    Acknowledgement, CutPhase, DeliveryCursor, DeliveryOwner, LastAcknowledged, outbox,
+    Acknowledgement, CutPhase, DeliveryCursor, DeliveryOwner, LastAcknowledged,
 };
 use agenc_ircd_types::ServerId;
 
-use super::super::events::{self, DeliveryStream, MAX_ACKED_REPLAY_ROWS};
+use super::super::events::DeliveryStream;
 use super::super::sync::{Action, PendingWork};
 use super::super::{CompanionCoordinator, CompanionFault};
+use super::retention::update::Update;
 use crate::federation::LinkId;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
@@ -22,6 +25,7 @@ pub struct PreparedAck {
     expected: DeliveryOwner,
     proposed: DeliveryCursor,
     acknowledgement: Acknowledgement,
+    replay: Box<Update>,
 }
 
 impl PreparedAck {
@@ -60,6 +64,7 @@ impl PreparedAck {
             .ok_or(CompanionFault::Storage)?;
         if stream.owner.as_ref() != Some(&self.expected)
             || super::cursor(stream)? != *self.expected.cursor()
+            || stream.replay != self.replay.expected
         {
             return Err(CompanionFault::Storage);
         }
@@ -76,6 +81,7 @@ impl PreparedAck {
                 self.acknowledgement,
             )?;
         }
+        self.replay.apply(stream);
         stream.owner = Some(proposed);
         Ok(())
     }
@@ -116,36 +122,15 @@ pub(crate) fn prepare(
         return Ok(Vec::new());
     }
     validate_coverage(stream, position)?;
-    let cursor = DeliveryCursor::new(
-        stream.generation,
-        stream.next_sequence,
-        LastAcknowledged::At {
-            sequence: position.delivery_sequence,
-            event_id: position.event_id,
-        },
-    )
-    .map_err(|_| CompanionFault::Protocol)?;
-    let proposed = DeliveryOwner::new(*owner.scope(), cursor, *owner.cut(), owner.phase())
-        .map_err(|_| CompanionFault::Storage)?;
-    let acknowledgement = Acknowledgement::received_at(trusted_ack_unix_seconds);
-    let writes = writes(
+    read::Request::new(
         stream,
-        position.delivery_sequence,
-        &proposed,
-        acknowledgement,
-    )?;
-    Ok(vec![Action::Stage {
-        writes,
-        work: PendingWork::Acknowledgement(PreparedAck {
-            peer,
-            link,
-            position,
-            resume: false,
-            expected: owner.clone(),
-            proposed: cursor,
-            acknowledgement,
-        }),
-    }])
+        peer,
+        link,
+        position,
+        false,
+        trusted_ack_unix_seconds,
+    )?
+    .plan(coordinator)
 }
 
 fn validate_source(
@@ -209,36 +194,28 @@ fn validate_coverage(
     Err(CompanionFault::Protocol)
 }
 
-fn writes(
-    stream: &DeliveryStream,
-    through: u64,
+fn write_proposal(
     proposed: &DeliveryOwner,
-    acknowledgement: Acknowledgement,
+    proposal: &super::retention::Proposal,
 ) -> Result<Vec<AccountServiceDurableWrite>, CompanionFault> {
-    let mut writes = vec![super::write(proposed)?];
-    let covered = stream
-        .rows
-        .iter()
-        .filter(|row| row.sequence <= through)
-        .count();
-    let mut trim = covered.saturating_sub(MAX_ACKED_REPLAY_ROWS);
-    for row in stream.rows.iter().take_while(|row| row.sequence <= through) {
-        if trim > 0 {
-            let key = outbox::outbox_key(proposed.scope(), stream.generation, row.sequence)
-                .map_err(|_| CompanionFault::Storage)?;
-            writes.push(AccountServiceDurableWrite::Delete {
-                table: agenc_ircd_storage::TableId::E2eeState,
-                key,
-            });
-            trim -= 1;
-        } else if !row.acked() {
-            writes.push(
-                events::outbox_write(proposed.scope(), stream.generation, row, acknowledgement)
-                    .map_err(|_| CompanionFault::Storage)?,
-            );
-        }
+    use agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::ReplayLedgerRow;
+    let range = proposal.range.ok_or(CompanionFault::Storage)?;
+    let mut rows = vec![super::write(proposed)?];
+    for row in [
+        ReplayLedgerRow::Owner(proposal.owner),
+        ReplayLedgerRow::Range(range),
+    ] {
+        rows.push(
+            super::super::request::state_row(
+                agenc_ircd_storage::TableId::E2eeState,
+                agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND,
+                row.key().map_err(|_| CompanionFault::Storage)?,
+                row.encode().map_err(|_| CompanionFault::Storage)?,
+            )
+            .map_err(|_| CompanionFault::Storage)?,
+        );
     }
-    Ok(writes)
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -281,34 +258,6 @@ pub(crate) fn prepare_resume(
         return Err(CompanionFault::Protocol);
     }
     stream.validate_barrier_resume(position.delivery_sequence, position.event_id)?;
-    let proposed = DeliveryCursor::new(
-        stream.generation,
-        stream.next_sequence,
-        LastAcknowledged::At {
-            sequence: position.delivery_sequence,
-            event_id: position.event_id,
-        },
-    )
-    .map_err(|_| CompanionFault::Protocol)?;
-    let updated = DeliveryOwner::new(*owner.scope(), proposed, *owner.cut(), owner.phase())
-        .map_err(|_| CompanionFault::Storage)?;
-    let acknowledgement = Acknowledgement::received_at(trusted_ack_unix_seconds);
-    let writes = writes(
-        stream,
-        position.delivery_sequence,
-        &updated,
-        acknowledgement,
-    )?;
-    Ok(vec![Action::Stage {
-        writes,
-        work: PendingWork::Acknowledgement(PreparedAck {
-            peer,
-            link,
-            position,
-            resume: true,
-            expected: owner.clone(),
-            proposed,
-            acknowledgement,
-        }),
-    }])
+    read::Request::new(stream, peer, link, position, true, trusted_ack_unix_seconds)?
+        .plan(coordinator)
 }

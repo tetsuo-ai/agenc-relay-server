@@ -34,8 +34,26 @@ fn a_mismatched_proposed_generation_fails_before_touching_the_stream() -> TestRe
         owner: Some(expected.clone()),
         ..DeliveryStream::default()
     };
-    coordinator.state.streams.insert(peer, before.clone());
+    let backing = crate::budget::BackingReservationPort::new(std::sync::Arc::new(
+        crate::budget::MemoryBudget::new(1_024),
+    ));
+    coordinator
+        .state
+        .streams
+        .insert(peer, before.try_clone(0, &backing)?);
+    let proposal = super::super::retention::Proposal {
+        owner: agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::ReplayOwner::new(
+            agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::ReplayOwnerFields {
+                scope, generation: 1, baseline: LastAcknowledged::BeforeFirst,
+                through: 0, event_id: [8; 16], first_retained: 1, retained_rows: 0,
+                retained_bytes: 0, trusted_unix_seconds: None,
+            },
+        )?,
+        range: None,
+        head: None,
+    };
     let candidate = PreparedAck {
+        replay: Box::new(Update::new(&before, &proposal)),
         resume: false,
         peer,
         link: LinkId::new(1),

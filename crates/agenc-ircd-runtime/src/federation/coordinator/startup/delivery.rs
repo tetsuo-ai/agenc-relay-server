@@ -44,14 +44,14 @@ impl Loader {
 
 pub(super) fn advance(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
     if coordinator.loader.delivery.complete {
-        super::finish(coordinator, context);
+        super::replay::advance(coordinator, context);
         return;
     }
     match next(coordinator, context) {
         Ok(Some((key, inventory))) => submit(coordinator, context, key, inventory),
         Ok(None) => {
             coordinator.loader.delivery.complete = true;
-            super::finish(coordinator, context);
+            super::replay::advance(coordinator, context);
         }
         Err(Violation::Ceiling) => {}
         Err(_) => super::fail_restore(coordinator),

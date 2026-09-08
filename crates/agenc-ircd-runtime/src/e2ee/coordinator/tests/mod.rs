@@ -213,7 +213,9 @@ impl Harness {
                 .writes
                 .push(Write::put(*table, key.clone(), plaintext.to_vec())?);
         }
-        fresh.coordinator.finish_restore()?;
+        fresh
+            .coordinator
+            .finish_restore_with_backing(fresh.backing.clone())?;
         fresh.sequence = self.sequence;
         // Companion origins are not durable: the edge re-declares the
         // attached device after a reload, which the harness copies over.

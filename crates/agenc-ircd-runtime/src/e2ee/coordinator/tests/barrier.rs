@@ -110,6 +110,7 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
             7,
             &mut entropy,
             &barriers,
+            &harness.backing,
         ),
         Err(agenc_ircd_e2ee::wire::reply::E2eeReplyCode::Syncing)
     ));
@@ -122,6 +123,7 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
         7,
         &mut entropy,
         &barriers,
+        &harness.backing,
     )
     .map_err(|code| format!("{code:?}"))?;
     let home_copies: Vec<_> = sequenced
@@ -169,7 +171,8 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
             &contents,
             7,
             &mut entropy,
-            &absent
+            &absent,
+            &harness.backing,
         )
         .is_err()
     );
@@ -190,22 +193,23 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
             &contents,
             7,
             &mut entropy,
-            &short
+            &short,
+            &harness.backing,
         )
         .is_err()
     );
     Ok(())
 }
 
-fn row(sequence: u64) -> StreamRow {
-    StreamRow {
+fn row(sequence: u64) -> TestResult<StreamRow> {
+    Ok(StreamRow {
         sequence,
         event_id: [u8::try_from(sequence).unwrap_or(0) + 1; 16],
-        event: vec![1; 8],
+        event: super::super::events::SharedBytes::for_fixture(vec![1; 8])?,
         payload: None,
         acknowledgement:
             agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement::Unacknowledged,
-    }
+    })
 }
 
 #[test]
@@ -213,7 +217,7 @@ fn the_barrier_window_admits_one_cumulative_acknowledgement() -> TestResult {
     let acknowledgement = agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement::AcknowledgedTimeUnknown;
     let mut stream = DeliveryStream::default();
     for sequence in 0..4 {
-        stream.rows.push_back(row(sequence));
+        stream.rows.push_back(row(sequence)?);
     }
     stream.next_sequence = 4;
     stream.barrier = Some((1, 2));

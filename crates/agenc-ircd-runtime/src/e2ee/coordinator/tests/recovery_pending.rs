@@ -402,7 +402,15 @@ fn retained_state(harness: &Harness) -> TestResult<RetainedRecoveryState> {
         lifecycles: state.lifecycles.clone(),
         conversations: state.conversations.clone(),
         objects: state.objects.clone(),
-        streams: state.streams.clone(),
+        streams: state
+            .streams
+            .iter()
+            .map(|(peer, stream)| {
+                stream
+                    .try_clone(0, &harness.backing)
+                    .map(|stream| (*peer, stream))
+            })
+            .collect::<Result<_, _>>()?,
         object_bytes: state.object_bytes,
         origin: state
             .origins

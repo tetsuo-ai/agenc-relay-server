@@ -2,9 +2,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use agenc_ircd_storage::e2ee_records::delivery_recovery::{
-    Acknowledgement, DeliveryRecoveryRow, outbox,
-};
+use agenc_ircd_storage::e2ee_records::delivery_recovery::{Acknowledgement, outbox};
 
 async fn activate_new_incarnation(
     fixture: &mut RestartFixture,
@@ -194,6 +192,7 @@ async fn acknowledged_outbox_restart_preserves_first_time_and_unknown_clock_meta
 
 #[tokio::test]
 async fn a_refused_ack_does_not_persist_prepared_retention_time() -> TestResult {
+    use agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::ReplayLedgerRow;
     let mut fixture = RestartFixture::new().await?;
     let first = position(&fixture, 0)?;
     let actions = events::on_ack(
@@ -208,9 +207,9 @@ async fn a_refused_ack_does_not_persist_prepared_retention_time() -> TestResult 
     };
     let staged_rows = writes.iter().filter_map(|write| match write {
         AccountServiceDurableWrite::Put { table, key, plaintext } => PersistentRecordValue::decode(*table, plaintext)
-            .ok().and_then(|value| DeliveryRecoveryRow::decode_at(key, value.body()).ok()),
+            .ok().and_then(|value| ReplayLedgerRow::decode_at(key, value.body()).ok()),
         _ => None,
-    }).filter(|row| matches!(row, DeliveryRecoveryRow::Outbox(row) if row.acknowledgement() == Acknowledgement::received_at(Some(100)))).count();
+    }).filter(|row| matches!(row, ReplayLedgerRow::Range(row) if row.fields().acknowledgement == Acknowledgement::received_at(Some(100)))).count();
     assert_eq!(staged_rows, 1);
     fixture.coordinator.set_pending(work);
     stage_ack_for_rejection(&mut fixture, writes)?;
@@ -227,6 +226,7 @@ async fn a_refused_ack_does_not_persist_prepared_retention_time() -> TestResult 
         .get(&home())
         .ok_or("restored stream")?;
     assert_eq!(stream.acked, None);
+    assert!(stream.replay.is_none());
     assert!(
         stream
             .rows

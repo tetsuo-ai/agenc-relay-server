@@ -121,6 +121,28 @@ fn key(
     StoredKey::new(bytes)
 }
 
+/// Builds the exact replay owner key without constructing authority from a cursor.
+pub fn replay_owner_key(scope: &DeliveryScope, generation: u64) -> Result<StoredKey, StorageError> {
+    key(REPLAY_OWNER_PREFIX, scope, generation, None)
+}
+
+/// Reads ACK intervals by final position within one complete scope and generation.
+pub fn ack_ranges_from(
+    scope: &DeliveryScope,
+    generation: u64,
+    first_final_sequence: u64,
+    limit: u16,
+) -> Result<crate::ReadPlan, StorageError> {
+    let prefix = key(ACK_RANGE_PREFIX, scope, generation, None)?;
+    let start = key(
+        ACK_RANGE_PREFIX,
+        scope,
+        generation,
+        Some(first_final_sequence),
+    )?;
+    super::super::prefix_range_from(prefix.as_bytes(), &start, limit)
+}
+
 fn put_baseline(baseline: LastAcknowledged, encoder: &mut Encoder) -> Result<(), StorageError> {
     match baseline {
         LastAcknowledged::BeforeFirst => encoder.put_u16(0),

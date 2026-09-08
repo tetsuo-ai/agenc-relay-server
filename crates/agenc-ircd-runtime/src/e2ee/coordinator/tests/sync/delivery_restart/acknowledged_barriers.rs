@@ -67,6 +67,7 @@ pub(super) async fn append_barrier(fixture: &mut RestartFixture) -> TestResult {
         42,
         &mut fixture.entropy,
         &assignments,
+        &fixture.storage.context_mut()?.backing_reservations(),
     )
     .map_err(|error| format!("barrier sequence: {error:?}"))?;
     fixture.commit(sequenced.writes).await?;
@@ -83,7 +84,14 @@ async fn acknowledged_barrier_rows_restart_with_exact_bytes_and_receipt_coverage
     append_barrier(&mut fixture).await?;
     assert!(acknowledge_copy(&mut fixture, 0).await.is_err());
     acknowledge_copy(&mut fixture, 1).await?;
-    let expected = fixture.coordinator.state.streams.clone();
+    let backing = fixture.storage.context_mut()?.backing_reservations();
+    let expected = fixture
+        .coordinator
+        .state
+        .streams
+        .iter()
+        .map(|(peer, stream)| stream.try_clone(0, &backing).map(|stream| (*peer, stream)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     fixture.restart().await?;
     assert_eq!(fixture.coordinator.state.streams, expected);
     assert!(!fixture.coordinator.delivering(home()));

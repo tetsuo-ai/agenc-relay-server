@@ -145,6 +145,12 @@ fn decoded(generation: u64, sequence: u64) -> TestResult<Decoded> {
     })
 }
 
+fn backing() -> crate::budget::BackingReservationPort {
+    crate::budget::BackingReservationPort::new(std::sync::Arc::new(
+        crate::budget::MemoryBudget::new(1_048_576),
+    ))
+}
+
 fn batch(coordinator: &CompanionCoordinator, request: &Decoded) -> TestResult<Assembled> {
     let mut entropy = Entropy;
     assemble(
@@ -156,6 +162,7 @@ fn batch(coordinator: &CompanionCoordinator, request: &Decoded) -> TestResult<As
         1,
         500,
         BarrierInputs {
+            backing: backing(),
             base_counts: None,
             base_capacity: &|_, _, _| true,
             entropy: &mut entropy,
@@ -239,6 +246,7 @@ fn legacy_history_after_partial_expiry(generation: u64) -> TestResult<CompanionC
         1,
         500,
         BarrierInputs {
+            backing: backing(),
             base_counts: None,
             base_capacity: &|_, _, _| true,
             entropy: &mut entropy,

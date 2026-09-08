@@ -256,6 +256,7 @@ pub fn run(
         state_generation,
         now,
         BarrierInputs {
+            backing: view.context.backing_reservations(),
             base_counts: base_counts.as_ref(),
             base_capacity: &*view.base_capacity,
             entropy: &mut pool,
@@ -539,6 +540,7 @@ struct Assembled {
 
 /// What barrier planning needs from the base side.
 struct BarrierInputs<'a> {
+    backing: crate::budget::BackingReservationPort,
     base_counts: Option<&'a BTreeMap<ServerId, (usize, u64)>>,
     base_capacity: &'a dyn Fn(ServerId, usize, u64) -> bool,
     entropy: &'a mut dyn agenc_ircd_types::EntropySource,
@@ -680,6 +682,7 @@ fn assemble(
         state_generation,
         barrier_inputs.entropy,
         &assignments,
+        &barrier_inputs.backing,
     )?;
     let barriers = complete_barriers(&assignments, &sequenced, state_generation)?;
     let (copies, mut writes, streams) = (sequenced.copies, sequenced.writes, sequenced.streams);

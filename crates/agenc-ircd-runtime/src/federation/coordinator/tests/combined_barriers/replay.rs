@@ -27,6 +27,7 @@ async fn append_later(fixture: &mut Fixture) -> TestResult {
         encoded_result: Vec::new(),
         payload: None,
     }];
+    let backing = fixture.core.context_mut()?.backing_reservations();
     let sequenced = events::sequence_copies(
         fixture
             .coordinator
@@ -38,6 +39,7 @@ async fn append_later(fixture: &mut Fixture) -> TestResult {
         2,
         fixture.core.context_mut()?.entropy_mut(),
         &BTreeMap::new(),
+        &backing,
     )
     .map_err(|e| format!("later companion: {e:?}"))?;
     assert_eq!(

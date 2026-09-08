@@ -3,16 +3,20 @@
 
 mod barriers;
 mod pending;
+pub(in crate::e2ee::coordinator) mod replay;
+mod replay_collection;
 
 use std::collections::BTreeMap;
 
-use agenc_ircd_domain::e2ee::limits::MAX_UNACKED_E2EE_EVENTS_PER_EDGE;
 use agenc_ircd_e2ee::limits::MAX_FEDERATION_CONTROL_OBJECT;
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::IrcFederationEvent;
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_ircd_storage::StoredKey;
 use agenc_ircd_storage::e2ee_records::CrossProfileTuple;
+use agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::{
+    ACK_RANGE_PREFIX, REPLAY_OWNER_PREFIX, ReplayLedgerRow,
+};
 use agenc_ircd_storage::e2ee_records::delivery_recovery::{
     CutPhase, DeliveryBarrier, DeliveryOwner, DeliveryRecoveryRow, LastAcknowledged, ScopedOutbox,
 };
@@ -26,26 +30,42 @@ use super::super::{CompanionCoordinator, CompanionFault};
 pub(crate) struct Restore {
     owners: BTreeMap<ServerId, DeliveryOwner>,
     versions: BTreeMap<ServerId, (u64, u64)>,
-    rows: BTreeMap<StoredKey, ScopedOutbox>,
-    counts: BTreeMap<ServerId, u64>,
+    streams: BTreeMap<ServerId, DeliveryStream>,
+    active: Option<(ServerId, Box<replay::Job>)>,
+    replay_started: bool,
     barriers: BTreeMap<ServerId, DeliveryBarrier>,
     failed: bool,
     pending: pending::Pending,
+    backing: Option<crate::budget::BackingReservationPort>,
 }
 
 impl Restore {
+    pub(crate) fn set_backing(&mut self, backing: crate::budget::BackingReservationPort) {
+        self.backing = Some(backing);
+    }
+
     pub(crate) fn admit_owner(
         &mut self,
         key: &StoredKey,
         value: &agenc_ircd_storage::PersistentRecordValue,
     ) {
         let bytes = value.body();
-        if self.pending.started() {
+        if self.pending.started() || self.replay_started {
             self.failed = true;
+            return;
+        }
+        if key.as_bytes().starts_with(REPLAY_OWNER_PREFIX)
+            || key.as_bytes().starts_with(ACK_RANGE_PREFIX)
+        {
+            self.failed |= ReplayLedgerRow::decode_at(key, bytes).is_err();
             return;
         }
         match DeliveryRecoveryRow::decode_at(key, bytes) {
             Ok(DeliveryRecoveryRow::Owner(owner)) => {
+                if self.owners.len() >= crate::federation::MAX_FEDERATION_PEERS {
+                    self.failed = true;
+                    return;
+                }
                 let peer = ServerId::from_bytes(owner.scope().target_server_id());
                 self.failed |= self.owners.insert(peer, owner).is_some();
                 self.failed |= self
@@ -62,7 +82,7 @@ impl Restore {
                 self.failed |= self.barriers.insert(peer, gate).is_some();
             }
             Ok(DeliveryRecoveryRow::CutPage(_)) => {}
-            Ok(DeliveryRecoveryRow::Outbox(row)) => self.admit_scoped_outbox(key, row),
+            Ok(DeliveryRecoveryRow::Outbox(_)) => {}
             _ => self.failed = true,
         }
     }
@@ -72,23 +92,11 @@ impl Restore {
         self.failed = true;
     }
 
-    fn admit_scoped_outbox(&mut self, key: &StoredKey, row: ScopedOutbox) {
-        let peer = ServerId::from_bytes(row.scope().target_server_id());
-        let count = self.counts.entry(peer).or_default();
-        let limit = MAX_UNACKED_E2EE_EVENTS_PER_EDGE + MAX_ACKED_REPLAY_ROWS as u64;
-        if *count >= limit {
-            self.failed = true;
-            return;
-        }
-        *count += 1;
-        self.failed |= self.rows.insert(key.clone(), row).is_some();
-    }
-
     pub(crate) fn apply(
         mut self,
         coordinator: &mut CompanionCoordinator,
     ) -> Result<(), CompanionFault> {
-        if self.failed {
+        if self.failed || self.active.is_some() || self.streams.len() != self.owners.len() {
             return Err(CompanionFault::Storage);
         }
         barriers::validate_owners(&self.barriers, &self.owners)?;
@@ -101,25 +109,11 @@ impl Restore {
                     super::super::sync::Snapshot::restored(&owner, pages, version)?,
                 );
             }
-            let cursor = owner.cursor();
-            let acked = match cursor.last_ack() {
-                LastAcknowledged::BeforeFirst => None,
-                LastAcknowledged::At { sequence, event_id } => Some((sequence, event_id)),
-            };
-            coordinator.state.streams.insert(
-                peer,
-                DeliveryStream {
-                    generation: cursor.generation(),
-                    next_sequence: cursor.next_sequence(),
-                    acked,
-                    owner: Some(owner),
-                    ..DeliveryStream::default()
-                },
-            );
-        }
-        for (_, row) in self.rows {
-            let peer = ServerId::from_bytes(row.scope().target_server_id());
-            restore_row(coordinator, row, self.barriers.get(&peer))?;
+            let stream = self.streams.remove(&peer).ok_or(CompanionFault::Storage)?;
+            if stream.owner.as_ref() != Some(&owner) {
+                return Err(CompanionFault::Storage);
+            }
+            coordinator.state.streams.insert(peer, stream);
         }
         barriers::install(&mut coordinator.state.streams, &self.barriers)?;
         coordinator.state.restored_barriers = self.barriers;
@@ -179,51 +173,13 @@ impl Restore {
     }
 }
 
-fn restore_row(
-    coordinator: &mut CompanionCoordinator,
-    row: ScopedOutbox,
-    gate: Option<&DeliveryBarrier>,
-) -> Result<(), CompanionFault> {
-    let peer = ServerId::from_bytes(row.scope().target_server_id());
-    let generation = row.generation();
-    let sequence = row.sequence();
-    let stream = coordinator
-        .state
-        .streams
-        .get_mut(&peer)
-        .ok_or(CompanionFault::Storage)?;
-    let owner = stream.owner.as_ref().ok_or(CompanionFault::Storage)?;
-    if row.scope() != owner.scope() || generation < stream.generation {
-        return Ok(());
-    }
-    if generation != stream.generation || sequence >= stream.next_sequence {
-        return Err(CompanionFault::Storage);
-    }
-    let restored = decode_row(&coordinator.state.objects, owner, sequence, row, gate)?;
-    if stream.acked.is_some_and(|(acked, _)| sequence <= acked) != restored.acked() {
-        return Err(CompanionFault::Storage);
-    }
-    if stream
-        .acked
-        .is_some_and(|(acked, id)| sequence == acked && id != restored.event_id)
-    {
-        return Err(CompanionFault::Storage);
-    }
-    if let Some(previous) = stream.rows.back()
-        && previous.sequence.checked_add(1) != Some(sequence)
-    {
-        return Err(CompanionFault::Storage);
-    }
-    stream.rows.push_back(restored);
-    Ok(())
-}
-
 fn decode_row(
     objects: &BTreeMap<[u8; 32], Vec<u8>>,
     owner: &DeliveryOwner,
     sequence: u64,
     row: ScopedOutbox,
     gate: Option<&DeliveryBarrier>,
+    backing: &crate::budget::BackingReservationPort,
 ) -> Result<StreamRow, CompanionFault> {
     let event_id = row.event_id();
     let event_object_id = row.event_object_id();
@@ -247,11 +203,13 @@ fn decode_row(
         row.payload_object_id(),
         row.payload_bytes(),
         &event,
+        backing,
     )?;
     Ok(StreamRow {
         sequence,
         event_id,
-        event: bytes.clone(),
+        event: super::super::events::SharedBytes::copy_from(bytes, backing)
+            .map_err(|_| CompanionFault::Ceiling)?,
         payload,
         acknowledgement: row.acknowledgement(),
     })
@@ -276,13 +234,14 @@ fn validate_event(
     Ok(())
 }
 
-type RestoredPayload = ([u8; 32], Vec<u8>);
+type RestoredPayload = ([u8; 32], super::super::events::SharedBytes);
 
 fn payload(
     objects: &BTreeMap<[u8; 32], Vec<u8>>,
     object_id: Option<[u8; 32]>,
     length: u32,
     event: &IrcFederationEvent,
+    backing: &crate::budget::BackingReservationPort,
 ) -> Result<Option<RestoredPayload>, CompanionFault> {
     let header_id = optional::<32>(event.payload_object_id.as_slice())?;
     if header_id != object_id {
@@ -301,7 +260,11 @@ fn payload(
     {
         return Err(CompanionFault::Storage);
     }
-    Ok(Some((id, bytes.clone())))
+    Ok(Some((
+        id,
+        super::super::events::SharedBytes::copy_from(bytes, backing)
+            .map_err(|_| CompanionFault::Ceiling)?,
+    )))
 }
 
 fn validate_complete(stream: &DeliveryStream) -> Result<(), CompanionFault> {
