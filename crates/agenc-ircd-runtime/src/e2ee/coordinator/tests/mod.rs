@@ -353,6 +353,16 @@ impl Harness {
             Ok(outcome) => outcome,
             Err(error) => return Ok(Err(error)),
         };
+        let resident = match super::resident::prepare(
+            &self.coordinator.state,
+            &outcome.writes,
+            &self.backing,
+            None,
+        ) {
+            Ok(prepared) => prepared,
+            Err(code) => return Ok(Err(code.into())),
+        };
+        resident.apply(&mut self.coordinator.state);
         for effect in std::mem::take(&mut outcome.effects) {
             effect(&mut self.coordinator.state);
         }

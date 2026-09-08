@@ -51,6 +51,7 @@ pub mod execute;
 mod mailbox_restore;
 pub mod ops;
 pub mod request;
+mod resident;
 pub(crate) mod response_read;
 mod startup;
 pub mod sync;
@@ -867,7 +868,8 @@ impl CompanionCoordinator {
         self.pending = None;
     }
 
-    /// Retains an object in memory under the retained-bytes ceiling.
+    /// Installs an explicit object in a test fixture. Live requests use resident admission.
+    #[cfg(test)]
     pub(crate) fn retain_object(
         state: &mut CompanionState,
         bytes: Vec<u8>,

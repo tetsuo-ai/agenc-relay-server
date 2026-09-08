@@ -69,9 +69,7 @@ pub fn submit_policy(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         object_bytes: bytes.len(),
         policy: verified,
     };
-    let retained_bytes = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        let _ = CompanionCoordinator::retain_object(companion, retained_bytes);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.policies.insert(policy_id, retained);
         }

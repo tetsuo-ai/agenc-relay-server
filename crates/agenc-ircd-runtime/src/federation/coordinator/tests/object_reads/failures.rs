@@ -211,7 +211,23 @@ async fn a_stalled_writer_owns_the_body_reservation_after_the_receipt() -> TestR
     f.commit_pending().await?;
     assert!(f.handle.queued_bytes() > 0);
     assert!(budget.charged() > baseline);
+    let queued = budget.charged();
     drop(f.queue);
+    assert!(budget.charged() < queued);
+    assert!(budget.charged() > baseline);
+    let stored = f.coordinator.companion_exec.as_ref().ok_or("executor")?;
+    let result = stored
+        .state
+        .results
+        .get(ObjectId::compute(&f.complete.request).as_bytes())
+        .ok_or("result")?;
+    assert!(
+        stored
+            .state
+            .object_memory
+            .contains_key(ObjectId::compute(&result.result).as_bytes())
+    );
+    drop(f.coordinator);
     assert_eq!(budget.charged(), baseline);
     Ok(())
 }

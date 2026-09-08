@@ -101,10 +101,8 @@ fn deliver(
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )?);
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.mailboxes = mailboxes;
-        CompanionCoordinator::retain_object(companion, retained).ok();
     }));
     Ok(outcome)
 }

@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 mod failures;
 mod fixture;
+mod resident;
 mod validation;
 use super::*;
 use crate::bridge::{StorageReadCompletionMessage, StorageReadId};

@@ -5,6 +5,9 @@
 #[path = "origin_replay/response_completeness.rs"]
 mod response_completeness;
 
+#[path = "origin_replay/resident_admission.rs"]
+mod resident_admission;
+
 use agenc_ircd_domain::e2ee::projection::EmptyKind;
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::{

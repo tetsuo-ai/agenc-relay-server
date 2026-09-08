@@ -2980,8 +2980,40 @@ inputs, logs, and workspace executables are in `cap79-selective-final-proof`.
 These small fixtures do not qualify startup above the former global object-cache
 capacity or establish the physical storage ceiling.
 
-CAP-79 still needs admission and retirement for live resident bodies, plus
-independent shared-body retention. Cleanup does not delete shared object bodies whose
+Live admission has an additional executed failure in
+`cap79-resident-admission-red-proof`. Direct assembly of a valid empty-identity
+result succeeds with a zero process memory budget, before any storage submission
+or receipt. The one-case regression fails in 0.00 seconds; its two exact test
+inputs and executable are archived. The new admission step passes that case.
+
+Assembly now derives the required resident set from its complete object and
+mailbox writes. It validates object keys, kinds, shared references, and combined
+capacity before staging. Temporary decoding and retained bodies carry separate
+memory reservations. Only the successful receipt transfers prepared bodies
+into coordinator state, before their dependent metadata effects. Rejected
+batches drop the private bodies and reservations. Directory, mailbox, policy,
+route, and sequencer effects no longer attempt fallible cache insertion after
+acceptance. The handler fixture uses the same admission step before applying
+its simulated receipt effects.
+
+Eight admission tests pass, covering shared bodies, cold payloads, required
+kinds, malformed keys, combined capacity, and release after partial preparation.
+Their row fixtures validate outer envelopes without claiming MLS semantics.
+Eighteen related actor and decoder cases pass in 1.26 seconds. Two new actor
+cases prove receipt ownership and refusal before storage submission; the latter
+models a full resident counter and does not contain 256 MiB of objects. The
+stalled-writer assertion now checks both output release and the resident result's
+remaining charge, then verifies its release when coordinator state drops.
+
+Both inventories cover 725 source files and the release catalog has 976 critical
+regions, including eight additions and 23 source rebindings. Coverage floors
+remain unchanged, without a new measurement. All eight checkpoint gates pass:
+2,593 tests pass, none fail, and 21 qualification tests remain ignored. The
+runtime suite has 1,136 passes. Source policy covers 858 Rust files. Exact
+inputs, logs, and workspace executables are in `cap79-resident-final-proof`.
+
+CAP-79 still needs retirement of live resident bodies and independent shared-body
+retention. Cleanup does not delete shared object bodies whose
 independent retention requirements remain unresolved. Every surviving body
 still counts against the disk ceiling, and the global object collector
 continues to refuse capacity loss under CAP-95.

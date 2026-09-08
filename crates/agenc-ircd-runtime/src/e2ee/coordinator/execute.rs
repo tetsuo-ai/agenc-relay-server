@@ -799,7 +799,14 @@ fn assemble(
             writes.push(write);
         }
     }
+    let resident = super::resident::prepare(
+        &coordinator.state,
+        &writes,
+        &barrier_inputs.backing,
+        uncached_response,
+    )?;
     let mut effects = outcome.effects;
+    effects.insert(0, Box::new(move |state| resident.apply(state)));
     let request_object_id = decoded.request_object_id;
     let stored = StoredResult {
         result: result.clone(),
@@ -811,18 +818,10 @@ fn assemble(
             })
             .collect(),
     };
-    let response_bytes = responses.clone();
-    let result_bytes = result.clone();
     effects.push(Box::new(move |state| {
         state.replays.insert(key, row);
         state.origin_sequences.insert(origin_key, sequence);
         state.results.insert(request_object_id, stored);
-        for bytes in response_bytes {
-            if uncached_response != Some(*agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes()) {
-                let _ = CompanionCoordinator::retain_object(state, bytes);
-            }
-        }
-        let _ = CompanionCoordinator::retain_object(state, result_bytes);
         if let Some(origin) = state.origins.get_mut(&origin_key) {
             origin.next_sequence = sequence.next_sequence;
         }

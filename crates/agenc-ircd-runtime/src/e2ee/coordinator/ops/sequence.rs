@@ -43,7 +43,7 @@ use agenc_ircd_storage::e2ee_records::{
 };
 
 use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
-use super::super::{CompanionCoordinator, CompanionState, ConversationState};
+use super::super::{CompanionCoordinator, ConversationState};
 use super::route::audience;
 use super::{Exec, Fail, cursor};
 
@@ -87,10 +87,6 @@ fn sequencer_row(
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )
     .map_err(Fail::from)
-}
-
-fn retain(state: &mut CompanionState, bytes: Vec<u8>) -> Option<[u8; 32]> {
-    CompanionCoordinator::retain_object(state, bytes).ok()
 }
 
 fn ids(values: &[&[u8]]) -> Vec<u8> {
@@ -253,9 +249,7 @@ fn pending(
         &quorum.accepted,
     )?);
     let ledger = quorum.ledger;
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.vote_ledgers.insert(subject, ledger);
         }
@@ -439,14 +433,10 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let commit = bytes.to_vec();
     let validation_time = envelope.aad.validation_time;
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
-        retain(companion, commit);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.last_validation_time = validation_time;
@@ -503,9 +493,7 @@ pub fn submit_authorization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )?);
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state
                 .approvals
@@ -578,9 +566,7 @@ pub fn submit_commit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state
                 .acks
@@ -791,13 +777,9 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let candidate_id = core.candidate_id;
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(finalization_id, request_object_id);
@@ -962,13 +944,9 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             None,
         ));
     }
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(abort_id, request_object_id);
@@ -1084,13 +1062,9 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             None,
         ));
     }
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(old_conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state.records.insert(slot.route_sequence, record_id);
             state.route_object_id = route_object_id;
@@ -1157,9 +1131,7 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state
                 .acks
@@ -1407,8 +1379,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             None,
         ));
     }
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         if let Some(new_conversation_id) = new_conversation {
             let successor = SequencerLog::from_activation(new_conversation_id, terminal_id);
@@ -1419,9 +1390,6 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             );
         }
         companion.logs.insert(old_conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(terminal_id, request_object_id);

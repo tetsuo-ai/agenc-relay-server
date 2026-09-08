@@ -542,6 +542,18 @@ pub(crate) enum AccountServiceDurableWrite {
 }
 
 impl AccountServiceDurableWrite {
+    /// Borrows the encoded persistent value of a put without copying storage buffers.
+    pub(crate) fn encoded_record(&self) -> Option<(TableId, &StoredKey, &[u8])> {
+        match self {
+            Self::Put {
+                table,
+                key,
+                plaintext,
+            } => Some((*table, key, plaintext.as_slice())),
+            Self::Delete { .. } => None,
+        }
+    }
+
     /// Whether both writes put the same plaintext under the same key, so
     /// one batch can drop a repeated put of an identical row.
     pub(crate) fn same_put(&self, other: &Self) -> bool {

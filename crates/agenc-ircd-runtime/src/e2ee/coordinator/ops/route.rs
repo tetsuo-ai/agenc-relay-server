@@ -393,7 +393,6 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     )?);
     outcome.effects.push(Box::new(move |state| {
         state.routes = probe;
-        let _ = CompanionCoordinator::retain_object(state, bytes);
     }));
     Ok(outcome)
 }
@@ -446,7 +445,6 @@ fn principals(
 /// route-state cut and a reload carry the coordinator's current head
 /// (companion 12.5) instead of the head at binding time.
 pub(super) struct HeadRefresh {
-    pub(super) route_object: Vec<u8>,
     pub(super) route_object_id: [u8; 32],
     pub(super) writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
 }
@@ -512,7 +510,6 @@ pub(super) fn refresh_head(
         )?,
     ];
     Ok(HeadRefresh {
-        route_object,
         route_object_id,
         writes,
     })
@@ -792,7 +789,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let home = exec.home;
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.routes = routes;
         if let Some(old) = predecessor {
@@ -801,8 +797,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         companion.logs.insert(conversation_id, log);
         companion.lifecycles.insert(conversation_id, lifecycle);
         companion.conversations.insert(conversation_id, state);
-        let _ = CompanionCoordinator::retain_object(companion, retained);
-        let _ = CompanionCoordinator::retain_object(companion, route_object);
         // Every edge hosting the channel holds the route from this copy on
         // (companion 12.5 projection entitlement).
         if direct_accounts.is_none() {
@@ -813,7 +807,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             }
         }
         for lock in locks {
-            let _ = CompanionCoordinator::retain_object(companion, lock.object);
             companion
                 .binding_locks
                 .entry((lock.account_digest, lock.root))
@@ -997,13 +990,10 @@ pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             None,
         ));
     }
-    let retained = bytes.to_vec();
+    let route_object_id = *agenc_ircd_e2ee::ObjectId::compute(&route_object).as_bytes();
     outcome.effects.push(Box::new(move |companion| {
         companion.routes = routes;
         companion.logs.insert(conversation_id, log);
-        let _ = CompanionCoordinator::retain_object(companion, retained);
-        let route_object_id = *agenc_ircd_e2ee::ObjectId::compute(&route_object).as_bytes();
-        let _ = CompanionCoordinator::retain_object(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.route_object_id = route_object_id;
         }
