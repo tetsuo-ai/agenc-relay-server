@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 765
-reviewed_source_sha256 = "9f68f5abaee3af2fd09f9919c92d7a75e77f93666e3ae66cb511eec216ab02d8"
+reviewed_source_sha256 = "87ab5e42aadf5b36140f67c42b20cec799e32b9f81449eaee42a7527dc688260"
 deferred = []
 
 [[region]]
@@ -51,9 +51,9 @@ reason = "Every closed FieldKind decode arm must run in the canonical federation
 id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/model.rs"
-source_sha256 = "3a8f6b17d50d93193f1a34e8e161cde53661563462ccb136a88e230582e8ccde"
-start_line = 1966
-end_line = 2151
+source_sha256 = "3c81d0d86931b2c613a2dfb8cb5aa1e70ca34d2d3ac12d89c11a6b5cc6600f36"
+start_line = 1969
+end_line = 2154
 metric = "branches"
 reason = "Every current domain cross-index and authority-fence check must take both outcomes."
 

@@ -7,6 +7,7 @@ use agenc_ircd_storage::{
     OPAQUE_FAKE_RECORD_KEY, RecordMutation, RecordReference, StorageAccountingLimits,
     StorageMutationBatch, StorageMutationHead,
 };
+use agenc_ircd_types::AccountId;
 use agenc_ircd_types::{AccountRandomId, InviteId};
 
 fn account_key(seed: u8) -> TestResult<StoredKey> {

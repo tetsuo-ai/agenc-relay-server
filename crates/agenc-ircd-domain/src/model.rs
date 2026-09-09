@@ -1761,26 +1761,29 @@ impl DomainState {
         self.channels.get(&channel_id)
     }
 
-    /// Applies retained audit policy to legacy rows that predate durable
-    /// administrative policy fields. Existing durable policy is never
-    /// cleared merely because retention removed its originating event.
-    pub fn install_admin_policy(
-        &mut self,
-        suspensions: Vec<(AccountId, UtcSecond)>,
-        quarantined_channels: Vec<ChannelInstanceId>,
+    /// Checks retained signed policy against complete durable records without changing them.
+    /// Deleted targets and policy whose audit event has expired need no reconstruction.
+    pub fn validate_retained_admin_policy(
+        &self,
+        suspensions: &[(AccountId, UtcSecond)],
+        quarantined_channels: &[ChannelInstanceId],
     ) -> Result<(), DomainError> {
         for (account_id, expires_at) in suspensions {
-            if let Some(account) = self.accounts.get_mut(&account_id) {
-                account.admin_suspension_expires_at = Some(expires_at);
+            if self
+                .accounts
+                .get(account_id)
+                .is_some_and(|account| account.admin_suspension_expires_at != Some(*expires_at))
+            {
+                return Err(DomainError::InvariantViolation);
             }
         }
         for channel_id in quarantined_channels {
-            if let Some(channel) = self
+            if self
                 .channels
-                .get_mut(&channel_id)
-                .filter(|channel| channel.persistence == PersistencePolicy::Registered)
+                .get(channel_id)
+                .is_some_and(|channel| !channel.admin_quarantined)
             {
-                channel.admin_quarantined = true;
+                return Err(DomainError::InvariantViolation);
             }
         }
         Ok(())
@@ -3210,6 +3213,54 @@ mod tests {
         live.account_id = None;
         live.account_session_generation = Generation::new(0)?;
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        Ok(())
+    }
+
+    #[test]
+    fn retained_admin_policy_checks_exact_values_without_rewriting_state() -> Result<(), DomainError>
+    {
+        let mut state = DomainState::new()?;
+        let account_id = account(1);
+        state.accounts.insert(
+            account_id,
+            AccountState::new(account_id, Generation::new(1)?, Revision::new(1)?),
+        );
+        let mut room = channel(1, "#policy")?;
+        room.persistence = PersistencePolicy::Registered;
+        room.role_grants.insert(account_id, Role::Owner);
+        let channel_id = room.channel_id;
+        state.channels.insert(channel_id, room);
+        let expires_at = UtcSecond::from_unix_seconds(1_000);
+        let suspensions = [(account_id, expires_at)];
+        assert_eq!(
+            state.validate_retained_admin_policy(&suspensions, &[]),
+            Err(DomainError::InvariantViolation)
+        );
+        assert!(!state.account_has_admin_suspension(account_id));
+        assert_eq!(
+            state.validate_retained_admin_policy(&[], &[channel_id]),
+            Err(DomainError::InvariantViolation)
+        );
+        assert!(!state.channel_is_quarantined(channel_id));
+        state.admin_suspend_account(account_id, expires_at)?;
+        state.admin_quarantine_channel(channel_id)?;
+        state.validate_retained_admin_policy(&suspensions, &[channel_id])?;
+        assert_eq!(
+            state.validate_retained_admin_policy(
+                &[(account_id, UtcSecond::from_unix_seconds(1_001))],
+                &[channel_id]
+            ),
+            Err(DomainError::InvariantViolation)
+        );
+        // Retention may remove signed events while durable policy remains in force.
+        state.validate_retained_admin_policy(&[], &[])?;
+        assert!(state.account_has_admin_suspension(account_id));
+        assert!(state.channel_is_quarantined(channel_id));
+        // A later committed deletion can remove either target.
+        state.validate_retained_admin_policy(
+            &[(account(2), expires_at)],
+            &[ChannelInstanceId::from_bytes(id(2))],
+        )?;
         Ok(())
     }
 }

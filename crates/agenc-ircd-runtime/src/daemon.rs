@@ -43,8 +43,8 @@ use agenc_ircd_storage::{
     embedded_storage_qualifications,
 };
 use agenc_ircd_types::{
-    AccountId, ChannelInstanceId, EntropySource as _, FederationRole, Generation,
-    MonotonicClock as _, OriginId, ServerId, TransactionId, UserId, WallClock as _,
+    EntropySource as _, FederationRole, Generation, MonotonicClock as _, OriginId, ServerId,
+    TransactionId, UserId, WallClock as _,
 };
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -105,8 +105,7 @@ use crate::runtime_config::{
     reload_channel, reload_preparation_channel,
 };
 use crate::state_core::durable::{
-    AccountingCeilings, AdminMutationAfterImage, KeyDeriver, PlanProjection,
-    project_admin_policy_backfill, project_batch, read_back_record,
+    AccountingCeilings, KeyDeriver, PlanProjection, project_batch, read_back_record,
 };
 use crate::state_core::inbox::{
     ConnectionCloseInbox, ConnectionClosePort, LifecycleControl, LifecycleFailure, LifecyclePhase,
@@ -582,26 +581,11 @@ fn build_live_state(
     } = inputs;
     let prepared = (|| -> Result<_, DaemonError> {
         let (suspensions, quarantined_channels) = storage.audit.policy_seed().into_parts();
-        let backfills = missing_admin_policy_backfills(
-            &storage.reconstruction.domain,
-            &suspensions,
-            &quarantined_channels,
-        )?;
         storage
             .reconstruction
             .domain
-            .install_admin_policy(suspensions, quarantined_channels)
+            .validate_retained_admin_policy(&suspensions, &quarantined_channels)
             .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
-        persist_admin_policy_backfills(
-            &storage.owner.port(),
-            &mut storage.reconstruction,
-            &storage.keys,
-            AccountingCeilings {
-                database_max_bytes: config.storage.database_max_bytes,
-                backup_max_bytes: config.storage.backup_max_bytes,
-            },
-            backfills,
-        )?;
         let crypto_config = CryptoWorkerConfig::new(
             limit_usize(config, LimitKey::ChannelKeyJobs)?,
             limit_usize(config, LimitKey::OpaqueJobs)?,
@@ -737,122 +721,6 @@ fn build_live_state(
         audit: Some(audit),
         backup: Some(backup),
     })
-}
-
-enum AdminPolicyBackfill {
-    Account(AccountId),
-    Channel(ChannelInstanceId),
-}
-
-fn missing_admin_policy_backfills(
-    domain: &agenc_ircd_domain::DomainState,
-    suspensions: &[(AccountId, agenc_ircd_types::UtcSecond)],
-    quarantined_channels: &[ChannelInstanceId],
-) -> Result<Vec<AdminPolicyBackfill>, DaemonError> {
-    let capacity = suspensions
-        .len()
-        .checked_add(quarantined_channels.len())
-        .ok_or(RuntimeError::Overflow)?;
-    let mut backfills = Vec::new();
-    backfills
-        .try_reserve_exact(capacity)
-        .map_err(|_| RuntimeError::MemoryExhausted)?;
-    for (account_id, expires_at) in suspensions {
-        if domain
-            .durable_account(*account_id)
-            .is_some_and(|account| account.admin_suspension_expires_at != Some(*expires_at))
-        {
-            backfills.push(AdminPolicyBackfill::Account(*account_id));
-        }
-    }
-    for channel_id in quarantined_channels {
-        if domain
-            .durable_channel(*channel_id)
-            .is_some_and(|channel| !channel.admin_quarantined)
-        {
-            backfills.push(AdminPolicyBackfill::Channel(*channel_id));
-        }
-    }
-    Ok(backfills)
-}
-
-fn persist_admin_policy_backfills(
-    storage: &StoragePort,
-    reconstruction: &mut Reconstruction,
-    keys: &KeyDeriver,
-    ceilings: AccountingCeilings,
-    backfills: Vec<AdminPolicyBackfill>,
-) -> Result<(), DaemonError> {
-    for backfill in backfills {
-        let after_image = match backfill {
-            AdminPolicyBackfill::Account(account_id) => AdminMutationAfterImage::Account(
-                reconstruction
-                    .domain
-                    .durable_account(account_id)
-                    .ok_or(RuntimeError::InvalidValue)?,
-            ),
-            AdminPolicyBackfill::Channel(channel_id) => AdminMutationAfterImage::Channel(
-                reconstruction
-                    .domain
-                    .durable_channel(channel_id)
-                    .ok_or(RuntimeError::InvalidValue)?,
-            ),
-        };
-        commit_admin_policy_backfill(storage, reconstruction, keys, ceilings, &after_image)?;
-    }
-    Ok(())
-}
-
-fn commit_admin_policy_backfill(
-    storage: &StoragePort,
-    reconstruction: &mut Reconstruction,
-    keys: &KeyDeriver,
-    ceilings: AccountingCeilings,
-    after_image: &AdminMutationAfterImage,
-) -> Result<(), DaemonError> {
-    let (table, key) = match after_image {
-        AdminMutationAfterImage::Account(account) => (
-            TableId::Account,
-            KeyDeriver::account_key(account.account_id)?,
-        ),
-        AdminMutationAfterImage::Channel(channel) => (
-            TableId::Channel,
-            KeyDeriver::channel_key(channel.channel_id)?,
-        ),
-    };
-    let transaction_id = startup_transaction_id()?;
-    let projected = project_admin_policy_backfill(
-        transaction_id,
-        after_image,
-        &reconstruction.index,
-        keys,
-        reconstruction.head,
-        ceilings,
-    )?;
-    let (batch, retained) = projected.into_parts();
-    let receipt = match storage.try_commit(batch)?.wait()? {
-        CommitOutcome::Committed(receipt) if receipt.transaction_id == transaction_id => receipt,
-        CommitOutcome::Committed(_) | CommitOutcome::Indeterminate => {
-            return Err(DaemonError::Runtime(RuntimeError::Storage(
-                StorageError::Unavailable,
-            )));
-        }
-        CommitOutcome::Rejected(error) => return Err(DaemonError::Storage(error)),
-    };
-    reconstruction.head = retained.advance(&receipt);
-    reconstruction.index.apply(retained.updates());
-    let result = storage
-        .try_read(ReadPlan::exact(table, key.clone()))?
-        .wait()?;
-    if result.storage_commit_sequence != receipt.storage_commit_sequence {
-        return Err(DaemonError::Runtime(RuntimeError::Storage(
-            StorageError::StaleState,
-        )));
-    }
-    reconstruction
-        .index
-        .refresh(vec![read_back_record(table, key, result)?])?;
-    Ok(())
 }
 
 fn startup_transaction_id() -> Result<TransactionId, DaemonError> {
@@ -4040,10 +3908,8 @@ async fn shutdown_blocking_owners(
 #[cfg(test)]
 mod tests {
     use agenc_ircd_config::{PathResolver, RateTable};
-    use agenc_ircd_domain::DurableAccount;
-    use agenc_ircd_storage::AccountRecordBody;
-    use agenc_ircd_testkit::{DeterministicMonotonicClock, account_id};
-    use agenc_ircd_types::{Revision, ServerId, UtcSecond};
+    use agenc_ircd_testkit::DeterministicMonotonicClock;
+    use agenc_ircd_types::ServerId;
 
     use crate::observe::log::{LogTarget, LogWriter};
     use crate::observe::metrics::{MetricLabel, MetricName, MetricsView, QueueName};
@@ -4147,64 +4013,6 @@ mod tests {
             ValidationDepth::Document,
         )
         .map_err(DaemonError::Configuration)
-    }
-
-    #[test]
-    fn legacy_admin_policy_backfill_survives_retention_and_restart() -> Result<(), DaemonError> {
-        let account_id = account_id(91);
-        let revision = Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?;
-        let legacy = DurableAccount {
-            account_id,
-            label: None,
-            presence: PresencePolicy::Private,
-            guest_direct_messages: GuestDirectMessagePolicy::Deny,
-            direct_messages: DirectMessagePolicy::Deny,
-            contacts: Vec::new(),
-            reserved_nicknames: Vec::new(),
-            session_generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
-            revision,
-            admin_suspension_expires_at: None,
-        };
-        let mut domain = agenc_ircd_domain::DomainState::restore(
-            revision,
-            vec![AccountRecordBody::decode(&AccountRecordBody::encode(
-                &legacy,
-            )?)?],
-            Vec::new(),
-            Vec::new(),
-        )
-        .map_err(|_| RuntimeError::InvalidValue)?;
-        let expires_at = UtcSecond::from_unix_seconds(10_000);
-        let suspensions = vec![(account_id, expires_at)];
-        let backfills = missing_admin_policy_backfills(&domain, &suspensions, &[])?;
-        assert!(matches!(
-            backfills.as_slice(),
-            [AdminPolicyBackfill::Account(found)] if *found == account_id
-        ));
-        domain
-            .install_admin_policy(suspensions, Vec::new())
-            .map_err(|_| RuntimeError::InvalidValue)?;
-
-        let persisted = AccountRecordBody::encode(
-            &domain
-                .durable_account(account_id)
-                .ok_or(RuntimeError::InvalidValue)?,
-        )?;
-        let restarted = agenc_ircd_domain::DomainState::restore(
-            revision,
-            vec![AccountRecordBody::decode(&persisted)?],
-            Vec::new(),
-            Vec::new(),
-        )
-        .map_err(|_| RuntimeError::InvalidValue)?;
-        assert_eq!(
-            restarted
-                .durable_account(account_id)
-                .and_then(|account| account.admin_suspension_expires_at),
-            Some(expires_at)
-        );
-        assert!(missing_admin_policy_backfills(&restarted, &[], &[])?.is_empty());
-        Ok(())
     }
 
     #[test]

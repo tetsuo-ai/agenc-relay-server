@@ -10,6 +10,7 @@ use agenc_ircd_crypto::LoginIndexDigest;
 use agenc_ircd_storage::{
     LoginIndexStoredKey, LoginIndexValue, LoginIndexValueKind, RecordMutation, RecordReference,
 };
+use agenc_ircd_types::AccountId;
 use agenc_ircd_types::{AccountRandomId, AccountServiceMessageKind, InviteId};
 
 pub(super) const CREATION: TransactionId = TransactionId::from_bytes([14; 16]);
