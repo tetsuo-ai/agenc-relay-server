@@ -20,7 +20,6 @@ impl Update {
             proposed: State {
                 owner: proposal.owner,
                 head: proposal.head,
-                persisted: true,
             },
         }
     }

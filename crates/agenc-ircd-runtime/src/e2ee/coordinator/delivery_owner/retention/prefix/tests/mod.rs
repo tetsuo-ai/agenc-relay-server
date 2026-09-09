@@ -20,7 +20,6 @@ type Record = (StoredKey, PersistentRecordValue);
 struct Fixture {
     current: DeliveryOwner,
     prior: State,
-    legacy: bool,
     count: u64,
     backing: BackingReservationPort,
 }
@@ -50,7 +49,7 @@ fn ledger(row: ReplayLedgerRow) -> TestResult<Record> {
 }
 
 impl Fixture {
-    fn new(count: u64, legacy: bool) -> TestResult<Self> {
+    fn new(count: u64) -> TestResult<Self> {
         let DeliveryRecoveryRow::Owner(template) = DeliveryRecoveryRow::decode(&fixture_body(7)?)?
         else {
             return Err("owner fixture".into());
@@ -69,11 +68,6 @@ impl Fixture {
         let owner = ReplayOwner::new(ReplayOwnerFields {
             scope: *current.scope(),
             generation: 0,
-            baseline: if legacy {
-                last
-            } else {
-                LastAcknowledged::BeforeFirst
-            },
             through,
             event_id: id(through),
             first_retained: 0,
@@ -83,7 +77,6 @@ impl Fixture {
         })?;
         Ok(Self {
             current,
-            legacy,
             count,
             prior: State {
                 owner,
@@ -94,7 +87,6 @@ impl Fixture {
                     0,
                     Acknowledgement::received_at(Some(100)),
                 )?),
-                persisted: !legacy,
             },
             backing: BackingReservationPort::new(Arc::new(MemoryBudget::new(1_048_576))),
         })
@@ -128,11 +120,6 @@ impl Fixture {
     fn rows(&self, count: u64) -> TestResult<Vec<Record>> {
         (0..count)
             .map(|sequence| {
-                let ack = if self.legacy && sequence < self.count {
-                    Acknowledgement::received_at(Some(100))
-                } else {
-                    Acknowledgement::Unacknowledged
-                };
                 let row = ScopedOutbox::new(ScopedOutboxFields {
                     scope: *self.current.scope(),
                     generation: 0,
@@ -142,7 +129,7 @@ impl Fixture {
                     event_bytes: 1024,
                     payload_object_id: None,
                     payload_bytes: 0,
-                    acknowledgement: ack,
+                    acknowledgement: Acknowledgement::Unacknowledged,
                     cross_profile: None,
                 })?;
                 Ok((
@@ -154,9 +141,6 @@ impl Fixture {
     }
 
     fn ranges(&self, count: u64) -> TestResult<Vec<Record>> {
-        if self.legacy {
-            return Ok(Vec::new());
-        }
         (0..count)
             .map(|sequence| {
                 ledger(ReplayLedgerRow::Range(AckRange::new(AckRangeFields {
@@ -172,9 +156,6 @@ impl Fixture {
     }
 
     fn owner(&self) -> TestResult<Vec<Record>> {
-        if self.legacy {
-            return Ok(Vec::new());
-        }
         Ok(vec![ledger(ReplayLedgerRow::Owner(self.prior.owner))?])
     }
 }
@@ -194,7 +175,7 @@ fn admit(prefix: &mut Prefix, truncated: bool, records: Vec<Record>) -> TestResu
 
 #[test]
 fn a_million_row_bound_needs_only_the_removed_head_and_its_successor() -> TestResult {
-    let fixture = Fixture::new(1_000_000, false)?;
+    let fixture = Fixture::new(1_000_000)?;
     let mut prefix = fixture.prefix(200, None)?;
     admit(&mut prefix, false, fixture.owner()?)?;
     // Both pages explicitly have unread tails. Finishing must not request them.
@@ -210,33 +191,27 @@ fn a_million_row_bound_needs_only_the_removed_head_and_its_successor() -> TestRe
 }
 
 #[test]
-fn age_trims_old_rows_but_keeps_the_new_ack_for_legacy_and_journal_sources() -> TestResult {
-    for legacy in [false, true] {
-        let fixture = Fixture::new(3, legacy)?;
-        let mut prefix = fixture.prefix(86_500, None)?;
-        admit(&mut prefix, false, fixture.owner()?)?;
-        admit(&mut prefix, false, fixture.ranges(3)?)?;
-        admit(&mut prefix, false, fixture.rows(4)?)?;
-        assert!(matches!(prefix.next()?, Next::Done));
-        let proposal = prefix.finish()?;
-        assert_eq!(proposal.owner.fields().retained_rows, 1);
-        assert_eq!(proposal.owner.fields().first_retained, 3);
-        assert_eq!(
-            proposal.owner.fields().baseline,
-            fixture.prior.owner.fields().baseline
-        );
-        assert_eq!(
-            proposal.head.ok_or("new ACK head")?.acknowledgement,
-            Acknowledgement::received_at(Some(86_500))
-        );
-    }
+fn age_trims_expired_rows_and_keeps_the_new_ack() -> TestResult {
+    let fixture = Fixture::new(3)?;
+    let mut prefix = fixture.prefix(86_500, None)?;
+    admit(&mut prefix, false, fixture.owner()?)?;
+    admit(&mut prefix, false, fixture.ranges(3)?)?;
+    admit(&mut prefix, false, fixture.rows(4)?)?;
+    assert!(matches!(prefix.next()?, Next::Done));
+    let proposal = prefix.finish()?;
+    assert_eq!(proposal.owner.fields().retained_rows, 1);
+    assert_eq!(proposal.owner.fields().first_retained, 3);
+    assert_eq!(
+        proposal.head.ok_or("new ACK head")?.acknowledgement,
+        Acknowledgement::received_at(Some(86_500))
+    );
     Ok(())
 }
 
 #[test]
 fn a_changed_or_missing_owner_and_an_unexpected_journal_refuse_the_scan() -> TestResult {
-    for case in 0..3 {
-        let fixture = Fixture::new(3, case == 2)?;
+    for case in 0..2 {
+        let fixture = Fixture::new(3)?;
         let mut prefix = fixture.prefix(200, None)?;
         let records = if case == 0 {
             Vec::new()
@@ -258,7 +233,7 @@ fn a_changed_or_missing_owner_and_an_unexpected_journal_refuse_the_scan() -> Tes
 #[test]
 fn a_changed_commit_or_head_cannot_authorize_a_retention_cutoff() -> TestResult {
     for changed_commit in [false, true] {
-        let fixture = Fixture::new(3, false)?;
+        let fixture = Fixture::new(3)?;
         let mut prefix = fixture.prefix(86_500, None)?;
         admit(&mut prefix, false, fixture.owner()?)?;
         let request = query(&mut prefix)?;
@@ -287,7 +262,7 @@ fn a_changed_commit_or_head_cannot_authorize_a_retention_cutoff() -> TestResult 
 
 #[test]
 fn retention_cannot_remove_a_protected_barrier_prefix() -> TestResult {
-    let fixture = Fixture::new(3, false)?;
+    let fixture = Fixture::new(3)?;
     let mut prefix = fixture.prefix(86_500, Some(1))?;
     admit(&mut prefix, false, fixture.owner()?)?;
     admit(&mut prefix, false, fixture.ranges(3)?)?;

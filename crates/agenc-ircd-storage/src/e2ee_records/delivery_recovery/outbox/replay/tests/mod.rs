@@ -24,7 +24,6 @@ fn owner() -> Result<ReplayOwnerFields, StorageError> {
     Ok(ReplayOwnerFields {
         scope: scope()?,
         generation: 8,
-        baseline: LastAcknowledged::BeforeFirst,
         through: 11,
         event_id: [0; 16],
         first_retained: 9,
@@ -60,7 +59,7 @@ fn hex(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 #[test]
 fn acknowledgement_range_matches_fixed_envelope_bytes() -> TestResult {
     let row = ReplayLedgerRow::Range(AckRange::new(range()?)?);
-    let expected = hex("00010017000e0001000000a6 00020002
+    let expected = hex("00010017000e0001000000a6 00030002
         0101010101010101010101010101010101010101010101010101010101010101
         02020202020202020202020202020202 03030303030303030303030303030303
         04040404040404040404040404040404 05050505050505050505050505050505
@@ -74,11 +73,11 @@ fn acknowledgement_range_matches_fixed_envelope_bytes() -> TestResult {
 #[test]
 fn owner_matches_fixed_envelope_bytes() -> TestResult {
     let row = ReplayLedgerRow::Owner(ReplayOwner::new(owner()?)?);
-    let expected = hex("00010017000e0001000000b8 00020001
+    let expected = hex("00010017000e0001000000b6 00030001
         0101010101010101010101010101010101010101010101010101010101010101
         02020202020202020202020202020202 03030303030303030303030303030303
         04040404040404040404040404040404 05050505050505050505050505050505
-        06060606060606060606060606060606 0000000000000007 0000000000000008 0000
+        06060606060606060606060606060606 0000000000000007 0000000000000008
         000000000000000b 00000000000000000000000000000000
         0000000000000009 0000000000000003 0000000000000300 0000")?;
     assert_eq!(row.encode()?, expected);
@@ -87,12 +86,8 @@ fn owner_matches_fixed_envelope_bytes() -> TestResult {
 }
 
 #[test]
-fn full_clock_and_baseline_fields_round_trip_with_zero_event_identity() -> TestResult {
+fn full_clock_fields_round_trip_with_zero_event_identity() -> TestResult {
     let mut fields = owner()?;
-    fields.baseline = LastAcknowledged::At {
-        sequence: 8,
-        event_id: [0; 16],
-    };
     fields.trusted_unix_seconds = Some(0);
     let owner = ReplayLedgerRow::Owner(ReplayOwner::new(fields)?);
     assert_eq!(owner.encode()?.len(), MAX_BODY_BYTES + ENVELOPE_BYTES);
@@ -111,12 +106,15 @@ fn full_clock_and_baseline_fields_round_trip_with_zero_event_identity() -> TestR
 }
 
 #[test]
-fn wrong_keys_versions_arms_lengths_and_legacy_decoders_are_rejected() -> TestResult {
+fn wrong_keys_versions_arms_lengths_and_record_families_are_rejected() -> TestResult {
     for row in [
         ReplayLedgerRow::Owner(ReplayOwner::new(owner()?)?),
         ReplayLedgerRow::Range(AckRange::new(range()?)?),
     ] {
         let bytes = row.encode()?;
+        let mut obsolete = bytes.clone();
+        *obsolete.get_mut(ENVELOPE_BYTES + 1).ok_or("body version")? = 2;
+        assert!(ReplayLedgerRow::decode_at(&row.key()?, &obsolete).is_err());
         assert!(DeliveryRecoveryRow::decode(&bytes).is_err());
         for end in 0..bytes.len() {
             assert!(ReplayLedgerRow::decode(bytes.get(..end).ok_or("truncation")?).is_err());
@@ -140,7 +138,7 @@ fn wrong_keys_versions_arms_lengths_and_legacy_decoders_are_rejected() -> TestRe
 }
 
 #[test]
-fn owner_rejects_impossible_suffix_totals_baselines_and_clock_overflow() -> TestResult {
+fn owner_rejects_impossible_suffix_totals_and_clock_overflow() -> TestResult {
     let valid = owner()?;
     for changed in [
         ReplayOwnerFields {
@@ -161,20 +159,6 @@ fn owner_rejects_impossible_suffix_totals_baselines_and_clock_overflow() -> Test
         },
         ReplayOwnerFields {
             retained_bytes: 16_777_216,
-            ..valid
-        },
-        ReplayOwnerFields {
-            baseline: LastAcknowledged::At {
-                sequence: 12,
-                event_id: [0; 16],
-            },
-            ..valid
-        },
-        ReplayOwnerFields {
-            baseline: LastAcknowledged::At {
-                sequence: 11,
-                event_id: [1; 16],
-            },
             ..valid
         },
         ReplayOwnerFields {

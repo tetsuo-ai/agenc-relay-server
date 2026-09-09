@@ -169,7 +169,7 @@ async fn seed_retained(fixture: &mut RestartFixture) -> TestResult<(DeliveryOwne
         ReplayLedgerRow::Owner(ReplayOwner::new(ReplayOwnerFields {
             scope: *owner.scope(),
             generation: 0,
-            baseline: LastAcknowledged::BeforeFirst,
+
             through: 4096,
             event_id: id(4096),
             first_retained: 0,
@@ -288,8 +288,7 @@ async fn composed_startup_recovers_journal_coverage_beyond_the_body_cache() -> T
         .get(&home())
         .ok_or("reconstructed stream")?;
     assert_eq!(stream.owner.as_ref(), Some(&owner));
-    let (replay, persisted) = stream.replay.ok_or("replay inventory")?.inspected();
-    assert!(persisted);
+    let replay = stream.replay.ok_or("replay inventory")?.inspected();
     assert_eq!(replay.fields().retained_rows, 4097);
     assert_eq!(replay.fields().first_retained, 0);
     assert_eq!(stream.rows.iter().filter(|row| row.acked()).count(), 4096);

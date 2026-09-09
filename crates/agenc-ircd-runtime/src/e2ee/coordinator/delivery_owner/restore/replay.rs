@@ -24,7 +24,6 @@ pub(in crate::e2ee::coordinator) struct Loaded {
     pub(in crate::e2ee::coordinator) stream: DeliveryStream,
     pub(in crate::e2ee::coordinator) owner: Option<ReplayOwner>,
     head: Option<Row>,
-    persisted: bool,
 }
 
 /// Validated retention metadata remains attached to its exact delivery stream.
@@ -32,13 +31,12 @@ pub(in crate::e2ee::coordinator) struct Loaded {
 pub(crate) struct State {
     pub(in crate::e2ee::coordinator::delivery_owner) owner: ReplayOwner,
     pub(in crate::e2ee::coordinator::delivery_owner) head: Option<Row>,
-    pub(in crate::e2ee::coordinator::delivery_owner) persisted: bool,
 }
 
 #[cfg(test)]
 impl State {
-    pub(in crate::e2ee::coordinator) fn inspected(self) -> (ReplayOwner, bool) {
-        (self.owner, self.persisted)
+    pub(in crate::e2ee::coordinator) fn inspected(self) -> ReplayOwner {
+        self.owner
     }
 }
 
@@ -52,7 +50,6 @@ impl Loaded {
         self.stream.replay = self.owner.map(|owner| State {
             owner,
             head: self.head,
-            persisted: self.persisted,
         });
         self.stream
     }
@@ -249,7 +246,6 @@ impl Job {
             stream: self.stream,
             owner: restored.owner,
             head: restored.head,
-            persisted: restored.persisted,
         })
     }
 }

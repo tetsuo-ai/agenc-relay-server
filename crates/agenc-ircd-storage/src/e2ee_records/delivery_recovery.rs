@@ -62,7 +62,7 @@ pub fn validate_body(body: &[u8]) -> Result<(), StorageError> {
         .ok_or(StorageError::InvalidEncoding)?;
     match version {
         [0, 1] => DeliveryRecoveryRow::decode(body).map(|_| ()),
-        [0, 2] => outbox::replay::ReplayLedgerRow::decode(body).map(|_| ()),
+        [0, 3] => outbox::replay::ReplayLedgerRow::decode(body).map(|_| ()),
         _ => Err(StorageError::UnsupportedVersion),
     }
 }

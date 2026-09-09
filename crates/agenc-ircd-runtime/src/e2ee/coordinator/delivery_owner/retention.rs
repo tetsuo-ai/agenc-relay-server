@@ -4,7 +4,6 @@
 mod append;
 pub(crate) mod cleanup;
 mod inventory;
-mod legacy;
 pub(crate) mod maintenance;
 pub(in crate::e2ee::coordinator) mod prefix;
 pub(super) mod recovery;
@@ -25,7 +24,6 @@ use agenc_ircd_storage::e2ee_records::delivery_recovery::{
 };
 
 use super::super::CompanionFault;
-pub(super) use legacy::LegacyInventory;
 pub(super) use row::Row;
 
 /// Unpublished totals may exceed a hard limit only while their prefix is scanned.

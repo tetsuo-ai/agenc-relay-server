@@ -122,7 +122,7 @@ async fn seed() -> TestResult<(Fixture, StoredKey)> {
         ReplayLedgerRow::Owner(ReplayOwner::new(ReplayOwnerFields {
             scope: *owner.scope(),
             generation: 0,
-            baseline: LastAcknowledged::BeforeFirst,
+
             through: 130,
             event_id: event_id(130),
             first_retained: 129,

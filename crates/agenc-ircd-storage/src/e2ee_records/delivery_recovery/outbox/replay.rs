@@ -1,6 +1,4 @@
-//! Version-two delivery replay records for explicit schema-four admission.
-//!
-//! The existing schema-three row decoder deliberately rejects this family.
+//! Scoped ACK journals and retained replay ownership.
 #![forbid(unsafe_code)]
 
 mod owner;
@@ -13,11 +11,11 @@ pub use range::{AckRange, AckRangeFields};
 
 use crate::codec::{Decoder, Encoder};
 use crate::e2ee_records::DELIVERY_RECOVERY_ROW_KIND;
-use crate::e2ee_records::delivery_recovery::{DeliveryScope, LastAcknowledged};
+use crate::e2ee_records::delivery_recovery::DeliveryScope;
 use crate::{ProtocolRecordBody, StorageError, StoredKey, TableId};
 
-/// Version kept separate from the schema-three delivery body.
-pub const REPLAY_BODY_VERSION: u16 = 2;
+/// Exact current replay-journal body version.
+pub const REPLAY_BODY_VERSION: u16 = 3;
 /// Exact full-scope replay owner prefix.
 pub const REPLAY_OWNER_PREFIX: &[u8] = b"delivery-replay-owner/v1/";
 /// Exact full-scope ACK range prefix, ordered by final sequence.
@@ -25,7 +23,7 @@ pub const ACK_RANGE_PREFIX: &[u8] = b"delivery-ack-range/v1/";
 const OWNER_ARM: u16 = 1;
 const RANGE_ARM: u16 = 2;
 const SCOPE_BYTES: usize = 120;
-const MAX_BODY_BYTES: usize = 216;
+const MAX_BODY_BYTES: usize = 190;
 const ENVELOPE_BYTES: usize = crate::MAX_DOMAIN_RECORD_BODY_BYTES - crate::MAX_PROTOCOL_BODY_BYTES;
 
 /// A typed range journal; construction grants no delivery authority.
@@ -141,26 +139,4 @@ pub fn ack_ranges_from(
         Some(first_final_sequence),
     )?;
     super::super::prefix_range_from(prefix.as_bytes(), &start, limit)
-}
-
-fn put_baseline(baseline: LastAcknowledged, encoder: &mut Encoder) -> Result<(), StorageError> {
-    match baseline {
-        LastAcknowledged::BeforeFirst => encoder.put_u16(0),
-        LastAcknowledged::At { sequence, event_id } => {
-            encoder.put_u16(1)?;
-            encoder.put_u64(sequence)?;
-            encoder.put_fixed(&event_id)
-        }
-    }
-}
-
-fn take_baseline(decoder: &mut Decoder<'_>) -> Result<LastAcknowledged, StorageError> {
-    match decoder.u16()? {
-        0 => Ok(LastAcknowledged::BeforeFirst),
-        1 => Ok(LastAcknowledged::At {
-            sequence: decoder.u64()?,
-            event_id: decoder.array()?,
-        }),
-        _ => Err(StorageError::InvalidEncoding),
-    }
 }

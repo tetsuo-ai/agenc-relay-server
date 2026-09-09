@@ -1,7 +1,7 @@
 //! A charged merge of bounded outbox and ACK-journal pages at one storage commit.
 #![forbid(unsafe_code)]
 
-mod legacy;
+mod initial;
 mod page;
 mod query;
 #[cfg(test)]
@@ -34,11 +34,10 @@ pub(in crate::e2ee::coordinator::delivery_owner) enum Next {
 pub(in crate::e2ee::coordinator::delivery_owner) struct Restored {
     pub(in crate::e2ee::coordinator::delivery_owner) owner: Option<ReplayOwner>,
     pub(in crate::e2ee::coordinator::delivery_owner) head: Option<Row>,
-    pub(in crate::e2ee::coordinator::delivery_owner) persisted: bool,
 }
 
 enum Scan {
-    Legacy(Box<legacy::Scan>),
+    Initial(Box<initial::Scan>),
     Ledger(Box<Inventory>),
 }
 
@@ -144,11 +143,10 @@ impl Reader {
             return Err(CompanionFault::Storage);
         }
         self.restored = Some(match self.scan.take().ok_or(CompanionFault::Storage)? {
-            Scan::Legacy(scan) => scan.finish()?,
+            Scan::Initial(scan) => scan.finish()?,
             Scan::Ledger(inventory) => Restored {
                 owner: Some(inventory.owner()),
                 head: inventory.finish()?,
-                persisted: true,
             },
         });
         Ok(Next::Done)
@@ -168,7 +166,7 @@ impl Reader {
         }
         let row = self.rows.pop_front().ok_or(CompanionFault::Storage)?;
         let effective = match self.scan.as_mut().ok_or(CompanionFault::Storage)? {
-            Scan::Legacy(scan) => scan.observe(row)?,
+            Scan::Initial(scan) => scan.observe(row)?,
             Scan::Ledger(inventory) => inventory.observe(row)?,
         };
         Ok(Next::Row(effective))

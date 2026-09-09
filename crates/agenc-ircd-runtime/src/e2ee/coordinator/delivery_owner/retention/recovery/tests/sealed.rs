@@ -69,48 +69,46 @@ async fn page(storage: &mut StateCoreFixture, reader: &mut Reader, request: &Que
 #[tokio::test]
 async fn sealed_outbox_and_ack_journal_pages_reconstruct_without_all_row_metadata_resident()
 -> TestResult {
-    for legacy in [false, true] {
-        let fixture = Fixture::new(legacy)?;
-        let mut storage = StateCoreFixture::new(vec![44; 65_536])?;
-        seed(&mut storage, &fixture).await?;
-        let mut reader = Reader::new(
-            fixture.current.clone(),
-            None,
-            &storage.context_mut()?.backing_reservations(),
-        )?;
-        let mut count = 0;
-        let mut reads = 0;
-        loop {
-            match reader.next()? {
-                Next::Read(request) => {
-                    page(&mut storage, &mut reader, &request).await?;
-                    reads += 1;
-                }
-                Next::Row(row) => {
-                    assert_eq!(row.sequence(), count);
-                    assert_eq!(row.acknowledgement().is_acknowledged(), count < 257);
-                    count += 1;
-                }
-                Next::Done => break,
+    let fixture = Fixture::new()?;
+    let mut storage = StateCoreFixture::new(vec![44; 65_536])?;
+    seed(&mut storage, &fixture).await?;
+    let mut reader = Reader::new(
+        fixture.current.clone(),
+        None,
+        &storage.context_mut()?.backing_reservations(),
+    )?;
+    let mut count = 0;
+    let mut reads = 0;
+    loop {
+        match reader.next()? {
+            Next::Read(request) => {
+                page(&mut storage, &mut reader, &request).await?;
+                reads += 1;
             }
+            Next::Row(row) => {
+                assert_eq!(row.sequence(), count);
+                assert_eq!(row.acknowledgement().is_acknowledged(), count < 257);
+                count += 1;
+            }
+            Next::Done => break,
         }
-        assert_eq!((count, reads), (258, if legacy { 5 } else { 7 }));
-        assert_eq!(
-            reader
-                .finish()?
-                .owner
-                .ok_or("owner")?
-                .fields()
-                .retained_bytes,
-            257 * 1024
-        );
     }
+    assert_eq!((count, reads), (258, 7));
+    assert_eq!(
+        reader
+            .finish()?
+            .owner
+            .ok_or("owner")?
+            .fields()
+            .retained_bytes,
+        257 * 1024
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn a_real_commit_between_pages_cannot_be_merged_into_the_captured_history() -> TestResult {
-    let fixture = Fixture::new(false)?;
+    let fixture = Fixture::new()?;
     let mut storage = StateCoreFixture::new(vec![44; 65_536])?;
     seed(&mut storage, &fixture).await?;
     let mut reader = Reader::new(
@@ -121,6 +119,25 @@ async fn a_real_commit_between_pages_cannot_be_merged_into_the_captured_history(
     let request = query(&mut reader)?;
     page(&mut storage, &mut reader, &request).await?;
     seed(&mut storage, &fixture).await?;
+    let request = query(&mut reader)?;
+    assert!(page(&mut storage, &mut reader, &request).await.is_err());
+    assert!(reader.next().is_err());
+    assert!(reader.finish().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn sealed_acknowledged_cursor_without_a_journal_cannot_publish_recovery() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.owner = None;
+    fixture.ranges.clear();
+    let mut storage = StateCoreFixture::new(vec![44; 65_536])?;
+    seed(&mut storage, &fixture).await?;
+    let mut reader = Reader::new(
+        fixture.current.clone(),
+        None,
+        &storage.context_mut()?.backing_reservations(),
+    )?;
     let request = query(&mut reader)?;
     assert!(page(&mut storage, &mut reader, &request).await.is_err());
     assert!(reader.next().is_err());

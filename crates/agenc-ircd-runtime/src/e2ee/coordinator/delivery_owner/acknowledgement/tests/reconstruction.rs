@@ -44,7 +44,7 @@ fn a_mismatched_proposed_generation_fails_before_touching_the_stream() -> TestRe
     let proposal = super::super::retention::Proposal {
         owner: agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::ReplayOwner::new(
             agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::ReplayOwnerFields {
-                scope, generation: 1, baseline: LastAcknowledged::BeforeFirst,
+                scope, generation: 1,
                 through: 0, event_id: [8; 16], first_retained: 1, retained_rows: 0,
                 retained_bytes: 0, trusted_unix_seconds: None,
             },

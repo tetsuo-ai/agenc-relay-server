@@ -8,23 +8,6 @@ use agenc_ircd_storage::e2ee_records::delivery_recovery::{
 
 type TestResult<T = ()> = crate::test_support::TestResult<T>;
 
-#[test]
-fn a_refused_legacy_row_poisons_the_inventory() -> TestResult {
-    let mut inventory = LegacyInventory::new(current(Some(1), 2)?);
-    assert!(
-        inventory
-            .observe(row(0, Acknowledgement::Unacknowledged)?)
-            .is_err()
-    );
-    assert!(
-        inventory
-            .observe(row(0, Acknowledgement::AcknowledgedTimeUnknown)?)
-            .is_err()
-    );
-    assert!(inventory.finish().is_err());
-    Ok(())
-}
-
 fn id(sequence: u64) -> [u8; 16] {
     let mut result = [0; 16];
     for (target, source) in result.iter_mut().zip(sequence.to_be_bytes()) {
@@ -65,7 +48,6 @@ fn baseline(current: &DeliveryOwner, first: u64, bytes: u64) -> TestResult<Repla
     Ok(ReplayOwner::new(ReplayOwnerFields {
         scope: *current.scope(),
         generation: current.cursor().generation(),
-        baseline: current.cursor().last_ack(),
         through: sequence,
         event_id,
         first_retained: first,
@@ -79,11 +61,7 @@ fn baseline(current: &DeliveryOwner, first: u64, bytes: u64) -> TestResult<Repla
 fn one_more_ack_preserves_4097_rows_under_the_published_limits() -> TestResult {
     let current = current(Some(4095), 4097)?;
     let ack = Acknowledgement::received_at(Some(100));
-    let mut inventory = LegacyInventory::new(current.clone());
-    for sequence in 0..4096 {
-        inventory.observe(row(sequence, ack)?)?;
-    }
-    let previous = inventory.finish()?.ok_or("legacy baseline")?;
+    let previous = baseline(&current, 0, 4096 * 1024)?;
     let draft = Draft::append(
         &current,
         Some(previous),
@@ -96,10 +74,6 @@ fn one_more_ack_preserves_4097_rows_under_the_published_limits() -> TestResult {
     assert_eq!(proposal.owner.fields().retained_rows, 4097);
     assert_eq!(proposal.owner.fields().retained_bytes, 4097 * 1024);
     assert_eq!(proposal.owner.fields().first_retained, 0);
-    assert_eq!(
-        proposal.owner.fields().baseline,
-        current.cursor().last_ack()
-    );
     assert_eq!(proposal.head, Some(row(0, ack)?));
     let range = proposal.range.ok_or("new ACK range")?;
     assert_eq!((range.fields().first, range.fields().last), (4096, 4096));
@@ -109,7 +83,6 @@ fn one_more_ack_preserves_4097_rows_under_the_published_limits() -> TestResult {
 #[test]
 fn the_first_ack_keeps_before_first_distinct_from_zero_event_identity() -> TestResult {
     let current = current(None, 1)?;
-    assert!(LegacyInventory::new(current.clone()).finish()?.is_none());
     let proposal = Draft::append(
         &current,
         None,
@@ -119,10 +92,6 @@ fn the_first_ack_keeps_before_first_distinct_from_zero_event_identity() -> TestR
         Some(0),
     )?
     .finish(Some(row(0, Acknowledgement::received_at(Some(0)))?))?;
-    assert_eq!(
-        proposal.owner.fields().baseline,
-        LastAcknowledged::BeforeFirst
-    );
     assert_eq!(proposal.owner.fields().event_id, [0; 16]);
     assert_eq!(proposal.owner.fields().retained_rows, 1);
     Ok(())
@@ -264,28 +233,6 @@ fn incomplete_or_conflicting_new_ack_prefixes_are_refused() -> TestResult {
 }
 
 #[test]
-fn legacy_inventory_cannot_guess_a_missing_tail_or_accept_a_gap() -> TestResult {
-    let current = current(Some(2), 3)?;
-    let mut missing = LegacyInventory::new(current.clone());
-    missing.observe(row(0, Acknowledgement::AcknowledgedTimeUnknown)?)?;
-    assert!(missing.finish().is_err());
-    let mut gap = LegacyInventory::new(current.clone());
-    gap.observe(row(0, Acknowledgement::AcknowledgedTimeUnknown)?)?;
-    assert!(
-        gap.observe(row(2, Acknowledgement::AcknowledgedTimeUnknown)?)
-            .is_err()
-    );
-    let empty = LegacyInventory::new(current)
-        .finish()?
-        .ok_or("empty legacy suffix")?;
-    assert_eq!(
-        (empty.fields().first_retained, empty.fields().retained_rows),
-        (3, 0)
-    );
-    Ok(())
-}
-
-#[test]
 fn a_replay_owner_must_match_the_current_cursor_and_full_scope() -> TestResult {
     let current = current(Some(0), 2)?;
     let previous = baseline(&current, 0, 1024)?;
@@ -306,10 +253,6 @@ fn a_replay_owner_must_match_the_current_cursor_and_full_scope() -> TestResult {
     })?;
     assert!(Draft::maintenance(&current, changed, None).is_err());
     let changed = ReplayOwner::new(ReplayOwnerFields {
-        baseline: LastAcknowledged::At {
-            sequence: 0,
-            event_id: [8; 16],
-        },
         event_id: [8; 16],
         ..*previous.fields()
     })?;

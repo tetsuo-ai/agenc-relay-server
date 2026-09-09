@@ -58,7 +58,7 @@ fn owner(
         reader.next_range = owner.fields().first_retained;
         Scan::Ledger(Box::new(inventory))
     } else {
-        Scan::Legacy(Box::new(legacy::Scan::new(reader.current.clone())))
+        Scan::Initial(Box::new(initial::Scan::new(reader.current.clone())?))
     });
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Persistent logical retention survives interrupted physical deletion.
 #![forbid(unsafe_code)]
 
-use super::{Decoder, DeliveryScope, Encoder, LastAcknowledged, StorageError};
+use super::{Decoder, DeliveryScope, Encoder, StorageError};
 use crate::e2ee_records::delivery_recovery::Acknowledgement;
 use agenc_ircd_e2ee::limits::{
     MAX_ACKED_E2EE_EVENT_REPLAY_BYTES_PER_EDGE, MAX_ACKED_E2EE_EVENT_REPLAY_ROWS_PER_EDGE,
@@ -10,12 +10,10 @@ use agenc_ircd_e2ee::limits::{
 /// Exact facts proposed by a cursor-owned retention transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReplayOwnerFields {
-    /// Complete accepted historical delivery scope.
+    /// Complete accepted delivery scope.
     pub scope: DeliveryScope,
     /// Delivery generation; zero is ordinary.
     pub generation: u64,
-    /// Last ACK interpreted through legacy per-row metadata.
-    pub baseline: LastAcknowledged,
     /// Exact latest acknowledged sequence.
     pub through: u64,
     /// Opaque identity of that sequence, including an ordinary all-zero ID.
@@ -37,15 +35,9 @@ pub struct ReplayOwner {
 }
 
 impl ReplayOwner {
-    /// Validates the exact suffix, original baseline, byte bounds, and clock representation.
+    /// Validates the exact suffix, byte bounds, and clock representation.
     pub fn new(fields: ReplayOwnerFields) -> Result<Self, StorageError> {
         validate_suffix(&fields)?;
-        if let LastAcknowledged::At { sequence, event_id } = fields.baseline
-            && (sequence > fields.through
-                || (sequence == fields.through && event_id != fields.event_id))
-        {
-            return Err(StorageError::InvalidEncoding);
-        }
         if let Some(time) = fields.trusted_unix_seconds
             && !matches!(
                 Acknowledgement::received_at(Some(time)),
@@ -62,7 +54,7 @@ impl ReplayOwner {
     pub const fn fields(&self) -> &ReplayOwnerFields {
         &self.fields
     }
-    /// Returns the complete historical scope.
+    /// Returns the complete delivery scope.
     #[must_use]
     pub const fn scope(&self) -> &DeliveryScope {
         &self.fields.scope
@@ -76,7 +68,6 @@ impl ReplayOwner {
     pub(super) fn put(&self, encoder: &mut Encoder) -> Result<(), StorageError> {
         self.scope().put(encoder)?;
         encoder.put_u64(self.generation())?;
-        super::put_baseline(self.fields.baseline, encoder)?;
         encoder.put_u64(self.fields.through)?;
         encoder.put_fixed(&self.fields.event_id)?;
         encoder.put_u64(self.fields.first_retained)?;
@@ -93,7 +84,6 @@ impl ReplayOwner {
         Self::new(ReplayOwnerFields {
             scope: DeliveryScope::take(decoder)?,
             generation: decoder.u64()?,
-            baseline: super::take_baseline(decoder)?,
             through: decoder.u64()?,
             event_id: decoder.array()?,
             first_retained: decoder.u64()?,

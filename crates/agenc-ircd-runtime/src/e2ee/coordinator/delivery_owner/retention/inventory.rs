@@ -1,7 +1,7 @@
 //! One range and one row suffice to validate a complete retained suffix.
 #![forbid(unsafe_code)]
 
-use super::{AckRange, Acknowledgement, CompanionFault, DeliveryOwner, LastAcknowledged};
+use super::{AckRange, Acknowledgement, CompanionFault, DeliveryOwner};
 use super::{ReplayOwner, Row, validate_previous};
 use agenc_ircd_e2ee::limits::{
     MAX_UNACKED_E2EE_EVENT_BYTES_PER_EDGE, MAX_UNACKED_E2EE_EVENTS_PER_EDGE,
@@ -50,7 +50,6 @@ impl Inventory {
     pub(super) fn needs_range(&self) -> Option<u64> {
         (!self.failed
             && self.next <= self.replay.fields().through
-            && !self.legacy(self.next)
             && self.range.is_none_or(|range| range.last() < self.next))
         .then_some(self.next)
     }
@@ -66,7 +65,6 @@ impl Inventory {
             || fields.first > next
             || fields.last < next
             || fields.last > self.replay.fields().through
-            || self.legacy(fields.first)
             || (next != self.replay.fields().first_retained && fields.first != next)
         {
             self.failed = true;
@@ -123,13 +121,6 @@ impl Inventory {
             && row.event_id() != self.replay.fields().event_id
         {
             return Err(CompanionFault::Storage);
-        }
-        if self.legacy(sequence) {
-            return if row.acknowledgement().is_acknowledged() {
-                Ok(row.acknowledgement())
-            } else {
-                Err(CompanionFault::Storage)
-            };
         }
         self.range_acknowledgement(row)
     }
@@ -194,10 +185,6 @@ impl Inventory {
             return Err(CompanionFault::Storage);
         }
         Ok(())
-    }
-
-    fn legacy(&self, sequence: u64) -> bool {
-        matches!(self.replay.fields().baseline, LastAcknowledged::At { sequence: end, .. } if sequence <= end)
     }
 
     pub(super) fn finish(self) -> Result<Option<Row>, CompanionFault> {

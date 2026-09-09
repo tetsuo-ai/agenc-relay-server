@@ -385,7 +385,6 @@ async fn a_replay_cutoff_inside_an_open_barrier_refuses_before_installing_a_stre
     let replay = ReplayLedgerRow::Owner(ReplayOwner::new(ReplayOwnerFields {
         scope: *fixture.gate.scope(),
         generation: endpoint.generation(),
-        baseline: LastAcknowledged::BeforeFirst,
         through: endpoint.last(),
         event_id: endpoint.final_event_id(),
         first_retained: endpoint.last().checked_add(1).ok_or("floor")?,

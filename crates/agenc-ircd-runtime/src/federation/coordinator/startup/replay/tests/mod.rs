@@ -47,7 +47,6 @@ fn seeded() -> TestResult<(
     let replay = ReplayLedgerRow::Owner(ReplayOwner::new(ReplayOwnerFields {
         scope,
         generation: 0,
-        baseline: last,
         through: 0,
         event_id: [8; 16],
         first_retained: 1,

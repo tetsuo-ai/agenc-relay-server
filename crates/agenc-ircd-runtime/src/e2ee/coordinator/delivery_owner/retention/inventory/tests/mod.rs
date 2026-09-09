@@ -9,7 +9,7 @@ use agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::{
     AckRangeFields, ReplayOwnerFields,
 };
 use agenc_ircd_storage::e2ee_records::delivery_recovery::{
-    DeliveryCursor, DeliveryRecoveryRow, ScopedOutboxFields, fixture_body,
+    DeliveryCursor, DeliveryRecoveryRow, LastAcknowledged, ScopedOutboxFields, fixture_body,
 };
 
 fn id(sequence: u64) -> [u8; 16] {
@@ -26,7 +26,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(first: u64, baseline: LastAcknowledged, through: u64, next: u64) -> TestResult<Self> {
+    fn new(first: u64, through: u64, next: u64) -> TestResult<Self> {
         let DeliveryRecoveryRow::Owner(owner) = DeliveryRecoveryRow::decode(&fixture_body(7)?)?
         else {
             return Err("owner fixture".into());
@@ -47,7 +47,6 @@ impl Fixture {
         let replay = ReplayOwner::new(ReplayOwnerFields {
             scope: *current.scope(),
             generation: 0,
-            baseline,
             through,
             event_id: id(through),
             first_retained: first,
@@ -90,22 +89,20 @@ impl Fixture {
 }
 
 #[test]
-fn mixed_legacy_and_range_acknowledgements_preserve_original_times() -> TestResult {
-    let f = Fixture::new(
-        0,
-        LastAcknowledged::At {
-            sequence: 1,
-            event_id: id(1),
-        },
-        4,
-        6,
-    )?;
+fn acknowledgement_ranges_preserve_each_original_receipt_time() -> TestResult {
+    let f = Fixture::new(0, 4, 6)?;
     let mut scan = f.inventory()?;
     let original = Acknowledgement::received_at(Some(100));
+    assert_eq!(scan.needs_range(), Some(0));
+    scan.admit_range(AckRange::new(AckRangeFields {
+        acknowledgement: original,
+        ..*f.range(0, 1)?.fields()
+    })?)?;
     for sequence in 0..2 {
         assert_eq!(scan.needs_range(), None);
         assert_eq!(
-            scan.observe(f.row(sequence, original)?)?.acknowledgement(),
+            scan.observe(f.row(sequence, Acknowledgement::Unacknowledged)?)?
+                .acknowledgement(),
             original
         );
     }
@@ -135,7 +132,7 @@ fn mixed_legacy_and_range_acknowledgements_preserve_original_times() -> TestResu
 
 #[test]
 fn the_retained_floor_may_start_inside_one_ack_range() -> TestResult {
-    let f = Fixture::new(3, LastAcknowledged::BeforeFirst, 4, 5)?;
+    let f = Fixture::new(3, 4, 5)?;
     let mut scan = f.inventory()?;
     scan.admit_range(f.range(0, 4)?)?;
     for sequence in 3..5 {
@@ -147,7 +144,7 @@ fn the_retained_floor_may_start_inside_one_ack_range() -> TestResult {
 
 #[test]
 fn missing_ranges_gaps_and_overlaps_cannot_cover_a_row() -> TestResult {
-    let f = Fixture::new(0, LastAcknowledged::BeforeFirst, 4, 5)?;
+    let f = Fixture::new(0, 4, 5)?;
     let mut missing = f.inventory()?;
     assert!(
         missing
@@ -168,7 +165,7 @@ fn missing_ranges_gaps_and_overlaps_cannot_cover_a_row() -> TestResult {
 
 #[test]
 fn range_scope_generation_and_final_identity_are_bound_to_the_rows() -> TestResult {
-    let f = Fixture::new(0, LastAcknowledged::BeforeFirst, 1, 2)?;
+    let f = Fixture::new(0, 1, 2)?;
     let range = f.range(0, 1)?;
     let wrong_generation = AckRange::new(AckRangeFields {
         generation: 1,
@@ -191,23 +188,8 @@ fn range_scope_generation_and_final_identity_are_bound_to_the_rows() -> TestResu
 }
 
 #[test]
-fn mixed_ack_encodings_cannot_rewrite_legacy_or_range_history() -> TestResult {
-    let legacy = Fixture::new(
-        0,
-        LastAcknowledged::At {
-            sequence: 0,
-            event_id: id(0),
-        },
-        0,
-        1,
-    )?;
-    assert!(
-        legacy
-            .inventory()?
-            .observe(legacy.row(0, Acknowledgement::Unacknowledged)?)
-            .is_err()
-    );
-    let f = Fixture::new(0, LastAcknowledged::BeforeFirst, 0, 2)?;
+fn per_row_acknowledgements_cannot_override_the_committed_journal() -> TestResult {
+    let f = Fixture::new(0, 0, 2)?;
     let mut scan = f.inventory()?;
     scan.admit_range(f.range(0, 0)?)?;
     assert!(
@@ -226,12 +208,12 @@ fn mixed_ack_encodings_cannot_rewrite_legacy_or_range_history() -> TestResult {
 
 #[test]
 fn missing_tail_surplus_rows_and_incorrect_byte_totals_refuse_completion() -> TestResult {
-    let f = Fixture::new(0, LastAcknowledged::BeforeFirst, 0, 2)?;
+    let f = Fixture::new(0, 0, 2)?;
     let mut scan = f.inventory()?;
     scan.admit_range(f.range(0, 0)?)?;
     scan.observe(f.row(0, Acknowledgement::Unacknowledged)?)?;
     assert!(scan.finish().is_err());
-    let f = Fixture::new(0, LastAcknowledged::BeforeFirst, 0, 1)?;
+    let f = Fixture::new(0, 0, 1)?;
     let mut scan = f.inventory()?;
     scan.admit_range(f.range(0, 0)?)?;
     scan.observe(f.row(0, Acknowledgement::Unacknowledged)?)?;
@@ -254,7 +236,7 @@ fn missing_tail_surplus_rows_and_incorrect_byte_totals_refuse_completion() -> Te
 
 #[test]
 fn an_empty_replay_suffix_still_requires_the_entire_unacknowledged_tail() -> TestResult {
-    let f = Fixture::new(1, LastAcknowledged::BeforeFirst, 0, 2)?;
+    let f = Fixture::new(1, 0, 2)?;
     assert!(f.inventory()?.finish().is_err());
     let mut scan = f.inventory()?;
     assert_eq!(scan.needs_range(), None);

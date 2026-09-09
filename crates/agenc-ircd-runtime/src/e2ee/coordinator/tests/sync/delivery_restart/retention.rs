@@ -56,15 +56,26 @@ async fn seed(fixture: &mut RestartFixture) -> TestResult<DeliveryPosition> {
     let owner = stream.owner.as_ref().ok_or("owner")?.clone();
     let template = original.rows.front().ok_or("template")?;
     let mut writes = Vec::new();
+    let mut retained_bytes = 0_u64;
     for sequence in 0..4097 {
         let row = row(template, sequence, &backing)?;
         writes.push(
             CompanionCoordinator::object_write(&row.event).map_err(|e| format!("object: {e:?}"))?,
         );
         writes.push(
-            events::outbox_write(owner.scope(), stream.generation, &row, row.acknowledgement)
-                .map_err(|e| format!("outbox: {e:?}"))?,
+            events::outbox_write(
+                owner.scope(),
+                stream.generation,
+                &row,
+                Acknowledgement::Unacknowledged,
+            )
+            .map_err(|e| format!("outbox: {e:?}"))?,
         );
+        if sequence < 4096 {
+            retained_bytes = retained_bytes
+                .checked_add(u64::try_from(row.event.len())?)
+                .ok_or("retained bytes")?;
+        }
         if sequence == 4095 {
             stream.acked = Some((sequence, row.event_id));
         }
@@ -77,6 +88,42 @@ async fn seed(fixture: &mut RestartFixture) -> TestResult<DeliveryPosition> {
         owner.phase(),
     )?);
     writes.push(events::cursor_write(home(), &stream).map_err(|e| format!("cursor: {e:?}"))?);
+
+    use agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::{
+        AckRange, AckRangeFields, ReplayLedgerRow, ReplayOwner, ReplayOwnerFields,
+    };
+    let (_, acknowledged_event) = stream.acked.ok_or("last ACK")?;
+    for row in [
+        ReplayLedgerRow::Owner(ReplayOwner::new(ReplayOwnerFields {
+            scope: *owner.scope(),
+            generation: stream.generation,
+            through: 4095,
+            event_id: acknowledged_event,
+            first_retained: 0,
+            retained_rows: 4096,
+            retained_bytes,
+            trusted_unix_seconds: Some(100),
+        })?),
+        ReplayLedgerRow::Range(AckRange::new(AckRangeFields {
+            scope: *owner.scope(),
+            generation: stream.generation,
+            first: 0,
+            last: 4095,
+            event_id: acknowledged_event,
+            acknowledgement: Acknowledgement::received_at(Some(100)),
+        })?),
+    ] {
+        writes.push(
+            crate::e2ee::coordinator::request::state_row(
+                TableId::E2eeState,
+                agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND,
+                row.key()?,
+                row.encode()?,
+            )
+            .map_err(|error| format!("journal: {error:?}"))?,
+        );
+    }
+
     let last = stream.rows.back().ok_or("last")?;
     let position = DeliveryPosition {
         server_id: *fixture.storage.identity.server_id.as_bytes(),
@@ -92,7 +139,7 @@ async fn seed(fixture: &mut RestartFixture) -> TestResult<DeliveryPosition> {
         .state
         .streams
         .get(&home())
-        .ok_or("restored legacy stream")?
+        .ok_or("restored stream")?
         .acked;
     let actions = fixture.frame(CompanionFrame::Resume {
         coordinator_server_id: *fixture.storage.identity.server_id.as_bytes(),
@@ -163,7 +210,7 @@ async fn durable_count(fixture: &mut RestartFixture) -> TestResult<(usize, usize
 async fn acknowledged_replay_retains_4097_rows_in_sealed_storage() -> TestResult {
     let mut fixture = RestartFixture::new().await?;
     let position = seed(&mut fixture).await?;
-    assert_eq!(durable_count(&mut fixture).await?, (4097, 4096));
+    assert_eq!(durable_count(&mut fixture).await?, (4097, 0));
     let actions = events::on_ack(
         &mut fixture.coordinator,
         LinkId::new(1),
@@ -184,8 +231,8 @@ async fn acknowledged_replay_retains_4097_rows_in_sealed_storage() -> TestResult
     ));
     assert_eq!(
         durable_count(&mut fixture).await?,
-        (4097, 4096),
-        "the journal ACK must preserve all references and original per-row ACK fields"
+        (4097, 0),
+        "the journal ACK must preserve every outbox reference without rewriting the row"
     );
     let restored = Box::pin(super::replay_startup::outer(&mut fixture)).await?;
     assert!(restored.loaded());
@@ -196,20 +243,12 @@ async fn acknowledged_replay_retains_4097_rows_in_sealed_storage() -> TestResult
         .streams
         .get(&home())
         .ok_or("restored stream")?;
-    let (replay, persisted) = stream.replay.ok_or("durable replay owner")?.inspected();
-    assert!(persisted);
+    let replay = stream.replay.ok_or("durable replay owner")?.inspected();
     assert_eq!(replay.fields().retained_rows, 4097);
     assert_eq!(replay.fields().first_retained, 0);
     assert_eq!(replay.fields().through, position.delivery_sequence);
     assert_eq!(replay.fields().event_id, position.event_id);
     assert_eq!(replay.fields().trusted_unix_seconds, Some(200));
-    assert!(matches!(
-        replay.fields().baseline,
-        agenc_ircd_storage::e2ee_records::delivery_recovery::LastAcknowledged::At {
-            sequence: 4095,
-            ..
-        }
-    ));
     assert_eq!(stream.rows.len(), 4096);
     assert!(stream.rows.iter().all(StreamRow::acked));
     assert_eq!(stream.rows.front().ok_or("hot head")?.sequence, 1);

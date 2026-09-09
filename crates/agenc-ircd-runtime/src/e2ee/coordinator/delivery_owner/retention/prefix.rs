@@ -80,7 +80,7 @@ impl Prefix {
         {
             return Err(CompanionFault::Storage);
         }
-        let expected = prior.persisted.then_some(prior.owner);
+        let expected = Some(prior.owner);
         let reader = recovery::Reader::new_bound(current, pinned_commit, expected, backing)?;
         Ok(Self {
             draft: Some(draft),

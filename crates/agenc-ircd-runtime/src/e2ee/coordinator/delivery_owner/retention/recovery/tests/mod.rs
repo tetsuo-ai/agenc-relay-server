@@ -1,6 +1,7 @@
 //! Pages cross interval boundaries; no test here substitutes metadata for object validation.
 #![forbid(unsafe_code)]
 
+mod initial;
 mod sealed;
 
 use super::*;
@@ -59,7 +60,7 @@ fn ledger(row: ReplayLedgerRow) -> TestResult<Record> {
 }
 
 impl Fixture {
-    fn new(legacy: bool) -> TestResult<Self> {
+    fn new() -> TestResult<Self> {
         let DeliveryRecoveryRow::Owner(original) = DeliveryRecoveryRow::decode(&fixture_body(7)?)?
         else {
             return Err("owner fixture".into());
@@ -80,7 +81,6 @@ impl Fixture {
         let replay = ReplayOwner::new(ReplayOwnerFields {
             scope: *current.scope(),
             generation: 0,
-            baseline: LastAcknowledged::BeforeFirst,
             through: 256,
             event_id: event_id(256),
             first_retained: 0,
@@ -90,21 +90,12 @@ impl Fixture {
         })?;
         let mut f = Self {
             current,
-            owner: if legacy {
-                None
-            } else {
-                Some(ledger(ReplayLedgerRow::Owner(replay))?)
-            },
+            owner: Some(ledger(ReplayLedgerRow::Owner(replay))?),
             ranges: Vec::new(),
             rows: Vec::new(),
             backing: BackingReservationPort::new(Arc::new(MemoryBudget::new(1_048_576))),
         };
         for sequence in 0..258 {
-            let ack = if legacy && sequence <= 256 {
-                Acknowledgement::received_at(Some(100))
-            } else {
-                Acknowledgement::Unacknowledged
-            };
             let row = ScopedOutbox::new(ScopedOutboxFields {
                 scope: *f.current.scope(),
                 generation: 0,
@@ -114,14 +105,14 @@ impl Fixture {
                 event_bytes: 1024,
                 payload_object_id: None,
                 payload_bytes: 0,
-                acknowledgement: ack,
+                acknowledgement: Acknowledgement::Unacknowledged,
                 cross_profile: None,
             })?;
             f.rows.push((
                 row.key()?,
                 value(DeliveryRecoveryRow::Outbox(row).encode()?)?,
             ));
-            if !legacy && sequence <= 256 {
+            if sequence <= 256 {
                 f.ranges.push(ledger(ReplayLedgerRow::Range(AckRange::new(
                     AckRangeFields {
                         scope: *f.current.scope(),
@@ -182,41 +173,39 @@ fn start(f: &Fixture) -> TestResult<Reader> {
 
 #[test]
 fn independently_paged_journals_reconstruct_every_effective_ack() -> TestResult {
-    for legacy in [false, true] {
-        let f = Fixture::new(legacy)?;
-        let mut reader = f.reader()?;
-        let mut sequence = 0;
-        let mut reads = 0;
-        loop {
-            match reader.next()? {
-                Next::Read(request) => {
-                    let (truncated, records) = f.page(&request)?;
-                    reader.admit(&request, 7, truncated, records)?;
-                    reads += 1;
-                }
-                Next::Row(row) => {
-                    assert_eq!(row.sequence(), sequence);
-                    assert_eq!(row.acknowledgement().is_acknowledged(), sequence < 257);
-                    sequence += 1;
-                }
-                Next::Done => break,
+    let f = Fixture::new()?;
+    let mut reader = f.reader()?;
+    let mut sequence = 0;
+    let mut reads = 0;
+    loop {
+        match reader.next()? {
+            Next::Read(request) => {
+                let (truncated, records) = f.page(&request)?;
+                reader.admit(&request, 7, truncated, records)?;
+                reads += 1;
             }
+            Next::Row(row) => {
+                assert_eq!(row.sequence(), sequence);
+                assert_eq!(row.acknowledgement().is_acknowledged(), sequence < 257);
+                sequence += 1;
+            }
+            Next::Done => break,
         }
-        assert_eq!(sequence, 258);
-        assert_eq!(reads, if legacy { 5 } else { 7 });
-        let restored = reader.finish()?;
-        assert_eq!(
-            restored.owner.ok_or("replay owner")?.fields().retained_rows,
-            257
-        );
-        assert_eq!(restored.head.ok_or("head")?.sequence, 0);
     }
+    assert_eq!(sequence, 258);
+    assert_eq!(reads, 7);
+    let restored = reader.finish()?;
+    assert_eq!(
+        restored.owner.ok_or("replay owner")?.fields().retained_rows,
+        257
+    );
+    assert_eq!(restored.head.ok_or("head")?.sequence, 0);
     Ok(())
 }
 
 #[test]
 fn a_commit_change_or_wrong_request_permanently_refuses_the_reader() -> TestResult {
-    let f = Fixture::new(false)?;
+    let f = Fixture::new()?;
     for drift in [false, true] {
         let mut reader = f.reader()?;
         let request = query(&mut reader)?;
@@ -240,13 +229,10 @@ fn a_commit_change_or_wrong_request_permanently_refuses_the_reader() -> TestResu
 
 #[test]
 fn orphan_ranges_and_missing_ledger_coverage_are_refused() -> TestResult {
-    let mut f = Fixture::new(false)?;
+    let mut f = Fixture::new()?;
     f.owner = None;
-    let mut reader = start(&f)?;
-    let request = query(&mut reader)?;
-    let (truncated, records) = f.page(&request)?;
-    assert!(reader.admit(&request, 7, truncated, records).is_err());
-    let f = Fixture::new(false)?;
+    assert!(start(&f).is_err());
+    let f = Fixture::new()?;
     let mut reader = start(&f)?;
     let request = query(&mut reader)?;
     reader.admit(&request, 7, false, Vec::new())?;
@@ -259,7 +245,7 @@ fn orphan_ranges_and_missing_ledger_coverage_are_refused() -> TestResult {
 
 #[test]
 fn oversized_empty_truncated_and_unsorted_pages_are_refused_before_use() -> TestResult {
-    let f = Fixture::new(false)?;
+    let f = Fixture::new()?;
     for case in 0..3 {
         let mut reader = start(&f)?;
         let request = query(&mut reader)?;
@@ -285,7 +271,7 @@ fn oversized_empty_truncated_and_unsorted_pages_are_refused_before_use() -> Test
 
 #[test]
 fn queued_metadata_stays_charged_until_the_reader_is_dropped() -> TestResult {
-    let f = Fixture::new(false)?;
+    let f = Fixture::new()?;
     let capacity = crate::budget::MemoryCharge::allocation(u64::try_from(METADATA_BYTES)?)?.bytes();
     let backing = BackingReservationPort::new(Arc::new(MemoryBudget::new(capacity)));
     let reader = Reader::new(f.current.clone(), None, &backing)?;

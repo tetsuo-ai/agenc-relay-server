@@ -6,7 +6,7 @@ use agenc_ircd_storage::e2ee_records::delivery_recovery::{DeliveryScope, Deliver
 
 #[test]
 fn each_historical_scope_field_is_required_for_range_and_owner_admission() -> TestResult {
-    let f = Fixture::new(0, LastAcknowledged::BeforeFirst, 0, 1)?;
+    let f = Fixture::new(0, 0, 1)?;
     let scope = f.current.scope();
     let original = DeliveryScopeFields {
         network_id: scope.network_id(),
@@ -65,7 +65,7 @@ fn each_historical_scope_field_is_required_for_range_and_owner_admission() -> Te
 
 #[test]
 fn a_known_ack_time_cannot_exceed_or_replace_a_missing_owner_watermark() -> TestResult {
-    let f = Fixture::new(0, LastAcknowledged::BeforeFirst, 0, 1)?;
+    let f = Fixture::new(0, 0, 1)?;
     for time in [None, Some(199)] {
         let replay = ReplayOwner::new(ReplayOwnerFields {
             trusted_unix_seconds: time,

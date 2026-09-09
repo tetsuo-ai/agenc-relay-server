@@ -39,7 +39,7 @@ fn inventory(first: u64, generation: u64) -> TestResult<(DeliveryStream, Deliver
     let replay = ReplayOwner::new(ReplayOwnerFields {
         scope: *owner.scope(),
         generation,
-        baseline: last,
+
         through: 1,
         event_id: [8; 16],
         first_retained: first,
@@ -54,7 +54,6 @@ fn inventory(first: u64, generation: u64) -> TestResult<(DeliveryStream, Deliver
         replay: Some(super::super::replay::State {
             owner: replay,
             head: None,
-            persisted: true,
         }),
         ..DeliveryStream::default()
     };

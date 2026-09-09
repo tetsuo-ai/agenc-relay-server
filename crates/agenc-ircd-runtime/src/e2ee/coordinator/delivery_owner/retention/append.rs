@@ -40,7 +40,6 @@ pub(super) fn begin(
         ReplayOwnerFields {
             scope: *current.scope(),
             generation: current.cursor().generation(),
-            baseline: current.cursor().last_ack(),
             through,
             event_id,
             first_retained: first,

@@ -51,8 +51,7 @@ impl Candidate {
         let Some(owner) = stream.owner.as_ref() else {
             return Err(CompanionFault::Storage);
         };
-        if !replay.persisted
-            || replay.owner.fields().first_retained == 0
+        if replay.owner.fields().first_retained == 0
             || owner.phase() != CutPhase::Ready
             || stream.barrier.is_some()
             || stream.hold_after.is_some()
