@@ -69,8 +69,7 @@ fn finalization_fixture() -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
 /// Models CAP72's typed-row output without calling the production transformer,
 /// so this admission regression cannot fail merely because CAP72 is absent.
 fn restored_pending(harness: &mut Harness, conversation: [u8; 32]) -> TestResult<Harness> {
-    // This fixture deliberately represents a legacy restored route without a
-    // declaration. Declared recovery fixtures add their exact provenance later.
+    // Pair the restored route with the exact declaration required at startup.
     let gate_key = agenc_ircd_storage::e2ee_records::recovery_gate_key(&conversation)?;
     harness.writes.retain(|write| {
         !write
@@ -79,6 +78,7 @@ fn restored_pending(harness: &mut Harness, conversation: [u8; 32]) -> TestResult
     });
     let route_key = RouteRow::key(&conversation)?;
     let mut changed = 0_usize;
+    let mut declaration = None;
     for write in &mut harness.writes {
         let Write::Put {
             table,
@@ -95,6 +95,20 @@ fn restored_pending(harness: &mut Harness, conversation: [u8; 32]) -> TestResult
         assert_eq!(value.record_kind(), ROUTE_ROW_KIND);
         let mut route = RouteRow::decode(value.body())?;
         route.recovery_gate = true;
+        declaration = Some(agenc_ircd_storage::E2eeRecoveryGate::new(
+            agenc_ircd_crypto::StorageDigest::from_bytes(conversation),
+            agenc_ircd_storage::E2eeRecoveryKind::Pending,
+            harness
+                .coordinator
+                .delivery_identity
+                .as_ref()
+                .ok_or("delivery identity")?
+                .recovery_epoch(),
+            agenc_ircd_crypto::StorageDigest::from_bytes(route.binding_id),
+            agenc_ircd_crypto::StorageDigest::from_bytes(route.accepted_state_id),
+            agenc_ircd_crypto::StorageDigest::from_bytes(route.sequencer_head_id),
+            agenc_ircd_crypto::StorageDigest::from_bytes([201; 32]),
+        ));
         let value = PersistentRecordValue::new(
             *table,
             value.record_kind(),
@@ -108,6 +122,18 @@ fn restored_pending(harness: &mut Harness, conversation: [u8; 32]) -> TestResult
         changed = changed.checked_add(1).ok_or("route count overflow")?;
     }
     assert!(changed > 0);
+    let value = PersistentRecordValue::new(
+        TableId::E2eeState,
+        agenc_ircd_storage::e2ee_records::RECOVERY_GATE_KIND,
+        1,
+        0,
+        None,
+        Vec::new(),
+        declaration.ok_or("recovery declaration")?.encode()?,
+    )?;
+    harness
+        .writes
+        .push(Write::put(TableId::E2eeState, gate_key, value.encode()?)?);
     let restored = harness.reloaded()?;
     let route = restored
         .coordinator

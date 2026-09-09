@@ -9,7 +9,7 @@ use crate::{E2eeRecoveryGate, E2eeRecoveryKind};
 struct Sources<'a> {
     route_key: &'a StoredKey,
     route: PersistentRecordValue,
-    gate: Option<PersistentRecordValue>,
+    gate: PersistentRecordValue,
 }
 
 pub(super) fn transform(
@@ -28,25 +28,18 @@ pub(super) fn transform(
         return Err(StorageError::StaleState);
     }
     let route = RouteRow::decode(route_value.body())?;
-    let gate = gate_value
-        .as_ref()
-        .map(|value| E2eeRecoveryGate::decode(value.body()))
-        .transpose()?;
-    if gate.is_some_and(|gate| gate.conversation_id().as_bytes() != &conversation) {
+    let gate = E2eeRecoveryGate::decode(gate_value.body())?;
+    if gate.conversation_id().as_bytes() != &conversation {
         return Err(StorageError::StaleState);
     }
     let restored = restore_gate(gate, &route, conversation, target_epoch, source_guard)?;
-    let metadata = gate_value.as_ref().unwrap_or(&route_value);
-    let (expires_at, references) = gate_value.as_ref().map_or((None, Vec::new()), |value| {
-        (value.expires_at(), value.references().to_vec())
-    });
     PersistentRecordValue::new(
         TableId::E2eeState,
         RECOVERY_GATE_KIND,
-        metadata.revision(),
-        metadata.generation(),
-        expires_at,
-        references,
+        gate_value.revision(),
+        gate_value.generation(),
+        gate_value.expires_at(),
+        gate_value.references().to_vec(),
         restored.encode()?,
     )?
     .encode()
@@ -57,7 +50,7 @@ fn paired_sources<'a>(
     sources: &'a [ConstructionSourceRecord],
 ) -> Result<Sources<'a>, StorageError> {
     if entry.target_table() != TableId::E2eeState
-        || !(1..=2).contains(&sources.len())
+        || sources.len() != 2
         || sources.len() != entry.sources().len()
     {
         return Err(StorageError::StaleState);
@@ -76,7 +69,7 @@ fn paired_sources<'a>(
     Ok(Sources {
         route_key: key,
         route: value,
-        gate,
+        gate: gate.ok_or(StorageError::StaleState)?,
     })
 }
 
@@ -98,15 +91,13 @@ fn source_value(
 }
 
 fn restore_gate(
-    gate: Option<E2eeRecoveryGate>,
+    gate: E2eeRecoveryGate,
     route: &RouteRow,
     conversation: [u8; 32],
     target_epoch: RecoveryEpoch,
     source_guard: StorageDigest,
 ) -> Result<E2eeRecoveryGate, StorageError> {
-    if let Some(gate) = gate
-        && gate.state() != E2eeRecoveryKind::Normal
-    {
+    if gate.state() != E2eeRecoveryKind::Normal {
         return restore_declared(gate, route, target_epoch, source_guard);
     }
     if route.recovery_gate {

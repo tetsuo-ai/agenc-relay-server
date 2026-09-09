@@ -103,18 +103,10 @@ fn restore_provenance_retains_a_conflict_and_refuses_a_normal_route_under_it()
 }
 
 #[test]
-fn restore_provenance_preserves_a_terminal_route_without_inventing_a_pending_lineage()
--> Result<(), StorageError> {
+fn restore_provenance_refuses_a_terminal_source_without_its_declaration() -> Result<(), StorageError>
+{
     let route = route_row(CONVERSATION, RouteLifecycle::Tombstone)?;
-    let rows = [route_source(&route)?];
-    let entries = plan_rows(&rows)?;
-    let gate = restored_gate(&rows, &entries)?;
-    assert_eq!(gate.state(), E2eeRecoveryKind::Closed);
-    assert_eq!(
-        gate.restored_accepted_state_id().as_bytes(),
-        &route.accepted_state_id
-    );
-    assert_eq!(gate.source_rollback_guard_hash().as_bytes(), &[232; 32]);
+    assert!(plan_rows(&[route_source(&route)?]).is_err());
     Ok(())
 }
 

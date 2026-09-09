@@ -152,13 +152,10 @@ fn restore_provenance_uses_current_source_heads_when_a_normal_gate_is_older()
 }
 
 #[test]
-fn restore_provenance_creates_a_declaration_for_a_normal_live_source_without_one()
--> Result<(), StorageError> {
+fn restore_provenance_refuses_a_normal_source_without_its_declaration() -> Result<(), StorageError>
+{
     let current = route_row(CONVERSATION, RouteLifecycle::Active)?;
-    let rows = [route_source(&current)?];
-    let entries = plan_rows(&rows)?;
-    assert_eq!(entries.len(), 2, "route and exact source declaration");
-    assert_pending_source(restored_gate(&rows, &entries)?, &current);
+    assert!(plan_rows(&[route_source(&current)?]).is_err());
     Ok(())
 }
 
@@ -176,21 +173,11 @@ fn restore_provenance_preserves_a_matching_pending_declaration() -> Result<(), S
 }
 
 #[test]
-fn restore_provenance_does_not_invent_a_declaration_for_an_already_pending_legacy_route()
--> Result<(), StorageError> {
+fn restore_provenance_refuses_a_pending_source_without_its_declaration() -> Result<(), StorageError>
+{
     let mut current = route_row(CONVERSATION, RouteLifecycle::Active)?;
     current.recovery_gate = true;
-    let rows = [route_source(&current)?];
-    let entries = plan_rows(&rows)?;
-    assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries
-            .first()
-            .ok_or(StorageError::StaleState)?
-            .target_key()
-            .as_bytes(),
-        rows[0].key.as_bytes()
-    );
+    assert!(plan_rows(&[route_source(&current)?]).is_err());
     Ok(())
 }
 

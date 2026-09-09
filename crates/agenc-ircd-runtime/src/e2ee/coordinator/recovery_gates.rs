@@ -59,6 +59,9 @@ impl Gates {
         routes: &BTreeMap<[u8; 32], RouteRow>,
         epoch: Option<RecoveryEpoch>,
     ) -> Result<(), CompanionFault> {
+        if self.rows.len() != routes.len() {
+            return Err(CompanionFault::Storage);
+        }
         for (id, owned) in &self.rows {
             let route = routes.get(id).ok_or(CompanionFault::Storage)?;
             validate_row(owned.row, route, epoch)?;

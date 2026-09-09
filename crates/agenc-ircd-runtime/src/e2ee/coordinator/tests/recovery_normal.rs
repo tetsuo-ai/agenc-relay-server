@@ -232,7 +232,7 @@ fn normal_gate_budget_refusal_keeps_the_route_unbound() -> TestResult {
 }
 
 #[test]
-fn a_legacy_normal_route_gets_a_declaration_with_its_next_committed_head() -> TestResult {
+fn startup_refuses_a_live_route_without_its_committed_declaration() -> TestResult {
     let mut harness = Harness::new()?;
     let id = harness.bind_channel()?;
     let key = recovery_gate_key(&id)?;
@@ -241,24 +241,25 @@ fn a_legacy_normal_route_gets_a_declaration_with_its_next_committed_head() -> Te
             .encoded_record()
             .is_some_and(|(table, stored, _)| table == TableId::E2eeState && stored == &key)
     });
-    harness = harness.reloaded()?;
+    assert!(harness.reloaded().is_err());
+    Ok(())
+}
+
+#[test]
+fn an_existing_route_cannot_recreate_a_missing_declaration_during_a_write() -> TestResult {
+    let mut harness = Harness::new()?;
+    let id = harness.bind_channel()?;
+    let before = harness.coordinator.state.logs.get(&id).ok_or("log")?.head();
+    let count = harness.writes.len();
+    harness.coordinator.state.recovery_gates = Default::default();
+    let commit = commit_bytes(&harness, id, 0, 20)?;
+    let outcome = evaluate_request(&mut harness, Op::SubmitCandidate, &id, Some(&commit))?;
+    assert_eq!(code(outcome), Some(E2eeReplyCode::RouteInvalid));
+    assert_eq!(
+        harness.coordinator.state.logs.get(&id).ok_or("log")?.head(),
+        before
+    );
+    assert_eq!(harness.writes.len(), count);
     assert!(harness.coordinator.state.recovery_gates.get(&id).is_none());
-    submit_candidate(&mut harness, id, 0, 20)?;
-    let gate = written_gate(&harness.writes, id)?.ok_or("new declaration")?;
-    let log = harness.coordinator.state.logs.get(&id).ok_or("log")?;
-    assert_eq!(
-        &log.head().record_id,
-        gate.restored_sequencer_head_id().as_bytes()
-    );
-    assert_eq!(gate.state(), E2eeRecoveryKind::Normal);
-    assert_eq!(
-        harness
-            .reloaded()?
-            .coordinator
-            .state
-            .recovery_gates
-            .get(&id),
-        Some(gate)
-    );
     Ok(())
 }

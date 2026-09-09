@@ -355,6 +355,14 @@ fn restore_case(case: Case) -> Result<(), Box<dyn Error>> {
         )],
         limits: test_limits(),
     };
+    if original_gate.is_none() {
+        assert!(execute_restore_command(request(false), &[source.qualification]).is_err());
+        assert!(
+            !output.exists(),
+            "a restore without a declaration cannot install a database"
+        );
+        return Ok(());
+    }
     let receipt = execute_restore_command(request(false), &[source.qualification])?;
     assert_eq!(
         execute_restore_command(request(true), &[source.qualification])?,
@@ -373,20 +381,11 @@ fn restore_case(case: Case) -> Result<(), Box<dyn Error>> {
         expected_route.recovery_gate = true;
     }
     assert_eq!(captured.route.as_ref(), Some(&expected_route));
-    if matches!(case, Case::PendingMissing) {
-        assert!(captured.gate.is_none());
-    } else if matches!(case, Case::Closed | Case::Conflict) {
+    if matches!(case, Case::Closed | Case::Conflict) {
         assert_eq!(captured.gate, original_gate);
     } else {
         let gate = captured.gate.ok_or("restored gate")?;
-        assert_eq!(
-            gate.state(),
-            if matches!(case, Case::TerminalMissing) {
-                E2eeRecoveryKind::Closed
-            } else {
-                E2eeRecoveryKind::Pending
-            }
-        );
+        assert_eq!(gate.state(), E2eeRecoveryKind::Pending);
         assert_eq!(gate.recovery_epoch(), receipt.target_recovery_epoch);
         assert_eq!(gate.source_rollback_guard_hash(), source_guard_hash);
         assert_heads(gate, &expected_route);

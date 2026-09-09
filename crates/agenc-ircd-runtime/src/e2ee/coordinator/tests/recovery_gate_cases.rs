@@ -307,27 +307,16 @@ fn a_gate_after_object_selection_refuses_startup() -> TestResult {
 }
 
 #[test]
-fn a_legacy_pending_route_has_no_invented_source_guard() -> TestResult {
+fn startup_refuses_a_pending_route_without_its_committed_declaration() -> TestResult {
     let (mut source, conversation, _) = finalization_fixture()?;
-    let fresh = restored_pending(&mut source, conversation)?;
-    assert!(
-        fresh
-            .coordinator
-            .state
-            .recovery_gates
-            .get(&conversation)
-            .is_none()
-    );
-    assert_eq!(
-        fresh
-            .coordinator
-            .state
-            .routes
-            .route(&ConversationId(conversation))
-            .ok_or("route")?
-            .recovery,
-        RecoveryState::Pending
-    );
+    let _control = restored_pending(&mut source, conversation)?;
+    let key = recovery_gate_key(&conversation)?;
+    source.writes.retain(|write| {
+        !write
+            .encoded_record()
+            .is_some_and(|(table, stored, _)| table == TableId::E2eeState && stored == &key)
+    });
+    assert!(source.reloaded().is_err());
     Ok(())
 }
 

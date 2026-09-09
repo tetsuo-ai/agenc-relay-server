@@ -84,6 +84,15 @@ fn prepare_route(
         }
         return Ok(());
     }
+    if exec
+        .coordinator
+        .state
+        .routes
+        .route(&ConversationId(id))
+        .is_some()
+    {
+        return Err(Code::RouteInvalid.into());
+    }
     let permit = exec.backing.reserve(4096).map_err(|_| Code::RateLimited)?;
     let row = E2eeRecoveryGate::new(
         StorageDigest::from_bytes(id),

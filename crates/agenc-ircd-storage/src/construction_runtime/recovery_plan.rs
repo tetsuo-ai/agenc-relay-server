@@ -58,8 +58,8 @@ pub(super) fn push(
     match state.record_kind() {
         RECOVERY_GATE_KIND => index_gate(builder, source).map(|()| true),
         ROUTE_ROW_KIND => {
-            let route = RouteRow::decode(state.body())?;
-            push_route(builder, source, &route)?;
+            RouteRow::decode(state.body())?;
+            push_route(builder, source)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -103,17 +103,15 @@ fn index_gate(
 fn take_gate(
     builder: &ConstructionPlanBuilder,
     key: &StoredKey,
-) -> Result<Option<StorageConstructionSource>, StorageError> {
+) -> Result<StorageConstructionSource, StorageError> {
     let mut table = builder
         .transaction
         .open_table(GATES)
         .map_err(|_| StorageError::DatabaseRejected)?;
-    let Some(encoded) = table
+    let encoded = table
         .remove(key.as_bytes())
         .map_err(|_| StorageError::DatabaseRejected)?
-    else {
-        return Ok(None);
-    };
+        .ok_or(StorageError::StaleState)?;
     let (schema, rest) = encoded
         .value()
         .split_first_chunk::<4>()
@@ -132,34 +130,24 @@ fn take_gate(
         StorageDigest::from_bytes(*id),
         u64::from_be_bytes(offset),
     )
-    .map(Some)
 }
 
 fn push_route(
     builder: &mut ConstructionPlanBuilder,
     source: &StorageConstructionSource,
-    route: &RouteRow,
 ) -> Result<(), StorageError> {
     let id = RouteRow::parse_key(source.key())?;
     let key = recovery_gate_key(&id)?;
     let gate = take_gate(builder, &key)?;
-    // An already-pending legacy route cannot supply missing original provenance.
-    // A normal source route is bound to this backup's authenticated heads instead.
-    if gate.is_some() || !route.recovery_gate {
-        let mut sources = vec![copy_source(source)?];
-        if let Some(gate) = gate {
-            sources.push(gate);
-        }
-        builder.push(StorageConstructionPlanEntry::new(
-            StorageConstructionKind::Restore,
-            sources,
-            TableId::E2eeState,
-            key,
-            source.record_schema(),
-            StorageConstructionAction::RestoreE2eeState,
-            0,
-        )?)?;
-    }
+    builder.push(StorageConstructionPlanEntry::new(
+        StorageConstructionKind::Restore,
+        vec![copy_source(source)?, gate],
+        TableId::E2eeState,
+        key,
+        source.record_schema(),
+        StorageConstructionAction::RestoreE2eeState,
+        0,
+    )?)?;
     builder.push(StorageConstructionPlanEntry::new(
         StorageConstructionKind::Restore,
         vec![copy_source(source)?],
