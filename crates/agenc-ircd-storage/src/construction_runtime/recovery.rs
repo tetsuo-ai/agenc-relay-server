@@ -99,17 +99,8 @@ fn validate_replay_key(key: &StoredKey, body: &[u8]) -> Result<(), StorageError>
 }
 
 fn validate_delivery_key(key: &StoredKey, body: &[u8]) -> Result<(), StorageError> {
-    match DeliveryRow::decode(body)? {
-        DeliveryRow::Cursor { .. } | DeliveryRow::WitnessedCursor { .. } => {
-            DeliveryRow::parse_cursor_key(key)?;
-        }
-        DeliveryRow::Outbox { .. } => {
-            DeliveryRow::parse_outbox_key(key)?;
-        }
-        DeliveryRow::Snapshot { .. } => {
-            DeliveryRow::parse_snapshot_key(key)?;
-        }
-    }
+    DeliveryRow::decode(body)?;
+    DeliveryRow::parse_cursor_key(key)?;
     Ok(())
 }
 

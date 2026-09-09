@@ -945,7 +945,7 @@ impl E2eeEdge {
                 delivery_generation,
             }) => {
                 self.commit_projection();
-                self.legacy_cursor = false;
+                self.witness_snapshot_required = false;
                 self.ready_recorded(context, edge, delivery_generation);
             }
             Some(PendingCommit::Witness) | None => {}

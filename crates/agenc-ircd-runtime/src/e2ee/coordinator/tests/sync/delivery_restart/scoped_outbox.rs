@@ -237,24 +237,22 @@ async fn a_refused_ack_does_not_persist_prepared_retention_time() -> TestResult 
 }
 
 #[tokio::test]
-async fn an_unbound_legacy_outbox_is_not_given_the_current_owner_scope_on_restart() -> TestResult {
+async fn coordinator_restart_rejects_edge_delivery_checkpoints() -> TestResult {
     let mut fixture = RestartFixture::new().await?;
-    let copy = fixture.copies.first().ok_or("event")?;
-    let body = agenc_ircd_storage::e2ee_records::DeliveryRow::Outbox {
-        event_id: copy.row.event_id,
-        event_object_id: *agenc_ircd_e2ee::ObjectId::compute(&copy.row.event).as_bytes(),
-        payload_object_id: None,
-        payload_bytes: 0,
-        acked: false,
-        cross_profile: None,
+    let body = agenc_ircd_storage::e2ee_records::DeliveryRow::WitnessedCursor {
+        generation: 0,
+        next_sequence: 0,
+        acked_sequence: 0,
+        acked_event_id: [0; 16],
+        barrier_open: false,
     }
     .encode()?;
-    let key = agenc_ircd_storage::e2ee_records::DeliveryRow::outbox_key(home().as_bytes(), 0, 0)?;
+    let key = agenc_ircd_storage::e2ee_records::DeliveryRow::cursor_key(home().as_bytes())?;
     let write = super::super::super::super::request::state_row(TableId::E2eeState, 10, key, body)
-        .map_err(|error| format!("legacy fixture: {error:?}"))?;
+        .map_err(|error| format!("edge checkpoint fixture: {error:?}"))?;
     fixture.commit(vec![write]).await?;
     let Err(error) = fixture.restart().await else {
-        return Err("legacy outbox inherited current owner scope".into());
+        return Err("coordinator accepted an edge checkpoint".into());
     };
     assert!(matches!(
         error.downcast_ref::<CompanionFault>(),

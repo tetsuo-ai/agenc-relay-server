@@ -23,7 +23,6 @@ use agenc_ircd_e2ee::tls::{Opaque, TlsEncode};
 use agenc_ircd_e2ee::wire::fragment::fragment_object;
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_federation_wire::FederationLineText;
-use agenc_ircd_storage::e2ee_records::DeliveryRow;
 use agenc_ircd_storage::e2ee_records::delivery_recovery::{
     Acknowledgement, DeliveryOwner, DeliveryRecoveryRow, DeliveryScope, ScopedOutbox,
     ScopedOutboxFields,
@@ -236,18 +235,6 @@ impl DeliveryStream {
     #[must_use]
     pub fn unacked_rows(&self) -> Vec<&StreamRow> {
         self.rows.iter().filter(|row| !row.acked()).collect()
-    }
-
-    /// The cursor row body.
-    #[must_use]
-    pub fn cursor_row(&self) -> DeliveryRow {
-        DeliveryRow::Cursor {
-            generation: self.generation,
-            next_sequence: self.next_sequence,
-            acked_sequence: self.acked.map_or(0, |(sequence, _)| sequence),
-            acked_event_id: self.acked.map_or([0; 16], |(_, event)| event),
-            barrier_open: false,
-        }
     }
 }
 

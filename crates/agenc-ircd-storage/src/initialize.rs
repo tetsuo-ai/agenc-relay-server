@@ -27,7 +27,7 @@ const STATE_META_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 pub enum StorageInitializationMode {
     /// Fresh live database; key state must already exist and no marker may exist.
     Live,
-    /// Restore/rekey/migration staging target; one construction marker must exist.
+    /// Restore or rekey staging target; one construction marker must exist.
     Construction,
 }
 
@@ -76,7 +76,7 @@ pub struct StorageInitializationConfig {
     pub mode: StorageInitializationMode,
     /// Small initial tracked record set.
     pub initial_records: Vec<InitialStorageRecord>,
-    /// Restore resets this to zero; rekey/migration preserve the source value.
+    /// Restore resets this to zero; rekey preserves the source value.
     pub account_service_response_count: u64,
     /// Initial logical state generation.
     pub state_generation: u64,

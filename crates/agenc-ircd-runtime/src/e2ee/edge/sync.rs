@@ -11,7 +11,7 @@ use agenc_ircd_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScope
 use agenc_ircd_e2ee::wire::carrier::CarrierCommand;
 use agenc_ircd_e2ee::wire::fragment::FragmentTag;
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
-use agenc_ircd_storage::e2ee_records::{DELIVERY_ROW_KIND, DeliveryRow};
+use agenc_ircd_storage::e2ee_records::DELIVERY_ROW_KIND;
 
 use super::router::Refusal;
 use super::{ClientOutput, E2eeEdge, PendingCommit, Phase};
@@ -461,30 +461,6 @@ impl E2eeEdge {
     #[must_use]
     pub fn cursor_row_kind() -> u16 {
         DELIVERY_ROW_KIND
-    }
-
-    /// Restores the durable cursor at startup.
-    pub fn restore_cursor(&mut self, row: &DeliveryRow) {
-        if let DeliveryRow::Cursor {
-            generation,
-            acked_sequence,
-            acked_event_id,
-            next_sequence,
-            ..
-        }
-        | DeliveryRow::WitnessedCursor {
-            generation,
-            acked_sequence,
-            acked_event_id,
-            next_sequence,
-            ..
-        } = row
-        {
-            self.delivery = DeliveryState {
-                generation: *generation,
-                cursor: (*next_sequence > 0).then_some((*acked_sequence, *acked_event_id)),
-            };
-        }
     }
 
     /// Frames from the coordinator once the profile is active.

@@ -412,8 +412,7 @@ fn install_stage(
     if edge.barrier.open.is_some() {
         return Err(invalid());
     }
-    // Legacy edge cursors did not checkpoint the witnessed record head. An
-    // active collecting barrier cannot be discarded without its durable fence.
+    // A collecting barrier requires the edge checkpoint that witnessed it.
     if companion
         .as_deref()
         .is_some_and(E2eeEdge::needs_witness_snapshot)

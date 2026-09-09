@@ -14,7 +14,7 @@ mod tests;
 
 pub use acknowledgement::Acknowledgement;
 
-/// Exact scoped outbox prefix; legacy kind-ten keys are unchanged.
+/// Exact scoped outbox prefix.
 pub const OUTBOX_PREFIX: &[u8] = b"delivery-outbox/v1/";
 /// Maximum complete event envelope bytes.
 pub const MAX_EVENT_BYTES: u32 = 65_536;

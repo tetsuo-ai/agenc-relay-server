@@ -115,14 +115,7 @@ fn a_persisted_witness_cannot_regress_or_fork_the_retained_route_cut() -> TestRe
 }
 
 #[test]
-fn legacy_resume_discards_the_unproven_cursor_but_marked_resume_preserves_it() -> TestResult {
-    let legacy = DeliveryRow::Cursor {
-        generation: 2,
-        next_sequence: 8,
-        acked_sequence: 7,
-        acked_event_id: [11; 16],
-        barrier_open: false,
-    };
+fn new_edge_requires_snapshot_and_committed_checkpoint_resumes() -> TestResult {
     let marked = DeliveryRow::WitnessedCursor {
         generation: 2,
         next_sequence: 8,
@@ -131,10 +124,11 @@ fn legacy_resume_discards_the_unproven_cursor_but_marked_resume_preserves_it() -
         barrier_open: false,
     };
     let mut restored = edge();
-    restored.restore_delivery(&legacy)?;
+    assert!(restored.needs_witness_snapshot());
     assert_eq!(restored.resume_delivery().generation, 0);
     assert_eq!(restored.resume_delivery().cursor, None);
     restored.restore_delivery(&marked)?;
+    assert!(!restored.needs_witness_snapshot());
     assert_eq!(restored.resume_delivery().generation, 2);
     assert_eq!(restored.resume_delivery().cursor, Some((7, [11; 16])));
     Ok(())

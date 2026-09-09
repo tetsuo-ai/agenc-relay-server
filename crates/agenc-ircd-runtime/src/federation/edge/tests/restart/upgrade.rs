@@ -1,51 +1,37 @@
 #![forbid(unsafe_code)]
 
-//! Legacy delivery cursors cannot stand in for a durable chain witness.
+//! A missing edge checkpoint cannot authorize resume or barrier reconstruction.
 
 use super::*;
 
-fn legacy_rows(collecting: bool) -> TestResult<Vec<InitialStorageRecord>> {
+fn rows_without_delivery_checkpoint(collecting: bool) -> TestResult<Vec<InitialStorageRecord>> {
     let mut rows = crash_rows(usize::from(collecting), false)?;
     if !collecting {
         rows.truncate(2);
     }
-    let cursor = DeliveryRow::Cursor {
-        generation: 1,
-        next_sequence: 7,
-        acked_sequence: 6,
-        acked_event_id: [75; 16],
-        barrier_open: collecting,
-    };
-    *rows.get_mut(1).ok_or("cursor row")? = record(
-        TableId::E2eeState,
-        DELIVERY_ROW_KIND,
-        DeliveryRow::cursor_key(COORDINATOR.as_bytes())?,
-        cursor.encode()?,
-    )?;
+    rows.remove(1);
     Ok(rows)
 }
 
 #[tokio::test]
-async fn a_legacy_cursor_requires_fresh_base_and_companion_snapshots() -> TestResult {
+async fn missing_checkpoint_requires_base_and_companion_snapshots() -> TestResult {
     let fixture = StateCoreFixture::with_registration_router_and_records(
         entropy_script(),
-        legacy_rows(false)?,
+        rows_without_delivery_checkpoint(false)?,
     )?;
     let (mut base, mut companion) = edges();
     fixture.restore_edge_state(&mut base, Some(&mut companion))?;
     assert!(companion.needs_witness_snapshot());
     assert_eq!(base.installed_epoch, None);
-    // Retain the sealed position for receipt checks, never as resume authority.
-    assert_eq!(base.companion_cursor(), (1, Some((6, [75; 16]))));
+    assert_eq!(base.companion_cursor(), (0, None));
     Ok(())
 }
 
 #[tokio::test]
-async fn a_legacy_collecting_barrier_requires_stopped_recovery_without_deleting_its_head()
--> TestResult {
+async fn missing_checkpoint_refuses_barrier_recovery_without_deleting_records() -> TestResult {
     let fixture = StateCoreFixture::with_registration_router_and_records(
         entropy_script(),
-        legacy_rows(true)?,
+        rows_without_delivery_checkpoint(true)?,
     )?;
     let (mut base, mut companion) = edges();
     assert!(

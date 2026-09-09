@@ -180,7 +180,7 @@ impl Restore {
                     push(&mut self.replays, key, ReplayRow::decode(body));
                 }
             }
-            DELIVERY_ROW_KIND => self.delivery.admit_outbox(key, body),
+            DELIVERY_ROW_KIND => self.objects.poison(),
             agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND => {
                 self.delivery.admit_owner(key, value);
             }

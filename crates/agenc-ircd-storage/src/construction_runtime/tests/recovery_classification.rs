@@ -253,13 +253,6 @@ fn declared_recovery_rejects_a_legacy_gate_under_another_conversation() -> Resul
 }
 
 fn delivery_rows() -> Result<Vec<RecoveryRow>, StorageError> {
-    let cursor = DeliveryRow::Cursor {
-        generation: 9,
-        next_sequence: 2,
-        acked_sequence: 0,
-        acked_event_id: [31; 16],
-        barrier_open: false,
-    };
     let witnessed = DeliveryRow::WitnessedCursor {
         generation: 9,
         next_sequence: 2,
@@ -267,40 +260,11 @@ fn delivery_rows() -> Result<Vec<RecoveryRow>, StorageError> {
         acked_event_id: [32; 16],
         barrier_open: false,
     };
-    let outbox = DeliveryRow::Outbox {
-        event_id: [32; 16],
-        event_object_id: [33; 32],
-        payload_object_id: None,
-        payload_bytes: 0,
-        acked: false,
-        cross_profile: None,
-    };
-    let snapshot = DeliveryRow::Snapshot {
-        generation: 9,
-        token: [34; 32],
-        entry_count: 0,
-        digest: [35; 32],
-        ready: true,
-        expires_at: 123_456,
-    };
-    let cases = [
-        ("cap72-cursor", DeliveryRow::cursor_key(&[36; 16])?, cursor),
-        (
-            "cap72-witnessed",
-            DeliveryRow::cursor_key(&[37; 16])?,
-            witnessed,
-        ),
-        (
-            "cap72-outbox",
-            DeliveryRow::outbox_key(&[36; 16], 9, 1)?,
-            outbox,
-        ),
-        (
-            "cap72-estate",
-            DeliveryRow::snapshot_key(&[36; 16])?,
-            snapshot,
-        ),
-    ];
+    let cases = [(
+        "cap72-witnessed",
+        DeliveryRow::cursor_key(&[37; 16])?,
+        witnessed,
+    )];
     cases
         .into_iter()
         .map(|(label, key, value)| {
@@ -447,12 +411,12 @@ fn declared_recovery_rejects_delivery_kind_key_and_arm_mismatches() -> Result<()
     }
     let mut row = delivery_rows()?
         .into_iter()
-        .nth(2)
+        .next()
         .ok_or(StorageError::InvalidEncoding)?;
-    row.key = DeliveryRow::cursor_key(&[36; 16])?;
-    assert!(recovery_selection(&row).is_err(), "outbox under cursor key");
-    row.key = StoredKey::new(crate::e2ee_records::prefix::OUTBOX.to_vec())?;
-    assert!(recovery_selection(&row).is_err(), "truncated outbox key");
+    row.key = StoredKey::new(b"outbox/v1/obsolete".to_vec())?;
+    assert!(recovery_selection(&row).is_err(), "unsupported outbox key");
+    row.key = StoredKey::new(crate::e2ee_records::prefix::DELIVERY.to_vec())?;
+    assert!(recovery_selection(&row).is_err(), "truncated cursor key");
     Ok(())
 }
 

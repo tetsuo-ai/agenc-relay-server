@@ -108,7 +108,7 @@ impl DatabaseHeaderTbs {
             schema_generation: decoder.u64()?,
             recovery_epoch: RecoveryEpoch::from_bytes(decoder.array()?),
         };
-        // Neutral control decoding serves authenticated backup and migration readers.
+        // Control decoding serves authenticated backup readers.
         // The engine separately requires the exact generation for its open mode.
         if value.storage_key_generation == 0 || value.schema_generation != SCHEMA_GENERATION {
             return Err(StorageError::UnsupportedVersion);

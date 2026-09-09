@@ -87,11 +87,6 @@ impl Restore {
         }
     }
 
-    pub(crate) fn admit_outbox(&mut self, _key: &StoredKey, _bytes: &[u8]) {
-        // Legacy transport records carry no full historical scope.
-        self.failed = true;
-    }
-
     pub(crate) fn apply(
         mut self,
         coordinator: &mut CompanionCoordinator,
