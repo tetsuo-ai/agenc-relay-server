@@ -7,7 +7,6 @@ mod restore_source;
 mod stopped;
 
 pub use restore_source::RestoreBackupSourceConfig;
-pub(crate) use restore_source::RestoreSourceAdmission;
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -2026,7 +2025,6 @@ impl RestoreLoginScan {
 
 impl<R: Read + Seek> RestoreBackupSource<R> {
     /// Verifies a current-schema signed stream before admitting restore authority.
-    /// Legacy sources require `open_with_legacy_validation` instead.
     pub fn open(
         input: R,
         source_master_key: StorageMasterKey,
@@ -2046,7 +2044,6 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
                 trusted_keys,
                 maximum_bytes,
             },
-            RestoreSourceAdmission::Current,
         )
     }
 
@@ -2467,9 +2464,7 @@ fn push_restore_channel_name(
     if let Some(name) = builder.discarded_restore_channel_name(channel.key())? {
         let binding = ChannelNameRecordBody::decode(value.body())?;
         if binding.name.canonical().as_bytes() != name
-            || binding
-                .channel_id
-                .is_some_and(|id| id.as_bytes() != channel.key().as_bytes())
+            || binding.channel_id.as_bytes() != channel.key().as_bytes()
         {
             return Err(StorageError::StaleState);
         }
@@ -2570,7 +2565,7 @@ pub trait ConstructionTargetWriter {
     ) -> Result<(), StorageError>;
 }
 
-/// Authenticated staging-database adapter used by restore, rekey, and migration commands.
+/// Authenticated staging-database adapter used by restore and rekey commands.
 pub struct ConstructionTarget {
     engine: StorageEngine,
 }
@@ -3252,11 +3247,7 @@ fn transform_channel_name(
     }
     let channel_body = ChannelRecordBody::decode(channel.body())?;
     let name_body = ChannelNameRecordBody::decode(name.body())?;
-    if name_body.name != channel_body.name
-        || name_body
-            .channel_id
-            .is_some_and(|channel_id| channel_id != channel_body.channel_id)
-    {
+    if name_body.name != channel_body.name || name_body.channel_id != channel_body.channel_id {
         return Err(StorageError::StaleState);
     }
     let revision = channel
@@ -3556,8 +3547,8 @@ mod tests {
             target_database_header_hash: ZERO,
             source_rollback_guard_hash: ZERO,
             source_stream_digest: None,
-            source_schema_generation: 1,
-            target_schema_generation: 1,
+            source_schema_generation: crate::SCHEMA_GENERATION,
+            target_schema_generation: crate::SCHEMA_GENERATION,
             transform_profile_hash: agenc_ircd_crypto::rekey_transform_profile_hash()?,
             target_database_instance_id: DatabaseId::from_bytes([1; 16]),
             source_master_key_id: ZERO,
@@ -4632,7 +4623,7 @@ mod tests {
             let key = StoredKey::new(vec![160 + kind as u8; 16])?;
             let source = backup_source(TableId::ChannelName, &key, 90 + u64::from(kind))?;
             let body = if kind == 1 {
-                b"#channel".to_vec()
+                crate::domain_records::fixtures::channel_name_body(1, "#channel")?
             } else {
                 Vec::new()
             };
@@ -5071,7 +5062,7 @@ mod tests {
             0,
             None,
             vec![reference],
-            b"#fixture".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#fixture")?,
         )?
         .encode()?;
         let sources = [
@@ -5086,7 +5077,10 @@ mod tests {
             transformer.transform(StorageConstructionKind::Restore, &entry, &sources)?;
         let name = PersistentRecordValue::decode(TableId::ChannelName, &transformed)?;
         assert_eq!(name.revision(), 8);
-        assert_eq!(name.body(), b"#fixture");
+        assert_eq!(
+            name.body(),
+            crate::domain_records::fixtures::channel_name_body(1, "#fixture")?
+        );
         Ok(())
     }
 
@@ -5790,7 +5784,7 @@ mod tests {
             0,
             None,
             vec![channel_reference],
-            b"#name".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#name")?,
         )?
         .encode()?;
         let channel_tombstone = domain_plaintext(TableId::Channel, 2)?;
@@ -5838,7 +5832,7 @@ mod tests {
             0,
             None,
             Vec::new(),
-            b"#name".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#name")?,
         )?
         .encode()?;
         assert_eq!(
@@ -5867,7 +5861,7 @@ mod tests {
             0,
             None,
             vec![wrong_reference],
-            b"#name".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#name")?,
         )?
         .encode()?;
         assert_eq!(
@@ -6406,7 +6400,7 @@ mod tests {
                 RecordReference::new(TableId::Channel, first_channel.clone())?,
                 RecordReference::new(TableId::Channel, second_channel)?,
             ],
-            b"#duplicate-channels".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(121, "#duplicate-channels")?,
         )?
         .encode()?;
         let channel_name_record = record(
@@ -6452,7 +6446,7 @@ mod tests {
             0,
             None,
             vec![RecordReference::new(TableId::Channel, first_channel)?],
-            b"#single-channel".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(121, "#single-channel")?,
         )?
         .encode()?;
         let single_channel_source = backup_source(TableId::ChannelName, &channel_name_key, 3)?;

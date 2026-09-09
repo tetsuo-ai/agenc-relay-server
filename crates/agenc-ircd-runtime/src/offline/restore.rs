@@ -1,10 +1,9 @@
-//! Stopped restore supplies the same legacy audit policy as explicit migration.
+//! Stopped restore of a verified current-format backup.
 #![forbid(unsafe_code)]
 
 use agenc_ircd_config::MaintenanceStorageConfig;
 use agenc_ircd_storage::{
-    RestoreCommandReceipt, RestoreCommandRequest, StorageQualification,
-    execute_validated_restore_command,
+    RestoreCommandReceipt, RestoreCommandRequest, StorageQualification, execute_restore_command,
 };
 
 use super::OfflineError;
@@ -18,7 +17,5 @@ pub fn execute_stopped_restore(
     if request.network_id != config.network_id || request.server_id != config.server_id {
         return Err(OfflineError::InvalidRequest);
     }
-    let mut validator = super::migration::legacy_audit_source_validator(config)?;
-    execute_validated_restore_command(request, qualifications, &mut validator)
-        .map_err(|_| OfflineError::Storage)
+    execute_restore_command(request, qualifications).map_err(|_| OfflineError::Storage)
 }

@@ -103,8 +103,6 @@ mod stage_ten_capacity;
 mod stage_ten_drills;
 #[path = "stage_eight_e2ee/stage_ten_login_index.rs"]
 mod stage_ten_login_index;
-#[path = "stage_eight_e2ee/stage_ten_migration.rs"]
-mod stage_ten_migration;
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 /// The edge registers a client only once its coordinator link is ACTIVE;
 /// registration attempts before that fail closed and are retried.
@@ -385,9 +383,6 @@ struct NodeFixture {
     operator_id: OperatorId,
     /// The federation listener this node binds; only the coordinator has one.
     federation_listener: Option<SocketAddr>,
-    /// The OPAQUE fake registration record the database was initialized with,
-    /// so a drill can rebuild the same database at another schema generation.
-    opaque_fake_record: Vec<u8>,
 }
 
 struct NodePlan<'a> {
@@ -577,7 +572,6 @@ impl NodeFixture {
                 NodeRole::Coordinator => plan.federation_address,
                 _ => None,
             },
-            opaque_fake_record: opaque.expose_fake_record_for_persistence().to_vec(),
         })
     }
 
@@ -774,9 +768,7 @@ fn initialize_database(
     )
 }
 
-/// Initializes a fixture database under `header`; a generation-1 header goes
-/// through the storage crate's legacy fixture constructor so the migration
-/// drill can start from a real predecessor database.
+/// Initializes a current-format fixture database under the supplied header.
 fn initialize_database_with_header(
     state_dir: &Path,
     header: DatabaseHeaderTbs,
@@ -785,7 +777,6 @@ fn initialize_database_with_header(
     login_index: [u8; 32],
     fake_record: &[u8],
 ) -> TestResult {
-    let schema_generation = header.schema_generation;
     let login_key = LoginIndexKey::from_bytes(login_index);
     let key_state = LoginIndexKeyState::stable(1, login_key.key_id(NETWORK_ID))?;
     let key_state_record = InitialStorageRecord::new(
@@ -830,11 +821,7 @@ fn initialize_database_with_header(
             integrity_checkpoint_manifests: 10_000,
         },
     };
-    let outcome = if schema_generation == SCHEMA_GENERATION {
-        initialize_storage(config)?
-    } else {
-        agenc_ircd_storage::initialize_legacy_storage(config)?
-    };
+    let outcome = initialize_storage(config)?;
     if !matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
         return Err(failure("storage initialization became indeterminate"));
     }

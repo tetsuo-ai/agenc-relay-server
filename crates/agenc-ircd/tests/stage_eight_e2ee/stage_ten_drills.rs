@@ -2,7 +2,6 @@
 //!
 //! Each drill is one ignored test that operates the frozen binary the way an
 //! operator would: restore and disaster restore through `storage restore`,
-//! schema migration through `storage migrate` with an injected interruption,
 //! account deletion followed by a rekey, key and certificate rotations,
 //! incident response, rollback refusal, resynchronization, host hardening,
 //! and observability. Every drill writes `<AGENC_STAGE10_DRILL_DIR>/<name>.json`
@@ -39,8 +38,6 @@ const DRILL_TOPIC: &str = "drill topic survives the operation";
 const MAX_LOG_BYTES: u64 = 64 * 1_024 * 1_024;
 /// Bound on a stopped-daemon command's output.
 const MAX_COMMAND_OUTPUT: usize = 1_024 * 1_024;
-/// How long the migration interruption experiment may take.
-const MIGRATION_ATTEMPTS: u32 = 6;
 /// A node with live peers may take longer than a lone node to drain.
 const DRILL_STOP_BUDGET: Duration = Duration::from_secs(60);
 /// Let the freshly linked network settle before the first operation.
@@ -919,165 +916,6 @@ fn drill_disaster_restore() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Migration with an injected interruption
-// ---------------------------------------------------------------------------
-
-/// Builds a generation-1 twin of edge B's database with the same identity,
-/// keys, and initial records, through the storage crate's legacy fixture
-/// constructor.
-fn build_legacy_database(fixture: &NodeFixture, directory: &Path) -> TestResult {
-    let seed = fixture.seed;
-    let (master, guard, login) = node_keys(fixture);
-    let header = DatabaseHeaderTbs {
-        network_id: NETWORK_ID,
-        server_id: fixture.server_id,
-        server_incarnation: ServerIncarnation::from_bytes([seed.wrapping_add(1); 16]),
-        database_instance_id: DatabaseId::from_bytes([seed.wrapping_add(6); 16]),
-        storage_key_generation: 1,
-        schema_generation: 1,
-        recovery_epoch: RecoveryEpoch::from_bytes([seed.wrapping_add(2); 16]),
-    };
-    create_directory(directory, 0o700)?;
-    initialize_database_with_header(
-        directory,
-        header,
-        master,
-        guard,
-        login,
-        &fixture.opaque_fake_record,
-    )
-}
-
-/// Points a node's configuration at another state directory.
-fn point_state_dir(fixture: &NodeFixture, directory: &Path) -> TestResult {
-    let current = current_state_dir(fixture)?;
-    let mut config = fs::read_to_string(&fixture.config_path)?;
-    replace_once(
-        &mut config,
-        &format!("state_dir = \"{}\"", protected_path_text(&current)?),
-        &format!("state_dir = \"{}\"", protected_path_text(directory)?),
-    )?;
-    fs::write(&fixture.config_path, config)?;
-    Ok(())
-}
-
-/// Runs `storage migrate`, killing it after `delay` unless `delay` is `None`.
-/// Returns the exit status and the captured output.
-fn run_migrate(
-    fixture: &NodeFixture,
-    output: &Path,
-    resume: bool,
-    delay: Option<Duration>,
-) -> TestResult<(Option<i32>, String, String)> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"));
-    command
-        .args(["storage", "migrate", "--config"])
-        .arg(&fixture.config_path)
-        .args([
-            "--target-schema-generation",
-            "2",
-            "--output-state-directory",
-        ])
-        .arg(output)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if resume {
-        command.arg("--resume");
-    }
-    let mut child = command.spawn()?;
-    if let Some(delay) = delay {
-        thread::sleep(delay);
-        let _ = child.kill();
-    }
-    let result = child.wait_with_output()?;
-    Ok((
-        result.status.code(),
-        bounded_text(&result.stdout),
-        bounded_text(&result.stderr),
-    ))
-}
-
-fn run_migration(drill: &mut Drill) -> TestResult<bool> {
-    let network = drill_network()?;
-    let _logs = LogGuard {
-        network: &network,
-        directory: drill.stderr_logs.clone(),
-    };
-    let mut nodes = DrillNodes::start(&network, drill)?;
-    let fixture = &network.edge_b;
-    nodes.stop(&network, 2, "migration drill")?;
-    drill.step("stop", "edge b stopped");
-    let mut interrupted = false;
-    let mut installed = None;
-    let mut delay = Duration::from_millis(400);
-    for attempt in 1..=MIGRATION_ATTEMPTS {
-        let legacy = fixture.data_dir.join(format!("state-legacy-{attempt}"));
-        build_legacy_database(fixture, &legacy)?;
-        point_state_dir(fixture, &legacy)?;
-        let output = fixture.data_dir.join(format!("state-migrated-{attempt}"));
-        let (code, stdout, stderr) = run_migrate(fixture, &output, false, Some(delay))?;
-        if code == Some(0) {
-            drill.step(
-                "interrupt",
-                format!("attempt {attempt}: migration finished before the {delay:?} kill"),
-            );
-            delay /= 2;
-            installed = Some((output, stdout));
-            if delay < Duration::from_millis(20) {
-                break;
-            }
-            continue;
-        }
-        interrupted = true;
-        drill.step(
-            "interrupt",
-            format!(
-                "attempt {attempt}: killed after {delay:?}, exit {code:?}: {}",
-                stderr.trim()
-            ),
-        );
-        let (code, stdout, stderr) = run_migrate(fixture, &output, true, None)?;
-        if code != Some(0) {
-            return Err(failure(format!("resume failed with {code:?}: {stderr}")));
-        }
-        drill.step(
-            "resume",
-            "identical command with --resume installed the target",
-        );
-        installed = Some((output, stdout));
-        break;
-    }
-    let Some((output, stdout)) = installed else {
-        return Err(failure("no migration attempt produced an installed target"));
-    };
-    drill.fact("interrupted_then_resumed", interrupted);
-    let receipt = stdout
-        .lines()
-        .find(|line| line.starts_with("schema generation: "))
-        .unwrap_or("")
-        .to_owned();
-    drill.fact("receipt", &receipt);
-    point_state_dir(fixture, &output)?;
-    nodes.restart(&network, 2)?;
-    drill.step("restart", "edge b serving the migrated directory");
-    let mut client = register_when_available(fixture, "migrated-check")?;
-    client.send("QUIT :checked")?;
-    drill.fact("serves_after_migration", true);
-    let clean = nodes.stop_all();
-    drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
-    Ok(interrupted && receipt.contains("1 -> 2") && clean.iter().all(|c| *c))
-}
-
-#[test]
-#[ignore = "Stage 10 drill; run through the qualification driver"]
-fn drill_migration() -> TestResult {
-    let mut drill = Drill::begin("migration")?;
-    let outcome = run_migration(&mut drill);
-    drill.finish(outcome)
-}
-
-// ---------------------------------------------------------------------------
 // Deletion followed by a rekey
 // ---------------------------------------------------------------------------
 
@@ -1511,14 +1349,14 @@ fn deletion_evidence_account_fixture(
 
     let account_id = agenc_ircd_testkit::account_id(byte);
     let revision = if generation == 1 { 3_u64 } else { 1_u64 };
-    // Version-one account body: identity, no label, private presence, permissive
-    // DM policies, empty contacts/nicknames, session generation and revision.
-    let mut body = 1_u16.to_be_bytes().to_vec();
+    // Current account body with no suspension and no optional profile fields.
+    let mut body = 2_u16.to_be_bytes().to_vec();
     body.extend_from_slice(account_id.random().as_bytes());
     body.extend_from_slice(&[0, 1, 0, 0]);
     body.extend_from_slice(&[0; 8]);
     body.extend_from_slice(&generation.to_be_bytes());
     body.extend_from_slice(&revision.to_be_bytes());
+    body.push(0);
     let account = if deleted {
         PersistentRecordValue::new(TableId::Account, 2, 9, 0, None, Vec::new(), Vec::new())?
     } else {

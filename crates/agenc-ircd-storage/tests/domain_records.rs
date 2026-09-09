@@ -35,6 +35,11 @@ pub(crate) fn live_body(table: TableId, seed: u8) -> Result<Vec<u8>, StorageErro
     }
 }
 
+pub(crate) fn channel_name_body(seed: u8, spelling: &str) -> Result<Vec<u8>, StorageError> {
+    let name = ChannelNameValue::parse(spelling).map_err(|_| StorageError::InvalidEncoding)?;
+    ChannelNameRecordBody::encode(ChannelInstanceId::from_bytes([seed; 16]), &name)
+}
+
 fn minimal_session(seed: u8) -> Result<DurableSession, StorageError> {
     Ok(DurableSession {
         session_id: SessionId::from_bytes([seed; 16]),
@@ -426,25 +431,19 @@ fn full_bodies_round_trip_and_admit_through_the_envelope() -> Result<(), Box<dyn
 }
 
 #[test]
-fn channel_body_v1_compatibility_is_limited_to_unkeyed_rows() -> Result<(), Box<dyn Error>> {
-    let unkeyed = minimal_channel(7)?;
-    let legacy_unkeyed = legacy_channel_body(&unkeyed, 1)?;
-    assert!(ChannelRecordBody::decode(&legacy_unkeyed)? == unkeyed);
-
-    let keyed = full_channel()?;
-    let legacy_keyed = legacy_channel_body(&keyed, 1)?;
-    assert_eq!(
-        ChannelRecordBody::decode(&legacy_keyed),
-        Err(StorageError::InvalidEncoding)
-    );
-
-    let version_two = legacy_channel_body(&keyed, 2)?;
-    let mut expected_version_two = keyed.clone();
-    expected_version_two.admin_quarantined = false;
-    assert!(ChannelRecordBody::decode(&version_two)? == expected_version_two);
-
-    let version_three = legacy_channel_body(&keyed, 3)?;
-    assert!(ChannelRecordBody::decode(&version_three)? == keyed);
+fn channel_body_requires_the_complete_current_format() -> Result<(), Box<dyn Error>> {
+    for channel in [minimal_channel(7)?, full_channel()?] {
+        assert_eq!(
+            ChannelRecordBody::decode(&ChannelRecordBody::encode(&channel)?)?,
+            channel
+        );
+        for version in [1, 2, 3] {
+            assert_eq!(
+                ChannelRecordBody::decode(&legacy_channel_body(&channel, version)?),
+                Err(StorageError::UnsupportedVersion)
+            );
+        }
+    }
 
     let mut missing = full_channel()?;
     missing.key_verifier = None;
@@ -462,7 +461,7 @@ fn channel_body_v1_compatibility_is_limited_to_unkeyed_rows() -> Result<(), Box<
 }
 
 #[test]
-fn account_body_v1_defaults_the_durable_admin_suspension() -> Result<(), Box<dyn Error>> {
+fn account_body_rejects_the_obsolete_suspension_free_format() -> Result<(), Box<dyn Error>> {
     let mut legacy = AccountRecordBody::encode(&full_account()?)?;
     set(&mut legacy, 1, 1)?;
     let retained = legacy
@@ -470,24 +469,23 @@ fn account_body_v1_defaults_the_durable_admin_suspension() -> Result<(), Box<dyn
         .checked_sub(9)
         .ok_or(StorageError::InvalidEncoding)?;
     legacy.truncate(retained);
-    let mut expected = full_account()?;
-    expected.admin_suspension_expires_at = None;
-    assert!(AccountRecordBody::decode(&legacy)? == expected);
+    assert_eq!(
+        AccountRecordBody::decode(&legacy),
+        Err(StorageError::UnsupportedVersion)
+    );
     Ok(())
 }
 
 #[test]
-fn channel_name_body_accepts_typed_and_legacy_bindings() -> Result<(), Box<dyn Error>> {
+fn channel_name_body_requires_an_explicit_channel_identity() -> Result<(), Box<dyn Error>> {
     let channel_id = ChannelInstanceId::from_bytes([70; 16]);
     let name = ChannelNameValue::parse("#Stable-Name")?;
     let encoded = ChannelNameRecordBody::encode(channel_id, &name)?;
     let decoded = ChannelNameRecordBody::decode(&encoded)?;
-    assert_eq!(decoded.channel_id, Some(channel_id));
+    assert_eq!(decoded.channel_id, channel_id);
     assert!(decoded.name == name);
 
-    let legacy = ChannelNameRecordBody::decode(b"#Stable-Name")?;
-    assert_eq!(legacy.channel_id, None);
-    assert!(legacy.name == name);
+    assert!(ChannelNameRecordBody::decode(b"#Stable-Name").is_err());
 
     let mut trailing = encoded;
     trailing.push(0);

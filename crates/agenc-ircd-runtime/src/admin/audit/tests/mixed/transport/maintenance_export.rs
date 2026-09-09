@@ -1,4 +1,4 @@
-//! Signed opt-in export remains gated by its own observed audit receipt.
+//! Signed export remains gated by its own observed audit receipt.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -61,10 +61,10 @@ async fn signed_maintenance_export_requires_observed_commit_before_any_batch() -
         challenge.session_id(),
         0,
         None,
-        b"AUDIT EXPORT 0 2 maintenance-v1",
+        b"AUDIT EXPORT 0 2",
     )?;
     let signed = format!(
-        "{} AUDIT EXPORT 0 2 maintenance-v1\r\n",
+        "{} AUDIT EXPORT 0 2\r\n",
         render_admin_tag(0, &tbs.sign(&fixture.operator)?, None)
     );
     let submitted = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -154,10 +154,10 @@ async fn signed_maintenance_export_publishes_exact_mixed_bytes_after_real_storag
         challenge.session_id(),
         0,
         None,
-        b"AUDIT EXPORT 0 3 maintenance-v1",
+        b"AUDIT EXPORT 0 3",
     )?;
     let signed = format!(
-        "{} AUDIT EXPORT 0 3 maintenance-v1\r\n",
+        "{} AUDIT EXPORT 0 3\r\n",
         render_admin_tag(0, &tbs.sign(&fixture.operator)?, None)
     );
 
@@ -195,7 +195,7 @@ async fn signed_maintenance_export_publishes_exact_mixed_bytes_after_real_storag
     let id = encode_base64url(&[7; 16]);
     assert_eq!(
         batch.lines.first().ok_or("batch start")?,
-        format!("BATCH +{id} agenc.ag/audit-maintenance-v1 0 3 4 0").as_bytes()
+        format!("BATCH +{id} agenc.ag/audit 0 3 4 0").as_bytes()
     );
     for (index, event) in fixture.chain()?.iter().enumerate() {
         let (kind, label) = match event {
@@ -231,7 +231,7 @@ async fn signed_maintenance_export_publishes_exact_mixed_bytes_after_real_storag
     })?;
     let observed = observed.ok_or("durable observed event")?;
     assert!(matches!(&observed, AuditEvent::Admin(event)
-        if event.tbs().command_tbs.canonical_command() == b"AUDIT EXPORT 0 3 maintenance-v1"));
+        if event.tbs().command_tbs.canonical_command() == b"AUDIT EXPORT 0 3"));
     assert_eq!(
         batch.lines.get(4).ok_or("observed line")?,
         format!(

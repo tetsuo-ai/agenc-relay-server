@@ -22,7 +22,7 @@
 > The daemon implements TLS-only direct, Tor-exit, and onion profiles,
 > coordinator/edge federation, and the E2EE server adapter. The external
 > cryptographic and protocol review remains open. Stage 09 adds optional WebSocket transport and
-> plaintext channel history with an explicit schema migration. Production
+> plaintext channel history. Production
 > qualification is in progress for [Stage 10](docs/stage-10-qualification.md).
 > Checkpoints do not qualify later source changes.
 
@@ -58,7 +58,7 @@ Ed25519, and authenticated storage.
 | 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
 | 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
 | 08 | implementation checkpoint closed; external review open | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
-| 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, purge, and schema migration |
+| 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, and purge |
 | 10 | in progress; no release decision | Production qualification and release evidence |
 
 `agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
@@ -87,8 +87,7 @@ record-chain witness at every edge, the cross-profile durable barrier, a
 coordinator reload from durable rows, the encrypted profile composed in the
 daemon, and a lifecycle driven by two independent MLS libraries; the
 external review task stays open. Stage 09 adds optional WSS transport,
-plaintext history, bounded purge and expiry, authenticated history replay,
-and stopped-daemon schema migration. See the
+plaintext history, bounded purge and expiry, and authenticated history replay. See the
 [Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
 [Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json), the
@@ -196,9 +195,7 @@ contains 10 passed records and closes exact source commit
 Coverage reached 75.38% of branches and 90.69% of lines, with all nine critical
 regions at 100%. The gate adds TCP/WSS transcript and stored-state equivalence,
 history lifecycle and encrypted-route refusals, all 16 build/configuration
-combinations, migration recovery, and WSS/history fuzz campaigns. Existing
-nodes need a stopped-daemon schema migration and a coordinated federation
-upgrade; follow the [Stage 09 operating instructions](docs/stage-09-operations.md).
+combinations and WSS/history fuzz campaigns.
 
 Stage 10 is in progress and has no checkpoint. The release qualification
 runner, the release image and reproducible container build, the storage,

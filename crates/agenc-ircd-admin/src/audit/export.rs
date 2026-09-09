@@ -4,24 +4,6 @@
 use super::*;
 use crate::{AuditEvent, MaintenanceAuditEvent};
 
-/// The signed command selects one exact output profile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AuditExportProfile {
-    /// Original `agenc.ag/audit` framing admits only administration events.
-    Legacy,
-    /// `agenc.ag/audit-maintenance-v1` also admits labelled maintenance events.
-    MaintenanceV1,
-}
-
-impl AuditExportProfile {
-    const fn batch_type(self) -> &'static str {
-        match self {
-            Self::Legacy => "agenc.ag/audit",
-            Self::MaintenanceV1 => "agenc.ag/audit-maintenance-v1",
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum EventRef<'a> {
     Admin(&'a AdminAuditEvent),
@@ -36,7 +18,7 @@ impl EventRef<'_> {
         }
     }
 
-    fn render(self, batch_id: &str, profile: AuditExportProfile) -> Result<String, AdminError> {
+    fn render(self, batch_id: &str) -> Result<String, AdminError> {
         match self {
             Self::Admin(event) => {
                 let token = encode_base64url(&event.encode()?);
@@ -44,13 +26,12 @@ impl EventRef<'_> {
                     "@batch={batch_id} NOTE AUDIT EVENT {token} :Audit event"
                 ))
             }
-            Self::Maintenance(event) if profile == AuditExportProfile::MaintenanceV1 => {
+            Self::Maintenance(event) => {
                 let token = encode_base64url(&event.encode()?);
                 Ok(format!(
                     "@batch={batch_id} NOTE AUDIT MAINTENANCE {token} :Maintenance audit event"
                 ))
             }
-            Self::Maintenance(_) => Err(AdminError::Audit),
         }
     }
 }
@@ -64,32 +45,11 @@ impl<'a> From<&'a AuditEvent> for EventRef<'a> {
     }
 }
 
-/// Renders a fully verified mixed chain in the selected profile without rewriting signed bytes.
-///
-/// The caller authenticates every record before calling. Ordering, coverage,
-/// exact counts, profile admission, and the existing byte limits are enforced here.
-pub fn render_export_batch_with_profile(
-    batch_id: &[u8; 16],
-    range: AuditRange,
-    checkpoints: &[AdminAuditCheckpoint],
-    events: &[AuditEvent],
-    profile: AuditExportProfile,
-) -> Result<Vec<String>, AdminError> {
-    render(
-        batch_id,
-        range,
-        checkpoints,
-        events.iter().map(EventRef::from),
-        profile,
-    )
-}
-
 pub(super) fn render<'a>(
     batch_id: &[u8; 16],
     range: AuditRange,
     checkpoints: &[AdminAuditCheckpoint],
     events: impl ExactSizeIterator<Item = EventRef<'a>> + Clone,
-    profile: AuditExportProfile,
 ) -> Result<Vec<String>, AdminError> {
     let records = checkpoints
         .len()
@@ -104,8 +64,7 @@ pub(super) fn render<'a>(
     let id = encode_base64url(batch_id);
     let mut lines = Vec::with_capacity(records.saturating_add(2));
     lines.push(format!(
-        "BATCH +{id} {} {} {} {} {}",
-        profile.batch_type(),
+        "BATCH +{id} agenc.ag/audit {} {} {} {}",
         range.from(),
         range.to(),
         events.len(),
@@ -118,7 +77,7 @@ pub(super) fn render<'a>(
         ));
     }
     for event in events {
-        lines.push(event.render(&id, profile)?);
+        lines.push(event.render(&id)?);
     }
     lines.push(format!("BATCH -{id}"));
     check_export_bytes(&lines)?;

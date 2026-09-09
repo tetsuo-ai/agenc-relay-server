@@ -246,7 +246,7 @@ tests. Configuration parsing alone cannot close the Tor requirement.
 Storage evidence comes from the final binary's own `storage qualify` command
 (below). Earlier redb component measurements cannot substitute for it.
 
-Operational evidence must cover restore, migration, deletion, rekey,
+Operational evidence must cover restore, deletion, rekey,
 login-index transition, each signing and transport key rotation, compromise
 response, resynchronization, host hardening, and observability.
 
@@ -381,10 +381,7 @@ storage owner, restores it into a new directory with `storage restore`,
 re-pins the new recovery epoch on both edges, restarts everything, and
 authenticates the drill account and re-reads the drill channel's topic.
 Disaster restore removes the coordinator's state directory first and expects
-the receipt to report no current guard witness. Migration builds a
-generation-1 twin of an edge database through the storage crate's
-`legacy-fixtures` constructor, runs `storage migrate`, kills it part way,
-completes it with `--resume`, and serves the installed directory. Deletion
+the receipt to report no current guard witness. Deletion
 creates and deletes an account through the client protocol, takes backups
 before creation, after creation, and after deletion, rekeys the coordinator
 from the last one, and checks the deleted login stays refused. It verifies

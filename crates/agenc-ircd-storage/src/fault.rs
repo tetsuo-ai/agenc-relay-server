@@ -43,8 +43,6 @@ pub enum StorageFaultSite {
     CheckpointInstall = 16,
     /// Checkpoint manifest/ancestor pruning.
     CheckpointPrune = 17,
-    /// Migration profile and registry validation.
-    MigrationProfile = 18,
     /// Construction-plan deterministic rebuild.
     ConstructionPlanRebuild = 19,
     /// Construction target batch.
@@ -97,7 +95,6 @@ impl StorageFaultSite {
             Self::CheckpointScan => "checkpoint-scan",
             Self::CheckpointInstall => "checkpoint-install",
             Self::CheckpointPrune => "checkpoint-prune",
-            Self::MigrationProfile => "migration-profile",
             Self::ConstructionPlanRebuild => "construction-plan-rebuild",
             Self::ConstructionBatch => "construction-batch",
             Self::ConstructionCursor => "construction-cursor",
@@ -117,7 +114,7 @@ impl StorageFaultSite {
 
     /// Returns every version-one site in numeric order.
     #[must_use]
-    pub const fn all() -> [Self; 32] {
+    pub const fn all() -> [Self; 31] {
         [
             Self::RecordRead,
             Self::RecordWrite,
@@ -136,7 +133,6 @@ impl StorageFaultSite {
             Self::CheckpointScan,
             Self::CheckpointInstall,
             Self::CheckpointPrune,
-            Self::MigrationProfile,
             Self::ConstructionPlanRebuild,
             Self::ConstructionBatch,
             Self::ConstructionCursor,

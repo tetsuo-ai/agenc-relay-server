@@ -1,4 +1,4 @@
-//! Startup, retention, and legacy export share one sealed mixed chain.
+//! Startup and retention share one sealed mixed chain.
 #![forbid(unsafe_code)]
 #![cfg(test)]
 
@@ -33,54 +33,6 @@ async fn sealed_mixed_chain_reconstructs_twice_without_rewriting_historical_scop
         })?;
         assert_eq!(retained, events);
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn legacy_export_refuses_a_retained_maintenance_event_before_observed_publication()
--> TestResult {
-    let fixture = Fixture::new();
-    let core = core(&fixture.chain()?)?;
-    let authority = fixture.authority(&core)?;
-    let source = core.audit_source()?;
-    let before = source.storage.try_statistics()?.wait()?;
-    for (from, to) in [(0, 2), (1, 1), (1, 2)] {
-        assert!(matches!(
-            authority
-                .prepare_export(AuditRange::new(from, to)?, [7; 16])?
-                .run(),
-            Err(AuditExportFailure::UnsupportedProfile)
-        ));
-    }
-    let after = source.storage.try_statistics()?.wait()?;
-    assert_eq!(
-        after.logical_database_bytes(),
-        before.logical_database_bytes()
-    );
-    assert_eq!(after.backup_stream_bytes(), before.backup_stream_bytes());
-    assert_eq!(fixture.authority(&core)?.cursor, authority.cursor);
-    let prepared = authority
-        .prepare_export(AuditRange::new(0, 0)?, [7; 16])?
-        .run()?;
-    let AuditEvent::Admin(observed) = fixture.admin(
-        authority.cursor,
-        AdminAuditPhase::Observed,
-        b"AUDIT EXPORT 0 0",
-    )?
-    else {
-        return Err("admin arm".into());
-    };
-    let frames = prepared.finish_with_observed(&observed)?;
-    assert!(
-        frames
-            .first()
-            .is_some_and(|line| line.starts_with("BATCH +"))
-    );
-    assert!(
-        frames
-            .last()
-            .is_some_and(|line| line.starts_with("BATCH -"))
-    );
     Ok(())
 }
 

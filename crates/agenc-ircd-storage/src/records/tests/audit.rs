@@ -6,7 +6,7 @@ const SIGNED_START: &[u8] =
     include_bytes!("../../../../../test-data/stage-ten/maintenance-audit-start-v1.bin");
 
 #[test]
-fn maintenance_audit_kind_is_admitted_only_by_schema_three() -> Result<(), StorageError> {
+fn maintenance_audit_records_require_the_current_schema() -> Result<(), StorageError> {
     let sequence = u64::from_be_bytes(
         SIGNED_START
             .get(84..92)
@@ -29,16 +29,23 @@ fn maintenance_audit_kind_is_admitted_only_by_schema_three() -> Result<(), Stora
         PersistentRecordValue::decode(TableId::Audit, &plaintext)?.body(),
         SIGNED_START
     );
-    crate::migration::validate_source_record(3, TableId::Audit, &key, 1, &plaintext)?;
-    for generation in [1, 2] {
+    crate::AuthenticatedSourceRecord::checked(
+        crate::SCHEMA_GENERATION,
+        TableId::Audit,
+        &key,
+        1,
+        &plaintext,
+    )?;
+    for generation in [1, 2, 3, 5] {
         assert_eq!(
-            crate::migration::validate_source_record(
+            crate::AuthenticatedSourceRecord::checked(
                 generation,
                 TableId::Audit,
                 &key,
                 1,
                 &plaintext
-            ),
+            )
+            .map(|_| ()),
             Err(StorageError::UnsupportedVersion)
         );
     }

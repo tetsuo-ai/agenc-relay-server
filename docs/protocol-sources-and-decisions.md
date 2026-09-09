@@ -246,12 +246,8 @@ under the same request identity. These canonical changes require a new base
 federation profile hash and coordinated peer upgrades. The E2EE companion
 bytes and profile remain unchanged.
 
-Typed History records and history replay kinds change the closed persistent
-schema. Stage 09 therefore ships database generation 2 and the exact offline
-copy-on-write 1-to-2 migration in Architecture Section 23.6. The source History
-table must be empty, as in production Stage 08. All optional-feature builds
-share that database format and the maintenance readers; turning history off
-never bypasses authentication, deletion, or encrypted-binding exclusion.
+All optional-feature builds use the current database format. Turning history
+off never bypasses authentication, deletion, or encrypted-binding exclusion.
 
 Build-time exclusion removes optional service dependency edges. Runtime
 disablement suppresses the service, listeners, capabilities, and new service

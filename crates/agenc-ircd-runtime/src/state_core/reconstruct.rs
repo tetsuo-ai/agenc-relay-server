@@ -1160,9 +1160,7 @@ impl Scan {
                 .channels
                 .get(&channel_id)
                 .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
-            if binding
-                .channel_id
-                .is_some_and(|bound_id| bound_id != channel_id)
+            if binding.channel_id != channel_id
                 || channel.name != binding.name
                 || !named.insert(channel_id)
             {
@@ -1712,7 +1710,7 @@ mod tests {
             0,
             None,
             vec![RecordReference::new(TableId::Channel, channel_key)?],
-            name.presentation().as_bytes().to_vec(),
+            ChannelNameRecordBody::encode(channel_id, &name)?,
         )?;
         let mut channel_scan = Scan::default();
         channel_scan.admit(
@@ -4207,20 +4205,13 @@ mod tests {
         typed.bind_channel_names(&keys)?;
         assert!(typed.index.channel_name_row(channel.channel_id) == Some(&name_key));
 
-        let mut legacy = scan_with_channel(163)?;
-        admit_sealed(
-            &mut legacy,
-            &keys,
-            TableId::ChannelName,
-            &name_key,
-            &channel_name_row(
+        assert!(matches!(
+            channel_name_row(
                 &channel_key,
-                channel.name.presentation().as_bytes().to_vec(),
-            )?,
-            164,
-        )?;
-        legacy.bind_channel_names(&keys)?;
-        assert!(legacy.index.channel_name_row(channel.channel_id) == Some(&name_key));
+                channel.name.presentation().as_bytes().to_vec()
+            ),
+            Err(RuntimeError::Storage(StorageError::UnsupportedVersion))
+        ));
 
         let mut unnamed = scan_with_channel(165)?;
         assert!(stale(unnamed.bind_channel_names(&keys)));

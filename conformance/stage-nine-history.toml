@@ -36,20 +36,6 @@ encrypted_history = false
 durable_result_bodies = false
 targets_query = false
 
-[migration]
-registry = "docs/storage-migration-1-to-2.registry"
-source_generation = 1
-target_generation = 2
-database_format = 1
-sealed_record_schema = 1
-registry_rules = 24
-source_modified = false
-live_migration = false
-required_backup = true
-legacy_history_rows = "reject"
-legacy_non_off_channel = "preserve policy and initialize empty control"
-
-
 [[test]]
 file = "crates/agenc-ircd-domain/tests/history.rs"
 names = ["exclusive_selectors_resolve_message_ids_by_event_position", "mixed_between_keeps_direction_but_renders_chronologically", "around_includes_the_pivot_and_backfills_at_either_boundary", "timestamp_exclusion_removes_all_rows_at_the_boundary_time", "empty_and_unknown_references_are_distinct_for_the_replay_owner", "constructors_and_selection_reject_invalid_metadata", "command_retains_selector_and_on_requires_an_authoritative_default"]

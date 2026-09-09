@@ -22,10 +22,10 @@ fn replay_ledger_is_admitted_only_under_generation_four() -> TestResult {
             row.encode()?,
         )?;
         let plaintext = value.encode()?;
-        crate::migration::validate_source_record(4, TableId::E2eeState, &key, 1, &plaintext)?;
+        crate::AuthenticatedSourceRecord::checked(4, TableId::E2eeState, &key, 1, &plaintext)?;
         for generation in [1, 2, 3, 5] {
             assert!(
-                crate::migration::validate_source_record(
+                crate::AuthenticatedSourceRecord::checked(
                     generation,
                     TableId::E2eeState,
                     &key,
@@ -36,9 +36,6 @@ fn replay_ledger_is_admitted_only_under_generation_four() -> TestResult {
                 "generation {generation}"
             );
         }
-        assert!(
-            crate::migration_v3::validate_source(TableId::E2eeState, &key, 1, &plaintext).is_err()
-        );
     }
     Ok(())
 }

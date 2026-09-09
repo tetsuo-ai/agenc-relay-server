@@ -17,7 +17,7 @@ REQUIRED_FACTS = {
     "models": {"models", "loom", "cancellation", "overload", "panic_containment", "shutdown", "miri", "sanitizers"},
     "interoperability": {"weechat", "irssi", "native_accounts", "openmls", "mls_rs", "federation", "tls", "wss", "tor_v3", "socks_isolation", "packet_capture", "dns_leaks", "metadata_canaries", "timing_classes", "trust_presentation", "safe_rendering"},
     "storage": {"native_tuple", "production_storage_path", "all_growth_cases", "sync_rename_phases", "reserve_boundaries", "backup_boundaries", "construction_boundaries", "signed_measurements"},
-    "drills": {"restore", "disaster_restore", "migration", "deletion", "rekey", "index_transition", "tls_rotation", "federation_rotation", "sequencer_rotation", "backup_rotation", "audit_rotation", "compromise", "rollback", "resynchronization", "host_hardening", "observability"},
+    "drills": {"restore", "disaster_restore", "deletion", "rekey", "index_transition", "tls_rotation", "federation_rotation", "sequencer_rotation", "backup_rotation", "audit_rotation", "compromise", "rollback", "resynchronization", "host_hardening", "observability"},
     "sources": {"primary_sources", "advisories", "dependency_policy", "decisions_current"},
     "claims": {"binary_identity", "separate_claims", "privacy_limits", "documentation_current", "decision_inspection"},
 }

@@ -138,20 +138,6 @@ pub(crate) fn initialize_stopped_construction(
     initialize_storage_inner(config)
 }
 
-/// Creates generation-one through generation-three fixtures through the authenticated seal
-/// path, for the engine tests and the migration drill. Available only to
-/// tests and behind the `legacy-fixtures` feature; a release build has no
-/// way to construct a legacy database.
-#[cfg(any(test, feature = "legacy-fixtures"))]
-pub fn initialize_legacy_storage(
-    config: StorageInitializationConfig,
-) -> Result<StorageInitializationOutcome, StorageError> {
-    if !matches!(config.header_tbs.schema_generation, 1..=3) {
-        return Err(StorageError::UnsupportedVersion);
-    }
-    initialize_storage_inner(config)
-}
-
 // agenc-review: focus owner=storage reviewed=2026-09-04 reason=sequence-zero construction retains the existing linear nonce-charge-commit transcript after explicit schema admission
 fn initialize_storage_inner(
     mut config: StorageInitializationConfig,

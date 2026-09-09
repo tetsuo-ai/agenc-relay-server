@@ -5,16 +5,12 @@ use crate::StorageError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConstructionSchema {
-    Two,
-    Three,
     Four,
 }
 
 impl ConstructionSchema {
     pub(crate) fn from_generation(generation: u64) -> Result<Self, StorageError> {
         match generation {
-            2 => Ok(Self::Two),
-            3 => Ok(Self::Three),
             4 => Ok(Self::Four),
             _ => Err(StorageError::UnsupportedVersion),
         }
@@ -22,8 +18,6 @@ impl ConstructionSchema {
 
     pub(crate) const fn generation(self) -> u64 {
         match self {
-            Self::Two => 2,
-            Self::Three => 3,
             Self::Four => 4,
         }
     }

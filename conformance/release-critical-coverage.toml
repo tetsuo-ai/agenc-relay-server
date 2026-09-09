@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 783
-reviewed_source_sha256 = "4004a032e865192a76d9233ccee90b2f51aa882480a9f1a68e1a09b8fd60fa01"
+reviewed_source_files = 765
+reviewed_source_sha256 = "9f68f5abaee3af2fd09f9919c92d7a75e77f93666e3ae66cb511eec216ab02d8"
 deferred = []
 
 [[region]]
@@ -218,9 +218,9 @@ reason = "Every closed ReleaseDecisionError discriminant must be observed by an 
 id = "storage-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-storage/src/error.rs"
-source_sha256 = "ba9553c08779741a5e9e6d4068a34df34d6c9db37ac36b643528b91778576f4a"
-start_line = 40
-end_line = 59
+source_sha256 = "e0c78f2442ffc2af907e8968aff5c5095c5e12ed3d700ab3419e91e1bb3f69b9"
+start_line = 38
+end_line = 56
 metric = "regions"
 reason = "Every closed StorageError discriminant must be observed by an error reporting test."
 
@@ -815,52 +815,22 @@ metric = "branches"
 reason = "Startup recovery classification decides whether persisted state is trusted."
 
 [[region]]
-id = "storage-migration-validate-source-record"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration.rs"
-source_sha256 = "f167632363bde1f6f625a86bd607255a5a55dd40cdc2558d9f1ed1016593f79d"
-start_line = 25
-end_line = 52
-metric = "branches"
-reason = "Schema migration admits only validated source rows."
-
-[[region]]
-id = "storage-migration-valid-rule-sources"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration.rs"
-source_sha256 = "f167632363bde1f6f625a86bd607255a5a55dd40cdc2558d9f1ed1016593f79d"
-start_line = 87
-end_line = 101
-metric = "branches"
-reason = "Schema migration admits only validated source rows."
-
-[[region]]
 id = "storage-execute-restore-command"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/restore_command.rs"
-source_sha256 = "972486a9655d66d9da6b8d7873680d2fd0e33d90b13940afc2995243cb526256"
-start_line = 154
-end_line = 210
+source_sha256 = "096920cbece23656520fc847945576340c82db0634085fa02b78e39b9c62c118"
+start_line = 138
+end_line = 193
 metric = "branches"
 reason = "Restore composes trust keys, fencing, and the construction ledger."
-
-[[region]]
-id = "storage-execute-migration-command"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command.rs"
-source_sha256 = "c40f5c80124d80f3c69621d0a9bdf9970cda5e48c814406dc208f4bdd429219f"
-start_line = 75
-end_line = 84
-metric = "regions"
-reason = "Migration composes the construction ledger and the resume rules."
 
 [[region]]
 id = "audit-scan-table-pages"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 1056
-end_line = 1129
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 1002
+end_line = 1075
 metric = "branches"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -868,9 +838,9 @@ reason = "The signed audit scan must refuse every gap, order, and signature fail
 id = "audit-verify-checkpoints"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 1140
-end_line = 1155
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 1086
+end_line = 1101
 metric = "regions"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -878,9 +848,9 @@ reason = "The signed audit scan must refuse every gap, order, and signature fail
 id = "audit-verify-events"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 1226
-end_line = 1239
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 1172
+end_line = 1185
 metric = "regions"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -888,9 +858,9 @@ reason = "The signed audit scan must refuse every gap, order, and signature fail
 id = "audit-verify-export-coverage"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 909
-end_line = 948
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 855
+end_line = 894
 metric = "branches"
 reason = "The signed audit scan must refuse every gap, order, and signature failure."
 
@@ -1516,7 +1486,7 @@ reason = "Current-operation verification additionally requires the entire exact 
 id = "cap5-storage-integrity-maintenance-audit-event-hash"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-crypto/src/storage_integrity.rs"
-source_sha256 = "73c5674f88f73abfedf8ec52ca0a4eac5eaa290f4d89810ee84f29e0e9752e32"
+source_sha256 = "1db724ce57df22abff7e99eed3e56189b90c3089c4a2adfb62545d7f972d4828"
 start_line = 403
 end_line = 408
 metric = "branches"
@@ -1586,9 +1556,9 @@ reason = "Both event variants supply their actual sequence, previous hash and ev
 id = "cap5-audit-auditchaincursor-advance-position"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-admin/src/audit.rs"
-source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
-start_line = 486
-end_line = 503
+source_sha256 = "a90a090d64e6135530114803c0300e99e1919bbae2f7d4d2b42c2f008a0777ef"
+start_line = 485
+end_line = 502
 metric = "branches"
 reason = "Advance only exact next sequence and previous hash, using checked successor arithmetic and preserving the actual event hash."
 
@@ -1596,7 +1566,7 @@ reason = "Advance only exact next sequence and previous hash, using checked succ
 id = "cap5-mixed-decode-event"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
+source_sha256 = "34c76e8024d02a8008e4c159b355a668f9033c1808b3c67c5ed9ff6b7e9bb13d"
 start_line = 6
 end_line = 16
 metric = "branches"
@@ -1606,7 +1576,7 @@ reason = "Audit rows allow only outer kind 1/2, checkpoint rows only kind 1; bod
 id = "cap5-mixed-permitted-kind"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
+source_sha256 = "34c76e8024d02a8008e4c159b355a668f9033c1808b3c67c5ed9ff6b7e9bb13d"
 start_line = 18
 end_line = 23
 metric = "branches"
@@ -1616,7 +1586,7 @@ reason = "Audit rows allow only outer kind 1/2, checkpoint rows only kind 1; bod
 id = "cap5-mixed-eventverifier-observe-event"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
+source_sha256 = "34c76e8024d02a8008e4c159b355a668f9033c1808b3c67c5ed9ff6b7e9bb13d"
 start_line = 26
 end_line = 48
 metric = "branches"
@@ -1626,9 +1596,9 @@ reason = "Maintenance requires the selected historical key interval and strict n
 id = "cap5-mixed-exportselection-consider-mixed"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
-start_line = 54
-end_line = 63
+source_sha256 = "34c76e8024d02a8008e4c159b355a668f9033c1808b3c67c5ed9ff6b7e9bb13d"
+start_line = 52
+end_line = 57
 metric = "branches"
 reason = "In-range maintenance is explicitly unsupported by legacy export; out-of-range bodies remain subject to the caller complete scan, and no selected maintenance body is silently omitted."
 
@@ -1636,9 +1606,9 @@ reason = "In-range maintenance is explicitly unsupported by legacy export; out-o
 id = "cap5-mixed-retentionselector-observe-event"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit/mixed.rs"
-source_sha256 = "1d2a0b28f6c2dfe258cf507b26add8653a1e51a27b142f3d40d3343ab7a6f3cf"
-start_line = 67
-end_line = 85
+source_sha256 = "34c76e8024d02a8008e4c159b355a668f9033c1808b3c67c5ed9ff6b7e9bb13d"
+start_line = 61
+end_line = 79
 metric = "branches"
 reason = "Mixed retention selects a bounded expired prefix with exact final sequence/hash; it cannot cross a pending operator intent or a nonexpired event."
 
@@ -1706,9 +1676,9 @@ reason = "Consume the prepared owner once; update the cursor only after receipt 
 id = "cap5-audit-auditauthority-reconstruct"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 152
-end_line = 209
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 148
+end_line = 205
 metric = "branches"
 reason = "Reconstruct authenticated checkpoint and mixed event chains at the same commit under mandatory current scope; resolve trusted current and historical keys before publishing audit authority."
 
@@ -1716,9 +1686,9 @@ reason = "Reconstruct authenticated checkpoint and mixed event chains at the sam
 id = "cap5-audit-auditauthority-is-reconciled"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 211
-end_line = 215
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 207
+end_line = 211
 metric = "branches"
 reason = "Maintenance or live administrative admission requires valid current key and genesis cursor/checkpoint state with no unresolved or in-progress startup intent."
 
@@ -1726,9 +1696,9 @@ reason = "Maintenance or live administrative admission requires valid current ke
 id = "cap5-audit-auditauthority-base-authority-is-valid"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 217
-end_line = 225
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 213
+end_line = 221
 metric = "branches"
 reason = "Maintenance or live administrative admission requires valid current key and genesis cursor/checkpoint state with no unresolved or in-progress startup intent."
 
@@ -1736,9 +1706,9 @@ reason = "Maintenance or live administrative admission requires valid current ke
 id = "cap5-audit-audittrust-new"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 963
-end_line = 991
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 909
+end_line = 937
 metric = "branches"
 reason = "Reject malformed or duplicate trust entries and wrong derived key IDs; historical event creation time must be in the selected key half-open trust interval, without requiring globally increasing timestamps."
 
@@ -1746,9 +1716,9 @@ reason = "Reject malformed or duplicate trust entries and wrong derived key IDs;
 id = "cap5-audit-audittrust-trusted"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 997
-end_line = 1003
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 943
+end_line = 949
 metric = "branches"
 reason = "Reject malformed or duplicate trust entries and wrong derived key IDs; historical event creation time must be in the selected key half-open trust interval, without requiring globally increasing timestamps."
 
@@ -1756,9 +1726,9 @@ reason = "Reject malformed or duplicate trust entries and wrong derived key IDs;
 id = "cap5-audit-auditexportsource-freeze"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 591
-end_line = 607
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 564
+end_line = 608
 metric = "branches"
 reason = "Complete authenticated checkpoint and mixed-event scans, unmatched-intent reconciliation and exact captured cursors before classifying UnsupportedProfile; no prepared export exists on refusal."
 
@@ -1766,19 +1736,9 @@ reason = "Complete authenticated checkpoint and mixed-event scans, unmatched-int
 id = "cap5-admin-adminowner-audit-export"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin.rs"
-source_sha256 = "cecb39a5c8cc594ec8623266cd8f70c13a449c0ff1faddba3d7a89691bc0ad5a"
-start_line = 1409
-end_line = 1474
-metric = "branches"
-reason = "Unsupported legacy export returns exact FAIL AUDIT UNAVAILABLE before Observed audit commit or BATCH output; source verification failures retain their distinct closed refusal path."
-
-[[region]]
-id = "cap5-admin-adminowner-output-export-job-failure"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin.rs"
-source_sha256 = "cecb39a5c8cc594ec8623266cd8f70c13a449c0ff1faddba3d7a89691bc0ad5a"
-start_line = 2401
-end_line = 2413
+source_sha256 = "358616e68f3d1a97a817467f13ed40af0071fd653f0ce28cc420f32196768261"
+start_line = 1402
+end_line = 1467
 metric = "branches"
 reason = "Unsupported legacy export returns exact FAIL AUDIT UNAVAILABLE before Observed audit commit or BATCH output; source verification failures retain their distinct closed refusal path."
 
@@ -1786,9 +1746,9 @@ reason = "Unsupported legacy export returns exact FAIL AUDIT UNAVAILABLE before 
 id = "cap5-audit-auditauthority-prepare-retention"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 324
-end_line = 343
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 319
+end_line = 338
 metric = "branches"
 reason = "Reconciled retention owns exact current event/checkpoint cursors; validate the signed checkpoint against the selected prefix before advancing retained-first state; preserve legacy checkpoint bytes."
 
@@ -1796,9 +1756,9 @@ reason = "Reconciled retention owns exact current event/checkpoint cursors; vali
 id = "cap5-audit-auditauthority-sign-retention"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 345
-end_line = 361
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 340
+end_line = 356
 metric = "branches"
 reason = "Reconciled retention owns exact current event/checkpoint cursors; validate the signed checkpoint against the selected prefix before advancing retained-first state; preserve legacy checkpoint bytes."
 
@@ -1806,9 +1766,9 @@ reason = "Reconciled retention owns exact current event/checkpoint cursors; vali
 id = "cap5-audit-auditauthority-commit-retention"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 363
-end_line = 385
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 358
+end_line = 380
 metric = "branches"
 reason = "Reconciled retention owns exact current event/checkpoint cursors; validate the signed checkpoint against the selected prefix before advancing retained-first state; preserve legacy checkpoint bytes."
 
@@ -1816,9 +1776,9 @@ reason = "Reconciled retention owns exact current event/checkpoint cursors; vali
 id = "cap5-audit-auditexportsource-retention-tbs"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 665
-end_line = 735
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 613
+end_line = 683
 metric = "branches"
 reason = "Verify the complete mixed source at one commit, select a bounded expired prefix without splitting intent/outcome, and bind exact checkpoint coverage, prior checkpoint hash and current event cursor."
 
@@ -2986,9 +2946,9 @@ reason = "Verify exact retained activation/binding and preserve a valid successo
 id = "storage-admission-construction-schema-from-generation"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_schema.rs"
-source_sha256 = "ad38fc6beb31f43e955347b7030811cf3bdaf9a0c791f111fbae7bc962ddd70d"
-start_line = 14
-end_line = 21
+source_sha256 = "bf563dbee3581d4b5bcfb6d8ad96374a1dd2b163218f70bf5eb3e91f3f288076"
+start_line = 12
+end_line = 17
 metric = "regions"
 reason = "Construction accepts only schema two or three and preserves the admitted source generation without authorizing normal service."
 
@@ -2996,9 +2956,9 @@ reason = "Construction accepts only schema two or three and preserves the admitt
 id = "storage-admission-construction-schema-generation"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_schema.rs"
-source_sha256 = "ad38fc6beb31f43e955347b7030811cf3bdaf9a0c791f111fbae7bc962ddd70d"
-start_line = 23
-end_line = 29
+source_sha256 = "bf563dbee3581d4b5bcfb6d8ad96374a1dd2b163218f70bf5eb3e91f3f288076"
+start_line = 19
+end_line = 23
 metric = "regions"
 reason = "Construction accepts only schema two or three and preserves the admitted source generation without authorizing normal service."
 
@@ -3006,149 +2966,19 @@ reason = "Construction accepts only schema two or three and preserves the admitt
 id = "storage-admission-construction-schema-header"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_schema.rs"
-source_sha256 = "ad38fc6beb31f43e955347b7030811cf3bdaf9a0c791f111fbae7bc962ddd70d"
-start_line = 31
-end_line = 46
+source_sha256 = "bf563dbee3581d4b5bcfb6d8ad96374a1dd2b163218f70bf5eb3e91f3f288076"
+start_line = 25
+end_line = 40
 metric = "regions"
 reason = "Construction accepts only schema two or three and preserves the admitted source generation without authorizing normal service."
-
-[[region]]
-id = "storage-admission-migration-profile-select"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 16
-end_line = 23
-metric = "regions"
-reason = "Only the registered one-to-two or two-to-three source, target, hash, action and transformer tuple is admitted."
-
-[[region]]
-id = "storage-admission-migration-profile-hash"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 25
-end_line = 31
-metric = "regions"
-reason = "Only the registered one-to-two or two-to-three source, target, hash, action and transformer tuple is admitted."
-
-[[region]]
-id = "storage-admission-migration-profile-source-generation"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 33
-end_line = 39
-metric = "regions"
-reason = "Only the registered one-to-two or two-to-three source, target, hash, action and transformer tuple is admitted."
-
-[[region]]
-id = "storage-admission-migration-profile-target-generation"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 41
-end_line = 47
-metric = "regions"
-reason = "Only the registered one-to-two or two-to-three source, target, hash, action and transformer tuple is admitted."
-
-[[region]]
-id = "storage-admission-migration-profile-transformer"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 80
-end_line = 88
-metric = "regions"
-reason = "Only the registered one-to-two or two-to-three source, target, hash, action and transformer tuple is admitted."
-
-[[region]]
-id = "storage-admission-migration-profile-transform"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 98
-end_line = 109
-metric = "regions"
-reason = "Only the registered one-to-two or two-to-three source, target, hash, action and transformer tuple is admitted."
-
-[[region]]
-id = "storage-admission-migration-profile-registered-rule-sources"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 112
-end_line = 120
-metric = "regions"
-reason = "Only the registered one-to-two or two-to-three source, target, hash, action and transformer tuple is admitted."
-
-[[region]]
-id = "storage-admission-migration-v2-profile-hash"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v2.rs"
-source_sha256 = "e63ee3699e4497b7b2f33429dd17f0df3b06401a4728e1b75e0539cf936a97f3"
-start_line = 19
-end_line = 21
-metric = "regions"
-reason = "The explicit schema-three migration preserves admitted original plaintext and refuses ambiguous old mailbox, delivery and barrier authority before output."
-
-[[region]]
-id = "storage-admission-migration-v2-valid-rule-sources"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v2.rs"
-source_sha256 = "e63ee3699e4497b7b2f33429dd17f0df3b06401a4728e1b75e0539cf936a97f3"
-start_line = 23
-end_line = 34
-metric = "regions"
-reason = "The explicit schema-three migration preserves admitted original plaintext and refuses ambiguous old mailbox, delivery and barrier authority before output."
-
-[[region]]
-id = "storage-admission-migration-v2-preserved-table"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v2.rs"
-source_sha256 = "e63ee3699e4497b7b2f33429dd17f0df3b06401a4728e1b75e0539cf936a97f3"
-start_line = 36
-end_line = 38
-metric = "regions"
-reason = "The explicit schema-three migration preserves admitted original plaintext and refuses ambiguous old mailbox, delivery and barrier authority before output."
-
-[[region]]
-id = "storage-admission-migration-v2-rebuild-migration-profile-plan"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v2.rs"
-source_sha256 = "e63ee3699e4497b7b2f33429dd17f0df3b06401a4728e1b75e0539cf936a97f3"
-start_line = 41
-end_line = 100
-metric = "regions"
-reason = "The explicit schema-three migration preserves admitted original plaintext and refuses ambiguous old mailbox, delivery and barrier authority before output."
-
-[[region]]
-id = "storage-admission-migration-v2-validate-source"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v2.rs"
-source_sha256 = "e63ee3699e4497b7b2f33429dd17f0df3b06401a4728e1b75e0539cf936a97f3"
-start_line = 103
-end_line = 125
-metric = "regions"
-reason = "The explicit schema-three migration preserves admitted original plaintext and refuses ambiguous old mailbox, delivery and barrier authority before output."
-
-[[region]]
-id = "storage-admission-migration-v2-transform"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v2.rs"
-source_sha256 = "e63ee3699e4497b7b2f33429dd17f0df3b06401a4728e1b75e0539cf936a97f3"
-start_line = 131
-end_line = 165
-metric = "regions"
-reason = "The explicit schema-three migration preserves admitted original plaintext and refuses ambiguous old mailbox, delivery and barrier authority before output."
 
 [[region]]
 id = "storage-admission-source-validation-checked"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/source_validation.rs"
-source_sha256 = "716a613aaa1b08358062bf443f6d981831abaa021536b27c7b169338af80b3b1"
+source_sha256 = "047d84955ae6b57d89a4229662041d0b7cfc12cd0bc2f577e9f1ae8496e86683"
 start_line = 22
-end_line = 43
+end_line = 40
 metric = "regions"
 reason = "Every original source row is authenticated under its actual generation and the complete semantic transcript must finish before any output is authorized."
 
@@ -3156,159 +2986,29 @@ reason = "Every original source row is authenticated under its actual generation
 id = "storage-admission-source-validation-validate-source-records"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/source_validation.rs"
-source_sha256 = "716a613aaa1b08358062bf443f6d981831abaa021536b27c7b169338af80b3b1"
-start_line = 103
-end_line = 120
+source_sha256 = "047d84955ae6b57d89a4229662041d0b7cfc12cd0bc2f577e9f1ae8496e86683"
+start_line = 100
+end_line = 117
 metric = "regions"
 reason = "Every original source row is authenticated under its actual generation and the complete semantic transcript must finish before any output is authorized."
-
-[[region]]
-id = "storage-admission-source-validation-observe"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/backup/source_validation.rs"
-source_sha256 = "703ad2bd57e5322f1424cb4a35a6ac712ec0c3919cad0845b8e486688a358fb2"
-start_line = 19
-end_line = 27
-metric = "regions"
-reason = "A legacy backup requires a complete semantic scan over the same exact twice-verified signed source stream and original source identity."
-
-[[region]]
-id = "storage-admission-source-validation-verify-legacy-backup-with-va"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/backup/source_validation.rs"
-source_sha256 = "703ad2bd57e5322f1424cb4a35a6ac712ec0c3919cad0845b8e486688a358fb2"
-start_line = 36
-end_line = 61
-metric = "regions"
-reason = "A legacy backup requires a complete semantic scan over the same exact twice-verified signed source stream and original source identity."
-
-[[region]]
-id = "storage-admission-source-validation-admit-verified-legacy-backup"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/backup/source_validation.rs"
-source_sha256 = "703ad2bd57e5322f1424cb4a35a6ac712ec0c3919cad0845b8e486688a358fb2"
-start_line = 63
-end_line = 92
-metric = "regions"
-reason = "A legacy backup requires a complete semantic scan over the same exact twice-verified signed source stream and original source identity."
-
-[[region]]
-id = "storage-admission-source-validation-source-facts"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/backup/source_validation.rs"
-source_sha256 = "703ad2bd57e5322f1424cb4a35a6ac712ec0c3919cad0845b8e486688a358fb2"
-start_line = 101
-end_line = 107
-metric = "regions"
-reason = "A legacy backup requires a complete semantic scan over the same exact twice-verified signed source stream and original source identity."
-
-[[region]]
-id = "storage-admission-restore-source-admit"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/construction_runtime/restore_source.rs"
-source_sha256 = "ab9de07dab0bdcde14db6297af0394623db987527f366b11a303ed68178abd49"
-start_line = 33
-end_line = 55
-metric = "regions"
-reason = "Current schema restore and explicitly validated legacy restore remain closed admission paths; caller omission cannot bypass legacy validation."
-
-[[region]]
-id = "storage-admission-restore-source-open-with-legacy-validation"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/construction_runtime/restore_source.rs"
-source_sha256 = "ab9de07dab0bdcde14db6297af0394623db987527f366b11a303ed68178abd49"
-start_line = 61
-end_line = 67
-metric = "regions"
-reason = "Current schema restore and explicitly validated legacy restore remain closed admission paths; caller omission cannot bypass legacy validation."
 
 [[region]]
 id = "storage-admission-restore-source-open-admitted"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime/restore_source.rs"
-source_sha256 = "ab9de07dab0bdcde14db6297af0394623db987527f366b11a303ed68178abd49"
-start_line = 69
-end_line = 100
+source_sha256 = "c3dc685c6fe6a92c6c3591d37d5babf72949627f91f4af453aaf3458c86041e1"
+start_line = 28
+end_line = 57
 metric = "regions"
 reason = "Current schema restore and explicitly validated legacy restore remain closed admission paths; caller omission cannot bypass legacy validation."
-
-[[region]]
-id = "storage-admission-admission-profile"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 17
-end_line = 23
-metric = "regions"
-reason = "Schema-two admission combines mandatory source grammar with caller semantic validation and complete transcript reconciliation before construction."
-
-[[region]]
-id = "storage-admission-admission-validate"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 25
-end_line = 43
-metric = "regions"
-reason = "Schema-two admission combines mandatory source grammar with caller semantic validation and complete transcript reconciliation before construction."
-
-[[region]]
-id = "storage-admission-admission-begin-source"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 51
-end_line = 56
-metric = "regions"
-reason = "Schema-two admission combines mandatory source grammar with caller semantic validation and complete transcript reconciliation before construction."
-
-[[region]]
-id = "storage-admission-admission-validate-record"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 58
-end_line = 69
-metric = "regions"
-reason = "Schema-two admission combines mandatory source grammar with caller semantic validation and complete transcript reconciliation before construction."
-
-[[region]]
-id = "storage-admission-admission-finish-source"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 71
-end_line = 73
-metric = "regions"
-reason = "Schema-two admission combines mandatory source grammar with caller semantic validation and complete transcript reconciliation before construction."
-
-[[region]]
-id = "storage-admission-migration-execute-schema-three-migration"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/offline/migration.rs"
-source_sha256 = "15a9fb60c64297313cc97b6de430f2b303c9f25f0db13eed7a3b1f66f82b678d"
-start_line = 15
-end_line = 29
-metric = "regions"
-reason = "Stopped migration binds the configured network and server, original database identity, trusted audit keys and complete legacy audit verification."
-
-[[region]]
-id = "storage-admission-migration-legacy-audit-source-validator"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/offline/migration.rs"
-source_sha256 = "15a9fb60c64297313cc97b6de430f2b303c9f25f0db13eed7a3b1f66f82b678d"
-start_line = 48
-end_line = 80
-metric = "regions"
-reason = "Stopped migration binds the configured network and server, original database identity, trusted audit keys and complete legacy audit verification."
 
 [[region]]
 id = "storage-admission-restore-execute-stopped-restore"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/offline/restore.rs"
-source_sha256 = "229f89bfb85568c58c1679156c312f7a874ddb663972b5a98fb45f5ac7f21b40"
-start_line = 13
-end_line = 24
+source_sha256 = "e50cd2228e707c213f904cba10fcf786a34e75bcd7354dcc6a3f7096965694a7"
+start_line = 12
+end_line = 21
 metric = "regions"
 reason = "Stopped restore supplies mandatory legacy audit validation from exact configured identity and trust before constructing a target."
 
@@ -3316,9 +3016,9 @@ reason = "Stopped restore supplies mandatory legacy audit validation from exact 
 id = "storage-admission-engine-validate-recovered-domain-record"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/engine.rs"
-source_sha256 = "7fd4b3a5a285205d388e3025684149727c6c5d29b2bf981859430d7850c9d439"
-start_line = 3206
-end_line = 3247
+source_sha256 = "6a5101d3a1bc59e0549a4e89a24e2534b3500be3b54e6dc3b2459fd8001ed824"
+start_line = 3185
+end_line = 3226
 metric = "regions"
 reason = "Recovered rows require canonical ownership and target existence, including exactly one Account reference for a redeemed invitation and empty Account and Session tombstones."
 
@@ -4886,7 +4586,7 @@ reason = "CAP84: infallible line-before-backing bundle precedes refusals. Existi
 id = "companion-mod-statecorecontext-backing-reservations"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "8a00e120a0f76f88ebb42367394b79644b0824039e3fe887128e0c29c2ada300"
+source_sha256 = "35ac513cf23f6650dbd0ce1612939b6292d0318ca1fc8e6a717c73cb0c4cf268"
 start_line = 837
 end_line = 839
 metric = "regions"
@@ -5606,7 +5306,7 @@ reason = "Distinguish BeforeFirst from ACK sequence zero; allow generation zero;
 id = "storage-profile-control-decode"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/control.rs"
-source_sha256 = "6eef7ab230ac51fe1c4199a44756609bb0e9994eb4a6ec93c40090af3c51cba5"
+source_sha256 = "c011b0ac6bce669bcc1d3ee125be771544075207dd6c8f669ed0b901d53c4703"
 start_line = 96
 end_line = 117
 metric = "regions"
@@ -5616,79 +5316,29 @@ reason = "Neutral control decoding admits only the closed known generations; ord
 id = "storage-profile-control-encode"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/control.rs"
-source_sha256 = "6eef7ab230ac51fe1c4199a44756609bb0e9994eb4a6ec93c40090af3c51cba5"
+source_sha256 = "c011b0ac6bce669bcc1d3ee125be771544075207dd6c8f669ed0b901d53c4703"
 start_line = 386
 end_line = 416
 metric = "regions"
 reason = "Rollback-guard encoding rejects unknown schemas and invalid nonce intervals before signing the original exact identity."
 
 [[region]]
-id = "storage-profile-migration-validate-legacy-kind"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration.rs"
-source_sha256 = "f167632363bde1f6f625a86bd607255a5a55dd40cdc2558d9f1ed1016593f79d"
-start_line = 76
-end_line = 85
-metric = "regions"
-reason = "Legacy audit admits only kind one and legacy companion state only kinds one through twelve, regardless of current schema extensions."
-
-[[region]]
-id = "storage-profile-migration-command-execute-validated-migration-co"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command.rs"
-source_sha256 = "c40f5c80124d80f3c69621d0a9bdf9970cda5e48c814406dc208f4bdd429219f"
-start_line = 91
-end_line = 107
-metric = "regions"
-reason = "The explicit schema-three command requires caller semantic admission before migration dispatch."
-
-[[region]]
-id = "storage-profile-migration-command-execute-migration-inner"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command.rs"
-source_sha256 = "c40f5c80124d80f3c69621d0a9bdf9970cda5e48c814406dc208f4bdd429219f"
-start_line = 117
-end_line = 168
-metric = "regions"
-reason = "Fresh, resumed and already installed migration paths authenticate the complete source before backup, target selection or publication."
-
-[[region]]
-id = "storage-profile-restore-command-execute-validated-restore-comman"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/restore_command.rs"
-source_sha256 = "972486a9655d66d9da6b8d7873680d2fd0e33d90b13940afc2995243cb526256"
-start_line = 142
-end_line = 152
-metric = "regions"
-reason = "The explicit legacy restore command requires a semantic validator and preserves the selected source schema."
-
-[[region]]
 id = "storage-profile-construction-runtime-validate-restore-copy-sourc"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
-source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
-start_line = 3057
-end_line = 3091
+source_sha256 = "3682bbf04cf40f76c798859280b8facb0862b2ca608d4e393ced48ac70541214"
+start_line = 3052
+end_line = 3086
 metric = "regions"
 reason = "Restored preserved rows obey the closed table and original semantic payload grammar; only explicit reconstruction actions may transform authority."
-
-[[region]]
-id = "storage-profile-stopped-open-migration-profile"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/engine/stopped.rs"
-source_sha256 = "68df6f1726464c25424d8a267deaf73490a59e2cef5c213bac88a33485a36bd2"
-start_line = 12
-end_line = 17
-metric = "regions"
-reason = "Stopped owners open only the explicitly selected authenticated schema. Construction markers, complete startup scans and operation identity retain authority over target service and installation."
 
 [[region]]
 id = "storage-profile-stopped-open-construction-target"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/engine/stopped.rs"
-source_sha256 = "68df6f1726464c25424d8a267deaf73490a59e2cef5c213bac88a33485a36bd2"
-start_line = 19
-end_line = 24
+source_sha256 = "8775e597e0cca35e905379760e0d336ac8203a8f7d266da9c4d190166ef267b1"
+start_line = 11
+end_line = 16
 metric = "regions"
 reason = "Stopped owners open only the explicitly selected authenticated schema. Construction markers, complete startup scans and operation identity retain authority over target service and installation."
 
@@ -5696,9 +5346,9 @@ reason = "Stopped owners open only the explicitly selected authenticated schema.
 id = "storage-profile-stopped-open-stopped-generation"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/engine/stopped.rs"
-source_sha256 = "68df6f1726464c25424d8a267deaf73490a59e2cef5c213bac88a33485a36bd2"
-start_line = 26
-end_line = 46
+source_sha256 = "8775e597e0cca35e905379760e0d336ac8203a8f7d266da9c4d190166ef267b1"
+start_line = 18
+end_line = 38
 metric = "regions"
 reason = "Stopped owners open only the explicitly selected authenticated schema. Construction markers, complete startup scans and operation identity retain authority over target service and installation."
 
@@ -5706,19 +5356,9 @@ reason = "Stopped owners open only the explicitly selected authenticated schema.
 id = "storage-profile-stopped-open-restore-boundary"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime/stopped.rs"
-source_sha256 = "db8576d2e7cc6f9e0fd43765b631ff4774162df8833401c78353d79e47a8aed9"
-start_line = 13
-end_line = 20
-metric = "regions"
-reason = "Stopped owners open only the explicitly selected authenticated schema. Construction markers, complete startup scans and operation identity retain authority over target service and installation."
-
-[[region]]
-id = "storage-profile-stopped-open-migration-profile-271abd35"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/construction_runtime/stopped.rs"
-source_sha256 = "db8576d2e7cc6f9e0fd43765b631ff4774162df8833401c78353d79e47a8aed9"
-start_line = 22
-end_line = 29
+source_sha256 = "7fecb1c1eb118e1eff572d27fe4c54e0f31c1b97887ba5c45a078ac33fe49ed5"
+start_line = 12
+end_line = 19
 metric = "regions"
 reason = "Stopped owners open only the explicitly selected authenticated schema. Construction markers, complete startup scans and operation identity retain authority over target service and installation."
 
@@ -5726,9 +5366,9 @@ reason = "Stopped owners open only the explicitly selected authenticated schema.
 id = "storage-profile-stopped-open-stopped"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime/stopped.rs"
-source_sha256 = "db8576d2e7cc6f9e0fd43765b631ff4774162df8833401c78353d79e47a8aed9"
-start_line = 34
-end_line = 45
+source_sha256 = "7fecb1c1eb118e1eff572d27fe4c54e0f31c1b97887ba5c45a078ac33fe49ed5"
+start_line = 24
+end_line = 35
 metric = "regions"
 reason = "Stopped owners open only the explicitly selected authenticated schema. Construction markers, complete startup scans and operation identity retain authority over target service and installation."
 
@@ -5736,9 +5376,9 @@ reason = "Stopped owners open only the explicitly selected authenticated schema.
 id = "storage-profile-stopped-completed-header-stopped"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime/stopped.rs"
-source_sha256 = "db8576d2e7cc6f9e0fd43765b631ff4774162df8833401c78353d79e47a8aed9"
-start_line = 49
-end_line = 56
+source_sha256 = "7fecb1c1eb118e1eff572d27fe4c54e0f31c1b97887ba5c45a078ac33fe49ed5"
+start_line = 39
+end_line = 46
 metric = "regions"
 reason = "Stopped owners open only the explicitly selected authenticated schema. Construction markers, complete startup scans and operation identity retain authority over target service and installation."
 
@@ -6546,9 +6186,9 @@ reason = "Route post-readback edge completions through the existing exact connec
 id = "cap13-mod-complete-index-refresh"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "8a00e120a0f76f88ebb42367394b79644b0824039e3fe887128e0c29c2ada300"
-start_line = 3766
-end_line = 3808
+source_sha256 = "35ac513cf23f6650dbd0ce1612939b6292d0318ca1fc8e6a717c73cb0c4cf268"
+start_line = 3765
+end_line = 3807
 metric = "regions"
 reason = "Install and validate the entire authenticated readback, finish the original continuation, then notify the router only for Batch continuation; reload/admin continuations cannot reopen ordinary staging early."
 
@@ -6923,22 +6563,12 @@ metric = "branches"
 reason = "Final barrier resume coverage and its receipt-owned cursor update require complete branch evidence before release."
 
 [[region]]
-id = "cap5-export-export-batch-type"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-admin/src/audit/export.rs"
-source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
-start_line = 17
-end_line = 22
-metric = "branches"
-reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
-
-[[region]]
 id = "cap5-export-export-sequence"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/audit/export.rs"
-source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
-start_line = 32
-end_line = 37
+source_sha256 = "b4416b2640aed49cd1cdb8a471b15b477c0ad2c79f135254638d270f58713e4c"
+start_line = 14
+end_line = 19
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -6946,9 +6576,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-export-render-0"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/audit/export.rs"
-source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
-start_line = 39
-end_line = 55
+source_sha256 = "b4416b2640aed49cd1cdb8a471b15b477c0ad2c79f135254638d270f58713e4c"
+start_line = 21
+end_line = 36
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -6956,9 +6586,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-export-render-1"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/audit/export.rs"
-source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
-start_line = 87
-end_line = 126
+source_sha256 = "b4416b2640aed49cd1cdb8a471b15b477c0ad2c79f135254638d270f58713e4c"
+start_line = 48
+end_line = 85
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -6966,19 +6596,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-export-from"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/audit/export.rs"
-source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
-start_line = 59
-end_line = 64
-metric = "branches"
-reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
-
-[[region]]
-id = "cap5-export-export-render-export-batch-with-profile"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-admin/src/audit/export.rs"
-source_sha256 = "48bef50ac3d6d6f97df61d71f4858b9b5fd2b7c63fe35de57df7a5127eaa1c6b"
-start_line = 71
-end_line = 85
+source_sha256 = "b4416b2640aed49cd1cdb8a471b15b477c0ad2c79f135254638d270f58713e4c"
+start_line = 40
+end_line = 45
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -6986,9 +6606,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-audit-render-export-batch"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/audit.rs"
-source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
-start_line = 511
-end_line = 524
+source_sha256 = "a90a090d64e6135530114803c0300e99e1919bbae2f7d4d2b42c2f008a0777ef"
+start_line = 510
+end_line = 522
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -6996,9 +6616,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-audit-check-event-order"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/audit.rs"
-source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
-start_line = 546
-end_line = 558
+source_sha256 = "a90a090d64e6135530114803c0300e99e1919bbae2f7d4d2b42c2f008a0777ef"
+start_line = 544
+end_line = 556
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -7006,9 +6626,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-audit-check-export-coverage"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/audit.rs"
-source_sha256 = "da6a30658566b65bd86663f52cb612cda19e45f817424f94a078ee91823d4845"
-start_line = 560
-end_line = 595
+source_sha256 = "a90a090d64e6135530114803c0300e99e1919bbae2f7d4d2b42c2f008a0777ef"
+start_line = 558
+end_line = 593
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -7016,9 +6636,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-command-parse"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/command.rs"
-source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
-start_line = 195
-end_line = 203
+source_sha256 = "e08a9e816c0d6219c8507f7d3dbd8140d9a5a6b7c534aaa2800ffaac60c3b7fb"
+start_line = 193
+end_line = 237
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -7026,9 +6646,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-command-verb"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/command.rs"
-source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
-start_line = 272
-end_line = 295
+source_sha256 = "e08a9e816c0d6219c8507f7d3dbd8140d9a5a6b7c534aaa2800ffaac60c3b7fb"
+start_line = 256
+end_line = 279
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -7036,9 +6656,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-command-required-permission"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/command.rs"
-source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
-start_line = 300
-end_line = 326
+source_sha256 = "e08a9e816c0d6219c8507f7d3dbd8140d9a5a6b7c534aaa2800ffaac60c3b7fb"
+start_line = 284
+end_line = 310
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -7046,19 +6666,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-command-is-read-only"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/command.rs"
-source_sha256 = "efbc6d5793a4039cac1cccd1839babde5e5b69d0281fd28fa9e6d4c51d206fb7"
-start_line = 344
-end_line = 356
-metric = "branches"
-reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
-
-[[region]]
-id = "cap5-export-audit-with-profile"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 500
-end_line = 503
+source_sha256 = "e08a9e816c0d6219c8507f7d3dbd8140d9a5a6b7c534aaa2800ffaac60c3b7fb"
+start_line = 328
+end_line = 339
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -7066,19 +6676,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-audit-finish-with-observed"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 540
-end_line = 579
-metric = "branches"
-reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
-
-[[region]]
-id = "cap5-export-audit-freeze-with-profile"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 609
-end_line = 660
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 519
+end_line = 552
 metric = "branches"
 reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
 
@@ -7086,9 +6686,9 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-job-prepare-audit-export-job"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin.rs"
-source_sha256 = "cecb39a5c8cc594ec8623266cd8f70c13a449c0ff1faddba3d7a89691bc0ad5a"
-start_line = 1384
-end_line = 1407
+source_sha256 = "358616e68f3d1a97a817467f13ed40af0071fd653f0ce28cc420f32196768261"
+start_line = 1383
+end_line = 1400
 metric = "branches"
 reason = "Audit export profile selection and frozen-job admission require complete branch evidence before release."
 
@@ -7096,9 +6696,9 @@ reason = "Audit export profile selection and frozen-job admission require comple
 id = "cap5-export-job-run"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin/audit.rs"
-source_sha256 = "47fa5a13cfe1b70ebae728e7c7baf48c5227d9200d74cdfa46a13fffb6cd8b07"
-start_line = 505
-end_line = 523
+source_sha256 = "53d7f653c5dc2fea577b01bf525f93cf15fb2f194dbe7ed06ec9b932e6e21ae2"
+start_line = 494
+end_line = 502
 metric = "branches"
 reason = "Audit export profile selection and frozen-job admission require complete branch evidence before release."
 
@@ -7141,76 +6741,6 @@ start_line = 465
 end_line = 503
 metric = "regions"
 reason = "An exact duplicate may replay only its complete retained result and every response in original descriptor order; missing objects cannot produce a shorter response set."
-
-[[region]]
-id = "cap79-schema-four-01-validate-schema-three-kind"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration.rs"
-source_sha256 = "f167632363bde1f6f625a86bd607255a5a55dd40cdc2558d9f1ed1016593f79d"
-start_line = 55
-end_line = 74
-metric = "regions"
-reason = "Generation-three source rows cannot acquire a later delivery body or audit encoding."
-
-[[region]]
-id = "cap79-schema-four-02-copy-rule"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 49
-end_line = 56
-metric = "regions"
-reason = "Every predecessor selects its disjoint rule set and exact source validator."
-
-[[region]]
-id = "cap79-schema-four-03-validate-copy-source"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_profile.rs"
-source_sha256 = "5d392c3bc3b83452c54e38b4d8414d24ebdf32c712d79298e9b3282ed8f99ee3"
-start_line = 58
-end_line = 78
-metric = "regions"
-reason = "Every predecessor selects its disjoint rule set and exact source validator."
-
-[[region]]
-id = "cap79-schema-four-04-valid-rule-sources"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v3.rs"
-source_sha256 = "f85cbe5795861f015583193fb89f0bca3e689fc8868e871650043e5adf4b538c"
-start_line = 20
-end_line = 31
-metric = "regions"
-reason = "The successor migration preserves only validated source rows under the pinned table and transform rules."
-
-[[region]]
-id = "cap79-schema-four-05-preserved-table"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v3.rs"
-source_sha256 = "f85cbe5795861f015583193fb89f0bca3e689fc8868e871650043e5adf4b538c"
-start_line = 33
-end_line = 35
-metric = "regions"
-reason = "The successor migration preserves only validated source rows under the pinned table and transform rules."
-
-[[region]]
-id = "cap79-schema-four-06-validate-source"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v3.rs"
-source_sha256 = "f85cbe5795861f015583193fb89f0bca3e689fc8868e871650043e5adf4b538c"
-start_line = 37
-end_line = 48
-metric = "regions"
-reason = "The successor migration preserves only validated source rows under the pinned table and transform rules."
-
-[[region]]
-id = "cap79-schema-four-07-transform"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_v3.rs"
-source_sha256 = "f85cbe5795861f015583193fb89f0bca3e689fc8868e871650043e5adf4b538c"
-start_line = 54
-end_line = 88
-metric = "regions"
-reason = "The successor migration preserves only validated source rows under the pinned table and transform rules."
 
 [[region]]
 id = "cap79-schema-four-08-validate-body"
@@ -7361,106 +6891,6 @@ start_line = 78
 end_line = 87
 metric = "regions"
 reason = "Acknowledgement ranges reject reversal, overflow, excess coverage, and invalid time metadata."
-
-[[region]]
-id = "cap79-schema-four-23-begin-source"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 81
-end_line = 86
-metric = "regions"
-reason = "A generation-three source requires complete semantic admission before any migration output."
-
-[[region]]
-id = "cap79-schema-four-24-validate-record"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 88
-end_line = 99
-metric = "regions"
-reason = "A generation-three source requires complete semantic admission before any migration output."
-
-[[region]]
-id = "cap79-schema-four-25-finish-source"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration_command/admission.rs"
-source_sha256 = "ef321804e8477911fbbcdb9ad9b415cae5fb791b53172385679e73ce6b4bc950"
-start_line = 101
-end_line = 103
-metric = "regions"
-reason = "A generation-three source requires complete semantic admission before any migration output."
-
-[[region]]
-id = "cap79-schema-four-26-begin-source"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit/source_validation/schema_three.rs"
-source_sha256 = "dfcb3b5ad43882525ec590a3b2860794cdeb50c04af04817b90ccc3eafd0fc38"
-start_line = 24
-end_line = 35
-metric = "regions"
-reason = "Frozen generation-three audit meanings, signatures, scope, sequence, and complete checkpoint anchors govern migration admission."
-
-[[region]]
-id = "cap79-schema-four-27-validate-record"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit/source_validation/schema_three.rs"
-source_sha256 = "dfcb3b5ad43882525ec590a3b2860794cdeb50c04af04817b90ccc3eafd0fc38"
-start_line = 37
-end_line = 52
-metric = "regions"
-reason = "Frozen generation-three audit meanings, signatures, scope, sequence, and complete checkpoint anchors govern migration admission."
-
-[[region]]
-id = "cap79-schema-four-28-finish-source"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit/source_validation/schema_three.rs"
-source_sha256 = "dfcb3b5ad43882525ec590a3b2860794cdeb50c04af04817b90ccc3eafd0fc38"
-start_line = 54
-end_line = 60
-metric = "regions"
-reason = "Frozen generation-three audit meanings, signatures, scope, sequence, and complete checkpoint anchors govern migration admission."
-
-[[region]]
-id = "cap79-schema-four-29-observe-schema-three"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit/source_validation/schema_three.rs"
-source_sha256 = "dfcb3b5ad43882525ec590a3b2860794cdeb50c04af04817b90ccc3eafd0fc38"
-start_line = 64
-end_line = 85
-metric = "regions"
-reason = "Frozen generation-three audit meanings, signatures, scope, sequence, and complete checkpoint anchors govern migration admission."
-
-[[region]]
-id = "cap79-schema-four-30-schema-three-event"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit/source_validation/schema_three.rs"
-source_sha256 = "dfcb3b5ad43882525ec590a3b2860794cdeb50c04af04817b90ccc3eafd0fc38"
-start_line = 87
-end_line = 118
-metric = "regions"
-reason = "Frozen generation-three audit meanings, signatures, scope, sequence, and complete checkpoint anchors govern migration admission."
-
-[[region]]
-id = "cap79-schema-four-31-validate-schema-three-command"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/admin/audit/source_validation/schema_three.rs"
-source_sha256 = "dfcb3b5ad43882525ec590a3b2860794cdeb50c04af04817b90ccc3eafd0fc38"
-start_line = 121
-end_line = 133
-metric = "regions"
-reason = "Frozen generation-three audit meanings, signatures, scope, sequence, and complete checkpoint anchors govern migration admission."
-
-[[region]]
-id = "cap79-schema-four-32-execute-schema-four-migration"
-category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/offline/migration.rs"
-source_sha256 = "15a9fb60c64297313cc97b6de430f2b303c9f25f0db13eed7a3b1f66f82b678d"
-start_line = 32
-end_line = 46
-metric = "regions"
-reason = "The successor command binds configured identity and mandatory frozen source audit validation."
 
 [[region]]
 id = "cap79-schema-four-33-validate-suffix"
@@ -10596,9 +10026,9 @@ reason = "Recovery declarations require exact paired source descriptors and rout
 id = "cap73-restore-provenance-015-start-inner"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
-source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
-start_line = 192
-end_line = 260
+source_sha256 = "3682bbf04cf40f76c798859280b8facb0862b2ca608d4e393ced48ac70541214"
+start_line = 191
+end_line = 259
 metric = "regions"
 reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
 
@@ -10606,9 +10036,9 @@ reason = "The shared construction planner resets and accounts for restore source
 id = "cap73-restore-provenance-016-push"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
-source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
-start_line = 263
-end_line = 302
+source_sha256 = "3682bbf04cf40f76c798859280b8facb0862b2ca608d4e393ced48ac70541214"
+start_line = 262
+end_line = 301
 metric = "regions"
 reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
 
@@ -10616,9 +10046,9 @@ reason = "The shared construction planner resets and accounts for restore source
 id = "cap73-restore-provenance-017-finish"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
-source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
-start_line = 595
-end_line = 662
+source_sha256 = "3682bbf04cf40f76c798859280b8facb0862b2ca608d4e393ced48ac70541214"
+start_line = 594
+end_line = 661
 metric = "regions"
 reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
 
@@ -10626,9 +10056,9 @@ reason = "The shared construction planner resets and accounts for restore source
 id = "cap73-restore-provenance-018-push-restore-record"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
-source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
-start_line = 2303
-end_line = 2344
+source_sha256 = "3682bbf04cf40f76c798859280b8facb0862b2ca608d4e393ced48ac70541214"
+start_line = 2300
+end_line = 2341
 metric = "regions"
 reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
 
@@ -10636,9 +10066,9 @@ reason = "The shared construction planner resets and accounts for restore source
 id = "cap73-restore-provenance-019-transform-e2ee-recovery-pending"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction_runtime.rs"
-source_sha256 = "942bedec5f16a1c1c4075e307807545201e245ffc78f7253f47c5d17277db5b0"
-start_line = 3293
-end_line = 3325
+source_sha256 = "3682bbf04cf40f76c798859280b8facb0862b2ca608d4e393ced48ac70541214"
+start_line = 3284
+end_line = 3316
 metric = "regions"
 reason = "The shared construction planner resets and accounts for restore source indexes, rejects incomplete pairing at finish, and dispatches only exact recovery transforms."
 
@@ -10646,9 +10076,9 @@ reason = "The shared construction planner resets and accounts for restore source
 id = "cap73-restore-provenance-020-validate-action"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/construction.rs"
-source_sha256 = "4dc3f9d13c97f139ebe2e4d5780e2e8b31badd3fe6850a19b1dff5c53a2df48e"
-start_line = 765
-end_line = 826
+source_sha256 = "358b793d3a556aa1b1633715d8244f542583453204144c436f769dcecbb6fa00"
+start_line = 720
+end_line = 776
 metric = "regions"
 reason = "The construction action matrix admits one or two E2EE-state sources only for the registered restore action and preserves other kind, table and rule constraints."
 

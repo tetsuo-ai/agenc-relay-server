@@ -12,17 +12,15 @@ use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
-use crate::construction_runtime::RestoreSourceAdmission;
 use crate::construction_schema::ConstructionSchema;
 use crate::{
     BackupTrustKey, ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor,
     ConstructionLimits, ConstructionPlan, ConstructionSourceDatabase, ConstructionSourceFacts,
     ConstructionTarget, DatabaseHeader, DatabaseHeaderTbs, InitialStorageRecord,
-    RecoveryTransformV1, RestoreBackupSourceConfig, SourceRecordValidator, StateDirectory,
-    StorageConstruction, StorageConstructionCursor, StorageConstructionKind, StorageEngineLimits,
-    StorageError, StorageInitializationConfig, StorageInitializationMode,
-    StorageInitializationOutcome, StorageOpenConfig, StorageOperationIdentity,
-    StorageQualification, StoredKey, TableId,
+    RecoveryTransformV1, RestoreBackupSourceConfig, StateDirectory, StorageConstruction,
+    StorageConstructionCursor, StorageConstructionKind, StorageEngineLimits, StorageError,
+    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
+    StorageOpenConfig, StorageOperationIdentity, StorageQualification, StoredKey, TableId,
 };
 
 const RESTORE_BATCH_RECORDS: usize = 1_000;
@@ -107,7 +105,7 @@ pub struct RestoreCommandRequest {
 /// Durable result of a completed or reverified restore.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RestoreCommandReceipt {
-    /// Schema generation preserved by restore. Legacy output requires explicit migration.
+    /// Current storage schema generation.
     pub schema_generation: u64,
     /// Installed output directory.
     pub output_state_directory: PathBuf,
@@ -134,34 +132,19 @@ pub fn execute_restore_command(
     request: RestoreCommandRequest,
     qualifications: &[StorageQualification],
 ) -> Result<RestoreCommandReceipt, StorageError> {
-    execute_restore_admitted(request, qualifications, RestoreSourceAdmission::Current)
-}
-
-/// Requires complete semantic admission of a schema-two signed source before any output.
-/// A legacy restore preserves schema two and must be migrated separately before service.
-pub fn execute_validated_restore_command(
-    request: RestoreCommandRequest,
-    qualifications: &[StorageQualification],
-    validator: &mut dyn SourceRecordValidator,
-) -> Result<RestoreCommandReceipt, StorageError> {
-    execute_restore_admitted(
-        request,
-        qualifications,
-        RestoreSourceAdmission::WithLegacy(validator),
-    )
+    execute_restore_admitted(request, qualifications)
 }
 
 fn execute_restore_admitted(
     request: RestoreCommandRequest,
     qualifications: &[StorageQualification],
-    admission: RestoreSourceAdmission<'_>,
 ) -> Result<RestoreCommandReceipt, StorageError> {
     validate_restore_request(&request)?;
     let limits = request.limits.validate()?;
     let construction_limits = construction_limits(limits)?;
     let secrets = RestoreSecrets::load(&request)?;
     let trusted_keys = trusted_restore_keys(&request)?;
-    let mut source = secrets.open_source(&request, &trusted_keys, limits, admission)?;
+    let mut source = secrets.open_source(&request, &trusted_keys, limits)?;
     let source_facts = source.facts()?;
     let source_header = source_facts.header;
     if (
@@ -243,18 +226,6 @@ struct RestoreSecrets {
     target_guard: Zeroizing<[u8; 32]>,
 }
 
-pub(crate) fn maintenance_backup_trust_keys(
-    rows: &[RestoreTrustKey],
-) -> Result<Vec<BackupTrustKey>, StorageError> {
-    if rows.is_empty() || rows.len() > crate::MAX_BACKUP_TRUST_KEYS {
-        return Err(StorageError::LimitExceeded);
-    }
-    rows.iter()
-        .copied()
-        .map(RestoreTrustKey::validate)
-        .collect()
-}
-
 impl RestoreSecrets {
     fn load(request: &RestoreCommandRequest) -> Result<Self, StorageError> {
         let source_master = read_secret_key(&request.source_master_key_file)?;
@@ -290,7 +261,6 @@ impl RestoreSecrets {
         request: &RestoreCommandRequest,
         trusted_keys: &[BackupTrustKey],
         limits: StorageEngineLimits,
-        admission: RestoreSourceAdmission<'_>,
     ) -> Result<crate::RestoreBackupSource<File>, StorageError> {
         let backup = open_private_regular(&request.backup_path, Mode::RUSR | Mode::WUSR)?;
         crate::RestoreBackupSource::open_admitted(
@@ -306,7 +276,6 @@ impl RestoreSecrets {
                 trusted_keys,
                 maximum_bytes: limits.backup_max_bytes,
             },
-            admission,
         )
     }
 }
@@ -1048,7 +1017,7 @@ mod tests {
                 &[0; 32],
                 None,
                 limits,
-                ConstructionSchema::Three
+                ConstructionSchema::Four
             )
             .map(|facts| facts.is_some()),
             Ok(false)
@@ -1063,7 +1032,7 @@ mod tests {
                 &[0; 32],
                 None,
                 limits,
-                ConstructionSchema::Three
+                ConstructionSchema::Four
             )
             .map(|facts| facts.is_some()),
             Err(StorageError::FilesystemRejected)
@@ -1085,7 +1054,7 @@ mod tests {
                 &[0; 32],
                 None,
                 limits,
-                ConstructionSchema::Three
+                ConstructionSchema::Four
             )
             .map(|facts| facts.is_some()),
             Err(StorageError::FilesystemRejected)

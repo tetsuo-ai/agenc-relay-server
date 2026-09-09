@@ -182,8 +182,6 @@ pub enum AdminCommand {
     BackupCreate(Reason),
     /// `AUDIT EXPORT <from> <to>` (audit).
     AuditExport(AuditRange),
-    /// `AUDIT EXPORT <from> <to> maintenance-v1` (audit).
-    AuditExportMaintenance(AuditRange),
     /// `RESTART :reason` (process, confirmed).
     Restart(Reason),
     /// `DIE :reason` (process, confirmed).
@@ -193,20 +191,6 @@ pub enum AdminCommand {
 impl AdminCommand {
     /// Parses one canonical line into the current command registry.
     pub fn parse(command: CanonicalCommand<'_>) -> Result<Self, AdminError> {
-        let parameters = command.parameters();
-        if let ("AUDIT", ["EXPORT", from, to, "maintenance-v1"]) =
-            (command.verb(), parameters.as_slice())
-        {
-            return AuditRange::parse(from, to).map(Self::AuditExportMaintenance);
-        }
-        Self::parse_schema_two(command)
-    }
-
-    /// Parses only the original command grammar admitted by storage schema two.
-    ///
-    /// Current registry extensions belong in `parse`; old signed bytes must
-    /// not acquire a new command meaning through a current-parser fallback.
-    pub fn parse_schema_two(command: CanonicalCommand<'_>) -> Result<Self, AdminError> {
         let parameters = command.parameters();
         match (command.verb(), parameters.as_slice()) {
             ("PING", [token]) => Ok(Self::Ping(ping_token(token)?)),
@@ -288,7 +272,7 @@ impl AdminCommand {
             Self::Squit { .. } => "SQUIT",
             Self::PeerQuarantine { .. } => "PEER",
             Self::BackupCreate(_) => "BACKUP",
-            Self::AuditExport(_) | Self::AuditExportMaintenance(_) => "AUDIT",
+            Self::AuditExport(_) => "AUDIT",
             Self::Restart(_) => "RESTART",
             Self::Die(_) => "DIE",
         }
@@ -320,7 +304,7 @@ impl AdminCommand {
                 Some(AdminPermission::Federation)
             }
             Self::BackupCreate(_) => Some(AdminPermission::Backup),
-            Self::AuditExport(_) | Self::AuditExportMaintenance(_) => Some(AdminPermission::Audit),
+            Self::AuditExport(_) => Some(AdminPermission::Audit),
             Self::Restart(_) | Self::Die(_) => Some(AdminPermission::Process),
         }
     }
@@ -351,7 +335,6 @@ impl AdminCommand {
                 | Self::Links
                 | Self::Stats(_)
                 | Self::AuditExport(_)
-                | Self::AuditExportMaintenance(_)
         )
     }
 

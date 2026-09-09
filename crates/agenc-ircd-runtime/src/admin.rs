@@ -52,9 +52,8 @@ use crate::state_core::{
 use crate::sync::Arc;
 use crate::tls::{CLOSE_NOTIFY_GRACE, WRITE_STALL_BUDGET};
 
+use audit::PendingStartupActionKind;
 pub(crate) use audit::{AuditAuthority, PreparedMaintenanceAudit};
-use audit::{AuditExportFailure, PendingStartupActionKind};
-pub use audit::{LegacyAuditSourceValidator, SchemaThreeAuditSourceValidator};
 
 /// RFC 9846 exporter label for the remote administrative session binding.
 pub(crate) const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
@@ -1289,7 +1288,7 @@ impl AdminOwner {
                 self.process_action(generation, &event, AdminProcessAction::Die, token)
                     .await;
             }
-            AdminCommand::AuditExport(range) | AdminCommand::AuditExportMaintenance(range) => {
+            AdminCommand::AuditExport(range) => {
                 self.audit_export(generation, &event, *range, token).await;
             }
             AdminCommand::BackupCreate(_) => {
@@ -1384,7 +1383,6 @@ impl AdminOwner {
     fn prepare_audit_export_job(
         &mut self,
         generation: ConnectionGeneration,
-        event: &AdminCommandEvent,
         range: agenc_ircd_admin::AuditRange,
     ) -> Option<audit::AuditExportJob> {
         let mut batch_id = [0_u8; 16];
@@ -1392,13 +1390,8 @@ impl AdminOwner {
             self.output_storage_unavailable(generation, "AUDIT");
             return None;
         }
-        let profile = if matches!(event.command, AdminCommand::AuditExportMaintenance(_)) {
-            agenc_ircd_admin::AuditExportProfile::MaintenanceV1
-        } else {
-            agenc_ircd_admin::AuditExportProfile::Legacy
-        };
         match self.audit.prepare_export(range, batch_id) {
-            Ok(job) => Some(job.with_profile(profile)),
+            Ok(job) => Some(job),
             Err(error) => {
                 self.output_export_failure(generation, error);
                 None
@@ -1420,13 +1413,13 @@ impl AdminOwner {
             );
             return;
         };
-        let Some(export) = self.prepare_audit_export_job(generation, event, range) else {
+        let Some(export) = self.prepare_audit_export_job(generation, range) else {
             return;
         };
         let frozen = match tokio::task::spawn_blocking(move || export.run()).await {
             Ok(Ok(frozen)) => frozen,
             Ok(Err(error)) => {
-                self.output_export_job_failure(generation, error);
+                self.output_export_failure(generation, error);
                 return;
             }
             Err(_) => {
@@ -2332,7 +2325,6 @@ impl AdminOwner {
             }
             AdminCommand::Stats(_)
             | AdminCommand::AuditExport(_)
-            | AdminCommand::AuditExportMaintenance(_)
             | AdminCommand::Ping(_)
             | AdminCommand::Pong(_)
             | AdminCommand::Quit
@@ -2396,20 +2388,6 @@ impl AdminOwner {
             | AdminCoreFailure::StorageUnavailable => render_stats_unavailable(selector),
         };
         self.output_line(generation, line);
-    }
-
-    fn output_export_job_failure(
-        &self,
-        generation: ConnectionGeneration,
-        error: AuditExportFailure,
-    ) {
-        match error {
-            AuditExportFailure::UnsupportedProfile => self.output_line(
-                generation,
-                "FAIL AUDIT UNAVAILABLE :Audit export unavailable".to_owned(),
-            ),
-            AuditExportFailure::Source(error) => self.output_export_failure(generation, error),
-        }
     }
 
     fn output_export_failure(&self, generation: ConnectionGeneration, error: crate::RuntimeError) {
@@ -2517,8 +2495,7 @@ const fn audit_phase_is_valid(command: &AdminCommand, phase: AdminAuditPhase) ->
         | AdminCommand::Info
         | AdminCommand::Links
         | AdminCommand::Stats(_)
-        | AdminCommand::AuditExport(_)
-        | AdminCommand::AuditExportMaintenance(_) => matches!(phase, AdminAuditPhase::Observed),
+        | AdminCommand::AuditExport(_) => matches!(phase, AdminAuditPhase::Observed),
         AdminCommand::Rehash(_)
         | AdminCommand::Kill { .. }
         | AdminCommand::BackupCreate(_)
@@ -2571,7 +2548,6 @@ fn map_backup_failure(error: StorageError) -> AdminCoreFailure {
         | StorageError::FilesystemRejected
         | StorageError::WriterLocked
         | StorageError::DatabaseRejected
-        | StorageError::UnsupportedMigration
         | StorageError::ResumeMismatch => AdminCoreFailure::StorageUnavailable,
     }
 }
@@ -4358,7 +4334,6 @@ mod tests {
             ),
             ("BACKUP CREATE :policy action".to_owned(), external),
             ("AUDIT EXPORT 0 10".to_owned(), observed.clone()),
-            ("AUDIT EXPORT 0 10 maintenance-v1".to_owned(), observed),
             ("RESTART :policy action".to_owned(), terminal.clone()),
             ("DIE :policy action".to_owned(), terminal),
         ];
@@ -4665,7 +4640,6 @@ mod tests {
             StorageError::FilesystemRejected,
             StorageError::WriterLocked,
             StorageError::DatabaseRejected,
-            StorageError::UnsupportedMigration,
             StorageError::ResumeMismatch,
         ] {
             assert_eq!(

@@ -2,7 +2,6 @@
 //! `AUDIT EXPORT` batch framing (spec 2318-2416, 4521-4541).
 
 mod export;
-pub use export::{AuditExportProfile, render_export_batch_with_profile};
 
 use agenc_ircd_crypto::{
     CryptoError, Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain,
@@ -512,14 +511,13 @@ pub fn render_export_batch(
     batch_id: &[u8; 16],
     range: AuditRange,
     checkpoints: &[AdminAuditCheckpoint],
-    events: &[AdminAuditEvent],
+    events: &[crate::AuditEvent],
 ) -> Result<Vec<String>, AdminError> {
     export::render(
         batch_id,
         range,
         checkpoints,
-        events.iter().map(export::EventRef::Admin),
-        AuditExportProfile::Legacy,
+        events.iter().map(export::EventRef::from),
     )
 }
 
@@ -858,7 +856,12 @@ mod tests {
         let checkpoint =
             AdminAuditCheckpoint::sign(checkpoint_tbs(0, 0, e0.event_hash())?, &audit_key())?;
         let range = AuditRange::new(0, 5)?;
-        let lines = render_export_batch(&[0; 16], range, &[checkpoint], std::slice::from_ref(&e1))?;
+        let lines = render_export_batch(
+            &[0; 16],
+            range,
+            &[checkpoint],
+            &[crate::AuditEvent::Admin(e1.clone())],
+        )?;
         assert_eq!(lines.len(), 4);
         assert_eq!(
             lines.first().map(String::as_str),
@@ -890,7 +893,15 @@ mod tests {
         assert_eq!(empty.len(), 2);
 
         assert_eq!(
-            render_export_batch(&[0; 16], range, &[], &[e1.clone(), e0.clone()]),
+            render_export_batch(
+                &[0; 16],
+                range,
+                &[],
+                &[
+                    crate::AuditEvent::Admin(e1.clone()),
+                    crate::AuditEvent::Admin(e0.clone())
+                ]
+            ),
             Err(AdminError::Audit)
         );
         assert_eq!(
@@ -898,7 +909,7 @@ mod tests {
                 &[0; 16],
                 AuditRange::new(2, 5)?,
                 &[],
-                std::slice::from_ref(&e1)
+                &[crate::AuditEvent::Admin(e1.clone())]
             ),
             Err(AdminError::Audit)
         );
@@ -919,7 +930,7 @@ mod tests {
                 &[0; 16],
                 range,
                 std::slice::from_ref(&checkpoint),
-                std::slice::from_ref(&e2)
+                &[crate::AuditEvent::Admin(e2.clone())]
             ),
             Err(AdminError::Audit)
         );
@@ -930,11 +941,11 @@ mod tests {
                 &[0; 16],
                 range,
                 std::slice::from_ref(&overlapping_checkpoint),
-                std::slice::from_ref(&e1)
+                &[crate::AuditEvent::Admin(e1.clone())]
             ),
             Err(AdminError::Audit)
         );
-        let many = vec![e1; 10_001];
+        let many = vec![crate::AuditEvent::Admin(e1); 10_001];
         assert_eq!(
             render_export_batch(&[0; 16], AuditRange::new(0, u64::MAX)?, &[], &many),
             Err(AdminError::Limit)

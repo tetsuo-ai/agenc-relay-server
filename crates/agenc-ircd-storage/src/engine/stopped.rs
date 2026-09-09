@@ -5,17 +5,9 @@ use super::{
     EngineOpenConfig, EngineStateDirectory, StorageEngine, StorageRuntimeLimits, storage_limit_pair,
 };
 use crate::construction_schema::ConstructionSchema;
-use crate::migration_profile::MigrationProfile;
 use crate::{StorageError, StorageOpenConfig};
 
 impl StorageEngine {
-    pub(crate) fn open_migration_profile(
-        config: StorageOpenConfig,
-        profile: MigrationProfile,
-    ) -> Result<Self, StorageError> {
-        Self::open_stopped_generation(config, profile.source_generation())
-    }
-
     pub(crate) fn open_construction_target(
         config: StorageOpenConfig,
         schema: ConstructionSchema,

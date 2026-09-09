@@ -1,4 +1,4 @@
-//! An unsupported selected body cannot hide later invalid source evidence.
+//! Export validates the complete signed source, including unselected events.
 #![forbid(unsafe_code)]
 #![cfg(test)]
 
@@ -27,7 +27,7 @@ fn cursor(events: &[AuditEvent]) -> TestResult<AuditChainCursor> {
 }
 
 #[tokio::test]
-async fn unsupported_legacy_profile_cannot_hide_a_later_invalid_signature() -> TestResult {
+async fn selected_maintenance_event_cannot_hide_a_later_invalid_signature() -> TestResult {
     let fixture = Fixture::new();
     let mut events = fixture.chain()?;
     let expected = cursor(&events)?;
@@ -38,15 +38,12 @@ async fn unsupported_legacy_profile_cannot_hide_a_later_invalid_signature() -> T
     let core = core(&events)?;
     let result =
         source(&fixture, &core)?.freeze(AuditRange::new(1, 1)?, [7; 16], expected, 0, [0; 32]);
-    assert!(matches!(
-        result,
-        Err(AuditExportFailure::Source(RuntimeError::InvalidValue))
-    ));
+    assert!(matches!(result, Err(RuntimeError::InvalidValue)));
     Ok(())
 }
 
 #[tokio::test]
-async fn unsupported_legacy_profile_cannot_hide_a_later_unmatched_intent() -> TestResult {
+async fn selected_maintenance_event_cannot_hide_a_later_unmatched_intent() -> TestResult {
     let fixture = Fixture::new();
     let mut events = fixture.chain()?;
     events.pop().ok_or("last observed audit event")?;
@@ -55,15 +52,12 @@ async fn unsupported_legacy_profile_cannot_hide_a_later_unmatched_intent() -> Te
     let core = core(&events)?;
     let result =
         source(&fixture, &core)?.freeze(AuditRange::new(1, 1)?, [7; 16], expected, 0, [0; 32]);
-    assert!(matches!(
-        result,
-        Err(AuditExportFailure::Source(RuntimeError::InvalidValue))
-    ));
+    assert!(matches!(result, Err(RuntimeError::InvalidValue)));
     Ok(())
 }
 
 #[tokio::test]
-async fn unsupported_legacy_profile_still_checks_the_complete_captured_cursor() -> TestResult {
+async fn audit_export_checks_the_complete_captured_cursor() -> TestResult {
     let fixture = Fixture::new();
     let core = core(&fixture.chain()?)?;
     let mut job = fixture
@@ -74,9 +68,6 @@ async fn unsupported_legacy_profile_still_checks_the_complete_captured_cursor() 
         .next_sequence
         .checked_add(1)
         .ok_or("cursor overflow")?;
-    assert!(matches!(
-        job.run(),
-        Err(AuditExportFailure::Source(RuntimeError::InvalidValue))
-    ));
+    assert!(matches!(job.run(), Err(RuntimeError::InvalidValue)));
     Ok(())
 }

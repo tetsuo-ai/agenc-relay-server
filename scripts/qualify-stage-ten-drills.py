@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the restore, migration, deletion, key-lifecycle, hardening, and observability drills."""
+"""Run the restore, deletion, key-lifecycle, hardening, and observability drills."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from release_qualification.driver import command, context, finish
 from release_qualification.process import execute
 from release_qualification.records import QualificationError, canonical, read_record, write_once
 
-DRILLS = ["restore", "disaster_restore", "migration", "deletion", "rekey", "index_transition", "tls_rotation",
+DRILLS = ["restore", "disaster_restore", "deletion", "rekey", "index_transition", "tls_rotation",
           "federation_rotation", "sequencer_rotation", "backup_rotation", "audit_rotation", "compromise", "rollback",
           "resynchronization", "host_hardening", "observability"]
 DRILL_TIMEOUT = 900

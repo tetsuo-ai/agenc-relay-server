@@ -31,8 +31,6 @@ pub enum StorageError {
     WriterLocked,
     /// A database operation failed before irreversible commit began.
     DatabaseRejected,
-    /// The requested migration profile is not compiled into this schema generation.
-    UnsupportedMigration,
     /// A maintenance operation could not safely resume the named construction.
     ResumeMismatch,
 }
@@ -52,7 +50,6 @@ impl fmt::Display for StorageError {
             Self::FilesystemRejected => "filesystem policy rejected storage",
             Self::WriterLocked => "storage writer is already locked",
             Self::DatabaseRejected => "database rejected the operation",
-            Self::UnsupportedMigration => "storage migration profile is unsupported",
             Self::ResumeMismatch => "storage construction cannot be resumed",
         })
     }

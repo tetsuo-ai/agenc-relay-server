@@ -3,7 +3,6 @@
 //! AgenC daemon and stopped-daemon command entry point.
 
 mod login_index;
-mod migration;
 mod options;
 mod storage_qualify;
 mod version;
@@ -42,7 +41,6 @@ const USAGE: &str = concat!(
     "  print-onboarding --config <file>\n",
     "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n",
     "  storage restore --config <file> --backup <file> [restore options]\n",
-    "  storage migrate --config <file> --target-schema-generation <2|3|4> --output-state-directory <new-directory> [--resume]\n",
     "  storage login-index-rotate-start --config <file> --new-key-file <file>\n",
     "  storage login-index-rotate-finish --config <file>\n",
     "  storage qualify --state-dir <new-directory> --scratch-dir <new-directory> --unsigned-report <file> --raw-log <file> [--json <file>]",
@@ -334,13 +332,6 @@ fn storage(arguments: &[OsString]) -> Result<(), CliFailure> {
         }
         _ => {}
     }
-    if arguments.first().and_then(|value| value.to_str()) == Some("migrate") {
-        return migration::run(
-            arguments
-                .get(1..)
-                .ok_or_else(|| CliFailure::usage(migration::USAGE))?,
-        );
-    }
     if arguments.first().and_then(|value| value.to_str()) == Some("qualify") {
         return storage_qualify::run(
             arguments
@@ -423,11 +414,6 @@ fn restore_request(
 }
 
 fn print_restore_receipt(receipt: &RestoreCommandReceipt) {
-    if receipt.schema_generation == 2 {
-        println!(
-            "restored schema generation 2; run storage migrate --target-schema-generation 3 before serve"
-        );
-    }
     println!(
         "recovery epoch changed: {} -> {}",
         receipt.source_recovery_epoch.to_base64url(),

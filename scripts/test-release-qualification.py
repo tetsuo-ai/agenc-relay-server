@@ -835,7 +835,7 @@ class DrillsDriverTests(unittest.TestCase):
     def test_record_shape_and_verdict_are_enforced(self) -> None:
         driver = self.driver()
         self.assertEqual(driver.DRILLS, sorted(driver.DRILLS, key=driver.DRILLS.index))
-        self.assertEqual(len(driver.DRILLS), 16)
+        self.assertEqual(len(driver.DRILLS), 15)
         self.assertTrue(driver.validate_record(self.record(), "restore"))
         self.assertFalse(driver.validate_record(self.record(passed=False), "restore"))
         for mutate in (

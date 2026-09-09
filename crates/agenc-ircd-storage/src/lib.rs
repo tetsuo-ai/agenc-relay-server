@@ -16,18 +16,6 @@ mod error;
 mod fault;
 pub mod federation_records;
 pub mod history_records;
-mod migration;
-pub use migration::MigrationTransformV1;
-mod migration_profile;
-mod migration_v2;
-pub use migration_v2::MigrationTransformV2;
-mod migration_v3;
-pub use migration_v3::MigrationTransformV3;
-mod migration_command;
-pub use migration_command::{
-    MigrationCommandReceipt, MigrationCommandRequest, execute_migration_command,
-    execute_validated_migration_command,
-};
 mod initialize;
 mod integrity;
 mod login_index;
@@ -49,7 +37,7 @@ pub use source_validation::{AuthenticatedSourceRecord, SourceRecordValidator};
 pub use backup::{
     BACKUP_FIXED_STREAM_BYTES, BackupHeader, BackupReceipt, BackupRecord, BackupStreamWriter,
     BackupTrailer, BackupTrustKey, MAX_BACKUP_TRUST_KEYS, VerifiedBackup, backup_stream_bytes,
-    verify_backup, verify_legacy_backup_with_validator,
+    verify_backup,
 };
 pub use construction::{
     MAX_CONSTRUCTION_PLAN_BYTES, STORAGE_CONSTRUCTION_KEY, StorageConstruction,
@@ -103,8 +91,6 @@ pub use federation_records::{
     outbox_range, parse_origin_key, parse_outbox_key, parse_projection_key, peer_key,
     projection_entry_key, projection_marker_key, projection_range, request_result_key,
 };
-#[cfg(any(test, feature = "legacy-fixtures"))]
-pub use initialize::initialize_legacy_storage;
 pub use initialize::{
     InitialStorageRecord, StorageInitializationConfig, StorageInitializationMode,
     StorageInitializationOutcome, initialize_storage,
@@ -154,7 +140,6 @@ pub use records::{
 pub use recovery::{RecoveryDisposition, classify_recovery_state};
 pub use restore_command::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, execute_restore_command,
-    execute_validated_restore_command,
 };
 pub use schema::{
     DATABASE_FORMAT, MAX_NONCE_DRAWS, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH,

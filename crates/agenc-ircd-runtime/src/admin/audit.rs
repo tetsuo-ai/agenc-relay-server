@@ -1,24 +1,20 @@
 //! Startup reconstruction and append cursor for the signed admin audit chain.
 
-mod export_failure;
 mod maintenance;
 mod mixed;
 #[cfg(test)]
 #[path = "audit/tests/mixed/mod.rs"]
 mod mixed_tests;
-mod source_validation;
 
-pub(crate) use export_failure::AuditExportFailure;
 pub(crate) use maintenance::PreparedMaintenanceAudit;
-pub use source_validation::{LegacyAuditSourceValidator, SchemaThreeAuditSourceValidator};
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_admin::{
     AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEvent, AdminAuditEventTbs,
     AdminAuditPhase, AdminCommand, AdminCommandEvent, AdminSessionBinding, AuditChainCursor,
-    AuditEvent, AuditExportProfile, AuditRange, CanonicalCommand, MAX_AUDIT_EXPORT_RECORDS,
-    MaintenanceAuditScope, OperatorRegistry, render_export_batch_with_profile,
+    AuditEvent, AuditRange, CanonicalCommand, MAX_AUDIT_EXPORT_RECORDS, MaintenanceAuditScope,
+    OperatorRegistry, render_export_batch,
 };
 use agenc_ircd_config::AuditTrustManifestEntry;
 use agenc_ircd_crypto::{Ed25519PublicKey, Ed25519SecretKey, audit_signing_key_id};
@@ -311,7 +307,6 @@ impl AuditAuthority {
         }
         let source = self.export.as_ref().ok_or(RuntimeError::InvalidValue)?;
         Ok(AuditExportJob {
-            profile: AuditExportProfile::Legacy,
             source: Arc::clone(source),
             range,
             batch_id,
@@ -487,7 +482,6 @@ impl AuditRetentionJob {
 }
 
 pub(crate) struct AuditExportJob {
-    profile: AuditExportProfile,
     source: Arc<AuditExportSource>,
     range: AuditRange,
     batch_id: [u8; 16],
@@ -497,28 +491,13 @@ pub(crate) struct AuditExportJob {
 }
 
 impl AuditExportJob {
-    pub(crate) fn with_profile(mut self, profile: AuditExportProfile) -> Self {
-        self.profile = profile;
-        self
-    }
-
-    pub(crate) fn run(self) -> Result<PreparedAuditExport, AuditExportFailure> {
-        if self.profile == AuditExportProfile::Legacy {
-            return self.source.freeze(
-                self.range,
-                self.batch_id,
-                self.expected_cursor,
-                self.expected_checkpoint_sequence,
-                self.expected_checkpoint_hash,
-            );
-        }
-        self.source.freeze_with_profile(
+    pub(crate) fn run(self) -> Result<PreparedAuditExport, RuntimeError> {
+        self.source.freeze(
             self.range,
             self.batch_id,
             self.expected_cursor,
             self.expected_checkpoint_sequence,
             self.expected_checkpoint_hash,
-            self.profile,
         )
     }
 }
@@ -544,13 +523,8 @@ impl PreparedAuditExport {
         if observed.tbs().phase != AdminAuditPhase::Observed {
             return Err(RuntimeError::InvalidValue);
         }
-        match parse_event_command(observed)? {
-            AdminCommand::AuditExport(range)
-                if range == self.range && self.selection.profile == AuditExportProfile::Legacy => {}
-            AdminCommand::AuditExportMaintenance(range)
-                if range == self.range
-                    && self.selection.profile == AuditExportProfile::MaintenanceV1 => {}
-            _ => return Err(RuntimeError::InvalidValue),
+        if parse_event_command(observed)? != AdminCommand::AuditExport(self.range) {
+            return Err(RuntimeError::InvalidValue);
         }
         let mut verifier = EventVerifier::new(
             self.binding,
@@ -568,12 +542,11 @@ impl PreparedAuditExport {
             &self.selection.checkpoints,
             &self.selection.events,
         )?;
-        render_export_batch_with_profile(
+        render_export_batch(
             &self.batch_id,
             self.range,
             &self.selection.checkpoints,
             &self.selection.events,
-            self.selection.profile,
         )
         .map_err(|_| RuntimeError::InvalidValue)
     }
@@ -595,28 +568,8 @@ impl AuditExportSource {
         expected_cursor: AuditChainCursor,
         expected_checkpoint_sequence: u64,
         expected_checkpoint_hash: [u8; 32],
-    ) -> Result<PreparedAuditExport, AuditExportFailure> {
-        self.freeze_with_profile(
-            range,
-            batch_id,
-            expected_cursor,
-            expected_checkpoint_sequence,
-            expected_checkpoint_hash,
-            AuditExportProfile::Legacy,
-        )
-    }
-
-    fn freeze_with_profile(
-        &self,
-        range: AuditRange,
-        batch_id: [u8; 16],
-        expected_cursor: AuditChainCursor,
-        expected_checkpoint_sequence: u64,
-        expected_checkpoint_hash: [u8; 32],
-        profile: AuditExportProfile,
-    ) -> Result<PreparedAuditExport, AuditExportFailure> {
+    ) -> Result<PreparedAuditExport, RuntimeError> {
         let mut selection = ExportSelection::new(range);
-        selection.profile = profile;
         let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
         scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
             checkpoint_verifier.observe(&checkpoint)?;
@@ -626,7 +579,7 @@ impl AuditExportSource {
         if checkpoints.next_sequence != expected_checkpoint_sequence
             || checkpoints.previous_hash != expected_checkpoint_hash
         {
-            return Err(RuntimeError::InvalidValue.into());
+            return Err(RuntimeError::InvalidValue);
         }
         let mut event_verifier = EventVerifier::new(
             self.binding,
@@ -634,18 +587,13 @@ impl AuditExportSource {
             &self.operators,
             checkpoints.cursor,
         );
-        let mut requires_maintenance_profile = false;
         scan_events(&self.storage, &self.keys, |event| {
             event_verifier.observe_event(&event)?;
-            requires_maintenance_profile |= !selection.consider_mixed(event)?;
-            Ok(())
+            selection.consider_mixed(event)
         })?;
         let events = event_verifier.finish_reconciled()?;
         if events.cursor != expected_cursor {
-            return Err(RuntimeError::InvalidValue.into());
-        }
-        if requires_maintenance_profile {
-            return Err(AuditExportFailure::UnsupportedProfile);
+            return Err(RuntimeError::InvalidValue);
         }
         selection.ensure_bounded()?;
         Ok(PreparedAuditExport {
@@ -736,7 +684,6 @@ impl AuditExportSource {
 }
 
 struct ExportSelection {
-    profile: AuditExportProfile,
     range: AuditRange,
     checkpoints: Vec<AdminAuditCheckpoint>,
     events: Vec<AuditEvent>,
@@ -746,7 +693,6 @@ struct ExportSelection {
 impl ExportSelection {
     const fn new(range: AuditRange) -> Self {
         Self {
-            profile: AuditExportProfile::Legacy,
             range,
             checkpoints: Vec::new(),
             events: Vec::new(),

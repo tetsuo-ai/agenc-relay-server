@@ -20,7 +20,6 @@ sources = root / "docs/protocol-sources-and-decisions.md"
 manifest = root / "docs/specification-manifest.txt"
 
 expected_files = {
-    "docs/storage-migration-1-to-2.registry": "974756b301d823a666adf9f08a6dbdb02ea22921c09400f1b04eea43ed429514",
     "rfcs/rfc1459-irc-protocol.txt": "d1fdc86169252b234b17c2f501c0ba7f512ba697ddf8a13b3da7ee4491a76799",
     "rfcs/rfc2810-irc-architecture.txt": "b00c6ae92ef66b1b2c3a15df86e6e1ab8268bcb40ebbadd388d75531bf6e62f6",
     "rfcs/rfc2811-irc-channel-management.txt": "41e2b24141669f0094e78896f5d2c54d26db2cbed8a299cf9b0bb1aca42d3a96",
@@ -457,7 +456,6 @@ if len(e2ee_profile_token) != 43 or "=" in e2ee_profile_token:
 profile_digest = bytes.fromhex(profile_hash)
 profile_token = base64.urlsafe_b64encode(profile_digest).rstrip(b"=").decode("ascii")
 manifest_raw_targets = (
-    "docs/storage-migration-1-to-2.registry",
     "docs/federation-v1-profile.registry",
     "docs/irc-mls-e2ee-extension.md",
     "docs/ircd-architecture-and-implementation-spec.md",

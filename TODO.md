@@ -865,18 +865,13 @@ durability or rollback outcome.
   - Invariants: `DUR-03`, `DUR-04`, `DUR-07`, `DUR-08`.
   - Evidence: complete corruption/recovery matrix and reconstructed-state comparison with the reference model.
 
-- [x] `S05-011` **Implement authenticated migrations.** Build output through
-  the bounded construction ledger, preserve or explicitly transform every
-  schema/invariant, support interruption/restart, and install only the matching
-  completion record.
-  - Version 1 ships schema generation 1 with no migration edge. The compiled
-    empty registry rejects every successor, while the construction executor
-    validates and resumes a future checked-in edge without in-place mutation.
+- [x] `S05-011` **Enforce current storage format admission.** Reject obsolete
+  formats before startup, backup restore, or key rotation can write output.
   - After: `S05-010`.
-  - Targets: `agenc-ircd-storage`, migration tooling.
-  - References: [Architecture §§23.5.2 and 23.6](docs/ircd-architecture-and-implementation-spec.md#236-migrations).
+  - Targets: `agenc-ircd-storage`.
+  - References: [Architecture §23.6](docs/ircd-architecture-and-implementation-spec.md#236-storage-format-admission).
   - Invariants: `DUR-04`, `DUR-09`, `DUR-11`, `DUR-12`.
-  - Evidence: every migration edge, crash point, stale plan, tamper, restart, space, and output-validation test.
+  - Evidence: current-format round trips and unsupported-format refusal tests.
 
 - [x] `S05-012` **Implement backup and restore.** Produce the authenticated
   bounded backup stream; restore only through construction; create new server,
@@ -2677,8 +2672,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
 
 Stage 09 implementation includes strict WSS framing and Origin/ALPN policy,
 authorization-fenced history paging, metadata-only replay, immutable message
-identities and retention, signed resumable purge, and the stopped-daemon
-schema-generation 1-to-2 migration. The independent build/runtime matrix and
+identities and retention, and signed resumable purge. The independent build/runtime matrix and
 live capture, disabled restart, and purge lifecycles pass. The
 [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 closes exact source commit `a93e53e71d22a6d5ec46bd749ec18068a9fa572b` with 10
@@ -2878,13 +2872,13 @@ alone.
 
   - Diagnostic campaign on e6dd301: the unchanged 300-second, 64-client workload passes in 305.81 seconds, including original-session pressure recovery, strict post-restart authentication, rekey, zero final outboxes, and three clean stops. The previous intermittent restart loop does not reproduce or gain a proven cause. CAP-13 remains material: 5,961 busy refusals and message p99 of 59.01 seconds are recorded despite the campaign assertion passing. An uninstrumented repeat and full candidate qualification remain required.
 
-- [ ] `S10-008` **Run restore, migration, deletion, and key-lifecycle drills.**
-  Exercise ordinary and disaster restore, schema migration, storage rekey,
+- [ ] `S10-008` **Run restore, deletion, and key-lifecycle drills.**
+  Exercise ordinary and disaster restore, storage rekey,
   login-index transition, TLS/federation/sequencer/backup/audit key rotation,
   compromise response, rollback, and client-visible resynchronization.
   - After: `S10-006`, `S10-007`.
   - Targets: operational drill evidence and runbooks.
-  - References: [Architecture §§23.6–23.9 and 25.4–25.5](docs/ircd-architecture-and-implementation-spec.md#236-migrations).
+  - References: [Architecture §§23.6–23.9 and 25.4–25.5](docs/ircd-architecture-and-implementation-spec.md#236-storage-format-admission).
   - Invariants: `DUR-04` through `DUR-12`, `FED-10`, `OPS-04`.
   - Evidence: timed drills, artifact/state hashes, failure injection, operator steps, and verified post-drill conformance.
   - Progress: sixteen drills run through `scripts/qualify-stage-ten-drills.py`; twelve pass and four fail on findings CAP-5, CAP-9, and CAP-11.

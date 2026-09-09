@@ -1036,26 +1036,6 @@ impl StorageEngine {
         Ok(engine)
     }
 
-    /// Opens only the frozen immediate-predecessor source for stopped migration.
-    pub(crate) fn open_migration_source(config: StorageOpenConfig) -> Result<Self, StorageError> {
-        let initial = StorageRuntimeLimits::from_engine(config.limits)?;
-        let (_writer, reader) = storage_limit_pair(initial);
-        Self::open_authenticated(
-            EngineOpenConfig {
-                expected_schema_generation: 1,
-                expected_network_id: config.expected_network_id,
-                expected_server_id: config.expected_server_id,
-                state_directory: EngineStateDirectory::Writable(config.state_directory),
-                storage_master_key: config.storage_master_key,
-                rollback_guard_root_key: config.rollback_guard_root_key,
-                login_index_key: config.login_index_key,
-                previous_login_index_key: config.previous_login_index_key,
-                limits: config.limits,
-            },
-            reader,
-        )
-    }
-
     pub(crate) fn refresh_runtime_limits(&mut self) {
         self.runtime_limits.load().install_into(&mut self.limits);
     }
@@ -2605,8 +2585,7 @@ impl StorageEngine {
                         self.header.tbs().storage_key_generation,
                         &stored_key,
                     )?;
-                    crate::migration::validate_source_record(
-                        self.header.tbs().schema_generation,
+                    crate::validate_record_plaintext(
                         table,
                         &stored_key,
                         sealed.record_schema(),
@@ -3851,7 +3830,6 @@ pub(crate) fn draw_nonces_with_faults(
 #[cfg(test)]
 pub(crate) mod tests {
     mod history_reads;
-    mod migration;
     use std::fs::OpenOptions;
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};
@@ -4459,8 +4437,8 @@ pub(crate) mod tests {
                 target_database_header_hash: StorageDigest::from_bytes([6; 32]),
                 source_rollback_guard_hash: StorageDigest::from_bytes([7; 32]),
                 source_stream_digest: None,
-                source_schema_generation: 1,
-                target_schema_generation: 1,
+                source_schema_generation: crate::SCHEMA_GENERATION,
+                target_schema_generation: crate::SCHEMA_GENERATION,
                 transform_profile_hash: StorageDigest::from_bytes([8; 32]),
                 target_database_instance_id: DatabaseId::from_bytes([9; 16]),
                 source_master_key_id: StorageDigest::from_bytes([10; 32]),
@@ -5371,8 +5349,12 @@ pub(crate) mod tests {
             (TableId::NicknameReservation, b"Nickname".as_slice()),
             (TableId::ChannelName, b"#Channel".as_slice()),
         ] {
-            let value =
-                PersistentRecordValue::new(table, 1, 1, 0, None, Vec::new(), spelling.to_vec())?;
+            let body = if table == TableId::ChannelName {
+                crate::domain_records::fixtures::channel_name_body(1, "#Channel")?
+            } else {
+                spelling.to_vec()
+            };
+            let value = PersistentRecordValue::new(table, 1, 1, 0, None, Vec::new(), body)?;
             let semantic = if table == TableId::NicknameReservation {
                 Nickname::parse(
                     std::str::from_utf8(spelling).map_err(|_| StorageError::InvalidEncoding)?,

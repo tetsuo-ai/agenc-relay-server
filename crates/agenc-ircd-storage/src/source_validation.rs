@@ -26,13 +26,10 @@ impl<'a> AuthenticatedSourceRecord<'a> {
         record_schema: u32,
         plaintext: &'a [u8],
     ) -> Result<Self, StorageError> {
-        crate::migration::validate_source_record(
-            source_schema_generation,
-            table,
-            key,
-            record_schema,
-            plaintext,
-        )?;
+        if source_schema_generation != crate::SCHEMA_GENERATION {
+            return Err(StorageError::UnsupportedVersion);
+        }
+        crate::validate_record_plaintext(table, key, record_schema, plaintext)?;
         Ok(Self {
             source_schema_generation,
             table,

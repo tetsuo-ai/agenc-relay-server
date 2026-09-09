@@ -100,7 +100,7 @@ fn domain_body(table: TableId, kind: u16, bytes: Vec<u8>) -> Result<Vec<u8>, Sto
         return Ok(b"nickname".to_vec());
     }
     if table == TableId::ChannelName && kind == 1 {
-        return Ok(b"#channel".to_vec());
+        return crate::domain_records::channel_name_body(8, "#channel");
     }
     let seed = bytes.first().copied().unwrap_or(1);
     if table == TableId::E2eeObject {
@@ -1391,10 +1391,6 @@ fn storage_errors_and_fault_controllers_cover_the_closed_failure_surface()
             "database rejected the operation",
         ),
         (
-            StorageError::UnsupportedMigration,
-            "storage migration profile is unsupported",
-        ),
-        (
             StorageError::ResumeMismatch,
             "storage construction cannot be resumed",
         ),
@@ -1742,41 +1738,6 @@ fn real_startup_and_backup_inject_read_and_publication_boundaries() -> Result<()
             faults.verify_fired()?;
             owner.shutdown()?;
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn absent_migration_profile_still_exercises_both_validation_boundaries()
--> Result<(), Box<dyn Error>> {
-    let identity = StorageOperationIdentity {
-        kind: StorageConstructionKind::Migrate,
-        command_version: 1,
-        source_database_header_hash: digest(211),
-        target_database_header_hash: digest(212),
-        source_rollback_guard_hash: digest(213),
-        source_stream_digest: None,
-        source_schema_generation: 1,
-        target_schema_generation: 2,
-        transform_profile_hash: digest(214),
-        target_database_instance_id: DatabaseId::from_bytes([215; 16]),
-        source_master_key_id: digest(216),
-        source_guard_root_key_id: digest(217),
-        target_master_key_id: digest(218),
-        target_guard_root_key_id: digest(219),
-        planned_entry_count: 1,
-        construction_plan_hash: digest(220),
-    };
-    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
-        let faults = StorageFaultInjector::new(
-            StorageFaultCase {
-                site: StorageFaultSite::MigrationProfile,
-                boundary,
-            },
-            1,
-        )?;
-        assert!(identity.validate_migration_profile(&faults).is_err());
-        faults.verify_fired()?;
     }
     Ok(())
 }
@@ -2501,7 +2462,7 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
             TableId::Channel,
             StoredKey::new(vec![4; 16])?,
         )?],
-        b"#fixture".to_vec(),
+        crate::domain_records::channel_name_body(4, "#fixture")?,
     )?
     .encode()?;
     let (name_reference, name_source) = opened_domain_source(

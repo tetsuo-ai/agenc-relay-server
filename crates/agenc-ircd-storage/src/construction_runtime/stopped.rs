@@ -4,7 +4,6 @@
 use super::{ConstructionSourceDatabase, ConstructionTarget};
 use crate::construction_schema::ConstructionSchema;
 use crate::engine::StorageEngine;
-use crate::migration_profile::MigrationProfile;
 use crate::{DatabaseHeader, StorageError, StorageOpenConfig};
 
 impl ConstructionSourceDatabase {
@@ -15,15 +14,6 @@ impl ConstructionSourceDatabase {
         schema: ConstructionSchema,
     ) -> Result<Self, StorageError> {
         let engine = StorageEngine::open_construction_target(config, schema)?;
-        let _capacity = engine.startup_scan()?;
-        Ok(Self { engine })
-    }
-
-    pub(crate) fn open_migration_profile(
-        config: StorageOpenConfig,
-        profile: MigrationProfile,
-    ) -> Result<Self, StorageError> {
-        let engine = StorageEngine::open_migration_profile(config, profile)?;
         let _capacity = engine.startup_scan()?;
         Ok(Self { engine })
     }

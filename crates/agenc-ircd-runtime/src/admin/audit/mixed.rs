@@ -49,17 +49,11 @@ impl EventVerifier<'_> {
 }
 
 impl ExportSelection {
-    /// Returns false for a verified selected body outside the legacy profile.
-    /// The caller must still verify the complete source before reporting refusal.
-    pub(super) fn consider_mixed(&mut self, event: AuditEvent) -> Result<bool, RuntimeError> {
+    pub(super) fn consider_mixed(&mut self, event: AuditEvent) -> Result<(), RuntimeError> {
         if !self.range.contains(event.audit_sequence()) {
-            return Ok(true);
+            return Ok(());
         }
-        if self.profile == AuditExportProfile::Legacy && matches!(event, AuditEvent::Maintenance(_))
-        {
-            return Ok(false);
-        }
-        self.push_event(event).map(|()| true)
+        self.push_event(event)
     }
 }
 

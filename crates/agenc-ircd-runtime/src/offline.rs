@@ -5,15 +5,11 @@
 //! or make generated listeners active. Secret bytes move from operating-system
 //! entropy into mode-0600 files and crypto adapters only.
 
-pub use crate::admin::{LegacyAuditSourceValidator, SchemaThreeAuditSourceValidator};
 pub use crate::daemon::login_index::{
     LoginIndexRotationError, LoginIndexRotationReceipt, execute_login_index_finish,
     execute_login_index_start,
 };
 
-mod migration;
-
-pub use migration::{execute_schema_four_migration, execute_schema_three_migration};
 mod restore;
 pub use restore::execute_stopped_restore;
 

@@ -28,10 +28,6 @@ use crate::codec::{Decoder, Encoder};
 const DOMAIN_BODY_VERSION: u16 = 1;
 /// Account bodies gained durable administrative suspension state in version two.
 const ACCOUNT_BODY_VERSION: u16 = 2;
-/// Channel bodies gained persisted join-key verifier material in version two.
-const CHANNEL_KEY_BODY_VERSION: u16 = 2;
-/// Channel bodies gained durable administrative quarantine state in version three.
-const CHANNEL_BODY_VERSION: u16 = 3;
 /// Channel bodies gained complete membership and invite state in version four.
 const COMPLETE_CHANNEL_BODY_VERSION: u16 = 4;
 /// Record kind of a live (non-tombstone) domain row.
@@ -182,7 +178,7 @@ impl AccountRecordBody {
         }
         let mut decoder = Decoder::new(encoded);
         let version = decoder.u16()?;
-        if !matches!(version, DOMAIN_BODY_VERSION | ACCOUNT_BODY_VERSION) {
+        if version != ACCOUNT_BODY_VERSION {
             return Err(StorageError::UnsupportedVersion);
         }
         let account_id = read_account_id(&mut decoder)?;
@@ -212,11 +208,7 @@ impl AccountRecordBody {
         }
         let session_generation = generation(&mut decoder)?;
         let revision = revision(&mut decoder)?;
-        let admin_suspension_expires_at = if version == ACCOUNT_BODY_VERSION {
-            optional_second(&mut decoder)?
-        } else {
-            None
-        };
+        let admin_suspension_expires_at = optional_second(&mut decoder)?;
         decoder.finish()?;
         if !ascending(&contacts) || !ascending(&reserved_nicknames) {
             return Err(StorageError::InvalidEncoding);
@@ -378,8 +370,8 @@ fn optional_account_id(decoder: &mut Decoder<'_>) -> Result<Option<AccountId>, S
 /// Decoded channel-name index binding.
 #[derive(Clone, Eq, PartialEq)]
 pub struct DecodedChannelNameRecord {
-    /// Channel identity carried by typed rows; absent only for legacy raw-name rows.
-    pub channel_id: Option<ChannelInstanceId>,
+    /// Exact channel identity carried by the index row.
+    pub channel_id: ChannelInstanceId,
     /// Validated stable spelling used to rederive the private index key.
     pub name: ChannelNameValue,
 }
@@ -400,20 +392,10 @@ impl ChannelNameRecordBody {
         Ok(encoder.finish())
     }
 
-    /// Decodes either a typed row or one legacy raw-name body.
+    /// Decodes one complete channel identity and name binding.
     pub fn decode(encoded: &[u8]) -> Result<DecodedChannelNameRecord, StorageError> {
         if encoded.len() > MAX_CHANNEL_NAME_RECORD_BODY_BYTES {
             return Err(StorageError::LimitExceeded);
-        }
-        if encoded.first() != Some(&0) {
-            let spelling =
-                std::str::from_utf8(encoded).map_err(|_| StorageError::InvalidEncoding)?;
-            let name =
-                ChannelNameValue::parse(spelling).map_err(|_| StorageError::InvalidEncoding)?;
-            return Ok(DecodedChannelNameRecord {
-                channel_id: None,
-                name,
-            });
         }
         let mut decoder = Decoder::new(encoded);
         expect_version(&mut decoder)?;
@@ -421,10 +403,7 @@ impl ChannelNameRecordBody {
         let name = ChannelNameValue::parse(text(&mut decoder, MAX_CHANNEL_NAME_BYTES)?)
             .map_err(|_| StorageError::InvalidEncoding)?;
         decoder.finish()?;
-        Ok(DecodedChannelNameRecord {
-            channel_id: Some(channel_id),
-            name,
-        })
+        Ok(DecodedChannelNameRecord { channel_id, name })
     }
 }
 
@@ -434,23 +413,9 @@ pub struct ChannelRecordBody;
 impl ChannelRecordBody {
     /// Encodes one complete durable-authority channel projection.
     pub fn encode(channel: &DurableChannel) -> Result<Vec<u8>, StorageError> {
-        Self::encode_version(channel, true)
-    }
-
-    /// Encodes the version-three registered-channel projection during the
-    /// decoder-first compatibility phase.
-    pub fn encode_legacy(channel: &DurableChannel) -> Result<Vec<u8>, StorageError> {
-        Self::encode_version(channel, false)
-    }
-
-    fn encode_version(channel: &DurableChannel, complete: bool) -> Result<Vec<u8>, StorageError> {
-        validate_channel(channel, complete).map_err(|_| StorageError::LimitExceeded)?;
+        validate_channel(channel).map_err(|_| StorageError::LimitExceeded)?;
         let mut encoder = Encoder::with_capacity(0, MAX_CHANNEL_RECORD_BODY_BYTES)?;
-        encoder.put_u16(if complete {
-            COMPLETE_CHANNEL_BODY_VERSION
-        } else {
-            CHANNEL_BODY_VERSION
-        })?;
+        encoder.put_u16(COMPLETE_CHANNEL_BODY_VERSION)?;
         encoder.put_fixed(channel.channel_id.as_bytes())?;
         encoder.put_vector_u32(channel.name.presentation().as_bytes())?;
         encoder.put_fixed(&[
@@ -466,9 +431,7 @@ impl ChannelRecordBody {
         put_key_verifier(&mut encoder, channel.key_verifier.as_ref())?;
         put_member_limit(&mut encoder, channel.member_limit)?;
         put_topic(&mut encoder, channel.topic.as_ref())?;
-        if complete {
-            put_memberships(&mut encoder, &channel.memberships)?;
-        }
+        put_memberships(&mut encoder, &channel.memberships)?;
         put_count(&mut encoder, channel.role_grants.len())?;
         for (account_id, role) in &channel.role_grants {
             encoder.put_fixed(account_id.random().as_bytes())?;
@@ -477,13 +440,9 @@ impl ChannelRecordBody {
         put_entries(&mut encoder, &channel.bans)?;
         put_entries(&mut encoder, &channel.exceptions)?;
         put_entries(&mut encoder, &channel.invite_exceptions)?;
-        if complete {
-            put_invites(&mut encoder, &channel.invites)?;
-        }
+        put_invites(&mut encoder, &channel.invites)?;
         encoder.put_fixed(&[history_byte(channel.history)])?;
-        if complete {
-            put_user_ids(&mut encoder, &channel.e2ee_removal_pending)?;
-        }
+        put_user_ids(&mut encoder, &channel.e2ee_removal_pending)?;
         encoder.put_fixed(&[bool_byte(channel.admin_quarantined)])?;
         Ok(encoder.finish())
     }
@@ -495,24 +454,18 @@ impl ChannelRecordBody {
         }
         let mut decoder = Decoder::new(encoded);
         let version = decoder.u16()?;
-        if !matches!(
-            version,
-            DOMAIN_BODY_VERSION
-                | CHANNEL_KEY_BODY_VERSION
-                | CHANNEL_BODY_VERSION
-                | COMPLETE_CHANNEL_BODY_VERSION
-        ) {
+        if version != COMPLETE_CHANNEL_BODY_VERSION {
             return Err(StorageError::UnsupportedVersion);
         }
-        let channel = decode_channel(&mut decoder, version)?;
+        let channel = decode_channel(&mut decoder)?;
         decoder.finish()?;
-        validate_channel(&channel, version == COMPLETE_CHANNEL_BODY_VERSION)?;
+        validate_channel(&channel)?;
         Ok(channel)
     }
 }
 
 // agenc-review: focus owner=storage reviewed=2026-09-01 reason=version-gated-canonical-channel-layout-is-kept-in-wire-order
-fn decode_channel(decoder: &mut Decoder<'_>, version: u16) -> Result<DurableChannel, StorageError> {
+fn decode_channel(decoder: &mut Decoder<'_>) -> Result<DurableChannel, StorageError> {
     let channel_id = ChannelInstanceId::from_bytes(decoder.array()?);
     let name = ChannelNameValue::parse(text(decoder, MAX_CHANNEL_NAME_BYTES)?)
         .map_err(|_| StorageError::InvalidEncoding)?;
@@ -524,44 +477,18 @@ fn decode_channel(decoder: &mut Decoder<'_>, version: u16) -> Result<DurableChan
     let created_at = UtcSecond::from_unix_seconds(decoder.u64()?);
     let revision = revision(decoder)?;
     let modes = modes_from(byte(decoder)?)?;
-    let key_verifier = if matches!(
-        version,
-        CHANNEL_KEY_BODY_VERSION | CHANNEL_BODY_VERSION | COMPLETE_CHANNEL_BODY_VERSION
-    ) {
-        key_verifier(decoder)?
-    } else {
-        None
-    };
+    let key_verifier = key_verifier(decoder)?;
     let member_limit = member_limit(decoder)?;
     let topic = topic(decoder)?;
-    let memberships = if version == COMPLETE_CHANNEL_BODY_VERSION {
-        memberships(decoder)?
-    } else {
-        Vec::new()
-    };
+    let memberships = memberships(decoder)?;
     let role_grants = role_grants(decoder)?;
     let bans = entries(decoder)?;
     let exceptions = entries(decoder)?;
     let invite_exceptions = entries(decoder)?;
-    let invites = if version == COMPLETE_CHANNEL_BODY_VERSION {
-        invites(decoder)?
-    } else {
-        Vec::new()
-    };
+    let invites = invites(decoder)?;
     let history = history_from(byte(decoder)?)?;
-    let e2ee_removal_pending = if version == COMPLETE_CHANNEL_BODY_VERSION {
-        user_ids(decoder, MAX_MEMBERS_PER_CHANNEL)?
-    } else {
-        Vec::new()
-    };
-    let admin_quarantined = if matches!(
-        version,
-        CHANNEL_BODY_VERSION | COMPLETE_CHANNEL_BODY_VERSION
-    ) {
-        bool_from(byte(decoder)?)?
-    } else {
-        false
-    };
+    let e2ee_removal_pending = user_ids(decoder, MAX_MEMBERS_PER_CHANNEL)?;
+    let admin_quarantined = bool_from(byte(decoder)?)?;
     Ok(DurableChannel {
         channel_id,
         name,
@@ -589,10 +516,9 @@ fn decode_channel(decoder: &mut Decoder<'_>, version: u16) -> Result<DurableChan
 }
 
 // agenc-review: focus owner=storage reviewed=2026-09-01 reason=complete-channel-cross-field-invariants-are-validated-in-one-closed-gate
-fn validate_channel(channel: &DurableChannel, complete: bool) -> Result<(), StorageError> {
+fn validate_channel(channel: &DurableChannel) -> Result<(), StorageError> {
     let durable_authority = channel.scope == ChannelScope::Global
         || channel.persistence == PersistencePolicy::Registered;
-    let legacy_lifetime = complete || channel.persistence == PersistencePolicy::Registered;
     let ordered_memberships = ascending(
         &channel
             .memberships
@@ -615,7 +541,6 @@ fn validate_channel(channel: &DurableChannel, complete: bool) -> Result<(), Stor
             .collect::<Vec<_>>(),
     );
     if !durable_authority
-        || !legacy_lifetime
         || (channel.persistence == PersistencePolicy::Ephemeral
             && (channel.memberships.is_empty() || !channel.role_grants.is_empty()))
         || channel.modes.join_key != channel.key_verifier.is_some()
@@ -1311,9 +1236,15 @@ pub(crate) mod fixtures {
             TableId::Account => AccountRecordBody::encode(&account(seed)?),
             TableId::Session => SessionRecordBody::encode(&session(seed)?),
             TableId::Channel => ChannelRecordBody::encode(&channel(seed)?),
+            TableId::ChannelName => channel_name_body(seed, "#fixture"),
             TableId::Sanction => SanctionRecordBody::encode(&sanction(seed)?),
             _ => Ok(Vec::new()),
         }
+    }
+
+    pub(crate) fn channel_name_body(seed: u8, spelling: &str) -> Result<Vec<u8>, StorageError> {
+        let name = ChannelNameValue::parse(spelling).map_err(|_| StorageError::InvalidEncoding)?;
+        super::ChannelNameRecordBody::encode(ChannelInstanceId::from_bytes([seed; 16]), &name)
     }
 
     fn account_id(seed: u8) -> AccountId {

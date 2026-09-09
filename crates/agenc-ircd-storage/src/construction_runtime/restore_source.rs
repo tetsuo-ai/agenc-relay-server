@@ -6,7 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 use agenc_ircd_crypto::{DatabaseBinding, LoginIndexKey, RollbackGuardRootKey, StorageMasterKey};
 
 use super::RestoreBackupSource;
-use crate::{BackupTrustKey, SourceRecordValidator, StorageError, VerifiedBackup};
+use crate::{BackupTrustKey, StorageError};
 
 /// Independent key roles and bounds for one signed restore source.
 pub struct RestoreBackupSourceConfig<'a> {
@@ -24,52 +24,10 @@ pub struct RestoreBackupSourceConfig<'a> {
     pub maximum_bytes: u64,
 }
 
-pub(crate) enum RestoreSourceAdmission<'a> {
-    Current,
-    WithLegacy(&'a mut dyn SourceRecordValidator),
-}
-
-impl RestoreSourceAdmission<'_> {
-    fn admit<R: Read + Seek>(
-        self,
-        input: &mut R,
-        config: &RestoreBackupSourceConfig<'_>,
-        verified: VerifiedBackup,
-    ) -> Result<VerifiedBackup, StorageError> {
-        match (
-            verified.header.source_header().tbs().schema_generation,
-            self,
-        ) {
-            (3 | 4, _) => Ok(verified),
-            (2, Self::WithLegacy(validator)) => crate::backup::admit_verified_legacy_backup(
-                input,
-                verified,
-                &config.source_master_key,
-                &config.source_guard_root,
-                config.trusted_keys,
-                config.maximum_bytes,
-                validator,
-            ),
-            _ => Err(StorageError::UnsupportedMigration),
-        }
-    }
-}
-
 impl<R: Read + Seek> RestoreBackupSource<R> {
-    /// Requires complete semantic admission for a legacy schema-two backup.
-    /// Schema-three and schema-four backups retain their original restore profile.
-    pub fn open_with_legacy_validation(
-        input: R,
-        config: RestoreBackupSourceConfig<'_>,
-        validator: &mut dyn SourceRecordValidator,
-    ) -> Result<Self, StorageError> {
-        Self::open_admitted(input, config, RestoreSourceAdmission::WithLegacy(validator))
-    }
-
     pub(crate) fn open_admitted(
         mut input: R,
         config: RestoreBackupSourceConfig<'_>,
-        admission: RestoreSourceAdmission<'_>,
     ) -> Result<Self, StorageError> {
         input
             .seek(SeekFrom::Start(0))
@@ -81,7 +39,6 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
             config.trusted_keys,
             config.maximum_bytes,
         )?;
-        let verified = admission.admit(&mut input, &config, verified)?;
         let source = verified.header.source_header();
         let binding = DatabaseBinding::new(
             source.tbs().network_id,

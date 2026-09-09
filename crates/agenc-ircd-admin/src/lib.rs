@@ -28,8 +28,7 @@ mod tbs;
 
 pub use audit::{
     AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEvent, AdminAuditEventTbs,
-    AdminAuditPhase, AuditChainCursor, AuditExportProfile, MAX_AUDIT_EVENT_BYTES,
-    render_export_batch, render_export_batch_with_profile,
+    AdminAuditPhase, AuditChainCursor, MAX_AUDIT_EVENT_BYTES, render_export_batch,
 };
 pub use audit_event::AuditEvent;
 pub use base64::{decode_fixed_base64url, encode_base64url};

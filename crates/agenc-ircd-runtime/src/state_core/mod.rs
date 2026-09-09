@@ -1805,7 +1805,6 @@ const fn storage_rejection_result(error: StorageError) -> ResultClass {
         | StorageError::FilesystemRejected
         | StorageError::WriterLocked
         | StorageError::DatabaseRejected
-        | StorageError::UnsupportedMigration
         | StorageError::ResumeMismatch => ResultClass::Error,
     }
 }
