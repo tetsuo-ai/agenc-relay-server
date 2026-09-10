@@ -29,7 +29,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Repository history | Push the existing committed branch and open its review | Complete at the baseline commit |
 | Conformance maintenance | Bind the accepted current-format specification and preserve historical evidence | Baseline and requirement bindings repaired |
 | Storage initialization | Preserve every existing rollback guard and reject reused initialization directories | Implemented; 316 storage tests pass |
-| STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Open; upstream release required |
+| STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Mutation/abort prototype prepared; full mechanism and upstream release open |
 | CAP-73 authority | Authenticate public state and its complete historical transitions without exposing private MLS context | Open |
 | CAP-73 recovery | Ingest signed terminal evidence and atomically install Closed or Conflict | Open |
 | CAP-74 | Resolve retained edge witnesses with authenticated ancestry | Open |
