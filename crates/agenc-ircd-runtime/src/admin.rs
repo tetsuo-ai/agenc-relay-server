@@ -1906,7 +1906,11 @@ impl AdminOwner {
                 }
             }
             AuditedReloadStart::Refused(rejection) => {
-                if self.audit.commit_event(&failure).is_err() {
+                if self
+                    .commit_action_audit(generation, failure, token)
+                    .await
+                    .is_err()
+                {
                     self.fail_closed(generation);
                     return;
                 }
@@ -2764,6 +2768,7 @@ async fn finish_admin_writer<W: AsyncWrite + Unpin>(writer: &mut W) {
 
 #[cfg(test)]
 mod tests {
+    mod reload_refusal;
     use std::fs::{self, OpenOptions};
     use std::io;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};

@@ -44,6 +44,7 @@ pub(super) enum ConvertedRequest {
     AccountService {
         opcode: FederationOpcode,
         envelope: Vec<u8>,
+        bound: Option<BoundSession>,
     },
     /// A session close with its hide kind.
     SessionClose {
@@ -105,17 +106,9 @@ pub(super) fn convert_operation(
         }
         FederatedOperation::AccountService {
             opcode,
-            session_id: None,
+            session_id,
             envelope,
-        } => {
-            let bytes = envelope
-                .encode_canonical()
-                .map_err(|_| DomainError::InvalidArgument)?;
-            Ok(ConvertedRequest::AccountService {
-                opcode: *opcode,
-                envelope: bytes.as_slice().to_vec(),
-            })
-        }
+        } => convert_account_carrier(context.domain(), peer, *opcode, *session_id, envelope),
         FederatedOperation::HistoryQuery {
             session_id,
             channel_id,
@@ -136,7 +129,6 @@ pub(super) fn convert_operation(
                 cursor: *cursor,
             })))
         }
-        FederatedOperation::AccountService { .. } => Ok(ConvertedRequest::Unavailable),
         _ => {
             let session_id = operation.session_id().ok_or(DomainError::InvalidArgument)?;
             let (user_id, bound) = hosted_session(context.domain(), peer, session_id)?;
@@ -152,6 +144,26 @@ pub(super) fn convert_operation(
             })))
         }
     }
+}
+
+fn convert_account_carrier(
+    domain: &DomainState,
+    peer: ServerId,
+    opcode: FederationOpcode,
+    session_id: Option<SessionId>,
+    envelope: &SchemaObject,
+) -> Result<ConvertedRequest, DomainError> {
+    let bound = session_id
+        .map(|session_id| hosted_session(domain, peer, session_id).map(|(_, bound)| bound))
+        .transpose()?;
+    let bytes = envelope
+        .encode_canonical()
+        .map_err(|_| DomainError::InvalidArgument)?;
+    Ok(ConvertedRequest::AccountService {
+        opcode,
+        envelope: bytes.as_slice().to_vec(),
+        bound,
+    })
 }
 
 fn convert_open(

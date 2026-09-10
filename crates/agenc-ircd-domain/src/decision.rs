@@ -248,6 +248,13 @@ impl E2eeRemovalFinality {
 }
 
 impl AuthorizedCommand {
+    /// Discards the authorization proof and returns the canonical command.
+    /// The caller must authorize it again before planning at another revision.
+    #[must_use]
+    pub fn into_command(self) -> CanonicalCommand {
+        self.command
+    }
+
     /// Returns the exact live user authority.
     #[must_use]
     pub const fn user_id(&self) -> UserId {
@@ -6171,11 +6178,6 @@ mod tests {
     {
         let mut fixture = fixture()?;
         let initial_state_revision = fixture.state.revision();
-        let initial_account_revision = fixture
-            .state
-            .account(fixture.owner_account)
-            .ok_or(DomainError::NotFound)?
-            .revision();
         let expires_at = UtcSecond::from_unix_seconds(100);
         fixture
             .state
@@ -6190,7 +6192,7 @@ mod tests {
                 .account(fixture.owner_account)
                 .ok_or(DomainError::NotFound)?
                 .revision(),
-            initial_account_revision
+            next_revision(initial_state_revision)?
         );
         assert!(
             fixture
@@ -6217,7 +6219,7 @@ mod tests {
                 .account(fixture.owner_account)
                 .ok_or(DomainError::NotFound)?
                 .revision(),
-            initial_account_revision
+            next_revision(next_revision(initial_state_revision)?)?
         );
         assert!(
             !fixture

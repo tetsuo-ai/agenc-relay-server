@@ -20,6 +20,7 @@ pub(crate) use render::prefix as source_prefix;
 mod render;
 mod request;
 mod retention;
+mod revocations;
 mod startup;
 mod sync;
 #[cfg(test)]
@@ -139,6 +140,8 @@ struct ConnectionOrigin {
     ever_acked: bool,
     /// A committed JOIN still owns its topic and NAMES response.
     join_names_pending: bool,
+    /// A committed session removal requires closure after any final receipt.
+    revoked: bool,
     deleted: bool,
     del_acked: bool,
 }
@@ -180,6 +183,7 @@ enum PendingCommit {
         companion_last: (u64, u64, [u8; 16]),
         coverage: Vec<journal::Version>,
         join_echoes: Vec<join_echo::JoinEcho>,
+        revoked: Vec<ConnectionGeneration>,
     },
     /// An event was applied; ACK follows the commit.
     Event {
@@ -187,6 +191,7 @@ enum PendingCommit {
         completion: Option<RequestId>,
         coverage: Option<journal::Version>,
         join_echo: Option<Box<join_echo::JoinEcho>>,
+        revoked: Option<ConnectionGeneration>,
     },
     /// A complete ordinary prefix shares one exclusive storage receipt.
     OrdinaryBatch(Box<ordinary_batch::Pending>),
@@ -1071,6 +1076,7 @@ impl EdgeFederation {
                 account: None,
                 acked_generation: None,
                 ever_acked: false,
+                revoked: false,
                 join_names_pending: false,
                 del_acked: false,
                 deleted: false,
@@ -1260,14 +1266,7 @@ impl EdgeFederation {
 
     /// Finishes the batch that just committed.
     pub fn batch_applied(&mut self, context: &mut StateCoreContext) -> Vec<EdgeCompletion> {
-        if matches!(self.commit.as_ref(), Some(PendingCommit::Journal { staged_after, .. })
-            if context.head().storage_commit_sequence <= *staged_after)
-        {
-            return Vec::new();
-        }
-        if matches!(self.commit.as_ref(), Some(PendingCommit::OrdinaryBatch(pending))
-            if context.head().storage_commit_sequence <= pending.staged_after)
-        {
+        if self.receipt_pending(context) {
             return Vec::new();
         }
         let mut completions = Vec::new();
@@ -1289,6 +1288,7 @@ impl EdgeFederation {
                 completion,
                 coverage,
                 join_echo,
+                revoked,
             }) => {
                 if let Some(echo) = join_echo
                     && let Err(violation) = join_echo::committed(self, *echo)
@@ -1297,6 +1297,7 @@ impl EdgeFederation {
                     return Vec::new();
                 }
                 completions.extend(self.settle_event(context, *header, completion, coverage));
+                completions.extend(revocations::committed(self, revoked));
             }
             Some(PendingCommit::SnapshotInstalled) => {
                 completions.extend(sync::installed(self, context));
@@ -1318,6 +1319,7 @@ impl EdgeFederation {
                 companion_last,
                 coverage,
                 join_echoes,
+                revoked,
             }) => {
                 if !self.commit_coverage(context, coverage) {
                     return Vec::new();
@@ -1332,12 +1334,22 @@ impl EdgeFederation {
                     base_last,
                     companion_last,
                 ));
+                completions.extend(revocations::committed(self, revoked));
             }
             None => {}
         }
         completions.extend(events::drain_queued(self, context));
         journal::continue_write(self, context);
         completions
+    }
+
+    fn receipt_pending(&self, context: &StateCoreContext) -> bool {
+        let staged_after = match self.commit.as_ref() {
+            Some(PendingCommit::Journal { staged_after, .. }) => Some(*staged_after),
+            Some(PendingCommit::OrdinaryBatch(pending)) => Some(pending.staged_after),
+            _ => None,
+        };
+        staged_after.is_some_and(|sequence| context.head().storage_commit_sequence <= sequence)
     }
 
     fn commit_join_echoes(

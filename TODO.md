@@ -1550,11 +1550,11 @@ code but deferred because each needs a design decision, a domain change, or a
 specification revision. None blocks the core-v1 gate. Line references are to
 the closure branch at review time.
 
-- [ ] Keyed JOIN and `MODE +k` replan after the Argon2 worker with
-  `plan_authorized` at the original revision (`channels.rs` `finish_pending`),
-  so any durable commit during the hash window returns `StaleRevision` and
-  renders SERVERBUSY. Re-authorize at the current revision with an unmetered
-  snapshot before replanning.
+- [x] Keyed JOIN and `MODE +k` now reauthorize with an unmetered current
+  snapshot after the Argon2 worker completes. Unrelated commits no longer
+  invalidate the result; changed session or channel authority still refuses
+  it. Deferred JOIN, MODE, changed-key and disconnected-session regressions
+  cover the repair.
 - [ ] `CHANCTL`, `CHATHISTORY`, and `MODE -b` resolve the channel name before
   authorization (`command_convert.rs`), so an unknown name answers 461 while an
   existing secret channel answers 481. Map an unresolved name to the same
@@ -1571,9 +1571,9 @@ the closure branch at review time.
   (`channels.rs` `close_registered`) and is retried only on the next batch
   event, so an idle server keeps the dead session and nickname (`STA-01`).
   Retry from a timer or from connection-closed events.
-- [ ] The account admin after-image does not advance `account.revision`
-  while the channel arm does (`state_core/mod.rs`), so `durable.rs` rewrites
-  the row under the old revision. Not verified against the storage engine.
+- [x] Account administration advances `account.revision` in both the durable
+  after-image and live state. The regression checks suspension, restoration,
+  matching after-images and refusal of stale confirmation revisions.
 - [ ] Committed `ACCT` and `CHANCTL` mutations emit no reply when
   `standard-replies` was not negotiated (`mutation_render.rs`), although
   Section 14.6 promises `NOTE ... UPDATED`; `CHATHISTORY` renders zero frames.
@@ -1591,11 +1591,10 @@ the closure branch at review time.
   against keys installed for the service account.
 - [ ] Disabled listeners still load TLS material, and `listener_key_reuse`
   and the runtime disagree about same-path key sharing. Decide one policy.
-- [ ] `runtime_config.rs` maps `TrySendError::Full` to
-  `AuditedReloadStart::Indeterminate` in `activate_audited` and
-  `commit_outcome` while `send_activation` maps it to `Busy`. `Full` is a
-  determinate rejection; unreachable today because the single-flight lease
-  keeps one prepared reload alive.
+- [x] Reload activation and outcome submission distinguish full or closed
+  inbox refusal from a lost reply after acceptance. A refused REHASH now
+  commits its failure audit before replying. Tests cover full-queue retry,
+  closed inboxes, lost replies and the admin audit receipt boundary.
 - [ ] The connection reader to StateCore channel is one process-wide 64-slot
   mpsc sized with the signal constant and shared with `Opened` notices and
   maintenance events (`daemon.rs`), so the per-connection

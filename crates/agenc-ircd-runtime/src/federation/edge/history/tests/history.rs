@@ -141,6 +141,7 @@ fn fixture_with_options(
     edge.origins.insert(
         generation,
         super::super::ConnectionOrigin {
+            revoked: false,
             pending_updates: std::collections::VecDeque::new(),
             origin_id: OriginId::from_bytes([8; 16]),
             connection_id: agenc_ircd_types::ConnectionId::from_bytes([7; 16]),

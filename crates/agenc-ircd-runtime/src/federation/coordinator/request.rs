@@ -490,11 +490,16 @@ fn run_operation(
             coordinator.queue_remote_session_open(link, peer, fresh, *seed, grant_id);
             Ok(())
         }
-        ConvertedRequest::AccountService { opcode, envelope } => {
+        ConvertedRequest::AccountService {
+            opcode,
+            envelope,
+            bound,
+        } => {
             if context.is_quiescing() {
                 return Err(Violation::Phase);
             }
-            coordinator.queue_remote_carrier(link, peer, fresh, opcode, envelope)
+            coordinator.bind_remote_account_request(context, peer, &mut fresh, opcode, bound)?;
+            coordinator.queue_remote_carrier(context, link, peer, fresh, envelope)
         }
         ConvertedRequest::SessionClose { user_id, kind } => {
             close_session(coordinator, context, link, peer, fresh, user_id, kind)

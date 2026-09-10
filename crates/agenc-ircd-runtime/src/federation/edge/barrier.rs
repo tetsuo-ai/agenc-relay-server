@@ -484,6 +484,11 @@ fn apply_complete(
         companion_last: partition.companion_last,
         coverage,
         join_echoes,
+        revoked: open
+            .base_events
+            .values()
+            .filter_map(|(_, event)| super::revocations::prepare(context, event))
+            .collect(),
     };
     writes.push(receipt_write);
     for write in companion_writes {

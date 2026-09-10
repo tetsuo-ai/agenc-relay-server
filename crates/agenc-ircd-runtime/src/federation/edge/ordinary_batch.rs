@@ -15,6 +15,7 @@ use agenc_ircd_types::RequestId;
 pub(super) struct EventReceipt {
     pub(super) header: EventHeader,
     pub(super) completion: Option<RequestId>,
+    pub(super) revoked: Option<crate::connection::ConnectionGeneration>,
 }
 
 pub(super) struct Pending {
@@ -115,6 +116,7 @@ pub(super) fn committed(
     }
     let mut completions = Vec::new();
     for receipt in &pending.receipts {
+        completions.extend(super::revocations::committed(edge, receipt.revoked));
         if let Some(request) = receipt.completion {
             completions.extend(events::committed_completion(
                 edge,

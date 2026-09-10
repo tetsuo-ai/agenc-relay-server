@@ -172,6 +172,7 @@ impl Draft {
         self.receipts.push(EventReceipt {
             header: *header,
             completion,
+            revoked: super::super::revocations::prepare(context, projected),
         });
         Ok(())
     }

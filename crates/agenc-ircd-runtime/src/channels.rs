@@ -5,7 +5,10 @@
 //! authorization, external inputs, bounded channel-key crypto continuations,
 //! commit-coupled rendering, and transport-safe session removal.
 
+mod deferred_authority;
 mod history;
+
+use deferred_authority::DeferredAuthority;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -162,6 +165,7 @@ struct PendingCryptoCommand {
     authorized: AuthorizedCommand,
     external: ExternalInputs,
     render_command: CanonicalCommand,
+    authority: DeferredAuthority,
     current: PendingCryptoKind,
     remaining: VecDeque<PreparedCryptoJob>,
     observation: CommandObservation,
@@ -233,6 +237,8 @@ impl RegisteredCommandExecutor {
             return rendered;
         }
         let prepared = (|| {
+            let authority =
+                DeferredAuthority::capture(context, origin.bound, &plan.render_command)?;
             let mut jobs = prepare_crypto_jobs(
                 context,
                 origin.bound,
@@ -258,9 +264,16 @@ impl RegisteredCommandExecutor {
                 TimerKind::CommandDeadline,
                 TimedId::Sequence(sequence),
             )?;
-            Ok((jobs, first, sequence, next_sequence, capabilities))
+            Ok((
+                jobs,
+                first,
+                sequence,
+                next_sequence,
+                capabilities,
+                authority,
+            ))
         })();
-        let (jobs, first, sequence, next_sequence, capabilities) = match prepared {
+        let (jobs, first, sequence, next_sequence, capabilities, authority) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 context.complete_command_observation(observation, ResultClass::Error);
@@ -284,6 +297,7 @@ impl RegisteredCommandExecutor {
             authorized,
             external,
             render_command,
+            authority,
             current: first.kind(),
             remaining: jobs,
             observation,
@@ -762,6 +776,7 @@ fn finish_pending(
         authorized,
         external,
         render_command,
+        authority,
         observation,
         ..
     } = pending;
@@ -774,9 +789,9 @@ fn finish_pending(
             message: &message,
         },
     };
-    let decision = match context.domain().plan_authorized(authorized, Some(external)) {
+    let decision = match authority.finish(context, authorized, external) {
         Ok(decision) => decision,
-        Err(error) => match domain_plan_error(error) {
+        Err(error) => match error {
             SessionCommandError::Public { error, silent } => {
                 let rendered = crate::client_render::render_domain_failure(
                     context,
@@ -1638,6 +1653,7 @@ pub(crate) struct FederatedDeferred {
     pub(crate) requests: Vec<ExternalInputRequest>,
     pub(crate) jobs: VecDeque<PreparedCryptoJob>,
     pub(crate) current: PendingCryptoKind,
+    authority: DeferredAuthority,
 }
 
 /// The public failure of one federated command, with the client-facing
@@ -1694,6 +1710,7 @@ pub(crate) fn plan_federated_command(
             .map_err(|error| domain_plan_error(error).into());
     }
     let command = rebuild(context.domain())?;
+    let authority = DeferredAuthority::capture(context, bound, &command)?;
     let mut jobs = federated_key_jobs(
         context,
         bound,
@@ -1712,6 +1729,7 @@ pub(crate) fn plan_federated_command(
         requests: crypto_requests,
         jobs,
         current,
+        authority,
     })))
 }
 
@@ -1800,15 +1818,15 @@ impl FederatedDeferred {
         context: &StateCoreContext,
     ) -> Result<PlanDecision, FederatedRefusal> {
         let _ = &self.requests;
-        context
-            .domain()
-            .plan_authorized(self.authorized, Some(self.external))
-            .map_err(|error| domain_plan_error(error).into())
+        self.authority
+            .finish(context, self.authorized, self.external)
+            .map_err(Into::into)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod deferred_revision;
     use agenc_ircd_crypto::{CryptoError, CryptoWorkerError};
     use agenc_ircd_domain::{MessageCommand, MessageTarget, NicknameValue, RateBucket, RateCharge};
     use agenc_ircd_types::{MonotonicTick, UserId};

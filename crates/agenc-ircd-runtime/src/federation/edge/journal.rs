@@ -556,6 +556,7 @@ pub(super) fn restore_origin(
 
 fn restored_origin(record: OriginRecord, row: &FederationOriginRecord) -> ConnectionOrigin {
     ConnectionOrigin {
+        revoked: false,
         pending_updates: std::collections::VecDeque::new(),
         origin_id: record.origin_id,
         connection_id: record.connection_id,

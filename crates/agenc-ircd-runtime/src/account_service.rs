@@ -4597,7 +4597,7 @@ impl AccountServiceCoordinator {
             transaction_record.expose_for_persistence().to_vec(),
         )?;
         let response = sealed.response_intent().response().as_bytes();
-        let writes = vec![
+        let mut writes = vec![
             AccountServiceDurableWrite::put(
                 TableId::AuthTransaction,
                 StoredKey::new(sealed.transaction_id().as_bytes().to_vec())?,
@@ -4605,6 +4605,13 @@ impl AccountServiceCoordinator {
             )?,
             request_result_write(revision, &request, RequestTerminal::Start, None, response)?,
         ];
+        context.join_remote_account_response(
+            request.generation,
+            revision,
+            response,
+            None,
+            &mut writes,
+        )?;
         let frames = self.response_frames(context, &request, response, false)?;
         let fanout = context
             .fanout_request_to(request.generation, frames)
@@ -4779,6 +4786,17 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        context.join_remote_account_response(
+            request.generation,
+            revision,
+            response,
+            sealed.result().ok().map(
+                |_| crate::federation::codec::results::ResultArm::Committed {
+                    resulting_state_generation: revision,
+                },
+            ),
+            &mut writes,
+        )?;
         let accepted = context.stage_durable_with_account_service(
             plan,
             fanout,

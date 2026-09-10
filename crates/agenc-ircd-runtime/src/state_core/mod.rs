@@ -3217,6 +3217,7 @@ impl StateCore {
                     .durable_account(account_id)
                     .ok_or(AdminCoreFailure::InvalidTarget)?;
                 account.admin_suspension_expires_at = Some(expires_at);
+                account.revision = revision;
                 Ok(AdminMutationAfterImage::Account(account))
             }
             AdminMutation::RestoreAccount(account_id) => {
@@ -3226,6 +3227,7 @@ impl StateCore {
                     .durable_account(account_id)
                     .ok_or(AdminCoreFailure::InvalidTarget)?;
                 account.admin_suspension_expires_at = None;
+                account.revision = revision;
                 Ok(AdminMutationAfterImage::Account(account))
             }
             AdminMutation::QuarantineChannel(channel_id)
@@ -4536,6 +4538,7 @@ mod lifecycle_tests {
 #[cfg(test)]
 mod tests {
     mod account_shutdown;
+    mod admin_revision;
     mod local_join;
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use tokio::sync::{mpsc, oneshot};
