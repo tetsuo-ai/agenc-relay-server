@@ -1807,10 +1807,10 @@ None blocks the core-v1 gate.
   `publish`, the file stays under its final name while the caller gets an
   error, and a retry then fails on `RENAME_NOREPLACE`. Unlink on post-publish
   failure or return a published-but-unverified receipt.
-- [ ] `cleanup_random_temporaries` lists by path and unlinks relative to the
-  locked directory descriptor (`platform.rs`), so the two can name different
-  directories if a parent is swapped in between; the prefix check fails
-  closed. List through the descriptor instead.
+- [x] `cleanup_random_temporaries` enumerates and unlinks through the same
+  locked directory descriptor. A regression replaces its original path,
+  preserves unrelated replacement-directory files, and verifies a fresh
+  enumeration cursor on a second sweep.
 - [ ] `sealed.rs` `decode` copies the ciphertext with `to_vec` and `open`
   clones it again, so every full scan pays two 16 MiB copies per record.
 - [ ] `construction_runtime.rs` `state.checkpoint_manifest_sequence + 1` is

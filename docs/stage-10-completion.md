@@ -37,7 +37,7 @@ unsupported. The current-format backup and restore contract remains required.
 | CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
 | Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Open |
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Open |
-| Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding repaired; other items open |
+| Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding and temporary cleanup repaired; other items open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Open |
 | Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
 
@@ -92,6 +92,15 @@ The first separate storage run refused its physical reserve probe because
 filesystem free space changed between samples on all five attempts. The same
 probe passes in the completed workspace run. Its exact boundary requirement
 and retry count are unchanged.
+
+### Temporary cleanup evidence
+
+Storage startup and backup creation now enumerate temporary files through
+the same open directory used for deletion. The new regression replaces the
+original directory path, checks that the replacement's files remain intact,
+and repeats cleanup through the retained descriptor. It fails with the earlier
+path-based enumeration and passes with the repair. All 10 platform tests,
+the complete storage suite and workspace Clippy pass.
 
 ## Required production evidence
 

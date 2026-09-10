@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 765
-reviewed_source_sha256 = "65922599e0947c6ac4fc7e057387bac12fd7d429307377a36b85dc75e256e3c8"
+reviewed_source_sha256 = "1132a66ebdfa94a7c3c37b4dffd05b612e5cf252f7842c021e235b94ae3db92b"
 deferred = []
 
 [[region]]
@@ -28,7 +28,7 @@ reason = "Sequence-zero admission, nonce accounting, database commit and exclusi
 id = "storage-initial-guard-absence"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/platform.rs"
-source_sha256 = "ea451ea354dcb6230bc584dc30d20fada91a1045576023859644953d40218cd4"
+source_sha256 = "0321aa07c6e6c93965cc8372df7549b4ce3a868273d1ffa5fb7afcac85cd6973"
 start_line = 560
 end_line = 566
 metric = "branches"
@@ -38,7 +38,7 @@ reason = "Every existing guard entry, including dangling symlinks, and every ins
 id = "storage-guard-durable-publication"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/platform.rs"
-source_sha256 = "ea451ea354dcb6230bc584dc30d20fada91a1045576023859644953d40218cd4"
+source_sha256 = "0321aa07c6e6c93965cc8372df7549b4ce3a868273d1ffa5fb7afcac85cd6973"
 start_line = 578
 end_line = 636
 metric = "branches"
@@ -10581,3 +10581,13 @@ start_line = 520
 end_line = 644
 metric = "branches"
 reason = "Durable channel authority, membership and canonical text validation must reject every invalid stored projection."
+
+[[region]]
+id = "storage-descriptor-temporary-cleanup"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/platform.rs"
+source_sha256 = "0321aa07c6e6c93965cc8372df7549b4ce3a868273d1ffa5fb7afcac85cd6973"
+start_line = 872
+end_line = 887
+metric = "branches"
+reason = "Temporary enumeration and deletion must use the same open directory authority and reject malformed owned names."
