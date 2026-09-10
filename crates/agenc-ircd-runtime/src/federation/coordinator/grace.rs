@@ -1,7 +1,6 @@
 //! Link loss, the fixed origin grace interval, and bounded expiry cleanup
 //! (spec 20.5 and 20.10).
 
-use agenc_ircd_domain::CanonicalCommand;
 use agenc_ircd_domain::federation::{MutationContext, SessionHideKind};
 use agenc_ircd_storage::federation_records::PeerPhase;
 use agenc_ircd_types::{ServerId, UserId};
@@ -26,6 +25,7 @@ pub(super) fn link_lost(
     let Ok(deadline) = coordinator.origins.link_lost(peer, incarnation, now) else {
         return;
     };
+    context.suspend_federation_peer(peer);
     state.grace_deadline = Some(deadline);
     state.phase = PeerPhase::Suspended;
     let _scheduled =
@@ -59,18 +59,11 @@ pub(super) fn queue_hosted_cleanup(
     context: &mut StateCoreContext,
     peer: ServerId,
 ) {
-    let hosted: Vec<UserId> = context
-        .domain()
-        .session_user_ids()
-        .filter(|user_id| {
-            context
-                .domain()
-                .session(*user_id)
-                .is_some_and(|session| session.home_server_id() == peer)
-        })
-        .collect();
+    let hosted: Vec<(agenc_ircd_types::SessionId, UserId)> =
+        context.domain().retained_peer_sessions(peer).collect();
     if let Some(state) = coordinator.peers.get_mut(&peer) {
-        state.cleanup.extend(hosted);
+        state.cleanup_cursor = hosted.first().map(|(session, _)| *session.as_bytes());
+        state.cleanup = hosted.into_iter().map(|(_, user)| user).collect();
     }
     continue_cleanup(coordinator, context, peer);
 }
@@ -98,10 +91,10 @@ pub(super) fn timer_fired(
         return true;
     }
     if let Some(state) = coordinator.peers.get_mut(&peer) {
-        state.phase = PeerPhase::Expired;
+        state.fence_pending = true;
         state.grace_deadline = None;
     }
-    queue_hosted_cleanup(coordinator, context, peer);
+    super::authority::continue_fence(coordinator, context, peer);
     true
 }
 
@@ -133,35 +126,52 @@ fn hide_next(
     context: &mut StateCoreContext,
     peer: ServerId,
 ) -> bool {
-    let Some(state) = coordinator.peers.get_mut(&peer) else {
-        return false;
-    };
-    while let Some(user_id) = state.cleanup.pop_front() {
-        let Some(bound) = super::request::bound_for(context, user_id) else {
-            continue;
+    loop {
+        let Some(state) = coordinator.peers.get(&peer) else {
+            return false;
         };
+        if state.fence_pending {
+            return false;
+        }
+        let Some(user_id) = state.cleanup.front().copied() else {
+            return false;
+        };
+        if context.domain().retained_session(user_id).is_none() {
+            if let Some(state) = coordinator.peers.get_mut(&peer) {
+                state.cleanup.pop_front();
+            }
+            continue;
+        }
         let Ok(plan) = context.domain().plan_session_disconnected(user_id) else {
-            continue;
+            return false;
         };
-        let command = CanonicalCommand::quit(None);
-        let Ok(fanout) =
-            crate::mutation_render::render_mutation(context, bound, None, &command, &plan)
+        let Ok(fanout) = crate::mutation_render::render_federation_expiry(context, user_id, &plan)
         else {
-            continue;
+            return false;
+        };
+        let Ok(writes) = super::authority::cleanup_writes(
+            coordinator,
+            context,
+            peer,
+            user_id,
+            plan.resulting_revision().get(),
+        ) else {
+            return false;
         };
         context.set_mutation_context(MutationContext {
             hide_kind: Some(SessionHideKind::OriginExpired),
             reason: SessionHideKind::OriginExpired.generic_reason().to_owned(),
             ..MutationContext::default()
         });
-        if context.stage_durable(plan, fanout, None, 0).is_ok() {
+        if context
+            .stage_durable_with_account_service(plan, fanout, None, 0, writes)
+            .is_ok()
+        {
             coordinator.counters.sessions_expired =
                 coordinator.counters.sessions_expired.saturating_add(1);
             coordinator.pending = Some(PendingCommit::Cleanup { peer });
             return true;
         }
-        state.cleanup.push_front(user_id);
         return false;
     }
-    false
 }

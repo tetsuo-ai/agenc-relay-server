@@ -528,6 +528,12 @@ impl FederationLineText {
         self.text.len()
     }
 
+    /// Returns the actual owned UTF-8 allocation capacity for memory admission.
+    #[must_use]
+    pub fn backing_capacity(&self) -> usize {
+        self.text.capacity()
+    }
+
     /// Reports whether the line is empty; a rendered line never is.
     #[must_use]
     pub fn is_empty(&self) -> bool {

@@ -17,6 +17,10 @@ use super::{E2eeEdge, LocalOrigin, Phase};
 use crate::federation::edge::{BaseOriginFacts, EdgeFederation};
 use crate::state_core::StateCoreContext;
 
+#[cfg(test)]
+#[path = "tests/origins.rs"]
+mod tests;
+
 impl E2eeEdge {
     /// Declares or re-declares every origin whose acknowledged base
     /// generation is ahead of its companion declaration.
@@ -56,16 +60,23 @@ impl E2eeEdge {
         facts: &BaseOriginFacts,
         base_generation: u64,
     ) -> Result<(), Refusal> {
-        let previous = self.origins.get(&generation).cloned();
-        let (update, previous_state_id) = match &previous {
-            Some(origin) if origin.declared.is_some() && origin.acked.is_some() => {
-                (true, origin.state_id)
+        let replay = self.origins.get_mut(&generation).and_then(|origin| {
+            let (cached_generation, bytes) = origin.declaration.as_ref()?;
+            if origin.origin_id != facts.origin_id || *cached_generation != base_generation {
+                return None;
             }
-            _ => (
-                base_generation != 0,
-                previous.as_ref().map_or([0; 32], |origin| origin.state_id),
-            ),
-        };
+            origin.declared = Some(base_generation);
+            Some(bytes.clone())
+        });
+        if let Some(bytes) = replay {
+            let lines = self.origin_lines(facts.origin_id, base_generation, &bytes)?;
+            return self
+                .send(context, edge, lines)
+                .then_some(())
+                .ok_or_else(|| E2eeReplyCode::Syncing.into());
+        }
+        let previous = self.origins.get(&generation).cloned();
+        let previous_state_id = previous.as_ref().map_or([0; 32], |origin| origin.state_id);
         let device = previous.as_ref().and_then(|origin| origin.device);
         let object = IrcFederationOrigin {
             profile_version: 1,
@@ -118,19 +129,7 @@ impl E2eeEdge {
             .and_then(|body| IrcWireObject::new(IrcWireObjectKind::FederationOrigin, body))
             .and_then(|object| object.encode())
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        let object_id = *agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes();
-        let mut lines = Vec::new();
-        for fragment in fragment_object(&bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
-            lines.push(self.line(&CompanionFrame::OriginState {
-                update,
-                coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
-                server_incarnation: self.config.incarnation,
-                origin_id: facts.origin_id,
-                origin_generation: base_generation,
-                object_id,
-                fragment,
-            })?);
-        }
+        let lines = self.origin_lines(facts.origin_id, base_generation, &bytes)?;
         let entry = self.origins.entry(generation).or_insert(LocalOrigin {
             origin_id: facts.origin_id,
             declared: None,
@@ -138,6 +137,7 @@ impl E2eeEdge {
             next_sequence: 0,
             sequenced: None,
             state_id: [0; 32],
+            declaration: None,
             user_id: None,
             account: None,
             device: None,
@@ -145,6 +145,7 @@ impl E2eeEdge {
         entry.origin_id = facts.origin_id;
         entry.declared = Some(base_generation);
         entry.state_id = state_id;
+        entry.declaration = Some((base_generation, bytes));
         entry.user_id = facts
             .session
             .map(|(_, user)| agenc_ircd_types::UserId::from_bytes(user));
@@ -153,6 +154,29 @@ impl E2eeEdge {
             return Err(E2eeReplyCode::Syncing.into());
         }
         Ok(())
+    }
+
+    /// Renders the retained object under its original descriptor on each link.
+    fn origin_lines(
+        &self,
+        origin_id: [u8; 16],
+        base_generation: u64,
+        bytes: &[u8],
+    ) -> Result<Vec<agenc_ircd_federation_wire::FederationLineText>, Refusal> {
+        let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
+        let mut lines = Vec::new();
+        for fragment in fragment_object(bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
+            lines.push(self.line(&CompanionFrame::OriginState {
+                update: base_generation != 0,
+                coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
+                server_incarnation: self.config.incarnation,
+                origin_id,
+                origin_generation: base_generation,
+                object_id,
+                fragment,
+            })?);
+        }
+        Ok(lines)
     }
 
     /// `EORIGIN ACK`: the declared generation is in force. A new generation

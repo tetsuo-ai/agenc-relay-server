@@ -1582,6 +1582,8 @@ impl Sanction {
 /// Complete pure authoritative state for Stage 03.
 pub struct DomainState {
     pub(crate) revision: Revision,
+    pub(crate) fenced_federation_peers: BTreeSet<ServerId>,
+    pub(crate) suspended_federation_peers: BTreeSet<ServerId>,
     pub(crate) accounts: BTreeMap<AccountId, AccountState>,
     pub(crate) sessions: BTreeMap<UserId, SessionState>,
     pub(crate) session_ids: BTreeMap<SessionId, UserId>,
@@ -1605,6 +1607,8 @@ impl DomainState {
     pub fn at_revision(revision: Revision) -> Self {
         Self {
             revision,
+            fenced_federation_peers: BTreeSet::new(),
+            suspended_federation_peers: BTreeSet::new(),
             accounts: BTreeMap::new(),
             sessions: BTreeMap::new(),
             session_ids: BTreeMap::new(),
@@ -1690,7 +1694,59 @@ impl DomainState {
     /// Looks up one live session by its User ID.
     #[must_use]
     pub fn session(&self, user_id: UserId) -> Option<&SessionState> {
+        self.sessions.get(&user_id).filter(|session| {
+            !self
+                .fenced_federation_peers
+                .contains(&session.home_server_id)
+        })
+    }
+
+    /// Retains physical rows for expiry plans after the peer's authority fence.
+    #[must_use]
+    pub fn retained_session(&self, user_id: UserId) -> Option<&SessionState> {
         self.sessions.get(&user_id)
+    }
+
+    /// Iterates retained sessions in the durable cleanup order, including fenced rows.
+    pub fn retained_peer_sessions(
+        &self,
+        peer: ServerId,
+    ) -> impl Iterator<Item = (SessionId, UserId)> + '_ {
+        self.session_ids
+            .iter()
+            .filter_map(move |(session_id, user)| {
+                self.sessions
+                    .get(user)
+                    .filter(|session| session.home_server_id == peer)
+                    .map(|_| (*session_id, *user))
+            })
+    }
+
+    /// Applies a committed federation authority fence without discarding physical rows.
+    pub fn fence_federation_peer(&mut self, peer: ServerId) {
+        self.suspended_federation_peers.insert(peer);
+        self.fenced_federation_peers.insert(peer);
+    }
+
+    /// Allows a new incarnation after all sessions behind its old fence are gone.
+    pub fn resume_federation_peer(&mut self, peer: ServerId) {
+        self.suspended_federation_peers.remove(&peer);
+        self.fenced_federation_peers.remove(&peer);
+    }
+
+    /// Keeps grace visibility while refusing new execution and direct targeting.
+    pub fn suspend_federation_peer(&mut self, peer: ServerId) {
+        self.suspended_federation_peers.insert(peer);
+    }
+
+    /// Whether a session can execute or become a new direct-message target.
+    #[must_use]
+    pub fn session_authority_available(&self, user: UserId) -> bool {
+        self.session(user).is_some_and(|session| {
+            !self
+                .suspended_federation_peers
+                .contains(&session.home_server_id)
+        })
     }
 
     /// Looks up one account by immutable Account ID.
@@ -1705,26 +1761,29 @@ impl DomainState {
         self.channels.get(&channel_id)
     }
 
-    /// Applies retained audit policy to legacy rows that predate durable
-    /// administrative policy fields. Existing durable policy is never
-    /// cleared merely because retention removed its originating event.
-    pub fn install_admin_policy(
-        &mut self,
-        suspensions: Vec<(AccountId, UtcSecond)>,
-        quarantined_channels: Vec<ChannelInstanceId>,
+    /// Checks retained signed policy against complete durable records without changing them.
+    /// Deleted targets and policy whose audit event has expired need no reconstruction.
+    pub fn validate_retained_admin_policy(
+        &self,
+        suspensions: &[(AccountId, UtcSecond)],
+        quarantined_channels: &[ChannelInstanceId],
     ) -> Result<(), DomainError> {
         for (account_id, expires_at) in suspensions {
-            if let Some(account) = self.accounts.get_mut(&account_id) {
-                account.admin_suspension_expires_at = Some(expires_at);
+            if self
+                .accounts
+                .get(account_id)
+                .is_some_and(|account| account.admin_suspension_expires_at != Some(*expires_at))
+            {
+                return Err(DomainError::InvariantViolation);
             }
         }
         for channel_id in quarantined_channels {
-            if let Some(channel) = self
+            if self
                 .channels
-                .get_mut(&channel_id)
-                .filter(|channel| channel.persistence == PersistencePolicy::Registered)
+                .get(channel_id)
+                .is_some_and(|channel| !channel.admin_quarantined)
             {
-                channel.admin_quarantined = true;
+                return Err(DomainError::InvariantViolation);
             }
         }
         Ok(())
@@ -1818,7 +1877,11 @@ impl DomainState {
         self.sessions
             .iter()
             .filter_map(|(user_id, session)| {
-                (session.account_id() == Some(account_id)).then_some(*user_id)
+                (session.account_id() == Some(account_id)
+                    && !self
+                        .fenced_federation_peers
+                        .contains(&session.home_server_id))
+                .then_some(*user_id)
             })
             .collect()
     }
@@ -1840,7 +1903,7 @@ impl DomainState {
     /// Returns the number of live sessions.
     #[must_use]
     pub fn session_count(&self) -> usize {
-        self.sessions.len()
+        self.session_user_ids().count()
     }
 
     /// Returns the number of live sessions bound to account authority.
@@ -1848,7 +1911,12 @@ impl DomainState {
     pub fn authenticated_session_count(&self) -> usize {
         self.sessions
             .values()
-            .filter(|session| session.account_id().is_some())
+            .filter(|session| {
+                session.account_id().is_some()
+                    && !self
+                        .fenced_federation_peers
+                        .contains(&session.home_server_id)
+            })
             .count()
     }
 
@@ -1886,7 +1954,10 @@ impl DomainState {
     /// Resolves one canonical nickname to the current live user.
     #[must_use]
     pub fn resolve_nickname(&self, nickname: &NicknameValue) -> Option<UserId> {
-        self.nicknames.get(nickname).copied()
+        self.nicknames
+            .get(nickname)
+            .copied()
+            .filter(|user| self.session(*user).is_some())
     }
 
     /// Resolves one canonical channel name to its current channel creation.
@@ -2206,13 +2277,28 @@ impl DomainState {
 
     /// Iterates live user identities in canonical order.
     pub fn session_user_ids(&self) -> impl Iterator<Item = UserId> + '_ {
-        self.sessions.keys().copied()
+        self.sessions
+            .iter()
+            .filter(|(_, session)| {
+                !self
+                    .fenced_federation_peers
+                    .contains(&session.home_server_id)
+            })
+            .map(|(user, _)| *user)
     }
 
     /// Resolves an accepted session identity to its live user.
     #[must_use]
     pub fn user_for_session(&self, session_id: SessionId) -> Option<UserId> {
         self.session_ids.get(&session_id).copied()
+    }
+
+    /// Resolves a public cloak only while its session remains authoritative.
+    /// Callers must still apply requester-specific visibility before disclosure.
+    #[must_use]
+    pub fn user_for_public_cloak(&self, cloak: PublicCloak) -> Option<UserId> {
+        let user = *self.public_cloaks.get(&cloak)?;
+        self.session(user).map(|_| user)
     }
 
     /// Projects one channel whose authority survives a coordinator restart.
@@ -3127,6 +3213,54 @@ mod tests {
         live.account_id = None;
         live.account_session_generation = Generation::new(0)?;
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+        Ok(())
+    }
+
+    #[test]
+    fn retained_admin_policy_checks_exact_values_without_rewriting_state() -> Result<(), DomainError>
+    {
+        let mut state = DomainState::new()?;
+        let account_id = account(1);
+        state.accounts.insert(
+            account_id,
+            AccountState::new(account_id, Generation::new(1)?, Revision::new(1)?),
+        );
+        let mut room = channel(1, "#policy")?;
+        room.persistence = PersistencePolicy::Registered;
+        room.role_grants.insert(account_id, Role::Owner);
+        let channel_id = room.channel_id;
+        state.channels.insert(channel_id, room);
+        let expires_at = UtcSecond::from_unix_seconds(1_000);
+        let suspensions = [(account_id, expires_at)];
+        assert_eq!(
+            state.validate_retained_admin_policy(&suspensions, &[]),
+            Err(DomainError::InvariantViolation)
+        );
+        assert!(!state.account_has_admin_suspension(account_id));
+        assert_eq!(
+            state.validate_retained_admin_policy(&[], &[channel_id]),
+            Err(DomainError::InvariantViolation)
+        );
+        assert!(!state.channel_is_quarantined(channel_id));
+        state.admin_suspend_account(account_id, expires_at)?;
+        state.admin_quarantine_channel(channel_id)?;
+        state.validate_retained_admin_policy(&suspensions, &[channel_id])?;
+        assert_eq!(
+            state.validate_retained_admin_policy(
+                &[(account_id, UtcSecond::from_unix_seconds(1_001))],
+                &[channel_id]
+            ),
+            Err(DomainError::InvariantViolation)
+        );
+        // Retention may remove signed events while durable policy remains in force.
+        state.validate_retained_admin_policy(&[], &[])?;
+        assert!(state.account_has_admin_suspension(account_id));
+        assert!(state.channel_is_quarantined(channel_id));
+        // A later committed deletion can remove either target.
+        state.validate_retained_admin_policy(
+            &[(account(2), expires_at)],
+            &[ChannelInstanceId::from_bytes(id(2))],
+        )?;
         Ok(())
     }
 }

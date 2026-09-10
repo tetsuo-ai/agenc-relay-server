@@ -87,6 +87,39 @@ fn ready_table() -> Result<OriginTable, OriginError> {
 }
 
 #[test]
+fn resync_partial_reset_does_not_extend_or_cancel_grace() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    let deadline = table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    table.reset(EDGE, INCARNATION);
+    assert!(
+        table.expire(EDGE, deadline).is_some(),
+        "RESET is not completed synchronization"
+    );
+    assert_eq!(
+        table.origin(&key(1)).map(|entry| entry.status),
+        Some(OriginStatus::Fenced)
+    );
+    let mut table = ready_table()?;
+    let deadline = table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    table.reset(EDGE, INCARNATION);
+    assert_eq!(
+        table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(2_000))?,
+        deadline
+    );
+    Ok(())
+}
+
+#[test]
+fn resync_expired_incarnation_cannot_reset_and_add_another_origin() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    let deadline = table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    assert!(table.expire(EDGE, deadline).is_some());
+    table.reset(EDGE, INCARNATION);
+    assert!(table.add(add(2)).is_err());
+    Ok(())
+}
+
+#[test]
 fn retiring_an_exact_replay_identity_preserves_floors_and_matches_restart()
 -> Result<(), OriginError> {
     let mut table = ready_table()?;
@@ -295,6 +328,84 @@ fn delete_is_durable_idempotent_and_final() -> Result<(), OriginError> {
 }
 
 #[test]
+fn a_deletion_replayed_after_a_reset_closes_the_origin_this_coordinator_holds()
+-> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    // The registration update committed and two requests ran under it.
+    table.update(update(1, 1, [1; 32], registered(1)))?;
+    for sequence in 0..2 {
+        let seed = u8::try_from(sequence).unwrap_or(0).wrapping_add(1);
+        table.classify_request(operation(1, 1, sequence), request(seed), [seed; 32], None)?;
+        table.commit_request(operation(1, 1, sequence), request(seed))?;
+    }
+    // With the link up the DEL must name the exact generation.
+    assert_eq!(
+        table.delete(key(1), 0, 9),
+        Err(OriginError::WrongGeneration)
+    );
+    table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    assert!(!table.is_resetting(EDGE, INCARNATION));
+    table.reset(EDGE, INCARNATION);
+    assert!(table.is_resetting(EDGE, INCARNATION));
+    // Replayed after the reset, a DEL naming the generation whose update
+    // acknowledgement never reached the edge closes the origin after
+    // everything this coordinator executed.
+    table.delete(key(1), 0, 9)?;
+    let entry = table.origin(&key(1)).ok_or(OriginError::UnknownOrigin)?;
+    assert_eq!(entry.status, OriginStatus::Deleted);
+    assert_eq!(entry.deleted_after, Some(2));
+    // A repeated replay is idempotent whatever it names.
+    table.delete(key(1), 1, 0)?;
+    // An origin this coordinator never committed stays unknown.
+    assert_eq!(table.delete(key(2), 0, 0), Err(OriginError::UnknownOrigin));
+    // READY revives suspended origins, never a deleted one.
+    table.ready(EDGE, INCARNATION)?;
+    assert!(!table.is_resetting(EDGE, INCARNATION));
+    assert_eq!(
+        table.origin(&key(1)).map(|entry| entry.status),
+        Some(OriginStatus::Deleted)
+    );
+    assert_eq!(
+        table.classify_request(operation(1, 1, 2), request(3), [3; 32], None),
+        Err(OriginError::Fenced)
+    );
+    // Once the link is ready the exact rule applies again.
+    table.add(add(3))?;
+    assert_eq!(
+        table.delete(key(3), 1, 0),
+        Err(OriginError::WrongGeneration)
+    );
+    Ok(())
+}
+
+#[test]
+fn operations_issued_before_a_deletion_still_execute_in_order() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    // The edge sent sequences 0 and 1, then deleted the origin at 2: both
+    // may still be queued behind the deletion and execute in order.
+    table.delete(key(1), 0, 2)?;
+    assert_eq!(
+        table.classify_request(operation(1, 0, 0), request(1), [1; 32], None),
+        Ok(ReplayDecision::Fresh)
+    );
+    table.commit_request(operation(1, 0, 0), request(1))?;
+    assert_eq!(
+        table.classify_request(operation(1, 0, 1), request(2), [2; 32], None),
+        Ok(ReplayDecision::Fresh)
+    );
+    table.commit_request(operation(1, 0, 1), request(2))?;
+    // Nothing at or beyond the deleted sequence executes.
+    assert_eq!(
+        table.classify_request(operation(1, 0, 2), request(3), [3; 32], None),
+        Err(OriginError::Fenced)
+    );
+    // The deletion is idempotent at its sequence and conflicts elsewhere.
+    table.delete(key(1), 0, 2)?;
+    assert_eq!(table.delete(key(1), 0, 3), Err(OriginError::Conflict));
+    Ok(())
+}
+
+#[test]
 fn link_loss_suspends_grace_expiry_fences_and_reset_resumes() -> Result<(), OriginError> {
     let mut table = ready_table()?;
     table.update(update(1, 1, [1; 32], registered(1)))?;
@@ -378,6 +489,7 @@ fn restore_rebuilds_durable_rows_without_protocol_checks() -> Result<(), OriginE
             binding: binding(),
             principal: registered(1),
             status: OriginStatus::Live,
+            deleted_after: None,
         },
     );
     table.restore_request_id(request(5), operation(1, 2, 6));
@@ -417,6 +529,19 @@ fn restore_rebuilds_durable_rows_without_protocol_checks() -> Result<(), OriginE
             None
         ),
         Err(OriginError::UnknownIncarnation)
+    );
+    Ok(())
+}
+
+#[test]
+fn resync_a_replaced_incarnation_cannot_return_after_another_reset() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    table.reset(EDGE, NEXT_INCARNATION);
+    table.ready(EDGE, NEXT_INCARNATION)?;
+    table.reset(EDGE, INCARNATION);
+    assert!(
+        !table.is_resetting(EDGE, INCARNATION),
+        "an old incarnation remains fenced after its replacement is ready"
     );
     Ok(())
 }

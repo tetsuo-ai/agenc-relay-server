@@ -60,6 +60,12 @@ impl DatabaseBinding {
         self.server_incarnation
     }
 
+    /// Returns the database identity authenticated by every stored record.
+    #[must_use]
+    pub const fn database_instance_id(self) -> DatabaseId {
+        self.database_instance_id
+    }
+
     /// Encodes the exact fixed-width TLS structure.
     pub fn encode(self) -> Result<[u8; DATABASE_BINDING_BYTES], CryptoError> {
         let mut encoded = [0_u8; DATABASE_BINDING_BYTES];

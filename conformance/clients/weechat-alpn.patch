@@ -1,0 +1,29 @@
+--- a/src/core/core-network.c
++++ b/src/core/core-network.c
+@@ -1821,6 +1821,26 @@
+             unhook (hook_connect);
+             return;
+         }
++        /* AgenC qualification build: retain the exact client ALPN. */
++        {
++            unsigned char protocol_name[] = "agenc-chat/1";
++            const gnutls_datum_t protocol = {
++                protocol_name, sizeof (protocol_name) - 1
++            };
++            rc = gnutls_alpn_set_protocols (
++                *HOOK_CONNECT(hook_connect, gnutls_sess),
++                &protocol, 1, GNUTLS_ALPN_MANDATORY);
++            if (rc != GNUTLS_E_SUCCESS)
++            {
++                (void) (HOOK_CONNECT(hook_connect, callback))
++                    (hook_connect->callback_pointer,
++                     hook_connect->callback_data,
++                     WEECHAT_HOOK_CONNECT_GNUTLS_INIT_ERROR,
++                     0, -1, "AgenC ALPN setup failed", NULL);
++                unhook (hook_connect);
++                return;
++            }
++        }
+         if (!network_is_ip_address (HOOK_CONNECT(hook_connect, address)))
+         {
+             /* set the server name (only if it's NOT an IPv4/IPv6) */

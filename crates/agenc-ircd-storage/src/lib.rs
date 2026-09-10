@@ -7,6 +7,7 @@ mod codec;
 mod construction;
 mod construction_directory;
 mod construction_runtime;
+mod construction_schema;
 mod control;
 mod domain_records;
 pub mod e2ee_records;
@@ -15,12 +16,6 @@ mod error;
 mod fault;
 pub mod federation_records;
 pub mod history_records;
-mod migration;
-pub use migration::MigrationTransformV1;
-mod migration_command;
-pub use migration_command::{
-    MigrationCommandReceipt, MigrationCommandRequest, execute_migration_command,
-};
 mod initialize;
 mod integrity;
 mod login_index;
@@ -28,12 +23,16 @@ mod mutation;
 mod owner;
 mod platform;
 mod qualification;
+mod qualification_workload;
 mod records;
 mod recovery;
 mod redb_store;
 mod restore_command;
 mod schema;
 mod sealed;
+mod source_validation;
+
+pub use source_validation::{AuthenticatedSourceRecord, SourceRecordValidator};
 
 pub use backup::{
     BACKUP_FIXED_STREAM_BYTES, BackupHeader, BackupReceipt, BackupRecord, BackupStreamWriter,
@@ -56,7 +55,8 @@ pub use construction_runtime::{
     ConstructionTargetWriter, ConstructionTransformer, DatabaseConstructionSourceReader,
     ExactCopyTransformer, MAX_CONSTRUCTION_BATCH_BYTES, MAX_CONSTRUCTION_BATCH_RECORDS,
     MAX_CONSTRUCTION_SOURCE_BYTES, MAX_CONSTRUCTION_TARGET_BYTES, RecoveryTransformV1,
-    RestoreBackupSource, VerifiedConstructionOutput, recovery_transform_prefix,
+    RestoreBackupSource, RestoreBackupSourceConfig, VerifiedConstructionOutput,
+    recovery_transform_prefix,
 };
 pub use control::{
     DATABASE_HEADER_BYTES, DatabaseHeader, DatabaseHeaderTbs, NONCE_RESERVATION_BYTES,
@@ -121,9 +121,15 @@ pub use platform::{
     InspectionStateDirectory, StateDirectory, StorageQualification, rename_path_no_replace,
 };
 pub use qualification::{
-    MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES, MAX_QUALIFIED_OBSERVED_GROWTH,
-    QualificationTarget, REQUIRED_QUALIFICATION_CASES, StorageGrowthCase, StorageGrowthRecorder,
-    StorageQualificationReport, StorageQualificationReportTbs, embedded_storage_qualifications,
+    MAX_GROWTH_SAMPLES, MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES,
+    MAX_QUALIFIED_OBSERVED_GROWTH, PhaseGrowth, QualificationTarget, REQUIRED_QUALIFICATION_CASES,
+    StorageGrowthCase, StorageGrowthProbe, StorageGrowthRecorder, StorageGrowthSample,
+    StorageQualificationReport, StorageQualificationReportTbs, allocated_directory_bytes,
+    embedded_storage_qualifications, phase_growth,
+};
+pub use qualification_workload::{
+    QualificationFailure, QualificationOutcome, QualificationRequest, WORKLOAD_DESCRIPTION,
+    qualify_production_storage, required_case_names,
 };
 pub use records::{
     E2eeRecoveryGate, E2eeRecoveryKind, KEY_CHECK_STORED_KEY, MAX_DOMAIN_RECORD_BODY_BYTES,

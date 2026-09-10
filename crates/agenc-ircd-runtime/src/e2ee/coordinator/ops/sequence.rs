@@ -43,7 +43,7 @@ use agenc_ircd_storage::e2ee_records::{
 };
 
 use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
-use super::super::{CompanionCoordinator, CompanionState, ConversationState};
+use super::super::{CompanionCoordinator, ConversationState};
 use super::route::audience;
 use super::{Exec, Fail, cursor};
 
@@ -87,10 +87,6 @@ fn sequencer_row(
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )
     .map_err(Fail::from)
-}
-
-fn retain(state: &mut CompanionState, bytes: Vec<u8>) -> Option<[u8; 32]> {
-    CompanionCoordinator::retain_object(state, bytes).ok()
 }
 
 fn ids(values: &[&[u8]]) -> Vec<u8> {
@@ -253,9 +249,7 @@ fn pending(
         &quorum.accepted,
     )?);
     let ledger = quorum.ledger;
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.vote_ledgers.insert(subject, ledger);
         }
@@ -353,10 +347,9 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             _ => Fail::with(E2eeReplyCode::RateLimited, &conversation_id),
         }
     })?;
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let signer =
+        super::super::sequencer_signing::at_time(exec.coordinator, envelope.aad.validation_time)
+            .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let commit_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let tbs = IrcCandidateReceiptTbs {
         profile_version: 1,
@@ -439,14 +432,10 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let commit = bytes.to_vec();
     let validation_time = envelope.aad.validation_time;
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
-        retain(companion, commit);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.last_validation_time = validation_time;
@@ -503,9 +492,7 @@ pub fn submit_authorization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )?);
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state
                 .approvals
@@ -533,11 +520,7 @@ pub fn submit_commit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 && slot.commit_object_id == ack.tbs.commit_object_id
         })
         .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
-    if ack.tbs.conversation_id != conversation_id
-        || ack.tbs.prior_epoch != slot.position.prior_epoch
-    {
-        return Err(Fail::with(E2eeReplyCode::EpochStale, &conversation_id));
-    }
+    super::ack_context::commit_submission(exec, &conversation_id, &ack.tbs, slot)?;
     let candidate_id = slot.candidate_id;
     let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let leaf = ack.tbs.old_leaf_index;
@@ -578,9 +561,7 @@ pub fn submit_commit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state
                 .acks
@@ -707,10 +688,11 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let signer = super::super::sequencer_signing::for_receipt(
+        exec.coordinator,
+        request.proof.receipt.tbs.sequencer_key_id,
+    )
+    .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let tbs = IrcCommitFinalizationTbs {
         profile_version: 1,
         network_id: exec.coordinator.network_id,
@@ -791,13 +773,9 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let candidate_id = core.candidate_id;
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(finalization_id, request_object_id);
@@ -892,10 +870,11 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let position = log
         .terminal_position(&core.candidate_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    let signer = super::super::sequencer_signing::for_receipt(
+        exec.coordinator,
+        request.receipt.tbs.sequencer_key_id,
+    )
+    .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let candidate_id = core.candidate_id;
     let tbs = IrcCommitAbortTbs {
         profile_version: 1,
@@ -962,13 +941,9 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             None,
         ));
     }
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(abort_id, request_object_id);
@@ -985,6 +960,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
     exec.attached_device()?;
+    super::route_successor::owner(exec, &old_conversation_id)?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
     let attempt: IrcReInitAttempt = decode(object.body(), MAX_REINIT_OBJECT)?;
@@ -1012,6 +988,7 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     if slot.attempt_sequence != tbs.attempt_sequence {
         return Err(Fail::with(E2eeReplyCode::EpochStale, &old_conversation_id));
     }
+    super::reinit_authority::verify(exec, &attempt)?;
     let attempt_id = CompanionCoordinator::id_of(SemanticHashDomain::ReinitAttemptId, tbs)?;
     let attempt_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let signer = exec
@@ -1083,13 +1060,9 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             None,
         ));
     }
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         companion.logs.insert(old_conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state.records.insert(slot.route_sequence, record_id);
             state.route_object_id = route_object_id;
@@ -1110,12 +1083,7 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .reinit_attempt()
         .filter(|slot| slot.attempt_id == ack.tbs.reinit_attempt_id)
         .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
-    if ack.tbs.old_conversation_id != old_conversation_id {
-        return Err(Fail::with(
-            E2eeReplyCode::RouteInvalid,
-            &old_conversation_id,
-        ));
-    }
+    super::ack_context::reinit_submission(exec, &old_conversation_id, &ack.tbs, slot)?;
     let attempt_id = slot.attempt_id;
     let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let leaf = ack.tbs.old_leaf_index;
@@ -1156,9 +1124,7 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
-        retain(companion, retained);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state
                 .acks
@@ -1175,13 +1141,10 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Outcome, Fail> {
     let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
     exec.attached_device()?;
+    super::route_successor::owner(exec, &old_conversation_id)?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let (attempt_id, quorum, terminal, terminal_id, new_conversation, record) = if activate {
         let mut request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
         super::terminal_proof::reinit_attempt(
@@ -1191,6 +1154,11 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             &request.attempt,
         )?;
         super::terminal_proof::reinit_activation(&request)?;
+        let signer = super::super::sequencer_signing::for_receipt(
+            exec.coordinator,
+            request.receipt.tbs.sequencer_key_id,
+        )
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
         let core = request.core.clone();
         let core = &core;
         if core.old_conversation_id != old_conversation_id {
@@ -1250,6 +1218,11 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             &request.receipt,
             &request.attempt,
         )?;
+        let signer = super::super::sequencer_signing::for_receipt(
+            exec.coordinator,
+            request.receipt.tbs.sequencer_key_id,
+        )
+        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
         let core = request.core.clone();
         let core = &core;
         if core.profile_version != 1
@@ -1405,8 +1378,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             None,
         ));
     }
-    let retained = bytes.to_vec();
-    let (route_object, route_object_id) = (refresh.route_object, refresh.route_object_id);
+    let route_object_id = refresh.route_object_id;
     outcome.effects.push(Box::new(move |companion| {
         if let Some(new_conversation_id) = new_conversation {
             let successor = SequencerLog::from_activation(new_conversation_id, terminal_id);
@@ -1417,9 +1389,6 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             );
         }
         companion.logs.insert(old_conversation_id, next_log);
-        retain(companion, retained);
-        retain(companion, record);
-        retain(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(terminal_id, request_object_id);
@@ -1454,22 +1423,39 @@ fn page(
 }
 
 /// `fetch_object`.
-pub fn fetch_object(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+pub fn fetch_object(exec: &mut Exec<'_>) -> Result<super::Prepared, Fail> {
     let (conversation_id, object_id) = exec
         .params()
         .read(|reader| Ok((reader.fixed::<32>()?, reader.fixed::<32>()?)))?;
     exec.attached_device()?;
     log(exec, &conversation_id)?;
-    let bytes = exec
-        .coordinator
-        .state
-        .objects
-        .get(&object_id)
-        .filter(|bytes| {
-            CompanionCoordinator::kind_of(bytes).is_some_and(|kind| !kind.is_server_only())
-        })
-        .cloned();
+    let request = super::super::object_read::Request {
+        conversation_id,
+        object_id,
+    };
+    let bytes = match exec.object_source {
+        super::super::object_read::Source::Resolved(resolved) => resolved
+            .lookup(request)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        super::super::object_read::Source::Unread => {
+            let Some(bytes) = exec.coordinator.state.objects.get(&object_id) else {
+                return Ok(super::Prepared::Read(request));
+            };
+            Some(bytes.as_slice())
+        }
+        #[cfg(test)]
+        super::super::object_read::Source::CompleteMemory => exec
+            .coordinator
+            .state
+            .objects
+            .get(&object_id)
+            .map(Vec::as_slice),
+    };
+    let bytes = bytes
+        .filter(|bytes| super::recovery_read::permitted(exec, &conversation_id, bytes))
+        .map(<[u8]>::to_vec);
     page(exec, bytes.into_iter().collect(), EmptyKind::Objects, None)
+        .map(|outcome| super::Prepared::Complete(Box::new(outcome)))
 }
 
 /// A page of retained proof objects sorted by their accumulator key.

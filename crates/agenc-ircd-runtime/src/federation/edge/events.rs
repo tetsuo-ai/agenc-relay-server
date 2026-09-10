@@ -1,5 +1,5 @@
 //! FEVENT application on the edge: replica apply, client rendering, the
-//! durable projection rows, and the cumulative ACK (spec 20.6, B.5, B.7).
+//! durable projection rows, and the ordered event ACK (spec 20.6, B.5, B.7).
 
 use agenc_ircd_domain::federation::{EdgeReplica, ProjectedEvent, ProjectionKey};
 use agenc_ircd_federation_wire::{
@@ -21,8 +21,8 @@ use crate::state_core::durable::AccountServiceDurableWrite;
 
 /// Projection state retained until an ordinary event's storage batch commits.
 pub(super) struct ProjectionBefore {
-    replica: EdgeReplica,
-    nicknames:
+    pub(super) replica: EdgeReplica,
+    pub(super) nicknames:
         std::collections::BTreeMap<agenc_ircd_types::UserId, agenc_ircd_domain::NicknameValue>,
 }
 
@@ -40,7 +40,7 @@ pub(super) fn receive(
     descriptor: EventDescriptor,
     object: &AssembledObject,
 ) -> Result<Vec<EdgeCompletion>, Violation> {
-    if edge.phase != Phase::Active {
+    if !matches!(edge.phase, Phase::Active | Phase::Origins) {
         return Err(Violation::Phase);
     }
     let mut budget = DecodeBudget::new(1 << 20, 4_096);
@@ -51,6 +51,12 @@ pub(super) fn receive(
     let arm = decode_event_arm(&event, &mut budget).map_err(|_| Violation::Codec)?;
     let projected =
         projected_event_of(header.event_kind, &arm, &mut budget).map_err(|_| Violation::Codec)?;
+    if let ProjectedEvent::RequestCompleted {
+        resulting_state_generation,
+    } = &projected
+    {
+        completion_of(edge, &header, *resulting_state_generation)?;
+    }
     let queued = if header.cross_profile.is_some() {
         QueuedEvent::BarrierPart {
             header,
@@ -59,11 +65,15 @@ pub(super) fn receive(
             bytes: object.as_slice().to_vec(),
         }
     } else {
-        QueuedEvent::Base { header, projected }
+        QueuedEvent::Base {
+            header,
+            projected,
+            encoded_bytes: object.as_slice().len(),
+        }
     };
-    // The edge's own slot or a batch of the encrypted profile in flight
-    // holds the event; both profiles drain after every commit.
-    if edge.commit.is_some() || context.in_flight() {
+    // A checkpoint owned by either profile holds the event, including the
+    // gather window before submission. Both profiles drain after each receipt.
+    if edge.commit.is_some() || !context.edge_checkpoint_ready() {
         if edge.queued_events.len() >= MAX_QUEUED_EVENTS {
             return Err(Violation::Ceiling);
         }
@@ -81,6 +91,7 @@ pub(super) enum QueuedEvent {
     Base {
         header: EventHeader,
         projected: ProjectedEvent,
+        encoded_bytes: usize,
     },
     /// A base part of a cross-profile barrier, with its exact bytes.
     BarrierPart {
@@ -96,8 +107,18 @@ fn apply_queued(
     context: &mut StateCoreContext,
     queued: QueuedEvent,
 ) -> Result<Vec<EdgeCompletion>, Violation> {
+    if let QueuedEvent::Base { header, .. } = &queued {
+        let expected = edge
+            .cursor
+            .map_or(Some(0), |(sequence, _)| sequence.checked_add(1));
+        if expected != Some(header.delivery_sequence) || edge.barrier.is_open() {
+            return Err(Violation::Consistency);
+        }
+    }
     match queued {
-        QueuedEvent::Base { header, projected } => apply(edge, context, header, projected),
+        QueuedEvent::Base {
+            header, projected, ..
+        } => apply(edge, context, header, projected),
         QueuedEvent::BarrierPart {
             header,
             projected,
@@ -131,13 +152,32 @@ fn check_header(
     if header.cross_profile.is_some() {
         return Ok(());
     }
-    let expected = edge
-        .cursor
-        .map_or(0, |(sequence, _)| sequence.saturating_add(1));
-    if edge.barrier.is_open() || header.delivery_sequence != expected {
+    let expected = next_received_sequence(edge);
+    if edge.barrier.is_open() || Some(header.delivery_sequence) != expected {
         return Err(Violation::Consistency);
     }
     Ok(())
+}
+
+fn next_received_sequence(edge: &EdgeFederation) -> Option<u64> {
+    let staged = match edge.commit.as_ref() {
+        Some(PendingCommit::Event { header, .. }) => Some(header.delivery_sequence),
+        Some(PendingCommit::OrdinaryBatch(pending)) => pending
+            .receipts
+            .last()
+            .map(|receipt| receipt.header.delivery_sequence),
+        _ => edge.cursor.map(|(sequence, _)| sequence),
+    };
+    let last_received = edge
+        .queued_events
+        .back()
+        .map(|queued| match queued {
+            QueuedEvent::Base { header, .. } | QueuedEvent::BarrierPart { header, .. } => {
+                header.delivery_sequence
+            }
+        })
+        .or(staged);
+    last_received.map_or(Some(0), |sequence| sequence.checked_add(1))
 }
 
 /// Applies queued events once the batch slot is free.
@@ -146,7 +186,15 @@ pub(super) fn drain_queued(
     context: &mut StateCoreContext,
 ) -> Vec<EdgeCompletion> {
     let mut completions = Vec::new();
-    while edge.commit.is_none() && !context.in_flight() {
+    while edge.commit.is_none() && context.edge_checkpoint_ready() {
+        match super::ordinary_batch::try_stage(edge, context) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(violation) => {
+                edge.fail_link(context, violation);
+                break;
+            }
+        }
         let Some(queued) = edge.queued_events.pop_front() else {
             break;
         };
@@ -195,9 +243,10 @@ fn apply_projection(
         .map_err(|_| Violation::Consistency)?;
     super::render::remember_nicknames(edge, &projected);
     let mut fanout = super::render::EventFanout::default();
-    super::render::render_event(
+    let join_echo = super::render::render_event(
         edge,
         context,
+        &header,
         &projected,
         &outcome,
         label.as_deref(),
@@ -212,9 +261,28 @@ fn apply_projection(
     let upserted = outcome.upserted.clone();
     let removed = outcome.removed.clone();
     let cursor = Some((header.delivery_sequence, header.event_id));
+    let coverage = if completion.is_some() {
+        let revision = context
+            .domain()
+            .plan_account_service_checkpoint()
+            .map_err(|_| Violation::Ceiling)?
+            .resulting_revision()
+            .get();
+        Some(super::journal::completion_write(
+            edge, &header, &projected, revision,
+        )?)
+    } else {
+        None
+    };
+    let (coverage, coverage_write) = match coverage {
+        Some((version, write)) => (Some(version), Some(write)),
+        None => (None, None),
+    };
     let pending = PendingCommit::Event {
         header: Box::new(header),
         completion,
+        coverage,
+        join_echo: join_echo.map(Box::new),
     };
     stage_rows(
         edge,
@@ -223,21 +291,33 @@ fn apply_projection(
         pending,
         fanout.finish()?,
         |edge, context, revision| {
-            let mut writes = Vec::new();
-            for key in &upserted {
-                if let Some(write) = entry_row(edge, key, revision) {
-                    writes.push(write);
-                }
-            }
-            for key in &removed {
-                if let Some(write) = removal_write(edge, context, key) {
-                    writes.push(write);
-                }
-            }
-            writes
+            projection_writes(edge, context, revision, &upserted, &removed, coverage_write)
         },
     )?;
     Ok(Vec::new())
+}
+
+fn projection_writes(
+    edge: &EdgeFederation,
+    context: &StateCoreContext,
+    revision: u64,
+    upserted: &[ProjectionKey],
+    removed: &[ProjectionKey],
+    coverage_write: Option<AccountServiceDurableWrite>,
+) -> Result<Vec<AccountServiceDurableWrite>, Violation> {
+    let mut writes = Vec::new();
+    if let Some(write) = coverage_write {
+        writes.push(write);
+    }
+    for key in upserted {
+        writes.push(entry_row(edge, key, revision)?);
+    }
+    for key in removed {
+        if let Some(write) = removal_write(edge, context, key)? {
+            writes.push(write);
+        }
+    }
+    Ok(writes)
 }
 
 /// Validates a completion's correlation without publishing its application.
@@ -271,6 +351,13 @@ pub(super) fn completion_of(
     {
         return Err(Violation::Consistency);
     }
+    // A durable origin DEL can retire a sink-gone request before its old
+    // completion finishes replaying. The event still advances the durable
+    // stream, but has no request coverage or client reply left to release.
+    if !edge.pending.contains_key(&correlation.request_id) {
+        return Ok(None);
+    }
+    super::join_echo::validate_completion(edge, &[], header)?;
     Ok(Some(correlation.request_id))
 }
 
@@ -321,7 +408,13 @@ pub(super) fn staged_completion_generation(
         PendingCommit::Event {
             header,
             completion: Some(owner),
+            ..
         } if *owner == request_id => Some(header.coordinator_state_generation),
+        PendingCommit::OrdinaryBatch(pending) => pending
+            .receipts
+            .iter()
+            .find(|receipt| receipt.completion == Some(request_id))
+            .map(|receipt| receipt.header.coordinator_state_generation),
         PendingCommit::BarrierApplied { .. } => edge
             .barrier
             .open
@@ -344,18 +437,21 @@ pub(super) fn removal_write(
     edge: &EdgeFederation,
     context: &StateCoreContext,
     key: &ProjectionKey,
-) -> Option<AccountServiceDurableWrite> {
+) -> Result<Option<AccountServiceDurableWrite>, Violation> {
     let generation = edge.replica.projection_generation();
-    let stored =
-        projection_entry_key(edge.config.server_id, generation, key.kind(), key.primary()).ok()?;
+    let stored = projection_entry_key(edge.config.server_id, generation, key.kind(), key.primary())
+        .map_err(|_| Violation::Codec)?;
     let exists = context
         .index()
         .existing(TableId::EdgeProjection, &stored)
-        .is_ok_and(|existing| existing.is_some());
+        .map_err(|_| Violation::Consistency)?
+        .is_some();
     if !exists {
-        return None;
+        return Ok(None);
     }
-    AccountServiceDurableWrite::delete(TableId::EdgeProjection, stored).ok()
+    AccountServiceDurableWrite::delete(TableId::EdgeProjection, stored)
+        .map(Some)
+        .map_err(|_| Violation::Codec)
 }
 
 /// The durable row of one replica entry under the active generation.
@@ -363,10 +459,10 @@ pub(super) fn entry_row(
     edge: &EdgeFederation,
     key: &ProjectionKey,
     revision: u64,
-) -> Option<AccountServiceDurableWrite> {
-    let record = edge.replica.record(key)?;
+) -> Result<AccountServiceDurableWrite, Violation> {
+    let record = edge.replica.record(key).ok_or(Violation::Consistency)?;
     let generation = edge.replica.projection_generation();
-    let arm = projection_arm_object(&record).ok()?;
+    let arm = projection_arm_object(&record).map_err(|_| Violation::Codec)?;
     let entry = agenc_ircd_federation_wire::ProjectionEntryHeader {
         network_id: edge.config.network_id,
         target_server_id: edge.config.server_id,
@@ -374,17 +470,18 @@ pub(super) fn entry_row(
         projection_kind: projection_kind(&record),
     }
     .build(&arm)
-    .ok()?;
-    let encoded = agenc_ircd_federation_wire::CanonicalEncode::encode_canonical(&entry).ok()?;
+    .map_err(|_| Violation::Codec)?;
+    let encoded = agenc_ircd_federation_wire::CanonicalEncode::encode_canonical(&entry)
+        .map_err(|_| Violation::Codec)?;
     let body = ProjectionEntryRecord {
         entry_object_id: *agenc_ircd_federation_wire::federation_object_id(encoded.as_slice())
             .as_bytes(),
         entry_object: encoded.as_slice().to_vec(),
     }
     .encode()
-    .ok()?;
-    let stored =
-        projection_entry_key(edge.config.server_id, generation, key.kind(), key.primary()).ok()?;
+    .map_err(|_| Violation::Codec)?;
+    let stored = projection_entry_key(edge.config.server_id, generation, key.kind(), key.primary())
+        .map_err(|_| Violation::Codec)?;
     edge.row_write(
         TableId::EdgeProjection,
         PROJECTION_ENTRY_KIND,
@@ -393,7 +490,7 @@ pub(super) fn entry_row(
         generation,
         body,
     )
-    .ok()
+    .map_err(|_| Violation::Codec)
 }
 
 /// Stages rows plus the peer row behind a checkpoint plan. `cursor` names
@@ -405,7 +502,11 @@ pub(super) fn stage_rows(
     cursor: Option<(u64, EventId)>,
     pending: PendingCommit,
     fanout: crate::state_core::fanout::FanoutRequest,
-    build: impl FnOnce(&EdgeFederation, &StateCoreContext, u64) -> Vec<AccountServiceDurableWrite>,
+    build: impl FnOnce(
+        &EdgeFederation,
+        &StateCoreContext,
+        u64,
+    ) -> Result<Vec<AccountServiceDurableWrite>, Violation>,
 ) -> Result<(), Violation> {
     if edge.commit.is_some() {
         return Err(Violation::Ceiling);
@@ -415,7 +516,7 @@ pub(super) fn stage_rows(
         .plan_account_service_checkpoint()
         .map_err(|_| Violation::Ceiling)?;
     let revision = plan.resulting_revision().get();
-    let mut writes = build(edge, context, revision);
+    let mut writes = build(edge, context, revision)?;
     writes.push(edge.peer_row(cursor.or(edge.cursor), revision)?);
     context
         .stage_durable_with_account_service(plan, fanout, None, 0, writes)
@@ -448,7 +549,28 @@ impl EdgeFederation {
         cursor: Option<(u64, EventId)>,
         revision: u64,
     ) -> Result<AccountServiceDurableWrite, Violation> {
-        let record = FederationPeerRecord {
+        let record = self
+            .peer_record(cursor)
+            .encode()
+            .map_err(|_| Violation::Codec)?;
+        let plaintext = PersistentRecordValue::new(
+            TableId::FederationPeer,
+            PEER_RECORD_KIND,
+            revision,
+            0,
+            None,
+            Vec::new(),
+            record,
+        )
+        .and_then(|value| value.encode())
+        .map_err(|_| Violation::Codec)?;
+        let key = peer_key(self.config.coordinator.server_id()).map_err(|_| Violation::Codec)?;
+        AccountServiceDurableWrite::put(TableId::FederationPeer, key, plaintext)
+            .map_err(|_| Violation::Codec)
+    }
+    pub(super) fn peer_record(&self, cursor: Option<(u64, EventId)>) -> FederationPeerRecord {
+        FederationPeerRecord {
+            fenced_incarnations: Vec::new(),
             server_incarnation: self
                 .live
                 .as_ref()
@@ -478,7 +600,7 @@ impl EdgeFederation {
             }),
             active_entry_count: u64::try_from(self.replica.entry_count()).unwrap_or(u64::MAX),
             active_entry_bytes: 0,
-            pending_generation: None,
+            pending_generation: super::sync::pending_generation(self),
             snapshot_required: self
                 .live
                 .as_ref()
@@ -493,21 +615,5 @@ impl EdgeFederation {
             quarantined: false,
             client_resync_epoch: self.client_resync_epoch,
         }
-        .encode()
-        .map_err(|_| Violation::Codec)?;
-        let plaintext = PersistentRecordValue::new(
-            TableId::FederationPeer,
-            PEER_RECORD_KIND,
-            revision,
-            0,
-            None,
-            Vec::new(),
-            record,
-        )
-        .and_then(|value| value.encode())
-        .map_err(|_| Violation::Codec)?;
-        let key = peer_key(self.config.coordinator.server_id()).map_err(|_| Violation::Codec)?;
-        AccountServiceDurableWrite::put(TableId::FederationPeer, key, plaintext)
-            .map_err(|_| Violation::Codec)
     }
 }

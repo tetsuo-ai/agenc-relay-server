@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+mod declared_recovery;
+mod reconstruction;
+
 use super::*;
 use agenc_ircd_domain::e2ee::ConversationId;
 use agenc_ircd_e2ee::objects::conversation::IrcConversationBindingPackage;
@@ -37,6 +40,10 @@ impl Fixture {
     fn prepare() -> TestResult<Self> {
         let mut harness = Harness::new()?;
         let old = harness.bind_channel()?;
+        Self::prepare_bound(harness, old)
+    }
+
+    fn prepare_bound(mut harness: Harness, old: [u8; 32]) -> TestResult<Self> {
         let reservation = reserve(&mut harness)?;
         let old_state = *harness
             .coordinator
@@ -70,7 +77,7 @@ impl Fixture {
             &harness.principal,
             DEVICE,
             &attempt.authorization.tbs,
-            SignatureDomain::CommitAuthorization,
+            SignatureDomain::ReinitAttemptAuthorization,
         )?])?;
         attempt.tbs.attempt_authorization_id = semantic_id_of(
             SemanticHashDomain::ReinitAttemptAuthorizationId,
@@ -348,21 +355,8 @@ fn successor_reload_rejects_missing_activation_evidence() -> TestResult {
     let key = agenc_ircd_storage::e2ee_records::object_key(&object)?;
     fixture.harness.writes.retain(|write| !matches!(write,
         Write::Put { table: agenc_ircd_storage::TableId::E2eeObject, key: present, .. } if *present == key));
-    let restored = fixture.harness.reloaded()?;
-    assert!(
-        !restored
-            .coordinator
-            .state
-            .conversations
-            .contains_key(&fixture.new)
-    );
-    assert!(
-        restored
-            .coordinator
-            .state
-            .routes
-            .route(&ConversationId(fixture.new))
-            .is_none()
-    );
+    // Both bound routes now declare their recovery epoch; missing activation
+    // evidence refuses the whole reconstruction before either gate is installed.
+    assert!(fixture.harness.reloaded().is_err());
     Ok(())
 }

@@ -319,6 +319,13 @@ impl DurableIndex {
         self.channel_names.insert(channel_id, key);
     }
 
+    /// Returns whether the index holds a row under the key, whether read
+    /// back already or still pending after the last commit.
+    #[must_use]
+    pub fn holds(&self, table: TableId, key: &StoredKey) -> bool {
+        self.rows.contains_key(&(table, key.clone()))
+    }
+
     /// Returns the before-image for a row, `None` when the row is absent.
     ///
     /// A pending row is a caller error: the index must be refreshed after
@@ -399,6 +406,31 @@ impl DurableIndex {
         if rows.is_empty() {
             self.nicknames.remove(&account_id);
         }
+    }
+
+    /// Exact sealed byte and row totals of one table, without allocating a copy.
+    pub(crate) fn table_backing(&self, table: TableId) -> Result<(usize, usize), RuntimeError> {
+        self.rows
+            .iter()
+            .filter(|((row_table, _), _)| *row_table == table)
+            .try_fold((0_usize, 0_usize), |(bytes, count), (_, row)| {
+                let IndexedRow::Known(existing) = row else {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                };
+                let size = usize::try_from(existing.sealed_record_bytes())
+                    .map_err(|_| RuntimeError::Overflow)?;
+                Ok((
+                    bytes.checked_add(size).ok_or(RuntimeError::Overflow)?,
+                    count.checked_add(1).ok_or(RuntimeError::Overflow)?,
+                ))
+            })
+    }
+
+    /// Whether a prior receipt still requires authenticated envelope readback.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.rows
+            .values()
+            .any(|row| matches!(row, IndexedRow::Pending { .. }))
     }
 
     /// Lists the rows whose sealed identity must be read back.
@@ -510,6 +542,18 @@ pub(crate) enum AccountServiceDurableWrite {
 }
 
 impl AccountServiceDurableWrite {
+    /// Borrows the encoded persistent value of a put without copying storage buffers.
+    pub(crate) fn encoded_record(&self) -> Option<(TableId, &StoredKey, &[u8])> {
+        match self {
+            Self::Put {
+                table,
+                key,
+                plaintext,
+            } => Some((*table, key, plaintext.as_slice())),
+            Self::Delete { .. } => None,
+        }
+    }
+
     /// Whether both writes put the same plaintext under the same key, so
     /// one batch can drop a repeated put of an identical row.
     pub(crate) fn same_put(&self, other: &Self) -> bool {
@@ -751,6 +795,38 @@ struct Projection<'a> {
     touched: BTreeSet<(TableId, StoredKey)>,
 }
 
+/// Checks the exact edge checkpoint contents with the same projection and
+/// storage validator used by submission. No transaction or sealing entropy is used.
+pub(super) fn preflight_checkpoint(
+    writes: &[AccountServiceDurableWrite],
+    revision: u64,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<(), RuntimeError> {
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    for write in writes {
+        projection.project_account_service_write(write, revision)?;
+    }
+    StorageMutationBatch::preflight_contents(
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        &mut projection.mutations,
+    )?;
+    Ok(())
+}
+
 /// Projects every plan's logical writes into one owned storage batch.
 ///
 /// Returns `None` when no plan produces a persisted delta; such plans are
@@ -861,61 +937,6 @@ pub(crate) fn project_admin_mutation_event(
         head,
         ceilings,
     )
-}
-
-/// Rewrites one legacy administrative policy after-image before live owners
-/// start. The originating signed mutation already advanced protocol state, so
-/// this codec migration advances only the storage commit sequence.
-pub(crate) fn project_admin_policy_backfill(
-    transaction_id: TransactionId,
-    after_image: &AdminMutationAfterImage,
-    index: &DurableIndex,
-    keys: &KeyDeriver,
-    head: HeadCounters,
-    ceilings: AccountingCeilings,
-) -> Result<ProjectedBatch, RuntimeError> {
-    let mut projection = Projection {
-        index,
-        keys,
-        mutations: Vec::new(),
-        updates: Vec::new(),
-        touched: BTreeSet::new(),
-    };
-    match after_image {
-        AdminMutationAfterImage::Account(account) => {
-            projection.put_account(account, account.revision.get())?;
-        }
-        AdminMutationAfterImage::Channel(channel) => {
-            projection.put_channel(channel, channel.revision.get())?;
-        }
-    }
-    let batch = StorageMutationBatch::new(
-        StorageMutationHead {
-            transaction_id,
-            expected_storage_commit_sequence: head.storage_commit_sequence,
-            expected_state_generation: head.state_generation,
-            resulting_state_generation: head.state_generation,
-            state_advancing_plan_count: 0,
-            expected_account_service_response_count: head.account_service_response_count,
-            resulting_account_service_response_count: head.account_service_response_count,
-        },
-        1,
-        StorageAccountingLimits {
-            current_logical_database_bytes: head.logical_database_bytes,
-            current_backup_stream_bytes: head.backup_stream_bytes,
-            database_max_bytes: ceilings.database_max_bytes,
-            backup_max_bytes: ceilings.backup_max_bytes,
-        },
-        projection.mutations,
-    )?;
-    Ok(ProjectedBatch {
-        resulting_logical_database_bytes: batch.resulting_logical_database_bytes(),
-        resulting_backup_stream_bytes: batch.resulting_backup_stream_bytes(),
-        resulting_account_service_response_count: head.account_service_response_count,
-        batch,
-        updates: projection.updates,
-        advancing_plans: 0,
-    })
 }
 
 fn project_admin_event(
@@ -1616,47 +1637,6 @@ mod tests {
                 .get(1)
                 .map(RecordMutation::table),
             Some(TableId::Audit)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn admin_policy_backfill_rewrites_one_row_without_advancing_protocol_state()
-    -> Result<(), RuntimeError> {
-        let plan = account_plan()?;
-        let mut account = match plan.durable_writes().first() {
-            Some(DurableWrite::PutAccount(account)) => account.clone(),
-            _ => return Err(RuntimeError::InvalidValue),
-        };
-        account.admin_suspension_expires_at = Some(UtcSecond::from_unix_seconds(500));
-        let current = HeadCounters {
-            state_generation: 9,
-            storage_commit_sequence: 4,
-            account_service_response_count: 3,
-            logical_database_bytes: 10_000,
-            backup_stream_bytes: 20_000,
-        };
-        let projected = project_admin_policy_backfill(
-            TransactionId::from_bytes([27; 16]),
-            &AdminMutationAfterImage::Account(account),
-            &DurableIndex::new(),
-            &keys()?,
-            current,
-            ceilings(),
-        )?;
-        assert_eq!(projected.advancing_plans(), 0);
-        assert_eq!(projected.batch.expected_state_generation(), 9);
-        assert_eq!(projected.batch.resulting_state_generation(), 9);
-        assert_eq!(projected.batch.state_advancing_plan_count(), 0);
-        assert_eq!(projected.batch.plan_count(), 1);
-        assert_eq!(projected.batch.mutations().len(), 1);
-        assert_eq!(
-            projected
-                .batch
-                .mutations()
-                .first()
-                .map(RecordMutation::table),
-            Some(TableId::Account)
         );
         Ok(())
     }

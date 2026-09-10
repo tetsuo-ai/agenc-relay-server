@@ -67,14 +67,30 @@ pub enum TimerKind {
     CommandDeadline,
     /// The fixed origin grace interval after a federation link is lost.
     FederationGrace,
+    /// One paced retry after definite edge journal admission refusal.
+    FederationJournalRetry,
     /// The pacing step between snapshot entry sends.
     FederationSnapshotSend,
     /// The fixed snapshot token lifetime.
     FederationSnapshotExpiry,
+    /// One paced retained-cursor validation or durable reconciliation step.
+    FederationResumeRetry,
     /// The companion ECAP negotiation deadline of one link.
     CompanionProfileDeadline,
     /// A companion ESTATE snapshot token lifetime.
     CompanionSnapshotExpiry,
+    /// Bounded offline companion replay expiry and storage-refusal retry.
+    CompanionReplayMaintenance,
+    /// Bounded durable mailbox expiry, including idle nodes without federation peers.
+    CompanionMailboxMaintenance,
+    /// Bounded expiry of completed companion request results and replay metadata.
+    CompanionRequestMaintenance,
+    /// The reserved retry wake for an edge's pending witness metadata.
+    CompanionWitnessRetry,
+    /// Expiry of process-local mailbox cursors and their immutable backing.
+    MailboxSnapshotExpiry,
+    /// Expiry of process-local base federation directory query backing.
+    DirectoryQueryExpiry,
 }
 
 /// Typed identity a timer entry names; never a protocol string.

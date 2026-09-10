@@ -292,25 +292,25 @@ impl EdgeReplica {
         Ok(())
     }
 
+    /// Every membership and invite is keyed by its own record identifiers at
+    /// insertion, so only the references they carry can dangle.
     fn validate_children(&self) -> Result<(), ReplicaError> {
-        for ((channel_id, user_id), membership) in &self.memberships {
+        for (channel_id, user_id) in self.memberships.keys() {
             if !self.channels.contains_key(channel_id) || !self.sessions.contains_key(user_id) {
                 return Err(ReplicaError::DanglingReference);
-            }
-            if membership.channel_id != *channel_id || membership.user_id != *user_id {
-                return Err(ReplicaError::InvalidRecord);
             }
         }
         self.validate_invites()
     }
 
     fn validate_invites(&self) -> Result<(), ReplicaError> {
-        for ((channel_id, invite_id), invite) in &self.invites {
+        for (channel_id, invite) in self
+            .invites
+            .iter()
+            .map(|((channel, _), invite)| (channel, invite))
+        {
             if !self.channels.contains_key(channel_id) || !self.hosts_principal(invite.target) {
                 return Err(ReplicaError::DanglingReference);
-            }
-            if invite.channel_id != *channel_id || invite.invite_id != *invite_id {
-                return Err(ReplicaError::InvalidRecord);
             }
         }
         Ok(())
@@ -368,7 +368,13 @@ impl EdgeReplica {
                 channel_id,
                 last_revision,
             } => {
-                self.expect_channel_revision(*channel_id, *last_revision, generation, false)?;
+                self.expect_channel_revision(
+                    *channel_id,
+                    *last_revision,
+                    generation,
+                    false,
+                    &mut outcome,
+                )?;
                 if self.local_members(*channel_id).next().is_some()
                     || self
                         .invites
@@ -394,8 +400,14 @@ impl EdgeReplica {
                     view.membership.membership_revision,
                     generation,
                     true,
+                    &mut outcome,
                 )?;
-                self.advance_home_session(user_id, *home_session_revision, generation)?;
+                self.advance_home_session(
+                    user_id,
+                    *home_session_revision,
+                    generation,
+                    &mut outcome,
+                )?;
                 if self.sessions.contains_key(&user_id) {
                     if self.memberships.contains_key(&(channel_id, user_id)) {
                         return Err(ReplicaError::UnknownEntity);
@@ -420,8 +432,19 @@ impl EdgeReplica {
                 outcome
                     .local_recipients
                     .extend(self.local_members(*channel_id));
-                self.expect_channel_revision(*channel_id, *resulting_revision, generation, true)?;
-                self.advance_home_session(source.user_id, *home_session_revision, generation)?;
+                self.expect_channel_revision(
+                    *channel_id,
+                    *resulting_revision,
+                    generation,
+                    true,
+                    &mut outcome,
+                )?;
+                self.advance_home_session(
+                    source.user_id,
+                    *home_session_revision,
+                    generation,
+                    &mut outcome,
+                )?;
                 self.remove_membership(*channel_id, source.user_id, &mut outcome);
             }
             ProjectedEvent::Kicked {
@@ -434,11 +457,18 @@ impl EdgeReplica {
                 outcome
                     .local_recipients
                     .extend(self.local_members(*channel_id));
-                self.expect_channel_revision(*channel_id, *resulting_revision, generation, true)?;
+                self.expect_channel_revision(
+                    *channel_id,
+                    *resulting_revision,
+                    generation,
+                    true,
+                    &mut outcome,
+                )?;
                 self.advance_home_session(
                     target.user_id,
                     *target_home_session_revision,
                     generation,
+                    &mut outcome,
                 )?;
                 self.remove_membership(*channel_id, target.user_id, &mut outcome);
             }
@@ -448,7 +478,13 @@ impl EdgeReplica {
                 changes,
                 ..
             } => {
-                self.expect_channel_revision(*channel_id, *resulting_revision, generation, true)?;
+                self.expect_channel_revision(
+                    *channel_id,
+                    *resulting_revision,
+                    generation,
+                    true,
+                    &mut outcome,
+                )?;
                 self.apply_mode_changes(*channel_id, changes, &mut outcome)?;
                 outcome
                     .local_recipients
@@ -464,7 +500,13 @@ impl EdgeReplica {
                 resulting_revision,
                 ..
             } => {
-                self.expect_channel_revision(*channel_id, *resulting_revision, generation, true)?;
+                self.expect_channel_revision(
+                    *channel_id,
+                    *resulting_revision,
+                    generation,
+                    true,
+                    &mut outcome,
+                )?;
                 if let ProjectedEvent::ChannelMembershipsRecomputed { memberships, .. } = event {
                     for view in memberships {
                         if view.membership.channel_id != *channel_id {
@@ -511,7 +553,12 @@ impl EdgeReplica {
                     if self.invites.contains_key(&(*channel_id, *invite_id)) {
                         return Err(ReplicaError::UnknownEntity);
                     }
-                    self.bump_channel_revision(*channel_id, *resulting_revision, generation)?;
+                    self.bump_channel_revision(
+                        *channel_id,
+                        *resulting_revision,
+                        generation,
+                        &mut outcome,
+                    )?;
                     self.invites.insert((*channel_id, *invite_id), *record);
                     outcome
                         .upserted
@@ -541,6 +588,7 @@ impl EdgeReplica {
                         *resulting_revision,
                         generation,
                         false,
+                        &mut outcome,
                     )?;
                 } else {
                     self.expect_channel_revision(
@@ -548,6 +596,7 @@ impl EdgeReplica {
                         *resulting_revision,
                         generation,
                         true,
+                        &mut outcome,
                     )?;
                 }
                 outcome
@@ -583,7 +632,13 @@ impl EdgeReplica {
                 channel_id,
                 final_revision,
             } => {
-                self.expect_channel_revision(*channel_id, *final_revision, generation, true)?;
+                self.expect_channel_revision(
+                    *channel_id,
+                    *final_revision,
+                    generation,
+                    true,
+                    &mut outcome,
+                )?;
                 outcome
                     .local_recipients
                     .extend(self.local_members(*channel_id));
@@ -654,6 +709,13 @@ impl EdgeReplica {
             }
             ProjectedEvent::RequestCompleted { .. } => {}
         }
+        // A row removed by this event supersedes its earlier revision bump.
+        // Several effects may update the same surviving row; persist it once.
+        outcome
+            .upserted
+            .retain(|key| !outcome.removed.contains(key));
+        outcome.upserted.sort_unstable();
+        outcome.upserted.dedup();
         Ok(outcome)
     }
 
@@ -814,7 +876,7 @@ impl EdgeReplica {
                 return Err(ReplicaError::SnapshotOrder);
             }
             previous = Some(*channel_id);
-            self.expect_channel_revision(*channel_id, *revision, generation, true)?;
+            self.expect_channel_revision(*channel_id, *revision, generation, true, outcome)?;
             outcome
                 .local_recipients
                 .extend(self.local_members(*channel_id));
@@ -875,9 +937,10 @@ impl EdgeReplica {
         carried: Revision,
         generation: Revision,
         state_changing: bool,
+        outcome: &mut ApplyOutcome,
     ) -> Result<(), ReplicaError> {
         if state_changing {
-            return self.bump_channel_revision(channel_id, carried, generation);
+            return self.bump_channel_revision(channel_id, carried, generation, outcome);
         }
         let detail = self
             .channels
@@ -894,6 +957,7 @@ impl EdgeReplica {
         channel_id: ChannelInstanceId,
         carried: Revision,
         generation: Revision,
+        outcome: &mut ApplyOutcome,
     ) -> Result<(), ReplicaError> {
         let detail = self
             .channels
@@ -905,7 +969,12 @@ impl EdgeReplica {
         if carried != generation && carried != detail.channel_revision {
             return Err(ReplicaError::Revision);
         }
-        detail.channel_revision = carried;
+        if detail.channel_revision != carried {
+            detail.channel_revision = carried;
+            outcome
+                .upserted
+                .push(ProjectionKey::channel_detail(channel_id));
+        }
         Ok(())
     }
 
@@ -914,13 +983,17 @@ impl EdgeReplica {
         user_id: UserId,
         home_session_revision: Option<Revision>,
         generation: Revision,
+        outcome: &mut ApplyOutcome,
     ) -> Result<(), ReplicaError> {
         match (self.sessions.get_mut(&user_id), home_session_revision) {
             (Some(session), Some(revision)) => {
                 if revision.get() < session.session_revision.get() || revision != generation {
                     return Err(ReplicaError::HomeSessionRevision);
                 }
-                session.session_revision = revision;
+                if session.session_revision != revision {
+                    session.session_revision = revision;
+                    outcome.upserted.push(ProjectionKey::session(user_id));
+                }
                 Ok(())
             }
             (None, None) => Ok(()),

@@ -5,6 +5,9 @@
 //! checks, fresh session identities, the ephemeral domain insertion, and
 //! bounded rendering into the connection sink.
 
+mod join_names;
+pub(crate) mod replies;
+
 use std::collections::{BTreeMap, VecDeque};
 
 use agenc_ircd_client_wire::{
@@ -116,6 +119,9 @@ struct ConnectionState {
     deadline: DeadlineState,
     allow_guests: bool,
     deferred_observations: VecDeque<CommandObservation>,
+    reply_pages: replies::ReplyPages,
+    join_names: Option<join_names::JoinNamesContinuation>,
+    join_deferred: crate::budget::RetainedQueue<join_names::DeferredJoinCommand>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -316,9 +322,10 @@ impl RegistrationRouter {
         port: &agenc_ircd_storage::StoragePort,
         keys: &crate::state_core::durable::KeyDeriver,
         head: crate::state_core::durable::HeadCounters,
+        backing: crate::budget::BackingReservationPort,
     ) -> Result<(), crate::RuntimeError> {
         if let Some(edge) = self.edge.as_mut() {
-            edge.restore(port, keys, self.e2ee.as_mut(), head)?;
+            edge.restore(port, keys, self.e2ee.as_mut(), head, Some(backing))?;
         }
         Ok(())
     }
@@ -444,6 +451,17 @@ impl RegistrationRouter {
             .and_then(|record| record.account)
             .and_then(|(account, _)| account.to_text().as_bytes().try_into().ok());
         e2ee.plaintext_refusal(edge, message, account)
+    }
+
+    fn companion_witness_timer(
+        &mut self,
+        context: &mut StateCoreContext,
+        entry: TimerEntry,
+    ) -> bool {
+        self.e2ee
+            .as_mut()
+            .zip(self.edge.as_mut())
+            .is_some_and(|(e2ee, edge)| e2ee.witness_timer_fired(context, edge, entry))
     }
 
     /// Drains the companion frames the edge admitted and applies what the
@@ -692,6 +710,17 @@ impl RegistrationRouter {
         actions: Vec<RegistrationAction>,
         observation: &mut Option<CommandObservation>,
     ) -> RouteOutcome {
+        let refreshed = state.bound.map_or(Ok(()), |bound| {
+            context.sessions_mut().refresh_capabilities(
+                generation,
+                bound,
+                state.registration.capability_state(),
+            )
+        });
+        if refreshed.is_err() {
+            complete_observation(context, observation, ResultClass::Error);
+            return RouteOutcome::Close(CloseReason::ProtocolError);
+        }
         let mut result = ResultClass::Ok;
         let mut pending: VecDeque<RegistrationAction> = actions.into();
         while let Some(action) = pending.pop_front() {
@@ -976,6 +1005,11 @@ impl RegistrationRouter {
             }
             RegistrationAction::ForwardRegisteredCommand(handoff) => {
                 let observation = observation.take().ok_or(RuntimeError::InvalidValue)?;
+                if self.edge.is_none()
+                    && (state.join_names.is_some() || context.has_local_join_seed(generation))
+                {
+                    return Self::defer_join_command(context, state, handoff, observation);
+                }
                 if self.edge.is_some() {
                     return self.route_edge_command(
                         context,
@@ -1165,7 +1199,8 @@ impl RegistrationRouter {
         let Some(edge) = self.edge.as_mut() else {
             return Err(RuntimeError::InvalidValue);
         };
-        if !edge.network_available() {
+        if !edge.network_available() && !crate::federation::edge::is_local_user_mode_query(&message)
+        {
             context.complete_command_observation(observation, ResultClass::Busy);
             self.send_one(
                 context,
@@ -1186,7 +1221,7 @@ impl RegistrationRouter {
             }
             Err((message, error)) => {
                 context.complete_command_observation(observation, ResultClass::Rejected);
-                self.render_edge_failure(context, generation, state, &message, error)?;
+                self.render_edge_failure(context, generation, state, &message, (error, false))?;
             }
         }
         Ok(ActionStep::Continue)
@@ -1196,9 +1231,9 @@ impl RegistrationRouter {
         &self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
-        state: &ConnectionState,
+        state: &mut ConnectionState,
         message: &agenc_ircd_client_wire::ParsedMessage,
-        error: DomainError,
+        failure: (DomainError, bool),
     ) -> Result<(), RuntimeError> {
         let nickname = self.target(state).to_owned();
         let frame = crate::client_render::failure_frame(
@@ -1206,10 +1241,20 @@ impl RegistrationRouter {
             &self.config.server_prefix,
             &nickname,
             message,
-            error,
+            failure.0,
             None,
         )?;
-        self.send_one(context, generation, frame)
+        let frames = state.reply_pages.failure(
+            state.registration.capability_state(),
+            &self.config.server_prefix,
+            message,
+            frame,
+            failure.1,
+        )?;
+        context
+            .send_to(generation, frames)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        Ok(())
     }
 
     /// Applies what the edge finished: registrations, failures, completions,
@@ -1276,21 +1321,68 @@ impl RegistrationRouter {
                 message,
                 error,
             } => {
-                if let Some(state) = self.connections.get(&generation) {
-                    let _rendered =
-                        self.render_edge_failure(context, generation, state, &message, error);
+                if message.command() == "JOIN"
+                    && self
+                        .connections
+                        .get(&generation)
+                        .is_some_and(|state| state.join_names.is_some())
+                {
+                    self.abort_join_names(context, generation);
+                    return;
+                }
+                if let Some(mut state) = self.connections.remove(&generation) {
+                    let rendered = self.render_edge_failure(
+                        context,
+                        generation,
+                        &mut state,
+                        &message,
+                        (error, true),
+                    );
+                    self.connections.insert(generation, state);
+                    if rendered.is_err() {
+                        close_transport(context, generation);
+                    }
                 }
             }
             EdgeCompletion::CommandCompleted {
                 generation,
                 message,
             } => self.after_edge_completion(context, generation, &message),
+            EdgeCompletion::JoinCommitted {
+                generation,
+                frames,
+                echo_permits,
+                message,
+            } => {
+                if self
+                    .begin_join_names(context, generation, frames, message)
+                    .is_err()
+                {
+                    self.abort_join_names(context, generation);
+                }
+                drop(echo_permits);
+            }
             EdgeCompletion::Replies {
                 generation,
                 frames,
+                page_sequence,
                 next_cursor,
                 message,
-            } => self.deliver_edge_replies(context, generation, frames, next_cursor, &message),
+            } => self.deliver_edge_replies(
+                context,
+                generation,
+                frames,
+                (page_sequence, next_cursor),
+                message,
+            ),
+            EdgeCompletion::AccountDeleted {
+                generation,
+                frames,
+                message,
+            } => {
+                self.deliver_edge_replies(context, generation, frames, (0, None), message);
+                close_transport(context, generation);
+            }
             EdgeCompletion::Resync { generation } => self.resync_edge_client(context, generation),
             EdgeCompletion::AccountCarrier {
                 generation,
@@ -1568,13 +1660,60 @@ impl RegistrationRouter {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         frames: Vec<WireMessage>,
-        next_cursor: Option<[u8; 32]>,
-        message: &agenc_ircd_client_wire::ParsedMessage,
+        page: (u32, Option<[u8; 32]>),
+        message: Box<agenc_ircd_client_wire::ParsedMessage>,
     ) {
-        let _sent = context.send_to(generation, frames);
-        if let (Some(cursor), Some(edge)) = (next_cursor, self.edge.as_mut()) {
-            edge.continue_query(context, generation, message, cursor);
+        if message.command() == "JOIN" {
+            if self
+                .deliver_join_names(context, generation, frames, page, message)
+                .is_err()
+            {
+                self.abort_join_names(context, generation);
+            }
+            return;
         }
+        let (_, next_cursor) = page;
+        let Ok(frames) = self.prepare_edge_replies(generation, frames, page, &message) else {
+            close_transport(context, generation);
+            return;
+        };
+        if !frames.is_empty() && context.send_to(generation, frames).is_err() {
+            close_transport(context, generation);
+            return;
+        }
+        if let (Some(cursor), Some(edge)) = (next_cursor, self.edge.as_mut())
+            && !edge.continue_query(context, generation, message, cursor)
+        {
+            close_transport(context, generation);
+        }
+    }
+
+    fn prepare_edge_replies(
+        &mut self,
+        generation: ConnectionGeneration,
+        frames: Vec<WireMessage>,
+        page: (u32, Option<[u8; 32]>),
+        message: &agenc_ircd_client_wire::ParsedMessage,
+    ) -> Result<Vec<WireMessage>, RuntimeError> {
+        let state = self
+            .connections
+            .get_mut(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let capabilities = state.registration.capability_state();
+        let frames = replies::private_account_frames(
+            capabilities,
+            &self.config.server_prefix,
+            state.nickname.as_deref().unwrap_or("*"),
+            message,
+            frames,
+        )?;
+        state.reply_pages.render(
+            capabilities,
+            &self.config.server_prefix,
+            message,
+            frames,
+            (page.0, page.1.is_some()),
+        )
     }
 
     fn resync_edge_client(
@@ -2531,8 +2670,35 @@ impl RegistrationRouter {
         {
             let _rejected = accounts.registration_rejected(context, generation);
         }
+        self.render_rejected_registration(context, generation, pending.event_generation);
         close_transport(context, generation);
         true
+    }
+
+    fn render_rejected_registration(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        event_generation: u64,
+    ) {
+        let Some(mut state) = self.connections.remove(&generation) else {
+            return;
+        };
+        let actions = state.registration.event(
+            RegistrationEvent::RegistrationCommitted {
+                generation: event_generation,
+                accepted: false,
+                authenticated: false,
+            },
+            context.now().get(),
+        );
+        if let Ok(actions) = actions {
+            let mut observation = None;
+            let _outcome =
+                self.drive_actions(context, generation, &mut state, actions, &mut observation);
+        }
+        self.release_lease(generation, &mut state);
+        self.connections.insert(generation, state);
     }
 
     /// Runs the remote account carriers the coordinator queued.
@@ -2659,6 +2825,12 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         event: crate::state_core::inbox::MaintenanceEvent,
     ) {
+        if let Some(edge) = self.edge.as_mut() {
+            edge.continue_request_journal(context);
+        }
+        if let Some(coordinator) = self.federation.as_mut() {
+            coordinator.continue_restore(context);
+        }
         if event == crate::state_core::inbox::MaintenanceEvent::RetentionSweep {
             let pending = self
                 .e2ee
@@ -2737,7 +2909,9 @@ impl CommandRouter for RegistrationRouter {
         message: agenc_ircd_client_wire::ParsedMessage,
         observation: CommandObservation,
     ) -> RouteOutcome {
-        self.route_message(context, generation, message, observation)
+        let outcome = self.route_message(context, generation, message, observation);
+        self.drain_local_join_seeds(context);
+        outcome
     }
 
     fn connection_opened(
@@ -2793,6 +2967,9 @@ impl CommandRouter for RegistrationRouter {
                     deadline: DeadlineState::Registration,
                     allow_guests: self.config.allow_guests,
                     deferred_observations: VecDeque::new(),
+                    reply_pages: replies::ReplyPages::default(),
+                    join_names: None,
+                    join_deferred: crate::budget::RetainedQueue::default(),
                 },
             );
             if let Some(edge) = self.edge.as_mut() {
@@ -2809,6 +2986,7 @@ impl CommandRouter for RegistrationRouter {
         generation: ConnectionGeneration,
         _reason: CloseReason,
     ) {
+        context.close_local_join_seed(generation);
         if let Some(accounts) = self.accounts.as_mut() {
             accounts.connection_closed(context, generation);
         }
@@ -2828,6 +3006,9 @@ impl CommandRouter for RegistrationRouter {
         };
         for observation in state.deferred_observations.drain(..) {
             context.complete_command_observation(observation, ResultClass::Closed);
+        }
+        for deferred in state.join_deferred.drain() {
+            context.complete_command_observation(deferred.observation, ResultClass::Closed);
         }
         cancel_connection_timers(context, generation);
         let _event = state
@@ -2864,6 +3045,25 @@ impl CommandRouter for RegistrationRouter {
         }
     }
 
+    fn begin_shutdown(&mut self, context: &mut StateCoreContext) -> bool {
+        if let Some(edge) = self.edge.as_mut() {
+            edge.cancel_journal_retry(context);
+        }
+        let Some(accounts) = self.accounts.as_mut() else {
+            return true;
+        };
+        if !accounts.cancel_for_shutdown(context) {
+            return false;
+        }
+        if let Some(federation) = self.federation.as_mut() {
+            crate::remote_accounts::shutdown(context, accounts, federation);
+        }
+        for (_, observation) in std::mem::take(&mut self.pending_observations) {
+            context.complete_command_observation(observation, ResultClass::Closed);
+        }
+        true
+    }
+
     fn reload_ready(&self) -> bool {
         self.federation
             .as_ref()
@@ -2881,6 +3081,13 @@ impl CommandRouter for RegistrationRouter {
                 .as_ref()
                 .is_none_or(AccountServiceCoordinator::reload_ready)
             && self.commands.reload_ready()
+    }
+
+    fn index_refreshed(&mut self, context: &mut StateCoreContext) {
+        if let Some(edge) = self.edge.as_mut() {
+            let completions = edge.index_refreshed(context);
+            self.apply_edge_completions(context, completions);
+        }
     }
 
     fn batch_applied(&mut self, context: &mut StateCoreContext, _plan_count: usize) {
@@ -2911,6 +3118,7 @@ impl CommandRouter for RegistrationRouter {
         }
         // A committed barrier part may have completed the set.
         self.drive_e2ee(context);
+        self.drain_local_join_seeds(context);
     }
 
     fn crypto_completed(
@@ -2939,6 +3147,7 @@ impl CommandRouter for RegistrationRouter {
         if let Err((generation, _error)) = self.commands.crypto_completed(context, message) {
             close_transport(context, generation);
         }
+        self.drain_local_join_seeds(context);
     }
 
     fn storage_read_completed(
@@ -2980,10 +3189,15 @@ impl CommandRouter for RegistrationRouter {
         &mut self,
         context: &mut StateCoreContext,
         origin: Option<crate::state_core::StagedOrigin>,
-        _error: agenc_ircd_storage::StorageError,
+        error: agenc_ircd_storage::StorageError,
     ) {
+        let witness_rejection = self
+            .e2ee
+            .as_ref()
+            .and_then(|e2ee| e2ee.witness_rejection(context));
+        context.discard_local_join_seeds();
         if let Some(federation) = self.federation.as_mut() {
-            federation.batch_rejected(context);
+            federation.batch_rejected_with_error(context, error);
         }
         if let (Some(accounts), Some(federation)) =
             (self.accounts.as_mut(), self.federation.as_mut())
@@ -2991,9 +3205,11 @@ impl CommandRouter for RegistrationRouter {
             crate::remote_accounts::batch_settled(context, accounts, federation);
         }
         if let Some(edge) = self.edge.as_mut() {
-            edge.batch_rejected(context);
+            edge.batch_rejected_with_error(context, error);
         }
-        if let Some(e2ee) = self.e2ee.as_mut() {
+        if let Some(e2ee) = self.e2ee.as_mut()
+            && !e2ee.witness_batch_rejected(witness_rejection)
+        {
             e2ee.batch_rejected();
         }
         let generation = origin.as_ref().map(StagedOrigin::generation);
@@ -3001,6 +3217,7 @@ impl CommandRouter for RegistrationRouter {
             .is_some_and(|generation| self.reject_pending_registration(context, generation))
         {
             self.retry_session_closes(context);
+            self.resume_ready_join_commands(context);
             return;
         }
         if let Some((generation, accounts)) = generation.zip(self.accounts.as_mut())
@@ -3010,6 +3227,7 @@ impl CommandRouter for RegistrationRouter {
                 reject_staged_origin(context, origin);
             }
             self.retry_session_closes(context);
+            self.resume_ready_join_commands(context);
             return;
         }
         let completions = self
@@ -3023,9 +3241,13 @@ impl CommandRouter for RegistrationRouter {
             self.apply_account_completions(context, completions);
         }
         self.retry_session_closes(context);
+        self.resume_ready_join_commands(context);
     }
 
     fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) {
+        if self.join_names_timer(context, entry) {
+            return;
+        }
         if let Some(federation) = self.federation.as_mut()
             && federation.timer_fired(context, entry)
         {
@@ -3034,6 +3256,9 @@ impl CommandRouter for RegistrationRouter {
         if let Some(edge) = self.edge.as_mut()
             && edge.timer_fired(context, entry)
         {
+            return;
+        }
+        if self.companion_witness_timer(context, entry) {
             return;
         }
         let Some(accounts) = self.accounts.as_mut() else {
@@ -3253,6 +3478,7 @@ fn cancel_connection_timers(context: &mut StateCoreContext, generation: Connecti
         TimerKind::RegistrationDeadline,
         TimerKind::Ping,
         TimerKind::Pong,
+        TimerKind::Batch,
     ] {
         context.timers_mut().cancel(kind, id);
     }
@@ -3260,7 +3486,7 @@ fn cancel_connection_timers(context: &mut StateCoreContext, generation: Connecti
 
 fn close_transport(context: &mut StateCoreContext, generation: ConnectionGeneration) {
     if let Some(sink) = context.sessions().sink_for_generation(generation) {
-        sink.begin_slow_consumer_close();
+        let _flushed = sink.close_after_flush(CloseReason::ProtocolError);
     }
     context.sessions_mut().mark_sink_gone(generation);
 }

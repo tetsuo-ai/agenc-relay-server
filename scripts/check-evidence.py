@@ -195,6 +195,9 @@ STAGE_BINDINGS = {
 }
 
 NORMATIVE_BINDINGS = {
+    "EVID-ARCH-REQ-DCCD630ED3C2D1099D57": (["ARCH-REQ-DCCD630ED3C2D1099D57"], "normative-requirement"),
+    "EVID-ARCH-REQ-A9435E6B2C79E8FC941E": (["ARCH-REQ-A9435E6B2C79E8FC941E"], "normative-requirement"),
+    "EVID-ARCH-REQ-36D7DB187D93A1E082E3": (["ARCH-REQ-36D7DB187D93A1E082E3"], "normative-requirement"),
     "EVID-ARCH-AUTH-03": (["ARCH-AUTH-03"], "normative-requirement"),
     "EVID-ARCH-AUTH-06": (["ARCH-AUTH-06"], "normative-requirement"),
     "EVID-ARCH-FED-01": (["ARCH-FED-01"], "normative-requirement"),
@@ -284,9 +287,6 @@ NORMATIVE_BINDINGS = {
     ),
     "EVID-ARCH-REQ-C70A2FA24AD661DB7BC3": (
         ["ARCH-REQ-C70A2FA24AD661DB7BC3"], "normative-requirement",
-    ),
-    "EVID-ARCH-REQ-2DAB3DDD73C2AE873977": (
-        ["ARCH-REQ-2DAB3DDD73C2AE873977"], "normative-requirement",
     ),
     "EVID-ARCH-REQ-351F91DD2F9F7B09DD4C": (
         ["ARCH-REQ-351F91DD2F9F7B09DD4C"], "normative-requirement",
@@ -467,6 +467,8 @@ NORMATIVE_BINDINGS = {
 # validating; a retired entry never counts toward a closure and no new
 # manifest may cite it.
 RETIRED_BINDINGS = {
+    # Current-format admission in 15acb53 removed migration from this atomicity sentence.
+    "EVID-ARCH-REQ-2DAB3DDD73C2AE873977": (["ARCH-REQ-2DAB3DDD73C2AE873977"], "normative-requirement"),
     # Section 7.5 padding moved from the MLS padding field to the
     # application content on 2026-09-04 (Stage 08 checkpoint 52c7ccb).
     "EVID-E2EE-REQ-58217F311021E979779A": (["E2EE-REQ-58217F311021E979779A"], "normative-requirement"),

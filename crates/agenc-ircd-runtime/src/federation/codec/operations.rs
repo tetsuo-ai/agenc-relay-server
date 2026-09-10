@@ -24,6 +24,8 @@ use super::{
 const TARGET_CHANNEL: u64 = 1;
 const TARGET_USER: u64 = 2;
 const MAX_KICK_TARGETS: usize = 4;
+/// The fixed B.4 user-mode code for operator notices.
+pub(crate) const USER_MODE_CODE_WALLOPS: u16 = 18;
 
 /// One join target with its optional key, zeroized on drop.
 #[derive(Clone, Eq, PartialEq)]

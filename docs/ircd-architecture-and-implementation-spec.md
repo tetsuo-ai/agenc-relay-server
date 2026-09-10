@@ -2995,7 +2995,7 @@ error still enters Section 21.5's `Indeterminate` reconciliation path.
 already authenticated as `StateMeta.backup_stream_bytes`. Before creating the
 temporary file on the backup filesystem it requires available bytes of at
 least `R(F) + backup_stream_bytes`; the temporary is renamed in place and does
-not coexist with a second final copy. Restore, rekey, migration, scratch-plan,
+not coexist with a second final copy. Restore, rekey, scratch-plan,
 and target-construction databases cannot reserve an assumed redb file length.
 They instead prove their exact logical and backup-stream ceilings in preflight
 and apply this same `R(F) + G` gate independently before every scratch or
@@ -4730,10 +4730,12 @@ Audit export uses one server-generated batch ID and this exact framing:
 BATCH +<batch-id> agenc.ag/audit <from> <to> <event-count> <checkpoint-count>
 @batch=<batch-id> NOTE AUDIT CHECKPOINT <base64url-AdminAuditCheckpoint> :Audit checkpoint
 @batch=<batch-id> NOTE AUDIT EVENT <base64url-AdminAuditEvent> :Audit event
+@batch=<batch-id> NOTE AUDIT MAINTENANCE <base64url-MaintenanceAuditEvent> :Maintenance audit event
 BATCH -<batch-id>
 ```
 
-The two counts are exact. Export includes every signed checkpoint whose deleted
+The two counts are exact. Each retained event uses its corresponding `EVENT`
+or `MAINTENANCE` line and keeps its original signed bytes. Export includes every signed checkpoint whose deleted
 range intersects the requested inclusive range and every retained event in the
 range, checkpoints first in checkpoint-sequence order and events second in
 audit-sequence order. Each base64url token is canonical and decodes to the
@@ -4871,14 +4873,12 @@ must match its Network and Server IDs. `server_incarnation`,
 initialization. Server incarnation remains fixed while the durable request and
 projection continuity of that database is intact. Restore changes the server
 incarnation, instance ID, and recovery epoch; rekey changes only the instance
-ID, and copy-on-write schema migration likewise changes only the instance ID
-among those three identity fields. A construction retaining the same master
+ID among those three identity fields. A construction retaining the same master
 advances `storage_key_generation` by exactly one without wrap because the
 fresh DatabaseBinding creates a new record-key generation; a construction
 with bytewise new master material starts that master's generation at one. A recovery epoch MUST be different from the source and any readable
-currently configured database. `schema_generation` changes only through
-Section-23.6 migration. The
-key-check object in Section 23.3
+currently configured database. Schema admission follows Section 23.6.
+The key-check object in Section 23.3
 authenticates every header field, including the mutable generations, without
 making those mutable fields associated data for every record.
 
@@ -4913,8 +4913,8 @@ intentional exceptions: the fixed `meta` records described above.
 | `e2ee_object` | companion object ID | exact opaque object | companion retention |
 | `e2ee_state` | companion typed key | exact route/replay/sequencer/mailbox state and Section-20.8 cross-profile stage, immutable part, and applied-receipt records | companion retention; barrier rows use their exact profile window |
 | `login_index_key_state` | fixed `agenc-chat/login-index-key-state/v1` bytes | current/previous generation, key IDs, and exact previous-entry count | exactly one |
-| `storage_construction` | fixed `agenc-chat/storage-construction/v1` bytes | restore/rekey/schema-migration staging identity, phase, and source cursor | staging only; absent from a live database |
-| `storage_operation` | storage-operation ID | authenticated completed restore/rekey/schema-migration provenance and finalization counters | permanent |
+| `storage_construction` | fixed `agenc-chat/storage-construction/v1` bytes | restore/rekey staging identity, phase, and source cursor | staging only; absent from a live database |
+| `storage_operation` | storage-operation ID | authenticated completed restore/rekey provenance and finalization counters | permanent |
 
 The record-encryption and backup `table_id` registry is fixed as follows:
 
@@ -5064,8 +5064,7 @@ the active key generation, and the fixed stored key
 `"agenc-chat/key-check/v1"`; `key_check_object_id` is the
 `sealed_record_id` of that complete `SealedRecord`. Startup first verifies that
 object ID, then decrypts and constant-time compares the header digest.
-Sequence-zero initialization for a first run, restore, rekey, or schema
-migration writes the header and matching key-check object in one immediate
+Sequence-zero initialization for a first run, restore, or rekey writes the header and matching key-check object in one immediate
 transaction. This authenticates mutable header
 generations and detects a wrong master key without attempting arbitrary record
 decryption.
@@ -5085,8 +5084,7 @@ exactly once in canonical plan order. One database transaction may batch
 1..256 plans,
 so its manifest records the exact previous and resulting generation and their
 difference equals its state-advancing plan count. Retention, integrity-
-checkpoint installation, backup bookkeeping, and representation-only
-migration work do not advance `state_generation`. Counters use checked
+checkpoint installation and backup bookkeeping do not advance `state_generation`. Counters use checked
 arithmetic and never wrap.
 
 One manifest has at most 65,535 distinct tracked-record mutations and at most
@@ -5148,7 +5146,7 @@ configuration. These sets MUST be one database transaction:
   session/origin tombstones, membership/invite removals, events, and outboxes;
 - retention deletion: deleted records, new deletion cursor, and audit
   checkpoint when applicable; and
-- offline restore/rekey/schema-migration construction batch: inserted/replaced target records,
+- offline restore/rekey construction batch: inserted/replaced target records,
   exact construction cursor, manifest, StateMeta, and successor guard; the
   dedicated finalization transaction atomically deletes the construction
   record, inserts its completed storage-operation record, and writes its
@@ -5344,7 +5342,7 @@ same value. If initialization creates `I` integrity-tracked
 envelopes, that count is exactly `I + 3`: one key-check envelope, the `I`
 tracked envelopes, one genesis-checkpoint envelope, and one StateMeta
 envelope. No manifest exists at sequence zero. The ordinary first-run set has
-at least the login-index key-state record; a restore/rekey/migration staging
+at least the login-index key-state record; a restore/rekey staging
 set has exactly one tracked construction record at sequence zero, with the
 login-index key state supplied later by its required plan entry.
 Implementations compute `I` from the actual initial mutation set rather than
@@ -5421,7 +5419,7 @@ coordinator-sealed account-service responses advances it by exactly that
 number in canonical plan order; exact replay of a stored result, edge receipt
 or forwarding of that ciphertext, retention deletion, checkpointing, and
 backup bookkeeping do not advance it. An edge database requires zero at every
-cut. Rekey and schema migration preserve the role-appropriate value exactly.
+cut. Rekey preserve the role-appropriate value exactly.
 Startup and construction validation reject a decrease or an unexplained
 advance within one recovery epoch, and checked overflow rejects before salt
 generation or any semantic side effect.
@@ -5442,7 +5440,7 @@ arithmetic before reserving nonces. Its resulting logical charge must be no
 greater than `storage.database_max_bytes`, and its resulting backup length no
 greater than `storage.backup_max_bytes`; otherwise it rejects at the last
 side-effect-free point. Retention deletions remain admissible. Startup,
-checkpoint scans, backup verification, restore, rekey, and migration recompute
+checkpoint scans, backup verification, restore and rekey recompute
 both sums independently and require exact StateMeta equality. These are abuse
 and recoverability ceilings, not claims about redb page overhead or filesystem
 allocation; the physical safety boundary is the reserve rule below.
@@ -5479,7 +5477,7 @@ transaction the reserved-phase guard may remain ahead until a later successful
 transaction carries the burned prefix into StateMeta. The effective guard/DB
 mark counts committed sealing calls and conservatively burns every uncertain
 slot, including values later replaced or deleted. It never decreases within one database instance/storage-key
-generation and never exceeds `2^40`. Restore, rekey, and schema migration reset
+generation and never exceeds `2^40`. Restore and rekey reset
 it only by creating a new database instance and storage-key generation; their
 bounded construction transactions then reserve and advance it normally rather
 than pretending the final mark is zero or merely the number of currently
@@ -5695,7 +5693,7 @@ commits the database and only then creates and syncs the first committed guard,
 whose reservation start/end equal that mark and whose reservation-state hash
 binds the fixed database record. It installs the pair by the same atomic state-directory rename
 used by restore; a final directory can never contain only one member of the
-initial pair. Restore, rekey, and schema migration create a new database
+initial pair. Restore and rekey create a new database
 instance and guard chain as Sections 23.6 through 23.8 specify.
 `uint64::MAX` is never wrapped; exhaustion requires an explicit new recovery
 epoch and fresh database instance before another affected logical counter can
@@ -5812,128 +5810,13 @@ combination, or exhausted verifier resource fails closed into offline repair
 mode. Automatic deletion, rollback, guard regeneration, or "best effort"
 startup is forbidden.
 
-### 23.6 Migrations
+### 23.6 Storage format admission
 
-Migrations are forward-only, copy-on-write constructions from one exact schema
-generation to its immediate successor. In-place mixed-schema state,
-reverse-running migration code, and redb savepoint restoration are forbidden.
-Each shipping migration is a reviewed protocol artifact with one source
-generation, target = source + 1 under checked arithmetic, command version,
-canonical rule registry, normative per-rule transformation pseudocode, and
-golden before/after/corruption vectors. Its profile hash is:
-
-```text
-storage_migration_profile_hash = SHA256(
-    "agenc-chat storage migration profile v1" ||
-    uint64(source_schema_generation) ||
-    uint64(target_schema_generation) ||
-    canonical_migration_registry_bytes)
-```
-
-Registry bytes are printable ASCII plus LF, end in exactly one LF, have no
-blank line, and sort bytewise. Each line is
-`rule|<uint16-decimal-rule-id>|<source-table-id>|<source-record-schema>|`
-`<target-table-id-or-absent>|<target-record-schema-or-zero>|<normative-name>`.
-Rule IDs are unique 1..65,535; numeric fields are canonical unsigned decimal;
-the source/target table-and-schema tuple is unique; `absent` requires target schema zero; a present
-target uses an integrity-tracked table and nonzero schema; and the normative
-name is 1..64 lowercase ASCII `[a-z0-9-]`. The separately cited normative
-rule text defines every field conversion, validation, split/merge, target-key
-derivation, and failure condition. A registry line without that text and
-vectors is not implementable and blocks release. Database format 1 initially
-began at schema generation 1. Stage 09 ships exactly one migration from
-generation 1 to 2, defined below. Fresh databases use generation 2, including
-builds with both optional service features disabled.
-
-The stopped-daemon command is:
-
-```text
-agenc-ircd storage migrate --config <file>
-    --target-schema-generation <current-plus-one>
-    --output-state-directory <new-directory> [--resume]
-```
-
-It holds the source writer lock, requires a current-head integrity checkpoint
-and a newly created/verified backup of that exact reservation/guard boundary,
-and resolves exactly one compiled migration profile whose source, target, and
-checked-in hash match. It then uses the Section-23.7 construction protocol
-with kind `construction_migrate`, the same source/target master and guard-root
-keys, a fresh database instance/storage-key generation, and one
-`construction_migrate_transform` plan entry per emitted target record. The
-plan entry's rule ID selects the exact registry rule; zero, an unknown rule,
-or a source/action/target tuple not admitted by that rule is fatal. A rule may
-emit zero or more entries and an entry may cite zero, one, or two canonically ordered
-source records; a migration needing a larger atomic source group requires a
-new construction-plan version rather than hidden scratch state.
-
-The target header names the successor schema from sequence zero and its key
-check is created there. Every retained logical value is decoded under the
-source schema, semantically validated, transformed, target-key-derived, and
-freshly sealed even when its logical bytes are unchanged. The migration
-preserves server incarnation, recovery epoch, state generation,
-account-service response count, domain revisions, request/outbox continuity,
-login-index key state, E2EE counters, and prior completed storage-operation
-records. Final marker replacement adds
-the new migration `StorageOperationCompletion`; full startup reconstruction,
-cross-schema vectors, a second read-back, and invariant validation precede
-atomic output-directory installation. The source state/configuration is never
-modified.
-
-A crash resumes only through the authenticated construction/completion
-identity and rebuilt migration-profile/plan hashes. A binary that lacks the
-exact source or target codec/profile refuses the command. Before the new
-output is ever started, the untouched source can be selected again without a
-rollback because no logical mutation occurred. Once the migrated instance has
-accepted a mutation, downgrade requires restoring the verified pre-migration
-backup into a new recovery epoch under Section 23.7; it never reopens the old
-continuity as though later state had not existed.
-
-#### 23.6.1 The generation-1 to generation-2 migration
-
-The canonical rules are pinned in `docs/storage-migration-1-to-2.registry`.
-Command version is 1. Source generation is exactly 1 and target generation is
-exactly 2. The database format, table IDs, stored-key shapes, sealed-record
-schema, and domain envelope remain 1. Ordinary service requires generation 2;
-source-generation decoding is available only to authenticated maintenance and
-backup readers. A generation-1 service startup reports that offline migration
-is required and does not modify the source.
-
-For each source table 1..13, 17, 18, 20..24, and 26 at record schema 1, rule ID
-is the table ID and the rule name is `preserve-validated-record`. Decode the
-source with its closed generation-1 key/kind/body/reference codecs, validate
-its semantic invariants, preserve its logical value, derive the target stored
-key through the same binding-aware rules as rekey construction, and emit one
-freshly sealed target record under the target binding. In particular, keyed
-NicknameReservation and ChannelName keys change with the target binding.
-The
-source RequestResult kind set remains 1..4. Target kinds 5/6 and typed History
-kinds 1/2 are admitted only under generation 2.
-
-Rule 27, `initialize-legacy-history-control`, additionally maps each source
-Channel record (table 8, schema 1) whose history policy is non-Off to one empty
-History control record (table 19, schema 1). It preserves the channel policy,
-uses the source's positive global state generation as both the control record
-revision and history authorization generation, and creates no message rows.
-Multiple rules with the same source tuple apply only through their explicitly
-distinct target tuples; both rules 8 and 27 apply to such a channel.
-
-Rule 19 is `reject-legacy-history`; any source History row aborts migration.
-Rule 25 is `reject-live-construction`; any source live construction marker
-also aborts migration. Their absent-target registry arms authorize no data
-deletion or guessed transformation. Production Stage 08 databases contain no
-History rows. Source key-check table 0, StateMeta table 14, and integrity tables
-15/16 are verified by source admission and regenerated through the construction
-protocol rather than copied as application records. The target key check
-binds the generation-2 header. Existing logical state, revisions, counters,
-login-index state, E2EE state, and request/outbox continuity are preserved.
-
-The checked-in rule registry, per-rule semantics, migration profile hash, and
-before/after/corruption vectors are one protocol artifact. A missing rule,
-unknown profile, nonempty source History table, changed rebuilt plan, or
-source/target invariant mismatch fails closed. Every publication boundary is
-covered by interruption/resume tests. The source configuration and directory
-remain untouched; selecting the installed target is an explicit stopped-daemon
-operator step under the upgrade and rollback rules above.
+The current database schema generation is 4. Initialization, service startup,
+inspection, backup verification, restore, and rekey MUST accept only that
+generation. Earlier development formats are unsupported. Restore and rekey
+preserve the schema generation and validate every record under the current
+codec before producing an output.
 
 ### 23.7 Backup format and restore
 
@@ -6034,7 +5917,7 @@ binding, and runs cross-reference invariants against the immutable cut. A
 failed backup is reported and its incomplete temporary file is removed on next
 startup.
 
-Restore, rekey, and schema migration use the same bounded target-construction protocol; they do
+Restore and rekey use the same bounded target-construction protocol; they do
 not write an arbitrarily large database in one transaction and do not label a
 multi-transaction result as commit sequence zero. The target staging database
 is initialized by one small sequence-zero transaction containing its header,
@@ -6043,14 +5926,14 @@ checkpoint over those tracked records, StateMeta, and the matching committed
 nonce-reservation state. Its first rollback guard
 names the verified source guard hash as predecessor.
 The sequence-zero StateMeta and genesis checkpoint use response count zero for
-restore because restore creates a fresh recovery epoch. Rekey and migration
+restore because restore creates a fresh recovery epoch. Rekey
 instead copy the authenticated source response count exactly because they
 preserve that epoch. No construction batch emits an account-service response,
 so every later construction manifest repeats that initial target count.
 
 ```text
 enum {
-    construction_restore(1), construction_rekey(2), construction_migrate(3)
+    construction_restore(1), construction_rekey(2)
 }
     StorageConstructionKind;
 enum { cursor_before_first(0), cursor_at_target(1), cursor_complete(2) }
@@ -6064,8 +5947,7 @@ enum {
     construction_restore_channel(4),
     construction_restore_channel_name(5),
     construction_restore_peer_tombstones(6),
-    construction_restore_e2ee_state(7),
-    construction_migrate_transform(8)
+    construction_restore_e2ee_state(7)
 } StorageConstructionAction;
 
 struct {
@@ -6149,11 +6031,10 @@ struct {
 } StorageOperationCompletion;
 ```
 
-For absent source stream material in rekey or schema migration,
+For absent source stream material in rekey,
 `source_stream_digest` is empty; it is exactly 32 bytes for restore.
 `source_schema_generation` equals the verified source header. Restore/rekey
-require an equal target schema generation; migration requires target schema =
-source schema + 1. If target master bytes equal the source master, the target
+require an equal target schema generation. If target master bytes equal the source master, the target
 header's storage-key generation is source + 1 without wrap; if the target
 master is bytewise new, its generation is exactly one. A source at
 `uint32::MAX` therefore requires a new target master. The target header hash
@@ -6167,8 +6048,7 @@ rekey_transform_profile_hash = SHA256(
     "agenc-chat storage rekey transform profile v1")
 ```
 
-Migration uses the Section-23.6 registry hash. Any other kind/generation/hash
-combination is invalid. `cursor_before_first` and
+Any other kind/generation/hash combination is invalid. `cursor_before_first` and
 `cursor_complete` have table ID zero and an empty key. `cursor_at_target`
 names the next uncommitted plan entry, has a table ID in `1..13`, `17..24`,
 or `26`, and a nonempty key.
@@ -6233,14 +6113,7 @@ the target binding. Restore uses these exact actions:
   records is likewise omitted; an object with an independent proof, mailbox,
   route, or terminal-state root remains exactly once.
 
-`construction_migrate_transform` is valid only for migration, has rule ID
-1..65,535, may have zero, one, or two sources as its rule declares, and is accepted only when the exact source set and target
-table/schema match that rule in the profile hashed by the construction
-identity. Restore/rekey reject a nonzero rule ID; migration rejects every
-other action. The normative migration rule determines whether a source is
-omitted, copied, split into several independently planned targets, or joined
-with one second source. Plan order, not rule execution order, remains target
-table/key order.
+Restore and rekey MUST reject every nonzero transform rule ID.
 
 Restore emits no plan target for a table-2 account-creation reservation, a
 table-6 in-flight invitation reservation, tables 4, 7, 12, 13, 17, or 18, an
@@ -6305,15 +6178,14 @@ plan in the private staging directory. It streams the source and never retains
 more than two source records plus one plan entry in memory. Decrypted values,
 login identifiers, message bodies, and secret keys never enter the plan. The
 canonical entry bytes total at most twice `storage.backup_max_bytes` and at
-most the fixed 2-TiB version-1 ceiling; a rekey or migration first computes the
+most the fixed 2-TiB version-1 ceiling; a rekey first computes the
 source's exact logical-database and backup-stream charges and rejects either
 one above its configured ceiling or the fixed 1-TiB version-1 ceiling. Counts
 and byte sums use checked `uint64` arithmetic. Preflight also computes the
 exact final target `logical_database_bytes` and `backup_stream_bytes` from
 every validated transform, including generated integrity-control and
 completion records. It rejects a target above `storage.database_max_bytes`,
-`storage.backup_max_bytes`, or the fixed 1-TiB ceiling, so a migration rule
-cannot hide unbounded expansion. Scratch insertion and every target batch use
+`storage.backup_max_bytes`, or the fixed 1-TiB ceiling. Scratch insertion and every target batch use
 Section 19.3's exact-filesystem `R(F) + G` gate; exhaustion aborts safely for a
 later exact `--resume` rather than weakening the bound. The tool hashes the
 entry count and the exact TLS encodings in target order as:
@@ -6475,13 +6347,13 @@ exactly 16 bytes.
 
 Expiry uses durable cursors and batches of at most 1,000 records or 16 MiB.
 Logical deletion removes indexes and values in one transaction. Physical pages
-may remain until an offline copy-on-write rekey, restore, or schema migration
+may remain until an offline copy-on-write rekey or restore
 writes a fresh database containing only retained logical records. Version 1
 has no in-place or standalone compaction operation and MUST NOT invoke redb's
 internal compaction path: its independent write transactions cannot bypass the
 StateCore mutation batch, authenticated manifest, nonce-reservation, and
 rollback-guard transition contract. An operator who needs space reclamation
-without a pending restore or migration performs a genuine key rotation with
+without a pending restore performs a genuine key rotation with
 the rekey command below. Operators are told that logical deletion or later
 file rewriting is not secure erasure on snapshots, copy-on-write filesystems,
 SSDs, or backups.
@@ -6689,7 +6561,7 @@ forbidden. This graph is checked in CI from `cargo metadata`.
 | `agenc-ircd-auth` | HPKE account-service envelopes, OPAQUE/SASL, account creation, and credential-change state machines | `types`, `crypto` |
 | `agenc-ircd-domain` | validated commands, authorization, state, plans, events, projections, rate policy | `types` |
 | `agenc-ircd-e2ee` | companion-profile public-object validation and base/E2EE transaction plans | `types`, `crypto`, `domain`, `federation-wire` |
-| `agenc-ircd-storage` | record codecs, redb owner, migrations, backups, recovery validation | `types`, `crypto`, `domain`, `e2ee` |
+| `agenc-ircd-storage` | record codecs, redb owner, backups, recovery validation | `types`, `crypto`, `domain`, `e2ee` |
 | `agenc-ircd-config` | strict TOML schema, path/permission validation, typed configuration | `types` |
 | `agenc-ircd-admin` | admin command parser, challenge verification, permission mapping | `types`, `crypto`, `domain` |
 | `agenc-ircd-runtime` | Tokio supervisors, listeners, `StateCore`, federation/link state, queue plumbing | every production library above |
@@ -7012,12 +6884,9 @@ restored in rehearsals at least every six months.
 
 ### 25.5 Upgrade and incident behavior
 
-An upgrade is staged edge by edge only after the coordinator understands both
-old and new wire profiles. Because version 1 has an exact profile hash, any
-wire/schema change requires a new profile and explicit dual-version bridge;
-operators cannot rolling-upgrade incompatible peers by ignoring FHELLO.
-Database migrations occur offline or under the bounded migration state in
-Section 23.6 before new listeners open.
+Federation peers require the same exact wire profile hash. A peer with a
+different profile cannot open a link. Storage admission follows Section 23.6
+before listeners open.
 
 For suspected key compromise, equivocation, rollback, database corruption,
 or secret exposure, the safe default is to quiesce affected listeners,
@@ -7053,7 +6922,7 @@ There are four independent version axes:
 | client base profile | `agenc.ag/privacy=v1` plus ISUPPORT Network ID | client-visible base semantics or mandatory limits change |
 | base federation | FHELLO `profile_version=1` and Appendix-B `profile_hash` | any canonical base object, registry, bound, or semantic changes |
 | encrypted client/federation | CAP `profile=<profile-hash>` and ECAP `(version=1, profile-hash)` | any companion-document byte, negotiated grammar, or encrypted semantic changes |
-| database | `database_format` and `schema_generation` | persistent encoding or migration generation changes |
+| database | `database_format` and `schema_generation` | persistent encoding changes |
 
 An unknown major profile is rejected. A new optional client capability may be
 added without changing the base major version only when disabling it leaves
@@ -7187,10 +7056,10 @@ rendered result. The identifiers are stable test and audit references.
 | `DUR-06` | Every record seal samples a fresh uniform 192-bit XChaCha20 nonce from the OS CSPRNG only after a durable one-use reservation is anchored by both the MACed database control record and matching guard; aborted/uncertain slots are burned, the authenticated nonce-draw high-water mark never exceeds `2^40` under one storage-key generation, and the resulting collision bound remains below `2^-113`. |
 | `DUR-07` | Insertion, deletion, or substitution of any integrity-tracked sealed record changes a manifest transition or checkpoint reconstruction and fails closed before state use. |
 | `DUR-08` | Startup accepts only an exact committed reservation-record/database/guard set, a valid same-state reserved set whose block is burned, the reservation record's one MAC-authorized pre-guard successor, or that reserved guard's one fully validated application successor; missing, otherwise ahead, stale, gapped, or mismatched control state is never guessed or regenerated. |
-| `DUR-09` | Restore/rekey/schema-migration output is produced only through the authenticated bounded construction ledger; its counters include every committed batch, its marker is atomically replaced by the matching permanent completion record, and an installed live database contains no construction record or scratch plan. |
+| `DUR-09` | Restore/rekey output is produced only through the authenticated bounded construction ledger; its counters include every committed batch, its marker is atomically replaced by the matching permanent completion record, and an installed live database contains no construction record or scratch plan. |
 | `DUR-10` | Login-index key state, configured key IDs, generations, index-key prefixes/value repeats, and exact previous-entry count agree; a missing key, duplicate owner, third generation, or forced dormant-account invalidation fails closed. |
 | `DUR-11` | StateMeta's logical-database and exact-backup-stream byte counters equal a full record scan at every accepted cut; no growth crosses either configured ceiling or begins without the fixed release-qualified physical-growth reserve. |
-| `DUR-12` | A coordinator StateMeta's account-service response count starts at zero only with a fresh recovery epoch, advances exactly once per newly committed coordinator-sealed response, never advances for exact replay or edge forwarding, is preserved by rekey/migration, and never wraps; the edge value is always zero. |
+| `DUR-12` | A coordinator StateMeta's account-service response count starts at zero only with a fresh recovery epoch, advances exactly once per newly committed coordinator-sealed response, never advances for exact replay or edge forwarding, is preserved by rekey, and never wraps; the edge value is always zero. |
 | `CON-01` | Each mutable protocol datum has exactly one runtime owner; no shared mutable map bypasses `StateCore` or `StorageOwner`. |
 | `CON-02` | Every task, worker job, timer, channel, batch, snapshot, reassembly, and output queue has a named owner, finite bound, cancellation path, and joined shutdown path. |
 | `CON-03` | A durable plan is constructed from one committed revision, reserved while in flight, and applied infallibly exactly once after its matching receipt. |
@@ -7270,8 +7139,7 @@ updates, duplicates, gaps, snapshot swaps, account switches, deletion-challenge
 replacement/expiry/restart replay, credential-change fresh-proof consumption,
 success/rejection/replay, response-count advancement/edge-zero behavior, and
 multi-session fencing, E2EE binding,
-login-index transition/migration, removal, rollback, restore/rekey/schema-
-migration construction, and shutdown. After every step, all Section-27 invariants
+login-index transition/migration, removal, rollback, restore/rekey construction, and shutdown. After every step, all Section-27 invariants
 and equality between model and implementation snapshots are checked.
 
 Restore sequences cover an exact current-boundary source, a refused older or
@@ -7338,7 +7206,7 @@ sealed response whose permit did not commit.
 3. client message/tag parse and render round trips;
 4. every base federation object and descriptor line;
 5. base and E2EE fragment reassembly/interleaving/timeouts;
-6. every persistent record, backup record, construction plan, and migration-profile decoder;
+6. every persistent record, backup record, construction plan decoder;
 7. account-service HPKE/OPAQUE application wrappers, certificates, signatures,
    and sealed records;
 8. wildcard masks, PRECIS preparation, and base64url canonicalization; and
@@ -7357,7 +7225,7 @@ Miri covers pure Rust codec/domain/crypto-wrapper tests.
 A faulting storage backend fails before and after every logical write, redb
 transaction phase, database sync, guard temporary write/sync/rename/directory
 sync for both reservation and committed phases, every reserved nonce draw,
-manifest/checkpoint installation/prune, migration-profile/plan validation, backup record,
+manifest/checkpoint installation/prune, construction-plan validation, backup record,
 construction-plan rebuild/batch/cursor/marker-to-completion replacement, and login-index
 transition/migration. The process is killed at each point, restarted, and
 required to recover the complete prior state with either a committed or burned
@@ -7387,7 +7255,7 @@ request or expose an uncommitted response.
 Configuration tests reject `storage.compaction_enabled` and every other
 unlisted key. A dependency/source policy check rejects a production call to
 redb's in-place compaction API. Deletion tests distinguish logical charge from
-database file length, and rekey/restore/migration rehearsals prove that their
+database file length, and rekey/restore rehearsals prove that their
 fresh output contains no deleted logical record while making no secure-erasure
 claim about the source filesystem or backup media.
 Restore rehearsals use wrong/correct source guard roots and prove successful
@@ -7544,7 +7412,10 @@ rules, replay handling, downgrade refusal, key lifecycle, persistent state,
 and published vectors. No novel security proof is a release requirement.
 
 There is no fixed reviewer count, signed-report format, degree or credential
-requirement, or external-review gate.
+requirement. Core and base-federation qualification impose no external-review
+gate. An encrypted-v1 release also requires the external cryptographic and
+protocol review, remediation, and re-review in companion Section 21 gate 13.
+That requirement does not prevent implementation or testing of any profile.
 
 No unresolved critical or high finding is permitted. A medium finding needs a
 documented threat analysis, compensating control, owner, and expiry approved by
@@ -7579,7 +7450,7 @@ security-sensitive successor until its acceptance evidence is complete.
    confirmation tests, constant-time-path review, secret-canary scans, and
    worker bounds.
 5. **Persistence:** implement record codecs, StorageOwner, transactions,
-   integrity/guard recovery, migration, backup/restore construction, deletion,
+   integrity/guard recovery, backup/restore construction, deletion,
    storage rekey, and login-index transition. Acceptance:
    the complete crash/fault/corruption matrix and `DUR-*` invariants.
 6. **Single-node runtime:** connect supervisors, StateCore, queues, timers,
@@ -7812,14 +7683,15 @@ narrows them:
 
 ```text
 001 002 003 004 005
-221 251 252 253 254 255 265 266
-301 303 305 306 311 312 315 318 319
+221 251 252 253 254 255 263 265 266
+301 302 303 305 306 311 312 314 315 318 319
 321 322 323 324 329 331 332 333 341
 346 347 348 349 352 353 366 367 368 369
 371 372 374 375 376 391
 401 402 403 404 405 406 407 409 411 412 417
 421 422 431 432 433 441 442 443 451 461 462 464 465
 471 472 473 474 475 476 477 481 482 483 501 502
+730 731 732 733 734
 900 901 902 903 904 905 906 907 908
 ```
 
@@ -7828,6 +7700,14 @@ SASL meanings. Numeric 317 idle time is intentionally absent. Numerics 325,
 338, 378, 379, and any numeric traditionally exposing an address, real host,
 route, or idle timestamp are forbidden. Admin replies use standard replies and
 the same safe subset rather than creating an unrestricted numeric tunnel.
+
+WHOWAS numeric 314 uses the retained nickname, ephemeral public user and host
+components, the fixed `*` marker, and the retained public account label or `*`
+as its trailing field. That field never contains a realname. Its numeric 312
+uses the configured public reply prefix and retained Unix second, without an
+exact server route. Current shared-context authorization still governs each
+record; neither a public label nor a historical nickname establishes account
+identity or permission to disclose a disconnected session.
 
 The closed base standard-reply code registry is:
 
@@ -9313,7 +9193,7 @@ symlinks and held by a nonblocking exclusive OS file lock for the entire open
 database lifetime; a stale unlocked file is harmless and never deleted to
 break a live lock. An unexpected entry does not authorize its use, and the
 daemon never discovers a database or guard by globbing. The three fixed names
-make restore/rekey/schema-migration installation one atomic state-directory
+make restore/rekey installation one atomic state-directory
 rename.
 
 The configured current/previous login-index key IDs must equal the exact
@@ -9639,7 +9519,7 @@ statements and test IDs.
 | requests/idempotency and paged queries | Sections 20.5--20.7; B.3/B.6 | opcode/result/origin/reply-code registry, `FED-03/04/13` | duplicate/conflict/gap/crash/cursor-expiry tests |
 | events/projections | Sections 20.8/20.9; B.4/B.5/B.7 | `PRV-02`, `FED-05..07` | multi-edge least-information and snapshot tests |
 | state ownership/concurrency | Section 21; Section 24.2 | `CON-01..05` | Loom, cancellation, queue and shutdown tests |
-| persistence/recovery | Section 23; C.5 | `DUR-01..12` | fault matrix, corruption, restore/migration/rekey drills |
+| persistence/recovery | Section 23; C.5 | `DUR-01..12` | fault matrix, corruption, restore/rekey drills |
 | Rust module boundaries | Section 24.1 | acyclic cargo-metadata policy | dependency-graph CI |
 | safe/legible Rust | Sections 21.4, 24.3 | no unsafe/panic/unbounded channel | lint/source scans and ordinary code review |
 | crypto/dependency policy | Sections 24.4/24.5, 30; source-decision ledger | locked versions/features/checksums/SBOM | vectors, deny/audit, reproducible build |

@@ -29,12 +29,16 @@ pub enum SignatureDomain {
     AdminCommand,
     /// Server audit-event signature over an event hash.
     AdminAuditEvent,
+    /// Server maintenance-event signature over the dedicated event hash.
+    MaintenanceAuditEvent,
     /// Server audit-checkpoint signature over a checkpoint hash.
     AdminAuditCheckpoint,
     /// Offline database-backup signature over the stream digest.
     BackupSignature,
     /// Release storage-growth qualification report.
     StorageQualificationReport,
+    /// Detached release decision over the canonical decision document.
+    ReleaseDecision,
     /// E2EE root identity.
     RootIdentity,
     /// E2EE root continuity.
@@ -107,9 +111,11 @@ impl SignatureDomain {
             Self::AdminSession => b"agenc-chat admin session v1",
             Self::AdminCommand => b"agenc-chat admin command v1",
             Self::AdminAuditEvent => b"agenc-chat admin audit signature v1",
+            Self::MaintenanceAuditEvent => b"agenc-chat maintenance audit signature v1",
             Self::AdminAuditCheckpoint => b"agenc-chat admin audit checkpoint signature v1",
             Self::BackupSignature => b"agenc-chat backup signature v1",
             Self::StorageQualificationReport => b"agenc-chat storage qualification report v1",
+            Self::ReleaseDecision => b"agenc-chat release decision v1",
             Self::RootIdentity => b"IRC-MLS/1 root identity",
             Self::RootContinuity => b"IRC-MLS/1 root continuity",
             Self::DeviceEnrollmentPossession => b"IRC-MLS/1 device enrollment possession",
@@ -180,9 +186,11 @@ impl SignatureDomain {
             | Self::AdminSession
             | Self::AdminCommand
             | Self::AdminAuditEvent
+            | Self::MaintenanceAuditEvent
             | Self::AdminAuditCheckpoint
             | Self::BackupSignature
-            | Self::StorageQualificationReport => SignatureEncoding::DirectPrefix,
+            | Self::StorageQualificationReport
+            | Self::ReleaseDecision => SignatureEncoding::DirectPrefix,
             Self::MlsKeyPackageTbs | Self::MlsLeafNodeTbs => SignatureEncoding::MlsSignWithLabel,
         }
     }

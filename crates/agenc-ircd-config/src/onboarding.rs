@@ -10,8 +10,10 @@ use crate::scalar::{DnsName, OnionAddress, base64url_32, encode_base64url_32, po
 /// Maximum accepted bytes in one canonical onboarding descriptor.
 pub const MAX_ONBOARDING_DESCRIPTOR_BYTES: usize = 4_096;
 
-/// Base federation profile hash token (spec 9305).
-pub const BASE_PROFILE_SHA256_TOKEN: &str = "g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA";
+/// Base federation profile hash token (spec 9305). The runtime crate binds this
+/// literal to the compiled registry hash, so a profile revision that forgets
+/// the descriptor fails a test instead of shipping a stale token.
+pub const BASE_PROFILE_SHA256_TOKEN: &str = "ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M";
 /// E2EE profile name token (spec 9308).
 pub const E2EE_PROFILE_TOKEN: &str = "IRC-MLS/1";
 /// E2EE profile hash token (spec 9309).

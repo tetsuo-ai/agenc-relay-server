@@ -189,7 +189,7 @@ pub enum AdminCommand {
 }
 
 impl AdminCommand {
-    /// Parses one canonical line into the closed registry.
+    /// Parses one canonical line into the current command registry.
     pub fn parse(command: CanonicalCommand<'_>) -> Result<Self, AdminError> {
         let parameters = command.parameters();
         match (command.verb(), parameters.as_slice()) {

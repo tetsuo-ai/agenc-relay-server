@@ -27,7 +27,7 @@ const STATE_META_KEY: &[u8] = b"agenc-chat/state-meta/v1";
 pub enum StorageInitializationMode {
     /// Fresh live database; key state must already exist and no marker may exist.
     Live,
-    /// Restore/rekey/migration staging target; one construction marker must exist.
+    /// Restore or rekey staging target; one construction marker must exist.
     Construction,
 }
 
@@ -76,7 +76,7 @@ pub struct StorageInitializationConfig {
     pub mode: StorageInitializationMode,
     /// Small initial tracked record set.
     pub initial_records: Vec<InitialStorageRecord>,
-    /// Restore resets this to zero; rekey/migration preserve the source value.
+    /// Restore resets this to zero; rekey preserves the source value.
     pub account_service_response_count: u64,
     /// Initial logical state generation.
     pub state_generation: u64,
@@ -114,13 +114,26 @@ pub fn initialize_storage(
     initialize_storage_inner(config)
 }
 
-/// Creates source-generation fixtures through the unchanged authenticated seal path.
-#[cfg(test)]
-pub(crate) fn initialize_legacy_test_storage(
+pub(crate) fn initialize_stopped_construction(
     config: StorageInitializationConfig,
 ) -> Result<StorageInitializationOutcome, StorageError> {
-    if config.header_tbs.schema_generation != 1 {
+    let schema = crate::construction_schema::ConstructionSchema::from_generation(
+        config.header_tbs.schema_generation,
+    )?;
+    if config.mode != StorageInitializationMode::Construction {
         return Err(StorageError::UnsupportedVersion);
+    }
+    let record = config
+        .initial_records
+        .iter()
+        .find(|record| record.table == TableId::StorageConstruction)
+        .ok_or(StorageError::InvalidEncoding)?;
+    let marker = crate::StorageConstruction::decode(&record.plaintext)?;
+    marker.identity.validate()?;
+    if marker.identity.target_schema_generation != schema.generation()
+        || marker.identity.target_database_instance_id != config.header_tbs.database_instance_id
+    {
+        return Err(StorageError::StaleState);
     }
     initialize_storage_inner(config)
 }
@@ -131,6 +144,7 @@ fn initialize_storage_inner(
 ) -> Result<StorageInitializationOutcome, StorageError> {
     let limits = config.limits.validate()?;
     validate_initial_records(config.mode, &mut config.initial_records)?;
+    config.state_directory.require_absent_guard()?;
     let _capacity = config
         .state_directory
         .admit_transaction(limits.fixed_reserve_bytes, limits.reserve_percent)?;
@@ -379,7 +393,11 @@ fn initialize_storage_inner(
         }
     }
     let guard_bytes = guard.encode()?;
-    if config.state_directory.replace_guard(&guard_bytes).is_err() {
+    if config
+        .state_directory
+        .install_initial_guard(&guard_bytes)
+        .is_err()
+    {
         return Ok(StorageInitializationOutcome::Indeterminate);
     }
     Ok(StorageInitializationOutcome::Complete {

@@ -891,7 +891,7 @@ impl<'a> BackupRecordVerification<'a> {
             record.stored_key(),
         )?;
         let plaintext = plaintext.expose_for_storage_codec();
-        crate::migration::validate_source_record(
+        crate::AuthenticatedSourceRecord::checked(
             self.header.source_header().tbs().schema_generation,
             record.table(),
             record.stored_key(),

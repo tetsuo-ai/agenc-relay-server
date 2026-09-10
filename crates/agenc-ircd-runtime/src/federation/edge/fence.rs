@@ -34,7 +34,7 @@ pub(super) fn stage(
         None,
         PendingCommit::BarrierFence,
         super::render::EventFanout::default().finish()?,
-        |_, _, _| Vec::new(),
+        |_, _, _| Ok(Vec::new()),
     )
 }
 

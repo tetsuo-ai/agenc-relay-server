@@ -62,6 +62,7 @@ EXPECTED_LATER_FUZZ_TARGETS = (
     "wss_upgrade",
     "wss_frame",
     "history_records",
+    "release_decision",
 )
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,

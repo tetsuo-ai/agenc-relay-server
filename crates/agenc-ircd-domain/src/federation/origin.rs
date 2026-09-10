@@ -110,6 +110,10 @@ pub struct OriginEntry {
     pub principal: OriginPrincipal,
     /// The lifecycle status.
     pub status: OriginStatus,
+    /// The edge's next sequence when it deleted the origin. Operations
+    /// below it were issued before the deletion and still execute in order;
+    /// the deletion fences only what would follow.
+    pub deleted_after: Option<u64>,
 }
 
 /// The synchronization phase of one edge link.
@@ -211,6 +215,8 @@ impl Error for OriginError {}
 #[derive(Default)]
 pub struct OriginTable {
     edges: BTreeMap<ServerId, EdgeLink>,
+    fenced_incarnations: BTreeSet<(ServerId, ServerIncarnation)>,
+    grace_deadlines: BTreeMap<ServerId, MonotonicTick>,
     origins: BTreeMap<OriginKey, OriginEntry>,
     request_ids: BTreeMap<RequestId, OperationKey>,
 }
@@ -258,7 +264,29 @@ impl OriginTable {
 
     /// Rebuilds one durable edge link state.
     pub fn restore_edge(&mut self, edge: ServerId, link: EdgeLink) {
+        if link.phase == EdgePhase::Expired {
+            self.fenced_incarnations
+                .insert((edge, link.server_incarnation));
+        }
+        if let EdgePhase::Suspended { grace_deadline } = link.phase {
+            self.grace_deadlines.insert(edge, grace_deadline);
+        }
         self.edges.insert(edge, link);
+    }
+
+    /// Rebuilds permanent incarnation fences from the peer checkpoint.
+    pub fn restore_fenced_incarnation(&mut self, edge: ServerId, incarnation: ServerIncarnation) {
+        self.fenced_incarnations.insert((edge, incarnation));
+    }
+
+    /// Returns permanent fences in canonical incarnation order.
+    pub fn fenced_incarnations_of(
+        &self,
+        edge: ServerId,
+    ) -> impl Iterator<Item = ServerIncarnation> + '_ {
+        self.fenced_incarnations
+            .iter()
+            .filter_map(move |(peer, incarnation)| (*peer == edge).then_some(*incarnation))
     }
 
     /// Records one accepted request identity at its replay key.
@@ -280,11 +308,28 @@ impl OriginTable {
     ///
     /// A new incarnation permanently fences every origin of the previous one.
     pub fn reset(&mut self, edge: ServerId, incarnation: ServerIncarnation) {
+        if self.fenced_incarnations.contains(&(edge, incarnation)) {
+            return;
+        }
+        if self.edges.get(&edge).is_some_and(|link| {
+            link.server_incarnation == incarnation && link.phase == EdgePhase::Expired
+        }) {
+            return;
+        }
         if let Some(link) = self.edges.get(&edge)
             && link.server_incarnation != incarnation
         {
             let previous = link.server_incarnation;
             self.fence_incarnation(edge, previous);
+            self.grace_deadlines.remove(&edge);
+        }
+        for (key, entry) in &mut self.origins {
+            if key.home_server_id == edge
+                && key.server_incarnation == incarnation
+                && entry.status == OriginStatus::Live
+            {
+                entry.status = OriginStatus::Suspended;
+            }
         }
         self.edges.insert(
             edge,
@@ -295,17 +340,46 @@ impl OriginTable {
         );
     }
 
+    /// Permanently ends the accepted incarnation before its durable cleanup.
+    pub fn fence_edge(&mut self, edge: ServerId) {
+        let Some(link) = self.edges.get_mut(&edge) else {
+            return;
+        };
+        link.phase = EdgePhase::Expired;
+        let incarnation = link.server_incarnation;
+        self.grace_deadlines.remove(&edge);
+        self.fence_incarnation(edge, incarnation);
+    }
+
+    /// Reports whether the edge's link is replaying its origins after a
+    /// reset, when a DEL may name an origin this coordinator never held.
+    #[must_use]
+    pub fn is_resetting(&self, edge: ServerId, incarnation: ServerIncarnation) -> bool {
+        self.edges.get(&edge).is_some_and(|link| {
+            link.server_incarnation == incarnation && link.phase == EdgePhase::Resetting
+        })
+    }
+
     /// Accepts FORIGIN READY after every origin was replayed.
     pub fn ready(
         &mut self,
         edge: ServerId,
         incarnation: ServerIncarnation,
     ) -> Result<(), OriginError> {
+        if self.origins_of(edge, incarnation).any(|(_, entry)| {
+            matches!(
+                entry.status,
+                OriginStatus::Suspended | OriginStatus::Blocked
+            )
+        }) {
+            return Err(OriginError::WrongPhase);
+        }
         let link = self.link_mut(edge, incarnation)?;
         if link.phase != EdgePhase::Resetting {
             return Err(OriginError::WrongPhase);
         }
         link.phase = EdgePhase::Ready;
+        self.grace_deadlines.remove(&edge);
         for (key, entry) in self.origins.iter_mut() {
             if key.home_server_id == edge
                 && key.server_incarnation == incarnation
@@ -337,6 +411,7 @@ impl OriginTable {
                         binding: declaration.binding,
                         principal: OriginPrincipal::UNREGISTERED,
                         status: OriginStatus::Live,
+                        deleted_after: None,
                     },
                 );
                 Ok(())
@@ -401,13 +476,16 @@ impl OriginTable {
         generation: u64,
         next_sequence: u64,
     ) -> Result<(), OriginError> {
-        self.require_synchronizing(origin)?;
+        let phase = self.require_synchronizing(origin)?;
         let entry = self
             .origins
             .get_mut(&origin)
             .ok_or(OriginError::UnknownOrigin)?;
+        let replay = phase == EdgePhase::Resetting;
         if entry.status == OriginStatus::Deleted {
-            return if entry.generation == generation && entry.next_sequence == next_sequence {
+            return if replay
+                || (entry.generation == generation && entry.deleted_after == Some(next_sequence))
+            {
                 Ok(())
             } else {
                 Err(OriginError::Conflict)
@@ -416,10 +494,27 @@ impl OriginTable {
         if entry.status == OriginStatus::Fenced {
             return Err(OriginError::Fenced);
         }
+        if replay {
+            // A DEL replayed after a reset closes an origin whose connection
+            // is gone. The edge may name a generation this coordinator never
+            // committed, or an older one whose update commit lost its
+            // acknowledgement; the origin ends either way, after everything
+            // this coordinator executed under its own generation.
+            let after = if generation == entry.generation {
+                next_sequence.max(entry.next_sequence)
+            } else {
+                entry.next_sequence
+            };
+            entry.deleted_after = Some(after);
+            entry.status = OriginStatus::Deleted;
+            return Ok(());
+        }
         if entry.generation != generation || next_sequence < entry.next_sequence {
             return Err(OriginError::WrongGeneration);
         }
-        entry.next_sequence = next_sequence;
+        // Requests the edge sent before the deletion may still be in flight
+        // or queued; they keep executing up to the deleted sequence.
+        entry.deleted_after = Some(next_sequence);
         entry.status = OriginStatus::Deleted;
         Ok(())
     }
@@ -444,6 +539,10 @@ impl OriginTable {
             OriginStatus::Suspended | OriginStatus::Blocked => {
                 return Err(OriginError::WrongPhase);
             }
+            OriginStatus::Deleted
+                if entry
+                    .deleted_after
+                    .is_some_and(|deleted_after| key.sequence < deleted_after) => {}
             OriginStatus::Deleted | OriginStatus::Fenced => return Err(OriginError::Fenced),
         }
         if key.generation != entry.generation {
@@ -523,18 +622,24 @@ impl OriginTable {
         incarnation: ServerIncarnation,
         now: MonotonicTick,
     ) -> Result<MonotonicTick, OriginError> {
-        let grace_deadline = now
+        let new_deadline = now
             .checked_add(
                 ORIGIN_DISCONNECT_GRACE_SECONDS
                     .checked_mul(1_000)
                     .ok_or(OriginError::Overflow)?,
             )
             .map_err(|_| OriginError::Overflow)?;
+        let grace_deadline = self
+            .grace_deadlines
+            .get(&edge)
+            .copied()
+            .unwrap_or(new_deadline);
         let link = self.link_mut(edge, incarnation)?;
         if matches!(link.phase, EdgePhase::Expired) {
             return Err(OriginError::Fenced);
         }
         link.phase = EdgePhase::Suspended { grace_deadline };
+        self.grace_deadlines.insert(edge, grace_deadline);
         for (key, entry) in self.origins.iter_mut() {
             if key.home_server_id == edge
                 && key.server_incarnation == incarnation
@@ -546,17 +651,30 @@ impl OriginTable {
         Ok(grace_deadline)
     }
 
+    /// A lost link came back before its grace interval passed. The incarnation
+    /// is present again, so its disconnect grace is cancelled; the origins stay
+    /// suspended until the resync re-declares them, and a later loss starts a
+    /// fresh interval. Returns whether a pending grace was cleared.
+    pub fn link_reestablished(&mut self, edge: ServerId, incarnation: ServerIncarnation) -> bool {
+        let Some(link) = self.edges.get(&edge) else {
+            return false;
+        };
+        if link.server_incarnation != incarnation || matches!(link.phase, EdgePhase::Expired) {
+            return false;
+        }
+        self.grace_deadlines.remove(&edge).is_some()
+    }
+
     /// Fences an edge incarnation whose grace interval passed, returning the
     /// sessions that cleanup must hide in byte order.
     pub fn expire(&mut self, edge: ServerId, now: MonotonicTick) -> Option<Vec<SessionId>> {
+        let grace_deadline = *self.grace_deadlines.get(&edge)?;
         let link = self.edges.get_mut(&edge)?;
-        let EdgePhase::Suspended { grace_deadline } = link.phase else {
-            return None;
-        };
         if now.get() < grace_deadline.get() {
             return None;
         }
         link.phase = EdgePhase::Expired;
+        self.grace_deadlines.remove(&edge);
         let incarnation = link.server_incarnation;
         let sessions = self.fence_incarnation(edge, incarnation);
         Some(sessions.into_iter().collect())
@@ -567,6 +685,7 @@ impl OriginTable {
         edge: ServerId,
         incarnation: ServerIncarnation,
     ) -> BTreeSet<SessionId> {
+        self.fenced_incarnations.insert((edge, incarnation));
         let mut sessions = BTreeSet::new();
         for (key, entry) in self.origins.iter_mut() {
             if key.home_server_id != edge || key.server_incarnation != incarnation {

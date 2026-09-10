@@ -154,7 +154,7 @@ fn descriptor_lines_occur_in_order_and_omit_absent_endpoints_as_units() -> TestR
     );
     assert_eq!(
         BASE_PROFILE_SHA256_TOKEN,
-        "g3AiB-HhFTyHItXMZop9G6uFulGPzd4DCjaBG0G9zEA"
+        "ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M"
     );
     assert_eq!(
         E2EE_PROFILE_SHA256_TOKEN,

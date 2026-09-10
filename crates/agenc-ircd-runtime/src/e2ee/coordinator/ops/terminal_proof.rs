@@ -57,6 +57,9 @@ pub(super) fn finalization(proof: &IrcFinalizationProof) -> Result<(), Fail> {
         proof_set_digest(SemanticHashDomain::AcknowledgementSet, &tbs).map_err(|_| invalid())?;
     if authorization_id != core.commit_authorization_id
         || acknowledgement_digest != core.acknowledgement_set_digest
+        || acks
+            .iter()
+            .any(|ack| !super::ack_context::commit_finalization(&ack.tbs, core))
     {
         return Err(invalid());
     }
@@ -144,6 +147,13 @@ pub(super) fn reinit_activation(request: &IrcReInitActivationRequest) -> Result<
         || named_result != retained_result
         || core.reinit_attempt_id != request.receipt.tbs.reinit_attempt_id
         || core.acknowledgement_set_digest != digest
+        || acks.iter().any(|ack| {
+            !super::ack_context::reinit_attempt(
+                &ack.tbs,
+                &request.attempt,
+                &request.receipt.tbs.reinit_attempt_id,
+            )
+        })
     {
         return Err(invalid());
     }

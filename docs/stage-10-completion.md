@@ -1,0 +1,214 @@
+# Stage 10 completion ledger
+
+This working ledger tracks the implementation requested on 2026-09-10. It is
+not a conformance manifest. A checked implementation item does not close a
+production gate or qualify another source commit.
+
+## Baseline
+
+The implementation starts at `365b9e0e196afb6f4ff4887054b25b001ed10c4a` on
+`stage-10-production`. Its 39 previously local commits are pushed, and
+[PR 27](https://github.com/tetsuo-ai/agenc-ircd/pull/27) is open as a draft.
+
+The locked all-feature workspace run passes 2,797 tests with no failures and
+21 ignored tests. Nineteen ignored tests are separate qualification scenarios;
+two generate deterministic fixtures. The requirement, source and workspace
+checks pass. The release-runner suite passes 48 tests. Fresh coverage measures
+75.09% branches and 91.45% lines. All eight interim critical regions pass;
+667 of the 1,052 release-critical regions remain below 100%.
+
+The accepted constraints are current-format storage only, published upstream
+redb dependencies only, unchanged physical growth limits, and all five v1
+claims on both native Linux targets. Earlier development formats remain
+unsupported. The current-format backup and restore contract remains required.
+
+## Implementation work
+
+| Item | Required result | Status |
+| --- | --- | --- |
+| Repository history | Push the existing committed branch and open its review | Complete at the baseline commit |
+| Conformance maintenance | Bind the accepted current-format specification and preserve historical evidence | Baseline and requirement bindings repaired |
+| Storage initialization | Preserve every existing rollback guard and reject reused initialization directories | Implemented; 316 storage tests pass |
+| STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Mutation/abort prototype prepared; full mechanism and upstream release open |
+| CAP-73 authority | Authenticate public state and its complete historical transitions without exposing private MLS context | Open |
+| CAP-73 recovery | Ingest signed terminal evidence and atomically install Closed or Conflict | Open |
+| CAP-74 | Resolve retained edge witnesses with authenticated ancestry | Open |
+| CAP-86 | Bind ReInit admission and ACK signatures to the required old and continuing leaves | Open |
+| CAP-101 | Select per-conversation credentials and retain exact old signers for unfinished records | Open |
+| CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
+| Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Open |
+| Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Parsed arena and CLI expiry repaired; other items open |
+| Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding and temporary cleanup repaired; other items open |
+| Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Open |
+| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
+
+Earlier findings remain in `TODO.md` and `stage-10-qualification.md`. A finding
+is closed here only with a current regression or a recorded current-source
+check showing the earlier repair. Historical checkpoint counts do not replace
+fresh results.
+
+### Storage initialization evidence
+
+Three integration regressions fail on the baseline because initialization
+reports success after overwriting a retained guard. The repair rejects a
+retained valid guard, malformed or empty guard, symlink or directory before
+creating `database.redb`. First-guard publication uses an exclusive rename;
+a late entry is preserved and a failure after the database commit remains
+Indeterminate. Later normal guard replacements retain their existing behavior.
+
+`cargo test -p agenc-ircd-storage --locked` passes 210 unit tests and 106
+integration tests, including the new five regression and control tests and
+the existing crash, restore and fault-injection cases. The production changes
+add no wire or storage format and change no dependency pin or limit. The
+release critical inventory now includes the initialization and guard checks.
+
+### Capacity report evidence
+
+The report verifier now requires at least 50,000 configured and observed
+connections for the production capacity job. The separate soak job requires
+at least 256. A 64-client development campaign cannot close production
+capacity. The driver records its actual configured and peak populations and
+rejects dropped resource samples, invalid sample times, unordered latency
+percentiles and non-boolean shutdown results.
+
+The regression tests fail on the earlier verifier and pass with the repair.
+`python3 scripts/test-release-qualification.py` passes all 50 tests, and
+`python3 scripts/qualify-release.py check` validates the 31-job inventory.
+The existing capacity driver still runs 64 clients and therefore cannot
+produce passing production evidence. Implementing and running the full
+workload remains open.
+
+### Canonical storage evidence
+
+Channel body encoding and decoding now use the domain topic parser and
+require canonical typed masks in every list. Persisted reference decoding
+requires strictly increasing table/key pairs. Three regression tests reproduce
+the earlier acceptance failures. A fourth test preserves valid topic tabs,
+Unicode, each mask subject and quiet masks. The release inventory now includes
+the changed envelope and channel validation gates.
+
+Workspace Clippy passes with warnings denied. The all-feature workspace tests
+pass, including live TLS, administration, restart, WSS and both MLS clients.
+The first separate storage run refused its physical reserve probe because
+filesystem free space changed between samples on all five attempts. The same
+probe passes in the completed workspace run. Its exact boundary requirement
+and retry count are unchanged.
+
+### Temporary cleanup evidence
+
+Storage startup and backup creation now enumerate temporary files through
+the same open directory used for deletion. The new regression replaces the
+original directory path, checks that the replacement's files remain intact,
+and repeats cleanup through the retained descriptor. It fails with the earlier
+path-based enumeration and passes with the repair. All 10 platform tests,
+the complete storage suite and workspace Clippy pass.
+
+### Specification and evidence bindings
+
+The specification baseline now names exact normative source commit
+`15acb53621e04b1aed87fa53033eb4b1f4628bd5`. Its six artifact bytes match that
+commit, including current-format admission, the audit export union and the
+client numeric corrections. The base and E2EE profile hashes are unchanged.
+No normative document or archived result was edited for this repair.
+
+Three current storage requirement bindings are added to the reviewed catalog.
+The replaced migration atomicity sentence remains an archive-only binding and
+is rejected for new closure. The catalog validates 382 bindings and all 1,000
+archived entries. Its 79 negative cases and explicit retired-closure checks
+pass. These catalog records identify required evidence; they do not provide
+new passing qualification artifacts.
+
+The inherited gates exposed three additional stale catalogs. Stage 01 now
+pins the same architecture and decision-ledger bytes as the baseline. Stage 04
+records the review of two changed crypto files: unkeyed artifact/snapshot
+hash adapters and a public database-ID accessor. The reviewed login HMAC,
+OPAQUE paths and secret comparisons are unchanged. Stage 05 no longer
+requires the five legacy migration modules removed by the current-format
+decision. Each stage's catalog check and negative self-tests pass.
+
+At `8daac95`, the fresh all-feature workspace run passes 2,807 tests with
+zero failures and 21 ignored tests. The separate documentation run passes
+41 tests. Workspace Clippy, both target compile checks, dependency policy and
+the advisory check pass. Coverage is 75.0714% branches and 91.4550% lines,
+with all eight interim critical regions at 100%. That inherited run exposed
+stale catalogs; the final validation below includes the resumed checks.
+
+### Reader and command-line boundaries
+
+The reader checks the pending parsed-byte and request counts before parsing
+each completed line. Refusal stops further accumulation. Forwarding now
+drains each complete line before feeding another, so a maximum-sized line
+retained from an earlier read can complete within the minimum arena. Two
+accumulator regressions fail with the earlier behavior. All 27 connection
+tests pass, including fragmented input, message ordering and the exact
+30-second inbox stall under a paused clock.
+
+Account invitation expiry now rejects noncanonical unsigned decimals before
+descriptor or signing-key access. The subprocess regression reproduces the
+earlier acceptance of `+1` and passes for eight invalid spellings after the
+repair. Workspace Clippy and source policy pass. The source-bound release
+inventory includes both reader gates and the CLI parser; its thresholds are
+unchanged.
+
+JOIN key duplication was rechecked against Appendix A.1. Its `csv(key,20)`
+grammar forbids duplicate canonical values, so the existing rejection is
+retained. The broader queue-ownership and command-authorization findings
+remain open.
+
+### Final local validation
+
+At `b2aa74760330b7a1c74fa0a1638402a5a20eba2d`,
+`cargo test --workspace --all-features --locked` passes 2,813 tests, including
+documentation tests, with zero failures and 21 ignored tests. The ignored
+set contains 19 qualification scenarios and two fixture generators. Live TLS,
+administration, federation, restart, WSS and both MLS client tests pass.
+
+Workspace Clippy with all targets and features and warnings denied, formatting,
+source policy and its 31 rejection cases, workspace policy, the requirement
+ledger and baseline checks pass. The 50 release-runner tests and the 31-job
+qualification inventory pass. Both x86_64 and AArch64 all-target compilation
+checks pass; native AArch64 execution remains outstanding.
+
+The 103 inherited Stage 00 through 09 commands were checked through the initial
+and resumed runs after the catalog and test repairs. The final Stage 07 through
+09 run passes its transcripts, bounded models, encrypted load and fuzz smoke
+checks. The optional-profile matrix passes four builds, nine admitted
+configurations, seven refusals before storage writes and retained-history
+restarts with history disabled. These are implementation checks. Full native
+release campaigns remain required.
+
+Fresh coverage is 75.09% branches and 91.46% lines. All eight interim critical
+regions and the three added reader/CLI regions reach 100%. The release check
+still fails its 90% branch floor and 672 of 1,061 critical regions, including
+regions without executable branch data. Both inventories bind all 765 current
+Rust source files; the thresholds remain unchanged.
+
+All three workflow files pass actionlint 1.7.12 syntax and expression checks,
+with its optional shellcheck and Pyflakes integrations disabled. The pinned
+checkout and upload action commits resolve. GitHub Actions still reports
+`startup_failure` before any job begins and supplies no actionable diagnostic.
+Hosted CI is not green.
+
+The isolated [upstream allocation probe](upstream/redb-allocation-probe/README.md)
+passes 424 host tests but cannot publish a transaction. Its required upstream
+container gates stop because Podman is unavailable. The normal-API fuzz smoke
+does not exercise the new probe API. Full bounded commit support, upstream
+acceptance and a published dependency remain open under STO-1.
+
+## Required production evidence
+
+- [ ] Mandatory build and analysis checks on native x86_64 and AArch64.
+- [ ] Default, WSS, history and combined feature checks, including retained-data restarts.
+- [ ] At least 90% branch coverage, 90% line coverage and 100% of the complete critical inventory.
+- [ ] Supported native ext4 storage tests at the unchanged 128 MiB qualified growth ceiling and 256 MiB operational reserve.
+- [ ] Independent IRC clients, OpenMLS and mls-rs lifecycles, federation failures and Tor privacy tests.
+- [ ] Default 50,000-connection capacity within 4 GiB, advertised active workloads and recorded hardware.
+- [ ] Each of the 21 fuzz targets for 24 CPU-hours per native target.
+- [ ] Seven-day sustained operation and all recovery, deletion, key-lifecycle and hardening drills.
+- [ ] Independent E2EE review for S08-039 with all findings resolved.
+- [ ] Reproducible binaries, SBOM and complete requirement evidence for the frozen candidate.
+- [ ] Signed release decision and independent verification of the exact artifact hashes.
+
+Source, lockfile, configuration, binary or qualification-policy changes create
+a new candidate. Full release qualification follows the reviewed merge and
+source freeze. Production deployment is a separate release-owner action.

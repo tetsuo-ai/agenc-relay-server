@@ -1160,3 +1160,29 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::AuthTransportError;
+
+    #[test]
+    fn every_discriminant_renders_a_distinct_message() {
+        let variants = [
+            AuthTransportError::BadState,
+            AuthTransportError::UnsupportedMechanism,
+            AuthTransportError::InvalidChunk,
+            AuthTransportError::WrongLength,
+            AuthTransportError::TagsForbidden,
+            AuthTransportError::LimitExceeded,
+            AuthTransportError::TimedOut,
+            AuthTransportError::Overflow,
+            AuthTransportError::AllocationFailed,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+}

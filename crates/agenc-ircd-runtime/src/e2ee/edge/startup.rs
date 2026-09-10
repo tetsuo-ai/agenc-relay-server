@@ -18,11 +18,11 @@ fn invalid() -> RuntimeError {
 
 impl E2eeEdge {
     pub(crate) fn needs_witness_snapshot(&self) -> bool {
-        self.legacy_cursor
+        self.witness_snapshot_required
     }
 
     pub(super) fn resume_delivery(&self) -> super::sync::DeliveryState {
-        if self.legacy_cursor {
+        if self.witness_snapshot_required {
             super::sync::DeliveryState::default()
         } else {
             self.delivery
@@ -30,32 +30,31 @@ impl E2eeEdge {
     }
 
     pub(crate) fn retention_blocked(&self) -> bool {
-        !self.pending.is_empty() || self.commit.is_some() || self.barrier_pending.is_some()
+        !self.pending.is_empty()
+            || self.commit.is_some()
+            || self.barrier_pending.is_some()
+            || self.witness_pending()
+            || self.witness_recovery_pending()
     }
 
     pub(crate) fn restore_delivery(&mut self, row: &DeliveryRow) -> Result<(), RuntimeError> {
-        let (DeliveryRow::Cursor {
+        let DeliveryRow::WitnessedCursor {
+            generation,
             next_sequence,
             acked_sequence,
             acked_event_id,
             ..
-        }
-        | DeliveryRow::WitnessedCursor {
-            next_sequence,
-            acked_sequence,
-            acked_event_id,
-            ..
-        }) = row
-        else {
-            return Err(invalid());
-        };
+        } = row;
         if (*next_sequence == 0 && (*acked_sequence != 0 || *acked_event_id != [0; 16]))
             || (*next_sequence > 0 && acked_sequence.checked_add(1) != Some(*next_sequence))
         {
             return Err(invalid());
         }
-        self.legacy_cursor = matches!(row, DeliveryRow::Cursor { .. });
-        self.restore_cursor(row);
+        self.witness_snapshot_required = false;
+        self.delivery = super::sync::DeliveryState {
+            generation: *generation,
+            cursor: (*next_sequence > 0).then_some((*acked_sequence, *acked_event_id)),
+        };
         Ok(())
     }
 

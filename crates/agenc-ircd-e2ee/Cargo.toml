@@ -12,5 +12,8 @@ agenc-ircd-federation-wire.workspace = true
 agenc-ircd-types.workspace = true
 sha2.workspace = true
 
+[dev-dependencies]
+agenc-ircd-testkit.workspace = true
+
 [lints]
 workspace = true

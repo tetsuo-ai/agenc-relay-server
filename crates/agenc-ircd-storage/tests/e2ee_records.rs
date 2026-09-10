@@ -15,13 +15,12 @@ use agenc_ircd_storage::e2ee_records::barrier::{
 };
 use agenc_ircd_storage::e2ee_records::{
     ATTACH_ROW_KIND, AttachChallenge, AttachRow, BARRIER_ROW_KIND, CLAIM_ROW_KIND, CandidateState,
-    ClaimOutcome, ClaimRow, CrossProfileTuple, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND,
-    DeliveryGrant, DeliveryRow, DirectoryRow, KEYSET_ROW_KIND, KeySetRow, MAILBOX_ROW_KIND,
-    MailboxKind, MailboxRow, OBJECT_RECORD_KIND, ObjectRow, PACKAGE_ROW_KIND, PackageRow,
-    PackageState, ProofRole, RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayKey,
-    ReplayRow, RouteLifecycle, RouteRow, SEQUENCER_ROW_KIND, SequencerRow, check_state_key,
-    object_key, prefix, record_kind_for_key, recovery_gate_key, validate_object_body,
-    validate_state_body,
+    ClaimOutcome, ClaimRow, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND, DeliveryGrant, DeliveryRow,
+    DirectoryRow, KEYSET_ROW_KIND, KeySetRow, MAILBOX_ROW_KIND, MailboxKind, MailboxRow,
+    OBJECT_RECORD_KIND, ObjectRow, PACKAGE_ROW_KIND, PackageRow, PackageState, ProofRole,
+    RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayKey, ReplayRow, RouteLifecycle,
+    RouteRow, SEQUENCER_ROW_KIND, SequencerRow, check_state_key, object_key, prefix,
+    record_kind_for_key, recovery_gate_key, validate_object_body, validate_state_body,
 };
 use agenc_ircd_storage::{
     CommitOutcome, DatabaseHeaderTbs, InitialStorageRecord, LoginIndexKeyState,
@@ -208,8 +207,6 @@ fn keys_classify_by_prefix_and_lay_out_exactly() -> TestResult {
         ),
         (ReplayRow::key(&replay_key())?, REPLAY_ROW_KIND),
         (DeliveryRow::cursor_key(&[1; 16])?, DELIVERY_ROW_KIND),
-        (DeliveryRow::outbox_key(&[1; 16], 1, 2)?, DELIVERY_ROW_KIND),
-        (DeliveryRow::snapshot_key(&[1; 16])?, DELIVERY_ROW_KIND),
         (KeySetRow::key()?, KEYSET_ROW_KIND),
         (identity().head_key()?, BARRIER_ROW_KIND),
         (identity().part_key(2)?, BARRIER_ROW_KIND),
@@ -255,10 +252,6 @@ fn keys_classify_by_prefix_and_lay_out_exactly() -> TestResult {
         ReplayRow::parse_key(&ReplayRow::key(&replay_key())?)?,
         replay_key()
     );
-    assert_eq!(
-        DeliveryRow::parse_outbox_key(&DeliveryRow::outbox_key(&[1; 16], 5, 6)?)?,
-        ([1; 16], 5, 6)
-    );
     assert!(RouteRow::parse_key(&ClaimRow::lock_key(&[1; 32])?).is_err());
     assert!(PackageRow::package_key(&[]).is_err());
     assert!(PackageRow::package_key(&[1; 256]).is_err());
@@ -285,7 +278,6 @@ fn page_plans_cover_every_shape() -> TestResult {
     assert!(DirectoryRow::binding_lock_range(&ACCOUNT, &[1; 32], 3, 500).is_ok());
     assert!(MailboxRow::item_range(&ACCOUNT, &DEVICE, MailboxKind::Binding, 0, 32).is_ok());
     assert!(ReplayRow::origin_range(&[1; 16], &[2; 16], &[3; 16], 4).is_ok());
-    assert!(DeliveryRow::outbox_range(&[1; 16], 2, 3, 64).is_ok());
     assert!(agenc_ircd_storage::e2ee_records::prefix_range(prefix::ROUTE, 16).is_ok());
     assert!(
         agenc_ircd_storage::e2ee_records::prefix_range_from(
@@ -453,27 +445,12 @@ fn item_row(grant: Option<DeliveryGrant>) -> MailboxRow {
 }
 
 fn cursor_row(acked_sequence: u64) -> DeliveryRow {
-    DeliveryRow::Cursor {
+    DeliveryRow::WitnessedCursor {
         generation: 1,
         next_sequence: 5,
         acked_sequence,
         acked_event_id: [1; 16],
         barrier_open: true,
-    }
-}
-
-fn outbox_row(
-    payload_object_id: Option<[u8; 32]>,
-    payload_bytes: u32,
-    cross_profile: Option<CrossProfileTuple>,
-) -> DeliveryRow {
-    DeliveryRow::Outbox {
-        event_id: [1; 16],
-        event_object_id: [2; 32],
-        payload_object_id,
-        payload_bytes,
-        acked: false,
-        cross_profile,
     }
 }
 
@@ -770,46 +747,10 @@ fn replay_delivery_and_keyset_rows_round_trip() -> TestResult {
     );
 
     let cursor = cursor_row(4);
-    let outbox = outbox_row(
-        Some([3; 32]),
-        400,
-        Some(CrossProfileTuple {
-            mutation_id: [4; 16],
-            part_index: 1,
-            part_count: 2,
-        }),
-    );
-    let snapshot = DeliveryRow::Snapshot {
-        generation: 2,
-        token: [5; 32],
-        entry_count: 32,
-        digest: [6; 32],
-        ready: true,
-        expires_at: 900,
-    };
-    for row in [&cursor, &outbox, &snapshot] {
-        assert_eq!(&DeliveryRow::decode(&row.encode()?)?, row);
-    }
+    assert_eq!(DeliveryRow::decode(&cursor.encode()?)?, cursor);
     assert!(cursor.matches_key(&DeliveryRow::cursor_key(&[1; 16])?));
-    assert!(outbox.matches_key(&DeliveryRow::outbox_key(&[1; 16], 1, 1)?));
-    assert!(snapshot.matches_key(&DeliveryRow::snapshot_key(&[1; 16])?));
     let inverted = cursor_row(6);
     assert!(DeliveryRow::decode(&inverted.encode()?).is_err());
-    let payload_without_bytes = outbox_row(Some([3; 32]), 0, None);
-    assert!(DeliveryRow::decode(&payload_without_bytes.encode()?).is_err());
-    let bad_tuple = outbox_row(
-        None,
-        0,
-        Some(CrossProfileTuple {
-            mutation_id: [4; 16],
-            part_index: 2,
-            part_count: 2,
-        }),
-    );
-    assert!(DeliveryRow::decode(&bad_tuple.encode()?).is_err());
-    let plain = outbox_row(None, 0, None);
-    assert_eq!(DeliveryRow::decode(&plain.encode()?)?, plain);
-
     assert_eq!(KeySetRow::decode(&keyset().encode()?)?, keyset());
     assert!(
         KeySetRow {
@@ -990,7 +931,7 @@ fn every_kind_validates_its_own_bodies_and_refuses_others() -> TestResult {
         ),
         (
             DELIVERY_ROW_KIND,
-            DeliveryRow::Cursor {
+            DeliveryRow::WitnessedCursor {
                 generation: 1,
                 next_sequence: 1,
                 acked_sequence: 0,
@@ -1144,7 +1085,25 @@ fn an_e2ee_mutation_commits_object_state_replay_outbox_and_barrier_atomically() 
     let object_key = object.key()?;
     let route_key = RouteRow::key(&CONVERSATION)?;
     let replay_key_bytes = ReplayRow::key(&replay_key())?;
-    let outbox_key = DeliveryRow::outbox_key(&[5; 16], 1, 1)?;
+    use agenc_ircd_storage::e2ee_records::delivery_recovery::{
+        Acknowledgement, DeliveryRecoveryRow, ScopedOutbox, ScopedOutboxFields, fixture_body,
+    };
+    let DeliveryRecoveryRow::Owner(owner) = DeliveryRecoveryRow::decode(&fixture_body(7)?)? else {
+        return Err("delivery scope fixture".into());
+    };
+    let outbox = ScopedOutbox::new(ScopedOutboxFields {
+        scope: *owner.scope(),
+        generation: 1,
+        sequence: 1,
+        event_id: [1; 16],
+        event_object_id: *agenc_ircd_e2ee::ObjectId::compute(&object.bytes).as_bytes(),
+        event_bytes: u32::try_from(object.bytes.len())?,
+        payload_object_id: None,
+        payload_bytes: 0,
+        acknowledgement: Acknowledgement::Unacknowledged,
+        cross_profile: None,
+    })?;
+    let outbox_key = outbox.key()?;
     let head_key = identity().head_key()?;
     let part_key = identity().part_key(0)?;
     let mutations = vec![
@@ -1177,16 +1136,8 @@ fn an_e2ee_mutation_commits_object_state_replay_outbox_and_barrier_atomically() 
         put(
             TableId::E2eeState,
             outbox_key.clone(),
-            DELIVERY_ROW_KIND,
-            DeliveryRow::Outbox {
-                event_id: [1; 16],
-                event_object_id: *agenc_ircd_e2ee::ObjectId::compute(&object.bytes).as_bytes(),
-                payload_object_id: None,
-                payload_bytes: 0,
-                acked: false,
-                cross_profile: None,
-            }
-            .encode()?,
+            agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND,
+            DeliveryRecoveryRow::Outbox(outbox).encode()?,
         )?,
         put(
             TableId::E2eeState,
@@ -1309,10 +1260,6 @@ fn every_state_key_splits_back_into_its_parts() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(
         DeliveryRow::parse_cursor_key(&DeliveryRow::cursor_key(&device)?)?,
-        device
-    );
-    assert_eq!(
-        DeliveryRow::parse_snapshot_key(&DeliveryRow::snapshot_key(&device)?)?,
         device
     );
     assert_eq!(

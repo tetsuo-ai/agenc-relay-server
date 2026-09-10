@@ -242,7 +242,7 @@ impl DomainState {
         requester: UserId,
         account_id: AccountId,
     ) -> ProjectionDecision<AccountProjection<'_>> {
-        let Some(session) = self.sessions.get(&requester) else {
+        let Some(session) = self.session(requester) else {
             return ProjectionDecision::Hidden;
         };
         if session.account_id != Some(account_id) {
@@ -267,7 +267,7 @@ impl DomainState {
         requester: UserId,
         target: UserId,
     ) -> ProjectionDecision<SessionProjection<'_>> {
-        let Some(target_session) = self.sessions.get(&target) else {
+        let Some(target_session) = self.session(target) else {
             return ProjectionDecision::Hidden;
         };
         if !self.session_is_visible(requester, target_session) {
@@ -279,7 +279,7 @@ impl DomainState {
     /// Returns presence without distinguishing an offline target from a hidden one.
     #[must_use]
     pub fn project_presence(&self, requester: UserId, target: UserId) -> PresenceProjection {
-        match self.sessions.get(&target) {
+        match self.session(target) {
             Some(session) if self.session_is_visible(requester, session) => {
                 PresenceProjection::Present
             }
@@ -305,7 +305,17 @@ impl DomainState {
             .try_reserve_exact(channel.memberships.len())
             .map_err(|_| DomainError::AllocationFailed)?;
         for membership in channel.memberships.values() {
-            let Some(session) = self.sessions.get(&membership.user_id) else {
+            if self
+                .sessions
+                .get(&membership.user_id)
+                .is_some_and(|session| {
+                    self.fenced_federation_peers
+                        .contains(&session.home_server_id)
+                })
+            {
+                continue;
+            }
+            let Some(session) = self.session(membership.user_id) else {
                 return Err(DomainError::InvariantViolation);
             };
             members.push(MemberProjection {
@@ -345,7 +355,13 @@ impl DomainState {
             projections.push(ChannelListProjection {
                 channel_id: channel.channel_id,
                 name: &channel.name,
-                member_count_lower_bound: member_bucket(channel.memberships.len()),
+                member_count_lower_bound: member_bucket(
+                    channel
+                        .memberships
+                        .keys()
+                        .filter(|user| self.session(**user).is_some())
+                        .count(),
+                ),
                 topic: topic_projection(channel),
             });
         }
@@ -389,8 +405,7 @@ impl DomainState {
     }
 
     fn shares_channel(&self, left: UserId, right: UserId) -> bool {
-        let (Some(left), Some(right)) = (self.sessions.get(&left), self.sessions.get(&right))
-        else {
+        let (Some(left), Some(right)) = (self.session(left), self.session(right)) else {
             return false;
         };
         left.joined_channels
@@ -400,8 +415,7 @@ impl DomainState {
 
     fn are_mutual_contacts(&self, requester: UserId, target: AccountId) -> bool {
         let Some(requester_account_id) = self
-            .sessions
-            .get(&requester)
+            .session(requester)
             .and_then(|session| session.account_id)
         else {
             return false;

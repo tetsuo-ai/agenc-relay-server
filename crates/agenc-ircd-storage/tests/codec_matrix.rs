@@ -60,7 +60,7 @@ fn domain_body(table: TableId, kind: u16, byte: u8) -> Result<Vec<u8>, StorageEr
         return Ok(b"nickname".to_vec());
     }
     if table == TableId::ChannelName && kind == 1 {
-        return Ok(b"#channel".to_vec());
+        return crate::domain_records::channel_name_body(byte, "#channel");
     }
     if table == TableId::E2eeObject {
         return agenc_ircd_storage::e2ee_records::fixtures::object_body(byte);
@@ -871,33 +871,12 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
         StorageConstructionAction::RekeyCopy,
         0,
     )?;
-    let migrate = StorageConstructionPlanEntry::new(
-        StorageConstructionKind::Migrate,
-        vec![source(
-            StorageConstructionSourceKind::DatabaseRecord,
-            TableId::Account,
-            b"m",
-            7,
-        )?],
-        TableId::Account,
-        stored_key(b"m")?,
-        1,
-        StorageConstructionAction::MigrateTransform,
-        1,
-    )?;
     assert!(
         StorageConstructionPlanEntry::decode(StorageConstructionKind::Rekey, &rekey.encode()?)
             .is_ok()
     );
-    assert!(
-        StorageConstructionPlanEntry::decode(StorageConstructionKind::Migrate, &migrate.encode()?)
-            .is_ok()
-    );
     exercise_single_byte_corruptions(&rekey.encode()?, |candidate| {
         StorageConstructionPlanEntry::decode(StorageConstructionKind::Rekey, candidate)?.encode()
-    });
-    exercise_single_byte_corruptions(&migrate.encode()?, |candidate| {
-        StorageConstructionPlanEntry::decode(StorageConstructionKind::Migrate, candidate)?.encode()
     });
     assert!(
         StorageConstructionSource::new(
@@ -1037,11 +1016,6 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
             StorageConstructionKind::Rekey,
             StorageConstructionAction::RekeyCopy,
             1,
-        ),
-        (
-            StorageConstructionKind::Migrate,
-            StorageConstructionAction::MigrateTransform,
-            0,
         ),
     ] {
         assert!(
@@ -1198,18 +1172,6 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
         )
         .is_err()
     );
-    assert!(
-        StorageConstructionPlanEntry::new(
-            StorageConstructionKind::Migrate,
-            Vec::new(),
-            TableId::Account,
-            stored_key(b"migration-wrong-action")?,
-            1,
-            StorageConstructionAction::RestoreAccount,
-            1,
-        )
-        .is_err()
-    );
 
     let restore_identity = StorageOperationIdentity {
         kind: StorageConstructionKind::Restore,
@@ -1336,15 +1298,7 @@ fn construction_codecs_cover_every_closed_action_and_cursor() -> Result<(), Box<
         .validate()
         .is_err()
     );
-    assert!(matches!(
-        StorageOperationIdentity {
-            kind: StorageConstructionKind::Migrate,
-            source_stream_digest: None,
-            ..restore_identity
-        }
-        .validate(),
-        Err(StorageError::UnsupportedMigration)
-    ));
+
     assert!(
         StorageConstructionCursor::BeforeFirst
             .validate(0, 1)

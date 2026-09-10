@@ -1,6 +1,9 @@
 //! The bounded link loop: framing, reassembly, keepalive, and the two queues
 //! between a link and the state owner (spec 20.3, 20.4, 21.3).
 
+mod reservation;
+pub(crate) use reservation::ReservedFrames;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -263,6 +266,7 @@ pub async fn write_line<W: AsyncWrite + Unpin>(
 pub struct LinkOutbound {
     /// The line to write, or `None` when the owner asks the link to close.
     line: Option<FederationLineText>,
+    _reservation: Option<reservation::QueuedReservation>,
 }
 
 /// Why one line was not queued.
@@ -291,6 +295,7 @@ pub struct LinkHandle {
     sender: mpsc::Sender<LinkOutbound>,
     queued_bytes: Arc<AtomicU64>,
     capacity_bytes: u64,
+    closed: Arc<std::sync::Mutex<bool>>,
 }
 
 impl LinkHandle {
@@ -307,7 +312,10 @@ impl LinkHandle {
         if reserved.is_err() {
             return Err(SendRefusal::QueueFull);
         }
-        match self.sender.try_send(LinkOutbound { line: Some(line) }) {
+        match self.sender.try_send(LinkOutbound {
+            line: Some(line),
+            _reservation: None,
+        }) {
             Ok(()) => Ok(()),
             Err(error) => {
                 release_queued(&self.queued_bytes, bytes);
@@ -321,7 +329,10 @@ impl LinkHandle {
 
     /// Asks the link task to close after the lines already queued.
     pub fn close(&self) {
-        let _sent = self.sender.try_send(LinkOutbound { line: None });
+        let _sent = self.sender.try_send(LinkOutbound {
+            line: None,
+            _reservation: None,
+        });
     }
 
     /// Returns the bytes currently queued.
@@ -341,14 +352,29 @@ fn release_queued(queued_bytes: &AtomicU64, bytes: u64) {
 pub struct LinkQueue {
     receiver: mpsc::Receiver<LinkOutbound>,
     queued_bytes: Arc<AtomicU64>,
+    closed: Arc<std::sync::Mutex<bool>>,
+}
+
+impl Drop for LinkQueue {
+    fn drop(&mut self) {
+        // A publisher that wins this lock sends before receiver draining; a
+        // publisher that follows it drops its frames without calling send.
+        if let Ok(mut closed) = self.closed.lock() {
+            *closed = true;
+        }
+        self.receiver.close();
+    }
 }
 
 impl LinkQueue {
     /// Receives the next queued line, releasing its byte reservation.
     pub async fn recv(&mut self) -> Option<FederationLineText> {
-        let line = self.receiver.recv().await?.line?;
+        let item = self.receiver.recv().await?;
+        let line = item.line?;
         let bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
-        release_queued(&self.queued_bytes, bytes);
+        if item._reservation.is_none() {
+            release_queued(&self.queued_bytes, bytes);
+        }
         Some(line)
     }
 }
@@ -358,15 +384,18 @@ impl LinkQueue {
 pub fn link_queue(capacity_bytes: u64) -> (LinkHandle, LinkQueue) {
     let (sender, receiver) = mpsc::channel(OUTBOUND_QUEUE_ITEMS);
     let queued_bytes = Arc::new(AtomicU64::new(0));
+    let closed = Arc::new(std::sync::Mutex::new(false));
     (
         LinkHandle {
             sender,
             queued_bytes: Arc::clone(&queued_bytes),
             capacity_bytes,
+            closed: Arc::clone(&closed),
         },
         LinkQueue {
             receiver,
             queued_bytes,
+            closed,
         },
     )
 }
@@ -497,7 +526,9 @@ impl<W: AsyncWrite + Unpin> LinkLoop<W> {
         };
         let bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
         let written = write_line(&mut self.writer, &line).await;
-        release_queued(&queue.queued_bytes, bytes);
+        if item._reservation.is_none() {
+            release_queued(&queue.queued_bytes, bytes);
+        }
         written.map_err(|_| LinkCloseReason::Transport)
     }
 
@@ -868,3 +899,7 @@ mod companion_line_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "link/tests/awaited_write.rs"]
+mod awaited_write_tests;

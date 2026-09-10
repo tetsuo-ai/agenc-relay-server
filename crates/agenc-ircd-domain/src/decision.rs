@@ -613,6 +613,8 @@ pub enum DomainEvent {
     DisplayNameChanged(UserId),
     /// One per-session away value changed.
     AwayChanged(UserId),
+    /// One session's user modes changed for its home edge.
+    UserModesChanged(UserId),
     /// One channel instance was created.
     ChannelCreated(ChannelInstanceId),
     /// One channel instance was destroyed and cannot be reused.
@@ -1537,12 +1539,37 @@ impl DomainState {
 
     /// Plans insertion of one session after Stage 02 and later auth acceptance.
     pub fn plan_session_opened(&self, seed: SessionSeed) -> Result<MutationPlan, DomainError> {
+        self.plan_session_opened_at_authentication(seed, None)
+    }
+
+    /// Plans an authenticated session with its original, process-local OPAQUE
+    /// instant in the same insertion revision. The deadline is never persisted.
+    pub fn plan_authenticated_session_opened(
+        &self,
+        seed: SessionSeed,
+        authenticated_at: MonotonicTick,
+    ) -> Result<MutationPlan, DomainError> {
+        if seed.account_id.is_none() {
+            return Err(DomainError::BadState);
+        }
+        self.plan_session_opened_at_authentication(seed, Some(authenticated_at))
+    }
+
+    fn plan_session_opened_at_authentication(
+        &self,
+        seed: SessionSeed,
+        authenticated_at: Option<MonotonicTick>,
+    ) -> Result<MutationPlan, DomainError> {
         self.validate_session_seed(&seed)?;
         let user_id = seed.user_id;
+        let mut session = SessionState::from_seed(seed);
+        session.fresh_auth_deadline = authenticated_at
+            .map(|instant| instant.checked_add(FRESH_AUTH_WINDOW_MILLIS))
+            .transpose()?;
         let mut recipients = RecipientSet::new();
         recipients.insert(user_id);
         self.single_mutation(
-            Mutation::InsertSession(SessionState::from_seed(seed)),
+            Mutation::InsertSession(session),
             DomainEvent::SessionOpened(user_id),
             recipients,
             Vec::new(),
@@ -2011,6 +2038,9 @@ impl DomainState {
         if authorized.expected_state_revision != self.revision {
             return Err(DomainError::StaleRevision);
         }
+        if !self.session_authority_available(authorized.user_id) {
+            return Err(DomainError::ServerBusy);
+        }
         let requests = self.external_requests(authorized.user_id, &authorized.command)?;
         let Some(inputs) = external else {
             if requests.is_empty() {
@@ -2165,6 +2195,9 @@ impl DomainState {
         let Some(session) = self.sessions.get(&envelope.user_id()) else {
             return Err(DomainError::NotFound);
         };
+        if !self.session_authority_available(envelope.user_id()) {
+            return Err(DomainError::ServerBusy);
+        }
         if session.session_id != envelope.session_id()
             || session.generation != envelope.session_generation()
         {
@@ -2357,6 +2390,9 @@ impl DomainState {
         let Some(target) = self.sessions.get(target_user) else {
             return Err(DomainError::InvariantViolation);
         };
+        if !self.session_authority_available(*target_user) {
+            return Err(DomainError::NotFound);
+        }
         let Some(target_account_id) = target.account_id else {
             return Ok(());
         };
@@ -3372,7 +3408,7 @@ impl DomainState {
         recipients.insert(user_id);
         self.command_plan(
             vec![Mutation::SetOperatorNotices { user_id, enabled }],
-            Vec::new(),
+            vec![DomainEvent::UserModesChanged(user_id)],
             recipients,
             charges,
             StorageClass::Durable,
@@ -3804,16 +3840,16 @@ impl DomainState {
                 self.apply_display_name(user_id, display_name, revision);
             }
             Mutation::SetFreshAuthDeadline { user_id, deadline } => {
+                // Process-local authentication state has no session projection.
                 if let Some(session) = self.sessions.get_mut(&user_id) {
                     self.account_deletion_challenges.remove(&session.session_id);
                     session.fresh_auth_deadline = Some(deadline);
-                    session.revision = revision;
                 }
             }
             Mutation::StartAccountDeletion(challenge) => {
+                // Consuming freshness leaves the published session revision intact.
                 if let Some(session) = self.sessions.get_mut(&challenge.user_id) {
                     session.fresh_auth_deadline = None;
-                    session.revision = revision;
                 }
                 self.account_deletion_challenges
                     .insert(challenge.session_id, challenge);
@@ -4041,7 +4077,7 @@ impl DomainState {
         }
     }
 
-    fn apply_monitor(&mut self, user_id: UserId, change: MonitorChange, revision: Revision) {
+    fn apply_monitor(&mut self, user_id: UserId, change: MonitorChange, _revision: Revision) {
         let Some(session) = self.sessions.get_mut(&user_id) else {
             return;
         };
@@ -4054,7 +4090,6 @@ impl DomainState {
             }
             MonitorChange::Clear => session.monitored_nicknames.clear(),
         }
-        session.revision = revision;
     }
 
     fn apply_display_name(
@@ -9755,6 +9790,204 @@ mod tests {
             &[DomainEvent::DisplayNameChanged(fixture.owner.user_id)]
         );
         Ok(())
+    }
+
+    #[test]
+    fn authenticated_session_open_retains_original_freshness_without_persisting_it()
+    -> Result<(), DomainError> {
+        let account_id = account_id(227);
+        let mut state = DomainState::new()?;
+        state.apply_account(
+            AccountState::new(
+                account_id,
+                agenc_ircd_types::Generation::new(1)?,
+                state.revision,
+            ),
+            state.revision,
+        );
+        let seed = session_seed(228, Some(account_id), 1)?;
+        let user_id = seed.user_id;
+        let previous_revision = state.revision;
+        let plan = state.plan_authenticated_session_opened(seed, MonotonicTick::from_ticks(100))?;
+        let prepared = state.prepare_mutation(plan)?;
+        state.apply_prepared(prepared)?;
+        let session = state
+            .session(user_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        assert_eq!(session.revision(), previous_revision.checked_add(1)?);
+        assert_eq!(
+            session.fresh_auth_deadline(),
+            Some(MonotonicTick::from_ticks(300_100))
+        );
+        let restored = DurableSession::from_state(session).into_state()?;
+        assert_eq!(restored.fresh_auth_deadline(), None);
+        assert!(matches!(
+            state.plan_account_deletion_start(
+                user_id,
+                account_id,
+                Vec::new(),
+                ExternalInputs {
+                    monotonic_now: Some(MonotonicTick::from_ticks(300_100)),
+                    deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(229))],
+                    ..ExternalInputs::default()
+                }
+            )?,
+            PlanDecision::Mutation(_)
+        ));
+        assert_eq!(
+            state
+                .plan_account_deletion_start(
+                    user_id,
+                    account_id,
+                    Vec::new(),
+                    ExternalInputs {
+                        monotonic_now: Some(MonotonicTick::from_ticks(300_101)),
+                        deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(229))],
+                        ..ExternalInputs::default()
+                    }
+                )
+                .err(),
+            Some(DomainError::BadState)
+        );
+        assert_eq!(
+            state
+                .plan_authenticated_session_opened(
+                    session_seed(226, None, 0)?,
+                    MonotonicTick::from_ticks(100)
+                )
+                .err(),
+            Some(DomainError::BadState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_authentication_keeps_the_published_session_revision() -> Result<(), DomainError> {
+        let (mut state, user_id, account_id) = private_auth_session()?;
+        let before = public_session_record(&state, user_id)?;
+        let session_generation = state
+            .session(user_id)
+            .ok_or(DomainError::NotFound)?
+            .generation();
+        let revision = state.revision();
+        let plan = state.plan_session_fresh_authentication(
+            user_id,
+            account_id,
+            session_generation,
+            MonotonicTick::from_ticks(200),
+        )?;
+        assert!(plan.events().is_empty());
+        let prepared = state.prepare_mutation(plan)?;
+        state.apply_prepared(prepared)?;
+        assert_eq!(state.revision(), revision.checked_add(1)?);
+        assert!(
+            public_session_record(&state, user_id)? == before,
+            "private authentication changed the published session record"
+        );
+        assert_eq!(
+            state
+                .session(user_id)
+                .ok_or(DomainError::NotFound)?
+                .fresh_auth_deadline(),
+            Some(MonotonicTick::from_ticks(300_200))
+        );
+        state.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_challenge_keeps_the_published_session_revision_until_confirmation()
+    -> Result<(), DomainError> {
+        let (mut state, user_id, account_id) = private_auth_session()?;
+        let before = public_session_record(&state, user_id)?;
+        let revision = state.revision();
+        let PlanDecision::Mutation(start) = state.plan_account_deletion_start(
+            user_id,
+            account_id,
+            Vec::new(),
+            ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(101)),
+                deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(231))],
+                ..ExternalInputs::default()
+            },
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(
+            start.events(),
+            &[DomainEvent::AccountDeletionChallengeStarted(user_id)]
+        );
+        let prepared = state.prepare_mutation(start)?;
+        state.apply_prepared(prepared)?;
+        assert_eq!(state.revision(), revision.checked_add(1)?);
+        assert!(
+            public_session_record(&state, user_id)? == before,
+            "private authentication changed the published session record"
+        );
+        assert_eq!(
+            state
+                .session(user_id)
+                .ok_or(DomainError::NotFound)?
+                .fresh_auth_deadline(),
+            None
+        );
+        state.validate()?;
+        let PlanDecision::Mutation(confirmed) = state.plan_account_deletion_confirm(
+            user_id,
+            account_id,
+            AccountDeletionToken::from_bytes(bytes(231)),
+            Vec::new(),
+            ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(102)),
+                ..ExternalInputs::default()
+            },
+        )?
+        else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(
+            confirmed.events(),
+            &[DomainEvent::AccountDeleted(account_id)]
+        );
+        let prepared = state.prepare_mutation(confirmed)?;
+        state.apply_prepared(prepared)?;
+        assert!(state.account(account_id).is_none());
+        assert!(state.session(user_id).is_none());
+        assert!(state.account_deletion_challenges.is_empty());
+        state.validate()?;
+        Ok(())
+    }
+
+    fn private_auth_session() -> Result<(DomainState, UserId, AccountId), DomainError> {
+        let account_id = account_id(229);
+        let mut state = DomainState::new()?;
+        state.apply_account(
+            AccountState::new(
+                account_id,
+                agenc_ircd_types::Generation::new(1)?,
+                state.revision,
+            ),
+            state.revision,
+        );
+        let seed = session_seed(230, Some(account_id), 1)?;
+        let user_id = seed.user_id;
+        let plan = state.plan_authenticated_session_opened(seed, MonotonicTick::from_ticks(100))?;
+        let prepared = state.prepare_mutation(plan)?;
+        state.apply_prepared(prepared)?;
+        Ok((state, user_id, account_id))
+    }
+
+    fn public_session_record(
+        state: &DomainState,
+        user_id: UserId,
+    ) -> Result<crate::federation::record::SessionRecord, DomainError> {
+        let durable = state
+            .durable_session(user_id)
+            .ok_or(DomainError::NotFound)?;
+        Ok(crate::federation::projection::session_record_from(
+            &durable, None,
+        ))
     }
 
     #[test]

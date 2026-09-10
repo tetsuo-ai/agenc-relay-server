@@ -5,6 +5,14 @@
 //! or make generated listeners active. Secret bytes move from operating-system
 //! entropy into mode-0600 files and crypto adapters only.
 
+pub use crate::daemon::login_index::{
+    LoginIndexRotationError, LoginIndexRotationReceipt, execute_login_index_finish,
+    execute_login_index_start,
+};
+
+mod restore;
+pub use restore::execute_stopped_restore;
+
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -1138,6 +1146,13 @@ fn trust_manifest(kind: &str, id: StorageDigest, public_key: [u8; 32]) -> String
         encode_base64url_32(&public_key),
         i64::MAX,
     )
+}
+
+/// Engine limits a freshly initialized node uses; stopped-daemon maintenance
+/// commands that create their own scratch database share them.
+#[must_use]
+pub fn default_storage_limits() -> StorageEngineLimits {
+    storage_limits()
 }
 
 fn storage_limits() -> StorageEngineLimits {

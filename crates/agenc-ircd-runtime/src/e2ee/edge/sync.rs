@@ -11,7 +11,7 @@ use agenc_ircd_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScope
 use agenc_ircd_e2ee::wire::carrier::CarrierCommand;
 use agenc_ircd_e2ee::wire::fragment::FragmentTag;
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
-use agenc_ircd_storage::e2ee_records::{DELIVERY_ROW_KIND, DeliveryRow};
+use agenc_ircd_storage::e2ee_records::DELIVERY_ROW_KIND;
 
 use super::router::Refusal;
 use super::{ClientOutput, E2eeEdge, PendingCommit, Phase};
@@ -63,6 +63,12 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
     ) -> bool {
+        if self.witness_recovery_pending() {
+            return false;
+        }
+        if !self.prepare_witness_retry(context, edge) || self.witness_pending() {
+            return false;
+        }
         if self.phase != Phase::Down {
             return true;
         }
@@ -457,30 +463,6 @@ impl E2eeEdge {
         DELIVERY_ROW_KIND
     }
 
-    /// Restores the durable cursor at startup.
-    pub fn restore_cursor(&mut self, row: &DeliveryRow) {
-        if let DeliveryRow::Cursor {
-            generation,
-            acked_sequence,
-            acked_event_id,
-            next_sequence,
-            ..
-        }
-        | DeliveryRow::WitnessedCursor {
-            generation,
-            acked_sequence,
-            acked_event_id,
-            next_sequence,
-            ..
-        } = row
-        {
-            self.delivery = DeliveryState {
-                generation: *generation,
-                cursor: (*next_sequence > 0).then_some((*acked_sequence, *acked_event_id)),
-            };
-        }
-    }
-
     /// Frames from the coordinator once the profile is active.
     pub fn handle_frames(
         &mut self,
@@ -488,6 +470,12 @@ impl E2eeEdge {
         edge: &mut EdgeFederation,
         frames: Vec<CompanionFrame>,
     ) -> Vec<ClientOutput> {
+        if self.witness_pending()
+            || self.witness_recovery_pending()
+            || (!frames.is_empty() && !self.prepare_witness_retry(context, edge))
+        {
+            return Vec::new();
+        }
         let mut outputs = Vec::new();
         self.adopt_barrier_cursor(edge);
         self.barrier_parts.retain(|mutation, _| {
@@ -509,12 +497,12 @@ impl E2eeEdge {
     /// when the record chain did not extend (companion 12.5), and the router
     /// forgets the link.
     pub(crate) fn fail_frame(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
-        self.counters.violations = self.counters.violations.saturating_add(1);
-        if self.record_witness(context) {
-            edge.fail_companion_witness(context);
-        } else {
-            edge.fail_companion_link(context);
+        if self.record_witness(context, edge) {
+            self.link_down();
+            return;
         }
+        self.counters.violations = self.counters.violations.saturating_add(1);
+        edge.fail_companion_link(context);
         self.link_down();
     }
 

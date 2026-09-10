@@ -26,13 +26,12 @@ use agenc_ircd_types::{
 use zeroize::Zeroizing;
 
 use crate::RuntimeError;
-use crate::federation::codec::operations::{FederatedOperation, MessageTargetArg, ModeChangeArg};
+use crate::federation::codec::operations::{
+    FederatedOperation, MessageTargetArg, ModeChangeArg, USER_MODE_CODE_WALLOPS,
+};
 use crate::federation::codec::{channel_name_of, history_of_value, nickname_of};
 use crate::state_core::StateCoreContext;
 use crate::state_core::session::BoundSession;
-
-/// User-mode code for `w` in the B.4 registry.
-const USER_MODE_CODE_WALLOPS: u16 = 2;
 
 /// What one operation converts into.
 pub(super) enum ConvertedRequest {
@@ -282,6 +281,14 @@ fn check_revisions(
     }
 }
 
+/// A message names the channel revision its edge last applied. The edge's
+/// replica trails the coordinator by the event delivery latency, so under
+/// concurrent joins, parts, and mode or topic changes an exact match would
+/// refuse a large share of ordinary traffic with `SERVER_BUSY`, and clients
+/// do not retry. The message is authorized and its recipients derived at the
+/// coordinator's current revision (STA-05, STA-07), so an older revision is
+/// accepted; a revision the coordinator has not reached is refused, since it
+/// cannot come from an event the coordinator committed.
 fn check_message_target(
     domain: &DomainState,
     target: &MessageTargetArg,
@@ -290,7 +297,13 @@ fn check_message_target(
         MessageTargetArg::Channel {
             channel_id,
             expected_revision,
-        } => check_channel_revision(domain, *channel_id, *expected_revision),
+        } => {
+            let channel = domain.channel(*channel_id).ok_or(DomainError::NotFound)?;
+            if *expected_revision > channel.revision().get() {
+                return Err(DomainError::StaleRevision);
+            }
+            Ok(())
+        }
         MessageTargetArg::User { .. } => Ok(()),
     }
 }
@@ -918,5 +931,38 @@ fn directory_command(
                 list,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod user_mode_tests {
+    use super::*;
+    use crate::test_support::{StateCoreFixture, seed_session};
+    use agenc_ircd_domain::federation::ModeDirection;
+    use agenc_ircd_domain::{CanonicalCommandView, ModeCommand};
+
+    #[test]
+    fn pinned_user_mode_operations_preserve_direction_and_forced_invisibility()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let user = seed_session(context, 1, "ModeOwner", None)?;
+        for (direction, enabled) in [(ModeDirection::Add, true), (ModeDirection::Remove, false)] {
+            let mut change = ModeChangeArg {
+                direction,
+                mode_code: 18,
+                argument: Zeroizing::new(Vec::new()),
+            };
+            let command = user_mode_command(context.domain(), user.session_id, &[change.clone()])?;
+            assert!(
+                matches!(command.view(), CanonicalCommandView::Mode(ModeCommand::UserOperatorNotices(_, actual)) if *actual == enabled)
+            );
+            change.mode_code = 17;
+            assert!(
+                user_mode_command(context.domain(), user.session_id, &[change]).is_err(),
+                "forced invisibility cannot be mutated"
+            );
+        }
+        Ok(())
     }
 }

@@ -9,8 +9,8 @@ use agenc_ircd_client_wire::{
 use agenc_ircd_domain::{
     AccountCommand, CanonicalCommand, CanonicalCommandView, ChannelCommand, ChannelNameValue,
     DomainEvent, DomainState, MaskList, Membership, MessageBatch, MessageKind, ModeChange,
-    ModeCommand, ModeOperation, MutationPlan, PresenceCommand, ProjectionDecision,
-    ResolvedMessageTarget, Role, TopicProjection, VisibilityMode,
+    ModeCommand, ModeOperation, MutationPlan, PresenceCommand, ResolvedMessageTarget, Role,
+    VisibilityMode,
 };
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, ChannelName, MaskSubject, PublicErrorCode, TypedMask, UserId,
@@ -25,6 +25,30 @@ use crate::state_core::fanout::{FanoutFrame, FanoutRequest, FanoutTarget};
 use crate::state_core::session::BoundSession;
 
 const NAMES_CHUNK_BYTES: usize = 8_000;
+
+mod join;
+mod local_join;
+pub(crate) use join::{join_result_frames, join_result_replies};
+pub(crate) use local_join::render_local_join_start;
+
+mod away;
+pub(crate) use away::away_result_replies;
+
+/// Origin-only replies stored atomically with a remote mutation.
+pub(crate) fn mutation_result_replies(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    command: &CanonicalCommand,
+    plan: &MutationPlan,
+) -> Result<Vec<agenc_ircd_federation_wire::SchemaObject>, RuntimeError> {
+    match command.view() {
+        CanonicalCommandView::Join(_) => join_result_replies(context, bound, command, plan),
+        CanonicalCommandView::Presence(PresenceCommand::Away(_)) => {
+            away_result_replies(context, bound, command, plan)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
 
 pub(crate) fn render_mutation(
     context: &StateCoreContext,
@@ -44,6 +68,26 @@ pub(crate) fn render_mutation(
     let source = session_prefix(session)?;
     render_command(&mut builder, plan, bound.user_id, &source, command.view())?;
     builder.append_failures(plan)?;
+    builder.finish()
+}
+
+/// Renders a canonical expiry plan from its retained physical session row.
+pub(crate) fn render_federation_expiry(
+    context: &StateCoreContext,
+    user: UserId,
+    plan: &MutationPlan,
+) -> Result<FanoutRequest, RuntimeError> {
+    if plan.expected_revision() != context.domain().revision() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    require_event(plan, DomainEvent::SessionHidden(user))?;
+    let session = context
+        .domain()
+        .retained_session(user)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let source = session_prefix(session)?;
+    let mut builder = FanoutBuilder::new(context, plan, None)?;
+    render_quit(&mut builder, plan, user, &source, "origin expired")?;
     builder.finish()
 }
 
@@ -232,6 +276,7 @@ struct FanoutBuilder<'context, 'reply> {
     targets: Vec<FanoutTarget>,
     frames: Vec<FanoutFrame>,
     origin_semantic: Vec<WireMessage>,
+    deferred_join_names: bool,
 }
 
 impl<'context, 'reply> FanoutBuilder<'context, 'reply> {
@@ -264,6 +309,7 @@ impl<'context, 'reply> FanoutBuilder<'context, 'reply> {
             targets,
             frames: Vec::new(),
             origin_semantic: Vec::new(),
+            deferred_join_names: false,
         })
     }
 
@@ -530,6 +576,9 @@ fn render_join_burst(
         .nickname()
         .presentation();
     render_join_topic(builder, nickname, name, user_id, channel)?;
+    if builder.deferred_join_names {
+        return Ok(());
+    }
     render_join_names(
         builder,
         reply.capabilities,
@@ -547,57 +596,10 @@ fn render_join_topic(
     user_id: UserId,
     channel: Option<&agenc_ircd_domain::ChannelState>,
 ) -> Result<(), RuntimeError> {
-    let prefix = builder.context.server_prefix();
-    let Some((channel, topic)) =
-        channel.and_then(|channel| channel.topic().map(|topic| (channel, topic)))
-    else {
-        return builder.push_origin(numeric(
-            prefix,
-            331,
-            nickname,
-            &[name.presentation()],
-            Some("No topic is set"),
-        )?);
-    };
-    // The burst shows what TOPIC would show: an E2EE-bound channel never
-    // reveals its plaintext topic text (spec 14.3).
-    let placeholder = matches!(
-        builder
-            .context
-            .domain()
-            .project_channel(user_id, channel.channel_id()),
-        Ok(ProjectionDecision::Visible(projection))
-            if matches!(projection.topic(), TopicProjection::EncryptedPlaceholder)
-    );
-    let text = if placeholder {
-        "Encrypted channel topic"
-    } else {
-        topic.text()
-    };
-    builder.push_origin(numeric(
-        prefix,
-        332,
-        nickname,
-        &[name.presentation()],
-        Some(text),
-    )?)?;
-    let setter = builder
-        .context
-        .domain()
-        .session(topic.setter())
-        .map(|session| session.nickname().presentation())
-        .unwrap_or(builder.context.server_prefix());
-    builder.push_origin(numeric(
-        prefix,
-        333,
-        nickname,
-        &[
-            name.presentation(),
-            setter,
-            &topic.set_at().get().to_string(),
-        ],
-        None,
-    )?)
+    for frame in join::topic_frames(builder.context, nickname, name, user_id, channel)? {
+        builder.push_origin(frame)?;
+    }
+    Ok(())
 }
 
 fn render_join_names(
@@ -1156,6 +1158,9 @@ fn render_presence(
     source: &str,
     presence: &PresenceCommand,
 ) -> Result<(), RuntimeError> {
+    if let PresenceCommand::MonitorAdd(targets) = presence {
+        return render_monitor_add(builder, user_id, targets);
+    }
     let PresenceCommand::Away(away) = presence else {
         return Ok(());
     };
@@ -1194,6 +1199,28 @@ fn render_presence(
             &[],
             Some(text),
         )?)?;
+    }
+    Ok(())
+}
+
+fn render_monitor_add(
+    builder: &mut FanoutBuilder<'_, '_>,
+    user_id: UserId,
+    targets: &[agenc_ircd_domain::NicknameValue],
+) -> Result<(), RuntimeError> {
+    if builder.reply.is_none() {
+        return Ok(());
+    }
+    let nickname = crate::client_render::requester_nickname(builder.context, user_id);
+    let frames = crate::query_render::monitor_status_frames(
+        builder.context.domain(),
+        builder.context.server_prefix(),
+        &nickname,
+        user_id,
+        targets,
+    )?;
+    for frame in frames {
+        builder.push_origin(frame)?;
     }
     Ok(())
 }
@@ -1960,6 +1987,60 @@ mod tests {
         render(context, owner, "JOIN 0", &|| {
             Ok(CanonicalCommand::part_all())
         })?;
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_add_replies_are_published_with_the_subscription_change()
+    -> Result<(), Box<dyn core::error::Error>> {
+        use crate::connection::ConnectionGeneration;
+        use crate::test_support::{
+            StateCoreFixture, bind_live_session, bound, negotiated_capabilities, plan_live,
+            seed_session,
+        };
+        use agenc_ircd_domain::{NicknameValue, PlanDecision};
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let owner = seed_session(context, 1, "MonitorOwner", None)?;
+        let capabilities = negotiated_capabilities(&["monitor"])?;
+        let sink = bind_live_session(
+            context,
+            1,
+            owner,
+            negotiated_capabilities(&["monitor"])?,
+            true,
+        )?;
+        let command = || {
+            CanonicalCommand::presence(PresenceCommand::MonitorAdd(vec![
+                NicknameValue::parse("MonitorOwner")?,
+                NicknameValue::parse("MissingMonitor")?,
+            ]))
+        };
+        let PlanDecision::Mutation(plan) = plan_live(context, owner, &command)? else {
+            return Err("MONITOR addition was not a mutation".into());
+        };
+        let request = parsed("MONITOR + MonitorOwner,MissingMonitor")?;
+        let reply = ReplyInput {
+            requester: owner.user_id,
+            generation: ConnectionGeneration::new(1),
+            capabilities: &capabilities,
+            request: &request,
+        };
+        let fanout = render_mutation(context, bound(owner), Some(reply), &command()?, &plan)?;
+        assert!(
+            sink.lines().is_empty(),
+            "no reply before subscription change"
+        );
+        context
+            .apply_ephemeral(plan, fanout)
+            .map_err(|_| "apply MONITOR")?;
+        assert_eq!(
+            sink.lines(),
+            vec![
+                ":server.example 731 MonitorOwner :MissingMonitor",
+                ":server.example 730 MonitorOwner :MonitorOwner",
+            ]
+        );
         Ok(())
     }
 

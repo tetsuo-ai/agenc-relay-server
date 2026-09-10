@@ -280,3 +280,25 @@ impl From<EcapViolation> for E2eeError {
 #[cfg(test)]
 #[path = "../tests/ecap.rs"]
 mod tests;
+
+#[cfg(test)]
+mod display_tests {
+    use super::KeySetError;
+
+    #[test]
+    fn every_discriminant_renders_a_distinct_message() {
+        let variants = [
+            KeySetError::Rollback,
+            KeySetError::Gap,
+            KeySetError::Equivocation,
+            KeySetError::Exhausted,
+            KeySetError::LocalMismatch,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+}

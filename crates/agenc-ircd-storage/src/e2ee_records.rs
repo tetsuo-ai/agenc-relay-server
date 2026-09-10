@@ -31,9 +31,7 @@
 //! | `ack-mailbox/v1/` | 8 | account digest, device ID, delivery token | [`MailboxRow::Ack`] |
 //! | `replay/v1/irc-mls-v1/` | 9 | home server, incarnation, origin, generation, sequence | [`ReplayRow`] |
 //! | `origin-sequence/v1/irc-mls-v1/` | 9 | home server, incarnation, origin | [`origin::OriginSequenceRow`] |
-//! | `delivery/v1/` | 10 | target server | [`DeliveryRow::Cursor`] |
-//! | `outbox/v1/` | 10 | target server, generation, sequence | [`DeliveryRow::Outbox`] |
-//! | `estate/v1/` | 10 | target server | [`DeliveryRow::Snapshot`] |
+//! | `delivery/v1/` | 10 | target server | [`DeliveryRow::WitnessedCursor`] |
 //! | `keyset/v1` | 11 | none | [`KeySetRow`] |
 //! | `cross-profile/head/v1/`, `cross-profile/part/v1/` | 12 | Section 20.8 layouts | [`barrier`] |
 //! | `witness/v1/` | 13 | conversation ID | [`WitnessRow`] |
@@ -47,6 +45,9 @@ use crate::schema::{MAX_STORED_KEY_BYTES, StoredKey, TableId};
 use crate::{MAX_PROTOCOL_BODY_BYTES, ReadPlan, StorageError};
 
 pub mod barrier;
+pub mod delivery_recovery;
+pub mod mailbox_sequence;
+pub use mailbox_sequence::{MAILBOX_SEQUENCE_ROW_KIND, MailboxSequenceRow};
 pub mod origin;
 
 /// The one live `e2ee_object` arm.
@@ -69,7 +70,7 @@ pub const ATTACH_ROW_KIND: u16 = 7;
 pub const MAILBOX_ROW_KIND: u16 = 8;
 /// Companion request replay rows and durable operation sequence floors.
 pub const REPLAY_ROW_KIND: u16 = 9;
-/// Companion delivery cursor, outbox, and ESTATE rows.
+/// Companion edge delivery checkpoints.
 pub const DELIVERY_ROW_KIND: u16 = 10;
 /// The sequencer key set row.
 pub const KEYSET_ROW_KIND: u16 = 11;
@@ -77,8 +78,10 @@ pub const KEYSET_ROW_KIND: u16 = 11;
 pub const BARRIER_ROW_KIND: u16 = 12;
 /// Edge witness violations of the sequencer record chain (companion 12.5).
 pub const WITNESS_ROW_KIND: u16 = 13;
+/// Complete coordinator delivery and snapshot ownership.
+pub const DELIVERY_RECOVERY_ROW_KIND: u16 = 14;
 
-/// Version prefix of the original companion body codecs.
+/// Version prefix of the companion body codecs.
 const BODY_VERSION: u16 = 1;
 const ID_BYTES: usize = 16;
 const HASH_BYTES: usize = 32;
@@ -139,10 +142,6 @@ pub mod prefix {
     pub const WITNESS: &[u8] = b"witness/v1/";
     /// Delivery cursor rows.
     pub const DELIVERY: &[u8] = b"delivery/v1/";
-    /// Outbox rows.
-    pub const OUTBOX: &[u8] = b"outbox/v1/";
-    /// ESTATE rows.
-    pub const ESTATE: &[u8] = b"estate/v1/";
     /// The key set row.
     pub const KEYSET: &[u8] = b"keyset/v1";
     /// Barrier head rows.
@@ -152,7 +151,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 29] = [
+const PREFIX_KINDS: [(&[u8], u16); 34] = [
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -176,12 +175,32 @@ const PREFIX_KINDS: [(&[u8], u16); 29] = [
     (prefix::REPLAY, REPLAY_ROW_KIND),
     (prefix::ORIGIN_SEQUENCE, REPLAY_ROW_KIND),
     (prefix::DELIVERY, DELIVERY_ROW_KIND),
-    (prefix::OUTBOX, DELIVERY_ROW_KIND),
-    (prefix::ESTATE, DELIVERY_ROW_KIND),
     (prefix::KEYSET, KEYSET_ROW_KIND),
     (prefix::BARRIER_HEAD, BARRIER_ROW_KIND),
     (prefix::BARRIER_PART, BARRIER_ROW_KIND),
     (prefix::WITNESS, WITNESS_ROW_KIND),
+    (delivery_recovery::OWNER_PREFIX, DELIVERY_RECOVERY_ROW_KIND),
+    (
+        delivery_recovery::outbox::replay::REPLAY_OWNER_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (
+        delivery_recovery::outbox::replay::ACK_RANGE_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (
+        delivery_recovery::outbox::OUTBOX_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (
+        delivery_recovery::CUT_PAGE_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (
+        delivery_recovery::BARRIER_PREFIX,
+        DELIVERY_RECOVERY_ROW_KIND,
+    ),
+    (mailbox_sequence::PREFIX, MAILBOX_SEQUENCE_ROW_KIND),
 ];
 
 /// The record kind a table-23 key must carry, from its prefix. `ack/v1/`
@@ -478,7 +497,7 @@ pub struct RouteRow {
     pub close_id: Option<[u8; HASH_BYTES]>,
     /// The predecessor close identifier for a recreated route.
     pub predecessor_close_id: Option<[u8; HASH_BYTES]>,
-    /// Whether a kind-1 recovery gate row exists for this conversation.
+    /// Whether restored recovery blocks ordinary mutations of this route.
     pub recovery_gate: bool,
     /// Retained object bytes charged to this conversation.
     pub stored_bytes: u64,
@@ -2201,24 +2220,10 @@ pub struct CrossProfileTuple {
     pub part_count: u16,
 }
 
-/// A delivery cursor, one outbox row, or the ESTATE transfer state.
+/// The edge delivery position committed with every touched route witness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryRow {
-    /// The per-target companion delivery cursor.
-    Cursor {
-        /// Delivery generation.
-        generation: u64,
-        /// The next sequence to assign.
-        next_sequence: u64,
-        /// The highest acknowledged sequence.
-        acked_sequence: u64,
-        /// The event identity at the acknowledged sequence.
-        acked_event_id: [u8; ID_BYTES],
-        /// Whether later events are held behind an open barrier.
-        barrier_open: bool,
-    },
     /// An edge cursor atomically checkpointed with every touched route witness.
-    /// This local arm distinguishes safe restart checkpoints from legacy cursors.
     WitnessedCursor {
         /// Delivery generation.
         generation: u64,
@@ -2231,55 +2236,14 @@ pub enum DeliveryRow {
         /// Whether later events are held behind an open barrier.
         barrier_open: bool,
     },
-    /// One queued event for a target.
-    Outbox {
-        /// Event identity.
-        event_id: [u8; ID_BYTES],
-        /// The retained `federation_event` object identifier.
-        event_object_id: [u8; HASH_BYTES],
-        /// The referenced data object, if the selector has one.
-        payload_object_id: Option<[u8; HASH_BYTES]>,
-        /// Payload object bytes, zero without a payload.
-        payload_bytes: u32,
-        /// Whether the row has been acknowledged.
-        acked: bool,
-        /// The cross-profile tuple, if the event is part of a barrier.
-        cross_profile: Option<CrossProfileTuple>,
-    },
-    /// The pending or active ESTATE transfer for a target.
-    Snapshot {
-        /// Snapshot generation.
-        generation: u64,
-        /// Snapshot token.
-        token: [u8; HASH_BYTES],
-        /// Entry count.
-        entry_count: u32,
-        /// Digest over the canonical entry partition.
-        digest: [u8; HASH_BYTES],
-        /// Whether READY was recorded.
-        ready: bool,
-        /// Token expiry second.
-        expires_at: u64,
-    },
 }
 
-const CURSOR_ARM: u16 = 1;
-const OUTBOX_ARM: u16 = 2;
-const SNAPSHOT_ARM: u16 = 3;
 const WITNESSED_CURSOR_ARM: u16 = 4;
-const MIN_PART_COUNT: u16 = 2;
-const MAX_PART_COUNT: u16 = 2_048;
 
 impl DeliveryRow {
-    /// The `delivery/v1/<target>` key.
     /// The target of a cursor key.
     pub fn parse_cursor_key(key: &StoredKey) -> Result<[u8; ID_BYTES], StorageError> {
         slice_array(suffix(key, prefix::DELIVERY, ID_BYTES)?, 0)
-    }
-
-    /// The target of a snapshot key.
-    pub fn parse_snapshot_key(key: &StoredKey) -> Result<[u8; ID_BYTES], StorageError> {
-        slice_array(suffix(key, prefix::ESTATE, ID_BYTES)?, 0)
     }
 
     /// The `delivery/v1/<target-server>` key.
@@ -2287,152 +2251,38 @@ impl DeliveryRow {
         key_of(&[prefix::DELIVERY, target])
     }
 
-    /// The `outbox/v1/<target><generation><sequence>` key.
-    pub fn outbox_key(
-        target: &[u8; ID_BYTES],
-        generation: u64,
-        sequence: u64,
-    ) -> Result<StoredKey, StorageError> {
-        key_of(&[
-            prefix::OUTBOX,
-            target,
-            &generation.to_be_bytes(),
-            &sequence.to_be_bytes(),
-        ])
-    }
-
-    /// Splits an outbox key into `(target, generation, sequence)`.
-    pub fn parse_outbox_key(key: &StoredKey) -> Result<([u8; ID_BYTES], u64, u64), StorageError> {
-        let rest = suffix(key, prefix::OUTBOX, ID_BYTES + 16)?;
-        Ok((
-            slice_array(rest, 0)?,
-            u64::from_be_bytes(slice_array(rest, ID_BYTES)?),
-            u64::from_be_bytes(slice_array(rest, ID_BYTES + 8)?),
-        ))
-    }
-
-    /// The outbox of one generation from `first_sequence` onward.
-    pub fn outbox_range(
-        target: &[u8; ID_BYTES],
-        generation: u64,
-        first_sequence: u64,
-        limit: u16,
-    ) -> Result<ReadPlan, StorageError> {
-        let scope = key_of(&[prefix::OUTBOX, target, &generation.to_be_bytes()])?;
-        prefix_range_from(
-            scope.as_bytes(),
-            &Self::outbox_key(target, generation, first_sequence)?,
-            limit,
-        )
-    }
-
-    /// The `estate/v1/<target>` key.
-    pub fn snapshot_key(target: &[u8; ID_BYTES]) -> Result<StoredKey, StorageError> {
-        key_of(&[prefix::ESTATE, target])
-    }
-
     /// Encodes the wrapped body.
     pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
         let mut encoder = encoder()?;
-        match self {
-            Self::Cursor {
-                generation,
-                next_sequence,
-                acked_sequence,
-                acked_event_id,
-                barrier_open,
-            }
-            | Self::WitnessedCursor {
-                generation,
-                next_sequence,
-                acked_sequence,
-                acked_event_id,
-                barrier_open,
-            } => {
-                let arm = if matches!(self, Self::WitnessedCursor { .. }) {
-                    WITNESSED_CURSOR_ARM
-                } else {
-                    CURSOR_ARM
-                };
-                encoder.put_u16(arm)?;
-                encoder.put_u64(*generation)?;
-                encoder.put_u64(*next_sequence)?;
-                encoder.put_u64(*acked_sequence)?;
-                encoder.put_fixed(acked_event_id)?;
-                put_bool(&mut encoder, *barrier_open)?;
-            }
-            Self::Outbox {
-                event_id,
-                event_object_id,
-                payload_object_id,
-                payload_bytes,
-                acked,
-                cross_profile,
-            } => {
-                encoder.put_u16(OUTBOX_ARM)?;
-                encoder.put_fixed(event_id)?;
-                encoder.put_fixed(event_object_id)?;
-                put_optional_hash(&mut encoder, payload_object_id.as_ref())?;
-                encoder.put_u32(*payload_bytes)?;
-                put_bool(&mut encoder, *acked)?;
-                put_tuple(&mut encoder, *cross_profile)?;
-            }
-            Self::Snapshot {
-                generation,
-                token,
-                entry_count,
-                digest,
-                ready,
-                expires_at,
-            } => {
-                encoder.put_u16(SNAPSHOT_ARM)?;
-                encoder.put_u64(*generation)?;
-                encoder.put_fixed(token)?;
-                encoder.put_u32(*entry_count)?;
-                encoder.put_fixed(digest)?;
-                put_bool(&mut encoder, *ready)?;
-                encoder.put_u64(*expires_at)?;
-            }
-        }
+        let Self::WitnessedCursor {
+            generation,
+            next_sequence,
+            acked_sequence,
+            acked_event_id,
+            barrier_open,
+        } = self;
+        encoder.put_u16(WITNESSED_CURSOR_ARM)?;
+        encoder.put_u64(*generation)?;
+        encoder.put_u64(*next_sequence)?;
+        encoder.put_u64(*acked_sequence)?;
+        encoder.put_fixed(acked_event_id)?;
+        put_bool(&mut encoder, *barrier_open)?;
         wrap(DELIVERY_ROW_KIND, encoder.finish())
     }
 
-    /// Decodes one wrapped body.
+    /// Decodes one wrapped checkpoint body.
     pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
         let inner = unwrap(DELIVERY_ROW_KIND, body)?;
         let mut decoder = decoder(&inner)?;
-        let row = match decoder.u16()? {
-            CURSOR_ARM => Self::Cursor {
-                generation: decoder.u64()?,
-                next_sequence: decoder.u64()?,
-                acked_sequence: decoder.u64()?,
-                acked_event_id: decoder.array()?,
-                barrier_open: take_bool(&mut decoder)?,
-            },
-            WITNESSED_CURSOR_ARM => Self::WitnessedCursor {
-                generation: decoder.u64()?,
-                next_sequence: decoder.u64()?,
-                acked_sequence: decoder.u64()?,
-                acked_event_id: decoder.array()?,
-                barrier_open: take_bool(&mut decoder)?,
-            },
-            OUTBOX_ARM => Self::Outbox {
-                event_id: decoder.array()?,
-                event_object_id: decoder.array()?,
-                payload_object_id: take_optional_hash(&mut decoder)?,
-                payload_bytes: decoder.u32()?,
-                acked: take_bool(&mut decoder)?,
-                cross_profile: take_tuple(&mut decoder)?,
-            },
-            SNAPSHOT_ARM => Self::Snapshot {
-                generation: decoder.u64()?,
-                token: decoder.array()?,
-                entry_count: decoder.u32()?,
-                digest: decoder.array()?,
-                ready: take_bool(&mut decoder)?,
-                expires_at: decoder.u64()?,
-            },
-            _ => return Err(StorageError::InvalidEncoding),
+        if decoder.u16()? != WITNESSED_CURSOR_ARM {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let row = Self::WitnessedCursor {
+            generation: decoder.u64()?,
+            next_sequence: decoder.u64()?,
+            acked_sequence: decoder.u64()?,
+            acked_event_id: decoder.array()?,
+            barrier_open: take_bool(&mut decoder)?,
         };
         decoder.finish()?;
         row.check()?;
@@ -2440,23 +2290,16 @@ impl DeliveryRow {
     }
 
     fn check(&self) -> Result<(), StorageError> {
-        let consistent = match self {
-            Self::Cursor {
-                next_sequence,
-                acked_sequence,
-                ..
-            }
-            | Self::WitnessedCursor {
-                next_sequence,
-                acked_sequence,
-                ..
-            } => acked_sequence <= next_sequence,
-            Self::Outbox {
-                payload_object_id,
-                payload_bytes,
-                ..
-            } => payload_object_id.is_some() == (*payload_bytes != 0),
-            Self::Snapshot { .. } => true,
+        let Self::WitnessedCursor {
+            next_sequence,
+            acked_sequence,
+            acked_event_id,
+            ..
+        } = self;
+        let consistent = if *next_sequence == 0 {
+            *acked_sequence == 0 && *acked_event_id == [0; ID_BYTES]
+        } else {
+            acked_sequence.checked_add(1) == Some(*next_sequence)
         };
         if consistent {
             Ok(())
@@ -2465,51 +2308,11 @@ impl DeliveryRow {
         }
     }
 
-    /// Whether this row belongs under `key`.
+    /// Whether this row belongs under an exact cursor key.
     #[must_use]
     pub fn matches_key(&self, key: &StoredKey) -> bool {
-        let bytes = key.as_bytes();
-        match self {
-            Self::Cursor { .. } | Self::WitnessedCursor { .. } => {
-                bytes.starts_with(prefix::DELIVERY)
-            }
-            Self::Outbox { .. } => bytes.starts_with(prefix::OUTBOX),
-            Self::Snapshot { .. } => bytes.starts_with(prefix::ESTATE),
-        }
+        Self::parse_cursor_key(key).is_ok()
     }
-}
-
-fn put_tuple(encoder: &mut Encoder, tuple: Option<CrossProfileTuple>) -> Result<(), StorageError> {
-    put_bool(encoder, tuple.is_some())?;
-    let tuple = tuple.unwrap_or(CrossProfileTuple {
-        mutation_id: [0; ID_BYTES],
-        part_index: 0,
-        part_count: 0,
-    });
-    encoder.put_fixed(&tuple.mutation_id)?;
-    encoder.put_u16(tuple.part_index)?;
-    encoder.put_u16(tuple.part_count)
-}
-
-fn take_tuple(decoder: &mut Decoder<'_>) -> Result<Option<CrossProfileTuple>, StorageError> {
-    let present = take_bool(decoder)?;
-    let tuple = CrossProfileTuple {
-        mutation_id: decoder.array()?,
-        part_index: decoder.u16()?,
-        part_count: decoder.u16()?,
-    };
-    if present {
-        if !(MIN_PART_COUNT..=MAX_PART_COUNT).contains(&tuple.part_count)
-            || tuple.part_index >= tuple.part_count
-        {
-            return Err(StorageError::InvalidEncoding);
-        }
-        return Ok(Some(tuple));
-    }
-    if tuple.mutation_id != [0; ID_BYTES] || tuple.part_index != 0 || tuple.part_count != 0 {
-        return Err(StorageError::InvalidEncoding);
-    }
-    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -2646,6 +2449,8 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         KEYSET_ROW_KIND => KeySetRow::decode(body).map(|_| ()),
         BARRIER_ROW_KIND => barrier::validate_body(body),
         WITNESS_ROW_KIND => WitnessRow::decode(body).map(|_| ()),
+        DELIVERY_RECOVERY_ROW_KIND => delivery_recovery::validate_body(body),
+        MAILBOX_SEQUENCE_ROW_KIND => MailboxSequenceRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),
     }
 }
@@ -2674,9 +2479,11 @@ pub mod fixtures {
         ObjectRow::new(bytes)?.encode()
     }
 
-    /// A valid table-23 body of `kind` (2 to 13).
+    /// A valid table-23 body of `kind` (2 to 14).
     pub fn state_body(kind: u16, seed: u8) -> Result<Vec<u8>, StorageError> {
-        if kind <= DIRECTORY_ROW_KIND {
+        if kind == DELIVERY_RECOVERY_ROW_KIND {
+            delivery_recovery::fixture_body(seed)
+        } else if kind <= DIRECTORY_ROW_KIND {
             structural_body(kind, seed)
         } else {
             operational_body(kind, seed)
@@ -2772,11 +2579,11 @@ pub mod fixtures {
                 retain_until: u64::from(seed),
             }
             .encode(),
-            DELIVERY_ROW_KIND => DeliveryRow::Cursor {
+            DELIVERY_ROW_KIND => DeliveryRow::WitnessedCursor {
                 generation: u64::from(seed),
                 next_sequence: 0,
                 acked_sequence: 0,
-                acked_event_id: id,
+                acked_event_id: [0; ID_BYTES],
                 barrier_open: false,
             }
             .encode(),

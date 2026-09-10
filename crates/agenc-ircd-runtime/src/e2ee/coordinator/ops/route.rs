@@ -25,8 +25,8 @@ use agenc_ircd_e2ee::objects::conversation::{
 use agenc_ircd_e2ee::objects::federation::{IrcFederationRouteState, IrcRouteStateKind};
 use agenc_ircd_e2ee::objects::sequencing::IrcGroupGenesisTbs;
 use agenc_ircd_e2ee::route::{
-    PrincipalRosters, channel_name_hash, channel_route_binding, close_authorization_id,
-    direct_route_binding, verify_binding_package,
+    PrincipalRosters, channel_name_hash, channel_route_binding, direct_route_binding,
+    verify_binding_package,
 };
 use agenc_ircd_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
@@ -201,10 +201,6 @@ pub fn application(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(bytes.to_vec()),
         ));
     }
-    let retained = bytes.to_vec();
-    outcome.effects.push(Box::new(move |state| {
-        let _ = CompanionCoordinator::retain_object(state, retained);
-    }));
     Ok(outcome)
 }
 
@@ -397,7 +393,6 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     )?);
     outcome.effects.push(Box::new(move |state| {
         state.routes = probe;
-        let _ = CompanionCoordinator::retain_object(state, bytes);
     }));
     Ok(outcome)
 }
@@ -450,7 +445,6 @@ fn principals(
 /// route-state cut and a reload carry the coordinator's current head
 /// (companion 12.5) instead of the head at binding time.
 pub(super) struct HeadRefresh {
-    pub(super) route_object: Vec<u8>,
     pub(super) route_object_id: [u8; 32],
     pub(super) writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
 }
@@ -516,7 +510,6 @@ pub(super) fn refresh_head(
         )?,
     ];
     Ok(HeadRefresh {
-        route_object,
         route_object_id,
         writes,
     })
@@ -796,7 +789,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let home = exec.home;
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.routes = routes;
         if let Some(old) = predecessor {
@@ -805,8 +797,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         companion.logs.insert(conversation_id, log);
         companion.lifecycles.insert(conversation_id, lifecycle);
         companion.conversations.insert(conversation_id, state);
-        let _ = CompanionCoordinator::retain_object(companion, retained);
-        let _ = CompanionCoordinator::retain_object(companion, route_object);
         // Every edge hosting the channel holds the route from this copy on
         // (companion 12.5 projection entitlement).
         if direct_accounts.is_none() {
@@ -817,7 +807,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             }
         }
         for lock in locks {
-            let _ = CompanionCoordinator::retain_object(companion, lock.object);
             companion
                 .binding_locks
                 .entry((lock.account_digest, lock.root))
@@ -889,7 +878,7 @@ pub fn query(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the close authorization, tombstones the route, and stages the rows, events, and commit effects as one atomic set
 /// `close_group`.
 pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
-    let (conversation_id, _reason) = exec
+    let (conversation_id, reason) = exec
         .params()
         .read(|reader| Ok((reader.fixed::<32>()?, reader.u16()?)))?;
     exec.attached_device()?;
@@ -898,8 +887,7 @@ pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let mut budget = DecodeBudget::new(MAX_CLOSE_OBJECT, 1 << 16);
     let close = IrcCloseAuthorization::decode_exact(object.body(), &mut budget)
         .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
-    let close_id = close_authorization_id(&close)
-        .map_err(|_| Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id))?;
+    let close_id = super::close_authority::verify(exec, &conversation_id, reason, &close)?;
     let state = conversation_state(exec, &conversation_id)?;
     let log = exec
         .coordinator
@@ -907,17 +895,6 @@ pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .logs
         .get(&conversation_id)
         .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
-    let tbs = &close.tbs;
-    let authorized = tbs.network_id == exec.coordinator.network_id
-        && tbs.conversation_id == conversation_id
-        && tbs.binding_id == state.binding
-        && state.proofs.contains_key(&tbs.authorizing_terminal_id);
-    if !authorized {
-        return Err(Fail::with(
-            E2eeReplyCode::FinalityRequired,
-            &conversation_id,
-        ));
-    }
     let mut log = log.clone();
     let position = log
         .close(close_id)
@@ -1001,13 +978,10 @@ pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             None,
         ));
     }
-    let retained = bytes.to_vec();
+    let route_object_id = *agenc_ircd_e2ee::ObjectId::compute(&route_object).as_bytes();
     outcome.effects.push(Box::new(move |companion| {
         companion.routes = routes;
         companion.logs.insert(conversation_id, log);
-        let _ = CompanionCoordinator::retain_object(companion, retained);
-        let route_object_id = *agenc_ircd_e2ee::ObjectId::compute(&route_object).as_bytes();
-        let _ = CompanionCoordinator::retain_object(companion, route_object);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.route_object_id = route_object_id;
         }

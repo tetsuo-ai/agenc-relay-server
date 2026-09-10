@@ -2,6 +2,13 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "stage_five_completion/recovery_provenance.rs"]
+mod recovery_provenance;
+#[path = "stage_five_completion/source_validation.rs"]
+mod source_validation;
+#[path = "stage_five_completion/witness_evidence.rs"]
+mod witness_evidence;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
@@ -93,7 +100,7 @@ fn domain_body(table: TableId, kind: u16, bytes: Vec<u8>) -> Result<Vec<u8>, Sto
         return Ok(b"nickname".to_vec());
     }
     if table == TableId::ChannelName && kind == 1 {
-        return Ok(b"#channel".to_vec());
+        return crate::domain_records::channel_name_body(8, "#channel");
     }
     let seed = bytes.first().copied().unwrap_or(1);
     if table == TableId::E2eeObject {
@@ -1384,10 +1391,6 @@ fn storage_errors_and_fault_controllers_cover_the_closed_failure_surface()
             "database rejected the operation",
         ),
         (
-            StorageError::UnsupportedMigration,
-            "storage migration profile is unsupported",
-        ),
-        (
             StorageError::ResumeMismatch,
             "storage construction cannot be resumed",
         ),
@@ -1735,41 +1738,6 @@ fn real_startup_and_backup_inject_read_and_publication_boundaries() -> Result<()
             faults.verify_fired()?;
             owner.shutdown()?;
         }
-    }
-    Ok(())
-}
-
-#[test]
-fn absent_migration_profile_still_exercises_both_validation_boundaries()
--> Result<(), Box<dyn Error>> {
-    let identity = StorageOperationIdentity {
-        kind: StorageConstructionKind::Migrate,
-        command_version: 1,
-        source_database_header_hash: digest(211),
-        target_database_header_hash: digest(212),
-        source_rollback_guard_hash: digest(213),
-        source_stream_digest: None,
-        source_schema_generation: 1,
-        target_schema_generation: 2,
-        transform_profile_hash: digest(214),
-        target_database_instance_id: DatabaseId::from_bytes([215; 16]),
-        source_master_key_id: digest(216),
-        source_guard_root_key_id: digest(217),
-        target_master_key_id: digest(218),
-        target_guard_root_key_id: digest(219),
-        planned_entry_count: 1,
-        construction_plan_hash: digest(220),
-    };
-    for boundary in [StorageFaultBoundary::Before, StorageFaultBoundary::After] {
-        let faults = StorageFaultInjector::new(
-            StorageFaultCase {
-                site: StorageFaultSite::MigrationProfile,
-                boundary,
-            },
-            1,
-        )?;
-        assert!(identity.validate_migration_profile(&faults).is_err());
-        faults.verify_fired()?;
     }
     Ok(())
 }
@@ -2358,60 +2326,7 @@ fn restore_transform_preserves_deleted_accounts_and_rejects_creation_reservation
     assert_eq!(transformed_account.revision(), 10);
     assert_eq!(transformed_account.generation(), 5);
 
-    let e2ee_key = StoredKey::new(vec![9, 8, 7])?;
-    let e2ee_body = E2eeRecoveryGate::new(
-        digest(80),
-        E2eeRecoveryKind::Normal,
-        RecoveryEpoch::from_bytes([80; 16]),
-        digest(81),
-        digest(82),
-        digest(83),
-        digest(84),
-    )
-    .encode()?;
-    let e2ee_plaintext =
-        PersistentRecordValue::new(TableId::E2eeState, 1, 3, 4, None, Vec::new(), e2ee_body)?
-            .encode()?;
-    let e2ee_sealed = StorageSealContext::new(&master, binding, 1)?
-        .seal(TableId::E2eeState, 1, [81; 24], &e2ee_key, &e2ee_plaintext)?
-        .encode()?;
-    let e2ee_reference = StorageConstructionSource::new(
-        StorageConstructionSourceKind::BackupRecord,
-        TableId::E2eeState,
-        StoredKey::new(e2ee_key.as_bytes().to_vec())?,
-        1,
-        agenc_ircd_storage::SealedRecord::decode(&e2ee_sealed)?.record_id()?,
-        2,
-    )?;
-    let e2ee_entry = StorageConstructionPlanEntry::new(
-        StorageConstructionKind::Restore,
-        vec![e2ee_reference],
-        TableId::E2eeState,
-        StoredKey::new(e2ee_key.as_bytes().to_vec())?,
-        1,
-        StorageConstructionAction::RestoreE2eeState,
-        0,
-    )?;
-    let e2ee_source = ConstructionSourceRecord::open(
-        e2ee_entry.sources().first().ok_or("missing E2EE source")?,
-        &e2ee_sealed,
-        &master,
-        binding,
-        1,
-    )?;
-    let target_epoch = RecoveryEpoch::from_bytes([82; 16]);
-    let source_guard_hash = digest(85);
-    let transformed_e2ee = RecoveryTransformV1::new(target_epoch, source_guard_hash).transform(
-        StorageConstructionKind::Restore,
-        &e2ee_entry,
-        &[e2ee_source],
-    )?;
-    let transformed_e2ee = PersistentRecordValue::decode(TableId::E2eeState, &transformed_e2ee)?;
-    assert_eq!(transformed_e2ee.record_kind(), 1);
-    let gate = E2eeRecoveryGate::decode(transformed_e2ee.body())?;
-    assert_eq!(gate.state(), E2eeRecoveryKind::Pending);
-    assert_eq!(gate.recovery_epoch(), target_epoch);
-    assert_eq!(gate.source_rollback_guard_hash(), source_guard_hash);
+    recovery_provenance::verify_sealed_gate_pair(&master, binding)?;
     Ok(())
 }
 
@@ -2547,7 +2462,7 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
             TableId::Channel,
             StoredKey::new(vec![4; 16])?,
         )?],
-        b"#fixture".to_vec(),
+        crate::domain_records::channel_name_body(4, "#fixture")?,
     )?
     .encode()?;
     let (name_reference, name_source) = opened_domain_source(
@@ -2614,19 +2529,21 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
             .is_ok()
     );
 
+    let other_e2ee_key = agenc_ircd_storage::e2ee_records::KeySetRow::key()?;
+    let other_e2ee_body = domain_body(TableId::E2eeState, 11, vec![7])?;
     let other_e2ee_plaintext = PersistentRecordValue::new(
         TableId::E2eeState,
-        2,
+        11,
         13,
         0,
         None,
         Vec::new(),
-        domain_body(TableId::E2eeState, 2, vec![7])?,
+        other_e2ee_body.clone(),
     )?
     .encode()?;
     let (other_e2ee_reference, other_e2ee_source) = opened_domain_source(
         TableId::E2eeState,
-        StoredKey::new(vec![7; 3])?,
+        other_e2ee_key.clone(),
         other_e2ee_plaintext,
         238,
     )?;
@@ -2634,19 +2551,19 @@ fn restore_transform_covers_every_closed_action_and_source_mismatch() -> Result<
         StorageConstructionKind::Restore,
         vec![other_e2ee_reference],
         TableId::E2eeState,
-        StoredKey::new(vec![7; 3])?,
+        other_e2ee_key,
         1,
         StorageConstructionAction::RestoreE2eeState,
         0,
     )?;
-    assert!(
-        recovery
-            .transform(
-                StorageConstructionKind::Restore,
-                &other_e2ee_entry,
-                &[other_e2ee_source],
-            )
-            .is_ok()
+    let restored_e2ee = recovery.transform(
+        StorageConstructionKind::Restore,
+        &other_e2ee_entry,
+        &[other_e2ee_source],
+    )?;
+    assert_eq!(
+        PersistentRecordValue::decode(TableId::E2eeState, &restored_e2ee)?.body(),
+        other_e2ee_body.as_slice(),
     );
 
     let maximum_account_revision = PersistentRecordValue::new(

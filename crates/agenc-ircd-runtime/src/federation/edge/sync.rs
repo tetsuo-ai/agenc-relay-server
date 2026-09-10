@@ -23,6 +23,7 @@ const INSTALL_BATCH_ROWS: usize = 256;
 /// A snapshot being received or installed.
 pub(super) struct SnapshotInstall {
     identity: SnapshotIdentity,
+    coordinator_incarnation: agenc_ircd_types::ServerIncarnation,
     expected: u64,
     entries: Vec<ProjectionRecord>,
     ids: Vec<FederationHash32>,
@@ -30,48 +31,96 @@ pub(super) struct SnapshotInstall {
     verified: bool,
     written: usize,
     ready_sent: bool,
+    cursor: Option<(u64, agenc_ircd_types::EventId)>,
+    staged_end: Option<usize>,
+    resync: Vec<crate::connection::ConnectionGeneration>,
 }
 
 /// Starts the origin exchange on a fresh link.
 pub(super) fn begin(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
-    let reset_sent = edge.send_frame(
+    if let Some(snapshot) = edge
+        .snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.ready_sent)
+    {
+        if edge.live.as_ref().is_some_and(|live| {
+            live.coordinator_epoch == snapshot.identity.recovery_epoch
+                && edge.installed_incarnation == Some(live.coordinator_incarnation)
+        }) {
+            edge.phase = Phase::Snapshot;
+            send_ready(edge, context);
+            return;
+        }
+        edge.snapshot = None;
+    }
+    resume(edge, context);
+}
+
+fn begin_origins(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    edge.phase = Phase::Origins;
+    edge.origin_ready = false;
+    edge.note_phase();
+    if !edge.send_frame(
         context,
         &FederationFrame::OriginReset {
             coordinator_server_id: edge.config.coordinator.server_id(),
             server_incarnation: edge.config.incarnation,
         },
-    );
-    if !reset_sent {
+    ) {
         return;
     }
-    // Acknowledgements belong to the link that gave them: the companion
-    // mirror waits for this link's FORIGIN ACK before it declares.
     for origin in edge.origins.values_mut() {
         origin.acked_generation = None;
     }
-    let generations: Vec<_> = edge.origins.keys().copied().collect();
-    for generation in generations {
-        let update = edge
-            .origins
-            .get(&generation)
-            .is_some_and(|origin| origin.generation > 0);
-        request::declare_origin(edge, context, generation, update);
+    let connections: Vec<_> = edge.origins.keys().copied().collect();
+    for connection in connections {
+        request::replay_origin(edge, context, connection);
     }
-    let ready_sent = edge.send_frame(
-        context,
-        &FederationFrame::OriginReady {
-            edge_server_id: edge.config.server_id,
-            server_incarnation: edge.config.incarnation,
-        },
-    );
-    if ready_sent {
-        resume(edge, context);
+}
+
+pub(super) fn origin_ready(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    incarnation: agenc_ircd_types::ServerIncarnation,
+) -> Result<(), Violation> {
+    if incarnation != edge.config.incarnation
+        || !matches!(edge.phase, Phase::Origins | Phase::Active)
+    {
+        return Err(Violation::Consistency);
+    }
+    edge.origin_ready = true;
+    activate_origins(edge, context);
+    Ok(())
+}
+
+pub(super) fn activate_origins(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    if edge.phase == Phase::Origins
+        && edge.origin_ready
+        && edge.origins.iter().all(|(connection, origin)| {
+            if origin.deleted {
+                origin.del_acked
+                    && super::journal::is_durable(
+                        edge,
+                        super::journal::Identity::Origin(*connection),
+                    )
+            } else {
+                origin.pending_updates.is_empty()
+                    && origin.acked_generation == Some(origin.generation)
+            }
+        })
+    {
+        edge.phase = Phase::Active;
+        edge.note_phase();
+        request::resend_pending(edge, context);
     }
 }
 
 /// Sends FRESUME from the durable cursor, or asks for a snapshot outright
 /// when the installed epoch is not the coordinator's.
 fn resume(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    if matches!(edge.commit, Some(PendingCommit::OrdinaryBatch(_))) {
+        return;
+    }
     let epoch_matches = edge
         .live
         .as_ref()
@@ -122,9 +171,7 @@ pub(super) fn resume_ok(
         edge.accepted_epoch = Some(live.coordinator_epoch);
         edge.installed_incarnation = Some(live.coordinator_incarnation);
     }
-    edge.phase = Phase::Active;
-    edge.note_phase();
-    request::resend_pending(edge, context);
+    begin_origins(edge, context);
     Ok(())
 }
 
@@ -164,6 +211,11 @@ pub(super) fn snapshot_begin(
     }
     edge.snapshot = Some(SnapshotInstall {
         identity,
+        coordinator_incarnation: edge
+            .live
+            .as_ref()
+            .ok_or(Violation::Phase)?
+            .coordinator_incarnation,
         expected: entry_count,
         entries: Vec::new(),
         ids: Vec::new(),
@@ -171,6 +223,9 @@ pub(super) fn snapshot_begin(
         verified: false,
         written: 0,
         ready_sent: false,
+        cursor: None,
+        staged_end: None,
+        resync: Vec::new(),
     });
     Ok(())
 }
@@ -249,33 +304,28 @@ pub(super) fn snapshot_end(
     if digest != snapshot.identity.snapshot_digest {
         return Err(Violation::Consistency);
     }
-    let entries = snapshot.entries.clone();
-    let generation = snapshot.identity.projection_generation;
-    snapshot.verified = true;
-    edge.replica
-        .install(generation, entries)
+    let mut verified = agenc_ircd_domain::federation::EdgeReplica::new(edge.config.server_id);
+    verified
+        .install(
+            snapshot.identity.projection_generation,
+            snapshot.entries.clone(),
+        )
         .map_err(|_| Violation::Consistency)?;
-    edge.cursor = match cursor {
+    snapshot.verified = true;
+    snapshot.cursor = match cursor {
         DeliveryCursor::Empty => None,
         DeliveryCursor::At {
             delivery_sequence,
             event_id,
         } => Some((delivery_sequence, event_id)),
     };
-    edge.applied_completions.clear();
-    // Every registered global client reconnects: the state image replaces
-    // events they never saw (spec 20.9).
-    edge.client_resync_epoch = edge.client_resync_epoch.saturating_add(1);
-    let resync: Vec<EdgeCompletion> = edge
-        .origins
-        .iter()
-        .filter(|(_, origin)| origin.session.is_some())
-        .map(|(generation, _)| EdgeCompletion::Resync {
-            generation: *generation,
-        })
-        .collect();
+    edge.client_resync_epoch = edge
+        .client_resync_epoch
+        .checked_add(1)
+        .ok_or(Violation::Ceiling)?;
+    mark_resync(edge);
     write_install_rows(edge, context)?;
-    Ok(resync)
+    Ok(Vec::new())
 }
 
 /// Writes the next batch of installed rows; READY follows the last one.
@@ -283,6 +333,10 @@ fn write_install_rows(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
 ) -> Result<(), Violation> {
+    if super::journal::has_dirty(edge) {
+        super::journal::continue_write(edge, context);
+        return Ok(());
+    }
     let (start, end) = match edge.snapshot.as_ref() {
         Some(snapshot) => (
             snapshot.written,
@@ -294,17 +348,23 @@ fn write_install_rows(
         None => return Ok(()),
     };
     if let Some(snapshot) = edge.snapshot.as_mut() {
-        snapshot.written = end;
+        snapshot.staged_end = Some(end);
     }
     let cursor = edge.cursor;
-    super::events::stage_rows(
+    let result = super::events::stage_rows(
         edge,
         context,
         cursor,
         PendingCommit::SnapshotInstalled,
         super::render::EventFanout::default().finish()?,
         |edge, _, revision| install_rows(edge, start, end, revision),
-    )
+    );
+    if result.is_err()
+        && let Some(snapshot) = edge.snapshot.as_mut()
+    {
+        snapshot.staged_end = None;
+    }
+    result
 }
 
 /// The rows of one install batch under the installed generation.
@@ -313,18 +373,21 @@ fn install_rows(
     start: usize,
     end: usize,
     revision: u64,
-) -> Vec<AccountServiceDurableWrite> {
-    let generation = edge.replica.projection_generation();
-    let Some(snapshot) = edge.snapshot.as_ref() else {
-        return Vec::new();
-    };
+) -> Result<Vec<AccountServiceDurableWrite>, Violation> {
+    let snapshot = edge.snapshot.as_ref().ok_or(Violation::Phase)?;
+    let generation = snapshot.identity.projection_generation;
     let mut writes = Vec::new();
-    for record in snapshot.entries.get(start..end).unwrap_or(&[]) {
-        if let Some(write) = install_row(edge, record, generation, revision) {
-            writes.push(write);
-        }
+    for record in snapshot
+        .entries
+        .get(start..end)
+        .ok_or(Violation::Consistency)?
+    {
+        writes.push(install_row(edge, record, generation, revision)?);
     }
-    writes
+    if end == snapshot.entries.len() {
+        writes.push(marker_row(edge, revision, false)?);
+    }
+    Ok(writes)
 }
 
 fn install_row(
@@ -332,9 +395,10 @@ fn install_row(
     record: &ProjectionRecord,
     generation: u64,
     revision: u64,
-) -> Option<AccountServiceDurableWrite> {
+) -> Result<AccountServiceDurableWrite, Violation> {
     let key = record.key();
-    let arm = crate::federation::codec::projection::projection_arm_object(record).ok()?;
+    let arm = crate::federation::codec::projection::projection_arm_object(record)
+        .map_err(|_| Violation::Codec)?;
     let entry = ProjectionEntryHeader {
         network_id: edge.config.network_id,
         target_server_id: edge.config.server_id,
@@ -342,17 +406,18 @@ fn install_row(
         projection_kind: crate::federation::codec::projection::projection_kind(record),
     }
     .build(&arm)
-    .ok()?;
-    let encoded = agenc_ircd_federation_wire::CanonicalEncode::encode_canonical(&entry).ok()?;
+    .map_err(|_| Violation::Codec)?;
+    let encoded = agenc_ircd_federation_wire::CanonicalEncode::encode_canonical(&entry)
+        .map_err(|_| Violation::Codec)?;
     let body = agenc_ircd_storage::federation_records::ProjectionEntryRecord {
         entry_object_id: *agenc_ircd_federation_wire::federation_object_id(encoded.as_slice())
             .as_bytes(),
         entry_object: encoded.as_slice().to_vec(),
     }
     .encode()
-    .ok()?;
-    let stored =
-        projection_entry_key(edge.config.server_id, generation, key.kind(), key.primary()).ok()?;
+    .map_err(|_| Violation::Codec)?;
+    let stored = projection_entry_key(edge.config.server_id, generation, key.kind(), key.primary())
+        .map_err(|_| Violation::Codec)?;
     edge.row_write(
         TableId::EdgeProjection,
         PROJECTION_ENTRY_KIND,
@@ -361,31 +426,41 @@ fn install_row(
         generation,
         body,
     )
-    .ok()
+    .map_err(|_| Violation::Codec)
 }
 
 /// One install batch is durable: continue, or send READY after the last.
-pub(super) fn installed(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
-    let (done, identity) = match edge.snapshot.as_ref() {
-        Some(snapshot) => (
-            snapshot.written >= snapshot.entries.len(),
-            snapshot.identity,
-        ),
-        None => return,
+pub(super) fn installed(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+) -> Vec<EdgeCompletion> {
+    let Some(snapshot) = edge.snapshot.as_mut() else {
+        return Vec::new();
     };
-    if !done {
+    if let Some(end) = snapshot.staged_end.take() {
+        snapshot.written = end;
+    }
+    if snapshot.written < snapshot.entries.len() {
         if let Err(violation) = write_install_rows(edge, context) {
             edge.fail_link(context, violation);
         }
-        return;
+        return Vec::new();
     }
-    if let Some(snapshot) = edge.snapshot.as_mut() {
-        if snapshot.ready_sent {
-            return;
-        }
-        snapshot.ready_sent = true;
-    }
+    snapshot.ready_sent = true;
+    edge.installed_incarnation = Some(snapshot.coordinator_incarnation);
+    let resync = std::mem::take(&mut snapshot.resync)
+        .into_iter()
+        .map(|generation| EdgeCompletion::Resync { generation })
+        .collect();
     edge.counters.snapshots_installed = edge.counters.snapshots_installed.saturating_add(1);
+    send_ready(edge, context);
+    resync
+}
+
+fn send_ready(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    let Some(identity) = edge.snapshot.as_ref().map(|snapshot| snapshot.identity) else {
+        return;
+    };
     edge.send_frame(
         context,
         &FederationFrame::SnapshotReady {
@@ -395,7 +470,66 @@ pub(super) fn installed(edge: &mut EdgeFederation, context: &mut StateCoreContex
     );
 }
 
-/// FSNAPSHOT ACTIVE: the installed generation becomes the live one.
+pub(super) fn has_durable_ready(edge: &EdgeFederation) -> bool {
+    edge.snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.ready_sent)
+}
+
+pub(super) fn pending_generation(edge: &EdgeFederation) -> Option<u64> {
+    edge.snapshot
+        .as_ref()
+        .filter(|snapshot| {
+            snapshot.ready_sent || snapshot.staged_end == Some(snapshot.entries.len())
+        })
+        .map(|snapshot| snapshot.identity.projection_generation)
+}
+
+fn marker_row(
+    edge: &EdgeFederation,
+    revision: u64,
+    active: bool,
+) -> Result<AccountServiceDurableWrite, Violation> {
+    use agenc_ircd_storage::federation_records::{
+        DeliveryCursorRecord, PROJECTION_MARKER_KIND, ProjectionGenerationState,
+        ProjectionMarkerRecord, projection_marker_key,
+    };
+    let snapshot = edge.snapshot.as_ref().ok_or(Violation::Phase)?;
+    let identity = snapshot.identity;
+    let body = ProjectionMarkerRecord {
+        state: if active {
+            ProjectionGenerationState::Active
+        } else {
+            ProjectionGenerationState::Pending
+        },
+        state_generation: identity.state_generation,
+        entry_count: snapshot.expected,
+        entry_bytes: snapshot.bytes,
+        digest: *identity.snapshot_digest.as_bytes(),
+        snapshot_token: Some(*identity.snapshot_token.as_bytes()),
+        cut_cursor: snapshot
+            .cursor
+            .map(|(delivery_sequence, event_id)| DeliveryCursorRecord {
+                delivery_sequence,
+                event_id: *event_id.as_bytes(),
+            }),
+        recovery_epoch: *identity.recovery_epoch.as_bytes(),
+    }
+    .encode()
+    .map_err(|_| Violation::Codec)?;
+    edge.row_write(
+        TableId::EdgeProjection,
+        PROJECTION_MARKER_KIND,
+        projection_marker_key(edge.config.server_id, identity.projection_generation)
+            .map_err(|_| Violation::Codec)?,
+        revision,
+        identity.projection_generation,
+        body,
+    )
+    .map_err(|_| Violation::Codec)
+}
+
+/// ACTIVE authorizes a durable swap before any new-generation traffic.
 pub(super) fn snapshot_active(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -405,12 +539,236 @@ pub(super) fn snapshot_active(
     if !snapshot.ready_sent || snapshot.identity != identity {
         return Err(Violation::Consistency);
     }
-    edge.snapshot = None;
+    if edge.commit.is_some() || context.in_flight() {
+        return Err(Violation::Ceiling);
+    }
+    let plan = context
+        .domain()
+        .plan_account_service_checkpoint()
+        .map_err(|_| Violation::Ceiling)?;
+    let revision = plan.resulting_revision().get();
+    let mut peer = edge.peer_record(snapshot.cursor);
+    peer.projection_generation = identity.projection_generation;
+    peer.active_entry_count = snapshot.expected;
+    peer.active_entry_bytes = snapshot.bytes;
+    peer.pending_generation = None;
+    peer.snapshot_required = false;
+    let peer_write = edge
+        .row_write(
+            TableId::FederationPeer,
+            agenc_ircd_storage::federation_records::PEER_RECORD_KIND,
+            agenc_ircd_storage::federation_records::peer_key(edge.config.coordinator.server_id())
+                .map_err(|_| Violation::Codec)?,
+            revision,
+            0,
+            peer.encode().map_err(|_| Violation::Codec)?,
+        )
+        .map_err(|_| Violation::Codec)?;
+    let (coverage, mut writes) =
+        super::journal::snapshot_writes(edge, identity.state_generation, revision)?;
+    writes.extend([marker_row(edge, revision, true)?, peer_write]);
+    context
+        .stage_durable_with_account_service(
+            plan,
+            super::render::EventFanout::default().finish()?,
+            None,
+            0,
+            writes,
+        )
+        .map_err(|_| Violation::Ceiling)?;
+    edge.commit = Some(PendingCommit::SnapshotActivated { coverage });
+    Ok(())
+}
+
+pub(super) fn activated(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    coverage: Vec<super::journal::Version>,
+) -> Vec<EdgeCompletion> {
+    let Some(snapshot) = edge.snapshot.take() else {
+        return Vec::new();
+    };
+    let identity = snapshot.identity;
+    if edge
+        .replica
+        .install(identity.projection_generation, snapshot.entries)
+        .is_err()
+    {
+        edge.fail_link(context, Violation::Consistency);
+        return Vec::new();
+    }
+    edge.cursor = snapshot.cursor;
+    edge.snapshot_cut = Some((identity.projection_generation, identity.state_generation));
+    let outputs = super::journal::snapshot_committed(edge, context, coverage);
     edge.installed_epoch = Some(identity.recovery_epoch);
     edge.accepted_epoch = Some(identity.recovery_epoch);
-    edge.installed_incarnation = edge.live.as_ref().map(|live| live.coordinator_incarnation);
-    edge.phase = Phase::Active;
+    edge.phase = Phase::Origins;
     edge.note_phase();
-    request::resend_pending(edge, context);
+    if edge.live.is_some() {
+        begin_origins(edge, context);
+    }
+    outputs
+}
+
+pub(super) fn restore_pending(
+    edge: &mut EdgeFederation,
+    generation: u64,
+    marker: agenc_ircd_storage::federation_records::ProjectionMarkerRecord,
+    entries: Vec<ProjectionRecord>,
+) -> Result<(), crate::RuntimeError> {
+    let invalid = super::startup::invalid;
+    let token = marker.snapshot_token.ok_or_else(invalid)?;
+    if marker.state != agenc_ircd_storage::federation_records::ProjectionGenerationState::Pending
+        || usize::try_from(marker.entry_count).ok() != Some(entries.len())
+    {
+        return Err(invalid());
+    }
+    verify_restored_cut(edge, generation, &marker, &entries)?;
+    let mut verified = agenc_ircd_domain::federation::EdgeReplica::new(edge.config.server_id);
+    verified
+        .install(generation, entries.clone())
+        .map_err(|_| invalid())?;
+    edge.snapshot = Some(SnapshotInstall {
+        identity: SnapshotIdentity {
+            snapshot_token: FederationHash32::from_bytes(token),
+            recovery_epoch: agenc_ircd_types::RecoveryEpoch::from_bytes(marker.recovery_epoch),
+            projection_generation: generation,
+            state_generation: marker.state_generation,
+            snapshot_digest: FederationHash32::from_bytes(marker.digest),
+        },
+        coordinator_incarnation: edge.installed_incarnation.ok_or_else(invalid)?,
+        expected: marker.entry_count,
+        written: entries.len(),
+        entries,
+        ids: Vec::new(),
+        bytes: marker.entry_bytes,
+        verified: true,
+        ready_sent: true,
+        cursor: marker.cut_cursor.map(|cursor| {
+            (
+                cursor.delivery_sequence,
+                agenc_ircd_types::EventId::from_bytes(cursor.event_id),
+            )
+        }),
+        staged_end: None,
+        resync: Vec::new(),
+    });
     Ok(())
+}
+
+fn mark_resync(edge: &mut EdgeFederation) {
+    let mut connections: std::collections::BTreeSet<_> = edge
+        .origins
+        .iter()
+        .filter(|(_, origin)| origin.session.is_some() && !origin.deleted)
+        .map(|(connection, _)| *connection)
+        .collect();
+    connections.extend(
+        edge.pending
+            .values()
+            .filter(|pending| {
+                !pending.sink_gone
+                    && matches!(
+                        pending.result,
+                        Some(crate::federation::codec::results::ResultArm::SessionRegistered(_))
+                    )
+            })
+            .map(|pending| pending.generation),
+    );
+    for connection in &connections {
+        if let Some(origin) = edge.origins.get_mut(connection) {
+            origin.deleted = true;
+        }
+        super::journal::mark_dirty(edge, super::journal::Identity::Origin(*connection));
+    }
+    let mut dirty = Vec::new();
+    for (id, pending) in &mut edge.pending {
+        if connections.contains(&pending.generation) {
+            pending.sink_gone = true;
+            dirty.push(*id);
+        }
+    }
+    for id in dirty {
+        super::journal::mark_dirty(edge, super::journal::Identity::Request(id));
+    }
+    if let Some(snapshot) = edge.snapshot.as_mut() {
+        snapshot.resync.extend(connections);
+    }
+}
+
+pub(super) fn continue_install(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
+    if edge.phase == Phase::Snapshot
+        && edge.commit.is_none()
+        && !context.in_flight()
+        && !super::journal::has_dirty(edge)
+        && edge
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.verified && !snapshot.ready_sent)
+        && let Err(violation) = write_install_rows(edge, context)
+    {
+        edge.fail_link(context, violation);
+    }
+}
+
+fn verify_restored_cut(
+    edge: &EdgeFederation,
+    generation: u64,
+    marker: &agenc_ircd_storage::federation_records::ProjectionMarkerRecord,
+    entries: &[ProjectionRecord],
+) -> Result<(), crate::RuntimeError> {
+    use agenc_ircd_federation_wire::CanonicalEncode;
+    let invalid = super::startup::invalid;
+    if generation <= edge.replica.projection_generation()
+        || marker.entry_count > MAX_SNAPSHOT_ENTRIES
+        || entries
+            .windows(2)
+            .any(|pair| matches!(pair, [first, second] if first.key() >= second.key()))
+    {
+        return Err(invalid());
+    }
+    let mut ids = Vec::new();
+    let mut bytes = 0_u64;
+    for record in entries {
+        let arm = crate::federation::codec::projection::projection_arm_object(record)
+            .map_err(|_| invalid())?;
+        let encoded = ProjectionEntryHeader {
+            network_id: edge.config.network_id,
+            target_server_id: edge.config.server_id,
+            projection_generation: generation,
+            projection_kind: crate::federation::codec::projection::projection_kind(record),
+        }
+        .build(&arm)
+        .and_then(|entry| entry.encode_canonical())
+        .map_err(|_| invalid())?;
+        bytes = bytes
+            .checked_add(u64::try_from(encoded.as_slice().len()).map_err(|_| invalid())?)
+            .ok_or_else(invalid)?;
+        if bytes > MAX_SNAPSHOT_BYTES {
+            return Err(invalid());
+        }
+        ids.push(agenc_ircd_federation_wire::federation_object_id(
+            encoded.as_slice(),
+        ));
+    }
+    let digest = snapshot_digest(
+        &agenc_ircd_types::RecoveryEpoch::from_bytes(marker.recovery_epoch),
+        generation,
+        marker.state_generation,
+        &ids,
+    )
+    .map_err(|_| invalid())?;
+    if digest.as_bytes() != &marker.digest || bytes != marker.entry_bytes {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(super) fn rejected_install(edge: &mut EdgeFederation) {
+    if let Some(snapshot) = edge.snapshot.as_mut() {
+        snapshot.staged_end = None;
+    }
+    if !has_durable_ready(edge) {
+        edge.snapshot = None;
+    }
 }

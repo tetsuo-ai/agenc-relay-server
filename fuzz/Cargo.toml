@@ -166,5 +166,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "release_decision"
+path = "fuzz_targets/release_decision.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -59,7 +59,7 @@ fn scenario(transport: ClientTransport) -> TestResult<Outcome> {
             vec!["committed account".into()],
         );
         creator.send("QUIT :creation complete")?;
-        creator.expect_closed_without_output()?;
+        trace.record("creator QUIT and EOF", creator_quit_reply(&mut creator)?);
         account
     };
     let mut member = IrcClient::connect_transport(&fixture, transport)?;
@@ -89,6 +89,19 @@ fn scenario(transport: ClientTransport) -> TestResult<Outcome> {
         transcript: trace.normalized(account)?,
         state: state::snapshot(&fixture, account)?,
     })
+}
+
+fn creator_quit_reply(client: &mut IrcClient) -> TestResult<Vec<String>> {
+    let mut line = String::new();
+    client.reader.read_line(&mut line)?;
+    if line != ":node.test ERROR :creation complete\r\n" {
+        return Err(failure(format!("unexpected creator QUIT reply: {line:?}")));
+    }
+    let mut extra = [0_u8; 1];
+    if client.reader.read(&mut extra)? != 0 {
+        return Err(failure("creator QUIT returned output after its ERROR"));
+    }
+    Ok(vec![line.trim_end_matches(['\r', '\n']).to_owned()])
 }
 
 #[test]

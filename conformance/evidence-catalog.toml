@@ -1,6 +1,21 @@
 schema_version = 1
 
 [[evidence]]
+id = "EVID-ARCH-REQ-DCCD630ED3C2D1099D57"
+claim_ids = ["ARCH-REQ-DCCD630ED3C2D1099D57"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-A9435E6B2C79E8FC941E"
+claim_ids = ["ARCH-REQ-A9435E6B2C79E8FC941E"]
+kind = "normative-requirement"
+
+[[evidence]]
+id = "EVID-ARCH-REQ-36D7DB187D93A1E082E3"
+claim_ids = ["ARCH-REQ-36D7DB187D93A1E082E3"]
+kind = "normative-requirement"
+
+[[evidence]]
 id = "EVID-S00-001-BASELINE"
 claim_ids = ["S00-001"]
 kind = "specification-baseline"

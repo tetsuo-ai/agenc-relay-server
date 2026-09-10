@@ -38,6 +38,14 @@ const COMMIT_CONTENT_TYPE: u8 = 3;
 #[path = "restart.rs"]
 mod restart;
 
+#[path = "recovery_pending.rs"]
+mod recovery_pending;
+
+#[path = "ack_context.rs"]
+mod ack_context;
+
+mod sequencer_eligibility;
+
 #[test]
 fn finalization_rejects_substituted_receipts_and_acknowledgements() -> TestResult {
     let mut harness = Harness::new()?;
@@ -712,6 +720,9 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
 }
 
 mod reinit {
+    mod ack_context;
+    mod admission;
+    mod attempt_authority;
     mod successor;
 
     use agenc_ircd_crypto::SignatureDomain;
@@ -790,7 +801,7 @@ mod reinit {
         Ok(())
     }
 
-    fn attempt(
+    pub(super) fn attempt(
         harness: &Harness,
         conversation: [u8; 32],
         old_state: [u8; 32],
@@ -820,9 +831,9 @@ mod reinit {
             &harness.principal,
             DEVICE,
             &authorization_tbs,
-            SignatureDomain::CommitAuthorization,
+            SignatureDomain::ReinitAttemptAuthorization,
         )?;
-        let attempt = IrcReInitAttempt {
+        let mut attempt = IrcReInitAttempt {
             tbs: IrcReInitAttemptTbs {
                 profile_version: 1,
                 network_id: NETWORK,
@@ -865,11 +876,12 @@ mod reinit {
             },
             creator_old_leaf_signature: Opaque::new(vec![16; 64])?,
         };
+        attempt_authority::authorize_attempt(harness, &mut attempt)?;
         let bytes = wire(IrcWireObjectKind::ReinitAttempt, &attempt)?;
         Ok((attempt, bytes))
     }
 
-    fn staged_receipt(
+    pub(super) fn staged_receipt(
         harness: &Harness,
         conversation: [u8; 32],
     ) -> TestResult<IrcReInitAttemptReceipt> {
@@ -898,7 +910,7 @@ mod reinit {
         }
     }
 
-    fn ack(
+    pub(super) fn ack(
         conversation: [u8; 32],
         old_state: [u8; 32],
         attempt_id: [u8; 32],
@@ -1228,7 +1240,7 @@ fn reinit_vote(
         signer_root_fingerprint: root_fingerprint(&harness.principal.root)?,
         signer_device_id: [device; 16],
         signer_device_certificate_id: certificate_id_of(&harness.principal, device)?,
-        device_signature: sign(&key(device), SignatureDomain::DispositionVote, &tbs)?,
+        device_signature: sign(&key(device), SignatureDomain::ReinitDisposition, &tbs)?,
     })
 }
 
@@ -1796,4 +1808,8 @@ fn a_reloaded_coordinator_completes_a_quorum_it_had_begun() -> TestResult {
         .collect::<TestResult<Vec<_>>>()?;
     assert_certificate_votes(&reloaded, &outcome.result, expected)?;
     Ok(())
+}
+
+pub(super) fn fresh_fetch_fixture() -> TestResult<super::FreshFetchFixture> {
+    recovery_pending::fresh_fetch_fixture()
 }

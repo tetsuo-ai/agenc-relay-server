@@ -14,15 +14,8 @@ fn reload_refuses_a_route_whose_candidate_commit_is_missing() -> TestResult {
     harness.writes.retain(|write| {
         !matches!(write, Write::Put { table: agenc_ircd_storage::TableId::E2eeObject, key, .. } if *key == missing_key)
     });
-    let reloaded = harness.reloaded()?;
-    assert!(
-        !reloaded
-            .coordinator
-            .state
-            .conversations
-            .contains_key(&conversation)
-    );
-    assert!(!reloaded.coordinator.state.logs.contains_key(&conversation));
+    // A declared live gate cannot outlive a route that failed reconstruction.
+    assert!(harness.reloaded().is_err());
     Ok(())
 }
 

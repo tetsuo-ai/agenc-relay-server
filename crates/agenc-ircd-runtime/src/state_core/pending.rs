@@ -187,6 +187,7 @@ pub(super) struct PendingMutationBatch {
     plans: Vec<StagedPlan>,
     reserved: BTreeSet<EntityId>,
     phase: BatchPhase,
+    exclusive: bool,
 }
 
 /// Why a plan could not join the batch; the plan is handed back untouched.
@@ -215,7 +216,19 @@ impl PendingMutationBatch {
             plans: vec![plan],
             reserved,
             phase: BatchPhase::Gathering { deadline },
+            exclusive: false,
         })
+    }
+
+    /// Seals a preflighted single checkpoint against every later batch join.
+    pub(super) fn start_exclusive(
+        plan: StagedPlan,
+        now: MonotonicTick,
+    ) -> Result<Self, (RuntimeError, Box<StagedPlan>)> {
+        let mut batch = Self::start(plan, now)?;
+        batch.exclusive = true;
+        batch.phase = BatchPhase::Gathering { deadline: now };
+        Ok(batch)
     }
 
     /// Adds a plan to a gathering batch when it chains on the previous plan's
@@ -224,7 +237,7 @@ impl PendingMutationBatch {
         &mut self,
         plan: StagedPlan,
     ) -> Result<(), (StageRefusal, Box<StagedPlan>)> {
-        if matches!(self.phase, BatchPhase::InFlight { .. }) {
+        if self.exclusive || matches!(self.phase, BatchPhase::InFlight { .. }) {
             return Err((StageRefusal::InFlight, Box::new(plan)));
         }
         if self.plans.len() >= MAX_BATCH_PLANS {
@@ -426,6 +439,26 @@ mod tests {
             .err()
             .map(|(error, _plan)| error);
         assert_eq!(error, Some(RuntimeError::Overflow));
+        Ok(())
+    }
+    #[test]
+    fn an_exclusive_checkpoint_refuses_a_compatible_later_plan_before_submission()
+    -> Result<(), RuntimeError> {
+        let now = MonotonicTick::from_ticks(10);
+        let mut ordinary =
+            PendingMutationBatch::start(staged(0, 1)?, now).map_err(|(error, _)| error)?;
+        ordinary
+            .try_stage(staged(1, 2)?)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let mut exclusive = PendingMutationBatch::start_exclusive(staged(0, 1)?, now)
+            .map_err(|(error, _)| error)?;
+        assert!(exclusive.gather_due(now));
+        assert!(!exclusive.in_flight());
+        assert!(matches!(
+            exclusive.try_stage(staged(1, 2)?),
+            Err((StageRefusal::InFlight, _))
+        ));
+        assert_eq!(exclusive.len(), 1);
         Ok(())
     }
 }

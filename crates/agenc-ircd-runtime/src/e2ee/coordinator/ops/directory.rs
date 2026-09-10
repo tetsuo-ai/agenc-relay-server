@@ -192,10 +192,8 @@ pub fn publish_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             chain_object_ids: chain,
         },
     )?);
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
-        CompanionCoordinator::retain_object(companion, retained).ok();
         let roster = companion
             .principals
             .remove(&account_digest)
@@ -291,10 +289,8 @@ pub fn publish_roster(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         );
     }
     let root = *root;
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
-        CompanionCoordinator::retain_object(companion, retained).ok();
         companion.pending_roots.remove(&account_digest);
         companion
             .principals
@@ -402,10 +398,8 @@ pub fn publish_capabilities(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             object_id,
         },
     )?);
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
-        CompanionCoordinator::retain_object(companion, retained).ok();
         companion
             .capabilities
             .insert((account_digest, device_id), verified);
@@ -546,7 +540,6 @@ pub fn attach_begin(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     )?);
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
-        CompanionCoordinator::retain_object(companion, bytes).ok();
         companion
             .challenges
             .insert((account_digest, device_id), server_challenge);
@@ -638,11 +631,9 @@ pub fn attach_finish(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     )?);
     // The attachment reaches the origin only through the EORIGIN UPDATE
     // that follows the base generation transition (companion 12.5).
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
         companion.challenges.remove(&(account_digest, device_id));
-        CompanionCoordinator::retain_object(companion, retained).ok();
     }));
     Ok(outcome)
 }
@@ -855,10 +846,8 @@ pub fn publish_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )?);
-    let retained = bytes.to_vec();
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
-        CompanionCoordinator::retain_object(companion, retained).ok();
     }));
     Ok(outcome)
 }

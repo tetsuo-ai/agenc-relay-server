@@ -5,6 +5,13 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+#[cfg(test)]
+#[path = "events/cache/tests/mod.rs"]
+mod cache_tests;
+mod row_storage;
+mod shared_bytes;
+pub use shared_bytes::SharedBytes;
+
 use agenc_ircd_domain::e2ee::limits::{
     MAX_UNACKED_E2EE_EVENT_BYTES_PER_EDGE, MAX_UNACKED_E2EE_EVENTS_PER_EDGE,
 };
@@ -16,14 +23,18 @@ use agenc_ircd_e2ee::tls::{Opaque, TlsEncode};
 use agenc_ircd_e2ee::wire::fragment::fragment_object;
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_federation_wire::FederationLineText;
-use agenc_ircd_storage::e2ee_records::DeliveryRow;
+use agenc_ircd_storage::e2ee_records::delivery_recovery::{
+    Acknowledgement, DeliveryOwner, DeliveryRecoveryRow, DeliveryScope, ScopedOutbox,
+    ScopedOutboxFields,
+};
 use agenc_ircd_types::ServerId;
 
 use super::{CompanionCoordinator, CompanionFault};
 use crate::state_core::durable::AccountServiceDurableWrite;
 
-/// ACKed rows retained for replay per edge.
+/// Acknowledged bodies retained in each edge's hot cache; durable history has separate limits.
 pub const MAX_ACKED_REPLAY_ROWS: usize = 4_096;
+pub(super) const MAX_ACKED_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// One queued event row of a delivery stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,16 +44,26 @@ pub struct StreamRow {
     /// Event identity.
     pub event_id: [u8; 16],
     /// The encoded `federation_event` wire object.
-    pub event: Vec<u8>,
+    pub event: SharedBytes,
     /// The referenced payload object identifier and bytes, if any.
-    pub payload: Option<([u8; 32], Vec<u8>)>,
-    /// Whether the edge acknowledged this row.
-    pub acked: bool,
+    pub payload: Option<([u8; 32], SharedBytes)>,
+    /// Durable ACK state and original accepted retention-time metadata.
+    pub acknowledgement: Acknowledgement,
+}
+
+impl StreamRow {
+    /// Whether the exact row is covered by a committed acknowledgement.
+    #[must_use]
+    pub const fn acked(&self) -> bool {
+        self.acknowledgement.is_acknowledged()
+    }
 }
 
 /// The delivery stream of one target edge.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct DeliveryStream {
+    /// Exact durable scope and cursor; absent only before READY is committed.
+    pub owner: Option<DeliveryOwner>,
     /// Delivery generation.
     pub generation: u64,
     /// The next sequence to assign.
@@ -56,13 +77,19 @@ pub struct DeliveryStream {
     /// The first and last sequence of an open cross-profile barrier; the
     /// edge acknowledges the last one cumulatively.
     pub barrier: Option<(u64, u64)>,
+    /// Later copies remain held until both profiles acknowledge their endpoints.
+    pub(crate) hold_after: Option<u64>,
+    /// Complete durable replay inventory; cached bodies may cover only its tail.
+    pub(crate) replay: Option<super::delivery_owner::restore::replay::State>,
+    // Rows and their body handles must drop before their container reservation.
+    pub(crate) row_backing: Option<row_storage::Backing>,
 }
 
 impl DeliveryStream {
     fn unacked(&self) -> (u64, u64) {
         self.rows
             .iter()
-            .filter(|row| !row.acked)
+            .filter(|row| !row.acked())
             .fold((0, 0), |(count, bytes), row| {
                 let row_bytes =
                     row.event.len() + row.payload.as_ref().map_or(0, |(_, bytes)| bytes.len());
@@ -82,14 +109,25 @@ impl DeliveryStream {
     }
 
     /// Acknowledges cumulatively through `sequence` with `event_id`.
-    pub fn acknowledge(&mut self, sequence: u64, event_id: [u8; 16]) -> Result<(), CompanionFault> {
+    pub fn acknowledge(
+        &mut self,
+        sequence: u64,
+        event_id: [u8; 16],
+        acknowledgement: Acknowledgement,
+    ) -> Result<(), CompanionFault> {
+        if !acknowledgement.is_acknowledged() {
+            return Err(CompanionFault::Protocol);
+        }
+        if self.acked == Some((sequence, event_id)) {
+            return Ok(());
+        }
         let Some(row) = self.rows.iter_mut().find(|row| row.sequence == sequence) else {
             return Err(CompanionFault::Protocol);
         };
         if row.event_id != event_id {
             return Err(CompanionFault::Protocol);
         }
-        if row.acked {
+        if row.acked() {
             return Ok(());
         }
         let expected = self.acked.map_or(0, |(acked, _)| acked.saturating_add(1));
@@ -99,39 +137,104 @@ impl DeliveryStream {
         if sequence != expected && !within_barrier {
             return Err(CompanionFault::Protocol);
         }
-        for row in self.rows.iter_mut().filter(|row| row.sequence <= sequence) {
-            row.acked = true;
+        self.record_acknowledgement(sequence, event_id, acknowledgement);
+        Ok(())
+    }
+
+    /// A resume may recover a lost ordinary prefix only through the exact gate end.
+    pub(super) fn validate_barrier_resume(
+        &self,
+        sequence: u64,
+        event_id: [u8; 16],
+    ) -> Result<(), CompanionFault> {
+        if self.barrier.is_none_or(|(_, last)| sequence != last) {
+            return Err(CompanionFault::Protocol);
+        }
+        let mut expected = self
+            .acked
+            .map_or(Some(0), |(acked, _)| acked.checked_add(1))
+            .ok_or(CompanionFault::Protocol)?;
+        for row in self
+            .rows
+            .iter()
+            .filter(|row| !row.acked() && row.sequence <= sequence)
+        {
+            if row.sequence != expected {
+                return Err(CompanionFault::Protocol);
+            }
+            if row.sequence == sequence {
+                return if row.event_id == event_id {
+                    Ok(())
+                } else {
+                    Err(CompanionFault::Protocol)
+                };
+            }
+            expected = expected.checked_add(1).ok_or(CompanionFault::Protocol)?;
+        }
+        Err(CompanionFault::Protocol)
+    }
+
+    pub(super) fn acknowledge_barrier_resume(
+        &mut self,
+        sequence: u64,
+        event_id: [u8; 16],
+        acknowledgement: Acknowledgement,
+    ) -> Result<(), CompanionFault> {
+        if !acknowledgement.is_acknowledged() {
+            return Err(CompanionFault::Protocol);
+        }
+        self.validate_barrier_resume(sequence, event_id)?;
+        self.record_acknowledgement(sequence, event_id, acknowledgement);
+        Ok(())
+    }
+
+    fn record_acknowledgement(
+        &mut self,
+        sequence: u64,
+        event_id: [u8; 16],
+        acknowledgement: Acknowledgement,
+    ) {
+        for row in self
+            .rows
+            .iter_mut()
+            .filter(|row| row.sequence <= sequence && !row.acked())
+        {
+            row.acknowledgement = acknowledgement;
         }
         self.acked = Some((sequence, event_id));
         if self.barrier.is_some_and(|(_, last)| sequence >= last) {
             self.barrier = None;
         }
-        while self.rows.iter().filter(|row| row.acked).count() > MAX_ACKED_REPLAY_ROWS {
-            if self.rows.front().is_some_and(|row| row.acked) {
-                self.rows.pop_front();
-            } else {
+        self.trim_acknowledged_cache();
+    }
+
+    fn trim_acknowledged_cache(&mut self) {
+        let mut bytes = 0_u64;
+        let mut first = None;
+        for (count, row) in self.rows.iter().rev().filter(|row| row.acked()).enumerate() {
+            let row_bytes = row
+                .event
+                .len()
+                .saturating_add(row.payload.as_ref().map_or(0, |(_, body)| body.len()));
+            bytes = bytes.saturating_add(u64::try_from(row_bytes).unwrap_or(u64::MAX));
+            if count >= MAX_ACKED_REPLAY_ROWS || bytes > MAX_ACKED_CACHE_BYTES {
                 break;
             }
+            first = Some(row.sequence);
         }
-        Ok(())
+        while self
+            .rows
+            .front()
+            .is_some_and(|row| row.acked() && first.is_none_or(|first| row.sequence < first))
+        {
+            self.rows.pop_front();
+        }
     }
 
     /// Unacknowledged rows in order, for retransmission.
     #[must_use]
     pub fn unacked_rows(&self) -> Vec<&StreamRow> {
-        self.rows.iter().filter(|row| !row.acked).collect()
-    }
-
-    /// The cursor row body.
-    #[must_use]
-    pub fn cursor_row(&self) -> DeliveryRow {
-        DeliveryRow::Cursor {
-            generation: self.generation,
-            next_sequence: self.next_sequence,
-            acked_sequence: self.acked.map_or(0, |(sequence, _)| sequence),
-            acked_event_id: self.acked.map_or([0; 16], |(_, event)| event),
-            barrier_open: false,
-        }
+        self.rows.iter().filter(|row| !row.acked()).collect()
     }
 }
 
@@ -223,6 +326,7 @@ pub(crate) fn sequence_copies(
     state_generation: u64,
     entropy: &mut dyn agenc_ircd_types::EntropySource,
     barriers: &BTreeMap<ServerId, BarrierAssignment>,
+    backing: &crate::budget::BackingReservationPort,
 ) -> Result<Sequenced, E2eeReplyCode> {
     let mut copies = Vec::new();
     let mut writes = Vec::new();
@@ -240,12 +344,26 @@ pub(crate) fn sequence_copies(
         {
             Some((_, stream)) => stream,
             None => {
-                let stream = coordinator
+                let additional = plan
+                    .events()
+                    .iter()
+                    .filter(|event| event.target == planned.target)
+                    .count();
+                if coordinator
                     .state
                     .streams
                     .get(&planned.target)
-                    .cloned()
-                    .unwrap_or_default();
+                    .is_some_and(|stream| {
+                        stream.would_block(u64::try_from(additional).unwrap_or(u64::MAX), 0)
+                    })
+                {
+                    return Err(E2eeReplyCode::Syncing);
+                }
+                let stream = match coordinator.state.streams.get(&planned.target) {
+                    Some(stream) => stream.try_clone(additional, backing),
+                    None => DeliveryStream::with_row_capacity(additional, backing),
+                }
+                .map_err(|_| E2eeReplyCode::RateLimited)?;
                 streams.push((planned.target, stream));
                 streams
                     .last_mut()
@@ -301,11 +419,25 @@ pub(crate) fn sequence_copies(
         let row = StreamRow {
             sequence,
             event_id,
-            event: event.clone(),
-            payload: payload_id.zip(content.payload.clone()),
-            acked: false,
+            event: SharedBytes::from_owned(event, backing)
+                .map_err(|_| E2eeReplyCode::RateLimited)?,
+            payload: payload_id
+                .zip(content.payload.as_ref())
+                .map(|(id, bytes)| SharedBytes::copy_from(bytes, backing).map(|bytes| (id, bytes)))
+                .transpose()
+                .map_err(|_| E2eeReplyCode::RateLimited)?,
+            acknowledgement: Acknowledgement::Unacknowledged,
         };
-        writes.push(outbox_write(planned.target, stream.generation, &row)?);
+        writes.push(outbox_write(
+            stream.owner.as_ref().ok_or(E2eeReplyCode::Syncing)?.scope(),
+            stream.generation,
+            &row,
+            Acknowledgement::Unacknowledged,
+        )?);
+        super::delivery_owner::append_object(&mut writes, &row.event)?;
+        if let Some((_, bytes)) = &row.payload {
+            super::delivery_owner::append_object(&mut writes, bytes)?;
+        }
         stream.rows.push_back(row.clone());
         copies.push(CopyToSend {
             target: planned.target,
@@ -313,7 +445,9 @@ pub(crate) fn sequence_copies(
             generation: stream.generation,
         });
     }
-    for (target, stream) in &streams {
+    for (target, stream) in &mut streams {
+        stream.owner =
+            Some(super::delivery_owner::refreshed(stream).map_err(|_| E2eeReplyCode::Syncing)?);
         writes.push(cursor_write(*target, stream)?);
     }
     let barrier_targets_missing = barriers
@@ -389,28 +523,38 @@ fn encode_event(
         .map_err(|_| E2eeReplyCode::InvalidFragment)
 }
 
-fn outbox_write(
-    target: ServerId,
+pub(super) fn outbox_write(
+    scope: &DeliveryScope,
     generation: u64,
     row: &StreamRow,
+    acknowledgement: Acknowledgement,
 ) -> Result<AccountServiceDurableWrite, E2eeReplyCode> {
-    let body = DeliveryRow::Outbox {
+    let event = super::delivery_owner::restore::decode_event(&row.event)
+        .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    let cross_profile = super::delivery_owner::restore::cross_profile(&event)
+        .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    let outbox = ScopedOutbox::new(ScopedOutboxFields {
+        scope: *scope,
+        generation,
+        sequence: row.sequence,
         event_id: row.event_id,
         event_object_id: *agenc_ircd_e2ee::ObjectId::compute(&row.event).as_bytes(),
+        event_bytes: u32::try_from(row.event.len()).map_err(|_| E2eeReplyCode::InvalidFragment)?,
         payload_object_id: row.payload.as_ref().map(|(id, _)| *id),
         payload_bytes: row.payload.as_ref().map_or(0, |(_, bytes)| {
             u32::try_from(bytes.len()).unwrap_or(u32::MAX)
         }),
-        acked: row.acked,
-        cross_profile: None,
-    }
-    .encode()
+        acknowledgement,
+        cross_profile,
+    })
     .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-    let key = DeliveryRow::outbox_key(target.as_bytes(), generation, row.sequence)
+    let key = outbox.key().map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    let body = DeliveryRecoveryRow::Outbox(outbox)
+        .encode()
         .map_err(|_| E2eeReplyCode::InvalidFragment)?;
     super::request::state_row(
         agenc_ircd_storage::TableId::E2eeState,
-        agenc_ircd_storage::e2ee_records::DELIVERY_ROW_KIND,
+        agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND,
         key,
         body,
     )
@@ -421,18 +565,11 @@ pub(crate) fn cursor_write(
     target: ServerId,
     stream: &DeliveryStream,
 ) -> Result<AccountServiceDurableWrite, E2eeReplyCode> {
-    let body = stream
-        .cursor_row()
-        .encode()
-        .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-    let key =
-        DeliveryRow::cursor_key(target.as_bytes()).map_err(|_| E2eeReplyCode::InvalidFragment)?;
-    super::request::state_row(
-        agenc_ircd_storage::TableId::E2eeState,
-        agenc_ircd_storage::e2ee_records::DELIVERY_ROW_KIND,
-        key,
-        body,
-    )
+    let owner = stream.owner.as_ref().ok_or(E2eeReplyCode::Syncing)?;
+    if owner.scope().target_server_id() != *target.as_bytes() {
+        return Err(E2eeReplyCode::InvalidFragment);
+    }
+    super::delivery_owner::write(owner).map_err(|_| E2eeReplyCode::InvalidFragment)
 }
 
 /// The `EEVENT` and optional `EDATA` lines of one row.
@@ -481,21 +618,18 @@ pub fn line(
 }
 
 /// Handles an `EACK` from `peer`.
-pub fn on_ack(
+pub(crate) fn on_ack(
     coordinator: &mut CompanionCoordinator,
+    link: crate::federation::LinkId,
     peer: ServerId,
     position: DeliveryPosition,
-) -> Result<(), CompanionFault> {
-    if position.server_id != *coordinator.server_id.as_bytes() {
-        return Err(CompanionFault::Protocol);
-    }
-    let stream = coordinator
-        .state
-        .streams
-        .get_mut(&peer)
-        .ok_or(CompanionFault::Protocol)?;
-    if stream.generation != position.delivery_generation {
-        return Err(CompanionFault::Protocol);
-    }
-    stream.acknowledge(position.delivery_sequence, position.event_id)
+    trusted_ack_unix_seconds: Option<u64>,
+) -> Result<Vec<super::sync::Action>, CompanionFault> {
+    super::delivery_owner::acknowledgement::prepare(
+        coordinator,
+        link,
+        peer,
+        position,
+        trusted_ack_unix_seconds,
+    )
 }

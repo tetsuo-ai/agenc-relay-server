@@ -6,7 +6,7 @@
 //! edge events inside the same storage batch as the mutation. The router
 //! that owns the links takes the encoded events after the commit.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_ircd_domain::federation::{
     CoordinatorProjection, MutationContext, MutationProjection, ProjectedEvent, ProjectionRecord,
@@ -17,6 +17,9 @@ use agenc_ircd_federation_wire::{
     CanonicalEncode, CrossProfilePart, EventHeader, ProjectionEntryHeader, ProjectionPrimaryKey,
     RequestCorrelation, federation_object_id,
 };
+use agenc_ircd_storage::e2ee_records::delivery_recovery::{
+    BarrierEndpoint, DeliveryBarrier, DeliveryScope,
+};
 use agenc_ircd_storage::federation_records::{
     OUTBOX_EVENT_KIND, OutboxEventRecord, PROJECTION_ENTRY_KIND, ProjectionEntryRecord, outbox_key,
     projection_entry_key,
@@ -24,10 +27,14 @@ use agenc_ircd_storage::federation_records::{
 use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_ircd_types::{EntropySource, EventId, NetworkId, ServerId};
 
+pub(crate) mod barrier;
+mod outbox;
+pub(crate) use outbox::OutboxBudget;
+
 use crate::RuntimeError;
 use crate::federation::codec::events::event_arm_object;
 use crate::federation::codec::projection::{projection_arm_object, projection_kind};
-use crate::state_core::durable::AccountServiceDurableWrite;
+use crate::state_core::durable::{AccountServiceDurableWrite, DurableIndex};
 
 /// One encoded event reserved in the outbox for a target edge.
 pub struct OutboundEvent {
@@ -43,6 +50,8 @@ pub struct OutboundEvent {
     pub object_id: FederationHash32,
     /// The complete canonical `FederationEvent` bytes.
     pub encoded: Vec<u8>,
+    /// The exact gate committed with this final base part, before publication.
+    pub(crate) combined_barrier: Option<Box<DeliveryBarrier>>,
 }
 
 /// The federated request one staged plan answers.
@@ -72,6 +81,7 @@ struct ProjectedOutput {
     advances: BTreeMap<ServerId, u64>,
     revision: u64,
     state_generation: u64,
+    fences: Vec<ServerId>,
 }
 
 /// The barrier tuple one target's base events carry (spec 20.8): every
@@ -82,6 +92,10 @@ pub struct CrossProfileAssignment {
     pub mutation_id: [u8; 16],
     /// Base plus companion parts.
     pub part_count: u16,
+    /// The full accepted companion delivery scope of the same transaction.
+    pub companion_scope: DeliveryScope,
+    /// The exact companion parts already prepared beside this base projection.
+    pub companion: BarrierEndpoint,
 }
 
 /// The delivery position one event is reserved at.
@@ -94,6 +108,7 @@ struct EventSlot {
 
 /// What one staged plan projected, held until its batch commits.
 pub struct PendingProjection {
+    fences: Vec<ServerId>,
     events: Vec<OutboundEvent>,
     projection: MutationProjection,
     advances: BTreeMap<ServerId, u64>,
@@ -105,6 +120,9 @@ pub struct FederationProjector {
     server_id: ServerId,
     index: CoordinatorProjection,
     edges: BTreeMap<ServerId, EdgeDelivery>,
+    snapshot_required: BTreeSet<ServerId>,
+    outbox_budgets: BTreeMap<ServerId, OutboxBudget>,
+    committed_fences: BTreeSet<ServerId>,
 }
 
 impl FederationProjector {
@@ -116,12 +134,27 @@ impl FederationProjector {
             server_id,
             index: CoordinatorProjection::new(server_id),
             edges: BTreeMap::new(),
+            snapshot_required: BTreeSet::new(),
+            outbox_budgets: BTreeMap::new(),
+            committed_fences: BTreeSet::new(),
         }
     }
 
     /// Declares or repositions one edge's delivery cursor.
     pub fn set_edge(&mut self, edge: ServerId, delivery: EdgeDelivery) {
+        if self
+            .edges
+            .get(&edge)
+            .is_none_or(|previous| previous.projection_generation != delivery.projection_generation)
+        {
+            self.snapshot_required.remove(&edge);
+        }
         self.edges.insert(edge, delivery);
+    }
+
+    /// Fences ordinary delivery reservations until a successor snapshot opens.
+    pub(crate) fn require_snapshot(&mut self, edge: ServerId) {
+        self.snapshot_required.insert(edge);
     }
 
     /// Returns one edge's delivery position.
@@ -165,6 +198,7 @@ impl FederationProjector {
         entropy: &mut dyn EntropySource,
         row_revision: u64,
         cross_profile: &BTreeMap<ServerId, CrossProfileAssignment>,
+        index: &DurableIndex,
     ) -> Result<Option<(Vec<AccountServiceDurableWrite>, PendingProjection)>, RuntimeError> {
         let mut projection = self
             .index
@@ -187,17 +221,38 @@ impl FederationProjector {
             advances: BTreeMap::new(),
             revision: row_revision,
             state_generation: plan.resulting_revision().get(),
+            fences: Vec::new(),
         };
         for delta in &projection.edges {
             let Some(delivery) = self.edges.get(&delta.target) else {
                 continue;
             };
             let assignment = cross_profile.get(&delta.target).copied();
-            self.project_edge(delta, *delivery, binding, entropy, &mut output, assignment)?;
+            self.project_edge(
+                delta,
+                *delivery,
+                binding,
+                entropy,
+                &mut output,
+                assignment,
+                index,
+            )?;
+        }
+        for (target, assignment) in cross_profile {
+            let gate = barrier::attach(
+                self.network_id,
+                self.server_id,
+                *target,
+                assignment,
+                output.state_generation,
+                &mut output.events,
+            )?;
+            output.writes.push(barrier::write(&gate, row_revision)?);
         }
         Ok(Some((
             output.writes,
             PendingProjection {
+                fences: output.fences,
                 events: output.events,
                 projection,
                 advances: output.advances,
@@ -264,9 +319,15 @@ impl FederationProjector {
         entropy: &mut dyn EntropySource,
         output: &mut ProjectedOutput,
         assignment: Option<CrossProfileAssignment>,
+        index: &DurableIndex,
     ) -> Result<(), RuntimeError> {
+        let blocked = self.snapshot_required.contains(&delta.target);
+        if blocked && assignment.is_some() {
+            return Err(RuntimeError::LimitExceeded);
+        }
         let mut sequence = delivery.next_delivery_sequence;
-        for (index, event) in delta.events.iter().enumerate() {
+        let mut reserved = Vec::new();
+        for (index, event) in delta.events.iter().enumerate().filter(|_| !blocked) {
             let slot = EventSlot {
                 target: delta.target,
                 projection_generation: delivery.projection_generation,
@@ -285,6 +346,14 @@ impl FederationProjector {
                 })
                 .transpose()?;
             let outbound = self.encode_event(slot, event, binding, entropy, part)?;
+            reserved.push(outbound);
+            sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        }
+        if !self.fit_outbox(delta.target, delivery, &reserved, assignment, output)? {
+            reserved.clear();
+            sequence = delivery.next_delivery_sequence;
+        }
+        for outbound in reserved {
             output.writes.push(outbox_write(
                 &outbound,
                 output.revision,
@@ -292,7 +361,6 @@ impl FederationProjector {
                 binding,
             )?);
             output.events.push(outbound);
-            sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
         }
         output.advances.insert(delta.target, sequence);
         for record in &delta.upserts {
@@ -310,6 +378,14 @@ impl FederationProjector {
                 key.kind(),
                 key.primary(),
             )?;
+            // A snapshot cut installs the edge's standing under its new
+            // generation before the cut rows are written (spec 20.9), and a
+            // refused cut batch leaves keys standing with no row at all. A
+            // key removed while its row does not exist needs no delete: the
+            // standing drops it on commit and the cut skips it.
+            if !index.holds(TableId::EdgeProjection, &stored) {
+                continue;
+            }
             output.writes.push(AccountServiceDurableWrite::delete(
                 TableId::EdgeProjection,
                 stored,
@@ -368,6 +444,7 @@ impl FederationProjector {
             event_id,
             object_id: federation_object_id(&bytes),
             encoded: bytes,
+            combined_barrier: None,
         })
     }
 
@@ -417,6 +494,10 @@ impl FederationProjector {
     /// Applies one committed projection and returns its events for delivery.
     pub fn committed(&mut self, pending: PendingProjection) -> Vec<OutboundEvent> {
         self.index.apply(&pending.projection);
+        for peer in pending.fences {
+            self.snapshot_required.insert(peer);
+            self.committed_fences.insert(peer);
+        }
         for (edge, next) in pending.advances {
             if let Some(delivery) = self.edges.get_mut(&edge) {
                 delivery.next_delivery_sequence = next;

@@ -64,12 +64,29 @@ pub(super) fn receive(
     object: AssembledObject,
     charge: Option<IngressCharge>,
 ) -> Result<(), Violation> {
-    let busy = coordinator
-        .crypto
-        .as_ref()
-        .is_some_and(|pending| pending.link == link)
+    // A request plans against the current state and stages its own batch.
+    // It waits while this link's crypto job, the coordinator's own batch, a
+    // history read, or a batch any other router staged is still open, so
+    // the plan is never refused as busy and answered with SERVER_BUSY for
+    // a slot that frees a few milliseconds later.
+    // It also waits behind requests already queued for its peer, so one
+    // origin's operations keep their sequence order.
+    let queued_ahead = coordinator
+        .peers
+        .get(&peer)
+        .ok_or(Violation::Misaddressed)?
+        .queued
+        .iter()
+        .any(|queued| queued.link == link);
+    let busy = queued_ahead
+        || coordinator
+            .crypto
+            .as_ref()
+            .is_some_and(|pending| pending.link == link)
         || coordinator.pending.is_some()
-        || coordinator.history.busy();
+        || coordinator.history.busy()
+        || context.in_flight()
+        || context.pending_len() != 0;
     if busy {
         let state = coordinator
             .peers
@@ -89,51 +106,76 @@ pub(super) fn receive(
     execute(coordinator, context, link, peer, descriptor, object, charge)
 }
 
-/// Executes queued requests once the link is idle again.
+/// Executes queued requests while the coordinator can take one: until a
+/// request stages a batch, starts a crypto job, or the queues are empty.
+/// Peers take turns, starting after the peer drained last, so one busy
+/// edge cannot starve another.
 pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
 ) {
-    if coordinator.pending.is_some() || coordinator.history.busy() {
-        return;
+    loop {
+        if coordinator.pending.is_some()
+            || coordinator.history.busy()
+            || context.in_flight()
+            || context.pending_len() != 0
+        {
+            return;
+        }
+        let Some((peer, queued)) = next_queued(coordinator) else {
+            return;
+        };
+        coordinator.drain_cursor = Some(peer);
+        if let Err(violation) = execute(
+            coordinator,
+            context,
+            queued.link,
+            peer,
+            queued.descriptor,
+            queued.object,
+            queued.charge,
+        ) {
+            coordinator.fail_link(context, queued.link, peer, violation);
+        }
     }
-    let next = coordinator.peers.iter_mut().find_map(|(peer, state)| {
-        let idle = coordinator
+}
+
+/// Takes the next drainable queued request, visiting peers in key order
+/// from the one after the last drained. A queue whose front belongs to a
+/// link that is gone, or whose link waits on crypto, is pruned or skipped.
+pub(super) fn next_queued(
+    coordinator: &mut FederationCoordinator,
+) -> Option<(ServerId, QueuedRequest)> {
+    let peers: Vec<ServerId> = match coordinator.drain_cursor {
+        Some(cursor) => coordinator
+            .peers
+            .range((
+                std::ops::Bound::Excluded(cursor),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(peer, _)| *peer)
+            .chain(coordinator.peers.range(..=cursor).map(|(peer, _)| *peer))
+            .collect(),
+        None => coordinator.peers.keys().copied().collect(),
+    };
+    for peer in peers {
+        let crypto_here = coordinator
             .crypto
             .as_ref()
-            .is_none_or(|pending| pending.peer != *peer);
-        if !idle
-            || !state.live.as_ref().is_some_and(|live| {
-                state
-                    .queued
-                    .front()
-                    .is_some_and(|queued| queued.link == live.link)
-            })
-        {
-            state.queued.retain(|queued| {
-                state
-                    .live
-                    .as_ref()
-                    .is_some_and(|live| live.link == queued.link)
-            });
-            return None;
+            .is_some_and(|pending| pending.peer == peer);
+        let Some(state) = coordinator.peers.get_mut(&peer) else {
+            continue;
+        };
+        let live = state.live.as_ref().map(|live| live.link);
+        state.queued.retain(|queued| Some(queued.link) == live);
+        if crypto_here {
+            continue;
         }
-        state.queued.pop_front().map(|queued| (*peer, queued))
-    });
-    let Some((peer, queued)) = next else {
-        return;
-    };
-    if let Err(violation) = execute(
-        coordinator,
-        context,
-        queued.link,
-        peer,
-        queued.descriptor,
-        queued.object,
-        queued.charge,
-    ) {
-        coordinator.fail_link(context, queued.link, peer, violation);
+        if let Some(queued) = state.queued.pop_front() {
+            return Some((peer, queued));
+        }
     }
+    None
 }
 
 fn execute(
@@ -165,22 +207,17 @@ fn execute(
             return replay(coordinator, context, link, peer, descriptor, &header);
         }
         Classified::Expired => {
-            let arm = ResultArm::Failed {
-                code: failure_code(DomainError::ServerBusy).to_owned(),
-                context: String::new(),
-            };
-            return fail_without_plan(
-                coordinator,
-                context,
-                link,
-                peer,
+            let fresh = FreshRequest {
                 key,
-                &header,
+                header,
                 descriptor,
-                object.object_id(),
-                (arm, Vec::new()),
+                request_object_id: object.object_id(),
+                bound: None,
+                command: None,
+                mutation: MutationContext::default(),
                 charge,
-            );
+            };
+            return expire_request(coordinator, context, link, peer, fresh);
         }
     }
     let operation = decode_request_operation(&request, &mut budget)
@@ -197,6 +234,108 @@ fn execute(
         charge,
     };
     run_operation(coordinator, context, link, peer, fresh, operation)
+}
+
+/// An expired replay ends its origin without advancing or rewriting its
+/// committed sequence. The refusal follows the durable fence checkpoint.
+fn expire_request(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+) -> Result<(), Violation> {
+    coordinator
+        .origins
+        .fence(&fresh.key.origin)
+        .map_err(|_| Violation::Origin)?;
+    let entry = coordinator
+        .origins
+        .origin(&fresh.key.origin)
+        .ok_or(Violation::Origin)?;
+    let result = encode_result(
+        coordinator,
+        &fresh,
+        &ResultArm::Failed {
+            code: "ORIGIN_EXPIRED".to_owned(),
+            context: String::new(),
+        },
+        None,
+        Vec::new(),
+    )?;
+    let plan = context
+        .domain()
+        .plan_account_service_checkpoint()
+        .map_err(|_| Violation::Ceiling)?;
+    let write = super::origin::origin_row(
+        coordinator,
+        fresh.key.origin,
+        entry.next_sequence,
+        plan.resulting_revision().get(),
+    )?;
+    let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
+        .map_err(|_| Violation::Ceiling)?;
+    context
+        .stage_durable_with_account_service(plan, fanout, None, 0, vec![write])
+        .map_err(|_| Violation::Ceiling)?;
+    coordinator.pending = Some(PendingCommit::OriginExpired {
+        peer,
+        link,
+        descriptor: fresh.descriptor,
+        result,
+        _charge: fresh.charge,
+    });
+    Ok(())
+}
+
+/// The exact committed registration result owns its session even before
+/// FORIGIN UPDATE binds that session into the next declared principal.
+pub(super) fn remember_registration(
+    coordinator: &mut FederationCoordinator,
+    context: &StateCoreContext,
+    origin: OriginKey,
+    result: &[u8],
+) -> Result<(), Violation> {
+    let mut budget = DecodeBudget::new(1 << 20, 4_096);
+    let object = SchemaObject::decode_exact("FederationResult", result, &mut budget)
+        .map_err(|_| Violation::Codec)?;
+    let header = ResultHeader::from_object(&object).map_err(|_| Violation::Codec)?;
+    if header.result_kind != agenc_ircd_types::FederationResultKind::SessionRegistered {
+        return Ok(());
+    }
+    let arm = agenc_ircd_federation_wire::decode_result_arm(&object, &mut budget)
+        .map_err(|_| Violation::Codec)?;
+    let ResultArm::SessionRegistered(registered) =
+        ResultArm::from_object(header.result_kind, &arm).map_err(|_| Violation::Codec)?
+    else {
+        return Err(Violation::Codec);
+    };
+    if context
+        .domain()
+        .session(registered.user_id)
+        .is_none_or(|session| {
+            session.session_id() != registered.session_id
+                || session.home_server_id() != origin.home_server_id
+        })
+    {
+        return Ok(());
+    }
+    coordinator
+        .registered_sessions
+        .entry(origin)
+        .or_default()
+        .insert(registered.user_id);
+    if coordinator.origins.origin(&origin).is_some_and(|entry| {
+        matches!(
+            entry.status,
+            agenc_ircd_domain::federation::OriginStatus::Deleted
+                | agenc_ircd_domain::federation::OriginStatus::Fenced
+        )
+    }) && let Some(state) = coordinator.peers.get_mut(&origin.home_server_id)
+    {
+        state.cleanup.push_back(registered.user_id);
+    }
+    Ok(())
 }
 
 /// What the replay classifier decided for a request.
@@ -352,6 +491,9 @@ fn run_operation(
             Ok(())
         }
         ConvertedRequest::AccountService { opcode, envelope } => {
+            if context.is_quiescing() {
+                return Err(Violation::Phase);
+            }
             coordinator.queue_remote_carrier(link, peer, fresh, opcode, envelope)
         }
         ConvertedRequest::SessionClose { user_id, kind } => {
@@ -408,15 +550,7 @@ fn run_query(
         let page = coordinator
             .queries
             .next_page(context, &scope, &query.identity, cursor)?;
-        return finish_without_plan(
-            coordinator,
-            context,
-            link,
-            peer,
-            fresh,
-            page.arm,
-            page.replies,
-        );
+        return answer_page(coordinator, context, link, peer, fresh, Ok(page));
     }
     let rebuild =
         |domain: &agenc_ircd_domain::DomainState| convert::rebuild_query(domain, &query.identity);
@@ -450,7 +584,7 @@ fn run_query(
 }
 
 /// Commits a rendered page, or the failure the renderer reported.
-fn answer_page(
+pub(super) fn answer_page(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
@@ -459,17 +593,38 @@ fn answer_page(
     page: Result<super::query::Page, DomainError>,
 ) -> Result<(), Violation> {
     match page {
-        Ok(page) => finish_without_plan(
-            coordinator,
-            context,
-            link,
-            peer,
-            fresh,
-            page.arm,
-            page.replies,
-        ),
+        Ok(page) => {
+            let result = finish_without_plan(
+                coordinator,
+                context,
+                link,
+                peer,
+                fresh,
+                page.arm,
+                page.replies,
+            );
+            settle_query_page(coordinator, context.now(), result, page.receipt)
+        }
         Err(error) => finish_failed(coordinator, context, link, peer, fresh, error),
     }
+}
+
+fn settle_query_page(
+    coordinator: &mut FederationCoordinator,
+    now: agenc_ircd_types::MonotonicTick,
+    result: Result<(), Violation>,
+    receipt: Option<super::query::QueryReceipt>,
+) -> Result<(), Violation> {
+    if result.is_ok()
+        && let Some(PendingCommit::Request { query, .. }) = coordinator.pending.as_mut()
+    {
+        *query = receipt;
+        return Ok(());
+    }
+    if let Some(receipt) = receipt {
+        coordinator.queries.reject_page(receipt, now);
+    }
+    Err(result.err().unwrap_or(Violation::Codec))
 }
 
 // agenc-review: allow owner=runtime reviewed=2026-09-02 reason=a query decision carries its link peer request cursor scope identity and decision to one result boundary
@@ -507,19 +662,65 @@ fn finish_query_decision(
                     DomainError::ServerBusy,
                 );
             };
-            stage_with_plan(
+            let result = directory_mutation_result(context, &fresh)?;
+            stage_with_plan_and_writes(
                 coordinator,
                 context,
                 link,
                 peer,
                 fresh,
-                ResultArm::NoContent,
+                result,
                 plan,
                 fanout,
+                Vec::new(),
             )
+            .map(|_| ())
         }
         other => finish_decision(coordinator, context, link, peer, fresh, other),
     }
+}
+
+fn directory_mutation_result(
+    context: &mut StateCoreContext,
+    fresh: &FreshRequest,
+) -> Result<(ResultArm, Vec<agenc_ircd_federation_wire::SchemaObject>), Violation> {
+    let Some(agenc_ircd_domain::CanonicalCommandView::Presence(
+        agenc_ircd_domain::PresenceCommand::MonitorAdd(targets),
+    )) = fresh
+        .command
+        .as_ref()
+        .map(agenc_ircd_domain::CanonicalCommand::view)
+    else {
+        return Ok((ResultArm::NoContent, Vec::new()));
+    };
+    let bound = fresh.bound.ok_or(Violation::Codec)?;
+    let nickname = crate::client_render::requester_nickname(context, bound.user_id);
+    let frames = crate::query_render::monitor_status_frames(
+        context.domain(),
+        context.server_prefix(),
+        &nickname,
+        bound.user_id,
+        targets,
+    )
+    .map_err(|_| Violation::Ceiling)?;
+    let replies = frames
+        .iter()
+        .map(crate::federation::codec::results::reply_object)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| Violation::Codec)?;
+    let mut snapshot_token = [0; 32];
+    context
+        .entropy_mut()
+        .fill_exact(&mut snapshot_token)
+        .map_err(|_| Violation::Ceiling)?;
+    Ok((
+        ResultArm::ReplyPage {
+            snapshot_token,
+            page_sequence: 0,
+            next_cursor: None,
+        },
+        replies,
+    ))
 }
 
 fn open_session(
@@ -530,11 +731,10 @@ fn open_session(
     fresh: FreshRequest,
     seed: SessionSeed,
 ) -> Result<(), Violation> {
-    open_session_with_writes(coordinator, context, link, peer, fresh, seed, Vec::new())
+    open_session_with_writes(coordinator, context, link, peer, fresh, seed, None).map(|_| ())
 }
 
-/// Opens a session; `writes` are the account-service rows that join the
-/// transaction, the consumed pre-registration grant of a remote client.
+/// Opens a session with its consumed grant and original authentication instant.
 pub(super) fn open_session_with_writes(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
@@ -542,8 +742,8 @@ pub(super) fn open_session_with_writes(
     peer: ServerId,
     fresh: FreshRequest,
     seed: SessionSeed,
-    writes: Vec<AccountServiceDurableWrite>,
-) -> Result<(), Violation> {
+    grant: Option<super::accounts::RemoteSessionGrant>,
+) -> Result<bool, Violation> {
     // The result names the account's current revision; the edge's decoder
     // requires it alongside the session generation (result.session_registered).
     let account = seed.account_id.map(|account| {
@@ -560,9 +760,17 @@ pub(super) fn open_session_with_writes(
         account,
         resulting_state_generation: 0,
     };
-    let plan = match context.domain().plan_session_opened(seed) {
+    let planned = match grant.as_ref() {
+        Some(grant) => context
+            .domain()
+            .plan_authenticated_session_opened(seed, grant.authenticated_at),
+        None => context.domain().plan_session_opened(seed),
+    };
+    let plan = match planned {
         Ok(plan) => plan,
-        Err(error) => return finish_failed(coordinator, context, link, peer, fresh, error),
+        Err(error) => {
+            return finish_failed(coordinator, context, link, peer, fresh, error).map(|()| false);
+        }
     };
     let generation = plan.resulting_revision().get();
     let arm = ResultArm::SessionRegistered(SessionRegistered {
@@ -578,10 +786,10 @@ pub(super) fn open_session_with_writes(
         link,
         peer,
         fresh,
-        arm,
+        (arm, Vec::new()),
         plan,
         fanout,
-        writes,
+        grant.map_or_else(Vec::new, |grant| grant.writes),
     )
 }
 
@@ -788,6 +996,13 @@ fn finish_decision(
             let (Some(bound), Some(command)) = (fresh.bound, fresh.command.as_ref()) else {
                 return Err(Violation::Codec);
             };
+            if matches!(
+                command.view(),
+                agenc_ircd_domain::CanonicalCommandView::Account(_)
+            ) {
+                coordinator.queue_remote_account_mutation(link, peer, fresh, plan);
+                return Ok(());
+            }
             let Ok(fanout) =
                 crate::mutation_render::render_mutation(context, bound, None, command, &plan)
             else {
@@ -838,62 +1053,73 @@ fn stage_with_plan(
     plan: agenc_ircd_domain::MutationPlan,
     fanout: crate::state_core::fanout::FanoutRequest,
 ) -> Result<(), Violation> {
+    let replies = match (fresh.bound, fresh.command.as_ref()) {
+        (Some(bound), Some(command)) => {
+            crate::mutation_render::mutation_result_replies(context, bound, command, &plan)
+                .map_err(internal_violation)?
+        }
+        _ => Vec::new(),
+    };
     stage_with_plan_and_writes(
         coordinator,
         context,
         link,
         peer,
         fresh,
-        arm,
+        (arm, replies),
         plan,
         fanout,
         Vec::new(),
     )
+    .map(|_| ())
 }
 
 // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=a staged request carries its link peer request result plan fanout and joined account rows to one durable staging boundary
 #[allow(clippy::too_many_arguments)]
-fn stage_with_plan_and_writes(
+pub(super) fn stage_with_plan_and_writes(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
     peer: ServerId,
     fresh: FreshRequest,
-    arm: ResultArm,
+    result: (ResultArm, Vec<agenc_ircd_federation_wire::SchemaObject>),
     plan: agenc_ircd_domain::MutationPlan,
     fanout: crate::state_core::fanout::FanoutRequest,
     extra_writes: Vec<AccountServiceDurableWrite>,
-) -> Result<(), Violation> {
-    let completion_event_id = fresh_event_id(context)?;
+) -> Result<bool, Violation> {
+    let (arm, replies) = result;
+    let completion_event_id = match &arm {
+        ResultArm::Committed { .. } | ResultArm::SessionRegistered(_) => {
+            Some(fresh_event_id(context)?)
+        }
+        _ => None,
+    };
     let generation = plan.resulting_revision().get();
-    let encoded = encode_result(
-        coordinator,
-        &fresh,
-        &arm,
-        Some(completion_event_id),
-        Vec::new(),
-    )?;
+    let encoded = encode_result(coordinator, &fresh, &arm, completion_event_id, replies)?;
     let mut writes = request_rows(
         coordinator,
         &fresh,
         &encoded,
-        Some(completion_event_id),
+        completion_event_id,
         generation,
         generation,
     )?;
     writes.extend(extra_writes);
     context.set_mutation_context(fresh.mutation.clone());
-    context.set_request_binding(RequestBinding {
-        home: peer,
-        correlation: RequestCorrelation {
-            replay_key: fresh.header.replay_key,
-            request_id: fresh.header.request_id,
-        },
-        completion_event_id,
-    });
+    if let Some(completion_event_id) = completion_event_id {
+        context.set_request_binding(RequestBinding {
+            home: peer,
+            correlation: RequestCorrelation {
+                replay_key: fresh.header.replay_key,
+                request_id: fresh.header.request_id,
+            },
+            completion_event_id,
+        });
+    }
     match context.stage_durable_with_account_service(plan, fanout, None, 0, writes) {
         Ok(crate::state_core::StageAccepted::Staged { .. }) => {
             coordinator.pending = Some(PendingCommit::Request {
+                staged_after: context.head().storage_commit_sequence,
                 peer,
                 link,
                 key: fresh.key,
@@ -901,9 +1127,11 @@ fn stage_with_plan_and_writes(
                 request_object_id: fresh.request_object_id,
                 result: encoded,
                 descriptor: fresh.descriptor,
+                header: fresh.header,
                 _charge: fresh.charge,
+                query: None,
             });
-            Ok(())
+            Ok(true)
         }
         Ok(crate::state_core::StageAccepted::AppliedInStep(_)) => Err(Violation::Codec),
         Err(_) => {
@@ -919,6 +1147,7 @@ fn stage_with_plan_and_writes(
                 fresh,
                 DomainError::ServerBusy,
             )
+            .map(|()| false)
         }
     }
 }
@@ -1021,6 +1250,7 @@ fn fail_without_plan(
         .stage_durable_with_account_service(plan, fanout, None, 0, writes)
         .map_err(|_| Violation::Ceiling)?;
     coordinator.pending = Some(PendingCommit::Request {
+        staged_after: context.head().storage_commit_sequence,
         peer,
         link,
         key: fresh.key,
@@ -1028,9 +1258,28 @@ fn fail_without_plan(
         request_object_id: fresh.request_object_id,
         result: encoded,
         descriptor: fresh.descriptor,
+        header: fresh.header,
         _charge: fresh.charge,
+        query: None,
     });
     Ok(())
+}
+
+/// Retires a link whose request batch was refused. No result or sequence was
+/// committed, so the edge must retain and resend the exact request after RESET.
+/// A non-durable busy result would be indistinguishable from a durable failure
+/// that consumed the sequence, and would make the next edge request a gap.
+pub(super) fn rejected(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+) {
+    drop(fresh);
+    if coordinator.link_is_live(link, peer) {
+        coordinator.fail_link(context, link, peer, Violation::Ceiling);
+    }
 }
 
 fn fresh_event_id(context: &mut StateCoreContext) -> Result<EventId, Violation> {

@@ -125,6 +125,94 @@ impl TlsFixture {
         })
     }
 
+    /// Re-issues the `mint` leaf for `dns_name`: the same CA and the same leaf
+    /// key, a new certificate with `serial`. This is the certificate renewal a
+    /// running listener can reload, since the key identity is unchanged.
+    pub fn reissue_leaf(
+        seed: [u8; 32],
+        dns_name: &str,
+        serial: u8,
+    ) -> Result<Self, TlsFixtureError> {
+        validate_dns_name(dns_name)?;
+        let ca_key = SigningKey::from_bytes(&derive_seed(CA_SEED_LABEL, &seed));
+        let leaf_key = SigningKey::from_bytes(&derive_seed(LEAF_SEED_LABEL, &seed));
+        let ca_name = name(CA_COMMON_NAME)?;
+        let ca_spki = subject_public_key_info(&ca_key.verifying_key().to_bytes())?;
+        let ca_extensions = sequence(&[
+            extension(&OID_BASIC_CONSTRAINTS, true, &sequence(&[boolean_true()])?)?,
+            extension(&OID_KEY_USAGE, true, &tlv(TAG_BIT_STRING, &CA_KEY_USAGE)?)?,
+        ])?;
+        let ca_tbs = tbs_certificate(1, &ca_name, &ca_name, &ca_spki, &ca_extensions)?;
+        let ca_certificate = certificate(&ca_tbs, &ca_key)?;
+        let leaf_name = name(dns_name.as_bytes())?;
+        let leaf_spki = subject_public_key_info(&leaf_key.verifying_key().to_bytes())?;
+        let san = sequence(&[tlv(TAG_SAN_DNS_NAME, dns_name.as_bytes())?])?;
+        let leaf_extensions = sequence(&[
+            extension(&OID_BASIC_CONSTRAINTS, true, &sequence(&[])?)?,
+            extension(&OID_KEY_USAGE, true, &tlv(TAG_BIT_STRING, &LEAF_KEY_USAGE)?)?,
+            extension(&OID_SUBJECT_ALT_NAME, false, &san)?,
+        ])?;
+        let leaf_tbs = tbs_certificate(serial, &ca_name, &leaf_name, &leaf_spki, &leaf_extensions)?;
+        let leaf_certificate = certificate(&leaf_tbs, &ca_key)?;
+        Ok(Self {
+            ca_certificate,
+            leaf_certificate,
+            leaf_private_key_pkcs8: pkcs8(&leaf_key.to_bytes())?,
+            leaf_spki_sha256: Sha256::digest(&leaf_spki).into(),
+            dns_name: dns_name.to_owned(),
+        })
+    }
+
+    /// Mints a fresh leaf for `dns_name` under the same CA that `mint` derives
+    /// from `seed`, with a distinct leaf key selected by `generation`. Clients
+    /// that trust the CA accept the new leaf; a pin on the old leaf's SPKI sees
+    /// a new identity. `generation` 0 reproduces `mint`.
+    pub fn rotate_leaf(
+        seed: [u8; 32],
+        dns_name: &str,
+        generation: u32,
+    ) -> Result<Self, TlsFixtureError> {
+        if generation == 0 {
+            return Self::mint(seed, dns_name);
+        }
+        validate_dns_name(dns_name)?;
+        let ca_key = SigningKey::from_bytes(&derive_seed(CA_SEED_LABEL, &seed));
+        let mut leaf_label = LEAF_SEED_LABEL.to_vec();
+        leaf_label.extend_from_slice(b" rotation ");
+        leaf_label.extend_from_slice(&generation.to_be_bytes());
+        let leaf_key = SigningKey::from_bytes(&derive_seed(&leaf_label, &seed));
+        let ca_name = name(CA_COMMON_NAME)?;
+        let ca_spki = subject_public_key_info(&ca_key.verifying_key().to_bytes())?;
+        let ca_extensions = sequence(&[
+            extension(&OID_BASIC_CONSTRAINTS, true, &sequence(&[boolean_true()])?)?,
+            extension(&OID_KEY_USAGE, true, &tlv(TAG_BIT_STRING, &CA_KEY_USAGE)?)?,
+        ])?;
+        let ca_tbs = tbs_certificate(1, &ca_name, &ca_name, &ca_spki, &ca_extensions)?;
+        let ca_certificate = certificate(&ca_tbs, &ca_key)?;
+        let leaf_name = name(dns_name.as_bytes())?;
+        let leaf_spki = subject_public_key_info(&leaf_key.verifying_key().to_bytes())?;
+        let san = sequence(&[tlv(TAG_SAN_DNS_NAME, dns_name.as_bytes())?])?;
+        let leaf_extensions = sequence(&[
+            extension(&OID_BASIC_CONSTRAINTS, true, &sequence(&[])?)?,
+            extension(&OID_KEY_USAGE, true, &tlv(TAG_BIT_STRING, &LEAF_KEY_USAGE)?)?,
+            extension(&OID_SUBJECT_ALT_NAME, false, &san)?,
+        ])?;
+        // Serials 1 and 2 belong to the CA and the original leaf.
+        let serial = u8::try_from(generation)
+            .ok()
+            .and_then(|generation| generation.checked_add(2))
+            .ok_or(TlsFixtureError::Overflow)?;
+        let leaf_tbs = tbs_certificate(serial, &ca_name, &leaf_name, &leaf_spki, &leaf_extensions)?;
+        let leaf_certificate = certificate(&leaf_tbs, &ca_key)?;
+        Ok(Self {
+            ca_certificate,
+            leaf_certificate,
+            leaf_private_key_pkcs8: pkcs8(&leaf_key.to_bytes())?,
+            leaf_spki_sha256: Sha256::digest(&leaf_spki).into(),
+            dns_name: dns_name.to_owned(),
+        })
+    }
+
     /// Mints the CA and a federation leaf whose only subjectAltName is the
     /// `urn:agenc-chat:server:<id>` URI of `server_id`; the leaf carries no
     /// extended key usage so it serves both link directions.

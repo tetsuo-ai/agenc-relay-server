@@ -5,7 +5,7 @@
 //! vote vector, or proof wrapper. The transport `object-id` is the one
 //! exception and lives in [`crate::object`] as a plain content address.
 
-use agenc_ircd_crypto::{SemanticHashDomain, semantic_digest};
+use agenc_ircd_crypto::{FederationSnapshotHash, SemanticHashDomain, semantic_digest};
 
 use crate::error::E2eeError;
 use crate::tls::{TlsEncode, Writer};
@@ -117,11 +117,79 @@ pub fn federation_snapshot_digest(
     delivery_generation: u64,
     ordered_state_object_ids: &[SemanticId],
 ) -> Result<SemanticId, E2eeError> {
-    let mut writer = Writer::new();
-    writer.u64(state_generation)?;
-    writer.u64(delivery_generation)?;
-    writer.vector(ordered_state_object_ids, 0, 0xffff_ffff)?;
-    semantic_id_over(SemanticHashDomain::FederationSnapshot, &writer.into_bytes())
+    federation_snapshot_digest_iter(
+        state_generation,
+        delivery_generation,
+        ordered_state_object_ids.len(),
+        ordered_state_object_ids,
+    )
+}
+
+/// Hashes an exact count of IDs in canonical conversation order without copying
+/// the IDs. The snapshot owner must establish that order before calling this.
+pub fn federation_snapshot_digest_iter<'a>(
+    state_generation: u64,
+    delivery_generation: u64,
+    count: usize,
+    ordered_state_object_ids: impl IntoIterator<Item = &'a SemanticId>,
+) -> Result<SemanticId, E2eeError> {
+    let mut digest = FederationSnapshotDigest::new(state_generation, delivery_generation, count)?;
+    for id in ordered_state_object_ids {
+        digest.push(id)?;
+    }
+    digest.finish()
+}
+
+/// A fixed-size snapshot digest owner that can survive bounded storage reads.
+/// The caller verifies conversation order and row ownership before each push.
+pub struct FederationSnapshotDigest {
+    digest: FederationSnapshotHash,
+}
+
+impl FederationSnapshotDigest {
+    /// Writes the exact version-one framing for the declared bounded ID count.
+    pub fn new(
+        state_generation: u64,
+        delivery_generation: u64,
+        count: usize,
+    ) -> Result<Self, E2eeError> {
+        if u64::try_from(count).map_err(|_| E2eeError::LimitExceeded)?
+            > crate::limits::MAX_FEDERATION_STATE_ENTRIES_PER_EDGE
+        {
+            return Err(E2eeError::LimitExceeded);
+        }
+        let id_bytes = count.checked_mul(32).ok_or(E2eeError::LimitExceeded)?;
+        let canonical_bytes = id_bytes.checked_add(20).ok_or(E2eeError::LimitExceeded)?;
+        let mut digest =
+            FederationSnapshotHash::new(canonical_bytes).map_err(|_| E2eeError::LimitExceeded)?;
+        digest
+            .update(&state_generation.to_be_bytes())
+            .map_err(|_| E2eeError::LimitExceeded)?;
+        digest
+            .update(&delivery_generation.to_be_bytes())
+            .map_err(|_| E2eeError::LimitExceeded)?;
+        digest
+            .update(
+                &u32::try_from(id_bytes)
+                    .map_err(|_| E2eeError::LimitExceeded)?
+                    .to_be_bytes(),
+            )
+            .map_err(|_| E2eeError::LimitExceeded)?;
+        Ok(Self { digest })
+    }
+
+    /// Absorbs one ordered ID without permitting more than the declared count.
+    pub fn push(&mut self, id: &SemanticId) -> Result<(), E2eeError> {
+        self.digest.update(id).map_err(|_| E2eeError::LimitExceeded)
+    }
+
+    /// Finishes only when the exact declared ID count has been supplied.
+    pub fn finish(self) -> Result<SemanticId, E2eeError> {
+        self.digest
+            .finish()
+            .map(|value| *value.as_bytes())
+            .map_err(|_| E2eeError::LimitExceeded)
+    }
 }
 
 /// A proof-set digest over a canonical vector of TBS values.

@@ -1,4 +1,4 @@
-//! Authenticated restore, rekey, and migration construction plans and cursors.
+//! Authenticated restore and rekey construction plans and cursors.
 
 use agenc_ircd_crypto::{
     ConstructionPlanHasher, StorageDigest, rekey_transform_profile_hash,
@@ -7,9 +7,7 @@ use agenc_ircd_crypto::{
 use agenc_ircd_types::DatabaseId;
 
 use crate::codec::{Decoder, Encoder};
-use crate::{
-    StorageError, StorageFaultBoundary, StorageFaultInjector, StorageFaultSite, StoredKey, TableId,
-};
+use crate::{StorageError, StoredKey, TableId};
 
 /// Fixed key of the sole in-progress construction marker.
 pub const STORAGE_CONSTRUCTION_KEY: &[u8] = b"agenc-chat/storage-construction/v1";
@@ -25,8 +23,6 @@ pub enum StorageConstructionKind {
     Restore = 1,
     /// Copy-on-write storage master-key rotation.
     Rekey = 2,
-    /// Immediate-successor schema migration.
-    Migrate = 3,
 }
 
 impl StorageConstructionKind {
@@ -34,7 +30,6 @@ impl StorageConstructionKind {
         match value {
             1 => Ok(Self::Restore),
             2 => Ok(Self::Rekey),
-            3 => Ok(Self::Migrate),
             _ => Err(StorageError::UnsupportedVersion),
         }
     }
@@ -245,8 +240,6 @@ pub enum StorageConstructionAction {
     RestorePeerTombstones = 6,
     /// Apply the fixed E2EE recovery-pending transform.
     RestoreE2eeState = 7,
-    /// Apply one compiled migration-registry rule.
-    MigrateTransform = 8,
 }
 
 impl StorageConstructionAction {
@@ -259,7 +252,6 @@ impl StorageConstructionAction {
             5 => Ok(Self::RestoreChannelName),
             6 => Ok(Self::RestorePeerTombstones),
             7 => Ok(Self::RestoreE2eeState),
-            8 => Ok(Self::MigrateTransform),
             _ => Err(StorageError::UnsupportedVersion),
         }
     }
@@ -286,11 +278,7 @@ impl StorageConstructionPlanEntry {
         action: StorageConstructionAction,
         transform_rule_id: u16,
     ) -> Result<Self, StorageError> {
-        if sources.len() > 2
-            || target_record_schema == 0
-            || !is_construction_target(target_table)
-            || (kind == StorageConstructionKind::Migrate && target_record_schema != 1)
-        {
+        if sources.len() > 2 || target_record_schema == 0 || !is_construction_target(target_table) {
             return Err(StorageError::InvalidEncoding);
         }
         sources.sort_by(|left, right| left.identity().cmp(&right.identity()));
@@ -396,7 +384,7 @@ impl StorageConstructionPlanEntry {
         self.action
     }
 
-    /// Returns the migration rule ID, or zero for restore/rekey.
+    /// Returns the reserved transform rule ID, which must be zero.
     #[must_use]
     pub const fn transform_rule_id(&self) -> u16 {
         self.transform_rule_id
@@ -450,7 +438,7 @@ pub struct StorageOperationIdentity {
     pub source_schema_generation: u64,
     /// Target schema generation.
     pub target_schema_generation: u64,
-    /// Fixed restore/rekey or compiled migration profile hash.
+    /// Fixed restore or rekey profile hash.
     pub transform_profile_hash: StorageDigest,
     /// Fresh target database instance.
     pub target_database_instance_id: DatabaseId,
@@ -472,7 +460,7 @@ impl StorageOperationIdentity {
     /// Validates version, schema relation, stream presence, and fixed profiles.
     // agenc-review: focus owner=storage reviewed=2026-08-27 reason=closed construction-kind matrix mirrors the normative identity union
     pub fn validate(&self) -> Result<(), StorageError> {
-        if self.command_version != 1 || self.source_schema_generation == 0 {
+        if self.command_version != 1 || self.source_schema_generation != crate::SCHEMA_GENERATION {
             return Err(StorageError::UnsupportedVersion);
         }
         match self.kind {
@@ -490,38 +478,8 @@ impl StorageOperationIdentity {
             {
                 Ok(())
             }
-            StorageConstructionKind::Migrate
-                if self.source_stream_digest.is_none()
-                    && self.source_schema_generation == 1
-                    && self.target_schema_generation == 2
-                    && self.transform_profile_hash == crate::migration::profile_hash()? =>
-            {
-                Ok(())
-            }
-            StorageConstructionKind::Migrate => Err(StorageError::UnsupportedMigration),
             _ => Err(StorageError::InvalidEncoding),
         }
-    }
-
-    /// Validates a stopped-daemon migration request under the qualification fault harness.
-    pub fn validate_migration_profile(
-        &self,
-        faults: &StorageFaultInjector,
-    ) -> Result<(), StorageError> {
-        faults.check(
-            StorageFaultSite::MigrationProfile,
-            StorageFaultBoundary::Before,
-        )?;
-        let validation = if self.kind == StorageConstructionKind::Migrate {
-            self.validate()
-        } else {
-            Err(StorageError::InvalidEncoding)
-        };
-        faults.check(
-            StorageFaultSite::MigrationProfile,
-            StorageFaultBoundary::After,
-        )?;
-        validation
     }
 
     fn encode_tbs(&self) -> Result<Vec<u8>, StorageError> {
@@ -803,12 +761,13 @@ fn validate_action(
             Ok(())
         }
         (StorageConstructionKind::Restore, StorageConstructionAction::RestoreE2eeState)
-            if rule_id == 0 && one_same_table && target == TableId::E2eeState =>
-        {
-            Ok(())
-        }
-        (StorageConstructionKind::Migrate, StorageConstructionAction::MigrateTransform)
-            if crate::migration::valid_rule_sources(sources, target, rule_id) =>
+            if rule_id == 0
+                && target == TableId::E2eeState
+                && (one_same_table
+                    || (sources.len() == 2
+                        && sources
+                            .iter()
+                            .all(|source| source.table == TableId::E2eeState))) =>
         {
             Ok(())
         }
@@ -823,8 +782,7 @@ mod tests {
     const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
 
     #[test]
-    fn cursor_codecs_and_migration_entrypoint_reject_cross_profile_inputs()
-    -> Result<(), StorageError> {
+    fn cursor_and_operation_decoders_reject_invalid_profiles() -> Result<(), StorageError> {
         let invalid_cursor = StorageConstructionCursor::AtTarget {
             table: TableId::KeyCheck,
             key: StoredKey::new(vec![1])?,
@@ -863,10 +821,7 @@ mod tests {
             planned_entry_count: 0,
             construction_plan_hash: ZERO,
         };
-        assert_eq!(
-            identity.validate_migration_profile(&StorageFaultInjector::disabled()),
-            Err(StorageError::InvalidEncoding),
-        );
+        assert_eq!(identity.validate(), Err(StorageError::UnsupportedVersion),);
         Ok(())
     }
 }

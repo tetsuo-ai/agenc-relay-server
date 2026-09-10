@@ -132,6 +132,45 @@ Use the local Unix admin socket for routine operation. Each operator still prove
 
 `REHASH` validates a complete replacement configuration before activation. Identity, storage-key, listener-purpose, wire-limit, OPAQUE, E2EE, HPKE, and onion-identity changes require a stopped restart or their named transition procedure. A rejected reload leaves the active configuration unchanged.
 
+To export stopped login-index rotation events together with ordinary admin
+events, sign `AUDIT EXPORT <from> <to> maintenance-v1` on the authenticated admin
+connection. The [maintenance export profile](admin-audit-maintenance-v1.md)
+defines the exact batch, record labels, historical verification, and limits.
+The operator needs the `audit` permission.
+
+## Qualify storage growth on a host
+
+`agenc-ircd storage qualify` measures the production storage engine on the
+filesystem that will hold the state directory. Give it two new directories on
+that filesystem and paths for the unsigned report, the raw log, and a JSON
+summary. It writes the report only when the largest observed growth stays at
+or below the qualification ceiling; the raw log and summary are kept in every
+case. The command may fallocate a temporary ballast file in the scratch
+directory to reach the reserve boundary and removes it before exiting. Run it
+before a release on each target and filesystem tuple you intend to claim, not
+on a live node.
+
+## Inspect a signed release decision
+
+A binary reports its compiled profiles with `agenc-ircd conformance --json`
+and leaves `qualified_claims` empty. Completed qualification is a detached
+directory signed by the release key, and the binary never bundles that key.
+To see which claims a decision grants the binary you deployed, pass the
+decision directory and the public key you obtained through a trusted channel:
+
+```sh
+agenc-ircd conformance --json \
+  --release-decision /path/to/decision \
+  --trusted-public-key /etc/agenc-ircd/trusted-release-public.pem
+```
+
+The command verifies the signature with that key only, then compares the
+decision's source commit, target, and artifact digest with the running
+executable. Claims appear only when all three match. A verified decision for
+another build leaves the claims empty and names the reason. A failed
+signature, an unreadable file, or a malformed decision is an error, and the
+binary treats a key found beside the decision as untrusted.
+
 ## Rotate and recover keys
 
 Assign one purpose to each key. Record its generation, creation time, activation time, retirement time, and recovery procedure.

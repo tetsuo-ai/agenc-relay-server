@@ -4,7 +4,7 @@ Status: research and review evidence for the version-1 specifications. This
 file is not a third normative protocol document. The precedence rules in
 `ircd-architecture-and-implementation-spec.md` remain authoritative.
 
-Last source-status check: 2026-08-24.
+Last source-status check: 2026-09-05.
 
 ## 1. Purpose
 
@@ -199,6 +199,25 @@ For every source or dependency update:
 No entry in this ledger replaces implementation tests or the release evidence
 required by the architecture specification.
 
+Since Stage 10 the status part of step 1 is automated for every source this
+ledger names. `scripts/check-release-sources.py` reads the RFC Editor status
+record of each RFC in Section 2, the Datatracker document and state records
+of the draft in Section 3, and the default-branch head of each repository in
+Section 4, then fetches each pinned commit to prove the remote still serves
+it. `conformance/release-source-decisions.toml` holds one entry per source
+with the observed status fields, the pin, the decision word, a note, and the
+SHA-256 of this ledger at the time of the decision. Any change in those
+fields, or an edit to this ledger, fails the release sources job until the
+change is reviewed and a new decision is recorded there.
+
+The 2026-09-05 check found two changes since 2026-08-24. RFC 9325 is now also
+updated by RFC 10015, which Section 2 already reviews as not applicable. The
+Tor specification default branch moved twelve commits past the pinned commit;
+the changes are typo fixes in the rendezvous specification, a shared random
+value tie-breaker for directory authorities, ntor handshake wording, and a
+pluggable-transport variable, none of which touches the onion-service or
+SOCKS behavior the architecture pins, so the pin in Section 4 is retained.
+
 ## 7. Stage 09 optional profiles and database upgrade
 
 The 2026-09-04 Stage 09 decision retains the IRCv3 commit pinned in Section 4.
@@ -227,12 +246,8 @@ under the same request identity. These canonical changes require a new base
 federation profile hash and coordinated peer upgrades. The E2EE companion
 bytes and profile remain unchanged.
 
-Typed History records and history replay kinds change the closed persistent
-schema. Stage 09 therefore ships database generation 2 and the exact offline
-copy-on-write 1-to-2 migration in Architecture Section 23.6. The source History
-table must be empty, as in production Stage 08. All optional-feature builds
-share that database format and the maintenance readers; turning history off
-never bypasses authentication, deletion, or encrypted-binding exclusion.
+All optional-feature builds use the current database format. Turning history
+off never bypasses authentication, deletion, or encrypted-binding exclusion.
 
 Build-time exclusion removes optional service dependency edges. Runtime
 disablement suppresses the service, listeners, capabilities, and new service
@@ -242,3 +257,22 @@ logical storage effects rather than nonce-dependent ciphertext bytes. Existing
 history databases retain their documented validation and cleanup behavior.
 Historical conformance manifests continue to describe only their recorded
 source commits. Stage 09 completion requires a new exact-source checkpoint.
+
+## 8. Stage 10 client directory reply corrections
+
+Production qualification found that Appendix A.2 omitted numeric 263 for
+temporary command refusal, numeric 302 for the required USERHOST command,
+and numerics 730 through 734 for the required MONITOR command. The registry
+now includes these replies with their pinned
+Modern IRC and IRCv3 meanings. USERHOST exposes only the visible session's
+ephemeral public cloak. MONITOR status applies the same presence visibility
+rules as ISON, while its list contains the requester's own subscriptions.
+This corrects the client reply registry. The federation object schema,
+federation profile hashes, and persistent record format are unchanged.
+
+WHOWAS also lacked numeric 314 and any retention implementation. Its reply
+uses only the fields Section 14.5 permits, with the public account label in
+place of a realname. The retained cloak can authorize a historical nickname
+only while it identifies a currently visible live session. A record whose
+session has disconnected is hidden; the daemon retains no historical audience
+or account identifier and grants no authority based on a public label.

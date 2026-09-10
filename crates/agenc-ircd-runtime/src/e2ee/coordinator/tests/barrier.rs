@@ -18,24 +18,27 @@ use super::super::events::{
 use super::super::{CompanionFault, StoredResult};
 use super::{Counter, HOME, Harness, TestResult};
 
-const PAYLOAD: [u8; 8] = [3; 8];
-
-fn planned(target: ServerId, kind: EventKind, conversation: Option<[u8; 32]>) -> PlannedEvent {
+fn planned(
+    target: ServerId,
+    kind: EventKind,
+    conversation: Option<[u8; 32]>,
+    payload: &[u8],
+) -> PlannedEvent {
     PlannedEvent {
         kind,
         conversation_id: conversation,
         target,
         payload_object_id: kind
             .has_payload()
-            .then(|| *agenc_ircd_e2ee::ObjectId::compute(&PAYLOAD).as_bytes()),
+            .then(|| *agenc_ircd_e2ee::ObjectId::compute(payload).as_bytes()),
         completion: kind == EventKind::RequestCompleted,
         route_sequence: 0,
         bytes: 1_024,
     }
 }
 
-fn content(planned: PlannedEvent) -> EventContent {
-    let payload = planned.kind.has_payload().then(|| PAYLOAD.to_vec());
+fn content(planned: PlannedEvent, payload: &[u8]) -> EventContent {
+    let payload = planned.kind.has_payload().then(|| payload.to_vec());
     EventContent {
         planned,
         origin: None,
@@ -61,17 +64,34 @@ fn decode_event(row: &StreamRow) -> TestResult<IrcFederationEvent> {
 
 #[test]
 fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -> TestResult {
-    let harness = Harness::new()?;
+    let mut harness = Harness::new()?;
     let home = ServerId::from_bytes(HOME);
     let other = ServerId::from_bytes([12; 16]);
     let conversation = [5; 32];
+    let payload = super::sync::snapshot_route(super::NETWORK, conversation, 7)?;
+    agenc_ircd_storage::e2ee_records::ObjectRow::new(payload.clone())?;
     let events = vec![
-        planned(home, EventKind::RouteStateChanged, Some(conversation)),
-        planned(other, EventKind::RouteStateChanged, Some(conversation)),
-        planned(home, EventKind::RequestCompleted, None),
+        planned(
+            home,
+            EventKind::RouteStateChanged,
+            Some(conversation),
+            &payload,
+        ),
+        planned(
+            other,
+            EventKind::RouteStateChanged,
+            Some(conversation),
+            &payload,
+        ),
+        planned(home, EventKind::RequestCompleted, None, &payload),
     ];
     let plan = EventPlan::order(events.clone())?;
-    let contents: Vec<EventContent> = plan.events().iter().cloned().map(content).collect();
+    let contents: Vec<EventContent> = plan
+        .events()
+        .iter()
+        .cloned()
+        .map(|planned| content(planned, &payload))
+        .collect();
     let mut barriers = BTreeMap::new();
     barriers.insert(
         home,
@@ -82,6 +102,20 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
         },
     );
     let mut entropy = Counter(0);
+    assert!(matches!(
+        sequence_copies(
+            &harness.coordinator,
+            &plan,
+            &contents,
+            7,
+            &mut entropy,
+            &barriers,
+            &harness.backing,
+        ),
+        Err(agenc_ircd_e2ee::wire::reply::E2eeReplyCode::Syncing)
+    ));
+    super::sync::initial_ready_peer(&mut harness.coordinator, home)?;
+    super::sync::initial_ready_peer(&mut harness.coordinator, other)?;
     let sequenced = sequence_copies(
         &harness.coordinator,
         &plan,
@@ -89,6 +123,7 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
         7,
         &mut entropy,
         &barriers,
+        &harness.backing,
     )
     .map_err(|code| format!("{code:?}"))?;
     let home_copies: Vec<_> = sequenced
@@ -136,7 +171,8 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
             &contents,
             7,
             &mut entropy,
-            &absent
+            &absent,
+            &harness.backing,
         )
         .is_err()
     );
@@ -157,54 +193,57 @@ fn companion_copies_of_a_barrier_target_carry_the_tuple_after_the_base_parts() -
             &contents,
             7,
             &mut entropy,
-            &short
+            &short,
+            &harness.backing,
         )
         .is_err()
     );
     Ok(())
 }
 
-fn row(sequence: u64) -> StreamRow {
-    StreamRow {
+fn row(sequence: u64) -> TestResult<StreamRow> {
+    Ok(StreamRow {
         sequence,
         event_id: [u8::try_from(sequence).unwrap_or(0) + 1; 16],
-        event: vec![1; 8],
+        event: super::super::events::SharedBytes::for_fixture(vec![1; 8])?,
         payload: None,
-        acked: false,
-    }
+        acknowledgement:
+            agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement::Unacknowledged,
+    })
 }
 
 #[test]
 fn the_barrier_window_admits_one_cumulative_acknowledgement() -> TestResult {
+    let acknowledgement = agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement::AcknowledgedTimeUnknown;
     let mut stream = DeliveryStream::default();
     for sequence in 0..4 {
-        stream.rows.push_back(row(sequence));
+        stream.rows.push_back(row(sequence)?);
     }
     stream.next_sequence = 4;
     stream.barrier = Some((1, 2));
     // Outside the window the ACK advances by exactly one.
     assert_eq!(
-        stream.acknowledge(1, [2; 16]),
+        stream.acknowledge(1, [2; 16], acknowledgement),
         Err(CompanionFault::Protocol)
     );
-    stream.acknowledge(0, [1; 16])?;
+    stream.acknowledge(0, [1; 16], acknowledgement)?;
     // Inside the window only the last part may be acknowledged, and the
     // acknowledgement is cumulative.
     assert_eq!(
-        stream.acknowledge(3, [4; 16]),
+        stream.acknowledge(3, [4; 16], acknowledgement),
         Err(CompanionFault::Protocol)
     );
-    stream.acknowledge(2, [3; 16])?;
+    stream.acknowledge(2, [3; 16], acknowledgement)?;
     assert_eq!(stream.acked, Some((2, [3; 16])));
     assert!(stream.barrier.is_none());
     assert_eq!(stream.unacked_rows().len(), 1);
     // A wrong event identity at the last part is refused.
     stream.barrier = Some((3, 3));
     assert_eq!(
-        stream.acknowledge(3, [9; 16]),
+        stream.acknowledge(3, [9; 16], acknowledgement),
         Err(CompanionFault::Protocol)
     );
-    stream.acknowledge(3, [4; 16])?;
+    stream.acknowledge(3, [4; 16], acknowledgement)?;
     assert!(stream.unacked_rows().is_empty());
     let _ = StoredResult {
         result: Vec::new(),

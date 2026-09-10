@@ -93,6 +93,21 @@ pub(crate) fn failure_frame(
     error: DomainError,
     target: Option<&FailedTarget>,
 ) -> Result<WireMessage, RuntimeError> {
+    if error == DomainError::LimitExceeded
+        && request.command() == "MONITOR"
+        && let [operation, targets] = request.middle()
+        && operation == "+"
+    {
+        let limit = agenc_ircd_domain::MAX_MONITORED_NICKNAMES.to_string();
+        return numeric_reply(
+            prefix,
+            734,
+            nickname,
+            &[&limit, targets],
+            Some("Monitor list is full"),
+        )
+        .map_err(|_| RuntimeError::InvalidValue);
+    }
     if let Some(frame) = standard_failure(capabilities, prefix, request, error, target)? {
         return Ok(frame);
     }
@@ -412,6 +427,26 @@ mod tests {
             CapRequestReply::Ack(_)
         ));
         Ok(capabilities)
+    }
+
+    #[test]
+    fn a_full_monitor_list_returns_its_limit_and_requested_targets() -> Result<(), Box<dyn Error>> {
+        let request = parsed("MONITOR + alice,bob")?;
+        for capabilities in [CapabilityState::default(), standard_capabilities()?] {
+            let reply = failure_frame(
+                &capabilities,
+                "server",
+                "requester",
+                &request,
+                DomainError::LimitExceeded,
+                None,
+            )?;
+            assert_eq!(
+                encoded(reply)?,
+                b":server 734 requester 100 alice,bob :Monitor list is full\r\n"
+            );
+        }
+        Ok(())
     }
 
     #[test]

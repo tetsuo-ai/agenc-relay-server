@@ -1,7 +1,7 @@
 //! FORIGIN RESET, ADD, UPDATE, DEL, and READY on the coordinator (spec 20.5).
 
 use agenc_ircd_domain::federation::{
-    OriginBinding, OriginDeclaration, OriginKey, OriginPrincipal, OriginStatus,
+    OriginBinding, OriginDeclaration, OriginError, OriginKey, OriginPrincipal, OriginStatus,
 };
 use agenc_ircd_federation_wire::{
     AssembledObject, DecodeBudget, FederationFrame, OriginDescriptor, OriginRecord, SchemaObject,
@@ -35,15 +35,31 @@ pub(super) fn reset(
     if live.incarnation != incarnation {
         return Err(Violation::Misaddressed);
     }
-    coordinator.origins.reset(peer, incarnation);
-    let previous = state.incarnation.replace(incarnation);
-    state.phase = agenc_ircd_storage::federation_records::PeerPhase::Suspended;
-    if previous.is_some_and(|previous| previous != incarnation) {
-        // A new incarnation permanently fences the previous one (FED-04), so
-        // the sessions it hosted can never be closed by their owners again;
-        // they are hidden now instead of waiting for a grace interval.
-        grace::queue_hosted_cleanup(coordinator, context, peer);
+    context.suspend_federation_peer(peer);
+    if state.fence_pending
+        || state.phase == agenc_ircd_storage::federation_records::PeerPhase::Expired
+    {
+        return Err(Violation::Origin);
     }
+    if state
+        .incarnation
+        .is_some_and(|previous| previous != incarnation)
+        && state.phase != agenc_ircd_storage::federation_records::PeerPhase::Clean
+    {
+        state.fence_pending = true;
+        state.grace_deadline = None;
+        coordinator.origins.fence_edge(peer);
+        grace::cancel_grace(context, peer);
+        super::authority::continue_fence(coordinator, context, peer);
+        return Err(Violation::Origin);
+    }
+    coordinator.origins.reset(peer, incarnation);
+    if !coordinator.origins.is_resetting(peer, incarnation) {
+        return Err(Violation::Origin);
+    }
+    state.incarnation = Some(incarnation);
+    state.phase = agenc_ircd_storage::federation_records::PeerPhase::Suspended;
+    continue_ready(coordinator, context, peer);
     Ok(())
 }
 
@@ -187,10 +203,6 @@ pub(super) fn delete(
     if coordinator.pending.is_some() {
         return Err(Violation::Ceiling);
     }
-    coordinator
-        .origins
-        .delete(key, generation, next_sequence)
-        .map_err(|_| Violation::Origin)?;
     let frame = FederationFrame::OriginAck {
         edge_server_id: peer,
         server_incarnation: key.server_incarnation,
@@ -198,6 +210,47 @@ pub(super) fn delete(
         generation,
         object_id: None,
     };
+    match coordinator.origins.delete(key, generation, next_sequence) {
+        Ok(()) => {
+            // The connection behind the origin is gone, so nobody can close
+            // its session any more. The edge's session close normally
+            // precedes the DEL; when it never arrived, or storage refused
+            // it, the session would keep its nickname until the next reset.
+            let session = coordinator
+                .origins
+                .origin(&key)
+                .and_then(|entry| entry.principal.session)
+                .map(|(_, user_id)| user_id)
+                .filter(|user_id| {
+                    context
+                        .domain()
+                        .session(*user_id)
+                        .is_some_and(|session| session.home_server_id() == peer)
+                });
+            if let Some(user_id) = session
+                && let Some(state) = coordinator.peers.get_mut(&peer)
+            {
+                state.cleanup.push_back(user_id);
+            }
+            if let Some(registered) = coordinator.registered_sessions.get(&key)
+                && let Some(state) = coordinator.peers.get_mut(&peer)
+            {
+                state.cleanup.extend(registered.iter().copied());
+            }
+        }
+        Err(OriginError::UnknownOrigin)
+            if coordinator.peers.get(&peer).is_some_and(|state| {
+                state.incarnation == Some(key.server_incarnation) && state.live.is_some()
+            }) =>
+        {
+            // A DEL replayed after a reset for an origin whose declaration
+            // this coordinator never committed: there is nothing to delete
+            // or record, and the acknowledgement lets the edge drop it.
+            let _sent = coordinator.send_frame(context, link, peer, &frame);
+            return Ok(());
+        }
+        Err(_) => return Err(Violation::Origin),
+    }
     stage_origin(coordinator, context, link, peer, key, frame, None)
 }
 
@@ -216,7 +269,15 @@ fn stage_origin(
         .map_err(|_| Violation::Ceiling)?;
     let revision = plan.resulting_revision().get();
     let entry = coordinator.origins.origin(&key).ok_or(Violation::Origin)?;
-    let writes = vec![origin_row(coordinator, key, entry.next_sequence, revision)?];
+    let closed_carrier = (entry.status == OriginStatus::Deleted)
+        .then(|| coordinator.remote_carrier_for_origin(peer, *key.origin_id.as_bytes()))
+        .flatten();
+    let writes = vec![
+        origin_row(coordinator, key, entry.next_sequence, revision)?,
+        coordinator
+            .peer_row(peer, revision)
+            .map_err(|_| Violation::Codec)?,
+    ];
     let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
         .map_err(|_| Violation::Ceiling)?;
     context
@@ -226,13 +287,13 @@ fn stage_origin(
         peer,
         link,
         frame,
+        closed_carrier,
         _charge: charge,
     });
     Ok(())
 }
 
-/// Accepts FORIGIN READY: execution resumes and orphaned sessions of the
-/// edge are scheduled for cleanup.
+/// Persists coordinator readiness after every retained origin was replayed.
 pub(super) fn ready(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
@@ -243,12 +304,23 @@ pub(super) fn ready(
         .origins
         .ready(peer, incarnation)
         .map_err(|_| Violation::Origin)?;
-    let bound: std::collections::BTreeSet<agenc_ircd_types::UserId> = coordinator
+    let mut bound: std::collections::BTreeSet<agenc_ircd_types::UserId> = coordinator
         .origins
         .origins_of(peer, incarnation)
         .filter(|(_, entry)| entry.status == OriginStatus::Live)
         .filter_map(|(_, entry)| entry.principal.session.map(|(_, user_id)| user_id))
         .collect();
+    for (key, users) in &coordinator.registered_sessions {
+        if key.home_server_id == peer
+            && key.server_incarnation == incarnation
+            && coordinator
+                .origins
+                .origin(key)
+                .is_some_and(|entry| entry.status == OriginStatus::Live)
+        {
+            bound.extend(users);
+        }
+    }
     let orphans: Vec<agenc_ircd_types::UserId> = context
         .domain()
         .session_user_ids()
@@ -265,12 +337,18 @@ pub(super) fn ready(
         .get_mut(&peer)
         .ok_or(Violation::Misaddressed)?;
     state.phase = agenc_ircd_storage::federation_records::PeerPhase::Ready;
+    state.grace_deadline = None;
+    grace::cancel_grace(context, peer);
     state.cleanup.extend(orphans);
-    grace::continue_cleanup(coordinator, context, peer);
-    if coordinator.pending.is_none() {
-        request::drain_queued(coordinator, context);
-    }
-    Ok(())
+    let link = state.live.as_ref().ok_or(Violation::Phase)?.link;
+    coordinator
+        .stage_rows(
+            context,
+            Vec::new(),
+            PendingCommit::OriginReady { peer, link },
+            Some(peer),
+        )
+        .map_err(|_| Violation::Ceiling)
 }
 
 /// Encodes the durable row of one origin at its current entry.
@@ -295,7 +373,9 @@ pub(super) fn origin_row(
     let body = FederationOriginRecord {
         origin_object: object.clone(),
         origin_object_id: entry.object_id,
-        next_sequence,
+        // A deleted origin is recorded at the sequence its edge deleted it,
+        // so a restart fences everything that would follow.
+        next_sequence: entry.deleted_after.unwrap_or(next_sequence),
         status,
         flags: 0,
     }
@@ -315,4 +395,39 @@ pub(super) fn origin_row(
         revision,
         body,
     )
+}
+
+/// The coordinator knows replay is complete when no retained origin remains suspended.
+pub(super) fn continue_ready(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    peer: ServerId,
+) {
+    if coordinator.pending.is_some() || context.in_flight() || context.pending_len() != 0 {
+        return;
+    }
+    let Some((incarnation, link)) = coordinator.peers.get(&peer).and_then(|state| {
+        state
+            .live
+            .as_ref()
+            .map(|live| (live.incarnation, live.link))
+    }) else {
+        return;
+    };
+    if !coordinator.origins.is_resetting(peer, incarnation)
+        || coordinator
+            .origins
+            .origins_of(peer, incarnation)
+            .any(|(_, entry)| {
+                matches!(
+                    entry.status,
+                    OriginStatus::Suspended | OriginStatus::Blocked
+                )
+            })
+    {
+        return;
+    }
+    if let Err(violation) = ready(coordinator, context, peer, incarnation) {
+        coordinator.fail_link(context, link, peer, violation);
+    }
 }

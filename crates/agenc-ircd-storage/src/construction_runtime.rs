@@ -1,5 +1,13 @@
 //! Bounded, resumable execution of authenticated construction plans.
 
+mod recovery;
+mod recovery_plan;
+mod recovery_provenance;
+mod restore_source;
+mod stopped;
+
+pub use restore_source::RestoreBackupSourceConfig;
+
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -29,7 +37,6 @@ use crate::{
     StorageFaultSite, StorageMutationBatch, StorageMutationHead, StorageOperationCompletion,
     StorageOperationIdentity, StoragePort, StoredKey, TableId, VerifiedBackup,
     construction_plan_hash, logical_meta_charge, logical_record_charge, validate_record_plaintext,
-    verify_backup,
 };
 
 /// Fixed version-one source logical/backup ceiling.
@@ -64,6 +71,8 @@ const CONSTRUCTION_PLAN_UNSORTED_TABLE: TableDefinition<'static, &'static [u8], 
     TableDefinition::new("construction_plan_unsorted");
 const RESTORE_CHANNEL_SOURCE_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("restore_channel_sources");
+const RESTORE_DISCARDED_CHANNEL_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
+    TableDefinition::new("restore_discarded_channels");
 const RESTORE_CURRENT_RECORD_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("restore_current_records");
 const RESTORE_REFERENCE_TABLE: TableDefinition<'static, &'static [u8], &'static [u8]> =
@@ -199,6 +208,7 @@ impl ConstructionPlanBuilder {
             .set_durability(Durability::Immediate)
             .map_err(|_| StorageError::DatabaseRejected)?;
         transaction.set_two_phase_commit(true);
+        recovery_plan::reset(&transaction)?;
         {
             let mut ordered = transaction
                 .open_table(CONSTRUCTION_PLAN_TABLE)
@@ -262,7 +272,11 @@ impl ConstructionPlanBuilder {
             .encoded_bytes
             .checked_add(u64::try_from(encoded.len()).map_err(|_| StorageError::Overflow)?)
             .ok_or(StorageError::Overflow)?;
-        if self.encoded_bytes > self.maximum_bytes {
+        let combined_bytes = self
+            .encoded_bytes
+            .checked_add(recovery_plan::pending_bytes(&self.transaction)?)
+            .ok_or(StorageError::Overflow)?;
+        if combined_bytes > self.maximum_bytes {
             return Err(StorageError::LimitExceeded);
         }
         let target = construction_plan_target_key(&entry)?;
@@ -315,6 +329,47 @@ impl ConstructionPlanBuilder {
             return Err(StorageError::StaleState);
         }
         Ok(())
+    }
+
+    fn discard_restore_channel(
+        &mut self,
+        key: &StoredKey,
+        name: &agenc_ircd_domain::ChannelNameValue,
+    ) -> Result<(), StorageError> {
+        let mut table = self
+            .transaction
+            .open_table(RESTORE_DISCARDED_CHANNEL_TABLE)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        if table
+            .insert(key.as_bytes(), name.canonical().as_bytes())
+            .map_err(|_| StorageError::DatabaseRejected)?
+            .is_some()
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(())
+    }
+
+    fn discarded_restore_channel_name(
+        &self,
+        key: &StoredKey,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let table = self
+            .transaction
+            .open_table(RESTORE_DISCARDED_CHANNEL_TABLE)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        let Some(name) = table
+            .get(key.as_bytes())
+            .map_err(|_| StorageError::DatabaseRejected)?
+        else {
+            return Ok(None);
+        };
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(name.value().len())
+            .map_err(|_| StorageError::AllocationFailed)?;
+        encoded.extend_from_slice(name.value());
+        Ok(Some(encoded))
     }
 
     fn restore_channel_source(
@@ -537,6 +592,7 @@ impl ConstructionPlanBuilder {
 
     /// Durably commits and independently re-reads the complete scratch plan.
     pub fn finish(self) -> Result<ConstructionPlan, StorageError> {
+        recovery_plan::require_consumed(&self.transaction)?;
         if self
             .expected_entries
             .is_some_and(|expected| self.entry_count != expected)
@@ -1968,9 +2024,9 @@ impl RestoreLoginScan {
 }
 
 impl<R: Read + Seek> RestoreBackupSource<R> {
-    /// Verifies the complete signed stream before admitting it as restore authority.
+    /// Verifies a current-schema signed stream before admitting restore authority.
     pub fn open(
-        mut input: R,
+        input: R,
         source_master_key: StorageMasterKey,
         source_guard_root: RollbackGuardRootKey,
         login_index_key: LoginIndexKey,
@@ -1978,31 +2034,17 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
         trusted_keys: &[BackupTrustKey],
         maximum_bytes: u64,
     ) -> Result<Self, StorageError> {
-        input
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        let verified = verify_backup(
-            &mut input,
-            &source_master_key,
-            &source_guard_root,
-            trusted_keys,
-            maximum_bytes,
-        )?;
-        let source = verified.header.source_header();
-        let binding = DatabaseBinding::new(
-            source.tbs().network_id,
-            source.tbs().server_id,
-            source.tbs().server_incarnation,
-            source.tbs().database_instance_id,
-        );
-        Ok(Self {
+        Self::open_admitted(
             input,
-            source_master_key,
-            login_index_key,
-            previous_login_index_key,
-            binding,
-            verified,
-        })
+            RestoreBackupSourceConfig {
+                source_master_key,
+                source_guard_root,
+                login_index_key,
+                previous_login_index_key,
+                trusted_keys,
+                maximum_bytes,
+            },
+        )
     }
 
     /// Returns the verified signed boundary retained for restore identity construction.
@@ -2271,6 +2313,11 @@ fn push_restore_record(
             RestoreSelection::Direct(_) => Err(StorageError::InvalidEncoding),
         };
     };
+    if action == StorageConstructionAction::RestoreE2eeState
+        && recovery_plan::push(builder, &source, record)?
+    {
+        return Ok(());
+    }
     let target_key = rekey_target_stored_key(
         &source,
         record,
@@ -2335,16 +2382,7 @@ fn select_restore_record(
         }
         TableId::Channel => {
             let value = PersistentRecordValue::decode(table, record.plaintext())?;
-            if value.record_kind() == 1 {
-                // Backup streams are written in strictly increasing (table, key) order by
-                // `BackupStreamWriter::write_record`, and Channel (8) precedes ChannelName
-                // (9), so every channel is indexed here before `push_restore_channel_name`
-                // looks it up.
-                builder.index_restore_channel_source(source)?;
-                Some(StorageConstructionAction::RestoreChannel)
-            } else {
-                None
-            }
+            select_restore_channel(builder, source, &value)?
         }
         TableId::ChannelName => {
             let value = PersistentRecordValue::decode(table, record.plaintext())?;
@@ -2357,7 +2395,7 @@ fn select_restore_record(
             let value = PersistentRecordValue::decode(table, record.plaintext())?;
             (value.record_kind() == 2).then_some(StorageConstructionAction::RestorePeerTombstones)
         }
-        TableId::E2eeState => Some(StorageConstructionAction::RestoreE2eeState),
+        TableId::E2eeState => recovery::select_e2ee_restore(source.key(), record.plaintext())?,
         TableId::KeyCheck
         | TableId::AuthTransaction
         | TableId::Session
@@ -2371,6 +2409,30 @@ fn select_restore_record(
         | TableId::StorageConstruction => None,
     };
     Ok(action.map_or(RestoreSelection::Omit, RestoreSelection::Direct))
+}
+
+fn select_restore_channel(
+    builder: &mut ConstructionPlanBuilder,
+    source: &StorageConstructionSource,
+    value: &PersistentRecordValue,
+) -> Result<Option<StorageConstructionAction>, StorageError> {
+    if value.record_kind() != 1 {
+        return Ok(None);
+    }
+    let channel = ChannelRecordBody::decode(value.body())?;
+    if channel.channel_id.as_bytes() != source.key().as_bytes()
+        || channel.revision.get() != value.revision()
+    {
+        return Err(StorageError::StaleState);
+    }
+    // Channel (8) precedes ChannelName (9) in the authenticated backup stream.
+    // Index even omitted channels so their name rows remain fully checked.
+    builder.index_restore_channel_source(source)?;
+    if channel.persistence == agenc_ircd_domain::PersistencePolicy::Ephemeral {
+        builder.discard_restore_channel(source.key(), &channel.name)?;
+        return Ok(None);
+    }
+    Ok(Some(StorageConstructionAction::RestoreChannel))
 }
 
 fn push_restore_channel_name(
@@ -2399,6 +2461,15 @@ fn push_restore_channel_name(
         context.target_binding,
         context.target_generation,
     )?;
+    if let Some(name) = builder.discarded_restore_channel_name(channel.key())? {
+        let binding = ChannelNameRecordBody::decode(value.body())?;
+        if binding.name.canonical().as_bytes() != name
+            || binding.channel_id.as_bytes() != channel.key().as_bytes()
+        {
+            return Err(StorageError::StaleState);
+        }
+        return Ok(());
+    }
     builder.push(StorageConstructionPlanEntry::new(
         StorageConstructionKind::Restore,
         vec![source, channel_source],
@@ -2494,7 +2565,7 @@ pub trait ConstructionTargetWriter {
     ) -> Result<(), StorageError>;
 }
 
-/// Authenticated staging-database adapter used by restore, rekey, and migration commands.
+/// Authenticated staging-database adapter used by restore and rekey commands.
 pub struct ConstructionTarget {
     engine: StorageEngine,
 }
@@ -2563,7 +2634,11 @@ impl ConstructionTarget {
         expected_identity: StorageOperationIdentity,
         output_path_hash: StorageDigest,
     ) -> Result<VerifiedConstructionOutput, StorageError> {
-        let mut engine = StorageEngine::open(config)?;
+        expected_identity.validate()?;
+        let schema = crate::construction_schema::ConstructionSchema::from_generation(
+            expected_identity.target_schema_generation,
+        )?;
+        let mut engine = StorageEngine::open_construction_target(config, schema)?;
         let _capacity = engine.startup_scan()?;
         let completion = engine.resume_completed_construction(expected_identity)?;
         let state = engine.construction_source_state();
@@ -3172,11 +3247,7 @@ fn transform_channel_name(
     }
     let channel_body = ChannelRecordBody::decode(channel.body())?;
     let name_body = ChannelNameRecordBody::decode(name.body())?;
-    if name_body.name != channel_body.name
-        || name_body
-            .channel_id
-            .is_some_and(|channel_id| channel_id != channel_body.channel_id)
-    {
+    if name_body.name != channel_body.name || name_body.channel_id != channel_body.channel_id {
         return Err(StorageError::StaleState);
     }
     let revision = channel
@@ -3216,20 +3287,22 @@ fn transform_e2ee_recovery_pending(
     target_recovery_epoch: RecoveryEpoch,
     source_rollback_guard_hash: StorageDigest,
 ) -> Result<Vec<u8>, StorageError> {
-    let source = exact_source(entry, sources)?;
-    let state = PersistentRecordValue::decode(TableId::E2eeState, source)?;
-    if state.record_kind() != 1 {
-        return rebuild_persistent(
-            &state,
-            TableId::E2eeState,
-            state.record_kind(),
-            state.revision(),
-            state.generation(),
+    if entry
+        .target_key()
+        .as_bytes()
+        .starts_with(crate::e2ee_records::prefix::RECOVERY)
+    {
+        return recovery_provenance::transform(
+            entry,
+            sources,
+            target_recovery_epoch,
+            source_rollback_guard_hash,
         );
     }
-    let body = crate::E2eeRecoveryGate::decode(state.body())?
-        .recover(target_recovery_epoch, source_rollback_guard_hash)
-        .encode()?;
+    let source = exact_source(entry, sources)?;
+    let state = recovery::decode_e2ee_restore(entry.target_key(), source)?;
+    let body =
+        recovery::e2ee_recovery_body(&state, target_recovery_epoch, source_rollback_guard_hash)?;
     PersistentRecordValue::new(
         TableId::E2eeState,
         state.record_kind(),
@@ -3330,6 +3403,9 @@ fn recovery_domain_body(
         (TableId::Channel, 1) => {
             let mut channel = ChannelRecordBody::decode(value.body())?;
             channel.revision = Revision::new(revision).map_err(|_| StorageError::Overflow)?;
+            channel.memberships.clear();
+            channel.invites.clear();
+            channel.e2ee_removal_pending.clear();
             ChannelRecordBody::encode(&channel)
         }
         (TableId::Account, 2) => Ok(value.body().to_vec()),
@@ -3339,6 +3415,8 @@ fn recovery_domain_body(
 
 #[cfg(test)]
 mod tests {
+    mod recovery_classification;
+
     use std::fs::{File, OpenOptions};
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -3469,8 +3547,8 @@ mod tests {
             target_database_header_hash: ZERO,
             source_rollback_guard_hash: ZERO,
             source_stream_digest: None,
-            source_schema_generation: 1,
-            target_schema_generation: 1,
+            source_schema_generation: crate::SCHEMA_GENERATION,
+            target_schema_generation: crate::SCHEMA_GENERATION,
             transform_profile_hash: agenc_ircd_crypto::rekey_transform_profile_hash()?,
             target_database_instance_id: DatabaseId::from_bytes([1; 16]),
             source_master_key_id: ZERO,
@@ -4423,6 +4501,33 @@ mod tests {
         Ok(())
     }
 
+    fn restore_selection_fixture(table: TableId) -> Result<(StoredKey, Vec<u8>), StorageError> {
+        match table {
+            TableId::E2eeState => Ok((
+                crate::e2ee_records::RouteRow::key(&[1; 32])?,
+                PersistentRecordValue::new(
+                    table,
+                    crate::e2ee_records::ROUTE_ROW_KIND,
+                    1,
+                    0,
+                    None,
+                    Vec::new(),
+                    recovery_classification::route_row(
+                        [1; 32],
+                        crate::e2ee_records::RouteLifecycle::Active,
+                    )?
+                    .encode()?,
+                )?
+                .encode()?,
+            )),
+            TableId::LoginIndexKeyState => Ok((
+                StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+                Vec::new(),
+            )),
+            _ => Ok((account_key(table.as_u16() as u8 + 80)?, Vec::new())),
+        }
+    }
+
     #[test]
     fn restore_selection_covers_every_preserve_transform_and_omission_arm()
     -> Result<(), StorageError> {
@@ -4446,13 +4551,9 @@ mod tests {
             TableId::StorageOperation,
             TableId::E2eeState,
         ] {
-            let key = if table == TableId::LoginIndexKeyState {
-                StoredKey::new(crate::LOGIN_INDEX_KEY_STATE_KEY.to_vec())?
-            } else {
-                account_key(table.as_u16() as u8 + 80)?
-            };
+            let (key, plaintext) = restore_selection_fixture(table)?;
             let source = backup_source(table, &key, u64::from(table.as_u16()) + 1)?;
-            let record = record(table, StoredKey::new(key.as_bytes().to_vec())?, Vec::new());
+            let record = record(table, StoredKey::new(key.as_bytes().to_vec())?, plaintext);
             assert!(matches!(
                 select_restore_record(&mut builder, &source, &record)?,
                 RestoreSelection::Direct(_)
@@ -4499,13 +4600,16 @@ mod tests {
         }
 
         for (kind, expected_direct) in [(1_u16, true), (2, false)] {
-            let key = StoredKey::new(vec![150 + kind as u8; 16])?;
+            let plaintext = domain_plaintext(TableId::Channel, kind)?;
+            let key = if kind == 1 {
+                let value = PersistentRecordValue::decode(TableId::Channel, &plaintext)?;
+                let channel = ChannelRecordBody::decode(value.body())?;
+                StoredKey::new(channel.channel_id.as_bytes().to_vec())?
+            } else {
+                StoredKey::new(vec![150 + kind as u8; 16])?
+            };
             let source = backup_source(TableId::Channel, &key, 80 + u64::from(kind))?;
-            let record = record(
-                TableId::Channel,
-                key,
-                domain_plaintext(TableId::Channel, kind)?,
-            );
+            let record = record(TableId::Channel, key, plaintext);
             assert_eq!(
                 matches!(
                     select_restore_record(&mut builder, &source, &record)?,
@@ -4519,7 +4623,7 @@ mod tests {
             let key = StoredKey::new(vec![160 + kind as u8; 16])?;
             let source = backup_source(TableId::ChannelName, &key, 90 + u64::from(kind))?;
             let body = if kind == 1 {
-                b"#channel".to_vec()
+                crate::domain_records::fixtures::channel_name_body(1, "#channel")?
             } else {
                 Vec::new()
             };
@@ -4610,6 +4714,118 @@ mod tests {
             );
         }
 
+        drop(builder);
+        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_omits_ephemeral_channels_and_their_validated_name_rows() -> Result<(), StorageError>
+    {
+        let (file, path) = scratch_file("omit-ephemeral-channel")?;
+        let mut builder = ConstructionPlanBuilder::start_streaming(
+            StorageConstructionKind::Restore,
+            file,
+            maximum_limits(),
+        )?;
+        let mut channel = ChannelRecordBody::decode(&crate::domain_records::fixtures::live_body(
+            TableId::Channel,
+            1,
+        )?)?;
+        let agenc_ircd_domain::Principal::Account(owner) = channel.creator else {
+            return Err(StorageError::InvalidEncoding);
+        };
+        channel.persistence = agenc_ircd_domain::PersistencePolicy::Ephemeral;
+        channel.role_grants.clear();
+        channel
+            .memberships
+            .push(agenc_ircd_domain::DurableMembership {
+                user_id: agenc_ircd_types::UserId::from_bytes([180; 16]),
+                account_id: Some(owner),
+                session_role: agenc_ircd_domain::Role::Owner,
+                effective_role: agenc_ircd_domain::Role::Owner,
+                membership_revision: channel.revision,
+                joined_at: channel.created_at,
+            });
+        let channel_key = StoredKey::new(channel.channel_id.as_bytes().to_vec())?;
+        let source = backup_source(TableId::Channel, &channel_key, 1)?;
+        let value = PersistentRecordValue::new(
+            TableId::Channel,
+            1,
+            channel.revision.get(),
+            0,
+            None,
+            Vec::new(),
+            ChannelRecordBody::encode(&channel)?,
+        )?;
+        let original = record(TableId::Channel, channel_key.clone(), value.encode()?);
+        assert!(matches!(
+            select_restore_record(&mut builder, &source, &original)?,
+            RestoreSelection::Omit
+        ));
+        let mismatched_key = StoredKey::new(vec![179; 16])?;
+        assert_eq!(
+            select_restore_record(
+                &mut builder,
+                &backup_source(TableId::Channel, &mismatched_key, 3)?,
+                &record(TableId::Channel, mismatched_key.clone(), value.encode()?),
+            )
+            .err(),
+            Some(StorageError::StaleState)
+        );
+        let master = StorageMasterKey::from_bytes([181; 32]);
+        let binding = DatabaseBinding::new(
+            NetworkId::from_bytes([182; 32]),
+            ServerId::from_bytes([183; 16]),
+            ServerIncarnation::from_bytes([184; 16]),
+            DatabaseId::from_bytes([185; 16]),
+        );
+        let context = RekeyContext {
+            source_master_key: &master,
+            source_binding: binding,
+            source_generation: 1,
+            target_master_key: &master,
+            target_binding: binding,
+            target_generation: 1,
+        };
+        let name_key = StoredKey::new(
+            derive_storage_index(
+                &master,
+                binding,
+                StorageTable::new(TableId::ChannelName.as_u16())?,
+                1,
+                channel.name.canonical().as_bytes(),
+            )?
+            .expose_for_storage_key()
+            .to_vec(),
+        )?;
+        for (id, expected) in [
+            (channel.channel_id, Ok(())),
+            (
+                agenc_ircd_types::ChannelInstanceId::from_bytes([186; 16]),
+                Err(StorageError::StaleState),
+            ),
+        ] {
+            let name = PersistentRecordValue::new(
+                TableId::ChannelName,
+                1,
+                channel.revision.get(),
+                0,
+                None,
+                vec![RecordReference::new(TableId::Channel, channel_key.clone())?],
+                ChannelNameRecordBody::encode(id, &channel.name)?,
+            )?;
+            assert_eq!(
+                push_restore_channel_name(
+                    &mut builder,
+                    backup_source(TableId::ChannelName, &name_key, 2)?,
+                    &record(TableId::ChannelName, name_key.clone(), name.encode()?),
+                    &context,
+                ),
+                expected
+            );
+        }
+        assert_eq!(builder.entry_count, 0);
         drop(builder);
         std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
         Ok(())
@@ -4846,7 +5062,7 @@ mod tests {
             0,
             None,
             vec![reference],
-            b"#fixture".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#fixture")?,
         )?
         .encode()?;
         let sources = [
@@ -4861,7 +5077,10 @@ mod tests {
             transformer.transform(StorageConstructionKind::Restore, &entry, &sources)?;
         let name = PersistentRecordValue::decode(TableId::ChannelName, &transformed)?;
         assert_eq!(name.revision(), 8);
-        assert_eq!(name.body(), b"#fixture");
+        assert_eq!(
+            name.body(),
+            crate::domain_records::fixtures::channel_name_body(1, "#fixture")?
+        );
         Ok(())
     }
 
@@ -4870,20 +5089,37 @@ mod tests {
         let target_epoch = RecoveryEpoch::from_bytes([222; 16]);
         let source_guard = StorageDigest::from_bytes([223; 32]);
         let mut transformer = RecoveryTransformV1::new(target_epoch, source_guard);
-        for (index, state) in [
+        for state in [
             crate::E2eeRecoveryKind::Normal,
             crate::E2eeRecoveryKind::Pending,
             crate::E2eeRecoveryKind::Conflict,
             crate::E2eeRecoveryKind::Closed,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let key = StoredKey::new(vec![224, index as u8, 1])?;
-            let entry = restore_entry(
+        ] {
+            let key = crate::e2ee_records::recovery_gate_key(&[227; 32])?;
+            let mut route = recovery_classification::route_row(
+                [227; 32],
+                if state == crate::E2eeRecoveryKind::Closed {
+                    crate::e2ee_records::RouteLifecycle::Tombstone
+                } else {
+                    crate::e2ee_records::RouteLifecycle::Active
+                },
+            )?;
+            route.recovery_gate = matches!(
+                state,
+                crate::E2eeRecoveryKind::Pending | crate::E2eeRecoveryKind::Conflict
+            );
+            let route_key = crate::e2ee_records::RouteRow::key(&[227; 32])?;
+            let entry = StorageConstructionPlanEntry::new(
+                StorageConstructionKind::Restore,
+                vec![
+                    backup_source(TableId::E2eeState, &key, 1)?,
+                    backup_source(TableId::E2eeState, &route_key, 2)?,
+                ],
                 TableId::E2eeState,
                 StoredKey::new(key.as_bytes().to_vec())?,
+                1,
                 StorageConstructionAction::RestoreE2eeState,
+                0,
             )?;
             let original_epoch = RecoveryEpoch::from_bytes([225; 16]);
             let original_guard = StorageDigest::from_bytes([226; 32]);
@@ -4891,9 +5127,9 @@ mod tests {
                 StorageDigest::from_bytes([227; 32]),
                 state,
                 original_epoch,
-                StorageDigest::from_bytes([228; 32]),
-                StorageDigest::from_bytes([229; 32]),
-                StorageDigest::from_bytes([230; 32]),
+                StorageDigest::from_bytes(route.binding_id),
+                StorageDigest::from_bytes(route.accepted_state_id),
+                StorageDigest::from_bytes(route.sequencer_head_id),
                 original_guard,
             );
             let plaintext = PersistentRecordValue::new(
@@ -4909,7 +5145,23 @@ mod tests {
             let transformed = transformer.transform(
                 StorageConstructionKind::Restore,
                 &entry,
-                &[record(TableId::E2eeState, key, plaintext)],
+                &[
+                    record(TableId::E2eeState, key, plaintext),
+                    record(
+                        TableId::E2eeState,
+                        route_key,
+                        PersistentRecordValue::new(
+                            TableId::E2eeState,
+                            crate::e2ee_records::ROUTE_ROW_KIND,
+                            1,
+                            0,
+                            None,
+                            Vec::new(),
+                            route.encode()?,
+                        )?
+                        .encode()?,
+                    ),
+                ],
             )?;
             let value = PersistentRecordValue::decode(TableId::E2eeState, &transformed)?;
             let recovered = crate::E2eeRecoveryGate::decode(value.body())?;
@@ -5532,7 +5784,7 @@ mod tests {
             0,
             None,
             vec![channel_reference],
-            b"#name".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#name")?,
         )?
         .encode()?;
         let channel_tombstone = domain_plaintext(TableId::Channel, 2)?;
@@ -5580,7 +5832,7 @@ mod tests {
             0,
             None,
             Vec::new(),
-            b"#name".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#name")?,
         )?
         .encode()?;
         assert_eq!(
@@ -5609,7 +5861,7 @@ mod tests {
             0,
             None,
             vec![wrong_reference],
-            b"#name".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(1, "#name")?,
         )?
         .encode()?;
         assert_eq!(
@@ -6148,7 +6400,7 @@ mod tests {
                 RecordReference::new(TableId::Channel, first_channel.clone())?,
                 RecordReference::new(TableId::Channel, second_channel)?,
             ],
-            b"#duplicate-channels".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(121, "#duplicate-channels")?,
         )?
         .encode()?;
         let channel_name_record = record(
@@ -6194,7 +6446,7 @@ mod tests {
             0,
             None,
             vec![RecordReference::new(TableId::Channel, first_channel)?],
-            b"#single-channel".to_vec(),
+            crate::domain_records::fixtures::channel_name_body(121, "#single-channel")?,
         )?
         .encode()?;
         let single_channel_source = backup_source(TableId::ChannelName, &channel_name_key, 3)?;

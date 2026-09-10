@@ -297,6 +297,8 @@ pub struct Outcome {
     pub snapshot_token: Option<[u8; 32]>,
     /// The next cursor for pages.
     pub next_cursor: Option<[u8; 32]>,
+    /// Earliest process-local mailbox cursor deadline, admitted before staging.
+    pub(crate) mailbox_expiry: Option<u64>,
     /// Event contents in plan order (the plan is derived from them).
     pub events: Vec<EventContent>,
     /// Durable rows.
@@ -321,6 +323,7 @@ impl Outcome {
             responses: Vec::new(),
             snapshot_token: None,
             next_cursor: None,
+            mailbox_expiry: None,
             events: Vec::new(),
             writes: Vec::new(),
             effects: Vec::new(),
@@ -337,6 +340,7 @@ impl Outcome {
             responses: Vec::new(),
             snapshot_token: None,
             next_cursor: None,
+            mailbox_expiry: None,
             events: Vec::new(),
             writes: Vec::new(),
             effects: Vec::new(),
@@ -469,11 +473,14 @@ pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Cl
         let Some(stored) = state.results.get(&decoded.request_object_id) else {
             return Classified::Violation;
         };
-        let responses = stored
+        let Some(responses) = stored
             .responses
             .iter()
-            .filter_map(|id| state.objects.get(id).cloned())
-            .collect();
+            .map(|id| state.objects.get(id).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Classified::Violation;
+        };
         return Classified::Replay(stored.result.clone(), responses);
     }
     let origin_key = CompanionOriginKey {

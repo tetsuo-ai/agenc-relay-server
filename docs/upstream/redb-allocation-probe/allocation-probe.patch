@@ -1,0 +1,481 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 918ad79..88b650d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,0 +3,4 @@
++## Allocation probe prototype (unreleased)
++* Add a mutation allocation probe with typed refusal and explicit rollback. Probe transactions
++  cannot publish. This experiment does not bound physical storage growth or database close.
++
+diff --git a/src/db.rs b/src/db.rs
+index 7d7dee1..1669baf 100644
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -1287,0 +1288,19 @@ impl Database {
++            None,
++        )
++    }
++
++    /// Begins an experimental transaction that meters cumulative rounded page allocations.
++    ///
++    /// This probe cannot publish. Calling `commit` explicitly aborts it and returns
++    /// [`crate::CommitError::AllocationProbe`]. An allocation refusal is sticky and does not
++    /// simulate an I/O error. This limit does not bound physical storage growth, commit work,
++    /// or database close; it is only a probe of mutation and rollback ownership.
++    pub fn begin_write_allocation_probe(
++        &self,
++        limit: u64,
++    ) -> Result<WriteTransaction, TransactionError> {
++        begin_write_with_allocation_policy(
++            &self.transaction_tracker,
++            &self.mem,
++            AllocationPolicy::Default,
++            Some(limit),
+@@ -1297,0 +1317 @@ fn begin_write_with_allocation_policy(
++    allocation_probe_limit: Option<u64>,
+@@ -1320,0 +1341 @@ fn begin_write_with_allocation_policy(
++        allocation_probe_limit,
+@@ -1336,2 +1357,6 @@ fn ensure_allocator_state_table_and_trim(
+-    let mut tx =
+-        begin_write_with_allocation_policy(transaction_tracker, mem, AllocationPolicy::Lowest)?;
++    let mut tx = begin_write_with_allocation_policy(
++        transaction_tracker,
++        mem,
++        AllocationPolicy::Lowest,
++        None,
++    )?;
+diff --git a/src/error.rs b/src/error.rs
+index 27ebbce..eb63e74 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -10,0 +11,18 @@ use core::panic;
++/// Result of an experimental allocation probe that did not publish a transaction.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum AllocationProbeRefusal {
++    /// The cumulative rounded page allocation limit was exhausted.
++    Exhausted,
++    /// Publication is unavailable until bounded commit preparation is implemented.
++    CommitUnavailable,
++}
++
++impl Display for AllocationProbeRefusal {
++    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
++        match self {
++            Self::Exhausted => write!(f, "Allocation probe exhausted"),
++            Self::CommitUnavailable => write!(f, "Allocation probe cannot publish"),
++        }
++    }
++}
++
+@@ -14,0 +33,2 @@ pub enum StorageError {
++    /// An allocation probe refused before the requested page allocation.
++    AllocationProbe(AllocationProbeRefusal),
+@@ -42,0 +63 @@ impl From<StorageError> for Error {
++            StorageError::AllocationProbe(reason) => Error::AllocationProbe(reason),
+@@ -57,0 +79 @@ impl Display for StorageError {
++            StorageError::AllocationProbe(reason) => reason.fmt(f),
+@@ -484,0 +507,2 @@ pub enum CommitError {
++    /// A probe transaction was explicitly aborted without publication.
++    AllocationProbe(AllocationProbeRefusal),
+@@ -493,0 +518 @@ impl CommitError {
++            CommitError::AllocationProbe(reason) => StorageError::AllocationProbe(reason),
+@@ -502,0 +528 @@ impl From<CommitError> for Error {
++            CommitError::AllocationProbe(reason) => Error::AllocationProbe(reason),
+@@ -517,0 +544 @@ impl Display for CommitError {
++            CommitError::AllocationProbe(reason) => reason.fmt(f),
+@@ -531,0 +559,2 @@ pub enum Error {
++    /// An experimental allocation probe refused without publication.
++    AllocationProbe(AllocationProbeRefusal),
+@@ -607,0 +637 @@ impl Display for Error {
++            Error::AllocationProbe(reason) => reason.fmt(f),
+diff --git a/src/lib.rs b/src/lib.rs
+index dacb629..0626dfa 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -81,2 +81,2 @@ pub use error::{
+-    CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
+-    StorageError, TableError, TransactionError,
++    AllocationProbeRefusal, CommitError, CompactionError, DatabaseError, Error, SavepointError,
++    SetDurabilityError, StorageError, TableError, TransactionError,
+diff --git a/src/transactions.rs b/src/transactions.rs
+index 0a73882..236a5a6 100644
+--- a/src/transactions.rs
++++ b/src/transactions.rs
+@@ -932,0 +933 @@ impl WriteTransaction {
++        allocation_probe_limit: Option<u64>,
+@@ -940 +941,5 @@ impl WriteTransaction {
+-        let page_allocator = PageAllocator::new(mem.clone(), allocation_policy);
++        let page_allocator = PageAllocator::with_allocation_probe(
++            mem.clone(),
++            allocation_policy,
++            allocation_probe_limit,
++        );
+@@ -1634,0 +1640,3 @@ impl WriteTransaction {
++    /// An allocation probe is also explicitly aborted and returns
++    /// [`CommitError::AllocationProbe`]; it never enters commit preparation.
++    ///
+@@ -1645,0 +1654,4 @@ impl WriteTransaction {
++        if let Some(reason) = self.page_allocator().allocation_probe_refusal()? {
++            self.abort_inner()?;
++            return Err(CommitError::AllocationProbe(reason));
++        }
+diff --git a/src/tree_store/page_store/page_manager.rs b/src/tree_store/page_store/page_manager.rs
+index 23773c0..2dcd0c4 100644
+--- a/src/tree_store/page_store/page_manager.rs
++++ b/src/tree_store/page_store/page_manager.rs
+@@ -17 +17 @@ use crate::tree_store::{Page, PageNumber, PageTracker};
+-use crate::{CacheStats, StorageBackend};
++use crate::{AllocationProbeRefusal, CacheStats, StorageBackend};
+@@ -170,0 +171,26 @@ pub(crate) struct PageAllocator {
++    allocation_probe: Option<Arc<Mutex<AllocationProbeBudget>>>,
++}
++
++struct AllocationProbeBudget {
++    remaining: u64,
++    exhausted: bool,
++}
++
++impl AllocationProbeBudget {
++    fn charge(&mut self, size: usize, page_size: usize) -> Result<()> {
++        let debit = size
++            .div_ceil(page_size)
++            .checked_next_power_of_two()
++            .and_then(|pages| pages.checked_mul(page_size))
++            .and_then(|bytes| u64::try_from(bytes).ok());
++        if !self.exhausted
++            && let Some(remaining) = debit.and_then(|bytes| self.remaining.checked_sub(bytes))
++        {
++            self.remaining = remaining;
++            return Ok(());
++        }
++        self.exhausted = true;
++        Err(StorageError::AllocationProbe(
++            AllocationProbeRefusal::Exhausted,
++        ))
++    }
+@@ -173,0 +200 @@ impl PageAllocator {
++    #[cfg(test)]
+@@ -174,0 +202,8 @@ impl PageAllocator {
++        Self::with_allocation_probe(mem, policy, None)
++    }
++
++    pub(crate) fn with_allocation_probe(
++        mem: Arc<TransactionalMemory>,
++        policy: AllocationPolicy,
++        limit: Option<u64>,
++    ) -> Self {
+@@ -178,0 +214,12 @@ impl PageAllocator {
++            allocation_probe: limit.map(|remaining| {
++                Arc::new(Mutex::new(AllocationProbeBudget {
++                    remaining,
++                    exhausted: false,
++                }))
++            }),
++        }
++    }
++
++    fn charge_allocation(&self, size: usize) -> Result<()> {
++        if let Some(probe) = &self.allocation_probe {
++            probe.lock()?.charge(size, self.mem.get_page_size())?;
+@@ -179,0 +227,14 @@ impl PageAllocator {
++        Ok(())
++    }
++
++    pub(crate) fn allocation_probe_refusal(&self) -> Result<Option<AllocationProbeRefusal>> {
++        self.allocation_probe
++            .as_ref()
++            .map(|probe| {
++                Ok(if probe.lock()?.exhausted {
++                    AllocationProbeRefusal::Exhausted
++                } else {
++                    AllocationProbeRefusal::CommitUnavailable
++                })
++            })
++            .transpose()
+@@ -215,0 +277 @@ impl PageAllocator {
++        self.charge_allocation(size)?;
+@@ -231,0 +294 @@ impl PageAllocator {
++        self.charge_allocation(size)?;
+@@ -1673,0 +1737,37 @@ mod test {
++    #[test]
++    fn allocation_probe_rounds_and_charges_every_extent() {
++        for page_size in [512, 4096] {
++            let mut probe = super::AllocationProbeBudget {
++                remaining: 3 * page_size as u64,
++                exhausted: false,
++            };
++            assert!(probe.charge(page_size + 1, page_size).is_ok());
++            assert_eq!(probe.remaining, page_size as u64);
++            assert!(probe.charge(1, page_size).is_ok());
++            assert_eq!(probe.remaining, 0);
++            assert!(probe.charge(1, page_size).is_err());
++        }
++    }
++
++    #[test]
++    fn allocation_probe_refusal_stays_latched_with_unused_budget() {
++        let mut probe = super::AllocationProbeBudget {
++            remaining: 4096,
++            exhausted: false,
++        };
++        assert!(probe.charge(4097, 4096).is_err());
++        assert_eq!(probe.remaining, 4096);
++        assert!(probe.charge(1, 4096).is_err());
++    }
++
++    #[test]
++    fn allocation_probe_refuses_extent_rounding_overflow() {
++        let mut probe = super::AllocationProbeBudget {
++            remaining: u64::MAX,
++            exhausted: false,
++        };
++        assert!(probe.charge(usize::MAX, 4096).is_err());
++        assert_eq!(probe.remaining, u64::MAX);
++        assert!(probe.charge(1, 4096).is_err());
++    }
++
+diff --git a/tests/allocation_probe.rs b/tests/allocation_probe.rs
+new file mode 100644
+index 0000000..5b95353
+--- /dev/null
++++ b/tests/allocation_probe.rs
+@@ -0,0 +1,239 @@
++#![forbid(unsafe_code)]
++
++use redb::{
++    AllocationProbeRefusal, CommitError, Database, ReadableDatabase, ReadableTable, StorageError,
++    TableDefinition,
++};
++
++const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("allocation_probe");
++type TestResult = Result<(), Box<dyn std::error::Error>>;
++
++fn seeded(file: &tempfile::NamedTempFile) -> Result<Database, Box<dyn std::error::Error>> {
++    let database = Database::create(file.path())?;
++    let transaction = database.begin_write()?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        table.insert(1, b"original".as_slice())?;
++    }
++    transaction.commit()?;
++    Ok(database)
++}
++
++fn assert_original(database: &Database) -> TestResult {
++    let read = database.begin_read()?;
++    let table = read.open_table(TABLE)?;
++    assert_eq!(
++        table.get(1)?.ok_or("missing original row")?.value(),
++        b"original"
++    );
++    assert!(table.get(2)?.is_none());
++    assert!(table.get(3)?.is_none());
++    Ok(())
++}
++
++fn assert_reusable(database: &Database) -> TestResult {
++    assert_original(database)?;
++    let transaction = database.begin_write()?;
++    transaction
++        .open_table(TABLE)?
++        .insert(4, b"later writer".as_slice())?;
++    transaction.commit()?;
++    Ok(())
++}
++
++#[test]
++fn allocation_refusal_can_explicitly_abort_and_reuse_the_database() -> TestResult {
++    let file = tempfile::NamedTempFile::new()?;
++    let database = seeded(&file)?;
++    let pinned = database.begin_read()?;
++    let transaction = database.begin_write_allocation_probe(8192)?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        table.insert(2, b"tentative".as_slice())?;
++        assert_eq!(
++            table.get(2)?.ok_or("missing tentative row")?.value(),
++            b"tentative"
++        );
++        let large = vec![7; 65536];
++        assert!(matches!(
++            table.insert(3, large.as_slice()),
++            Err(StorageError::AllocationProbe(
++                AllocationProbeRefusal::Exhausted
++            ))
++        ));
++    }
++    transaction.abort()?;
++    assert_eq!(
++        pinned
++            .open_table(TABLE)?
++            .get(1)?
++            .ok_or("missing pinned row")?
++            .value(),
++        b"original"
++    );
++    assert_reusable(&database)?;
++    drop(pinned);
++    drop(database);
++    let reopened = Database::open(file.path())?;
++    assert_original(&reopened)?;
++    assert_eq!(
++        reopened
++            .begin_read()?
++            .open_table(TABLE)?
++            .get(4)?
++            .ok_or("missing later row")?
++            .value(),
++        b"later writer"
++    );
++    Ok(())
++}
++
++#[test]
++fn ignored_allocation_refusal_cannot_commit_or_poison_the_next_writer() -> TestResult {
++    let file = tempfile::NamedTempFile::new()?;
++    let database = seeded(&file)?;
++    let transaction = database.begin_write_allocation_probe(8192)?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        table.insert(2, b"tentative".as_slice())?;
++        let large = vec![7; 65536];
++        assert!(matches!(
++            table.insert(3, large.as_slice()),
++            Err(StorageError::AllocationProbe(
++                AllocationProbeRefusal::Exhausted
++            ))
++        ));
++        assert!(matches!(
++            table.insert(3, large.as_slice()),
++            Err(StorageError::AllocationProbe(
++                AllocationProbeRefusal::Exhausted
++            ))
++        ));
++    }
++    assert!(matches!(
++        transaction.commit(),
++        Err(CommitError::AllocationProbe(
++            AllocationProbeRefusal::Exhausted
++        ))
++    ));
++    assert_reusable(&database)?;
++    drop(database);
++    assert_original(&Database::open(file.path())?)?;
++    Ok(())
++}
++
++#[test]
++fn unexhausted_probe_commit_aborts_without_entering_publication() -> TestResult {
++    let file = tempfile::NamedTempFile::new()?;
++    let database = seeded(&file)?;
++    let transaction = database.begin_write_allocation_probe(1024 * 1024)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"tentative".as_slice())?;
++    assert!(matches!(
++        transaction.commit(),
++        Err(CommitError::AllocationProbe(
++            AllocationProbeRefusal::CommitUnavailable
++        ))
++    ));
++    assert_reusable(&database)?;
++    Ok(())
++}
++
++#[test]
++fn zero_budget_refuses_the_first_copy_on_write_allocation() -> TestResult {
++    let file = tempfile::NamedTempFile::new()?;
++    let database = seeded(&file)?;
++    let transaction = database.begin_write_allocation_probe(0)?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        assert!(matches!(
++            table.insert(2, b"tentative".as_slice()),
++            Err(StorageError::AllocationProbe(
++                AllocationProbeRefusal::Exhausted
++            ))
++        ));
++    }
++    transaction.abort()?;
++    assert_reusable(&database)?;
++    Ok(())
++}
++
++#[test]
++fn allocation_limit_is_shared_by_tables_in_the_same_transaction() -> TestResult {
++    const OTHER: TableDefinition<u64, &[u8]> = TableDefinition::new("other");
++    let file = tempfile::NamedTempFile::new()?;
++    let database = seeded(&file)?;
++    let seed = database.begin_write()?;
++    seed.open_table(OTHER)?
++        .insert(1, b"other original".as_slice())?;
++    seed.commit()?;
++    let transaction = database.begin_write_allocation_probe(4096)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"tentative".as_slice())?;
++    {
++        let mut other = transaction.open_table(OTHER)?;
++        assert!(matches!(
++            other.insert(2, b"must refuse".as_slice()),
++            Err(StorageError::AllocationProbe(
++                AllocationProbeRefusal::Exhausted
++            ))
++        ));
++    }
++    transaction.abort()?;
++    assert_reusable(&database)?;
++    let read = database.begin_read()?;
++    let other = read.open_table(OTHER)?;
++    assert_eq!(
++        other.get(1)?.ok_or("missing other original")?.value(),
++        b"other original"
++    );
++    assert!(other.get(2)?.is_none());
++    Ok(())
++}
++
++#[test]
++fn refusal_during_a_branch_update_preserves_the_entire_old_tree() -> TestResult {
++    let file = tempfile::NamedTempFile::new()?;
++    let database = seeded(&file)?;
++    let seed = database.begin_write()?;
++    let value = [9; 128];
++    {
++        let mut table = seed.open_table(TABLE)?;
++        for key in 10..210 {
++            table.insert(key, value.as_slice())?;
++        }
++    }
++    seed.commit()?;
++    let pinned = database.begin_read()?;
++    let transaction = database.begin_write_allocation_probe(4096)?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        assert!(matches!(
++            table.insert(100, b"replacement".as_slice()),
++            Err(StorageError::AllocationProbe(
++                AllocationProbeRefusal::Exhausted
++            ))
++        ));
++    }
++    transaction.abort()?;
++    for read in [pinned, database.begin_read()?] {
++        let table = read.open_table(TABLE)?;
++        for key in 10..210 {
++            assert_eq!(table.get(key)?.ok_or("missing seeded row")?.value(), value);
++        }
++    }
++    assert_reusable(&database)?;
++    drop(database);
++    let reopened = Database::open(file.path())?;
++    let read = reopened.begin_read()?;
++    let table = read.open_table(TABLE)?;
++    for key in 10..210 {
++        assert_eq!(
++            table.get(key)?.ok_or("missing reopened row")?.value(),
++            value
++        );
++    }
++    Ok(())
++}

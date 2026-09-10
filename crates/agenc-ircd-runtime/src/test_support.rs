@@ -5,6 +5,8 @@
 //! with deterministic clocks and scripted entropy. Tests reach the live
 //! `StateCoreContext` through `context_mut`.
 
+mod audit;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -495,6 +497,30 @@ fn edge_router(
 }
 
 impl StateCoreFixture {
+    /// Stops the storage owner and reconstructs a registration core from the same directory.
+    pub(crate) fn restart_registration_storage(&mut self, entropy: Vec<u8>) -> TestResult {
+        drop(self.state.take());
+        drop(self.storage_receivers.take());
+        drop(self.crypto_completions.take());
+        let owner = self.owner.take().ok_or("storage owner")?;
+        owner.shutdown()?;
+        let qualification = signed_test_qualification(StateDirectory::probe(&self._directory.0)?)?;
+        let mut owner = open_test_storage(&self.identity, &self._directory, &qualification)?;
+        let router = registration_router(
+            &self.identity,
+            &self.opaque,
+            self.key_state,
+            "server.example",
+        )?;
+        let (state, storage_receivers, crypto_completions) =
+            compose_test_state(&mut owner, entropy, Box::new(router), true)?;
+        self.owner = Some(owner);
+        self.state = Some(state);
+        self.storage_receivers = Some(storage_receivers);
+        self.crypto_completions = Some(crypto_completions);
+        Ok(())
+    }
+
     /// Exercises the daemon's authenticated edge reload against this fixture's storage.
     pub(crate) fn restore_edge_state(
         &self,
@@ -512,7 +538,13 @@ impl StateCoreFixture {
             &owner.port(),
             &keys,
             companion,
-            crate::state_core::durable::HeadCounters::from_recovered(recovered),
+            self.state.as_ref().map_or_else(
+                || crate::state_core::durable::HeadCounters::from_recovered(recovered),
+                |state| state.context().head(),
+            ),
+            self.state
+                .as_ref()
+                .map(|state| state.context().backing_reservations()),
         )?;
         Ok(())
     }
@@ -559,7 +591,13 @@ impl StateCoreFixture {
         else {
             return Err("image commit refused".into());
         };
-        edge.restore(&owner.port(), &keys, companion, retained.advance(&receipt))?;
+        edge.restore(
+            &owner.port(),
+            &keys,
+            companion,
+            retained.advance(&receipt),
+            Some(context.backing_reservations()),
+        )?;
         Ok(())
     }
 
@@ -735,7 +773,8 @@ impl StateCoreFixture {
                 let mut coordinator = federation_coordinator(&identity, peers)?;
                 if let Some(setup) = companion {
                     coordinator.set_companion_profile(Some(setup.profile));
-                    coordinator.install_companion_executor(setup.executor);
+                    coordinator
+                        .install_companion_executor(setup.executor, identity.server_incarnation)?;
                 }
                 Box::new(
                     registration_router(&identity, &opaque, key_state, prefix)?
@@ -798,6 +837,15 @@ impl StateCoreFixture {
     /// The live context owned by the core.
     pub(crate) fn context_mut(&mut self) -> Result<&mut StateCoreContext, RuntimeError> {
         Ok(self.state_mut()?.context_mut())
+    }
+}
+
+impl StateCoreFixture {
+    /// Settles one staged component batch through storage and authenticated readback.
+    pub(crate) async fn commit_staged_batch(&mut self) -> TestResult {
+        let state = self.state.as_mut().ok_or("state")?;
+        let (storage, reads, _) = self.storage_receivers.as_mut().ok_or("storage receivers")?;
+        state.commit_fixture_batch(storage, reads).await
     }
 }
 
@@ -1132,7 +1180,8 @@ impl ClientSink for FrameSink {
     }
 
     fn queue_snapshot(&self) -> ClientQueueSnapshot {
-        ClientQueueSnapshot::default()
+        // Recorded frames have already drained from this nonblocking test sink.
+        ClientQueueSnapshot::new(0, 1_048_576)
     }
 }
 

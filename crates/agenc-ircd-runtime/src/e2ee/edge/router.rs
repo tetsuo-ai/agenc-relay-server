@@ -19,7 +19,7 @@ use agenc_ircd_types::ChannelInstanceId;
 
 use crate::connection::ConnectionGeneration;
 
-use super::{ClientOutput, E2eeEdge, Ingress, PendingRequest, Phase, SessionFacts};
+use super::{ClientOutput, E2eeEdge, Ingress, PendingRequest, SessionFacts};
 use crate::federation::edge::EdgeFederation;
 use crate::state_core::StateCoreContext;
 
@@ -172,7 +172,7 @@ impl E2eeEdge {
         if !facts.capabilities.enabled(E2EE_CAPABILITY) {
             return Err(E2eeReplyCode::CapRequired.into());
         }
-        if self.phase != Phase::Active {
+        if !self.is_active() {
             return Err(E2eeReplyCode::Syncing.into());
         }
         let command = self.parse_line(edge, message)?;

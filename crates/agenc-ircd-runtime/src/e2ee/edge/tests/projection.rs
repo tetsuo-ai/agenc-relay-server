@@ -387,3 +387,6 @@ async fn refused_snapshot_storage_keeps_the_previous_delivery_generation() -> Te
 
 #[path = "witness_restart.rs"]
 mod witness_restart;
+
+#[path = "witness_persistence.rs"]
+mod witness_persistence;

@@ -241,6 +241,17 @@ impl StorageMutationBatch {
         Self::new_for_scope(head, plan_count, accounting, mutations, MutationScope::Live)
     }
 
+    /// Checks and orders the exact live mutation contents without allocating a
+    /// transaction identity. The final constructor repeats this same validation.
+    /// `LimitExceeded` here denotes only a count, byte, or accounting ceiling;
+    /// malformed contents retain their specific non-resource error.
+    pub fn preflight_contents(
+        accounting: StorageAccountingLimits,
+        mutations: &mut [RecordMutation],
+    ) -> Result<(), StorageError> {
+        mutation_content(accounting, mutations, MutationScope::Live).map(|_| ())
+    }
+
     /// Builds an authentication-finish batch containing one exact lazy index migration.
     pub fn new_login_index_lazy(
         head: StorageMutationHead,
@@ -338,83 +349,7 @@ impl StorageMutationBatch {
         if response_delta > u64::try_from(plan_count).map_err(|_| StorageError::Overflow)? {
             return Err(StorageError::InvalidEncoding);
         }
-        mutations.sort_by(|left, right| {
-            (left.table(), left.key().as_bytes()).cmp(&(right.table(), right.key().as_bytes()))
-        });
-        let mut identities = BTreeSet::new();
-        let mut puts = 0_usize;
-        let mut logical = accounting.current_logical_database_bytes;
-        let mut backup = accounting.current_backup_stream_bytes;
-        let mut owned_bytes = 0_usize;
-        let mut tracked_mutation_bytes = 0_usize;
-        for mutation in &mutations {
-            if (
-                !mutation.table().is_integrity_tracked(),
-                (scope, mutation.table()) == (MutationScope::Live, TableId::StorageConstruction),
-            ) != (false, false)
-            {
-                return Err(StorageError::InvalidEncoding);
-            }
-            let identity = (mutation.table(), mutation.key().as_bytes());
-            if !identities.insert(identity) {
-                return Err(StorageError::InvalidEncoding);
-            }
-            let key_len = mutation.key().as_bytes().len();
-            owned_bytes = owned_bytes
-                .checked_add(key_len)
-                .and_then(|value| value.checked_add(mutation.plaintext().map_or(0, <[u8]>::len)))
-                .ok_or(StorageError::Overflow)?;
-            if let Some(before) = mutation.before() {
-                let before_bytes = usize::try_from(before.sealed_record_bytes)
-                    .map_err(|_| StorageError::Overflow)?;
-                tracked_mutation_bytes = tracked_mutation_bytes
-                    .checked_add(before_bytes)
-                    .ok_or(StorageError::Overflow)?;
-                logical = logical
-                    .checked_sub(logical_record_charge(key_len, before_bytes)?)
-                    .ok_or(StorageError::StaleState)?;
-                backup = backup
-                    .checked_sub(backup_record_charge(key_len, before_bytes)?)
-                    .ok_or(StorageError::StaleState)?;
-            }
-            if let Some(after_bytes) = mutation.resulting_sealed_bytes()? {
-                tracked_mutation_bytes = tracked_mutation_bytes
-                    .checked_add(after_bytes)
-                    .ok_or(StorageError::Overflow)?;
-                puts = puts.checked_add(1).ok_or(StorageError::Overflow)?;
-                logical = logical
-                    .checked_add(logical_record_charge(key_len, after_bytes)?)
-                    .ok_or(StorageError::Overflow)?;
-                backup = backup
-                    .checked_add(backup_record_charge(key_len, after_bytes)?)
-                    .ok_or(StorageError::Overflow)?;
-            }
-            tracked_mutation_bytes = tracked_mutation_bytes
-                .checked_add(key_len)
-                .ok_or(StorageError::Overflow)?;
-        }
-        let manifest_plaintext_bytes = manifest_plaintext_bytes(&mutations)?;
-        let manifest_sealed_bytes = manifest_plaintext_bytes
-            .checked_add(MIN_SEALED_RECORD_BYTES)
-            .ok_or(StorageError::Overflow)?;
-        logical = logical
-            .checked_add(logical_record_charge(8, manifest_sealed_bytes)?)
-            .ok_or(StorageError::Overflow)?;
-        backup = backup
-            .checked_add(backup_record_charge(8, manifest_sealed_bytes)?)
-            .ok_or(StorageError::Overflow)?;
-        // Every mutation that reached this point is integrity tracked and the batch is non-empty,
-        // so the tracked count needs no separate check.
-        if (
-            owned_bytes > MAX_STORAGE_MUTATION_BATCH_BYTES,
-            tracked_mutation_bytes > MAX_TRACKED_MUTATION_BYTES,
-            logical > accounting.database_max_bytes,
-            backup > accounting.backup_max_bytes,
-        ) != (false, false, false, false)
-        {
-            return Err(StorageError::LimitExceeded);
-        }
-        let seal_count = puts.checked_add(2).ok_or(StorageError::Overflow)?;
+        let content = mutation_content(accounting, &mut mutations, scope)?;
         Ok(Self {
             transaction_id: head.transaction_id,
             expected_storage_commit_sequence: head.expected_storage_commit_sequence,
@@ -424,11 +359,11 @@ impl StorageMutationBatch {
             expected_account_service_response_count: head.expected_account_service_response_count,
             resulting_account_service_response_count: head.resulting_account_service_response_count,
             plan_count: u16::try_from(plan_count).map_err(|_| StorageError::Overflow)?,
-            seal_count: u32::try_from(seal_count).map_err(|_| StorageError::Overflow)?,
+            seal_count: content.seal_count,
             expected_logical_database_bytes: accounting.current_logical_database_bytes,
             expected_backup_stream_bytes: accounting.current_backup_stream_bytes,
-            resulting_logical_database_bytes: logical,
-            resulting_backup_stream_bytes: backup,
+            resulting_logical_database_bytes: content.logical,
+            resulting_backup_stream_bytes: content.backup,
             mutations,
             fault_site: None,
         })
@@ -525,6 +460,134 @@ impl StorageMutationBatch {
 
     pub(crate) const fn fault_site(&self) -> Option<StorageFaultSite> {
         self.fault_site
+    }
+}
+
+struct MutationContent {
+    logical: u64,
+    backup: u64,
+    seal_count: u32,
+}
+
+struct ContentAccounting {
+    logical: u64,
+    backup: u64,
+    puts: usize,
+    owned: usize,
+    tracked: usize,
+}
+
+fn mutation_content(
+    accounting: StorageAccountingLimits,
+    mutations: &mut [RecordMutation],
+    scope: MutationScope,
+) -> Result<MutationContent, StorageError> {
+    if mutations.is_empty() {
+        return Err(StorageError::InvalidEncoding);
+    }
+    if mutations.len() > MAX_TRACKED_MUTATIONS {
+        return Err(StorageError::LimitExceeded);
+    }
+    mutations.sort_by(|left, right| {
+        (left.table(), left.key().as_bytes()).cmp(&(right.table(), right.key().as_bytes()))
+    });
+    let mut previous = None;
+    let mut totals = ContentAccounting {
+        logical: accounting.current_logical_database_bytes,
+        backup: accounting.current_backup_stream_bytes,
+        puts: 0,
+        owned: 0,
+        tracked: 0,
+    };
+    for mutation in mutations.iter() {
+        let identity = (mutation.table(), mutation.key().as_bytes());
+        if !mutation.table().is_integrity_tracked()
+            || (scope, mutation.table()) == (MutationScope::Live, TableId::StorageConstruction)
+            || previous == Some(identity)
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        previous = Some(identity);
+        totals.add(mutation)?;
+    }
+    totals.finish(accounting, mutations)
+}
+
+impl ContentAccounting {
+    fn add(&mut self, mutation: &RecordMutation) -> Result<(), StorageError> {
+        let key_len = mutation.key().as_bytes().len();
+        self.owned = self
+            .owned
+            .checked_add(key_len)
+            .and_then(|value| value.checked_add(mutation.plaintext().map_or(0, <[u8]>::len)))
+            .ok_or(StorageError::Overflow)?;
+        if let Some(before) = mutation.before() {
+            let before_bytes =
+                usize::try_from(before.sealed_record_bytes).map_err(|_| StorageError::Overflow)?;
+            self.tracked = self
+                .tracked
+                .checked_add(before_bytes)
+                .ok_or(StorageError::Overflow)?;
+            self.logical = self
+                .logical
+                .checked_sub(logical_record_charge(key_len, before_bytes)?)
+                .ok_or(StorageError::StaleState)?;
+            self.backup = self
+                .backup
+                .checked_sub(backup_record_charge(key_len, before_bytes)?)
+                .ok_or(StorageError::StaleState)?;
+        }
+        if let Some(after_bytes) = mutation.resulting_sealed_bytes()? {
+            self.tracked = self
+                .tracked
+                .checked_add(after_bytes)
+                .ok_or(StorageError::Overflow)?;
+            self.puts = self.puts.checked_add(1).ok_or(StorageError::Overflow)?;
+            self.logical = self
+                .logical
+                .checked_add(logical_record_charge(key_len, after_bytes)?)
+                .ok_or(StorageError::Overflow)?;
+            self.backup = self
+                .backup
+                .checked_add(backup_record_charge(key_len, after_bytes)?)
+                .ok_or(StorageError::Overflow)?;
+        }
+        self.tracked = self
+            .tracked
+            .checked_add(key_len)
+            .ok_or(StorageError::Overflow)?;
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        accounting: StorageAccountingLimits,
+        mutations: &[RecordMutation],
+    ) -> Result<MutationContent, StorageError> {
+        let manifest_bytes = manifest_plaintext_bytes(mutations)?
+            .checked_add(MIN_SEALED_RECORD_BYTES)
+            .ok_or(StorageError::Overflow)?;
+        self.logical = self
+            .logical
+            .checked_add(logical_record_charge(8, manifest_bytes)?)
+            .ok_or(StorageError::Overflow)?;
+        self.backup = self
+            .backup
+            .checked_add(backup_record_charge(8, manifest_bytes)?)
+            .ok_or(StorageError::Overflow)?;
+        if self.owned > MAX_STORAGE_MUTATION_BATCH_BYTES
+            || self.tracked > MAX_TRACKED_MUTATION_BYTES
+            || self.logical > accounting.database_max_bytes
+            || self.backup > accounting.backup_max_bytes
+        {
+            return Err(StorageError::LimitExceeded);
+        }
+        let seals = self.puts.checked_add(2).ok_or(StorageError::Overflow)?;
+        Ok(MutationContent {
+            logical: self.logical,
+            backup: self.backup,
+            seal_count: u32::try_from(seals).map_err(|_| StorageError::Overflow)?,
+        })
     }
 }
 
@@ -762,6 +825,111 @@ mod tests {
         assert_eq!(
             manifest_plaintext_bytes(&mutations),
             Err(StorageError::LimitExceeded),
+        );
+        Ok(())
+    }
+    fn preflight_row(before: Option<ExistingRecord>) -> Result<RecordMutation, StorageError> {
+        RecordMutation::put(
+            TableId::Sanction,
+            StoredKey::new(vec![1; 18])?,
+            1,
+            before,
+            vec![7; 64],
+        )
+    }
+
+    fn preflight_head() -> StorageMutationHead {
+        StorageMutationHead {
+            transaction_id: TransactionId::from_bytes([8; 16]),
+            expected_storage_commit_sequence: 0,
+            expected_state_generation: 0,
+            resulting_state_generation: 1,
+            state_advancing_plan_count: 1,
+            expected_account_service_response_count: 0,
+            resulting_account_service_response_count: 0,
+        }
+    }
+
+    #[test]
+    fn exact_preflight_and_constructor_share_logical_and_backup_boundaries()
+    -> Result<(), StorageError> {
+        let generous = StorageAccountingLimits {
+            current_logical_database_bytes: 0,
+            current_backup_stream_bytes: 0,
+            database_max_bytes: u64::MAX,
+            backup_max_bytes: u64::MAX,
+        };
+        let measured =
+            StorageMutationBatch::new(preflight_head(), 1, generous, vec![preflight_row(None)?])?;
+        let exact = StorageAccountingLimits {
+            database_max_bytes: measured.resulting_logical_database_bytes(),
+            backup_max_bytes: measured.resulting_backup_stream_bytes(),
+            ..generous
+        };
+        for (limits, accepted) in [
+            (exact, true),
+            (
+                StorageAccountingLimits {
+                    database_max_bytes: exact
+                        .database_max_bytes
+                        .checked_sub(1)
+                        .ok_or(StorageError::Overflow)?,
+                    ..exact
+                },
+                false,
+            ),
+            (
+                StorageAccountingLimits {
+                    backup_max_bytes: exact
+                        .backup_max_bytes
+                        .checked_sub(1)
+                        .ok_or(StorageError::Overflow)?,
+                    ..exact
+                },
+                false,
+            ),
+        ] {
+            let preflight =
+                StorageMutationBatch::preflight_contents(limits, &mut [preflight_row(None)?]);
+            let actual =
+                StorageMutationBatch::new(preflight_head(), 1, limits, vec![preflight_row(None)?]);
+            assert_eq!(preflight.is_ok(), accepted);
+            assert_eq!(actual.is_ok(), accepted);
+            if !accepted {
+                assert_eq!(preflight, Err(StorageError::LimitExceeded));
+                assert_eq!(actual.err(), Some(StorageError::LimitExceeded));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_preflight_preserves_malformed_identity_and_before_image_errors()
+    -> Result<(), StorageError> {
+        let limits = StorageAccountingLimits {
+            current_logical_database_bytes: 0,
+            current_backup_stream_bytes: 0,
+            database_max_bytes: u64::MAX,
+            backup_max_bytes: u64::MAX,
+        };
+        let mut duplicate = vec![preflight_row(None)?, preflight_row(None)?];
+        assert_eq!(
+            StorageMutationBatch::preflight_contents(limits, &mut duplicate),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            StorageMutationBatch::new(preflight_head(), 1, limits, duplicate).err(),
+            Some(StorageError::InvalidEncoding)
+        );
+        let before = ExistingRecord::new(1, StorageDigest::from_bytes([4; 32]), 256)?;
+        let mut invalid_before = vec![preflight_row(Some(before))?];
+        assert_eq!(
+            StorageMutationBatch::preflight_contents(limits, &mut invalid_before),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            StorageMutationBatch::new(preflight_head(), 1, limits, invalid_before).err(),
+            Some(StorageError::StaleState)
         );
         Ok(())
     }

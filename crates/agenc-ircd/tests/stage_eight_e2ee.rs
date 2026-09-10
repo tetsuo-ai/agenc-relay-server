@@ -4,6 +4,7 @@
 //! fail-closed partition behaviour of an edge.
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
@@ -11,8 +12,8 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -93,13 +94,28 @@ const BACKUP_MAX_BYTES: u64 = 2_147_483_648;
 const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[path = "stage_eight_e2ee/close_authority.rs"]
+mod close_authority;
+#[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
+mod stage_ten_capacity;
+#[path = "stage_eight_e2ee/stage_ten_drills.rs"]
+mod stage_ten_drills;
+#[path = "stage_eight_e2ee/stage_ten_login_index.rs"]
+mod stage_ten_login_index;
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 /// The edge registers a client only once its coordinator link is ACTIVE;
 /// registration attempts before that fail closed and are retried.
 const NETWORK_WAIT: Duration = Duration::from_secs(60);
+const TRANSCRIPT_LINES: usize = 256;
+const REPLY_DEADLINE: Duration = Duration::from_secs(60);
 const NETWORK_ID: NetworkId = NetworkId::from_bytes([1; 32]);
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+// Claims outlive the probe sockets and every fixture restart. Parallel fixture
+// builders cannot choose an address already assigned elsewhere in this process.
+static LOOPBACK_ADDRESS_CLAIMS: Mutex<BTreeSet<SocketAddr>> = Mutex::new(BTreeSet::new());
+const LOOPBACK_ADDRESS_ATTEMPTS: usize = 128;
 
 fn failure(message: impl Into<String>) -> TestError {
     message.into().into()
@@ -162,10 +178,121 @@ fn write_trust_manifest(
 }
 
 fn reserve_loopback_address() -> TestResult<SocketAddr> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let address = listener.local_addr()?;
-    drop(listener);
-    Ok(address)
+    let mut claims = LOOPBACK_ADDRESS_CLAIMS
+        .lock()
+        .map_err(|_| failure("loopback address claims are poisoned"))?;
+    reserve_loopback_address_with(&mut claims, || {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        Ok(address)
+    })
+}
+
+fn reserve_loopback_address_with(
+    claims: &mut BTreeSet<SocketAddr>,
+    mut select: impl FnMut() -> TestResult<SocketAddr>,
+) -> TestResult<SocketAddr> {
+    for _ in 0..LOOPBACK_ADDRESS_ATTEMPTS {
+        let address = select()?;
+        if claims.insert(address) {
+            return Ok(address);
+        }
+    }
+    Err(failure(
+        "loopback address selection exhausted its distinct candidates",
+    ))
+}
+
+#[test]
+fn loopback_address_selection_skips_every_prior_fixture_claim() -> TestResult {
+    let first: SocketAddr = "127.0.0.1:32000".parse()?;
+    let second: SocketAddr = "127.0.0.1:32001".parse()?;
+    let mut candidates = [first, first, second].into_iter();
+    let mut select = || {
+        candidates
+            .next()
+            .ok_or_else(|| failure("selector exhausted"))
+    };
+    let mut claims = BTreeSet::new();
+    assert_eq!(
+        reserve_loopback_address_with(&mut claims, &mut select)?,
+        first
+    );
+    assert_eq!(
+        reserve_loopback_address_with(&mut claims, &mut select)?,
+        second
+    );
+    assert_eq!(claims.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn loopback_address_selection_bounds_repeated_candidates() -> TestResult {
+    let address: SocketAddr = "127.0.0.1:32000".parse()?;
+    let mut claims = BTreeSet::from([address]);
+    let mut attempts = 0;
+    let result = reserve_loopback_address_with(&mut claims, || {
+        attempts += 1;
+        Ok(address)
+    });
+    assert!(
+        result.is_err(),
+        "an already claimed endpoint must never be returned"
+    );
+    assert_eq!(attempts, LOOPBACK_ADDRESS_ATTEMPTS);
+    assert_eq!(claims, BTreeSet::from([address]));
+    Ok(())
+}
+
+#[test]
+fn loopback_address_selection_preserves_binding_errors_and_claims() -> TestResult {
+    let address: SocketAddr = "127.0.0.1:32000".parse()?;
+    let mut claims = BTreeSet::from([address]);
+    let mut attempts = 0;
+    let error = reserve_loopback_address_with(&mut claims, || {
+        attempts += 1;
+        Err(io::Error::from(io::ErrorKind::PermissionDenied).into())
+    })
+    .err()
+    .ok_or_else(|| failure("binding error was discarded"))?;
+    assert_eq!(
+        error.downcast_ref::<io::Error>().map(io::Error::kind),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(attempts, 1);
+    assert_eq!(claims, BTreeSet::from([address]));
+    Ok(())
+}
+
+#[test]
+fn loopback_address_claims_are_unique_across_parallel_fixtures() -> TestResult {
+    let addresses = thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..16)
+                        .map(|_| reserve_loopback_address())
+                        .collect::<TestResult<Vec<_>>>()
+                })
+            })
+            .collect();
+        let mut addresses = BTreeSet::new();
+        for worker in workers {
+            for address in worker
+                .join()
+                .map_err(|_| failure("address worker failed"))??
+            {
+                assert!(
+                    addresses.insert(address),
+                    "parallel fixtures reused {address}"
+                );
+            }
+        }
+        Ok::<_, TestError>(addresses)
+    })?;
+    assert_eq!(addresses.len(), 64);
+    Ok(())
 }
 
 fn replace_once(document: &mut String, old: &str, new: &str) -> TestResult {
@@ -247,6 +374,15 @@ struct NodeFixture {
     public_address: SocketAddr,
     dns_name: String,
     client_tls: TlsFixture,
+    /// The identity seed, admin socket, key material, and directories the
+    /// Stage 10 campaign and drills need to operate the node like an operator.
+    seed: u8,
+    server_id: ServerId,
+    admin_socket: PathBuf,
+    data_dir: PathBuf,
+    operator_id: OperatorId,
+    /// The federation listener this node binds; only the coordinator has one.
+    federation_listener: Option<SocketAddr>,
 }
 
 struct NodePlan<'a> {
@@ -254,6 +390,19 @@ struct NodePlan<'a> {
     coordinator: &'a NodeIdentity,
     federation_address: Option<SocketAddr>,
     peers: &'a [&'a NodeIdentity],
+    /// Stage 10 campaign settings; `None` keeps the Stage 08 configuration.
+    capacity: Option<CapacityPlan>,
+}
+
+/// Overrides the campaign applies on top of the Stage 08 configuration.
+#[derive(Clone, Copy)]
+struct CapacityPlan {
+    /// Client listener ceiling.
+    max_connections: u64,
+    /// Direct connections admitted from one address. Every campaign client
+    /// arrives from loopback, so the per-address abuse ceiling must clear the
+    /// per-edge share of the campaign or half the clients are refused.
+    connections_per_address: u64,
 }
 
 impl NodeFixture {
@@ -392,6 +541,9 @@ impl NodeFixture {
         };
         let mut config = render_template(&values)?;
         apply_common_overrides(&mut config, public_address, uid)?;
+        if let Some(capacity) = plan.capacity {
+            apply_capacity_overrides(&mut config, capacity)?;
+        }
         apply_federation_overrides(&mut config, plan, &tls_dir, &ca_path)?;
         let sequencer = Ed25519SecretKey::from_bytes([plan.coordinator.seed.wrapping_add(15); 32]);
         let credentials = builders::sequencer_credentials_document(
@@ -411,6 +563,15 @@ impl NodeFixture {
             public_address,
             dns_name,
             client_tls,
+            seed,
+            server_id: identity.server_id,
+            admin_socket: runtime_dir.join("admin.sock"),
+            data_dir,
+            operator_id,
+            federation_listener: match plan.identity.role {
+                NodeRole::Coordinator => plan.federation_address,
+                _ => None,
+            },
         })
     }
 
@@ -494,6 +655,39 @@ fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> 
     )
 }
 
+/// Enables the local admin socket and raises the client ceiling for the
+/// Stage 10 campaign; nothing else differs from the Stage 08 node.
+fn apply_capacity_overrides(config: &mut String, capacity: CapacityPlan) -> TestResult {
+    replace_once(
+        config,
+        "enabled = false\npurpose = \"admin_local\"",
+        "enabled = true\npurpose = \"admin_local\"",
+    )?;
+    replace_once(
+        config,
+        "max_connections = 32\n",
+        &format!("max_connections = {}\n", capacity.max_connections),
+    )?;
+    replace_once(
+        config,
+        "# direct_connections_per_address = 16 (1..256)\n",
+        &format!(
+            "direct_connections_per_address = {}\n",
+            capacity.connections_per_address
+        ),
+    )?;
+    // New-connection and handshake buckets are keyed by the source /24, which
+    // every campaign client shares; both sit at their configuration maxima.
+    // The pre-authentication bucket is already at its maximum, so the
+    // campaign paces registrations under it instead.
+    replace_once(
+        config,
+        "\n[privacy]",
+        "\n[limits.rate.new_direct]\nrefill_tokens = 16\nrefill_seconds = 1\nburst = 64\n\n\
+[limits.rate.tls_handshake]\nrefill_tokens = 32\nrefill_seconds = 1\nburst = 128\n\n[privacy]",
+    )
+}
+
 /// Enables federation: the private CA bundle, the peer table, and the
 /// federation listener entry. A coordinator serves the listener; an edge
 /// keeps it disabled and dials with its certificate (spec C.3).
@@ -555,6 +749,34 @@ fn initialize_database(
     login_index: [u8; 32],
     opaque: &OpaqueProfile,
 ) -> TestResult {
+    let header = DatabaseHeaderTbs::new(
+        NETWORK_ID,
+        identity.server_id,
+        identity.incarnation,
+        database_id,
+        1,
+        SCHEMA_GENERATION,
+        identity.recovery_epoch,
+    )?;
+    initialize_database_with_header(
+        state_dir,
+        header,
+        storage_master,
+        rollback_guard,
+        login_index,
+        opaque.expose_fake_record_for_persistence(),
+    )
+}
+
+/// Initializes a current-format fixture database under the supplied header.
+fn initialize_database_with_header(
+    state_dir: &Path,
+    header: DatabaseHeaderTbs,
+    storage_master: [u8; 32],
+    rollback_guard: [u8; 32],
+    login_index: [u8; 32],
+    fake_record: &[u8],
+) -> TestResult {
     let login_key = LoginIndexKey::from_bytes(login_index);
     let key_state = LoginIndexKeyState::stable(1, login_key.key_id(NETWORK_ID))?;
     let key_state_record = InitialStorageRecord::new(
@@ -570,7 +792,7 @@ fn initialize_database(
         0,
         None,
         Vec::new(),
-        opaque.expose_fake_record_for_persistence().to_vec(),
+        fake_record.to_vec(),
     )?;
     let fake_record = InitialStorageRecord::new(
         TableId::OpaqueRecord,
@@ -580,17 +802,9 @@ fn initialize_database(
     )?;
     let qualifications = embedded_storage_qualifications()?;
     let state_directory = StateDirectory::open(state_dir, &qualifications)?;
-    let outcome = initialize_storage(StorageInitializationConfig {
+    let config = StorageInitializationConfig {
         state_directory,
-        header_tbs: DatabaseHeaderTbs::new(
-            NETWORK_ID,
-            identity.server_id,
-            identity.incarnation,
-            database_id,
-            1,
-            SCHEMA_GENERATION,
-            identity.recovery_epoch,
-        )?,
+        header_tbs: header,
         storage_master_key: StorageMasterKey::from_bytes(storage_master),
         rollback_guard_root_key: RollbackGuardRootKey::from_bytes(rollback_guard),
         mode: StorageInitializationMode::Live,
@@ -606,7 +820,8 @@ fn initialize_database(
             backup_max_bytes: BACKUP_MAX_BYTES,
             integrity_checkpoint_manifests: 10_000,
         },
-    })?;
+    };
+    let outcome = initialize_storage(config)?;
     if !matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
         return Err(failure("storage initialization became indeterminate"));
     }
@@ -619,13 +834,57 @@ struct DaemonProcess {
 
 impl DaemonProcess {
     fn start(config_path: &Path) -> TestResult<Self> {
-        let child = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
-            .arg("serve")
-            .arg("--config")
-            .arg(config_path)
+        Self::start_in(config_path, None)
+    }
+
+    /// Starts the daemon, optionally inside a cgroup v2 leaf. The shell moves
+    /// itself into the leaf and then replaces itself with the daemon, so the
+    /// daemon keeps the pid the test signals and every page it charges lands
+    /// in the leaf.
+    fn start_in(config_path: &Path, cgroup_leaf: Option<&Path>) -> TestResult<Self> {
+        Self::start_logged(config_path, cgroup_leaf, None)
+    }
+
+    /// Like `start_in`, appending the daemon's stderr to `stderr_log` when one
+    /// is given, so a fail-closed exit keeps its reason with the campaign.
+    fn start_logged(
+        config_path: &Path,
+        cgroup_leaf: Option<&Path>,
+        stderr_log: Option<&Path>,
+    ) -> TestResult<Self> {
+        let daemon = env!("CARGO_BIN_EXE_agenc-ircd");
+        let mut command = match cgroup_leaf {
+            Some(leaf) => {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .arg("-c")
+                    .arg("printf '%d\\n' \"$$\" > \"$1/cgroup.procs\" && exec \"$2\" serve --config \"$3\"")
+                    .arg("agenc-campaign-node")
+                    .arg(leaf)
+                    .arg(daemon)
+                    .arg(config_path);
+                command
+            }
+            None => {
+                let mut command = Command::new(daemon);
+                command.arg("serve").arg("--config").arg(config_path);
+                command
+            }
+        };
+        let stderr = match stderr_log {
+            Some(path) => Stdio::from(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .mode(0o600)
+                    .open(path)?,
+            ),
+            None => Stdio::inherit(),
+        };
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(stderr)
             .spawn()?;
         Ok(Self { child: Some(child) })
     }
@@ -639,6 +898,33 @@ impl DaemonProcess {
         child.kill()?;
         let _status = child.wait()?;
         Ok(())
+    }
+
+    /// Waits for a daemon that was asked to stop through its admin socket.
+    fn wait(&mut self) -> TestResult<ExitStatus> {
+        self.wait_within(STOP_TIMEOUT)
+    }
+
+    /// Like `wait`, with a caller-chosen budget.
+    fn wait_within(&mut self, budget: Duration) -> TestResult<ExitStatus> {
+        let deadline = Instant::now() + budget;
+        loop {
+            let child = self
+                .child
+                .as_mut()
+                .ok_or_else(|| failure("daemon was already joined"))?;
+            if let Some(status) = child.try_wait()? {
+                self.child = None;
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                let _terminated = child.kill();
+                let _status = child.wait();
+                self.child = None;
+                return Err(failure("daemon did not stop within its total budget"));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     fn stop(&mut self) -> TestResult<ExitStatus> {
@@ -719,9 +1005,29 @@ impl IrcClient {
         Ok(())
     }
 
-    fn read_until(&mut self, mut complete: impl FnMut(&str) -> bool) -> TestResult<Vec<String>> {
+    fn read_until(&mut self, complete: impl FnMut(&str) -> bool) -> TestResult<Vec<String>> {
+        self.read_until_within(TRANSCRIPT_LINES, complete)
+    }
+
+    /// Reads until `complete` accepts a line, `limit` lines have arrived, or
+    /// `REPLY_DEADLINE` passes; probes inside a busy channel pass a limit that
+    /// covers the traffic interleaved before a reply, and the deadline keeps
+    /// a never-matching predicate from reading traffic forever.
+    fn read_until_within(
+        &mut self,
+        limit: usize,
+        mut complete: impl FnMut(&str) -> bool,
+    ) -> TestResult<Vec<String>> {
+        let deadline = Instant::now() + REPLY_DEADLINE;
         let mut lines = Vec::new();
-        for _ in 0..256 {
+        for _ in 0..limit {
+            if Instant::now() > deadline {
+                return Err(failure(format!(
+                    "reply did not arrive within {REPLY_DEADLINE:?}; first lines {:?}; last lines {:?}",
+                    lines.iter().take(5).collect::<Vec<_>>(),
+                    lines.iter().rev().take(3).collect::<Vec<_>>()
+                )));
+            }
             let mut line = String::new();
             let read = self.reader.read_line(&mut line).map_err(|error| {
                 failure(format!(
@@ -740,7 +1046,11 @@ impl IrcClient {
                 return Ok(lines);
             }
         }
-        Err(failure("reply exceeded the 256-line transcript bound"))
+        Err(failure(format!(
+            "reply exceeded the {limit}-line transcript bound; first lines {:?}; last lines {:?}",
+            lines.iter().take(5).collect::<Vec<_>>(),
+            lines.iter().rev().take(3).collect::<Vec<_>>()
+        )))
     }
 
     /// Registers `nickname`; a `NETWORK_UNAVAILABLE` refusal means the edge
@@ -868,6 +1178,11 @@ struct Network {
 }
 
 fn build_network() -> TestResult<Network> {
+    build_network_with(None)
+}
+
+/// One coordinator and two edges, optionally configured for the campaign.
+fn build_network_with(capacity: Option<CapacityPlan>) -> TestResult<Network> {
     let coordinator = NodeIdentity::new(20, NodeRole::Coordinator, "core.test")?;
     let edge_a = NodeIdentity::new(40, NodeRole::Edge, "edge-a.test")?;
     let edge_b = NodeIdentity::new(60, NodeRole::Edge, "edge-b.test")?;
@@ -878,18 +1193,21 @@ fn build_network() -> TestResult<Network> {
             coordinator: &coordinator,
             federation_address: Some(federation_address),
             peers: &[&edge_a, &edge_b],
+            capacity,
         })?,
         edge_a: NodeFixture::create(&NodePlan {
             identity: &edge_a,
             coordinator: &coordinator,
             federation_address: Some(federation_address),
             peers: &[&coordinator],
+            capacity,
         })?,
         edge_b: NodeFixture::create(&NodePlan {
             identity: &edge_b,
             coordinator: &coordinator,
             federation_address: Some(federation_address),
             peers: &[&coordinator],
+            capacity,
         })?,
     })
 }
@@ -1047,9 +1365,23 @@ fn opaque_identifiers<'a>(
     }
 }
 
+/// The start and finish request identities one account exchange consumes.
+/// Stage 08 tests derive them from one byte; the Stage 10 campaign supplies
+/// fresh identities so thousands of exchanges never replay a request.
+fn account_requests(request_seed: u8) -> TestResult<[RequestId; 2]> {
+    let finish_seed = request_seed
+        .checked_add(1)
+        .ok_or_else(|| failure("account request seed overflow"))?;
+    Ok([
+        RequestId::from_bytes([request_seed; 16]),
+        RequestId::from_bytes([finish_seed; 16]),
+    ])
+}
+
 fn seal_account_payload(
+    fixture: &NodeFixture,
     network_id: NetworkId,
-    request_seed: u8,
+    request: RequestId,
     payload: AccountRequestPayload,
 ) -> TestResult<(
     [u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
@@ -1059,15 +1391,90 @@ fn seal_account_payload(
     let public_key = private_key.public_key()?;
     let binding = AccountRequestBinding::new(
         network_id,
-        COORDINATOR_RECOVERY_EPOCH,
+        account_recovery_epoch(fixture, network_id)?,
         public_key.key_id(),
-        RequestId::from_bytes([request_seed; 16]),
+        request,
         payload.message_kind(),
     );
     let plaintext = encode_request_plaintext(&payload)?;
     let (sealed, token) = seal_account_request(public_key, binding, plaintext.expose_for_hpke())?;
     let envelope = AccountServiceEnvelope::from_sealed(sealed)?;
     Ok((*envelope.as_bytes(), token))
+}
+
+/// Uses the same validated epoch pin as the edge's coordinator trust record.
+fn account_recovery_epoch(
+    fixture: &NodeFixture,
+    network_id: NetworkId,
+) -> TestResult<RecoveryEpoch> {
+    let config = agenc_ircd_config::load_config(
+        &fixture.config_path,
+        agenc_ircd_config::ValidationDepth::Document,
+    )?;
+    if config.network.network_id != network_id {
+        return Err(failure("account request network differs from the fixture"));
+    }
+    config
+        .federation
+        .peers
+        .iter()
+        .find(|peer| {
+            peer.enabled
+                && peer.role == NodeRole::Coordinator
+                && peer.server_id == config.network.coordinator_server_id
+        })
+        .map(|peer| peer.recovery_epoch)
+        .ok_or_else(|| failure("fixture lacks an enabled coordinator epoch pin"))
+}
+
+#[test]
+fn account_envelopes_follow_the_current_coordinator_epoch_pin() -> TestResult {
+    let network = build_network()?;
+    let old_epoch = COORDINATOR_RECOVERY_EPOCH;
+    let new_epoch = RecoveryEpoch::from_bytes([215; 16]);
+    let private_key = AccountHpkePrivateKey::from_bytes(ACCOUNT_HPKE_PRIVATE)?;
+    let payload = || -> TestResult<AccountRequestPayload> {
+        Ok(AccountRequestPayload::AuthenticationFinish(
+            AuthenticationFinish {
+                network_id: NETWORK_ID,
+                transaction_id: agenc_ircd_types::TransactionId::from_bytes([217; 16]),
+                ke3: OpaqueKe3::from_bytes([0; agenc_ircd_auth::OPAQUE_KE3_BYTES])?,
+            },
+        ))
+    };
+    let (old_bytes, _) = seal_account_payload(
+        &network.edge_a,
+        NETWORK_ID,
+        RequestId::from_bytes([213; 16]),
+        payload()?,
+    )?;
+    stage_ten_capacity::repin_peer_epoch(
+        &network.edge_a,
+        network.coordinator.server_id,
+        &new_epoch.to_base64url(),
+    )?;
+    let (new_bytes, _) = seal_account_payload(
+        &network.edge_a,
+        NETWORK_ID,
+        RequestId::from_bytes([214; 16]),
+        payload()?,
+    )?;
+    let old_envelope = AccountServiceEnvelope::parse(old_bytes)?;
+    let new_envelope = AccountServiceEnvelope::parse(new_bytes)?;
+    let open = |epoch, envelope: &AccountServiceEnvelope| {
+        agenc_ircd_auth::open_and_parse_request(
+            &private_key,
+            epoch,
+            NETWORK_ID,
+            envelope.message_kind(),
+            envelope,
+        )
+    };
+    assert!(open(old_epoch, &old_envelope).is_ok());
+    assert!(open(new_epoch, &old_envelope).is_err());
+    assert!(open(new_epoch, &new_envelope).is_ok());
+    assert!(open(old_epoch, &new_envelope).is_err());
+    Ok(())
 }
 
 fn open_account_payload(
@@ -1353,18 +1760,29 @@ fn committed_account(completion: Completion, expected: Option<AccountId>) -> Tes
 
 fn create_live_account(
     client: &mut IrcClient,
-    _fixture: &NodeFixture,
+    fixture: &NodeFixture,
     login_name: &str,
     request_seed: u8,
 ) -> TestResult<AccountId> {
+    create_live_account_with(client, fixture, login_name, account_requests(request_seed)?)
+}
+
+fn create_live_account_with(
+    client: &mut IrcClient,
+    fixture: &NodeFixture,
+    login_name: &str,
+    requests: [RequestId; 2],
+) -> TestResult<AccountId> {
+    let [start_request, finish_request] = requests;
     let mut rng = TestOpaqueRng::new();
     let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
     let (start_envelope, start_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
-        request_seed,
+        start_request,
         AccountRequestPayload::CreationStart(CreationStart {
             network_id: NETWORK_ID,
             login: NormalizedLogin::prepare(login_name)?,
@@ -1406,12 +1824,10 @@ fn create_live_account(
     )?;
     rng.require_success()?;
 
-    let finish_seed = request_seed
-        .checked_add(1)
-        .ok_or_else(|| failure("creation request seed overflow"))?;
     let (finish_envelope, finish_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
-        finish_seed,
+        finish_request,
         AccountRequestPayload::CreationFinish(CreationFinish {
             network_id: NETWORK_ID,
             transaction_id,
@@ -1440,18 +1856,38 @@ fn create_live_account(
 
 fn authenticate_live_account(
     client: &mut IrcClient,
-    _fixture: &NodeFixture,
+    fixture: &NodeFixture,
     login_name: &str,
     password: &[u8],
     request_seed: u8,
     expected_account: AccountId,
 ) -> TestResult {
+    authenticate_live_account_with(
+        client,
+        fixture,
+        login_name,
+        password,
+        account_requests(request_seed)?,
+        expected_account,
+    )
+}
+
+fn authenticate_live_account_with(
+    client: &mut IrcClient,
+    fixture: &NodeFixture,
+    login_name: &str,
+    password: &[u8],
+    requests: [RequestId; 2],
+    expected_account: AccountId,
+) -> TestResult {
+    let [start_request, finish_request] = requests;
     let mut rng = TestOpaqueRng::new();
     let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (start_envelope, start_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
-        request_seed,
+        start_request,
         AccountRequestPayload::AuthenticationStart(AuthenticationStart {
             network_id: NETWORK_ID,
             login: NormalizedLogin::prepare(login_name)?,
@@ -1481,12 +1917,10 @@ fn authenticate_live_account(
     )?;
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
     rng.require_success()?;
-    let finish_seed = request_seed
-        .checked_add(1)
-        .ok_or_else(|| failure("authentication request seed overflow"))?;
     let (finish_envelope, finish_token) = seal_account_payload(
+        fixture,
         NETWORK_ID,
-        finish_seed,
+        finish_request,
         AccountRequestPayload::AuthenticationFinish(AuthenticationFinish {
             network_id: NETWORK_ID,
             transaction_id,
@@ -2290,29 +2724,7 @@ fn close_conversation(
     bound: &BoundConversation,
     terminal: [u8; 32],
 ) -> TestResult<[u8; 32]> {
-    let intent = IrcCloseIntent {
-        reason_code: 1,
-        validation_time: VALIDATION_TIME + 1,
-    };
-    let tbs = IrcCloseAuthorizationTbs {
-        profile_version: 1,
-        network_id: *NETWORK_ID.as_bytes(),
-        conversation_id: bound.conversation,
-        binding_id: bound.binding_id,
-        authorizing_terminal_id: terminal,
-        close_intent_id: semantic_id_of(SemanticHashDomain::CloseIntentId, &intent)?,
-        close_intent: intent,
-    };
-    let approval = builders::commit_approval(
-        &principal.keys,
-        principal.device,
-        &tbs,
-        SignatureDomain::CloseAuthorization,
-    )?;
-    let close = IrcCloseAuthorization {
-        tbs,
-        approvals: TlsVec::new(vec![approval])?,
-    };
+    let close = close_authority::authorization(principal, bound, terminal)?;
     let close_id = e2ee::route::close_authorization_id(&close)?;
     let object = wire_object(IrcWireObjectKind::CloseAuthorization, &close)?;
     let conversation = base64url_encode(&bound.conversation);
@@ -2625,7 +3037,13 @@ fn exercise_encrypted_network(network: &Network, coordinator: &mut DaemonProcess
     // the broadcast, encrypted traffic is refused, and plaintext stays refused.
     let close_id = step(
         "close",
-        close_conversation(&mut alice, &mut alice_keys, &bound, finalization_id),
+        close_authority::close_after_public_transition(
+            &mut alice,
+            &mut alice_keys,
+            &bob_keys,
+            &bound,
+            (1, finalization_id),
+        ),
     )?;
     let broadcast = step(
         "close broadcast",
@@ -2750,6 +3168,9 @@ mod real_clients {
     use std::path::Path;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use agenc_ircd_testkit::client_policy::{
+        ClientTrust, DisplayError, TrustState, render_decrypted_text,
+    };
     use agenc_ircd_testkit::e2ee::ids::{account_id_digest, leaf_capabilities_digest};
     use agenc_ircd_testkit::e2ee::mls_outer::{MlsOuterMessage, parse_mls_message};
     use agenc_ircd_testkit::e2ee::objects::content::{
@@ -2876,11 +3297,24 @@ mod real_clients {
         head: [u8; 32],
         text: &str,
     ) -> TestResult<Vec<u8>> {
+        padded_content_bound(bound, bound.route_binding, sender, sequence, head, text)
+    }
+
+    /// Like `padded_content`, but under a caller-chosen route binding so a
+    /// receiver can observe a binding it never accepted.
+    fn padded_content_bound(
+        bound: &BoundConversation,
+        route_binding: [u8; 32],
+        sender: &Principal,
+        sequence: u64,
+        head: [u8; 32],
+        text: &str,
+    ) -> TestResult<Vec<u8>> {
         let mut content = IrcEncryptedContent {
             profile_version: 1,
             network_id: *NETWORK_ID.as_bytes(),
             conversation_id: bound.conversation,
-            route_binding: bound.route_binding,
+            route_binding,
             sender_device_id: [sender.device; 16],
             leaf_credential_generation: 0,
             sender_sequence: sequence,
@@ -2912,8 +3346,8 @@ mod real_clients {
     }
 
     /// What a certified Commit leaves behind.
-    struct Certified {
-        finalization_id: [u8; 32],
+    pub(super) struct Certified {
+        pub(super) finalization_id: [u8; 32],
         record_id: [u8; 32],
     }
 
@@ -2922,7 +3356,7 @@ mod real_clients {
     /// `old_policy_id` (companion 12.1 to 12.4).
     // agenc-review: allow owner=tests reviewed=2026-09-04 reason=one certification names the client the binder its co-voters the conversation the commit the prior position both policies and the rule together
     #[allow(clippy::too_many_arguments)]
-    fn certify_commit(
+    pub(super) fn certify_commit(
         client: &mut IrcClient,
         binder: &mut Principal,
         co_voters: &[&Principal],
@@ -2930,12 +3364,15 @@ mod real_clients {
         commit: &[u8],
         prior: (u64, [u8; 32]),
         policies: ([u8; 32], [u8; 32]),
-        rule: IrcCommitAuthorizationRule,
+        transition: close_authority::CertificationTransition,
     ) -> TestResult<Certified> {
         let network = *NETWORK_ID.as_bytes();
         let conversation = bound.conversation;
         let (prior_epoch, prior_state_id) = prior;
         let (old_policy_id, resulting_policy_id) = policies;
+        let (rule, actions, target) = transition.fields();
+        let canonical_validation_time =
+            close_authority::candidate_validation_time(bound, &prior_state_id, commit)?;
         let commit = raw_object(IrcWireObjectKind::CommitMls, commit.to_vec())?;
         let commit_object_id = *e2ee::ObjectId::compute(&commit).as_bytes();
         let conversation_token = base64url_encode(&conversation);
@@ -2969,19 +3406,14 @@ mod real_clients {
                 prior_state_id,
                 candidate_id,
                 commit_object_id,
-                canonical_validation_time: VALIDATION_TIME,
+                canonical_validation_time,
                 old_policy_id,
                 authorization_rule: rule,
-                action_bits: match rule {
-                    IrcCommitAuthorizationRule::BootstrapActivation => {
-                        action_bits::POLICY | action_bits::BOOTSTRAP
-                    }
-                    _ => action_bits::ADD_LEAF,
-                },
+                action_bits: actions,
                 resulting_policy_id,
                 resulting_group_context_digest: [1; 32],
                 resulting_ratchet_tree_digest: [2; 32],
-                transition_target_digest: [0; 32],
+                transition_target_digest: target,
             },
             &[(&binder.keys, binder.device)],
         )?;
@@ -3448,7 +3880,7 @@ mod real_clients {
                 &activation.commit().to_bytes()?,
                 (0, genesis),
                 (initial_policy_id, operational_policy_id),
-                IrcCommitAuthorizationRule::BootstrapActivation,
+                close_authority::CertificationTransition::Bootstrap,
             ),
         )?;
         group.merge_pending_commit(&creator.provider)?;
@@ -3503,7 +3935,7 @@ mod real_clients {
                 &commit.to_bytes()?,
                 (1, activated.finalization_id),
                 (operational_policy_id, operational_policy_id),
-                IrcCommitAuthorizationRule::ControlledTransition,
+                close_authority::CertificationTransition::Add,
             ),
         )?;
         group.merge_pending_commit(&creator.provider)?;
@@ -3561,10 +3993,80 @@ mod real_clients {
         assert_eq!(received_aad, aad);
         assert_eq!(content_text(&decrypted)?, reply_text);
 
-        // The channel closes under the finalization that added bob.
+        // Decrypted text is data: CTCP markers, terminal controls, HTML, bidi
+        // controls, and a leading command prefix render inert through the
+        // test client's display policy after a real cross-library decrypt.
+        let mut trust = ClientTrust::first_contact();
+        assert_eq!(trust.state(), TrustState::UnverifiedEncrypted);
+        trust.observe_transparency();
+        assert_eq!(trust.state(), TrustState::TransparencyObserved);
+        let hostile =
+            "/quit \u{1}ACTION dance\u{1} <script>alert(1)</script> \u{1b}[31mred \u{202e}rtl";
+        let reply = padded_content(&bound, &bob_keys, 1, added.finalization_id, hostile)?;
+        let encrypted = bob_group
+            .encrypt_application_message(&reply, aad.clone())?
+            .to_bytes()?;
+        let received = step(
+            "hostile text relay",
+            relay_application(&mut bob, &mut bob_keys, &mut alice, &bound, &encrypted),
+        )?;
+        let (decrypted, _) = creator.decrypt(&mut group, &received)?;
+        let rendered = render_decrypted_text(content_text(&decrypted)?.as_bytes())?;
+        assert!(
+            !rendered
+                .as_str()
+                .contains(['\u{1}', '\u{1b}', '<', '>', '\u{202e}'])
+        );
+        assert!(rendered.as_str().starts_with(
+            "/quit \\u{0001}ACTION dance\\u{0001} &lt;script&gt;alert(1)&lt;/script&gt; \\u{001b}[31mred \\u{202e}rtl"
+        ));
+
+        // A decrypted message under a route binding this client never accepted
+        // is an unexpected security change: sending stays blocked until the new
+        // bindings are authenticated out of band and the change is reviewed.
+        let foreign = padded_content_bound(
+            &bound,
+            [0xff; 32],
+            &bob_keys,
+            2,
+            added.finalization_id,
+            "binding changed",
+        )?;
+        let encrypted = bob_group
+            .encrypt_application_message(&foreign, aad.clone())?
+            .to_bytes()?;
+        let received = step(
+            "foreign binding relay",
+            relay_application(&mut bob, &mut bob_keys, &mut alice, &bound, &encrypted),
+        )?;
+        let (decrypted, _) = creator.decrypt(&mut group, &received)?;
+        let mut budget = DecodeBudget::new(1 << 16, 64);
+        let observed = IrcEncryptedContent::decode_checked(&decrypted, &mut budget)?;
+        assert_ne!(observed.route_binding, bound.route_binding);
+        trust.unexpected_security_change();
+        assert_eq!(trust.state(), TrustState::SecurityChanged);
+        assert!(!trust.state().permits_sending());
+        assert_eq!(
+            trust.accept_reviewed_change(),
+            Err(DisplayError::ReviewRequired)
+        );
+        trust.authenticate_out_of_band();
+        assert_eq!(trust.state(), TrustState::SecurityChanged);
+        trust.accept_reviewed_change()?;
+        assert_eq!(trust.state(), TrustState::VerifiedEncrypted);
+        assert!(trust.state().permits_sending());
+
+        // The server's public close checks use a separate synthetic closing
+        // candidate. The MLS exchange above does not validate that lifecycle.
         step(
             "close after real traffic",
-            close_conversation(&mut alice, &mut alice_keys, &bound, added.finalization_id),
+            close_authority::close_after_public_transition(
+                &mut alice,
+                &mut alice_keys,
+                &bob_keys,
+                &bound,
+                (2, added.finalization_id),
+            ),
         )?;
 
         let recorded = recorded_lifecycle()?;

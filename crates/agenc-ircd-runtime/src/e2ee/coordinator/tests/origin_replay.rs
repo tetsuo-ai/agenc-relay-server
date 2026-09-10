@@ -2,6 +2,12 @@
 
 //! Durable request assembly and restart without retained replay results.
 
+#[path = "origin_replay/response_completeness.rs"]
+mod response_completeness;
+
+#[path = "origin_replay/resident_admission.rs"]
+mod resident_admission;
+
 use agenc_ircd_domain::e2ee::projection::EmptyKind;
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::{
@@ -142,6 +148,12 @@ fn decoded(generation: u64, sequence: u64) -> TestResult<Decoded> {
     })
 }
 
+fn backing() -> crate::budget::BackingReservationPort {
+    crate::budget::BackingReservationPort::new(std::sync::Arc::new(
+        crate::budget::MemoryBudget::new(1_048_576),
+    ))
+}
+
 fn batch(coordinator: &CompanionCoordinator, request: &Decoded) -> TestResult<Assembled> {
     let mut entropy = Entropy;
     assemble(
@@ -152,7 +164,9 @@ fn batch(coordinator: &CompanionCoordinator, request: &Decoded) -> TestResult<As
         Outcome::scalar(request::ResultBody::Empty(EmptyKind::Identity)),
         1,
         500,
+        None,
         BarrierInputs {
+            backing: backing(),
             base_counts: None,
             base_capacity: &|_, _, _| true,
             entropy: &mut entropy,
@@ -184,7 +198,7 @@ fn reload(
         let value = PersistentRecordValue::decode(*table, plaintext)?;
         restored.admit_restored(*table, key, &value);
     }
-    restored.finish_restore();
+    restored.finish_restore_with_backing(backing())?;
     Ok(restored)
 }
 
@@ -235,7 +249,9 @@ fn legacy_history_after_partial_expiry(generation: u64) -> TestResult<CompanionC
         outcome,
         1,
         500,
+        None,
         BarrierInputs {
+            backing: backing(),
             base_counts: None,
             base_capacity: &|_, _, _| true,
             entropy: &mut entropy,

@@ -35,10 +35,29 @@ use agenc_ircd_types::ServerId;
 use crate::federation::LinkId;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
+mod delivery_owner;
+pub(crate) mod object_read;
+pub(crate) use delivery_owner::acknowledgement::read::{
+    Job as AckReadJob, Request as AckReadRequest,
+};
+pub(crate) use delivery_owner::restore::replay::Request as ReplayRestoreRequest;
+pub(crate) use delivery_owner::retention::cleanup as replay_cleanup;
+pub(crate) use delivery_owner::retention::maintenance::{
+    Candidate as ReplayMaintenanceCandidate, Job as ReplayMaintenanceJob,
+    Prepared as PreparedReplayMaintenance,
+};
 pub mod events;
 pub mod execute;
+pub(crate) mod mailbox_expiry;
+mod mailbox_restore;
 pub mod ops;
+mod recovery_gates;
 pub mod request;
+pub(crate) mod request_expiry;
+mod resident;
+pub(crate) mod response_read;
+pub mod results;
+mod sequencer_signing;
 mod startup;
 pub mod sync;
 #[cfg(test)]
@@ -141,6 +160,12 @@ pub struct CompanionState {
     pub directory: Directory,
     /// Mailboxes.
     pub mailboxes: Mailboxes,
+    /// Process-local cuts; opaque mailbox cursors never survive reconstruction.
+    pub(crate) mailbox_snapshots: ops::mailbox_snapshot::Store,
+    /// Scheduled expiry ownership is independent of candidate snapshot effects.
+    pub(crate) mailbox_expiry_armed: Option<u64>,
+    /// Monotonic receipt time used before publishing a prepared mailbox cut.
+    pub(crate) mailbox_snapshot_now: u64,
     /// Route entitlements per edge.
     pub entitlements: RouteEntitlements,
     /// Companion origins.
@@ -154,10 +179,15 @@ pub struct CompanionState {
     /// Durable next-sequence floors, independent of replay result retention.
     pub origin_sequences:
         BTreeMap<CompanionOriginKey, agenc_ircd_storage::e2ee_records::origin::OriginSequenceRow>,
+    /// Exact declared recovery provenance retains its memory owner after startup.
+    pub(crate) recovery_gates: recovery_gates::Gates,
     /// Retained results and responses by request object identifier.
-    pub results: BTreeMap<[u8; 32], StoredResult>,
+    pub results: results::Store,
     /// Per-conversation retained state the sequencer needs between records.
     pub conversations: BTreeMap<[u8; 32], ConversationState>,
+    /// Gates awaiting the outer owner's independent base-stream validation.
+    pub(crate) restored_barriers:
+        BTreeMap<ServerId, agenc_ircd_storage::e2ee_records::delivery_recovery::DeliveryBarrier>,
     /// Delivery streams per target edge.
     pub streams: BTreeMap<ServerId, events::DeliveryStream>,
     /// Verified root and roster heads by account digest.
@@ -170,6 +200,8 @@ pub struct CompanionState {
     pub challenges: BTreeMap<([u8; 32], [u8; 16]), [u8; 32]>,
     /// Binding lock object identifiers by account digest, root, and sequence.
     pub binding_locks: BTreeMap<([u8; 32], [u8; 32]), LockChain>,
+    /// Restored object bytes drop before their backing reservations.
+    pub(crate) object_memory: BTreeMap<[u8; 32], crate::budget::MemoryPermit>,
 }
 
 /// The root binding locks of one (account, root fingerprint) by sequence.
@@ -295,6 +327,8 @@ pub struct PendingCompanion {
     pub effects: Vec<Effect>,
     /// The cross-profile barriers the batch opens.
     pub barriers: Vec<execute::BarrierPlanned>,
+    /// A cold response keeps its input, staging, and output backing through publication.
+    pub(crate) object_backing: Option<std::sync::Arc<crate::budget::MemoryPermit>>,
 }
 
 /// A request waiting behind an in-flight batch.
@@ -346,6 +380,7 @@ pub struct CompanionCoordinator {
     pub server_id: ServerId,
     /// The local server name for rendered lines.
     pub server_name: String,
+    delivery_identity: Option<delivery_owner::LocalIdentity>,
     signer: Option<SequencerSigner>,
     key_set: Option<SequencerKeySet>,
     current_credential: Option<agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential>,
@@ -401,6 +436,7 @@ impl CompanionCoordinator {
             network_id,
             server_id,
             server_name,
+            delivery_identity: None,
             signer: None,
             key_set: None,
             global_disk_bytes: 0,
@@ -427,10 +463,36 @@ impl CompanionCoordinator {
         self.restore.admit(table, key, value);
     }
 
+    /// Supplies backing before a declared recovery row allocates retained metadata.
+    pub(crate) fn admit_restored_with_backing(
+        &mut self,
+        table: agenc_ircd_storage::TableId,
+        key: &agenc_ircd_storage::StoredKey,
+        value: &agenc_ircd_storage::PersistentRecordValue,
+        backing: &crate::budget::BackingReservationPort,
+    ) {
+        if table == agenc_ircd_storage::TableId::E2eeState
+            && value.record_kind() == agenc_ircd_storage::e2ee_records::RECOVERY_GATE_KIND
+        {
+            self.restore.admit_gate(key, value, backing);
+        } else {
+            self.admit_restored(table, key, value);
+        }
+    }
+
     /// Rebuilds the companion state from the collected rows.
-    pub fn finish_restore(&mut self) {
+    pub fn finish_restore(&mut self) -> Result<(), CompanionFault> {
         let restore = std::mem::take(&mut self.restore);
-        startup::rebuild(self, restore);
+        startup::rebuild(self, restore)
+    }
+
+    /// The composed storage adapter supplies the existing process memory budget.
+    pub(crate) fn finish_restore_with_backing(
+        &mut self,
+        backing: crate::budget::BackingReservationPort,
+    ) -> Result<(), CompanionFault> {
+        self.restore.set_backing(backing);
+        self.finish_restore()
     }
 
     /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.
@@ -482,13 +544,13 @@ impl CompanionCoordinator {
         key: Ed25519SecretKey,
         key_set: SequencerKeySet,
         current: agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential,
-    ) {
-        let credential_id = key_set
-            .current()
-            .map_or([0; 32], |credential| credential.credential_id);
+    ) -> Result<(), E2eeError> {
+        let credential_id =
+            sequencer_signing::selected_credential(&self.network_id, &key, &key_set, &current)?;
         self.signer = Some(SequencerSigner { key, credential_id });
         self.key_set = Some(key_set);
         self.current_credential = Some(current);
+        Ok(())
     }
 
     /// The raw current sequencer credential.
@@ -531,6 +593,11 @@ impl CompanionCoordinator {
         host: &dyn sync::CompanionHost,
         entropy: &mut dyn agenc_ircd_types::EntropySource,
     ) -> Result<Vec<sync::Action>, CompanionFault> {
+        let sync = self.peers.entry(peer).or_default();
+        if sync.link.is_some_and(|current| current != link) {
+            return Err(CompanionFault::Protocol);
+        }
+        sync.link = Some(link);
         match frame {
             CompanionFrame::Request {
                 correlation,
@@ -543,10 +610,9 @@ impl CompanionCoordinator {
                 fragment,
             } => self.on_payload_fragment(peer, correlation, object_id, fragment, now_millis),
             CompanionFrame::Ack(position) => {
-                events::on_ack(self, peer, position)?;
-                Ok(Vec::new())
+                events::on_ack(self, link, peer, position, host.trusted_ack_unix_seconds())
             }
-            other => self.on_sync_frame(link, peer, other, now_millis, host, entropy),
+            other => self.on_sync_frame(peer, other, now_millis, host, entropy),
         }
     }
 
@@ -666,11 +732,18 @@ impl CompanionCoordinator {
             .results
             .get(&row.request_object_id)
             .ok_or(CompanionFault::Protocol)?;
-        let responses: Vec<Vec<u8>> = stored
+        let responses = stored
             .responses
             .iter()
-            .filter_map(|id| self.state.objects.get(id).cloned())
-            .collect();
+            .map(|id| self.state.objects.get(id).cloned())
+            .collect::<Option<Vec<_>>>();
+        let Some(responses) = responses else {
+            return Ok(vec![sync::Action::ReadResponses(response_read::Identity {
+                peer,
+                correlation: *correlation,
+                request_object_id: object_id,
+            })]);
+        };
         let lines = execute::replay_lines(self, correlation, home, &stored.result, &responses)
             .map_err(|_| CompanionFault::Protocol)?;
         Ok(vec![sync::Action::Send(lines)])
@@ -784,16 +857,27 @@ impl CompanionCoordinator {
     }
 
     /// Applies the committed batch's effects and hands back what to send.
-    /// `resync_epoch` is the base resync epoch an activation covers.
+    /// The historical base epoch is part of the captured durable owner.
     pub fn batch_applied(
         &mut self,
         resync_epoch: Option<u64>,
     ) -> Result<Option<sync::Committed>, CompanionFault> {
         match self.pending.take() {
             None => Ok(None),
-            Some(sync::PendingWork::Activate { peer, .. }) => self
-                .activate_committed(peer, resync_epoch)
+            Some(sync::PendingWork::Activate { peer, link, owner }) => self
+                .activate_committed(peer, link, owner, resync_epoch)
                 .map(|lines| Some(sync::Committed::Lines(lines))),
+            Some(sync::PendingWork::Snapshot(publication)) => {
+                Ok(Some(sync::Committed::Snapshot(publication)))
+            }
+            Some(sync::PendingWork::Fetch(publication)) => {
+                Ok(Some(sync::Committed::Fetch(publication)))
+            }
+            Some(sync::PendingWork::Acknowledgement(ack)) => {
+                let peer = ack.peer();
+                ack.apply(self)?;
+                Ok(Some(sync::Committed::Acknowledged(peer)))
+            }
             Some(sync::PendingWork::Request(mut pending)) => {
                 for effect in std::mem::take(&mut pending.effects) {
                     effect(&mut self.state);
@@ -808,7 +892,8 @@ impl CompanionCoordinator {
         self.pending = None;
     }
 
-    /// Retains an object in memory under the retained-bytes ceiling.
+    /// Installs an explicit object in a test fixture. Live requests use resident admission.
+    #[cfg(test)]
     pub(crate) fn retain_object(
         state: &mut CompanionState,
         bytes: Vec<u8>,
@@ -881,5 +966,15 @@ impl CorrelationExt for Correlation {
             head.copy_from_slice(&self.request_id);
         }
         route
+    }
+}
+
+impl CompanionCoordinator {
+    /// Seals complete mailbox metadata before the composed loader reads object bodies.
+    pub(crate) fn select_restored_objects(
+        &mut self,
+        backing: crate::budget::BackingReservationPort,
+    ) -> Result<(), CompanionFault> {
+        self.restore.select_objects(backing)
     }
 }

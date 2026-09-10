@@ -661,24 +661,13 @@ async fn next_accept(
     spec: &ValidatedSpec,
 ) -> Option<Accepted> {
     let listener_slot = Arc::clone(slots).acquire_owned().await.ok()?;
-    if let Some(runtime) = &shared.runtime_config {
-        let active = slot_capacity.saturating_sub(slots.available_permits());
-        let ceiling = runtime.load().listener_ceiling(&spec.name)?;
-        if active > ceiling {
-            return None;
-        }
+    if !listener_slot_within_limit(slots, slot_capacity, shared, spec) {
+        return None;
     }
     let handshake_slot = if spec.tls.is_some() {
         let permit = shared.handshakes.acquire().await.ok()?;
-        if let Some(runtime) = &shared.runtime_config {
-            let active = shared
-                .handshakes
-                .capacity()
-                .saturating_sub(shared.handshakes.available());
-            let ceiling = runtime.load().tls_handshake_ceiling()?;
-            if active > ceiling {
-                return None;
-            }
+        if !handshake_slot_within_limit(shared) {
+            return None;
         }
         Some(permit)
     } else {
@@ -694,11 +683,48 @@ async fn next_accept(
             AcceptedTransport::Unix(stream)
         }
     };
+    // Reload can lower either ceiling while the socket accept is pending.
+    // Refuse before TLS or task admission without disturbing existing permits.
+    if !listener_slot_within_limit(slots, slot_capacity, shared, spec)
+        || (handshake_slot.is_some() && !handshake_slot_within_limit(shared))
+    {
+        return None;
+    }
     Some(Accepted {
         transport,
         listener_slot,
         handshake_slot,
     })
+}
+
+fn listener_slot_within_limit(
+    slots: &Semaphore,
+    slot_capacity: usize,
+    shared: &ListenerShared,
+    spec: &ValidatedSpec,
+) -> bool {
+    let Some(runtime) = &shared.runtime_config else {
+        return true;
+    };
+    let active = slot_capacity.saturating_sub(slots.available_permits());
+    runtime
+        .load()
+        .listener_ceiling(&spec.name)
+        .is_some_and(|ceiling| active <= ceiling)
+}
+
+fn handshake_slot_within_limit(shared: &ListenerShared) -> bool {
+    let Some(runtime) = &shared.runtime_config else {
+        return true;
+    };
+    let active = shared
+        .handshakes
+        .capacity()
+        .saturating_sub(shared.handshakes.available());
+    runtime
+        .load()
+        .tls_handshake_ceiling()
+        .is_some_and(|ceiling| active <= ceiling)
 }
 
 /// The accept-path checks of spec lines 2784-2790; a refusal drops the
@@ -1355,6 +1381,157 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct QuietObserver;
+
+    impl ConnectionObserver for QuietObserver {}
+
+    fn reload_accept_fixture(
+        runtime: RuntimeConfigHandle,
+    ) -> Result<(ListenerShared, ValidatedSpec), Box<dyn std::error::Error>> {
+        let (inbox, _receiver) = mpsc::channel(1);
+        let (connection_closes, _close_inbox) =
+            crate::state_core::inbox::connection_close_channel();
+        let shared = ListenerShared {
+            budget: Arc::new(MemoryBudget::new(1 << 20)),
+            handshakes: HandshakeLimiter::new(2)?,
+            client_slots: Arc::new(Semaphore::new(2)),
+            client_slot_capacity: 2,
+            admission: Arc::new(PermissiveAdmission),
+            observer: Arc::new(QuietObserver),
+            inbox,
+            connection_closes,
+            admin: None,
+            limits: ConnectionLimits::DEFAULT,
+            runtime_config: Some(runtime),
+            federation_accepts: None,
+            generations: AtomicU64::new(1),
+        };
+        let spec = ValidatedSpec {
+            name: ListenerName::parse("public")?,
+            purpose: ListenerPurpose::ClientOnion,
+            max_connections: 2,
+            tls: None,
+            profile: None,
+            local_admin: None,
+        };
+        Ok((shared, spec))
+    }
+
+    fn publish_listener_ceiling(
+        runtime: &RuntimeConfigHandle,
+        ceiling: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::runtime_config::{ConfigRevision, RuntimeConfigSnapshot};
+
+        let previous = runtime.load();
+        let mut config = previous.config().clone();
+        let listener = config
+            .listeners
+            .iter_mut()
+            .find(|listener| listener.name.as_str() == "public")
+            .ok_or(RuntimeError::InvalidValue)?;
+        listener.max_connections = ceiling;
+        let revision = previous
+            .revision()
+            .get()
+            .checked_add(1)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let candidate = Arc::new(RuntimeConfigSnapshot::from_parts(
+            ConfigRevision::new(revision)?,
+            config,
+            crate::test_support::golden_parts("example", None)?,
+        ));
+        runtime.publish_after(previous.revision(), candidate, || Ok(()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_pending_accept_rechecks_a_lowered_listener_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let runtime =
+            RuntimeConfigHandle::new(crate::test_support::golden_snapshot("example", None)?);
+        publish_listener_ceiling(&runtime, 2)?;
+        let (shared, spec) = reload_accept_fixture(runtime.clone())?;
+        let tcp = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = tcp.local_addr()?;
+        let listener = BoundListener::Tcp(tcp);
+        let slots = Arc::new(Semaphore::new(2));
+        let held = Arc::clone(&slots).acquire_owned().await?;
+        let mut pending = Box::pin(next_accept(&listener, &slots, 2, &shared, &spec));
+        let first_poll =
+            std::future::poll_fn(|context| Poll::Ready(pending.as_mut().poll(context))).await;
+        assert!(first_poll.is_pending());
+        assert_eq!(slots.available_permits(), 0);
+
+        publish_listener_ceiling(&runtime, 1)?;
+        let mut client = TcpStream::connect(address).await?;
+        assert!(pending.await.is_none(), "the old ceiling admitted a socket");
+        assert_eq!(slots.available_permits(), 1);
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            tokio::io::AsyncReadExt::read(&mut client, &mut byte).await?,
+            0
+        );
+        assert_eq!(held.num_permits(), 1);
+        drop(held);
+        assert_eq!(slots.available_permits(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_pending_accept_rechecks_a_lowered_handshake_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::runtime_config::{ConfigRevision, RuntimeConfigSnapshot};
+        use crate::tls::{CertChain, ClientAuth, PrivateKey, build_server_config_blocking};
+        use agenc_ircd_config::LimitKey;
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let runtime =
+            RuntimeConfigHandle::new(crate::test_support::golden_snapshot("example", None)?);
+        let (shared, mut spec) = reload_accept_fixture(runtime.clone())?;
+        let fixture = agenc_ircd_testkit::TlsFixture::mint([51; 32], "node.test")?;
+        spec.tls = Some(build_server_config_blocking(
+            TlsEndpointProfile::Client,
+            CertChain::parse(fixture.leaf_certificate_der())?,
+            PrivateKey::parse(fixture.leaf_private_key_pkcs8_der())?,
+            ClientAuth::None,
+        )?);
+        let held = shared.handshakes.acquire().await?;
+        let tcp = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = tcp.local_addr()?;
+        let listener = BoundListener::Tcp(tcp);
+        let slots = Arc::new(Semaphore::new(2));
+        let mut pending = Box::pin(next_accept(&listener, &slots, 2, &shared, &spec));
+        let first_poll =
+            std::future::poll_fn(|context| Poll::Ready(pending.as_mut().poll(context))).await;
+        assert!(first_poll.is_pending());
+        assert_eq!(shared.handshakes.available(), 0);
+
+        let previous = runtime.load();
+        let mut config = previous.config().clone();
+        config.limits.values = config.limits.values.with(LimitKey::TlsHandshakes, 1);
+        let candidate = Arc::new(RuntimeConfigSnapshot::from_parts(
+            ConfigRevision::new(2)?,
+            config,
+            crate::test_support::golden_parts("example", None)?,
+        ));
+        runtime.publish_after(previous.revision(), candidate, || Ok(()))?;
+        let _client = TcpStream::connect(address).await?;
+        assert!(
+            pending.await.is_none(),
+            "the old ceiling admitted a handshake"
+        );
+        assert_eq!(slots.available_permits(), 2);
+        assert_eq!(shared.handshakes.available(), 1);
+        drop(held);
+        assert_eq!(shared.handshakes.available(), 2);
+        Ok(())
+    }
 
     #[test]
     #[cfg(feature = "wss")]

@@ -1,5 +1,7 @@
 //! Live Stage 06 daemon composition for a standalone coordinator.
 
+pub(crate) mod login_index;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -8,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-use agenc_ircd_admin::{AdminSessionBinding, OperatorRecord, OperatorRegistry};
+use agenc_ircd_admin::{
+    AdminSessionBinding, MaintenanceAuditScope, OperatorRecord, OperatorRegistry,
+};
 use agenc_ircd_auth::{
     AuthError, CHANNEL_KEY_HASH_BYTES as AUTH_CHANNEL_HASH_BYTES,
     CHANNEL_KEY_ITERATIONS as AUTH_CHANNEL_ITERATIONS, CHANNEL_KEY_LANES as AUTH_CHANNEL_LANES,
@@ -39,8 +43,8 @@ use agenc_ircd_storage::{
     embedded_storage_qualifications,
 };
 use agenc_ircd_types::{
-    AccountId, ChannelInstanceId, EntropySource as _, FederationRole, Generation,
-    MonotonicClock as _, OriginId, ServerId, TransactionId, UserId, WallClock as _,
+    EntropySource as _, FederationRole, Generation, MonotonicClock as _, OriginId, ServerId,
+    TransactionId, UserId, WallClock as _,
 };
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -101,8 +105,7 @@ use crate::runtime_config::{
     reload_channel, reload_preparation_channel,
 };
 use crate::state_core::durable::{
-    AccountingCeilings, AdminMutationAfterImage, KeyDeriver, PlanProjection,
-    project_admin_policy_backfill, project_batch, read_back_record,
+    AccountingCeilings, KeyDeriver, PlanProjection, project_batch, read_back_record,
 };
 use crate::state_core::inbox::{
     ConnectionCloseInbox, ConnectionClosePort, LifecycleControl, LifecycleFailure, LifecyclePhase,
@@ -164,8 +167,12 @@ pub enum DaemonError {
     RuntimeStart,
     /// A supervised owner ended unexpectedly.
     TaskFailed,
+    /// The state owner stopped on its own; the exit names why.
+    StateCore(StateCoreExit),
     /// One or more owners did not join within the configured shutdown budget.
     ShutdownTimeout,
+    /// A shutdown phase returned a closed owner failure.
+    ShutdownFailed(ShutdownPhase, ShutdownFailure),
     /// The sequencer credentials file did not parse, did not verify for
     /// this network, or names no key the coordinator holds.
     E2eeCredentials,
@@ -188,7 +195,14 @@ impl fmt::Display for DaemonError {
             Self::Runtime(error) => write!(formatter, "runtime startup failed: {error}"),
             Self::RuntimeStart => formatter.write_str("Tokio runtime startup failed"),
             Self::TaskFailed => formatter.write_str("a supervised daemon owner failed"),
+            Self::StateCore(exit) => write!(formatter, "the state owner stopped: {exit}"),
             Self::ShutdownTimeout => formatter.write_str("daemon shutdown exceeded its deadline"),
+            Self::ShutdownFailed(phase, failure) => write!(
+                formatter,
+                "daemon shutdown failed: phase={} owner={}",
+                phase.label(),
+                shutdown_failure_label(*failure),
+            ),
             Self::E2eeCredentials => formatter.write_str(
                 "E2EE sequencer credentials file is invalid or does not match the sequencer key",
             ),
@@ -463,10 +477,13 @@ impl LiveStorage {
             .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?
             .get();
         let audit = AuditAuthority::reconstruct(
-            AdminSessionBinding {
-                network_id: config.network.network_id,
-                server_id: config.server.server_id,
-            },
+            MaintenanceAuditScope::new(
+                config.network.network_id,
+                config.server.server_id,
+                storage.database_binding().database_instance_id(),
+                storage.database_binding().server_incarnation(),
+                storage.recovery_epoch(),
+            ),
             Ed25519SecretKey::from_bytes(*secrets.audit_signing().expose()),
             &trust,
             owner.port(),
@@ -564,26 +581,11 @@ fn build_live_state(
     } = inputs;
     let prepared = (|| -> Result<_, DaemonError> {
         let (suspensions, quarantined_channels) = storage.audit.policy_seed().into_parts();
-        let backfills = missing_admin_policy_backfills(
-            &storage.reconstruction.domain,
-            &suspensions,
-            &quarantined_channels,
-        )?;
         storage
             .reconstruction
             .domain
-            .install_admin_policy(suspensions, quarantined_channels)
+            .validate_retained_admin_policy(&suspensions, &quarantined_channels)
             .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
-        persist_admin_policy_backfills(
-            &storage.owner.port(),
-            &mut storage.reconstruction,
-            &storage.keys,
-            AccountingCeilings {
-                database_max_bytes: config.storage.database_max_bytes,
-                backup_max_bytes: config.storage.backup_max_bytes,
-            },
-            backfills,
-        )?;
         let crypto_config = CryptoWorkerConfig::new(
             limit_usize(config, LimitKey::ChannelKeyJobs)?,
             limit_usize(config, LimitKey::OpaqueJobs)?,
@@ -616,6 +618,7 @@ fn build_live_state(
             &storage.owner.port(),
             &storage.keys,
             storage.reconstruction.head,
+            crate::budget::BackingReservationPort::new(Arc::clone(&budget)),
         )?;
         let limits = operational_limits(config)?;
         let history = crate::state_core::history::HistoryState::load(
@@ -718,122 +721,6 @@ fn build_live_state(
         audit: Some(audit),
         backup: Some(backup),
     })
-}
-
-enum AdminPolicyBackfill {
-    Account(AccountId),
-    Channel(ChannelInstanceId),
-}
-
-fn missing_admin_policy_backfills(
-    domain: &agenc_ircd_domain::DomainState,
-    suspensions: &[(AccountId, agenc_ircd_types::UtcSecond)],
-    quarantined_channels: &[ChannelInstanceId],
-) -> Result<Vec<AdminPolicyBackfill>, DaemonError> {
-    let capacity = suspensions
-        .len()
-        .checked_add(quarantined_channels.len())
-        .ok_or(RuntimeError::Overflow)?;
-    let mut backfills = Vec::new();
-    backfills
-        .try_reserve_exact(capacity)
-        .map_err(|_| RuntimeError::MemoryExhausted)?;
-    for (account_id, expires_at) in suspensions {
-        if domain
-            .durable_account(*account_id)
-            .is_some_and(|account| account.admin_suspension_expires_at != Some(*expires_at))
-        {
-            backfills.push(AdminPolicyBackfill::Account(*account_id));
-        }
-    }
-    for channel_id in quarantined_channels {
-        if domain
-            .durable_channel(*channel_id)
-            .is_some_and(|channel| !channel.admin_quarantined)
-        {
-            backfills.push(AdminPolicyBackfill::Channel(*channel_id));
-        }
-    }
-    Ok(backfills)
-}
-
-fn persist_admin_policy_backfills(
-    storage: &StoragePort,
-    reconstruction: &mut Reconstruction,
-    keys: &KeyDeriver,
-    ceilings: AccountingCeilings,
-    backfills: Vec<AdminPolicyBackfill>,
-) -> Result<(), DaemonError> {
-    for backfill in backfills {
-        let after_image = match backfill {
-            AdminPolicyBackfill::Account(account_id) => AdminMutationAfterImage::Account(
-                reconstruction
-                    .domain
-                    .durable_account(account_id)
-                    .ok_or(RuntimeError::InvalidValue)?,
-            ),
-            AdminPolicyBackfill::Channel(channel_id) => AdminMutationAfterImage::Channel(
-                reconstruction
-                    .domain
-                    .durable_channel(channel_id)
-                    .ok_or(RuntimeError::InvalidValue)?,
-            ),
-        };
-        commit_admin_policy_backfill(storage, reconstruction, keys, ceilings, &after_image)?;
-    }
-    Ok(())
-}
-
-fn commit_admin_policy_backfill(
-    storage: &StoragePort,
-    reconstruction: &mut Reconstruction,
-    keys: &KeyDeriver,
-    ceilings: AccountingCeilings,
-    after_image: &AdminMutationAfterImage,
-) -> Result<(), DaemonError> {
-    let (table, key) = match after_image {
-        AdminMutationAfterImage::Account(account) => (
-            TableId::Account,
-            KeyDeriver::account_key(account.account_id)?,
-        ),
-        AdminMutationAfterImage::Channel(channel) => (
-            TableId::Channel,
-            KeyDeriver::channel_key(channel.channel_id)?,
-        ),
-    };
-    let transaction_id = startup_transaction_id()?;
-    let projected = project_admin_policy_backfill(
-        transaction_id,
-        after_image,
-        &reconstruction.index,
-        keys,
-        reconstruction.head,
-        ceilings,
-    )?;
-    let (batch, retained) = projected.into_parts();
-    let receipt = match storage.try_commit(batch)?.wait()? {
-        CommitOutcome::Committed(receipt) if receipt.transaction_id == transaction_id => receipt,
-        CommitOutcome::Committed(_) | CommitOutcome::Indeterminate => {
-            return Err(DaemonError::Runtime(RuntimeError::Storage(
-                StorageError::Unavailable,
-            )));
-        }
-        CommitOutcome::Rejected(error) => return Err(DaemonError::Storage(error)),
-    };
-    reconstruction.head = retained.advance(&receipt);
-    reconstruction.index.apply(retained.updates());
-    let result = storage
-        .try_read(ReadPlan::exact(table, key.clone()))?
-        .wait()?;
-    if result.storage_commit_sequence != receipt.storage_commit_sequence {
-        return Err(DaemonError::Runtime(RuntimeError::Storage(
-            StorageError::StaleState,
-        )));
-    }
-    reconstruction
-        .index
-        .refresh(vec![read_back_record(table, key, result)?])?;
-    Ok(())
 }
 
 fn startup_transaction_id() -> Result<TransactionId, DaemonError> {
@@ -1339,7 +1226,9 @@ fn e2ee_setup(
                 config.server.server_id,
                 config.server.name.as_str().to_owned(),
             );
-            executor.install_sequencer(key, key_set, current);
+            executor
+                .install_sequencer(key, key_set, current)
+                .map_err(|_| DaemonError::E2eeCredentials)?;
             executor.set_global_disk_bytes(config.e2ee.global_disk_bytes);
             Some(executor)
         }
@@ -1400,7 +1289,9 @@ fn attach_coordinator_role(
     if let Some(e2ee) = e2ee {
         coordinator.set_companion_profile(Some(e2ee.profile));
         if let Some(executor) = e2ee.executor {
-            coordinator.install_companion_executor(executor);
+            coordinator
+                .install_companion_executor(executor, setup.local.incarnation())
+                .map_err(|_| DaemonError::E2eeCredentials)?;
         }
     }
     Ok(router.with_federation(coordinator))
@@ -3348,7 +3239,10 @@ fn state_completion_failure(
     if matches!(completion, Ok(StateCoreExit::Indeterminate(_))) {
         observer.storage_indeterminate();
     }
-    DaemonError::TaskFailed
+    match completion {
+        Ok(exit) => DaemonError::StateCore(exit),
+        Err(_) => DaemonError::TaskFailed,
+    }
 }
 
 enum ShutdownTrigger {
@@ -3682,10 +3576,25 @@ async fn request_lifecycle(
 }
 
 fn validate_shutdown_report(report: ShutdownReport) -> Result<(), DaemonError> {
-    match report.first_problem().map(|problem| problem.kind) {
+    match report.first_problem() {
         None => Ok(()),
-        Some(ShutdownProblemKind::TimedOut) => Err(DaemonError::ShutdownTimeout),
-        Some(ShutdownProblemKind::Failed(_)) => Err(DaemonError::TaskFailed),
+        Some(problem) => match problem.kind {
+            ShutdownProblemKind::TimedOut => Err(DaemonError::ShutdownTimeout),
+            ShutdownProblemKind::Failed(failure) => {
+                Err(DaemonError::ShutdownFailed(problem.phase, failure))
+            }
+        },
+    }
+}
+
+fn shutdown_failure_label(failure: ShutdownFailure) -> &'static str {
+    match failure {
+        ShutdownFailure::Listener => "listener",
+        ShutdownFailure::StateCore => "state_core",
+        ShutdownFailure::Writer => "writer",
+        ShutdownFailure::Audit => "audit",
+        ShutdownFailure::Storage => "storage",
+        ShutdownFailure::Join => "join",
     }
 }
 
@@ -3999,16 +3908,64 @@ async fn shutdown_blocking_owners(
 #[cfg(test)]
 mod tests {
     use agenc_ircd_config::{PathResolver, RateTable};
-    use agenc_ircd_domain::DurableAccount;
-    use agenc_ircd_storage::AccountRecordBody;
-    use agenc_ircd_testkit::{DeterministicMonotonicClock, account_id};
-    use agenc_ircd_types::{Revision, ServerId, UtcSecond};
+    use agenc_ircd_testkit::DeterministicMonotonicClock;
+    use agenc_ircd_types::ServerId;
 
     use crate::observe::log::{LogTarget, LogWriter};
     use crate::observe::metrics::{MetricLabel, MetricName, MetricsView, QueueName};
     use crate::state_core::IndeterminateCause;
 
     use super::*;
+
+    struct FailingShutdown {
+        phase: ShutdownPhase,
+        failure: ShutdownFailure,
+    }
+
+    impl ShutdownHooks for FailingShutdown {
+        async fn run(
+            &mut self,
+            phase: ShutdownPhase,
+            _budget: Duration,
+        ) -> Result<(), ShutdownFailure> {
+            if phase == self.phase {
+                Err(self.failure)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn stop_deadline_expired(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn shutdown_errors_retain_the_first_phase_and_closed_owner_label() {
+        for (failure, label) in [
+            (ShutdownFailure::Listener, "listener"),
+            (ShutdownFailure::StateCore, "state_core"),
+            (ShutdownFailure::Writer, "writer"),
+            (ShutdownFailure::Audit, "audit"),
+            (ShutdownFailure::Storage, "storage"),
+            (ShutdownFailure::Join, "join"),
+        ] {
+            let (_signals, mut inbox) = tokio::sync::mpsc::channel(1);
+            let mut hooks = FailingShutdown {
+                phase: ShutdownPhase::Flush,
+                failure,
+            };
+            let report = run_shutdown(ShutdownPlan::DEFAULT, &mut hooks, &mut inbox).await;
+            let result = validate_shutdown_report(report);
+            assert!(
+                matches!(result, Err(DaemonError::ShutdownFailed(ShutdownPhase::Flush, actual)) if actual == failure)
+            );
+            if let Err(error) = result {
+                assert_eq!(
+                    error.to_string(),
+                    format!("daemon shutdown failed: phase=flush owner={label}")
+                );
+            }
+        }
+    }
 
     struct MemoryLogTarget(Vec<String>);
 
@@ -4059,64 +4016,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_admin_policy_backfill_survives_retention_and_restart() -> Result<(), DaemonError> {
-        let account_id = account_id(91);
-        let revision = Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?;
-        let legacy = DurableAccount {
-            account_id,
-            label: None,
-            presence: PresencePolicy::Private,
-            guest_direct_messages: GuestDirectMessagePolicy::Deny,
-            direct_messages: DirectMessagePolicy::Deny,
-            contacts: Vec::new(),
-            reserved_nicknames: Vec::new(),
-            session_generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
-            revision,
-            admin_suspension_expires_at: None,
-        };
-        let mut domain = agenc_ircd_domain::DomainState::restore(
-            revision,
-            vec![AccountRecordBody::decode(&AccountRecordBody::encode(
-                &legacy,
-            )?)?],
-            Vec::new(),
-            Vec::new(),
-        )
-        .map_err(|_| RuntimeError::InvalidValue)?;
-        let expires_at = UtcSecond::from_unix_seconds(10_000);
-        let suspensions = vec![(account_id, expires_at)];
-        let backfills = missing_admin_policy_backfills(&domain, &suspensions, &[])?;
-        assert!(matches!(
-            backfills.as_slice(),
-            [AdminPolicyBackfill::Account(found)] if *found == account_id
-        ));
-        domain
-            .install_admin_policy(suspensions, Vec::new())
-            .map_err(|_| RuntimeError::InvalidValue)?;
-
-        let persisted = AccountRecordBody::encode(
-            &domain
-                .durable_account(account_id)
-                .ok_or(RuntimeError::InvalidValue)?,
-        )?;
-        let restarted = agenc_ircd_domain::DomainState::restore(
-            revision,
-            vec![AccountRecordBody::decode(&persisted)?],
-            Vec::new(),
-            Vec::new(),
-        )
-        .map_err(|_| RuntimeError::InvalidValue)?;
-        assert_eq!(
-            restarted
-                .durable_account(account_id)
-                .and_then(|account| account.admin_suspension_expires_at),
-            Some(expires_at)
-        );
-        assert!(missing_admin_policy_backfills(&restarted, &[], &[])?.is_empty());
-        Ok(())
-    }
-
-    #[test]
     fn pending_maintenance_coalesces_without_dropping_distinct_work() {
         let mut pending = PendingMaintenance::default();
         pending.record_retention_sweep();
@@ -4128,6 +4027,37 @@ mod tests {
         assert_eq!(pending.take(), Some(MaintenanceEvent::RetentionSweep));
         assert_eq!(pending.take(), None);
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_state_owner_exit_names_its_cause_in_the_daemon_failure() {
+        use crate::state_core::{CorruptionCause, IndeterminateCause};
+        let (observer, _log) = test_observer();
+        let corrupt = state_completion_failure(
+            Ok(StateCoreExit::Corrupt(CorruptionCause::ProjectionFailed)),
+            &observer,
+        );
+        assert_eq!(
+            corrupt.to_string(),
+            "the state owner stopped: state core committed state unusable: a plan projection failed"
+        );
+        let indeterminate = state_completion_failure(
+            Ok(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate,
+            )),
+            &observer,
+        );
+        assert_eq!(
+            indeterminate.to_string(),
+            "the state owner stopped: state core durable outcome indeterminate: storage reported an indeterminate commit"
+        );
+        let (sender, receiver) = oneshot::channel::<StateCoreExit>();
+        drop(sender);
+        let lost = receiver.await;
+        assert!(matches!(
+            state_completion_failure(lost, &observer),
+            DaemonError::TaskFailed
+        ));
     }
 
     #[tokio::test]
@@ -4175,7 +4105,9 @@ mod tests {
                 )),
                 observer.as_ref(),
             ),
-            DaemonError::TaskFailed
+            DaemonError::StateCore(StateCoreExit::Indeterminate(
+                IndeterminateCause::StorageIndeterminate
+            ))
         ));
         let snapshot = observer.metrics().snapshot(MetricsView::Operator);
         assert!(snapshot.counts.iter().any(|(key, histogram)| {
@@ -4452,6 +4384,52 @@ mod tests {
             e2ee_setup(&other, None),
             Err(DaemonError::E2eeCredentials)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn sequencer_eligibility_setup_preserves_selected_credential_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::e2ee::coordinator::tests::support::{key, sequencer_credential_in};
+        use agenc_ircd_crypto::{SemanticHashDomain, SignatureDomain};
+        use agenc_ircd_e2ee::ids::semantic_id_of;
+        use agenc_ircd_e2ee::sequencer::SequencerCredentialsFile;
+        use agenc_ircd_e2ee::tls::{TlsEncode, TlsVec};
+        let directory = crate::test_support::TestDirectory::create()?;
+        let path = directory.0.join("sequencer-overlap.bin");
+        let mut config = public_config()?;
+        config.federation.enabled = true;
+        config.e2ee.enabled = true;
+        config.e2ee.sequencer_credentials_file = Some(path.clone());
+        let network = *config.network.network_id.as_bytes();
+        let old = sequencer_credential_in(network, &key(90), 0, (0, 1_000), None)?;
+        let next =
+            sequencer_credential_in(network, &key(91), 1, (100, 2_000), Some((&key(90), &old)))?;
+        let document = SequencerCredentialsFile {
+            set_generation: 1,
+            credentials: TlsVec::new(vec![old.clone(), next.clone()])?,
+        };
+        std::fs::write(&path, document.encode()?)?;
+        for (seed, credential) in [(90, old), (91, next)] {
+            let setup = e2ee_setup(&config, Some(&[seed; 32]))?.ok_or("setup")?;
+            assert_eq!(setup.profile.local.key_set_generation, 1);
+            let executor = setup.executor.ok_or("executor")?;
+            let signer = executor.signer().ok_or("signer")?;
+            let expected = semantic_id_of(SemanticHashDomain::SequencerKey, &credential.tbs)?;
+            assert_eq!(signer.credential_id, expected);
+            assert_eq!(executor.current_credential(), Some(&credential));
+            let signature = signer.sign(SignatureDomain::Reservation, &credential.tbs)?;
+            executor
+                .key_set()
+                .and_then(|set| set.credential(&expected))
+                .ok_or("credential")?
+                .key
+                .verify(
+                    SignatureDomain::Reservation,
+                    &credential.tbs.encode()?,
+                    &signature,
+                )?;
+        }
         Ok(())
     }
 

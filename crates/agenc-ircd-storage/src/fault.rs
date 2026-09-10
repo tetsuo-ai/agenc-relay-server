@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::qualification::StorageGrowthProbe;
 use crate::{StorageError, StorageError::DatabaseRejected};
 
 /// Closed logical storage boundary registry exercised by the fault campaign.
@@ -42,8 +43,6 @@ pub enum StorageFaultSite {
     CheckpointInstall = 16,
     /// Checkpoint manifest/ancestor pruning.
     CheckpointPrune = 17,
-    /// Migration profile and registry validation.
-    MigrationProfile = 18,
     /// Construction-plan deterministic rebuild.
     ConstructionPlanRebuild = 19,
     /// Construction target batch.
@@ -75,9 +74,47 @@ pub enum StorageFaultSite {
 }
 
 impl StorageFaultSite {
+    /// Returns the fixed lowercase label used in qualification case names.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RecordRead => "record-read",
+            Self::RecordWrite => "record-write",
+            Self::Allocation => "allocation",
+            Self::TransactionBegin => "transaction-begin",
+            Self::TransactionPhaseOne => "transaction-phase-one",
+            Self::TransactionPhaseTwo => "transaction-phase-two",
+            Self::DatabaseSync => "database-sync",
+            Self::GuardTemporaryCreate => "guard-temporary-create",
+            Self::GuardWrite => "guard-write",
+            Self::GuardFileSync => "guard-file-sync",
+            Self::GuardRename => "guard-rename",
+            Self::GuardDirectorySync => "guard-directory-sync",
+            Self::NonceDraw => "nonce-draw",
+            Self::Manifest => "manifest",
+            Self::CheckpointScan => "checkpoint-scan",
+            Self::CheckpointInstall => "checkpoint-install",
+            Self::CheckpointPrune => "checkpoint-prune",
+            Self::ConstructionPlanRebuild => "construction-plan-rebuild",
+            Self::ConstructionBatch => "construction-batch",
+            Self::ConstructionCursor => "construction-cursor",
+            Self::ConstructionCompletion => "construction-completion",
+            Self::BackupRecord => "backup-record",
+            Self::BackupFileSync => "backup-file-sync",
+            Self::BackupRename => "backup-rename",
+            Self::BackupDirectorySync => "backup-directory-sync",
+            Self::LoginIndexRotationStart => "login-index-rotation-start",
+            Self::LoginIndexLazyMigration => "login-index-lazy-migration",
+            Self::LoginIndexRotationFinish => "login-index-rotation-finish",
+            Self::WriterLock => "writer-lock",
+            Self::CapacityAdmission => "capacity-admission",
+            Self::ConstructionDirectoryRename => "construction-directory-rename",
+        }
+    }
+
     /// Returns every version-one site in numeric order.
     #[must_use]
-    pub const fn all() -> [Self; 32] {
+    pub const fn all() -> [Self; 31] {
         [
             Self::RecordRead,
             Self::RecordWrite,
@@ -96,7 +133,6 @@ impl StorageFaultSite {
             Self::CheckpointScan,
             Self::CheckpointInstall,
             Self::CheckpointPrune,
-            Self::MigrationProfile,
             Self::ConstructionPlanRebuild,
             Self::ConstructionBatch,
             Self::ConstructionCursor,
@@ -230,13 +266,17 @@ impl StorageFaultSchedule {
 #[derive(Clone, Debug, Default)]
 pub struct StorageFaultInjector {
     schedule: Option<Arc<Mutex<StorageFaultSchedule>>>,
+    probe: Option<Arc<StorageGrowthProbe>>,
 }
 
 impl StorageFaultInjector {
     /// Creates the no-fault production controller.
     #[must_use]
     pub const fn disabled() -> Self {
-        Self { schedule: None }
+        Self {
+            schedule: None,
+            probe: None,
+        }
     }
 
     /// Creates one occurrence-aware qualification controller.
@@ -245,7 +285,20 @@ impl StorageFaultInjector {
             schedule: Some(Arc::new(Mutex::new(StorageFaultSchedule::new(
                 case, occurrence,
             )?))),
+            probe: None,
         })
+    }
+
+    /// Observes every boundary without injecting anything.
+    ///
+    /// The handle is not enabled, so the production redb backend stays
+    /// selected; only the stopped-daemon growth qualification uses it.
+    #[must_use]
+    pub const fn probing(probe: Arc<StorageGrowthProbe>) -> Self {
+        Self {
+            schedule: None,
+            probe: Some(probe),
+        }
     }
 
     /// Returns whether this handle can inject a fault.
@@ -254,12 +307,16 @@ impl StorageFaultInjector {
         self.schedule.is_some()
     }
 
-    /// Fails at the configured side of the selected logical boundary.
+    /// Records the boundary for a growth probe, then fails at the configured side of
+    /// the selected logical boundary.
     pub fn check(
         &self,
         site: StorageFaultSite,
         boundary: StorageFaultBoundary,
     ) -> Result<(), StorageError> {
+        if let Some(probe) = &self.probe {
+            probe.observe(site, boundary)?;
+        }
         let Some(schedule) = &self.schedule else {
             return Ok(());
         };

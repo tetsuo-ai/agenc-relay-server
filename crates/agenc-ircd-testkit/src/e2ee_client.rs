@@ -1051,6 +1051,31 @@ pub fn finality_vote(
 
 /// The `e2ee.sequencer_credentials_file` document for one sequencer key:
 /// generation zero, a single credential valid over `interval`.
+/// A credentials document for set generation 1 whose credential chains from
+/// the generation-0 credential `previous` signed, so a rotated sequencer key
+/// carries its signed continuity.
+pub fn sequencer_rotation_document(
+    network_id: [u8; 32],
+    previous: &Ed25519SecretKey,
+    next: &Ed25519SecretKey,
+    interval: (u64, u64),
+) -> Result<Vec<u8>, E2eeError> {
+    use agenc_ircd_e2ee::sequencer::SequencerCredentialsFile;
+    let previous_credential = sequencer_credential_in(network_id, previous, 0, interval, None)?;
+    let credential = sequencer_credential_in(
+        network_id,
+        next,
+        1,
+        interval,
+        Some((previous, &previous_credential)),
+    )?;
+    let document = SequencerCredentialsFile {
+        set_generation: 1,
+        credentials: TlsVec::new(vec![previous_credential, credential])?,
+    };
+    document.encode()
+}
+
 pub fn sequencer_credentials_document(
     network_id: [u8; 32],
     secret: &Ed25519SecretKey,

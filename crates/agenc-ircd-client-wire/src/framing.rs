@@ -335,3 +335,29 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::FramingError;
+
+    #[test]
+    fn every_discriminant_renders_a_distinct_message() {
+        let variants = [
+            FramingError::BareLineFeed,
+            FramingError::BareCarriageReturn,
+            FramingError::EmbeddedNul,
+            FramingError::InvalidUtf8,
+            FramingError::LineTooLong,
+            FramingError::ClientTagsTooLong,
+            FramingError::UnexpectedEof,
+            FramingError::TimedOut,
+            FramingError::AllocationFailed,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+}

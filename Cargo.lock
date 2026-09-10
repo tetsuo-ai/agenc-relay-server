@@ -68,8 +68,10 @@ dependencies = [
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
+ "rustix",
  "rustls",
  "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -151,6 +153,7 @@ dependencies = [
  "agenc-ircd-crypto",
  "agenc-ircd-domain",
  "agenc-ircd-federation-wire",
+ "agenc-ircd-testkit",
  "agenc-ircd-types",
  "sha2 0.11.0",
 ]

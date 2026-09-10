@@ -1959,3 +1959,26 @@ mod tests {
         validate_post_registration_command(&parsed(line)?).map(|_| ())
     }
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::RegistrationGrammarError;
+
+    #[test]
+    fn every_discriminant_renders_a_distinct_message() {
+        let variants = [
+            RegistrationGrammarError::UnknownCommand,
+            RegistrationGrammarError::NoPrivileges,
+            RegistrationGrammarError::NeedMoreParameters,
+            RegistrationGrammarError::InputTooLong,
+            RegistrationGrammarError::InvalidArgument,
+            RegistrationGrammarError::AllocationFailed,
+        ];
+        let rendered: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(rendered.iter().all(|text| !text.is_empty()));
+        let mut unique = rendered.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
+    }
+}

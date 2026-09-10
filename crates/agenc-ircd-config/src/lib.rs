@@ -21,6 +21,7 @@ mod network;
 mod onboarding;
 mod paths;
 mod privacy;
+mod release_decision;
 mod scalar;
 mod secrets;
 mod server;
@@ -61,6 +62,10 @@ pub use onboarding::{
 };
 pub use paths::{PathResolver, load_public_text, read_protected_bytes};
 pub use privacy::{HistoryDefault, PrivacyConfig};
+pub use release_decision::{
+    MAX_RELEASE_DECISION_BYTES, MAX_RELEASE_PUBLIC_KEY_BYTES, ReleaseArtifact, ReleaseClaim,
+    ReleaseDecisionDocument, ReleaseDecisionError, parse_release_public_key_pem,
+};
 pub use scalar::{
     Bound, DnsName, HttpsOrigin, ONION_LABEL_BYTES, OnionAddress, PeerEndpoint, SocksEndpoint,
     encode_base64url_32,

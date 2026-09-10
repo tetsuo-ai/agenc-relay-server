@@ -1,0 +1,85 @@
+schema_version = 1
+targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+release_features = ["history", "wss"]
+claims = ["core-v1", "federated-v1", "encrypted-v1", "wss", "history"]
+minimum_branch_percent = 90
+minimum_line_percent = 90
+critical_percent = 100
+fuzz_cpu_seconds_per_target = 86400
+soak_elapsed_seconds = 604800
+maximum_log_bytes = 67108864
+maximum_record_bytes = 4194304
+maximum_workers = 16
+external_review_task = "S08-039"
+
+# Every result is bound to this policy, the candidate, and a native target.
+# Long campaigns and external inputs are separate from ordinary CI checks.
+[[job]]
+id = "workspace"
+tasks = ["S10-002", "S10-003"]
+kind = "command"
+argv = ["bash", "scripts/check-stage-ten.sh"]
+timeout_seconds = 14400
+
+[[job]]
+id = "models"
+tasks = ["S10-004"]
+kind = "command"
+argv = ["bash", "scripts/run-stage-ten-models.sh"]
+timeout_seconds = 14400
+
+[[job]]
+id = "interoperability"
+tasks = ["S10-005"]
+kind = "command"
+argv = ["python3", "scripts/qualify-stage-ten-network.py"]
+timeout_seconds = 14400
+
+[[job]]
+id = "storage"
+tasks = ["S10-006"]
+kind = "command"
+argv = ["python3", "scripts/qualify-stage-ten-storage.py"]
+timeout_seconds = 14400
+
+[[job]]
+id = "capacity"
+tasks = ["S10-007"]
+kind = "command"
+argv = ["python3", "scripts/qualify-stage-ten-capacity.py", "capacity"]
+timeout_seconds = 14400
+
+[[job]]
+id = "soak"
+tasks = ["S10-007"]
+kind = "soak"
+argv = ["python3", "scripts/qualify-stage-ten-capacity.py", "soak"]
+timeout_seconds = 612000
+
+[[job]]
+id = "drills"
+tasks = ["S10-008", "S10-009"]
+kind = "command"
+argv = ["python3", "scripts/qualify-stage-ten-drills.py"]
+timeout_seconds = 14400
+
+[[job]]
+id = "reproducibility"
+tasks = ["S10-010"]
+kind = "command"
+argv = ["python3", "scripts/build-release.py", "verify"]
+timeout_seconds = 14400
+
+[[job]]
+id = "sources"
+tasks = ["S10-011"]
+kind = "command"
+argv = ["python3", "scripts/check-release-sources.py"]
+timeout_seconds = 3600
+
+[[job]]
+id = "claims"
+tasks = ["S10-012"]
+kind = "command"
+argv = ["python3", "scripts/check-release-claims.py"]
+timeout_seconds = 3600

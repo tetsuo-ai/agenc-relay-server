@@ -1,9 +1,10 @@
 //! Signed physical-growth qualification reports and tuple lookup.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::os::unix::fs::MetadataExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use agenc_ircd_crypto::{
     Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, StorageDigest,
@@ -12,7 +13,8 @@ use agenc_ircd_crypto::{
 
 use crate::codec::{Decoder, Encoder};
 use crate::{
-    FilesystemTuple, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StorageError, StorageQualification,
+    FilesystemTuple, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StorageError, StorageFaultBoundary,
+    StorageFaultSite, StorageQualification,
 };
 
 /// Release qualification's greatest allowed observed positive growth: half the physical growth
@@ -403,8 +405,16 @@ impl StorageGrowthRecorder {
 
     /// Adds one case without permitting duplicate names or excessive growth.
     pub fn record(&mut self, case: StorageGrowthCase) -> Result<(), StorageError> {
+        if case.positive_delta() > MAX_QUALIFIED_OBSERVED_GROWTH {
+            return Err(StorageError::LimitExceeded);
+        }
+        self.record_observed(case)
+    }
+
+    /// Adds one case whatever its growth, so an over-ceiling observation is
+    /// retained as evidence; the report's validation still refuses to sign it.
+    pub fn record_observed(&mut self, case: StorageGrowthCase) -> Result<(), StorageError> {
         if self.cases.len() == MAX_QUALIFICATION_CASES
-            || case.positive_delta() > MAX_QUALIFIED_OBSERVED_GROWTH
             || self.cases.iter().any(|existing| existing.name == case.name)
         {
             return Err(StorageError::LimitExceeded);
@@ -552,6 +562,162 @@ fn allocated_path_set(paths: &[&Path]) -> Result<u64, StorageError> {
 impl Default for StorageGrowthRecorder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Greatest number of boundary samples one probe retains.
+pub const MAX_GROWTH_SAMPLES: usize = 1 << 20;
+/// Greatest number of directory entries a probe sums.
+const MAX_PROBED_ENTRIES: usize = 4_096;
+
+/// One allocated-block observation taken at a logical storage boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageGrowthSample {
+    /// Boundary that was reached.
+    pub site: StorageFaultSite,
+    /// Side of the boundary.
+    pub boundary: StorageFaultBoundary,
+    /// Allocated bytes of the whole state directory at that moment.
+    pub allocated_bytes: u64,
+}
+
+/// Measurement-only observer of every production storage boundary.
+///
+/// The probe sums the allocated blocks of the state directory inode and every
+/// regular file inside it, so guard temporaries, the guard, and the database
+/// are all counted whatever their current names are. It never changes the
+/// backend or injects a failure.
+#[derive(Debug)]
+pub struct StorageGrowthProbe {
+    directory: PathBuf,
+    samples: Mutex<Vec<StorageGrowthSample>>,
+}
+
+impl StorageGrowthProbe {
+    /// Observes one existing state directory.
+    pub fn new(directory: &Path) -> Result<Self, StorageError> {
+        if directory.is_symlink() || !directory.is_dir() {
+            return Err(StorageError::FilesystemRejected);
+        }
+        Ok(Self {
+            directory: directory.to_path_buf(),
+            samples: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Samples the directory at one boundary; a full probe fails closed.
+    pub fn observe(
+        &self,
+        site: StorageFaultSite,
+        boundary: StorageFaultBoundary,
+    ) -> Result<(), StorageError> {
+        let allocated_bytes = allocated_directory_bytes(&self.directory)?;
+        let mut samples = self.samples.lock().map_err(|_| StorageError::Unavailable)?;
+        if samples.len() >= MAX_GROWTH_SAMPLES {
+            return Err(StorageError::LimitExceeded);
+        }
+        samples
+            .try_reserve(1)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        samples.push(StorageGrowthSample {
+            site,
+            boundary,
+            allocated_bytes,
+        });
+        Ok(())
+    }
+
+    /// Returns every retained sample in observation order.
+    pub fn samples(&self) -> Result<Vec<StorageGrowthSample>, StorageError> {
+        let samples = self.samples.lock().map_err(|_| StorageError::Unavailable)?;
+        let mut copied = Vec::new();
+        copied
+            .try_reserve_exact(samples.len())
+            .map_err(|_| StorageError::AllocationFailed)?;
+        copied.extend_from_slice(&samples);
+        Ok(copied)
+    }
+}
+
+/// Sums allocated bytes of a state directory inode and its regular files.
+pub fn allocated_directory_bytes(directory: &Path) -> Result<u64, StorageError> {
+    let metadata = fs::symlink_metadata(directory).map_err(|_| StorageError::FilesystemRejected)?;
+    if !metadata.is_dir() {
+        return Err(StorageError::FilesystemRejected);
+    }
+    let mut total = metadata
+        .blocks()
+        .checked_mul(512)
+        .ok_or(StorageError::Overflow)?;
+    let entries = fs::read_dir(directory).map_err(|_| StorageError::FilesystemRejected)?;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_PROBED_ENTRIES {
+            return Err(StorageError::LimitExceeded);
+        }
+        let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
+        let metadata =
+            fs::symlink_metadata(entry.path()).map_err(|_| StorageError::FilesystemRejected)?;
+        if !metadata.is_file() {
+            continue;
+        }
+        total = total
+            .checked_add(
+                metadata
+                    .blocks()
+                    .checked_mul(512)
+                    .ok_or(StorageError::Overflow)?,
+            )
+            .ok_or(StorageError::Overflow)?;
+    }
+    Ok(total)
+}
+
+/// The largest observed before/after pair of one boundary site.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PhaseGrowth {
+    /// Greatest positive delta across every pair.
+    pub maximum_delta: u64,
+    /// Number of complete before/after pairs observed.
+    pub pairs: u64,
+    /// Allocated bytes before the largest pair.
+    pub allocated_before: u64,
+    /// Allocated bytes after the largest pair.
+    pub allocated_after: u64,
+}
+
+/// Pairs each site's before sample with its next after sample and keeps the
+/// largest positive growth per site.
+pub fn phase_growth(
+    samples: &[StorageGrowthSample],
+) -> Result<BTreeMap<StorageFaultSite, PhaseGrowth>, StorageError> {
+    let mut pending: BTreeMap<StorageFaultSite, u64> = BTreeMap::new();
+    let mut growth: BTreeMap<StorageFaultSite, PhaseGrowth> = BTreeMap::new();
+    for sample in samples {
+        if sample.boundary == StorageFaultBoundary::Before {
+            pending.insert(sample.site, sample.allocated_bytes);
+            continue;
+        }
+        let Some(before) = pending.remove(&sample.site) else {
+            continue;
+        };
+        growth
+            .entry(sample.site)
+            .or_default()
+            .observe(before, sample.allocated_bytes)?;
+    }
+    Ok(growth)
+}
+
+impl PhaseGrowth {
+    fn observe(&mut self, before: u64, after: u64) -> Result<(), StorageError> {
+        let delta = after.saturating_sub(before);
+        if self.pairs == 0 || delta > self.maximum_delta {
+            self.maximum_delta = delta;
+            self.allocated_before = before;
+            self.allocated_after = after;
+        }
+        self.pairs = self.pairs.checked_add(1).ok_or(StorageError::Overflow)?;
+        Ok(())
     }
 }
 

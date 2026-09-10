@@ -10,6 +10,34 @@ use super::*;
 const REQUEST: RequestId = RequestId::from_bytes([41; 16]);
 const EVENT: EventId = EventId::from_bytes([42; 16]);
 
+#[tokio::test]
+async fn an_absent_request_does_not_relax_completion_generation_or_ownership_checks() -> TestResult
+{
+    for conflicting_owner in [false, true] {
+        let mut fixture = StateCoreFixture::new(entropy_script())?;
+        let mut edge = pending_edge()?;
+        let arm_generation = if conflicting_owner { 10 } else { 11 };
+        let (descriptor, object) = completion_object_at(&edge, 10, arm_generation)?;
+        edge.pending
+            .remove(&REQUEST)
+            .ok_or("pending")?
+            .sink_gone(&mut edge);
+        if conflicting_owner {
+            edge.by_completion
+                .insert(EVENT, RequestId::from_bytes([99; 16]));
+        }
+        assert!(matches!(
+            events::receive(&mut edge, fixture.context_mut()?, descriptor, &object),
+            Err(Violation::Consistency)
+        ));
+        assert!(edge.commit.is_none());
+        assert!(edge.cursor.is_none());
+        assert!(edge.pending.is_empty());
+        assert!(edge.applied_completions.is_empty());
+    }
+    Ok(())
+}
+
 fn pending_edge() -> TestResult<EdgeFederation> {
     let mut edge = edge_with_projection()?;
     let header = RequestHeader {
@@ -27,6 +55,8 @@ fn pending_edge() -> TestResult<EdgeFederation> {
     edge.pending.insert(
         REQUEST,
         request::PendingRequest {
+            sink_gone: false,
+            result_bytes: Vec::new(),
             generation: ConnectionGeneration::new(1),
             kind: request::PendingKind::Command {
                 message: Box::new(parse_message(FramedLine::new("NICK after")?)?.ok_or("message")?),
@@ -36,8 +66,10 @@ fn pending_edge() -> TestResult<EdgeFederation> {
             sent: true,
             result: None,
             replies: Vec::new(),
+            join_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
+            completion_coverage: None,
         },
     );
     Ok(edge)
@@ -198,6 +230,11 @@ async fn completion_results_before_during_and_after_storage_wait_for_commit() ->
         let (descriptor, object) = completion_object(&edge)?;
         if order == 0 {
             assert!(deliver_result(&mut edge, &mut fixture)?.is_empty());
+            assert!(
+                commit_edge_batches(&mut edge, &mut fixture)
+                    .await?
+                    .is_empty()
+            );
         }
         assert!(
             events::receive(&mut edge, fixture.context_mut()?, descriptor, &object)
@@ -211,11 +248,12 @@ async fn completion_results_before_during_and_after_storage_wait_for_commit() ->
             assert!(deliver_result(&mut edge, &mut fixture)?.is_empty());
         }
         assert!(edge.pending.contains_key(&REQUEST));
-        let outputs = edge.batch_applied(fixture.context_mut()?);
+        let outputs = commit_edge_batches(&mut edge, &mut fixture).await?;
         if order == 2 {
             assert!(outputs.is_empty());
             assert!(edge.applied_completions.contains(&EVENT));
-            assert_eq!(deliver_result(&mut edge, &mut fixture)?.len(), 1);
+            assert!(deliver_result(&mut edge, &mut fixture)?.is_empty());
+            assert_eq!(commit_edge_batches(&mut edge, &mut fixture).await?.len(), 1);
         } else {
             assert_eq!(outputs.len(), 1);
         }
@@ -252,7 +290,10 @@ async fn refused_completion_storage_cannot_release_a_later_result() -> TestResul
         }
         assert_eq!(edge.cursor, None);
         assert!(events::receive(&mut edge, recovered.context_mut()?, descriptor, &object).is_ok());
-        assert_eq!(edge.batch_applied(recovered.context_mut()?).len(), 1);
+        assert_eq!(
+            commit_edge_batches(&mut edge, &mut recovered).await?.len(),
+            1
+        );
         assert!(!edge.pending.contains_key(&REQUEST));
     }
     Ok(())
@@ -292,7 +333,11 @@ async fn nonterminal_results_cannot_consume_a_durable_completion() -> TestResult
     let mut edge = pending_edge()?;
     let (descriptor, object) = completion_object(&edge)?;
     assert!(events::receive(&mut edge, fixture.context_mut()?, descriptor, &object).is_ok());
-    assert!(edge.batch_applied(fixture.context_mut()?).is_empty());
+    assert!(
+        commit_edge_batches(&mut edge, &mut fixture)
+            .await?
+            .is_empty()
+    );
     let error = deliver_result_arm(
         &mut edge,
         &mut fixture,
@@ -311,7 +356,8 @@ async fn nonterminal_results_cannot_consume_a_durable_completion() -> TestResult
             .is_some_and(|pending| pending.result.is_none())
     );
     assert!(edge.applied_completions.contains(&EVENT));
-    assert_eq!(deliver_result(&mut edge, &mut fixture)?.len(), 1);
+    assert!(deliver_result(&mut edge, &mut fixture)?.is_empty());
+    assert_eq!(commit_edge_batches(&mut edge, &mut fixture).await?.len(), 1);
     assert!(edge.applied_completions.is_empty());
     Ok(())
 }
@@ -359,6 +405,11 @@ async fn completion_generations_must_match_in_every_result_arrival_order() -> Te
                 )?
                 .is_empty()
             );
+            assert!(
+                commit_edge_batches(&mut edge, &mut fixture)
+                    .await?
+                    .is_empty()
+            );
             assert!(matches!(
                 events::receive(&mut edge, fixture.context_mut()?, descriptor, &object),
                 Err(Violation::Consistency)
@@ -370,7 +421,11 @@ async fn completion_generations_must_match_in_every_result_arrival_order() -> Te
                 events::receive(&mut edge, fixture.context_mut()?, descriptor, &object).is_ok()
             );
             if order == 2 {
-                assert!(edge.batch_applied(fixture.context_mut()?).is_empty());
+                assert!(
+                    commit_edge_batches(&mut edge, &mut fixture)
+                        .await?
+                        .is_empty()
+                );
             }
             let error = deliver_result_arm(
                 &mut edge,
@@ -389,12 +444,8 @@ async fn completion_generations_must_match_in_every_result_arrival_order() -> Te
                     .is_some_and(|pending| pending.result.is_none())
             );
             let outputs = deliver_result(&mut edge, &mut fixture)?;
-            if order == 1 {
-                assert!(outputs.is_empty());
-                assert_eq!(edge.batch_applied(fixture.context_mut()?).len(), 1);
-            } else {
-                assert_eq!(outputs.len(), 1);
-            }
+            assert!(outputs.is_empty());
+            assert_eq!(commit_edge_batches(&mut edge, &mut fixture).await?.len(), 1);
         }
     }
     Ok(())

@@ -48,7 +48,18 @@ impl EdgeFederation {
         if !cleanup_ready(self, context, companion_pending) {
             return;
         }
-        if let Some(mutation) = self.barrier.fenced.keys().next().copied() {
+        if let Some(mutation) = self
+            .barrier
+            .fenced
+            .iter()
+            .find(|(_, barrier)| {
+                !super::journal::needs_fenced_evidence(
+                    self,
+                    barrier.stage.identity.coordinator_state_generation,
+                )
+            })
+            .map(|(mutation, _)| *mutation)
+        {
             if let Err(violation) = cleanup_fenced(self, context, mutation) {
                 self.fail_link(context, violation);
             }
@@ -132,7 +143,7 @@ fn cleanup(
             finished,
         },
         super::render::EventFanout::default().finish()?,
-        |_, _, _| writes,
+        |_, _, _| Ok(writes),
     )
 }
 
@@ -246,6 +257,6 @@ fn cleanup_fenced(
             finished,
         },
         super::render::EventFanout::default().finish()?,
-        |_, _, _| writes,
+        |_, _, _| Ok(writes),
     )
 }

@@ -141,6 +141,7 @@ fn fixture_with_options(
     edge.origins.insert(
         generation,
         super::super::ConnectionOrigin {
+            pending_updates: std::collections::VecDeque::new(),
             origin_id: OriginId::from_bytes([8; 16]),
             connection_id: agenc_ircd_types::ConnectionId::from_bytes([7; 16]),
             connection_nonce: [7; 32],
@@ -151,6 +152,9 @@ fn fixture_with_options(
             session: Some((identity.session_id, identity.user_id)),
             account: None,
             acked_generation: Some(0),
+            ever_acked: true,
+            join_names_pending: false,
+            del_acked: false,
             deleted: false,
         },
     );
@@ -220,6 +224,8 @@ fn fixture_with_options(
     edge.pending.insert(
         ID,
         request::PendingRequest {
+            sink_gone: false,
+            result_bytes: Vec::new(),
             generation,
             kind: PendingKind::Command {
                 message: Box::new(
@@ -234,8 +240,10 @@ fn fixture_with_options(
             sent: true,
             result: None,
             replies: Vec::new(),
+            join_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
+            completion_coverage: None,
         },
     );
     let message = HistoryMessageRecord {

@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 440
-reviewed_source_sha256 = "30406c7f667f5efcc00378cf5117ebb33fc7def348560230a9ef75549b8590e5"
+reviewed_source_files = 765
+reviewed_source_sha256 = "4b6cd0e9f7fe069ec9184196dffec5911e5f90c36417b1ed4625e592459d5332"
 deferred = []
 
 [[region]]
@@ -31,9 +31,9 @@ reason = "Every accepted and rejected syntax path must be exercised at the clien
 id = "domain-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
-start_line = 2080
-end_line = 2346
+source_sha256 = "5e6e9557a880760d38a034a739f6a7dcfefcd67e32c490f2269aeadae539bda8"
+start_line = 2110
+end_line = 2379
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -51,9 +51,9 @@ reason = "Every closed FieldKind decode arm must run in the canonical federation
 id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-domain/src/model.rs"
-source_sha256 = "17b848730f9e3ccac7f0d2771db78f233c952745c71ca62db4cc7645eee6aa63"
-start_line = 1898
-end_line = 2083
+source_sha256 = "3c81d0d86931b2c613a2dfb8cb5aa1e70ca34d2d3ac12d89c11a6b5cc6600f36"
+start_line = 1969
+end_line = 2154
 metric = "branches"
 reason = "Every current domain cross-index and authority-fence check must take both outcomes."
 
@@ -71,9 +71,9 @@ reason = "Every enumerated rollback-guard, reservation, and database recovery st
 id = "history-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "433ae9b679580c5c369b56d44dbb59101e7f2ebc1383e1aa470d0db6bb684186"
-start_line = 2369
-end_line = 2390
+source_sha256 = "5e6e9557a880760d38a034a739f6a7dcfefcd67e32c490f2269aeadae539bda8"
+start_line = 2405
+end_line = 2426
 metric = "branches"
 reason = "History requests require current membership, plaintext content, enabled retention, and an eligible channel."
 
@@ -81,18 +81,8 @@ reason = "History requests require current membership, plaintext content, enable
 id = "wss-upgrade-error-responses"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-client-wire/src/websocket_transport/upgrade.rs"
-source_sha256 = "d598a0585f51a34bfa6cb50d78f2503ce40a08035dea6d7e819dbd46b7a9da1e"
+source_sha256 = "ac48a85d41e9aabc5eea363ab3bd47f734b0f06d3cbb2312e7610cfd489b0fa1"
 start_line = 37
 end_line = 48
 metric = "regions"
 reason = "Every closed upgrade error maps to a fixed public response without reflecting peer input."
-
-[[region]]
-id = "migration-rule-source-target-binding"
-category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/migration.rs"
-source_sha256 = "090df2d7958ed33eadc0080657f7cd0f5a367a277348b9873a9c699583b82aa3"
-start_line = 48
-end_line = 62
-metric = "branches"
-reason = "Only the registered source, target, schema, and exact migration rule tuples may construct records."

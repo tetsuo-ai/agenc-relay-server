@@ -140,6 +140,30 @@ impl E2eeRecoveryGate {
         self.state
     }
 
+    /// Returns the exact conversation whose recovery state is recorded.
+    #[must_use]
+    pub const fn conversation_id(self) -> StorageDigest {
+        self.conversation_id
+    }
+
+    /// Returns the binding authenticated by the restored source.
+    #[must_use]
+    pub const fn restored_binding_id(self) -> StorageDigest {
+        self.restored_binding_id
+    }
+
+    /// Returns the accepted state authenticated by the restored source.
+    #[must_use]
+    pub const fn restored_accepted_state_id(self) -> StorageDigest {
+        self.restored_accepted_state_id
+    }
+
+    /// Returns the sequencer head authenticated by the restored source.
+    #[must_use]
+    pub const fn restored_sequencer_head_id(self) -> StorageDigest {
+        self.restored_sequencer_head_id
+    }
+
     /// Returns the lineage epoch bound by this gate.
     #[must_use]
     pub const fn recovery_epoch(self) -> RecoveryEpoch {
@@ -587,7 +611,13 @@ impl PersistentRecordValue {
             .try_reserve_exact(reference_count)
             .map_err(|_| StorageError::AllocationFailed)?;
         for _ in 0..reference_count {
-            references.push(RecordReference::decode(&mut decoder)?);
+            let reference = RecordReference::decode(&mut decoder)?;
+            if references.last().is_some_and(|previous| {
+                compare_references(previous, &reference) != std::cmp::Ordering::Less
+            }) {
+                return Err(StorageError::InvalidEncoding);
+            }
+            references.push(reference);
         }
         let body = decoder.vector_u32(MAX_DOMAIN_RECORD_BODY_BYTES)?.to_vec();
         decoder.finish()?;
@@ -729,8 +759,26 @@ pub fn validate_record_plaintext(
             let value = PersistentRecordValue::decode(table, plaintext)?;
             crate::history_records::validate_binding(stored_key, &value)
         }
+        TableId::E2eeState => validate_companion_plaintext(stored_key, plaintext),
         _ => PersistentRecordValue::decode(table, plaintext).map(|_| ()),
     }
+}
+
+fn validate_companion_plaintext(key: &StoredKey, plaintext: &[u8]) -> Result<(), StorageError> {
+    let value = PersistentRecordValue::decode(TableId::E2eeState, plaintext)?;
+    match value.record_kind() {
+        crate::e2ee_records::DELIVERY_RECOVERY_ROW_KIND => {
+            crate::e2ee_records::delivery_recovery::validate_at(key, value.body())?;
+        }
+        crate::e2ee_records::mailbox_sequence::MAILBOX_SEQUENCE_ROW_KIND => {
+            crate::e2ee_records::mailbox_sequence::MailboxSequenceRow::decode_keyed(
+                key,
+                value.body(),
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Validates an encoded sealed record against the closed table/key/schema inventory.
@@ -874,14 +922,18 @@ const fn record_kind_is_valid(table: TableId, kind: u16) -> bool {
         TableId::EdgeOutbox => 3,
         TableId::EdgeProjection => 3,
         TableId::History => 2,
-        TableId::Audit => 1,
+        TableId::Audit => 2,
         TableId::AuditCheckpoint => 1,
         TableId::E2eeObject => 1,
-        TableId::E2eeState => 12,
+        TableId::E2eeState => 15,
         _ => 0,
     };
     kind != 0 && kind <= maximum
 }
+
+#[cfg(test)]
+#[path = "records/tests/audit.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -893,6 +945,52 @@ mod tests {
         IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
         IntegrityRecordMutation, IntegrityRecordVersion, StorageSealContext,
     };
+
+    #[test]
+    fn domain_record_decoder_requires_strict_reference_order() -> Result<(), StorageError> {
+        let reference = |table, key| RecordReference::new(table, StoredKey::new(vec![key; 16])?);
+        let first = reference(TableId::Channel, 1)?;
+        let second = reference(TableId::Channel, 2)?;
+        let earlier_table = reference(TableId::AuthTransaction, 1)?;
+        let value = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            1,
+            1,
+            0,
+            None,
+            vec![second.clone(), first.clone()],
+            Vec::new(),
+        )?;
+        let canonical = value.encode()?;
+        assert_eq!(
+            PersistentRecordValue::decode(TableId::AuthTransaction, &canonical)?.encode()?,
+            canonical
+        );
+        for references in [
+            [second, first.clone()],
+            [first.clone(), first],
+            [reference(TableId::Channel, 1)?, earlier_table],
+        ] {
+            let mut encoder = Encoder::with_capacity(0, 1_024)?;
+            encoder.put_u16(DOMAIN_RECORD_VERSION)?;
+            encoder.put_u16(1)?;
+            encoder.put_u64(1)?;
+            encoder.put_u64(0)?;
+            encoder.put_u16(0)?;
+            encoder.put_u64(0)?;
+            encoder.put_u32(2)?;
+            for reference in references {
+                reference.encode(&mut encoder)?;
+            }
+            encoder.put_vector_u32(&[])?;
+            assert_eq!(
+                PersistentRecordValue::decode(TableId::AuthTransaction, &encoder.finish())
+                    .map(|_| ()),
+                Err(StorageError::InvalidEncoding)
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn domain_record_admission_stops_at_the_exact_sealed_plaintext_ceiling()

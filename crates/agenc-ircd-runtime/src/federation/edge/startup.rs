@@ -12,7 +12,7 @@ use agenc_ircd_storage::e2ee_records::barrier::{
 };
 use agenc_ircd_storage::e2ee_records::{
     BARRIER_ROW_KIND, DELIVERY_ROW_KIND, DeliveryRow, OBJECT_RECORD_KIND, ObjectRow,
-    ROUTE_ROW_KIND, RouteRow,
+    ROUTE_ROW_KIND, RouteRow, WITNESS_ROW_KIND, WitnessRow,
 };
 use agenc_ircd_storage::federation_records::{
     FederationPeerRecord, PEER_RECORD_KIND, PROJECTION_ENTRY_KIND, ProjectionEntryRecord, peer_key,
@@ -40,6 +40,9 @@ type Mutation = [u8; 16];
 struct Restore {
     peer: Option<FederationPeerRecord>,
     projection: Vec<ProjectionRecord>,
+    pending_projection: Vec<ProjectionRecord>,
+    pending_marker: Option<agenc_ircd_storage::federation_records::ProjectionMarkerRecord>,
+    active_cut: Option<(u64, u64)>,
     heads: BTreeMap<Mutation, BarrierHead>,
     parts: BTreeMap<Mutation, Vec<BarrierPart>>,
     bytes: usize,
@@ -69,7 +72,11 @@ impl EdgeFederation {
         keys: &KeyDeriver,
         mut companion: Option<&mut E2eeEdge>,
         head: HeadCounters,
+        backing: Option<crate::budget::BackingReservationPort>,
     ) -> Result<(), RuntimeError> {
+        if let Some(companion) = companion.as_deref_mut() {
+            companion.restore_witness_backing(backing.ok_or_else(invalid)?)?;
+        }
         let mut restored = Restore::default();
         scan_values(port, keys, TableId::FederationPeer, |key, value| {
             if key == peer_key(self.config.coordinator.server_id())? {
@@ -84,9 +91,20 @@ impl EdgeFederation {
             restored.projection(self, key, value)
         })?;
         restored.install_projection(self)?;
-        scan_values(port, keys, TableId::RequestResult, |key, value| {
-            super::history::validate_restored(self, &key, &value)
+        scan_values(port, keys, TableId::FederationOrigin, |key, value| {
+            if value.record_kind() == agenc_ircd_storage::federation_records::ORIGIN_RECORD_KIND {
+                super::journal::restore_origin(self, &key, &value)?;
+            }
+            Ok(())
         })?;
+        scan_values(port, keys, TableId::RequestResult, |key, value| {
+            if value.record_kind() == agenc_ircd_storage::federation_records::EDGE_REQUEST_KIND {
+                super::journal::restore_request(self, &key, &value)
+            } else {
+                super::history::validate_restored(self, &key, &value)
+            }
+        })?;
+        super::journal::finish_restore(self);
         scan_values(port, keys, TableId::E2eeState, |key, value| {
             restored.admit_state(self, companion.as_deref_mut(), key, value)
         })?;
@@ -124,12 +142,58 @@ impl Restore {
         Ok(())
     }
 
+    fn marker(
+        &mut self,
+        edge: &EdgeFederation,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        let parts = agenc_ircd_storage::federation_records::parse_projection_key(key)?;
+        let marker =
+            agenc_ircd_storage::federation_records::ProjectionMarkerRecord::decode(value.body())?;
+        if parts.target != edge.config.server_id
+            || *key
+                != agenc_ircd_storage::federation_records::projection_marker_key(
+                    parts.target,
+                    parts.projection_generation,
+                )?
+        {
+            return Err(invalid());
+        }
+        if self
+            .peer
+            .as_ref()
+            .is_some_and(|peer| peer.pending_generation == Some(parts.projection_generation))
+        {
+            self.pending_marker = Some(marker);
+        } else if marker.state
+            == agenc_ircd_storage::federation_records::ProjectionGenerationState::Active
+            && self
+                .peer
+                .as_ref()
+                .is_some_and(|peer| peer.projection_generation == parts.projection_generation)
+        {
+            self.active_cut = Some((parts.projection_generation, marker.state_generation));
+        }
+        Ok(())
+    }
+
+    fn active_projection(&self, generation: u64) -> bool {
+        self.peer.as_ref().is_some_and(|peer| {
+            (!peer.snapshot_required || peer.pending_generation.is_some())
+                && peer.projection_generation == generation
+        })
+    }
+
     fn projection(
         &mut self,
         edge: &EdgeFederation,
         key: StoredKey,
         value: PersistentRecordValue,
     ) -> Result<(), RuntimeError> {
+        if value.record_kind() == agenc_ircd_storage::federation_records::PROJECTION_MARKER_KIND {
+            return self.marker(edge, &key, &value);
+        }
         if value.record_kind() != PROJECTION_ENTRY_KIND {
             return Err(invalid());
         }
@@ -162,11 +226,16 @@ impl Restore {
         {
             return Err(invalid());
         }
-        if self.peer.as_ref().is_some_and(|peer| {
-            !peer.snapshot_required && peer.projection_generation == header.projection_generation
-        }) {
+        if self.active_projection(header.projection_generation) {
             self.charge(row.entry_object.len())?;
             self.projection.push(record);
+        } else if self
+            .peer
+            .as_ref()
+            .is_some_and(|peer| peer.pending_generation == Some(header.projection_generation))
+        {
+            self.charge(row.entry_object.len())?;
+            self.pending_projection.push(record);
         }
         Ok(())
     }
@@ -203,6 +272,15 @@ impl Restore {
             (!peer.snapshot_required).then_some(RecoveryEpoch::from_bytes(peer.recovery_epoch));
         edge.installed_incarnation = Some(ServerIncarnation::from_bytes(peer.server_incarnation));
         edge.client_resync_epoch = peer.client_resync_epoch;
+        edge.snapshot_cut = self.active_cut;
+        if let Some(generation) = peer.pending_generation {
+            super::sync::restore_pending(
+                edge,
+                generation,
+                self.pending_marker.take().ok_or_else(invalid)?,
+                std::mem::take(&mut self.pending_projection),
+            )?;
+        }
         Ok(())
     }
 
@@ -214,6 +292,12 @@ impl Restore {
         value: PersistentRecordValue,
     ) -> Result<(), RuntimeError> {
         match value.record_kind() {
+            WITNESS_ROW_KIND => {
+                self.charge(value.body().len())?;
+                companion
+                    .ok_or_else(invalid)?
+                    .restore_chain_witness(&key, WitnessRow::decode(value.body())?)?;
+            }
             BARRIER_ROW_KIND => {
                 self.admit_barrier(edge, key, &value)?;
             }
@@ -328,8 +412,7 @@ fn install_stage(
     if edge.barrier.open.is_some() {
         return Err(invalid());
     }
-    // Legacy edge cursors did not checkpoint the witnessed record head. An
-    // active collecting barrier cannot be discarded without its durable fence.
+    // A collecting barrier requires the edge checkpoint that witnessed it.
     if companion
         .as_deref()
         .is_some_and(E2eeEdge::needs_witness_snapshot)

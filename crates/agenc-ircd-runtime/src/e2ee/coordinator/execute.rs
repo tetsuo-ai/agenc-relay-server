@@ -15,6 +15,7 @@ use agenc_ircd_e2ee::limits::S2S_IDEMPOTENCY_RETENTION_SECONDS;
 use agenc_ircd_e2ee::wire::fragment::fragment_object;
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
 use agenc_ircd_federation_wire::CanonicalEncode;
+use agenc_ircd_storage::e2ee_records::delivery_recovery::{BarrierEndpoint, DeliveryScope};
 use agenc_ircd_types::{ChannelInstanceId, OriginId, ServerId, ServerIncarnation, UserId};
 
 use super::ConversationState;
@@ -23,7 +24,6 @@ use super::ops::{self, Exec, Fail};
 use super::request::{self, Classified, Decoded, Outcome, ResponseObject};
 use super::{
     CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteRequest, PendingCompanion,
-    StoredResult,
 };
 use crate::federation::LinkId;
 use crate::federation::codec::source_view_object;
@@ -92,6 +92,10 @@ pub enum Staged {
     Batch,
     /// An exact replay; the lines to resend immediately.
     Replay(Vec<agenc_ircd_federation_wire::FederationLineText>),
+    /// A retained response set needs exact object reads before any output.
+    ReadResponses(super::response_read::Identity),
+    /// A fresh authorized object lookup must complete before its result is staged.
+    ReadObject(super::object_read::PendingRequest),
 }
 
 /// Everything the owner supplies about the base state for one execution.
@@ -116,8 +120,12 @@ pub struct BarrierPlanned {
     pub base_parts: u16,
     /// Base plus companion parts.
     pub part_count: u16,
-    /// The last companion delivery sequence of the barrier.
-    pub companion_last: u64,
+    /// The transaction's shared state generation.
+    pub state_generation: u64,
+    /// The full accepted companion delivery scope.
+    pub companion_scope: DeliveryScope,
+    /// The complete companion endpoint, including its final event identity.
+    pub companion: BarrierEndpoint,
 }
 
 /// The base origin principal the companion origin mirrors.
@@ -160,7 +168,6 @@ pub fn base_origin_key(origin: &CompanionOrigin) -> BaseOriginKey {
 
 /// Executes one complete request and stages its batch. Returns the exact
 /// replay lines when the request was a duplicate.
-// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one companion request flows through decode, replay classification, execution, event sequencing, result encoding, and staging in order
 pub fn run(
     coordinator: &mut CompanionCoordinator,
     view: BaseView<'_>,
@@ -169,12 +176,29 @@ pub fn run(
     complete: CompleteRequest,
     facts_for: &dyn Fn(BaseOriginKey) -> OriginFacts,
 ) -> Result<Staged, E2eeReplyCode> {
+    run_with_object(coordinator, view, link, peer, complete, facts_for, None)
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-08 reason=one request preserves ordered decode, replay admission, optional object-read suspension, authorization, sequencing, and atomic staging
+pub(crate) fn run_with_object(
+    coordinator: &mut CompanionCoordinator,
+    view: BaseView<'_>,
+    link: LinkId,
+    peer: ServerId,
+    complete: CompleteRequest,
+    facts_for: &dyn Fn(BaseOriginKey) -> OriginFacts,
+    resolved: Option<&super::object_read::Resolved>,
+) -> Result<Staged, E2eeReplyCode> {
     let home = *peer.as_bytes();
     let decoded = request::decode(coordinator, &complete)?;
     if decoded.request.home_server_id != home {
         return Err(E2eeReplyCode::InvalidFragment);
     }
-    match request::classify(&coordinator.state, home, &decoded) {
+    let classified = request::classify(&coordinator.state, home, &decoded);
+    if resolved.is_some() && !matches!(classified, Classified::Fresh) {
+        return Err(E2eeReplyCode::OperationConflict);
+    }
+    match classified {
         Classified::Fresh => {}
         Classified::Replay(result, responses) => {
             return Ok(Staged::Replay(replay_lines(
@@ -185,7 +209,18 @@ pub fn run(
                 &responses,
             )?));
         }
-        Classified::Violation => return Err(E2eeReplyCode::OperationConflict),
+        Classified::Violation => {
+            let identity = super::response_read::Identity {
+                peer,
+                correlation: complete.correlation,
+                request_object_id: decoded.request_object_id,
+            };
+            return if identity.missing(coordinator) {
+                Ok(Staged::ReadResponses(identity))
+            } else {
+                Err(E2eeReplyCode::OperationConflict)
+            };
+        }
     }
     let origin_key = CompanionOriginKey {
         home_server_id: home,
@@ -212,7 +247,7 @@ pub fn run(
     let state_generation = plan.resulting_revision().get();
     let source_view = source_view_bytes(view.context, facts);
     let mut pool = EntropyPool::fill(view.context.entropy_mut())?;
-    let mut outcome = execute(
+    let prepared = execute(
         coordinator,
         view.context,
         &view.peers,
@@ -224,8 +259,25 @@ pub fn run(
         facts.user_id,
         source_view,
         &mut pool,
+        resolved,
     );
+    let mut outcome = match prepared {
+        ops::Prepared::Complete(outcome) => *outcome,
+        ops::Prepared::Read(request) => {
+            return Ok(Staged::ReadObject(super::object_read::PendingRequest {
+                complete,
+                request,
+            }));
+        }
+    };
     let base_plan = outcome.base_plan.take();
+    if let Some(deadline) = outcome.mailbox_expiry {
+        ops::mailbox_snapshot::reserve_expiry(
+            view.context.timers_mut(),
+            deadline,
+            &mut coordinator.state.mailbox_expiry_armed,
+        )?;
+    }
     let base_counts = match &base_plan {
         Some(plan) if plan.resulting_revision().get() == state_generation => Some(
             view.context
@@ -243,7 +295,9 @@ pub fn run(
         outcome,
         state_generation,
         now,
+        resolved.and_then(super::object_read::Resolved::uncached_id),
         BarrierInputs {
+            backing: view.context.backing_reservations(),
             base_counts: base_counts.as_ref(),
             base_capacity: &*view.base_capacity,
             entropy: &mut pool,
@@ -267,6 +321,8 @@ pub fn run(
                             CrossProfileAssignment {
                                 mutation_id: barrier.mutation_id,
                                 part_count: barrier.part_count,
+                                companion_scope: barrier.companion_scope,
+                                companion: barrier.companion,
                             },
                         )
                     })
@@ -296,6 +352,7 @@ pub fn run(
             events: assembled.copies,
             effects: assembled.effects,
             barriers: assembled.barriers,
+            object_backing: resolved.map(super::object_read::Resolved::backing),
         },
     )));
     Ok(Staged::Batch)
@@ -315,7 +372,8 @@ fn execute(
     user_id: Option<UserId>,
     source_view: Vec<u8>,
     entropy: &mut dyn agenc_ircd_types::EntropySource,
-) -> Outcome {
+    resolved: Option<&super::object_read::Resolved>,
+) -> ops::Prepared {
     let domain = context.domain();
     let holds_channel = |edge: ServerId, channel: ChannelInstanceId| {
         context
@@ -330,18 +388,7 @@ fn execute(
             .filter(|edge| holds_channel(*edge, channel))
             .collect()
     };
-    let attached_edges = |digest: &[u8; 32]| -> Vec<ServerId> {
-        let mut edges: Vec<ServerId> = coordinator
-            .state
-            .origins
-            .values()
-            .filter(|origin| origin.account_digest == Some(*digest) && origin.device.is_some())
-            .map(|origin| ServerId::from_bytes(origin.home_server_id))
-            .collect();
-        edges.sort();
-        edges.dedup();
-        edges
-    };
+    let attached_edges = |digest: &[u8; 32]| attached_origin_edges(coordinator, digest);
     let channel_member = |channel: ChannelInstanceId| {
         user_id.is_some_and(|user| {
             domain
@@ -353,6 +400,13 @@ fn execute(
         binding_plan(domain, user_id, channel, principals)
     };
     let mut exec = Exec {
+        object_source: resolved.map_or(
+            super::object_read::Source::Unread,
+            super::object_read::Source::Resolved,
+        ),
+        queries: user_id.map(|user| context.query_reservations(user)),
+        backing: context.backing_reservations(),
+        monotonic_millis: crate::e2ee::link::tick_millis(context.now()),
         coordinator,
         home,
         origin,
@@ -369,12 +423,28 @@ fn execute(
         source_view,
     };
     match ops::execute(&mut exec) {
-        Ok(mut outcome) => {
+        Ok(ops::Prepared::Complete(mut outcome)) => {
             project_routes(&exec, &mut outcome);
-            outcome
+            ops::Prepared::Complete(outcome)
         }
-        Err(Fail { code, context }) => Outcome::failed(code, context),
+        Ok(ops::Prepared::Read(request)) => ops::Prepared::Read(request),
+        Err(Fail { code, context }) => {
+            ops::Prepared::Complete(Box::new(Outcome::failed(code, context)))
+        }
     }
+}
+
+fn attached_origin_edges(coordinator: &CompanionCoordinator, digest: &[u8; 32]) -> Vec<ServerId> {
+    let mut edges: Vec<ServerId> = coordinator
+        .state
+        .origins
+        .values()
+        .filter(|origin| origin.account_digest == Some(*digest) && origin.device.is_some())
+        .map(|origin| ServerId::from_bytes(origin.home_server_id))
+        .collect();
+    edges.sort();
+    edges.dedup();
+    edges
 }
 
 /// Route projection entitlement (companion 12.5): every target of a
@@ -522,9 +592,50 @@ struct Assembled {
 
 /// What barrier planning needs from the base side.
 struct BarrierInputs<'a> {
+    backing: crate::budget::BackingReservationPort,
     base_counts: Option<&'a BTreeMap<ServerId, (usize, u64)>>,
     base_capacity: &'a dyn Fn(ServerId, usize, u64) -> bool,
     entropy: &'a mut dyn agenc_ircd_types::EntropySource,
+}
+
+fn complete_barriers(
+    assignments: &BTreeMap<ServerId, BarrierAssignment>,
+    sequenced: &events::Sequenced,
+    state_generation: u64,
+) -> Result<Vec<BarrierPlanned>, E2eeReplyCode> {
+    assignments
+        .iter()
+        .map(|(target, assignment)| {
+            let (_, stream) = sequenced
+                .streams
+                .iter()
+                .find(|(peer, _)| peer == target)
+                .ok_or(E2eeReplyCode::Syncing)?;
+            let owner = stream.owner.as_ref().ok_or(E2eeReplyCode::Syncing)?;
+            let (first, last) = stream.barrier.ok_or(E2eeReplyCode::Syncing)?;
+            let copy = sequenced
+                .copies
+                .iter()
+                .find(|copy| copy.target == *target && copy.row.sequence == last)
+                .ok_or(E2eeReplyCode::Syncing)?;
+            if sequenced.barrier_last.get(target) != Some(&last)
+                || copy.generation != stream.generation
+                || last >= stream.next_sequence
+            {
+                return Err(E2eeReplyCode::Syncing);
+            }
+            Ok(BarrierPlanned {
+                target: *target,
+                mutation_id: assignment.mutation_id,
+                base_parts: assignment.base_parts,
+                part_count: assignment.part_count,
+                state_generation,
+                companion_scope: *owner.scope(),
+                companion: BarrierEndpoint::new(stream.generation, first, last, copy.row.event_id)
+                    .map_err(|_| E2eeReplyCode::Syncing)?,
+            })
+        })
+        .collect()
 }
 
 /// Plans one barrier per target that receives both base and companion
@@ -576,6 +687,7 @@ fn assemble(
     mut outcome: Outcome,
     state_generation: u64,
     now: u64,
+    uncached_response: Option<[u8; 32]>,
     barrier_inputs: BarrierInputs<'_>,
 ) -> Result<Assembled, E2eeReplyCode> {
     let opcode = Opcode(decoded.request.opcode.value());
@@ -623,22 +735,9 @@ fn assemble(
         state_generation,
         barrier_inputs.entropy,
         &assignments,
+        &barrier_inputs.backing,
     )?;
-    let barriers: Vec<BarrierPlanned> = assignments
-        .iter()
-        .filter_map(|(target, assignment)| {
-            sequenced
-                .barrier_last
-                .get(target)
-                .map(|last| BarrierPlanned {
-                    target: *target,
-                    mutation_id: assignment.mutation_id,
-                    base_parts: assignment.base_parts,
-                    part_count: assignment.part_count,
-                    companion_last: *last,
-                })
-        })
-        .collect();
+    let barriers = complete_barriers(&assignments, &sequenced, state_generation)?;
     let (copies, mut writes, streams) = (sequenced.copies, sequenced.writes, sequenced.streams);
     let completion_event_id = copies
         .iter()
@@ -659,9 +758,9 @@ fn assemble(
         .map(|response| response.bytes.clone())
         .collect();
     for response in &outcome.responses {
-        writes.push(CompanionCoordinator::object_write(&response.bytes)?);
+        super::delivery_owner::append_object(&mut writes, &response.bytes)?;
     }
-    writes.push(CompanionCoordinator::object_write(&result)?);
+    super::delivery_owner::append_object(&mut writes, &result)?;
     let retain_until = now.saturating_add(if outcome.security_mutation {
         SECURITY_MUTATION_REPLAY_SECONDS
     } else {
@@ -699,28 +798,27 @@ fn assemble(
             writes.push(write);
         }
     }
+    let resident = super::resident::prepare(
+        &coordinator.state,
+        &writes,
+        &barrier_inputs.backing,
+        uncached_response,
+    )?;
     let mut effects = outcome.effects;
+    effects.insert(0, Box::new(move |state| resident.apply(state)));
     let request_object_id = decoded.request_object_id;
-    let stored = StoredResult {
-        result: result.clone(),
-        responses: outcome
-            .responses
-            .iter()
-            .map(|response: &ResponseObject| {
-                *agenc_ircd_e2ee::ObjectId::compute(&response.bytes).as_bytes()
-            })
-            .collect(),
-    };
-    let response_bytes = responses.clone();
-    let result_bytes = result.clone();
+    let stored = super::results::Prepared::capture(
+        &result,
+        outcome.responses.iter().map(|response: &ResponseObject| {
+            *agenc_ircd_e2ee::ObjectId::compute(&response.bytes).as_bytes()
+        }),
+        &barrier_inputs.backing,
+    )
+    .map_err(|_| E2eeReplyCode::RateLimited)?;
     effects.push(Box::new(move |state| {
         state.replays.insert(key, row);
         state.origin_sequences.insert(origin_key, sequence);
-        state.results.insert(request_object_id, stored);
-        for bytes in response_bytes {
-            let _ = CompanionCoordinator::retain_object(state, bytes);
-        }
-        let _ = CompanionCoordinator::retain_object(state, result_bytes);
+        stored.apply(&mut state.results, request_object_id);
         if let Some(origin) = state.origins.get_mut(&origin_key) {
             origin.next_sequence = sequence.next_sequence;
         }
@@ -890,6 +988,7 @@ pub fn committed_lines(
             target: pending.peer,
             sequence: None,
             line,
+            backing: pending.object_backing.clone(),
         });
     }
     for copy in &pending.events {
@@ -898,6 +997,7 @@ pub fn committed_lines(
                 target: copy.target,
                 sequence: Some(copy.row.sequence),
                 line,
+                backing: None,
             });
         }
     }
@@ -913,4 +1013,6 @@ pub struct CommittedLine {
     pub sequence: Option<u64>,
     /// The line.
     pub line: agenc_ircd_federation_wire::FederationLineText,
+    /// Keeps a cold response charged while the link writer owns its lines.
+    pub(crate) backing: Option<std::sync::Arc<crate::budget::MemoryPermit>>,
 }

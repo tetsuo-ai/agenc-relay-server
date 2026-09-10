@@ -3,6 +3,9 @@
 //! Synchronization tests: EORIGIN mirroring, ERESUME, and the ESTATE
 //! transfer, driven through the frame entry point with a fake base host.
 
+mod delivery_restart;
+mod origin_admission;
+
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_e2ee::federation::frames::{CompanionFrame, DeliveryPosition};
 use agenc_ircd_e2ee::ids::{federation_snapshot_digest, semantic_id_of};
@@ -16,7 +19,7 @@ use agenc_ircd_types::ServerId;
 use agenc_ircd_storage::e2ee_records::{ReplayKey, ReplayRow};
 
 use super::super::sync::{Action, BaseOriginView, Committed, CompanionHost, Cut, PendingWork};
-use super::super::{CompanionFault, CompanionOriginKey, StoredResult};
+use super::super::{CompanionFault, CompanionOriginKey};
 use super::{Counter, HOME, Harness, INCARNATION, NETWORK, ORIGIN, TestResult, object_id, wire};
 use crate::federation::LinkId;
 use crate::federation::link::{ParsedLine, parse_line};
@@ -34,6 +37,11 @@ struct FakeHost {
     ready: bool,
     resync_epoch: u64,
     revision: u64,
+    backing: crate::budget::BackingReservationPort,
+    clock: Result<
+        super::super::sync::CutClockSample,
+        agenc_ircd_storage::e2ee_records::delivery_recovery::RetirementReason,
+    >,
 }
 
 impl Default for FakeHost {
@@ -50,11 +58,33 @@ impl Default for FakeHost {
             ready: true,
             resync_epoch: 0,
             revision: 40,
+            clock: super::super::delivery_owner::clock::sample(),
+            backing: crate::budget::BackingReservationPort::new(crate::sync::Arc::new(
+                crate::budget::MemoryBudget::new(1_073_741_824),
+            )),
         }
     }
 }
 
 impl CompanionHost for FakeHost {
+    fn cut_clock_sample(
+        &self,
+    ) -> Result<
+        super::super::sync::CutClockSample,
+        agenc_ircd_storage::e2ee_records::delivery_recovery::RetirementReason,
+    > {
+        self.clock
+    }
+
+    fn reserve_cut_backing(
+        &self,
+        capacity: usize,
+    ) -> Result<crate::budget::MemoryPermit, CompanionFault> {
+        self.backing
+            .reserve(capacity)
+            .map_err(|_| CompanionFault::Ceiling)
+    }
+
     fn live_incarnation(&self, _peer: ServerId) -> Option<[u8; 16]> {
         self.incarnation
     }
@@ -99,10 +129,13 @@ fn parse(line: &FederationLineText) -> TestResult<CompanionFrame> {
 fn frames(actions: &[Action]) -> TestResult<Vec<CompanionFrame>> {
     let mut frames = Vec::new();
     for action in actions {
-        if let Action::Send(lines) = action {
-            for line in lines {
-                frames.push(parse(line)?);
-            }
+        let lines = match action {
+            Action::Send(lines) => lines.as_slice(),
+            Action::SendPage(output) => output.lines(),
+            _ => continue,
+        };
+        for line in lines {
+            frames.push(parse(line)?);
         }
     }
     Ok(frames)
@@ -179,14 +212,7 @@ impl Sync {
     }
 
     fn frame(&mut self, frame: CompanionFrame) -> Result<Vec<Action>, CompanionFault> {
-        self.harness.coordinator.on_frame(
-            LinkId::new(1),
-            home(),
-            frame,
-            NOW_MILLIS,
-            &self.host,
-            &mut self.entropy,
-        )
+        self.frame_at(frame, NOW_MILLIS)
     }
 
     fn frame_at(
@@ -194,14 +220,53 @@ impl Sync {
         frame: CompanionFrame,
         now_millis: u64,
     ) -> Result<Vec<Action>, CompanionFault> {
-        self.harness.coordinator.on_frame(
+        let actions = self.harness.coordinator.on_frame(
             LinkId::new(1),
             home(),
             frame,
             now_millis,
             &self.host,
             &mut self.entropy,
-        )
+        )?;
+        self.finish_snapshot_actions(actions, now_millis)
+    }
+
+    // These are state-machine controls. RestartFixture separately uses real storage receipts.
+    fn finish_snapshot_actions(
+        &mut self,
+        mut actions: Vec<Action>,
+        now: u64,
+    ) -> Result<Vec<Action>, CompanionFault> {
+        for _ in 0..agenc_ircd_storage::e2ee_records::delivery_recovery::MAX_SNAPSHOT_PAGES + 2 {
+            if !matches!(
+                actions.as_slice(),
+                [Action::Stage {
+                    work: PendingWork::Snapshot(_) | PendingWork::Fetch(_),
+                    ..
+                }]
+            ) {
+                return Ok(actions);
+            }
+            let Some(Action::Stage { work, .. }) = actions.into_iter().next() else {
+                return Err(CompanionFault::Protocol);
+            };
+            self.harness.coordinator.set_pending(work);
+            actions = match self
+                .harness
+                .coordinator
+                .batch_applied(Some(self.host.resync_epoch))?
+            {
+                Some(Committed::Snapshot(publication)) => self
+                    .harness
+                    .coordinator
+                    .continue_snapshot_publication(*publication, now, &self.host)?,
+                Some(Committed::Fetch(publication)) => {
+                    publication.committed(&mut self.harness.coordinator, now, &self.host)?
+                }
+                _ => return Err(CompanionFault::Protocol),
+            };
+        }
+        Err(CompanionFault::Ceiling)
     }
 
     fn reset(&mut self) -> TestResult<Vec<CompanionFrame>> {
@@ -253,7 +318,7 @@ impl Sync {
         let [Action::Stage { writes, work }] = actions.as_slice() else {
             return Err("expected one staged batch".into());
         };
-        assert_eq!(writes.len(), 2);
+        assert_ready_owner(writes, cut)?;
         assert!(matches!(work, PendingWork::Activate { .. }));
         let Some(Action::Stage { work, .. }) = actions.into_iter().next() else {
             return Err("expected one staged batch".into());
@@ -269,6 +334,53 @@ impl Sync {
         };
         lines.iter().map(|(_, line)| parse(line)).collect()
     }
+}
+
+fn assert_ready_owner(
+    writes: &[crate::state_core::durable::AccountServiceDurableWrite],
+    cut: Cut,
+) -> TestResult {
+    assert_ready_owner_for(writes, cut, home())
+}
+
+fn assert_ready_owner_for(
+    writes: &[crate::state_core::durable::AccountServiceDurableWrite],
+    cut: Cut,
+    peer: ServerId,
+) -> TestResult {
+    use crate::state_core::durable::AccountServiceDurableWrite;
+    use agenc_ircd_storage::e2ee_records::delivery_recovery::{
+        CutPhase, DeliveryRecoveryRow, LastAcknowledged,
+    };
+    use agenc_ircd_storage::{PersistentRecordValue, TableId};
+    let [
+        AccountServiceDurableWrite::Put {
+            table,
+            key,
+            plaintext,
+        },
+    ] = writes
+    else {
+        return Err("one exact Ready owner write".into());
+    };
+    assert_eq!(*table, TableId::E2eeState);
+    let value = PersistentRecordValue::decode(*table, plaintext)?;
+    assert_eq!(value.record_kind(), 14);
+    let DeliveryRecoveryRow::Owner(owner) = DeliveryRecoveryRow::decode_at(key, value.body())?
+    else {
+        return Err("Ready owner arm".into());
+    };
+    assert_eq!(owner.phase(), CutPhase::Ready);
+    assert_eq!(owner.scope().target_server_id(), *peer.as_bytes());
+    assert_eq!(owner.scope().target_incarnation(), INCARNATION);
+    assert_eq!(owner.cut().token(), cut.token);
+    assert_eq!(owner.cut().state_generation(), cut.state_generation);
+    assert_eq!(owner.cut().digest(), cut.digest);
+    assert_eq!(owner.cut().entry_count(), cut.entry_count);
+    assert_eq!(owner.cursor().generation(), cut.delivery_generation);
+    assert_eq!(owner.cursor().next_sequence(), 0);
+    assert_eq!(owner.cursor().last_ack(), LastAcknowledged::BeforeFirst);
+    Ok(())
 }
 
 fn begin_cut(frames: &[CompanionFrame]) -> TestResult<(Cut, u32, Option<[u8; 32]>)> {
@@ -530,17 +642,17 @@ fn resume_opens_a_transfer_for_a_new_scope_then_replays_the_exact_cursor() -> Te
         stream.rows.push_back(super::super::events::StreamRow {
             sequence,
             event_id: [u8::try_from(sequence)? + 1; 16],
-            event: wire(
+            event: super::super::events::SharedBytes::for_fixture(wire(
                 IrcWireObjectKind::FederationOrigin,
                 &origin_object(0, [0; 32], None, None)?.0,
-            )?,
+            )?)?,
             payload: None,
-            acked: false,
+            acknowledgement: agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement::Unacknowledged,
         });
         stream.next_sequence = sequence + 1;
     }
     stream
-        .acknowledge(0, [1; 16])
+        .acknowledge(0, [1; 16], agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement::AcknowledgedTimeUnknown)
         .map_err(|fault| format!("{fault:?}"))?;
     assert_eq!(sync.resume(0, None).err(), Some(CompanionFault::Protocol));
     assert_eq!(
@@ -590,8 +702,18 @@ fn a_base_reset_opens_the_next_delivery_generation() -> TestResult {
             .map(|stream| stream.generation),
         Some(1)
     );
-    // An abandoned transfer forces a fresh one on the next resume.
+    // Link loss alone retains this pending cut and cannot mint a new generation.
     sync.harness.coordinator.link_closed(home());
+    assert_eq!(sync.resume(1, None).err(), Some(CompanionFault::Protocol));
+    assert_eq!(
+        sync.harness
+            .coordinator
+            .peer_sync(home())
+            .and_then(|peer| peer.snapshot.as_ref())
+            .map(|snapshot| snapshot.cut),
+        Some(next)
+    );
+    sync.host.resync_epoch = 2;
     let page = frames(&sync.resume(1, None).map_err(|fault| format!("{fault:?}"))?)?;
     let (again, _, _) = begin_cut(&page)?;
     assert_eq!(again.delivery_generation, 2);
@@ -606,10 +728,7 @@ fn entitle(sync: &mut Sync, count: usize) -> TestResult<Vec<[u8; 32]>> {
             id[..8].copy_from_slice(&u64::try_from(index)?.to_be_bytes());
             id
         };
-        let bytes = wire(
-            IrcWireObjectKind::FederationState,
-            &origin_object(0, [0; 32], None, None)?.0,
-        )?;
+        let bytes = snapshot_route(NETWORK, conversation, 40)?;
         let object = object_id(&bytes);
         let state = sync
             .harness
@@ -779,13 +898,8 @@ fn a_retransmitted_request_replays_its_stored_result() -> TestResult {
         IrcWireObjectKind::FederationResult,
         &origin_object(0, [0; 32], None, None)?.0,
     )?;
-    sync.harness.coordinator.state.results.insert(
-        request_object,
-        StoredResult {
-            result,
-            responses: Vec::new(),
-        },
-    );
+    super::super::results::Prepared::capture(&result, std::iter::empty(), &sync.harness.backing)?
+        .apply(&mut sync.harness.coordinator.state.results, request_object);
     let mut replay = Vec::new();
     for frame in fragments {
         replay.extend(sync.frame(frame)?);
@@ -891,5 +1005,108 @@ fn a_reloaded_coordinator_accepts_a_replayed_origin_update() -> TestResult {
             ..
         }]
     ));
+    Ok(())
+}
+
+pub(super) fn snapshot_route(
+    network_id: [u8; 32],
+    conversation_id: [u8; 32],
+    state_generation: u64,
+) -> TestResult<Vec<u8>> {
+    use agenc_ircd_e2ee::objects::conversation::IrcConversationKind;
+    use agenc_ircd_e2ee::objects::federation::{IrcFederationRouteState, IrcRouteStateKind};
+    wire(
+        IrcWireObjectKind::FederationState,
+        &IrcFederationRouteState {
+            profile_version: 1,
+            network_id,
+            state_generation,
+            conversation_id,
+            conversation_kind: IrcConversationKind::Channel,
+            route_binding: [11; 32],
+            semantic_route_lock_id: [12; 32],
+            channel_instance_id: Opaque::new(vec![13; 16])?,
+            canonical_channel_name_hash: [14; 32],
+            direct_account_a: Opaque::new(Vec::new())?,
+            direct_account_b: Opaque::new(Vec::new())?,
+            binding_id: [15; 32],
+            finalized_epoch: 1,
+            accepted_state_id: [16; 32],
+            sequencer_record_head_sequence: 0,
+            sequencer_record_head_id: [17; 32],
+            state: IrcRouteStateKind::ActiveRoute,
+        },
+    )
+}
+
+/// Completes the initial cut and Ready receipt for a handler-only fixture peer.
+pub(super) fn initial_ready_peer(
+    coordinator: &mut super::super::CompanionCoordinator,
+    peer: ServerId,
+) -> TestResult {
+    let host = FakeHost {
+        revision: super::STATE_GENERATION,
+        ..FakeHost::default()
+    };
+    let mut entropy = Counter(60);
+    let mut actions = coordinator.on_frame(
+        LinkId::new(1),
+        peer,
+        CompanionFrame::Resume {
+            coordinator_server_id: COORDINATOR,
+            server_incarnation: INCARNATION,
+            delivery_generation: 0,
+            last: None,
+        },
+        NOW_MILLIS,
+        &host,
+        &mut entropy,
+    )?;
+    for _ in 0..agenc_ircd_storage::e2ee_records::delivery_recovery::MAX_SNAPSHOT_PAGES + 2 {
+        if !matches!(
+            actions.as_slice(),
+            [Action::Stage {
+                work: PendingWork::Snapshot(_),
+                ..
+            }]
+        ) {
+            break;
+        }
+        let Some(Action::Stage { work, .. }) = actions.into_iter().next() else {
+            return Err("expected exact initial page or owner stage".into());
+        };
+        coordinator.set_pending(work);
+        let Some(Committed::Snapshot(publication)) = coordinator.batch_applied(Some(0))? else {
+            return Err("expected exact initial page or owner receipt".into());
+        };
+        actions = coordinator.continue_snapshot_publication(*publication, NOW_MILLIS, &host)?;
+    }
+    let (cut, _, _) = begin_cut(&frames(&actions)?)?;
+    let actions = coordinator.on_frame(
+        LinkId::new(1),
+        peer,
+        CompanionFrame::StateCut {
+            active: false,
+            server_id: COORDINATOR,
+            snapshot_token: cut.token,
+            state_generation: cut.state_generation,
+            delivery_generation: cut.delivery_generation,
+            snapshot_digest: cut.digest,
+        },
+        NOW_MILLIS,
+        &host,
+        &mut entropy,
+    )?;
+    let Some(Action::Stage { writes, work }) = actions.into_iter().next() else {
+        return Err("Ready must stage its durable owner".into());
+    };
+    assert_ready_owner_for(&writes, cut, peer)?;
+    assert!(matches!(work, PendingWork::Activate { .. }));
+    coordinator.set_pending(work);
+    assert!(matches!(
+        coordinator.batch_applied(Some(0))?,
+        Some(Committed::Lines(_))
+    ));
+    assert!(coordinator.delivering(peer));
     Ok(())
 }

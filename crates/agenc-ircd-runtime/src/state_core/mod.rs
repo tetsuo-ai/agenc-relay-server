@@ -12,14 +12,19 @@
 pub(crate) mod admin;
 mod admin_history;
 pub mod durable;
+pub(crate) mod edge_checkpoint;
 pub mod fanout;
 pub(crate) mod history;
 pub mod inbox;
+pub(crate) mod local_join;
 mod pending;
 pub mod projector;
+pub(crate) mod query_usage;
 pub mod reconstruct;
+pub(crate) mod remote_result;
 pub mod session;
 pub mod timers;
+pub(crate) mod whowas;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -46,6 +51,8 @@ pub(crate) use admin::{
     AdminMutation, AdminTarget, admin_core_channel,
 };
 pub use pending::{GATHER_WINDOW_MILLIS, MAX_BATCH_PLANS, StagedOrigin};
+#[cfg(test)]
+mod fixture;
 
 use crate::RuntimeError;
 use crate::admission::{
@@ -189,6 +196,12 @@ pub trait CommandRouter: Send {
     /// command authority.
     fn startup(&mut self, _context: &mut StateCoreContext) {}
 
+    /// Cancels unfinished exchanges after all admitted storage work settles.
+    /// Returns false while a staged authority still owns its outcome.
+    fn begin_shutdown(&mut self, _context: &mut StateCoreContext) -> bool {
+        true
+    }
+
     /// Handles one parsed line from an admitted connection.
     fn route(
         &mut self,
@@ -247,6 +260,9 @@ pub trait CommandRouter: Send {
     /// barrier. Routers use this only to retry work that was deferred behind
     /// the single in-flight batch.
     fn batch_applied(&mut self, _context: &mut StateCoreContext, _plan_count: usize) {}
+
+    /// Notifies the router after every pending durable identity is authenticated.
+    fn index_refreshed(&mut self, _context: &mut StateCoreContext) {}
 
     /// A reload signal arrived.
     fn reload_requested(&mut self, _context: &mut StateCoreContext) {}
@@ -405,6 +421,33 @@ pub enum CorruptionCause {
     ConnectionStateFailed,
 }
 
+impl IndeterminateCause {
+    /// The closed label an operator sees for this cause.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::StorageIndeterminate => "storage reported an indeterminate commit",
+            Self::TransactionMismatch => "a receipt named another transaction",
+            Self::UnexpectedCompletion => "a receipt arrived with nothing in flight",
+            Self::CompletionChannelClosed => "the completion channel closed with a batch pending",
+            Self::Bridge(_) => "the storage bridge refused or failed",
+        }
+    }
+}
+
+impl CorruptionCause {
+    /// The closed label an operator sees for this cause.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ApplyFailed => "committed rows could not be applied",
+            Self::IndexRefreshFailed => "committed rows could not be read back",
+            Self::ProjectionFailed => "a plan projection failed",
+            Self::ConnectionStateFailed => "a physical close named an unknown connection",
+        }
+    }
+}
+
 impl fmt::Display for StateCoreExit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -413,10 +456,16 @@ impl fmt::Display for StateCoreExit {
             Self::Quiesced => formatter.write_str("state core quiesced"),
             Self::Interrupted => formatter.write_str("state core interrupted"),
             Self::Stopped => formatter.write_str("state core stopped"),
-            Self::Indeterminate(_) => {
-                formatter.write_str("state core durable outcome indeterminate")
-            }
-            Self::Corrupt(_) => formatter.write_str("state core committed state unusable"),
+            Self::Indeterminate(cause) => write!(
+                formatter,
+                "state core durable outcome indeterminate: {}",
+                cause.label()
+            ),
+            Self::Corrupt(cause) => write!(
+                formatter,
+                "state core committed state unusable: {}",
+                cause.label()
+            ),
         }
     }
 }
@@ -488,6 +537,7 @@ pub enum StageAccepted {
 enum DurableAdmission {
     Ordinary,
     ShutdownSessionClose,
+    AccountTransactionCleanup,
 }
 
 /// Why an ephemeral plan could not be applied; nothing changed.
@@ -521,6 +571,8 @@ pub enum BatchStep {
 pub struct StateCoreContext {
     domain: DomainState,
     history: Option<history::HistoryState>,
+    whowas: whowas::WhowasHistory,
+    local_joins: local_join::LocalJoins,
     sessions: SessionTable,
     buckets: BucketTable,
     prefixes: PrefixRegistry,
@@ -547,6 +599,7 @@ pub struct StateCoreContext {
     observer: Option<Arc<RuntimeObserver>>,
     federation: Option<FederationProjector>,
     next_mutation: MutationContext,
+    remote_account_results: BTreeMap<ConnectionGeneration, remote_result::RemoteResultBinding>,
     next_correlation: Option<RequestBinding>,
     next_cross_profile: BTreeMap<ServerId, projector::CrossProfileAssignment>,
     outbound_events: Vec<OutboundEvent>,
@@ -612,10 +665,29 @@ impl StateCoreContext {
         &self.domain
     }
 
+    pub(crate) const fn whowas(&self) -> &whowas::WhowasHistory {
+        &self.whowas
+    }
+
     /// Borrows the session table.
     #[must_use]
     pub const fn sessions(&self) -> &SessionTable {
         &self.sessions
+    }
+
+    /// Installs the committed peer authority fence before exposing later work.
+    pub(crate) fn fence_federation_peer(&mut self, peer: ServerId) {
+        self.domain.fence_federation_peer(peer);
+    }
+
+    /// Publishes a peer's committed READY after the previous incarnation was cleaned.
+    pub(crate) fn resume_federation_peer(&mut self, peer: ServerId) {
+        self.domain.resume_federation_peer(peer);
+    }
+
+    /// Applies immediate grace authority restrictions after link loss or RESET.
+    pub(crate) fn suspend_federation_peer(&mut self, peer: ServerId) {
+        self.domain.suspend_federation_peer(peer);
     }
 
     /// Mutably borrows the session table for registration composition.
@@ -761,6 +833,24 @@ impl StateCoreContext {
         self.fanout_now(request)
     }
 
+    /// Hands an owner only the ability to reserve backing from the existing budget.
+    pub(crate) fn backing_reservations(&self) -> crate::budget::BackingReservationPort {
+        crate::budget::BackingReservationPort::new(Arc::clone(&self.budget))
+    }
+
+    /// Charges bounded output retained before it can enter a client queue.
+    pub(crate) fn reserve_output_backing(
+        &self,
+        capacity: usize,
+    ) -> Result<crate::budget::MemoryPermit, RuntimeError> {
+        let charge =
+            MemoryCharge::allocation(u64::try_from(capacity).map_err(|_| RuntimeError::Overflow)?)?;
+        self.budget
+            .try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?
+            .split_exact(charge.bytes())
+            .ok_or(RuntimeError::InvalidValue)
+    }
+
     /// Reserves all live query ceilings and the maximum backing charge before
     /// the caller allocates its immutable projection.
     pub(crate) fn prepare_query_snapshot(
@@ -775,9 +865,8 @@ impl StateCoreContext {
         let limits = self.runtime_resource_limits;
         let session = self
             .sessions
-            .sink_for_generation(generation)
-            .ok_or(RuntimeError::InvalidValue)?
-            .queue_snapshot();
+            .query_snapshot_for(generation)
+            .ok_or(RuntimeError::InvalidValue)?;
         let global = self.sessions.queue_snapshot();
         let charge = MemoryCharge::allocation(max_backing_capacity)?;
         if !limits.admits_query(session, global, max_rows, charge.bytes()) {
@@ -900,6 +989,7 @@ impl StateCoreContext {
             self.entropy.as_mut(),
             row_revision,
             &cross_profile,
+            &self.index,
         )
     }
 
@@ -1052,6 +1142,31 @@ impl StateCoreContext {
             0,
             Vec::new(),
             DurableAdmission::ShutdownSessionClose,
+        )
+    }
+
+    /// Stages only owner-validated account transaction cleanup. This builds
+    /// its own checkpoint and empty output, including during shutdown.
+    pub(crate) fn stage_account_transaction_cleanup(
+        &mut self,
+        cleanup: crate::account_service::AccountTransactionCleanup,
+    ) -> Result<StageAccepted, StageRefused> {
+        let writes = cleanup
+            .into_writes()
+            .map_err(|_| StageRefused::Domain(DomainError::InvariantViolation))?;
+        let plan = self
+            .domain
+            .plan_account_service_checkpoint()
+            .map_err(StageRefused::Domain)?;
+        let fanout = FanoutRequest::new(Vec::new(), Vec::new())
+            .map_err(|error| StageRefused::Fanout(FanoutRefused::Invalid(error)))?;
+        self.stage_durable_inner(
+            plan,
+            fanout,
+            None,
+            0,
+            writes,
+            DurableAdmission::AccountTransactionCleanup,
         )
     }
 
@@ -1282,8 +1397,17 @@ impl StateCoreContext {
     }
 
     fn apply_plan(&mut self, plan: MutationPlan) -> Result<ApplyReceipt, DomainError> {
+        let historical = self.whowas.prepare(
+            &self.domain,
+            &plan,
+            self.now(),
+            self.utc_now().ok(),
+            self.budget.as_ref(),
+        );
         let prepared = self.domain.prepare_mutation(plan)?;
         let receipt = self.domain.apply_prepared(prepared)?;
+        self.local_joins.committed(receipt.revision());
+        self.whowas.committed(historical);
         self.counters.plans_applied = self.counters.plans_applied.saturating_add(1);
         Ok(receipt)
     }
@@ -1297,7 +1421,8 @@ impl StateCoreContext {
             .as_ref()
             .and_then(PendingMutationBatch::gather_deadline);
         let prefix = self.prefixes.next_erasure_deadline();
-        [timer, gather, prefix].into_iter().flatten().min()
+        let whowas = self.whowas.next_deadline();
+        [timer, gather, prefix, whowas].into_iter().flatten().min()
     }
 
     /// Submits the pending batch when its gather window closed.
@@ -1680,7 +1805,6 @@ const fn storage_rejection_result(error: StorageError) -> ResultClass {
         | StorageError::FilesystemRejected
         | StorageError::WriterLocked
         | StorageError::DatabaseRejected
-        | StorageError::UnsupportedMigration
         | StorageError::ResumeMismatch => ResultClass::Error,
     }
 }
@@ -1739,6 +1863,9 @@ pub struct StateCore {
     reload_provisional: Option<ProvisionalReload>,
     checkpoint_pending: Option<PendingIntegrityCheckpoint>,
     checkpoint_retry_suppressed: bool,
+    /// Whether the rows of the last commit are still being read back into
+    /// the index; no batch projects until they are.
+    index_refresh_in_flight: bool,
     storage_limit_writer: StorageLimitWriter,
     liveness: Arc<Liveness>,
 }
@@ -2041,6 +2168,8 @@ impl StateCore {
             context: StateCoreContext {
                 domain: inputs.reconstruction.domain,
                 history: None,
+                whowas: whowas::WhowasHistory::new(),
+                local_joins: local_join::LocalJoins::default(),
                 sessions: SessionTable::new(),
                 buckets: BucketTable::new(inputs.config.rate_limits, bucket_budget),
                 prefixes: PrefixRegistry::new(prefix_budget),
@@ -2067,6 +2196,7 @@ impl StateCore {
                 observer: None,
                 federation: None,
                 next_mutation: MutationContext::default(),
+                remote_account_results: BTreeMap::new(),
                 next_correlation: None,
                 next_cross_profile: BTreeMap::new(),
                 outbound_events: Vec::new(),
@@ -2086,6 +2216,7 @@ impl StateCore {
             reload_provisional: None,
             checkpoint_pending: None,
             checkpoint_retry_suppressed: false,
+            index_refresh_in_flight: false,
             storage_limit_writer: inputs.storage_limit_writer,
             liveness: inputs.liveness,
         };
@@ -2143,6 +2274,9 @@ impl StateCore {
             .runtime_resource_limits()
             .ok_or(RuntimeError::InvalidValue)?;
         self.context.runtime_resource_limits = limits;
+        self.context
+            .whowas
+            .configure(handle.load().config(), self.context.now());
         self.reload_receiver = receiver;
         self.reload_handle = Some(handle);
         self.reload_admission = Some(admission);
@@ -2584,6 +2718,9 @@ impl StateCore {
     }
 
     fn apply_runtime_snapshot(&mut self, snapshot: &RuntimeConfigSnapshot) {
+        self.context
+            .whowas
+            .configure(snapshot.config(), self.context.now());
         if let Some(limits) = snapshot.runtime_resource_limits() {
             self.context.runtime_resource_limits = limits;
         }
@@ -2994,9 +3131,10 @@ impl StateCore {
     }
 
     /// The revision a confirmation token binds to: the entity revision for an
-    /// account or channel, and the state generation for the process, so a
-    /// client commit elsewhere never invalidates an operator's confirmation
-    /// (spec 22.4).
+    /// account or channel, and a stable revision for this live process.
+    /// Admin sessions bind confirmations to this process and consume them
+    /// on disconnect or an authority reload (spec 22.5). Ordinary client
+    /// commits do not replace the process target.
     fn admin_target_revision(&self, target: AdminTarget) -> Result<Revision, AdminCoreFailure> {
         if self.context.quiescing {
             return Err(AdminCoreFailure::Quiescing);
@@ -3012,9 +3150,7 @@ impl StateCore {
                 .domain
                 .channel(channel_id)
                 .map(agenc_ircd_domain::ChannelState::revision),
-            AdminTarget::Process => {
-                Revision::new(self.context.head.state_generation.saturating_add(1)).ok()
-            }
+            AdminTarget::Process => Some(Revision::INITIAL),
         };
         revision.ok_or(AdminCoreFailure::InvalidTarget)
     }
@@ -3464,11 +3600,11 @@ impl StateCore {
         let outcome = self
             .router
             .route(&mut self.context, generation, message, observation);
-        if let RouteOutcome::Close(_reason) = outcome {
-            // The sink contract exposes one close path; the transport owner
-            // ends the connection and reports it on the reserved close lane.
+        if let RouteOutcome::Close(reason) = outcome {
+            // Preserve accepted final replies until the bounded writer drains
+            // them and reports physical closure on the reserved close lane.
             if let Some(sink) = self.context.sessions.sink_for_generation(generation) {
-                sink.begin_slow_consumer_close();
+                let _flushed = sink.close_after_flush(reason);
             }
             self.context.sessions.mark_sink_gone(generation);
         }
@@ -3505,9 +3641,15 @@ impl StateCore {
 
     /// Drives the pending batch and routes any rejections.
     fn step_batch(&mut self) -> Option<StateCoreExit> {
+        // A projection reads the sealed identity of every row it touches;
+        // rows the last commit wrote are known only once the index read them
+        // back, so a batch gathered meanwhile waits for that refresh instead
+        // of projecting against pending rows and stopping the core as
+        // corrupt.
         if self.admin_pending.is_some()
             || self.reload_provisional.is_some()
             || self.checkpoint_pending.is_some()
+            || self.index_refresh_in_flight
         {
             return None;
         }
@@ -3545,6 +3687,7 @@ impl StateCore {
     /// Fires every due timer; `Some` ends the loop.
     pub fn step_wake(&mut self) -> Option<StateCoreExit> {
         let now = self.context.now();
+        self.context.whowas.expire(now);
         self.context.erase_idle_prefixes_at(now);
         while let Some(entry) = self.context.timers.pop_due(now) {
             self.context.counters.timers_fired =
@@ -3654,7 +3797,11 @@ impl StateCore {
                 }
             };
         }
+        let batch_readback = matches!(continuation, IndexRefreshContinuation::Batch);
         continuation.complete();
+        if batch_readback {
+            self.router.index_refreshed(&mut self.context);
+        }
         self.maintain_history();
         Ok(())
     }
@@ -3685,6 +3832,7 @@ impl StateCore {
         let mut lifecycle_completed = None;
         let mut lifecycle_replies = PendingLifecycleReplies::default();
         let mut shutdown_connections_started = false;
+        let mut shutdown_router_started = false;
         let mut shutdown_acknowledgements = Vec::new();
         let mut shutdown_checkpoint_attempted = false;
         let mut shutdown_checkpoint_complete = false;
@@ -3701,6 +3849,7 @@ impl StateCore {
         progress.tick().await;
         loop {
             let refresh_in_flight = index_refresh.is_some();
+            self.index_refresh_in_flight = refresh_in_flight;
             let refresh_blocked = index_refresh
                 .as_ref()
                 .is_some_and(|pending: &PendingIndexRefresh| pending.waiting.is_none());
@@ -3711,6 +3860,17 @@ impl StateCore {
             // gathering therefore carries one plan per batch; `wake_instant`
             // still fires the gather deadline and `step_wake` submits it.
             let hold_inbox = in_flight || self.context.pending_len() != 0;
+            if !shutdown_router_started
+                && lifecycle_target.is_some_and(|phase| phase >= LifecyclePhase::Drain)
+                && !hold_inbox
+                && self.reload_pending.is_none()
+                && self.reload_provisional.is_none()
+            {
+                shutdown_router_started = self.router.begin_shutdown(&mut self.context);
+                if shutdown_router_started || self.context.pending_len() != 0 {
+                    continue;
+                }
+            }
             let safe_point =
                 !in_flight && self.context.pending_len() == 0 && self.router.reload_ready();
             if safe_point {
@@ -3738,6 +3898,9 @@ impl StateCore {
                     && shutdown_acknowledgements
                         .iter()
                         .all(FlushAcknowledgement::is_acknowledged)
+                    // Writer completion can precede physical close and durable session cleanup.
+                    // Internal account carriers have no transport close lane.
+                    && !self.context.sessions.has_physical_connections()
                     && !shutdown_checkpoint_attempted
                     && !shutdown_checkpoint_failed
                 {
@@ -3781,6 +3944,7 @@ impl StateCore {
                     || !shutdown_checkpoint_attempted);
             let wake = self.wake_instant();
             let prefix_wake = self.prefix_wake_instant();
+            let whowas_wake = self.whowas_wake_instant();
             let exit = tokio::select! {
                 biased;
                 () = token.cancelled(), if cancellation_open => {
@@ -3864,6 +4028,11 @@ impl StateCore {
                     self.context.erase_idle_prefixes();
                     None
                 },
+                () = tokio::time::sleep_until(whowas_wake.unwrap_or_else(Instant::now)), if whowas_wake.is_some() => {
+                    // Privacy expiry remains runnable while durable readback or reload waits.
+                    self.context.whowas.expire(self.context.now());
+                    None
+                },
                 request = self.admin_receiver.recv(), if self.admin_open && !in_flight && self.context.pending_len() == 0 && !activation_barrier => match request {
                     Some(request) => self.step_admin_request(request),
                     None => {
@@ -3917,6 +4086,7 @@ impl StateCore {
                                 Ok(pending) => {
                                     let complete = pending.is_none();
                                     index_refresh = pending;
+                                    self.index_refresh_in_flight = index_refresh.is_some();
                                     if complete {
                                         self.step_batch()
                                     } else {
@@ -3944,6 +4114,8 @@ impl StateCore {
                                             Ok(next) => {
                                                 let complete = next.is_none();
                                                 index_refresh = next;
+                                                self.index_refresh_in_flight =
+                                                    index_refresh.is_some();
                                                 if complete {
                                                     self.step_batch()
                                                 } else {
@@ -3968,6 +4140,8 @@ impl StateCore {
                                                 Ok(next) => {
                                                     let complete = next.is_none();
                                                     index_refresh = next;
+                                                    self.index_refresh_in_flight =
+                                                        index_refresh.is_some();
                                                     Ok(complete)
                                                 }
                                                 Err(exit) => Err(exit),
@@ -4010,6 +4184,7 @@ impl StateCore {
                             Ok(next) => {
                                 let complete = next.is_none();
                                 index_refresh = next;
+                                self.index_refresh_in_flight = index_refresh.is_some();
                                 if complete {
                                     self.step_batch()
                                 } else {
@@ -4059,6 +4234,12 @@ impl StateCore {
         let delay = deadline.get().saturating_sub(now.get());
         Some(Instant::now() + Duration::from_millis(delay))
     }
+
+    fn whowas_wake_instant(&self) -> Option<Instant> {
+        let deadline = self.context.whowas.next_deadline()?;
+        let delay = deadline.get().saturating_sub(self.context.now().get());
+        Some(Instant::now() + Duration::from_millis(delay))
+    }
 }
 
 fn invite_reload_floor_accepts(limits: OperationalLimits, usage: OperationalUsage) -> bool {
@@ -4076,6 +4257,126 @@ fn usize_u64(value: usize) -> u64 {
 mod lifecycle_tests {
     use super::*;
 
+    fn open_queued_connection(
+        core: &mut StateCore,
+    ) -> crate::test_support::TestResult<Arc<crate::connection::WriterQueue>> {
+        use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort};
+        use crate::connection::{ClientSink, QueueLimits, WriterQueue};
+        let generation = ConnectionGeneration::new(1);
+        let limits = QueueLimits::DEFAULT;
+        let charge = limits.backing_charge()?;
+        let budget = MemoryBudget::new(charge.bytes());
+        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
+        let backing = permits.split_exact(charge.bytes()).ok_or("queue backing")?;
+        let queue = WriterQueue::new(generation, limits, backing)?;
+        let (acknowledgement, mut accepted) = tokio::sync::oneshot::channel();
+        assert!(
+            core.step_message(StateCoreMessage::Opened {
+                generation,
+                purpose: crate::purpose::ListenerPurpose::ClientOnion,
+                source: crate::state_core::inbox::SourceAddressKey::onion_listener(),
+                sink: Arc::clone(&queue) as Arc<dyn ClientSink>,
+                acknowledgement,
+            })
+            .is_none()
+        );
+        assert_eq!(accepted.try_recv()?, ConnectionOpenOutcome::Accepted);
+        Ok(queue)
+    }
+
+    fn queued_registration_lines(
+        core: &mut StateCore,
+        lines: &[&str],
+    ) -> crate::test_support::TestResult {
+        for (index, line) in lines.iter().enumerate() {
+            let framed = agenc_ircd_client_wire::FramedLine::new(line)?;
+            let message = agenc_ircd_client_wire::parse_message(framed)?.ok_or("message")?;
+            assert!(
+                core.route_line(
+                    ConnectionGeneration::new(1),
+                    u64::try_from(index)? + 1,
+                    message
+                )
+                .is_none()
+            );
+        }
+        Ok(())
+    }
+
+    fn queued_error_then_close(
+        queue: &crate::connection::WriterQueue,
+        error: &str,
+    ) -> crate::test_support::TestResult {
+        let crate::connection::QueuePop::Frame(frame) = queue.pop() else {
+            return Err("queued ERROR was discarded before writer delivery".into());
+        };
+        let text = std::str::from_utf8(frame.as_bytes())?;
+        assert!(text.contains(error), "{text}");
+        assert!(matches!(
+            queue.pop(),
+            crate::connection::QueuePop::Closed(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_client_quit_flushes_its_error_before_closing() -> crate::test_support::TestResult {
+        let mut fixture =
+            crate::test_support::StateCoreFixture::with_registration_router(vec![7; 1024])?;
+        let core = fixture.state_mut()?;
+        let queue = open_queued_connection(core)?;
+        queued_registration_lines(core, &["QUIT :leaving"])?;
+        queued_error_then_close(&queue, " ERROR :leaving")
+    }
+
+    #[test]
+    fn a_preauth_rate_refusal_keeps_the_transport_open() -> crate::test_support::TestResult {
+        use crate::admission::{BucketDemand, BucketKey, BucketKind, RateLimits};
+        let mut fixture =
+            crate::test_support::StateCoreFixture::with_registration_router(vec![7; 1024])?;
+        let core = fixture.state_mut()?;
+        let queue = open_queued_connection(core)?;
+        core.context.buckets_mut().reload(RateLimits::defaults());
+        let demand = BucketDemand::new(
+            BucketKind::PreAuthCommand,
+            BucketKey::Connection(ConnectionGeneration::new(1)),
+            10,
+        )?;
+        let now = core.context.now();
+        core.context
+            .buckets_mut()
+            .charge_all_or_nothing(now, &[demand])
+            .map_err(|_| "consume preauth burst")?;
+        queued_registration_lines(core, &["PING :retry-later"])?;
+        let crate::connection::QueuePop::Frame(frame) = queue.pop() else {
+            return Err("rate refusal was not delivered".into());
+        };
+        assert!(std::str::from_utf8(frame.as_bytes())?.contains(" 263 * PING :"));
+        assert!(matches!(queue.pop(), crate::connection::QueuePop::Empty));
+        assert_eq!(queue.closed_reason(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_registration_flushes_its_refusal_before_closing() -> crate::test_support::TestResult
+    {
+        let entropy = (0_u32..65_536)
+            .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+            .collect();
+        let mut fixture = crate::test_support::StateCoreFixture::with_registration_router(entropy)?;
+        let core = fixture.state_mut()?;
+        let queue = open_queued_connection(core)?;
+        queued_registration_lines(core, &["NICK pressure", "USER pressure 0 * :Pressure"])?;
+        assert_eq!(core.context.pending_len(), 1);
+        core.router.batch_rejected(
+            &mut core.context,
+            Some(StagedOrigin::silent(ConnectionGeneration::new(1))),
+            agenc_ircd_storage::StorageError::LimitExceeded,
+        );
+        assert_eq!(core.context.domain().session_count(), 0);
+        queued_error_then_close(&queue, " ERROR :Registration rejected")
+    }
+
     fn invite_limits() -> Result<OperationalLimits, DomainError> {
         OperationalLimits::new(agenc_ircd_domain::OperationalLimitValues {
             sessions_per_account: 8,
@@ -4088,6 +4389,101 @@ mod lifecycle_tests {
             invites_global: 4,
             contacts_per_account: 1_000,
         })
+    }
+
+    #[test]
+    fn a_gathered_batch_waits_while_the_index_reads_the_last_commit_back()
+    -> crate::test_support::TestResult {
+        let mut fixture = crate::test_support::StateCoreFixture::with_registration_router(
+            (0_u32..65_536)
+                .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+                .collect(),
+        )?;
+        let mut parts = fixture.take_run_parts()?;
+        let core = &mut parts.state;
+        let generation = agenc_ircd_types::Generation::new(1)?;
+        let revision = core.context.domain().revision();
+        let account = agenc_ircd_domain::AccountState::new(
+            agenc_ircd_testkit::account_id(7),
+            generation,
+            revision,
+        );
+        let plan = core.context.domain().plan_account_created(account)?;
+        let request = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?;
+        core.context
+            .stage_durable(plan, request, None, 0)
+            .map_err(|_| "staging was refused")?;
+        assert_eq!(core.context.pending_len(), 1);
+        // The gather window closes; the rows of the previous commit are
+        // still being read back, so the batch must not project yet.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        core.index_refresh_in_flight = true;
+        assert!(core.step_batch().is_none());
+        assert!(
+            !core.context.in_flight(),
+            "the batch waits for the index read-back"
+        );
+        assert_eq!(core.context.pending_len(), 1);
+        // Once the index is current the same batch goes to storage.
+        core.index_refresh_in_flight = false;
+        assert!(core.step_batch().is_none());
+        assert!(
+            core.context.in_flight(),
+            "the batch is with storage once the index is current"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_standing_key_removed_before_its_cut_row_lands_needs_no_delete()
+    -> crate::test_support::TestResult {
+        let mut fixture = crate::test_support::StateCoreFixture::with_federation_coordinator(
+            (0_u32..65_536)
+                .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+                .collect(),
+            Vec::new(),
+        )?;
+        let mut parts = fixture.take_run_parts()?;
+        let core = &mut parts.state;
+        let edge = agenc_ircd_types::ServerId::from_bytes(agenc_ircd_testkit::bytes(240));
+        let identity = crate::test_support::seed_session(&mut core.context, 5, "quill", None)?;
+        // A snapshot cut installs the edge's standing under a new generation
+        // before any row of that generation is written; a refused cut batch
+        // leaves it that way.
+        let records = agenc_ircd_domain::federation::CoordinatorProjection::standing_of(
+            core.context.domain(),
+            edge,
+        );
+        assert!(!records.is_empty(), "the session stands for its home edge");
+        let projector = core.context.federation_mut().ok_or("no projector")?;
+        projector.set_edge(
+            edge,
+            crate::state_core::projector::EdgeDelivery {
+                projection_generation: 2,
+                next_delivery_sequence: 0,
+            },
+        );
+        projector.install_edge(edge, &records);
+        let plan = core
+            .context
+            .domain()
+            .plan_session_disconnected(identity.user_id)?;
+        let request = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?;
+        core.context
+            .stage_durable(plan, request, None, 0)
+            .map_err(|_| "staging was refused")?;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // The removal must not delete the row the cut never wrote; the batch
+        // projects and goes to storage instead of stopping the core.
+        assert!(
+            core.step_batch().is_none(),
+            "the removal projects without the unwritten row"
+        );
+        assert!(
+            core.context.in_flight(),
+            "the batch is with storage after the removal projected"
+        );
+        Ok(())
     }
 
     #[test]
@@ -4139,6 +4535,8 @@ mod lifecycle_tests {
 
 #[cfg(test)]
 mod tests {
+    mod account_shutdown;
+    mod local_join;
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use tokio::sync::{mpsc, oneshot};
 
@@ -4251,6 +4649,140 @@ mod tests {
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
         assert!(replies.iter().all(Result::is_ok), "{replies:?}");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_waits_for_physical_close_and_checkpoints_its_session_cleanup() -> TestResult {
+        let entropy = (0_u32..65_536)
+            .map(|index| u8::try_from((index * 7 + 3) % 256).unwrap_or_default())
+            .collect();
+        let mut fixture = StateCoreFixture::with_registration_router(entropy)?;
+        let mut parts = fixture.take_run_parts()?;
+        let virtual_generation = ConnectionGeneration::new(1 << 62);
+        parts.state.context.sessions.open_virtual(
+            virtual_generation,
+            FrameSink::new(virtual_generation, true),
+            parts.state.context.now(),
+        )?;
+        let (inbox, inbox_receiver) = mpsc::channel(8);
+        let (closes, close_inbox) = connection_close_channel();
+        let (lifecycle, lifecycle_receiver) = lifecycle_channel();
+        let driver = drive_delayed_shutdown_close(inbox, closes, lifecycle);
+        let run = parts.state.run(
+            inbox_receiver,
+            close_inbox,
+            lifecycle_receiver,
+            parts.storage,
+            parts.storage_reads,
+            parts.checkpoints,
+            parts.crypto,
+            CancellationToken::root(),
+        );
+        let (exit, result) = tokio::join!(run, driver);
+        let (_inbox, _closes, waited_for_close) = result?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(
+            waited_for_close,
+            "writer flush alone must not acknowledge the final storage checkpoint"
+        );
+        assert!(!parts.state.context.sessions.has_physical_connections());
+        assert_eq!(parts.state.context.sessions.len(), 1);
+        assert!(
+            parts
+                .state
+                .context
+                .sessions
+                .connection(virtual_generation)
+                .is_some()
+        );
+        assert_eq!(parts.state.context.head.state_generation, 2);
+        assert!(
+            matches!(
+                parts.state.context.bridge.port().try_checkpoint()?.wait()?,
+                agenc_ircd_storage::CheckpointOutcome::NotNeeded
+            ),
+            "Stop must not need another checkpoint after the final session cleanup"
+        );
+        Ok(())
+    }
+
+    async fn drive_delayed_shutdown_close(
+        inbox: mpsc::Sender<StateCoreMessage>,
+        closes: crate::state_core::inbox::ConnectionClosePort,
+        lifecycle: LifecycleControl,
+    ) -> TestResult<(
+        mpsc::Sender<StateCoreMessage>,
+        crate::state_core::inbox::ConnectionClosePort,
+        bool,
+    )> {
+        let sinks = [FrameSink::new(ConnectionGeneration::new(1), true)];
+        open_connections(&inbox, &sinks).await?;
+        drive_script(
+            &inbox,
+            &sinks,
+            &[
+                (1, "NICK alice"),
+                (1, "USER alice 0 * :Alice"),
+                (1, "WAIT  001 "),
+            ],
+        )
+        .await?;
+        lifecycle
+            .request(LifecyclePhase::Quiesce)
+            .await
+            .map_err(|_| "quiesce")?;
+        lifecycle
+            .request(LifecyclePhase::Drain)
+            .await
+            .map_err(|_| "drain")?;
+        let mut flushing = Box::pin(lifecycle.request(LifecyclePhase::Flush));
+        let early =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut flushing).await;
+        let returned_permit = publish_shutdown_close(&closes)?;
+        drop(returned_permit.await?);
+        let waited = match early {
+            Ok(result) => {
+                result.map_err(|_| "early flush")?;
+                false
+            }
+            Err(_) => {
+                tokio::time::timeout(std::time::Duration::from_secs(2), &mut flushing)
+                    .await?
+                    .map_err(|_| "flush")?;
+                true
+            }
+        };
+        drop(flushing);
+        lifecycle
+            .request(LifecyclePhase::Stop)
+            .await
+            .map_err(|_| "stop")?;
+        Ok((inbox, closes, waited))
+    }
+
+    fn publish_shutdown_close(
+        closes: &crate::state_core::inbox::ConnectionClosePort,
+    ) -> TestResult<oneshot::Receiver<crate::budget::MemoryPermit>> {
+        use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge};
+        let budget = MemoryBudget::new(1);
+        let mut permits =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(1)])?)?;
+        let permit = permits.split_exact(1).ok_or("memory permit")?;
+        let (return_permit, returned_permit) = oneshot::channel();
+        closes
+            .try_reserve()
+            .map_err(|()| "physical-close slot")?
+            .send(crate::state_core::inbox::PhysicalCloseNotice {
+                generation: ConnectionGeneration::new(1),
+                reason: crate::state_core::inbox::CloseReason::Shutdown,
+                closed_at: None,
+                final_line_sequence: 2,
+                state_permit: crate::state_core::inbox::ConnectionStatePermit::new(
+                    permit,
+                    return_permit,
+                ),
+            });
+        Ok(returned_permit)
     }
 
     #[tokio::test]
@@ -4426,6 +4958,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postregistration_capability_changes_reach_recipient_renderers() -> TestResult {
+        const SCRIPT: &[(u64, &str)] = &[
+            (1, "NICK alice"),
+            (1, "USER alice 0 * :Alice"),
+            (1, "WAIT  001 "),
+            (2, "NICK bob"),
+            (2, "USER bob 0 * :Bob"),
+            (2, "WAIT  001 "),
+            (1, "PRIVMSG bob :before-capability"),
+            (2, "WAIT PRIVMSG bob :before-capability"),
+            (2, "CAP LS 302"),
+            (2, "CAP REQ :message-tags server-time"),
+            (2, "WAIT CAP bob ACK :message-tags server-time"),
+            (1, "PRIVMSG bob :after-capability"),
+            (2, "WAIT PRIVMSG bob :after-capability"),
+            (2, "CAP REQ :-server-time -message-tags"),
+            (2, "WAIT CAP bob ACK :-server-time -message-tags"),
+            (1, "PRIVMSG bob :after-disable"),
+            (2, "WAIT PRIVMSG bob :after-disable"),
+            (1, "QUIT :done"),
+            (2, "QUIT :done"),
+        ];
+        let sinks = vec![
+            FrameSink::new(ConnectionGeneration::new(1), true),
+            FrameSink::new(ConnectionGeneration::new(2), true),
+        ];
+        let (exit, (_open, sinks, stopped)) =
+            run_core(true, |inbox, lifecycle, _token| async move {
+                open_connections(&inbox, &sinks).await?;
+                drive_script(&inbox, &sinks, SCRIPT).await?;
+                let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+                Ok((inbox, sinks, stopped))
+            })
+            .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(stopped.is_ok());
+        let lines = sinks.get(1).ok_or("missing recipient")?.lines();
+        for (body, tagged) in [
+            ("before-capability", false),
+            ("after-capability", true),
+            ("after-disable", false),
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| line.ends_with(body))
+                .ok_or("missing message")?;
+            assert_eq!(line.starts_with("@time="), tagged, "{line}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn two_guests_share_a_channel_and_exercise_moderation_and_failures() -> TestResult {
         // (connection, line) in delivery order; connection 3 refuses output.
         const SCRIPT: &[(u64, &str)] = &[
@@ -4578,6 +5162,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_confirmation_survives_unrelated_durable_client_commits() -> TestResult {
+        use crate::state_core::admin::{AdminCoreFailure, AdminTarget};
+        use agenc_ircd_admin::StatsSelector;
+
+        let (exit, (_open, before, after, quiesced, storage_before, storage_after)) =
+            run_core_with(
+                true,
+                |fixture| fixture.install_admin_port(),
+                |inbox, lifecycle, token, port| async move {
+                    let before = port
+                        .target_revision(AdminTarget::Process, &token)
+                        .await
+                        .map_err(|_| "process target unavailable")?;
+                    let storage_before = port
+                        .snapshot(&token)
+                        .await
+                        .map_err(|_| "snapshot unavailable")?
+                        .values(StatsSelector::Storage)
+                        .get(5)
+                        .copied()
+                        .ok_or("missing storage counter")?;
+                    let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
+                    let outcomes = open_connections(&inbox, &sinks).await?;
+                    assert!(
+                        outcomes
+                            .iter()
+                            .all(|outcome| matches!(outcome, ConnectionOpenOutcome::Accepted))
+                    );
+                    drive_script(
+                        &inbox,
+                        &sinks,
+                        &[
+                            (1, "CAP LS 302"),
+                            (1, "NICK operator-probe"),
+                            (1, "USER probe 0 * :Probe"),
+                            (1, "CAP END"),
+                            (1, "JOIN #confirmation"),
+                            (1, "WAIT 366 "),
+                        ],
+                    )
+                    .await?;
+                    let after = port
+                        .target_revision(AdminTarget::Process, &token)
+                        .await
+                        .map_err(|_| "process target unavailable")?;
+                    let storage_after = port
+                        .snapshot(&token)
+                        .await
+                        .map_err(|_| "snapshot unavailable")?
+                        .values(StatsSelector::Storage)
+                        .get(5)
+                        .copied()
+                        .ok_or("missing storage counter")?;
+                    assert!(lifecycle.request(LifecyclePhase::Quiesce).await.is_ok());
+                    let quiesced = port.target_revision(AdminTarget::Process, &token).await;
+                    assert!(lifecycle.request(LifecyclePhase::Stop).await.is_ok());
+                    Ok((
+                        inbox,
+                        before,
+                        after,
+                        quiesced,
+                        storage_before,
+                        storage_after,
+                    ))
+                },
+            )
+            .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+        assert!(storage_after > storage_before, "client mutations committed");
+        assert_eq!(
+            after, before,
+            "ordinary traffic does not change the process target"
+        );
+        assert_eq!(quiesced, Err(AdminCoreFailure::Quiescing));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn live_reloads_apply_no_change_and_refuse_stale_revisions() -> TestResult {
         use crate::runtime_config::{PreparedReload, ReloadOutcome, RuntimeConfigHandle};
         use crate::test_support::{golden_config, golden_parts, golden_snapshot};
@@ -4708,11 +5370,14 @@ mod tests {
             run_core(true, |inbox, lifecycle, _token| async move {
                 let _outcomes = open_connections(&inbox, &sinks).await?;
                 drive_script(&inbox, &sinks, REGISTER).await?;
-                // AWAY stages a durable batch; the MONITOR pair is ephemeral
+                // AWAY stages a durable batch; the MONITOR sequence is ephemeral
                 // and arrives inside the gather window with no pacing at all.
-                for (sequence, line) in
-                    [(3, "AWAY :busy"), (4, "MONITOR + alice"), (5, "MONITOR S")]
-                {
+                for (sequence, line) in [
+                    (3, "AWAY :busy"),
+                    (4, "MONITOR + alice"),
+                    (5, "MONITOR S"),
+                    (6, "MONITOR L"),
+                ] {
                     let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
                     send(
                         &inbox,
@@ -4724,7 +5389,7 @@ mod tests {
                     )
                     .await?;
                 }
-                drive_script(&inbox, &sinks, &[(1, "WAIT  303 ")]).await?;
+                drive_script(&inbox, &sinks, &[(1, "WAIT  733 ")]).await?;
                 let stopped = lifecycle.request(LifecyclePhase::Stop).await;
                 Ok((inbox, sinks, stopped))
             })
@@ -4733,11 +5398,18 @@ mod tests {
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
         let lines = sinks.first().ok_or("no sink")?.lines();
         let away = lines.iter().position(|line| line.contains(" 306 alice "));
-        let monitor = lines
+        let monitor: Vec<_> = lines
             .iter()
-            .position(|line| line.contains(" 303 alice ") && line.ends_with(":alice"));
+            .enumerate()
+            .filter_map(|(index, line)| {
+                (line.contains(" 730 alice ") && line.ends_with(":alice")).then_some(index)
+            })
+            .collect();
+        let [added, status] = monitor.as_slice() else {
+            return Err(format!("expected both MONITOR replies: {lines:?}").into());
+        };
         assert!(
-            away.is_some_and(|away| monitor.is_some_and(|monitor| away < monitor)),
+            away.is_some_and(|away| away < *added && added < status),
             "{lines:?}"
         );
         assert!(
@@ -4835,9 +5507,32 @@ impl StateCoreContext {
 
 #[cfg(test)]
 impl StateCoreContext {
+    /// Observes reservation ownership in asynchronous read and writer fixtures.
+    pub(crate) fn backing_budget_for_test(&self) -> Arc<MemoryBudget> {
+        Arc::clone(&self.budget)
+    }
+
+    /// Marks the same termination boundary used by the owner loop.
+    pub(crate) fn quiesce_for_test(&mut self) {
+        self.quiescing = true;
+    }
+
     /// Installs a trusted deterministic wall clock for retention boundary tests.
     pub(crate) fn set_wall_for_test(&mut self, seconds: u64) {
         self.wall = Box::new(agenc_ircd_testkit::DeterministicWallClock::at(seconds));
         self.drift = DriftMonitor::new(self.now(), UtcSecond::from_unix_seconds(seconds));
+    }
+
+    /// Advances a fixture's timer clock without changing its wall-clock trust anchor.
+    pub(crate) fn set_monotonic_for_test(&mut self, ticks: u64) {
+        self.monotonic = Box::new(agenc_ircd_testkit::DeterministicMonotonicClock::at(ticks));
+    }
+
+    /// Replaces a fixture wall reading without resetting drift detection.
+    pub(crate) fn set_untrusted_wall_for_test(&mut self, seconds: Option<u64>) {
+        self.wall = Box::new(seconds.map_or_else(
+            || agenc_ircd_testkit::DeterministicWallClock::unavailable_at(0),
+            agenc_ircd_testkit::DeterministicWallClock::at,
+        ));
     }
 }

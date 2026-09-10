@@ -234,6 +234,57 @@ fn kinds(events: &[&ProjectedEvent]) -> Vec<agenc_ircd_types::FederationEventKin
 }
 
 #[test]
+fn user_mode_changes_update_only_the_home_edge_and_match_its_snapshot() -> Result<(), DomainError> {
+    use agenc_ircd_types::FederationEventKind;
+
+    let mut harness = Harness::new()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let name = ChannelNameValue::parse("#shared-modes")?;
+    let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+    harness.run(alice, join, &MutationContext::default())?;
+    harness.run(bob, join, &MutationContext::default())?;
+    let nickname = harness
+        .state
+        .session(alice)
+        .ok_or(DomainError::NotFound)?
+        .nickname()
+        .clone();
+    for (enabled, bits) in [(true, 3), (false, 1), (true, 3)] {
+        let projection = harness.run(
+            alice,
+            || {
+                Ok(CanonicalCommand::user_operator_notices(
+                    nickname.clone(),
+                    enabled,
+                ))
+            },
+            &MutationContext::default(),
+        )?;
+        assert_eq!(
+            kinds(&events_for(&projection, EDGE_A)),
+            vec![FederationEventKind::UserModesChanged]
+        );
+        assert!(events_for(&projection, EDGE_B).is_empty());
+        let record = harness
+            .replicas
+            .get(&EDGE_A)
+            .and_then(|replica| replica.session(alice))
+            .ok_or(DomainError::NotFound)?;
+        assert_eq!(record.user_mode_bits, bits);
+        assert_eq!(record.session_revision, harness.state.revision());
+        assert_eq!(
+            harness
+                .state
+                .session(alice)
+                .map(|session| session.operator_notices()),
+            Some(enabled)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn sessions_channels_messages_and_departures_project_least_information() -> Result<(), DomainError>
 {
     use agenc_ircd_types::FederationEventKind as K;
@@ -560,5 +611,225 @@ fn standing_keys_round_trip_through_removal() -> Result<(), DomainError> {
     assert!(standing.remove(&ProjectionKey::channel_detail(channel)));
     assert!(!standing.remove(&ProjectionKey::session(user)));
     assert_eq!(standing.entry_count(), 0);
+    Ok(())
+}
+
+/// Registers an account for `user` and switches the open session onto it,
+/// returning the account id. Home and shared edges observe the authority
+/// change and the account state.
+impl Harness {
+    fn register(
+        &mut self,
+        user: UserId,
+        seed: u8,
+    ) -> Result<agenc_ircd_types::AccountId, DomainError> {
+        let account_id = agenc_ircd_types::AccountId::from_random(
+            agenc_ircd_types::AccountRandomId::from_bytes([seed; 16]),
+        );
+        let account =
+            crate::AccountState::new(account_id, Generation::new(1)?, self.state.revision());
+        let plan = self.state.plan_account_created(account)?;
+        self.commit(plan, &MutationContext::default())?;
+        let session = self.state.session(user).ok_or(DomainError::NotFound)?;
+        let plan = self.state.plan_session_account_switch(
+            user,
+            session.generation(),
+            Some((account_id, Generation::new(1)?)),
+        )?;
+        self.commit(plan, &MutationContext::default())?;
+        Ok(account_id)
+    }
+}
+
+#[test]
+fn account_switch_back_to_guest_hides_the_account_projection() -> Result<(), DomainError> {
+    let mut harness = Harness::new()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let account_id = harness.register(alice, 41)?;
+    assert!(
+        harness
+            .index
+            .edge(EDGE_A)
+            .is_some_and(|standing| standing.holds_account(account_id))
+    );
+    let session = harness.state.session(alice).ok_or(DomainError::NotFound)?;
+    let plan = harness
+        .state
+        .plan_session_account_switch(alice, session.generation(), None)?;
+    harness.commit(plan, &MutationContext::default())?;
+    assert!(
+        harness
+            .index
+            .edge(EDGE_A)
+            .is_some_and(|standing| !standing.holds_account(account_id))
+    );
+    assert!(
+        harness
+            .replicas
+            .get(&EDGE_A)
+            .and_then(|replica| replica.account(account_id))
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn away_and_display_name_reach_home_and_shared_edges() -> Result<(), DomainError> {
+    use agenc_ircd_types::FederationEventKind as K;
+    let mut harness = Harness::new()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let name = ChannelNameValue::parse("#room")?;
+    for user in [alice, bob] {
+        let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+        harness.run(user, join, &MutationContext::default())?;
+    }
+    let away = || {
+        crate::CanonicalCommand::presence(crate::PresenceCommand::Away(Some(
+            crate::AwayText::try_from_str("brb", ControlPolicy::RejectAll)?,
+        )))
+    };
+    let projection = harness.run(alice, away, &MutationContext::default())?;
+    assert_eq!(
+        kinds(&events_for(&projection, EDGE_B)),
+        vec![K::AwayChanged]
+    );
+    assert_eq!(
+        kinds(&events_for(&projection, EDGE_A)),
+        vec![K::AwayChanged]
+    );
+
+    let setname = || {
+        Ok(CanonicalCommand::setname(DisplayNameValue::prepare(
+            "Alice A.",
+        )?))
+    };
+    let projection = harness.run(alice, setname, &MutationContext::default())?;
+    assert_eq!(
+        kinds(&events_for(&projection, EDGE_B)),
+        vec![K::DisplayNameChanged]
+    );
+    Ok(())
+}
+
+#[test]
+fn kicks_and_mode_changes_project_to_member_edges() -> Result<(), DomainError> {
+    use crate::{ModeChange, ModeOperation};
+    use agenc_ircd_types::FederationEventKind as K;
+    let mut harness = Harness::new()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let name = ChannelNameValue::parse("#ops")?;
+    for user in [alice, bob] {
+        let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+        harness.run(user, join, &MutationContext::default())?;
+    }
+    // Alice, the channel owner, grants Bob voice, then removes it.
+    let grant = {
+        let name = name.clone();
+        let target = harness
+            .state
+            .session(bob)
+            .ok_or(DomainError::NotFound)?
+            .nickname()
+            .clone();
+        move || {
+            CanonicalCommand::mode(
+                name.clone(),
+                vec![ModeChange::Role {
+                    operation: ModeOperation::Add,
+                    role: Role::Voice,
+                    target: target.clone(),
+                }],
+            )
+        }
+    };
+    let context = MutationContext {
+        actor: Some(alice),
+        ..MutationContext::default()
+    };
+    let projection = harness.run(alice, grant, &context)?;
+    assert!(kinds(&events_for(&projection, EDGE_B)).contains(&K::ChannelModesChanged));
+
+    // Alice kicks Bob; both edges observe the removal.
+    let kick = {
+        let name = name.clone();
+        let target = harness
+            .state
+            .session(bob)
+            .ok_or(DomainError::NotFound)?
+            .nickname()
+            .clone();
+        move || {
+            CanonicalCommand::kick(
+                name.clone(),
+                vec![target.clone()],
+                Some(DepartureReason::try_from_str(
+                    "out",
+                    ControlPolicy::RejectAll,
+                )?),
+            )
+        }
+    };
+    let context = MutationContext {
+        actor: Some(alice),
+        reason: "out".to_owned(),
+        ..MutationContext::default()
+    };
+    let projection = harness.run(alice, kick, &context)?;
+    assert!(kinds(&events_for(&projection, EDGE_B)).contains(&K::MemberParted));
+    let channel_id = harness
+        .state
+        .resolve_channel(&name)
+        .ok_or(DomainError::NotFound)?;
+    assert!(
+        harness
+            .replicas
+            .get(&EDGE_B)
+            .and_then(|replica| replica.channel(channel_id))
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn resync_expiry_hides_retained_sessions_from_presence_and_membership_queries()
+-> Result<(), DomainError> {
+    let mut harness = Harness::new()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let name = ChannelNameValue::parse("#room")?;
+    let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+    harness.run(alice, join, &MutationContext::default())?;
+    harness.run(bob, join, &MutationContext::default())?;
+    let channel = harness
+        .state
+        .resolve_channel(&name)
+        .ok_or(DomainError::NotFound)?;
+    harness.state.fence_federation_peer(EDGE_A);
+    assert_eq!(
+        harness.state.project_presence(bob, alice),
+        crate::PresenceProjection::Absent
+    );
+    assert_eq!(
+        harness
+            .state
+            .resolve_nickname(&NicknameValue::parse("user1")?),
+        None
+    );
+    assert!(!harness.state.session_user_ids().any(|user| user == alice));
+    let crate::ProjectionDecision::Visible(view) = harness.state.project_channel(bob, channel)?
+    else {
+        return Err(DomainError::InvariantViolation);
+    };
+    assert_eq!(
+        view.members().len(),
+        1,
+        "the physical membership is absent behind the peer fence"
+    );
+    assert!(
+        harness.state.durable_session(alice).is_some(),
+        "cleanup still needs the retained row"
+    );
     Ok(())
 }

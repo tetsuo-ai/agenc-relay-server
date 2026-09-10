@@ -23,6 +23,9 @@ type TestResult = Result<(), Box<dyn Error>>;
 const LOCAL: ServerId = ServerId::from_bytes([10; 16]);
 const REMOTE: ServerId = ServerId::from_bytes([11; 16]);
 
+#[path = "replica/durable_changes.rs"]
+mod durable_changes;
+
 fn revision(value: u64) -> Revision {
     Revision::new(value).unwrap_or_else(|_| revision(0))
 }
@@ -417,5 +420,518 @@ fn session_hidden_and_invites_erase_dependent_state() -> TestResult {
     };
     replica.apply(&hidden_channel, 3)?;
     assert_eq!(replica.entry_count(), 0);
+    Ok(())
+}
+
+fn account_record(revision_value: u64) -> Result<AccountRecord, DomainError> {
+    Ok(AccountRecord {
+        account_id: account_id(),
+        account_session_generation: Generation::new(2)?,
+        account_revision: revision(revision_value),
+    })
+}
+
+fn invite_record(channel: u8, invite: u8, target: crate::Principal, rev: u64) -> InviteRecord {
+    InviteRecord {
+        channel_id: ChannelInstanceId::from_bytes([channel; 16]),
+        invite_id: InviteId::from_bytes([invite; 16]),
+        target,
+        inviter_user_id: UserId::from_bytes([9; 16]),
+        creation_revision: revision(rev),
+        expires_at: UtcSecond::from_unix_seconds(600),
+    }
+}
+
+fn invited(record: InviteRecord, inviter: &SessionRecord, rev: u64) -> ProjectedEvent {
+    ProjectedEvent::Invited {
+        channel_id: record.channel_id,
+        invite_id: record.invite_id,
+        resulting_revision: revision(rev),
+        local_projection: Some(record),
+        inviter: source(inviter),
+        named_target: source(inviter),
+    }
+}
+
+#[test]
+fn validation_reports_invites_whose_hosting_account_left() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let account = Some((account_id(), Generation::new(2)?));
+    let alice = session(1, LOCAL, account)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::AccountStateChanged(account_record(1)?), 1)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 1)?), 1)?;
+    let target = crate::Principal::Account(account_id());
+    replica.apply(&invited(invite_record(2, 3, target, 2), &alice, 2), 2)?;
+    replica.validate()?;
+    let hidden = ProjectedEvent::SessionHidden {
+        source: source(&alice),
+        last_revision: revision(1),
+        kind: SessionHideKind::ClientQuit,
+        channels: Vec::new(),
+        reason: String::new(),
+    };
+    replica.apply(&hidden, 3)?;
+    assert!(replica.account(account_id()).is_none());
+    assert_eq!(replica.validate(), Err(ReplicaError::DanglingReference));
+    Ok(())
+}
+
+#[test]
+fn channel_hidden_refuses_while_only_invites_remain() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 1)?), 1)?;
+    let target = crate::Principal::Guest(alice.user_id);
+    replica.apply(&invited(invite_record(2, 3, target, 2), &alice, 2), 2)?;
+    let hidden = ProjectedEvent::ChannelHidden {
+        channel_id: ChannelInstanceId::from_bytes([2; 16]),
+        last_revision: revision(2),
+    };
+    assert_eq!(replica.apply(&hidden, 3), Err(ReplicaError::ChildrenRemain));
+    Ok(())
+}
+
+#[test]
+fn topic_and_recomputation_events_replace_only_known_memberships() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    let bob = session(2, REMOTE, None)?;
+    let channel = ChannelInstanceId::from_bytes([2; 16]);
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 1)?), 1)?;
+    let joined = ProjectedEvent::MemberJoined {
+        view: MembershipView {
+            membership: membership(2, 1, 2),
+            source: source(&alice),
+        },
+        home_session_revision: Some(revision(2)),
+        display_name: DisplayNameValue::prepare("User")?,
+    };
+    replica.apply(&joined, 2)?;
+    let topic = ProjectedEvent::TopicChanged {
+        channel_id: channel,
+        resulting_revision: revision(3),
+        actor: source(&alice),
+        topic: None,
+    };
+    let outcome = replica.apply(&topic, 3)?;
+    assert!(outcome.local_recipients.contains(&alice.user_id));
+    let mut promoted = membership(2, 1, 4);
+    promoted.role = Role::Owner;
+    let recomputed = ProjectedEvent::ChannelMembershipsRecomputed {
+        channel_id: channel,
+        resulting_revision: revision(4),
+        actor: crate::federation::record::ActorView(None),
+        memberships: vec![
+            MembershipView {
+                membership: promoted,
+                source: source(&alice),
+            },
+            MembershipView {
+                membership: membership(2, 2, 4),
+                source: source(&bob),
+            },
+        ],
+    };
+    let outcome = replica.apply(&recomputed, 4)?;
+    assert_eq!(
+        outcome.upserted,
+        vec![
+            ProjectionKey::channel_detail(channel),
+            ProjectionKey::membership(channel, alice.user_id)
+        ]
+    );
+    assert_eq!(
+        replica
+            .membership(channel, alice.user_id)
+            .map(|record| record.role),
+        Some(Role::Owner)
+    );
+    assert!(replica.membership(channel, bob.user_id).is_none());
+    let foreign = ProjectedEvent::ChannelMembershipsRecomputed {
+        channel_id: channel,
+        resulting_revision: revision(5),
+        actor: crate::federation::record::ActorView(None),
+        memberships: vec![MembershipView {
+            membership: membership(3, 1, 5),
+            source: source(&alice),
+        }],
+    };
+    assert_eq!(replica.apply(&foreign, 5), Err(ReplicaError::InvalidRecord));
+    Ok(())
+}
+
+#[test]
+fn invitations_check_the_inviter_locality_and_the_projection_identity() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    let bob = session(2, REMOTE, None)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 1)?), 1)?;
+    let guest = crate::Principal::Guest(alice.user_id);
+    // A remote inviter is not a local recipient; the hosted target is.
+    let outcome = replica.apply(&invited(invite_record(2, 3, guest, 2), &bob, 2), 2)?;
+    assert!(!outcome.local_recipients.contains(&bob.user_id));
+    assert!(outcome.local_recipients.contains(&alice.user_id));
+    let mut mismatched = invited(invite_record(2, 4, guest, 3), &alice, 3);
+    if let ProjectedEvent::Invited { invite_id, .. } = &mut mismatched {
+        *invite_id = InviteId::from_bytes([5; 16]);
+    }
+    assert_eq!(
+        replica.apply(&mismatched, 3),
+        Err(ReplicaError::InvalidRecord)
+    );
+    let unknown_channel = invited(invite_record(7, 4, guest, 3), &alice, 3);
+    assert_eq!(
+        replica.apply(&unknown_channel, 3),
+        Err(ReplicaError::DanglingReference)
+    );
+    let unhosted = crate::Principal::Account(account_id());
+    let unhosted_target = invited(invite_record(2, 4, unhosted, 3), &alice, 3);
+    assert_eq!(
+        replica.apply(&unhosted_target, 3),
+        Err(ReplicaError::DanglingReference)
+    );
+    Ok(())
+}
+
+#[test]
+fn message_delivery_checks_the_target_revision_and_local_parties() -> TestResult {
+    use crate::federation::record::{DeliveredMessageRecord, DeliveryTarget};
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    let bob = session(2, REMOTE, None)?;
+    let channel = ChannelInstanceId::from_bytes([2; 16]);
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 3)?), 3)?;
+    let message = |target: DeliveryTarget, target_revision: u64| {
+        ProjectedEvent::MessageDelivered(DeliveredMessageRecord {
+            message_id: agenc_ircd_types::MessageId::from_bytes([8; 16]),
+            kind: crate::MessageKind::Privmsg,
+            target,
+            sender: source(&alice),
+            target_revision: revision(target_revision),
+            channel_event_sequence: 4,
+            received_unix_milliseconds: 1,
+            tags: Vec::new(),
+            body: "hi".to_owned(),
+        })
+    };
+    assert_eq!(
+        replica.apply(&message(DeliveryTarget::Channel(channel), 2), 4),
+        Err(ReplicaError::Revision)
+    );
+    let outcome = replica.apply(&message(DeliveryTarget::User(bob.user_id), 3), 4)?;
+    assert_eq!(
+        outcome.local_recipients.into_iter().collect::<Vec<_>>(),
+        vec![alice.user_id]
+    );
+    Ok(())
+}
+
+#[test]
+fn policy_changes_reject_regressed_or_foreign_revisions() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 3)?), 3)?;
+    assert_eq!(
+        replica.apply(&ProjectedEvent::ChannelPolicyChanged(detail(2, 2)?), 4),
+        Err(ReplicaError::Revision)
+    );
+    assert_eq!(
+        replica.apply(&ProjectedEvent::ChannelPolicyChanged(detail(2, 4)?), 5),
+        Err(ReplicaError::Revision)
+    );
+    replica.apply(&ProjectedEvent::ChannelPolicyChanged(detail(2, 5)?), 5)?;
+    assert_eq!(
+        replica
+            .channel(ChannelInstanceId::from_bytes([2; 16]))
+            .map(|d| d.channel_revision),
+        Some(revision(5))
+    );
+    Ok(())
+}
+
+#[test]
+fn account_state_accepts_equal_or_newer_revisions() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let account = Some((account_id(), Generation::new(2)?));
+    let alice = session(1, LOCAL, account)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::AccountStateChanged(account_record(1)?), 1)?;
+    replica.apply(&ProjectedEvent::AccountStateChanged(account_record(1)?), 2)?;
+    replica.apply(&ProjectedEvent::AccountStateChanged(account_record(3)?), 3)?;
+    assert_eq!(
+        replica
+            .account(account_id())
+            .map(|record| record.account_revision),
+        Some(revision(3))
+    );
+    Ok(())
+}
+
+#[test]
+fn snapshot_rejects_each_malformed_record_shape() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let install =
+        |replica: &mut EdgeReplica, entries: Vec<ProjectionRecord>| replica.install(1, entries);
+    assert_eq!(
+        install(
+            &mut replica,
+            vec![ProjectionRecord::Account(account_record(0)?)]
+        ),
+        Err(ReplicaError::InvalidRecord)
+    );
+    let zero_generation = session(1, LOCAL, Some((account_id(), Generation::new(0)?)))?;
+    assert_eq!(
+        install(
+            &mut replica,
+            vec![ProjectionRecord::Session(zero_generation)]
+        ),
+        Err(ReplicaError::InvalidRecord)
+    );
+    let mut wide_bits = session(1, LOCAL, None)?;
+    wide_bits.user_mode_bits = 5;
+    assert_eq!(
+        install(&mut replica, vec![ProjectionRecord::Session(wide_bits)]),
+        Err(ReplicaError::InvalidRecord)
+    );
+    let mut labelled_guest = session(1, LOCAL, None)?;
+    labelled_guest.account_label = Some(crate::AccountLabelValue::parse("guest-label")?);
+    assert_eq!(
+        install(
+            &mut replica,
+            vec![ProjectionRecord::Session(labelled_guest)]
+        ),
+        Err(ReplicaError::InvalidRecord)
+    );
+    let mut zero_revision = detail(2, 1)?;
+    zero_revision.channel_revision = revision(0);
+    assert_eq!(
+        install(
+            &mut replica,
+            vec![ProjectionRecord::ChannelDetail(zero_revision)]
+        ),
+        Err(ReplicaError::InvalidRecord)
+    );
+    for bits in [0b000, 0b100_0100, 0b01_1100] {
+        let mut bad = detail(2, 1)?;
+        bad.simple_mode_bits = bits;
+        assert_eq!(
+            install(&mut replica, vec![ProjectionRecord::ChannelDetail(bad)]),
+            Err(ReplicaError::InvalidRecord),
+            "{bits:b}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn session_views_drop_accounts_only_when_no_session_holds_them() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let account = Some((account_id(), Generation::new(2)?));
+    let alice = session(1, LOCAL, account)?;
+    let bob = session(2, LOCAL, account)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&bob, true)), 1)?;
+    replica.apply(&ProjectedEvent::AccountStateChanged(account_record(1)?), 1)?;
+    // Alice logs out; Bob still holds the account, so it stays.
+    let mut guest_alice = alice.clone();
+    guest_alice.account = None;
+    guest_alice.session_revision = revision(2);
+    let outcome = replica.apply(&ProjectedEvent::SessionVisible(view(&guest_alice, true)), 2)?;
+    assert!(outcome.removed.is_empty());
+    assert!(replica.account(account_id()).is_some());
+    // Bob logs out too; nobody holds the account any more.
+    let mut guest_bob = bob.clone();
+    guest_bob.account = None;
+    guest_bob.session_revision = revision(3);
+    let outcome = replica.apply(&ProjectedEvent::SessionVisible(view(&guest_bob, true)), 3)?;
+    assert_eq!(outcome.removed, vec![ProjectionKey::account(account_id())]);
+    // A session that named an account the replica never stored drops nothing.
+    let other = Some((
+        AccountId::from_random(AccountRandomId::from_bytes([6; 16])),
+        Generation::new(1)?,
+    ));
+    let carol = session(3, LOCAL, other)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&carol, true)), 4)?;
+    let mut guest_carol = carol.clone();
+    guest_carol.account = None;
+    guest_carol.session_revision = revision(5);
+    let outcome = replica.apply(&ProjectedEvent::SessionVisible(view(&guest_carol, true)), 5)?;
+    assert!(outcome.removed.is_empty());
+    Ok(())
+}
+
+#[test]
+fn home_records_must_describe_the_viewed_user() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    let bob = session(2, LOCAL, None)?;
+    let crossed = SessionEventView {
+        source: alice.source_view(),
+        home_projection: Some(bob),
+    };
+    assert_eq!(
+        replica.apply(&ProjectedEvent::SessionVisible(crossed), 1),
+        Err(ReplicaError::InvalidRecord)
+    );
+    Ok(())
+}
+
+#[test]
+fn session_hidden_requires_ordered_and_complete_channel_lists() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    for channel in [2, 3] {
+        replica.apply(&ProjectedEvent::ChannelVisible(detail(channel, 1)?), 1)?;
+        let joined = ProjectedEvent::MemberJoined {
+            view: MembershipView {
+                membership: membership(channel, 1, 2),
+                source: source(&alice),
+            },
+            home_session_revision: Some(revision(2)),
+            display_name: DisplayNameValue::prepare("User")?,
+        };
+        replica.apply(&joined, 2)?;
+    }
+    let hidden = |channels: Vec<(ChannelInstanceId, Revision)>| ProjectedEvent::SessionHidden {
+        source: source(&alice),
+        last_revision: revision(2),
+        kind: SessionHideKind::ClientQuit,
+        channels,
+        reason: String::new(),
+    };
+    let two = ChannelInstanceId::from_bytes([2; 16]);
+    let three = ChannelInstanceId::from_bytes([3; 16]);
+    assert_eq!(
+        replica.apply(&hidden(vec![(three, revision(3)), (two, revision(3))]), 3),
+        Err(ReplicaError::SnapshotOrder)
+    );
+    assert_eq!(
+        replica.apply(&hidden(vec![(two, revision(3))]), 3),
+        Err(ReplicaError::DanglingReference)
+    );
+    Ok(())
+}
+
+#[test]
+fn channel_revision_copies_and_bumps_follow_the_generation_rule() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    let mut ahead = alice.clone();
+    ahead.session_revision = revision(5);
+    replica.apply(&ProjectedEvent::SessionVisible(view(&ahead, true)), 5)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 5)?), 5)?;
+    let channel = ChannelInstanceId::from_bytes([2; 16]);
+    let hidden = ProjectedEvent::ChannelHidden {
+        channel_id: channel,
+        last_revision: revision(6),
+    };
+    assert_eq!(replica.apply(&hidden, 7), Err(ReplicaError::Revision));
+    let display_name = DisplayNameValue::prepare("User")?;
+    let joined = |membership_revision: u64, home: Option<u64>| ProjectedEvent::MemberJoined {
+        view: MembershipView {
+            membership: membership(2, 1, membership_revision),
+            source: source(&alice),
+        },
+        home_session_revision: home.map(revision),
+        display_name: display_name.clone(),
+    };
+    // A membership carrying the installed channel revision is accepted even
+    // though the generation moved on.
+    replica.apply(&joined(5, Some(7)), 7)?;
+    assert_eq!(
+        replica
+            .channel(channel)
+            .map(|detail| detail.channel_revision),
+        Some(revision(5))
+    );
+    // A home revision below the session's or away from the generation is refused.
+    assert_eq!(
+        replica.apply(&joined(8, Some(4)), 8),
+        Err(ReplicaError::HomeSessionRevision)
+    );
+    assert_eq!(
+        replica.apply(&joined(8, Some(9)), 8),
+        Err(ReplicaError::HomeSessionRevision)
+    );
+    Ok(())
+}
+
+#[test]
+fn mode_changes_validate_prefix_and_list_entries() -> TestResult {
+    use crate::federation::record::{ModeDirection, ModeListEntryRecord, ProjectedModeChange};
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    let bob = session(2, REMOTE, None)?;
+    let channel = ChannelInstanceId::from_bytes([2; 16]);
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 1)?), 1)?;
+    let joined = ProjectedEvent::MemberJoined {
+        view: MembershipView {
+            membership: membership(2, 1, 2),
+            source: source(&alice),
+        },
+        home_session_revision: Some(revision(2)),
+        display_name: DisplayNameValue::prepare("User")?,
+    };
+    replica.apply(&joined, 2)?;
+    let prefix = |channel_byte: u8, user: u8, who: &SessionRecord| ProjectedModeChange::Prefix {
+        direction: ModeDirection::Add,
+        mode_code: 12,
+        view: MembershipView {
+            membership: membership(channel_byte, user, 3),
+            source: source(who),
+        },
+    };
+    let entry = |channel_byte: u8, mode_code: u16| ProjectedModeChange::List {
+        direction: ModeDirection::Add,
+        entry: ModeListEntryRecord {
+            channel_id: ChannelInstanceId::from_bytes([channel_byte; 16]),
+            mode_code,
+            entry_id: agenc_ircd_types::EntryId::from_bytes([7; 16]),
+            mask: "*!*@host".to_owned(),
+            setter: source(&alice),
+            created_at: UtcSecond::from_unix_seconds(1),
+            expires_at: None,
+        },
+    };
+    let changed =
+        |rev: u64, changes: Vec<ProjectedModeChange>| ProjectedEvent::ChannelModesChanged {
+            channel_id: channel,
+            resulting_revision: revision(rev),
+            actor: crate::federation::record::ActorView(None),
+            changes,
+        };
+    assert_eq!(
+        replica.apply(&changed(3, vec![prefix(3, 1, &alice)]), 3),
+        Err(ReplicaError::InvalidRecord)
+    );
+    assert_eq!(
+        replica.apply(&changed(3, vec![entry(3, 1)]), 3),
+        Err(ReplicaError::InvalidRecord)
+    );
+    assert_eq!(
+        replica.apply(&changed(3, vec![entry(2, 4)]), 3),
+        Err(ReplicaError::InvalidRecord)
+    );
+    let outcome = replica.apply(
+        &changed(
+            3,
+            vec![prefix(2, 1, &alice), prefix(2, 2, &bob), entry(2, 1)],
+        ),
+        3,
+    )?;
+    assert_eq!(
+        outcome.upserted,
+        vec![
+            ProjectionKey::channel_detail(channel),
+            ProjectionKey::membership(channel, alice.user_id),
+        ]
+    );
+    assert!(replica.membership(channel, bob.user_id).is_none());
     Ok(())
 }

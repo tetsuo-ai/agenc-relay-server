@@ -1,0 +1,96 @@
+# Reviewed decisions for every NOASSERTION the release SBOM may still carry.
+# scripts/build-release.py verify refuses a build whose SBOM has an undecided
+# entry. Native entries name the exact Ubuntu package version, architecture,
+# and copyright file digest observed in the release image; the container
+# build applies the SPDX expression only on an exact match, so a package
+# update in a rebuilt image returns to NOASSERTION until it is reviewed here.
+schema_version = 1
+
+[[workspace]]
+name = "agenc-ircd"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-admin"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-auth"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-client-wire"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-config"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-crypto"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-domain"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-e2ee"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-federation-wire"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-runtime"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-storage"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-testkit"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[workspace]]
+name = "agenc-ircd-types"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+
+[[patched]]
+name = "opaque-ke"
+version = "4.0.1"
+decision = "accept"
+note = "Reviewed local patch of the crates.io release; the tree digest and the upstream checksum are in conformance/vendored-dependencies.toml."
+
+[[native]]
+package = "libc6"
+version = "2.39-0ubuntu8.8"
+architecture = "amd64"
+license = "LGPL-2.1-or-later AND GPL-2.0-or-later"
+copyright_sha256 = "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265"
+decision = "accept"
+note = "GNU C Library runtime: libc, libm, and the dynamic loader. The copyright file is free-form; the library is LGPL 2.1 or later and the packaged utilities carry GPL 2 or later, so both are declared."
+
+[[native]]
+package = "libgcc-s1"
+version = "14.2.0-4ubuntu2~24.04.1"
+architecture = "amd64"
+license = "GPL-3.0-or-later WITH GCC-exception-3.1"
+copyright_sha256 = "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+decision = "accept"
+note = "GCC support library linked into every Rust binary; the copyright file is free-form and names the GCC runtime library exception."
