@@ -252,6 +252,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parsed_arena_refuses_overflow_without_wrapping_its_charge()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut pending = pending();
+        pending.bytes = usize::MAX;
+        pending.accept(FramedLine::new("PING")?, ReaderLimits::DEFAULT);
+        assert!(pending.rejected);
+        assert_eq!(pending.bytes, usize::MAX);
+        assert!(pending.messages.is_empty());
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn full_inbox_stalls_the_reader_without_accepting_following_lines()
     -> Result<(), Box<dyn std::error::Error>> {

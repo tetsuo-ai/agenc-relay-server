@@ -13,7 +13,16 @@ fn invite_expiry_rejects_noncanonical_decimal_before_opening_inputs() -> Result<
         std::process::id()
     ));
     assert!(!missing.exists());
-    for expiry in ["+1", "01", "-1", " 1", "1 ", "١", "18446744073709551616"] {
+    for expiry in [
+        "+1",
+        "01",
+        "-1",
+        " 1",
+        "1 ",
+        "١",
+        "18446744073709551616",
+        "184467440737095516150",
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
             .args(["account-invite", "create", "--descriptor"])
             .arg(&missing)

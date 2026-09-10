@@ -139,13 +139,13 @@ The reader checks the pending parsed-byte and request counts before parsing
 each completed line. Refusal stops further accumulation. Forwarding now
 drains each complete line before feeding another, so a maximum-sized line
 retained from an earlier read can complete within the minimum arena. Two
-accumulator regressions fail with the earlier behavior. All 26 connection
+accumulator regressions fail with the earlier behavior. All 27 connection
 tests pass, including fragmented input, message ordering and the exact
 30-second inbox stall under a paused clock.
 
 Account invitation expiry now rejects noncanonical unsigned decimals before
 descriptor or signing-key access. The subprocess regression reproduces the
-earlier acceptance of `+1` and passes for seven invalid spellings after the
+earlier acceptance of `+1` and passes for eight invalid spellings after the
 repair. Workspace Clippy and source policy pass. The source-bound release
 inventory includes both reader gates and the CLI parser; its thresholds are
 unchanged.

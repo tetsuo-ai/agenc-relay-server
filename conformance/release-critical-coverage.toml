@@ -11,14 +11,14 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 765
-reviewed_source_sha256 = "96ce0d13acee366ce8887a7408614ded8f7ffd7685c5ec901fe032606e5ac518"
+reviewed_source_sha256 = "4b6cd0e9f7fe069ec9184196dffec5911e5f90c36417b1ed4625e592459d5332"
 deferred = []
 
 [[region]]
 id = "reader-parsed-arena-admission"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/connection/reader.rs"
-source_sha256 = "8b02ec548c42ef6b3cdebeecaa2202e75558ed61614cca8a6874c349f1ed97ee"
+source_sha256 = "d53b4ecb585ffc23e7054017dd00e2877eb4668625abf998d880d0645ace0cad"
 start_line = 87
 end_line = 108
 metric = "branches"
@@ -28,7 +28,7 @@ reason = "Completed lines must fit both per-connection bounds before parsing or 
 id = "reader-fragmented-line-drain"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/connection/reader.rs"
-source_sha256 = "8b02ec548c42ef6b3cdebeecaa2202e75558ed61614cca8a6874c349f1ed97ee"
+source_sha256 = "d53b4ecb585ffc23e7054017dd00e2877eb4668625abf998d880d0645ace0cad"
 start_line = 187
 end_line = 207
 metric = "branches"

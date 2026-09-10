@@ -1607,7 +1607,7 @@ the closure branch at review time.
 - [x] The reader now checks parsed byte and request bounds before parsing a
   completed line and keeps refusal sticky. It drains each completed line before
   framing another, including a maximum-sized line split across reads. The two
-  accumulator regressions fail with the earlier behavior; all 26 connection
+  accumulator regressions fail with the earlier behavior; all 27 connection
   tests pass, including exact bounds and the paused-time inbox stall case.
 - [ ] One recorded gate run closed a fresh guest connection after the TLS
   handshake and before its first reply
@@ -1845,7 +1845,7 @@ None blocks the core-v1 gate.
 - [x] `account-invite create --expires-in` rejects signs, leading zeroes,
   whitespace, non-ASCII digits and overflow before reading protected inputs.
   A subprocess regression reproduces the earlier acceptance of `+1` and
-  passes for all seven invalid spellings with the repair.
+  passes for all eight invalid spellings with the repair.
 ## Stage 07 — Base federation
 
 Outcome: one coordinator and its authenticated edges converge through bounded,
