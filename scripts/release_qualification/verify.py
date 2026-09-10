@@ -12,6 +12,9 @@ from .records import (MAX_LOG_BYTES, QualificationError, canonical, digest, file
 RESULT_FIELDS = {"schema_version", "candidate_sha256", "start_sha256", "finished_at", "job_id", "target", "outcome", "measurement", "report_sha256"}
 MEASUREMENT_FIELDS = {"exit_code", "failure", "elapsed_ns", "cpu_user_ns", "cpu_system_ns", "maximum_rss_kib", "log_sha256", "log_bytes"}
 REPORT_FIELDS = {"schema_version", "job_id", "candidate_sha256", "target", "facts", "artifacts"}
+CAPACITY_CONNECTION_FLOOR = 50_000
+SOAK_CONNECTION_FLOOR = 256
+MAX_CAMPAIGN_CONNECTIONS = 250_000
 # Boolean qualification facts every driver of that job must attest; each must be exactly true.
 REQUIRED_FACTS = {
     "models": {"models", "loom", "cancellation", "overload", "panic_containment", "shutdown", "miri", "sanitizers"},
@@ -55,7 +58,10 @@ def verify_report(attempt: Path, report: dict[str, Any], job: dict[str, Any], ca
         require_hash(facts["corpus_before"], "initial corpus")
         require_hash(facts["corpus_after"], "final corpus")
     elif name in ("capacity", "soak"):
-        require_fields(facts, {"elapsed_ns", "samples", "missed_events", "envelope_violations", "returned_to_envelope", "scenario_counts", "latency_classes", "capacity_demonstrated", "hardware", "resource_source", "messages_refused"}, "capacity facts")
+        require_fields(facts, {"elapsed_ns", "samples", "missed_events", "envelope_violations", "returned_to_envelope", "scenario_counts", "latency_classes", "workload_demonstrated", "connections", "peak_live_connections", "hardware", "resource_source", "messages_refused"}, "capacity facts")
+        connection_floor = CAPACITY_CONNECTION_FLOOR if name == "capacity" else SOAK_CONNECTION_FLOOR
+        require_integer(facts["connections"], connection_floor, MAX_CAMPAIGN_CONNECTIONS, "qualified connection population")
+        require_integer(facts["peak_live_connections"], facts["connections"], 3 * MAX_CAMPAIGN_CONNECTIONS, "observed connection population")
         require_integer(facts["elapsed_ns"], (604800 if name == "soak" else 300) * 10**9, 10**18, "campaign duration")
         if facts["resource_source"] not in ("cgroup", "procfs"):
             raise QualificationError("capacity evidence does not name how daemon resources were measured")
@@ -63,7 +69,7 @@ def verify_report(attempt: Path, report: dict[str, Any], job: dict[str, Any], ca
         require_integer(facts["samples"], 2, 10**9, "campaign samples")
         require_integer(facts["missed_events"], 0, 0, "missed events")
         require_integer(facts["envelope_violations"], 0, 0, "envelope violations")
-        if facts["returned_to_envelope"] is not True or facts["capacity_demonstrated"] is not True:
+        if facts["returned_to_envelope"] is not True or facts["workload_demonstrated"] is not True:
             raise QualificationError("capacity or sustained-operation envelope failed")
         require_fields(facts["scenario_counts"], {"reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss"}, "campaign scenarios")
         for scenario in ("reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss"):

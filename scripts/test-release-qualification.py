@@ -141,7 +141,8 @@ class RecordTests(unittest.TestCase):
         path.write_bytes(b"{}\n")
         job = {"id": "capacity"}
         facts = {"elapsed_ns": 300 * 10**9, "samples": 2, "missed_events": 0, "envelope_violations": 0,
-                 "returned_to_envelope": True, "capacity_demonstrated": True, "hardware": "test host",
+                 "returned_to_envelope": True, "workload_demonstrated": True, "hardware": "test host",
+                 "connections": 50_000, "peak_live_connections": 50_000,
                  "scenario_counts": {name: 1 for name in ("reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss")},
                  "latency_classes": ["admission", "durable_mutation", "fanout", "message", "opaque", "snapshot"],
                  "resource_source": "cgroup", "messages_refused": 0}
@@ -154,11 +155,28 @@ class RecordTests(unittest.TestCase):
             lambda facts: facts.pop("messages_refused"),
             lambda facts: facts.__setitem__("messages_refused", -1),
             lambda facts: facts.__setitem__("missed_events", 1),
+            lambda facts: facts.pop("connections"),
+            lambda facts: facts.pop("peak_live_connections"),
+            lambda facts: facts.__setitem__("connections", 49_999),
+            lambda facts: facts.__setitem__("connections", True),
+            lambda facts: facts.__setitem__("peak_live_connections", 49_999),
         ):
             changed = copy.deepcopy(report)
             mutate(changed["facts"])
             with self.subTest(facts=changed["facts"]), self.assertRaises(QualificationError):
                 verify_report(self.root, changed, job, "a" * 64, report["target"])
+
+    def test_small_campaign_cannot_close_production_capacity(self) -> None:
+        driver = CapacityDriverTests.driver()
+        raw = CapacityDriverTests.record(driver, connections=64)
+        facts = driver.validate_campaign(raw, 300, 64)
+        path = self.root / "small-campaign.json"
+        path.write_bytes(canonical(raw))
+        report = {"schema_version": 1, "job_id": "capacity", "candidate_sha256": "a" * 64,
+                  "target": "x86_64-unknown-linux-gnu", "artifacts": {path.name: file_digest(path)},
+                  "facts": facts}
+        with self.assertRaises(QualificationError):
+            verify_report(self.root, report, {"id": "capacity"}, "a" * 64, report["target"])
 
     def test_job_inventory_includes_every_committed_parser(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -284,7 +302,8 @@ class SyntheticCandidate:
                     "corpus_before": "6" * 64, "corpus_after": "7" * 64, "crashes": 0}
         if name in ("capacity", "soak"):
             return {"elapsed_ns": (604800 if name == "soak" else 300) * 10**9, "samples": 2, "missed_events": 0,
-                    "envelope_violations": 0, "returned_to_envelope": True, "capacity_demonstrated": True,
+                    "envelope_violations": 0, "returned_to_envelope": True, "workload_demonstrated": True,
+                    "connections": 256 if name == "soak" else 50_000, "peak_live_connections": 256 if name == "soak" else 50_000,
                     "scenario_counts": {scenario: 1 for scenario in ("reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss")},
                     "latency_classes": ["admission", "durable_mutation", "fanout", "message", "opaque", "snapshot"], "hardware": "synthetic", "resource_source": "cgroup", "messages_refused": 0}
         if name == "reproducibility":
@@ -762,11 +781,13 @@ class CapacityDriverTests(unittest.TestCase):
 
     @classmethod
     def record(cls, driver, seconds: int = 300, connections: int = 64) -> dict:
+        later = cls.sample(connections - 1)
+        later["at_ns"] = 20
         return {"schema_version": 1, "elapsed_ns": seconds * 10**9, "connections": connections, "resource_source": "cgroup",
-                "samples": [cls.sample(connections), cls.sample(connections - 1)],
+                "samples": [cls.sample(connections), later],
                 "latency_classes": {name: {"count": 5, "p50_ns": 1, "p95_ns": 2, "p99_ns": 3} for name in driver.LATENCY_CLASSES},
                 "scenario_counts": {name: 1 for name in driver.SCENARIOS}, "missed_events": 0, "envelope_violations": 0,
-                "population_shortfalls": 0,
+                "population_shortfalls": 0, "sample_failures": 0,
                 "messages_sent": 100, "messages_received": 700, "messages_refused": 0,
                 "returned_to_envelope": True, "daemons_stopped_cleanly": [True, True, True], "hardware": "test host"}
 
@@ -776,6 +797,9 @@ class CapacityDriverTests(unittest.TestCase):
         self.assertEqual(facts["scenario_counts"]["rekey"], 1)
         self.assertEqual(facts["latency_classes"], driver.LATENCY_CLASSES)
         self.assertEqual(facts["resource_source"], "cgroup")
+        self.assertEqual(facts["connections"], 64)
+        self.assertEqual(facts["peak_live_connections"], 64)
+        self.assertIs(facts["workload_demonstrated"], True)
         procfs = self.record(driver)
         procfs["resource_source"] = "procfs"
         self.assertEqual(driver.validate_campaign(procfs, 300, 64)["resource_source"], "procfs")
@@ -811,6 +835,27 @@ class CapacityDriverTests(unittest.TestCase):
                 driver.validate_campaign(changed, 300, 64)
         with self.assertRaises(QualificationError):
             driver.validate_campaign(self.record(driver), 300, 65)
+
+
+    def test_campaign_rejects_lost_samples_and_invalid_measurements(self) -> None:
+        driver = self.driver()
+        for mutate in (
+            lambda record: record.__setitem__("sample_failures", 1),
+            lambda record: record.pop("sample_failures"),
+            lambda record: record.__setitem__("missed_events", False),
+            lambda record: record["samples"][0].__setitem__("at_ns", -1),
+            lambda record: record["samples"][1].__setitem__("at_ns", 301 * 10**9),
+            lambda record: record["samples"][1].__setitem__("at_ns", 10),
+            lambda record: record["samples"][1].__setitem__("at_ns", 0),
+            lambda record: record["latency_classes"]["message"].__setitem__("p50_ns", -1),
+            lambda record: record["latency_classes"]["message"].__setitem__("p95_ns", 4),
+            lambda record: record["latency_classes"].__setitem__("message", []),
+            lambda record: record.__setitem__("daemons_stopped_cleanly", [1, 1, 1]),
+        ):
+            raw = self.record(driver)
+            mutate(raw)
+            with self.subTest(raw=raw), self.assertRaises(QualificationError):
+                driver.validate_campaign(raw, 300, 64)
 
 
 class DrillsDriverTests(unittest.TestCase):

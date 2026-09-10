@@ -14,7 +14,7 @@ from release_qualification.daemon_tests import DaemonTests
 from release_qualification.driver import context, finish
 from release_qualification.policy import load_policy
 from release_qualification.process import execute
-from release_qualification.records import QualificationError, canonical, read_record, write_once
+from release_qualification.records import QualificationError, canonical, read_record, require_integer, write_once
 
 CAMPAIGN_TEST = "stage_ten_capacity::sustained_operation_campaign"
 CAPACITY_SECONDS = 300
@@ -41,11 +41,14 @@ def delegated_scope_wrapper(root: Path, evidence: Path) -> list[str]:
     return list(DELEGATED_SCOPE) if probe["exit_code"] == 0 and probe["failure"] is None else []
 
 
-def validate_samples(samples: list[Any], connections: int) -> None:
+def validate_samples(samples: list[Any], connections: int, elapsed_ns: int) -> int:
     live = 0
+    previous_ns = -1
     for sample in samples:
         if not isinstance(sample, dict) or type(sample.get("at_ns")) is not int:
             raise QualificationError("campaign sample has an unknown shape")
+        require_integer(sample["at_ns"], previous_ns + 1, elapsed_ns, "campaign sample time")
+        previous_ns = sample["at_ns"]
         for name in SAMPLE_TRIPLES:
             values = sample.get(name)
             if not isinstance(values, list) or len(values) != 3 or any(type(value) is not int or value < 0 for value in values):
@@ -54,11 +57,11 @@ def validate_samples(samples: list[Any], connections: int) -> None:
             raise QualificationError("campaign sample recorded zero anonymous memory for a daemon")
         if any(sample["tasks"][index] == 0 for index in range(3)):
             raise QualificationError("campaign sample recorded zero tasks for a daemon")
-        if type(sample.get("live_client_connections")) is not int:
-            raise QualificationError("campaign sample lacks live connection counts")
+        require_integer(sample.get("live_client_connections"), 0, 750_000, "live client connections")
         live = max(live, sample["live_client_connections"])
     if live < connections:
         raise QualificationError("campaign never held the configured connection count")
+    return live
 
 
 def validate_campaign(report: dict[str, Any], minimum_seconds: int, connections: int) -> dict[str, Any]:
@@ -69,27 +72,31 @@ def validate_campaign(report: dict[str, Any], minimum_seconds: int, connections:
         raise QualificationError("campaign record does not name its resource source")
     if report["elapsed_ns"] < minimum_seconds * 10**9:
         raise QualificationError("campaign ran shorter than its required duration")
+    require_integer(report.get("connections"), 4, 250_000, "configured connections")
     if report.get("connections") != connections:
         raise QualificationError("campaign ran with a different connection count")
     samples = report.get("samples")
     if not isinstance(samples, list) or len(samples) < 2 or len(samples) > MAX_SAMPLES:
         raise QualificationError("campaign record lacks resource samples")
-    validate_samples(samples, connections)
+    peak_live = validate_samples(samples, connections, report["elapsed_ns"])
     classes = report.get("latency_classes")
     if not isinstance(classes, dict) or sorted(classes) != LATENCY_CLASSES:
         raise QualificationError("campaign record omits a latency class")
     for name, values in classes.items():
-        if type(values.get("count")) is not int or values["count"] < 1 or any(type(values.get(key)) is not int for key in ("p50_ns", "p95_ns", "p99_ns")):
+        if not isinstance(values, dict) or type(values.get("count")) is not int or values["count"] < 1:
             raise QualificationError(f"latency class {name} has no samples")
+        previous = 0
+        for key in ("p50_ns", "p95_ns", "p99_ns"):
+            require_integer(values.get(key), previous, report["elapsed_ns"], f"{name} {key}")
+            previous = values[key]
     counts = report.get("scenario_counts")
     if not isinstance(counts, dict) or sorted(counts) != sorted(SCENARIOS):
         raise QualificationError("campaign record omits a scenario")
     for scenario in SCENARIOS:
         if type(counts[scenario]) is not int or counts[scenario] < 1:
             raise QualificationError(f"scenario {scenario} did not run")
-    for field in ("missed_events", "envelope_violations", "population_shortfalls"):
-        if report.get(field) != 0:
-            raise QualificationError(f"campaign reported nonzero {field}")
+    for field in ("missed_events", "envelope_violations", "population_shortfalls", "sample_failures"):
+        require_integer(report.get(field), 0, 0, field)
     for field in ("messages_sent", "messages_received", "messages_refused"):
         if type(report.get(field)) is not int or report[field] < 0:
             raise QualificationError(f"campaign record lacks an integer {field}")
@@ -97,14 +104,16 @@ def validate_campaign(report: dict[str, Any], minimum_seconds: int, connections:
         raise QualificationError("campaign observed no channel fanout")
     if report.get("returned_to_envelope") is not True:
         raise QualificationError("resources did not return to the warm envelope")
-    if report.get("daemons_stopped_cleanly") != [True, True, True]:
+    stopped = report.get("daemons_stopped_cleanly")
+    if not isinstance(stopped, list) or len(stopped) != 3 or any(value is not True for value in stopped):
         raise QualificationError("a daemon did not stop cleanly")
     hardware = report.get("hardware")
     if not isinstance(hardware, str) or not hardware.strip():
         raise QualificationError("campaign record omits the hardware description")
     return {"elapsed_ns": report["elapsed_ns"], "samples": len(samples), "missed_events": 0, "envelope_violations": 0,
             "returned_to_envelope": True, "scenario_counts": {scenario: counts[scenario] for scenario in SCENARIOS},
-            "latency_classes": LATENCY_CLASSES, "capacity_demonstrated": True, "hardware": hardware.strip(),
+            "latency_classes": LATENCY_CLASSES, "workload_demonstrated": True, "hardware": hardware.strip(),
+            "connections": connections, "peak_live_connections": peak_live,
             "resource_source": report["resource_source"], "messages_refused": report["messages_refused"]}
 
 

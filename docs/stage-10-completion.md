@@ -39,7 +39,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Open |
-| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Open |
+| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
 
 Earlier findings remain in `TODO.md` and `stage-10-qualification.md`. A finding
 is closed here only with a current regression or a recorded current-source
@@ -60,6 +60,22 @@ integration tests, including the new five regression and control tests and
 the existing crash, restore and fault-injection cases. The production changes
 add no wire or storage format and change no dependency pin or limit. The
 release critical inventory now includes the initialization and guard checks.
+
+### Capacity report evidence
+
+The report verifier now requires at least 50,000 configured and observed
+connections for the production capacity job. The separate soak job requires
+at least 256. A 64-client development campaign cannot close production
+capacity. The driver records its actual configured and peak populations and
+rejects dropped resource samples, invalid sample times, unordered latency
+percentiles and non-boolean shutdown results.
+
+The regression tests fail on the earlier verifier and pass with the repair.
+`python3 scripts/test-release-qualification.py` passes all 50 tests, and
+`python3 scripts/qualify-release.py check` validates the 31-job inventory.
+The existing capacity driver still runs 64 clients and therefore cannot
+produce passing production evidence. Implementing and running the full
+workload remains open.
 
 ## Required production evidence
 
