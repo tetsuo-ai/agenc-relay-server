@@ -130,8 +130,8 @@ At `8daac95`, the fresh all-feature workspace run passes 2,807 tests with
 zero failures and 21 ignored tests. The separate documentation run passes
 41 tests. Workspace Clippy, both target compile checks, dependency policy and
 the advisory check pass. Coverage is 75.0714% branches and 91.4550% lines,
-with all eight interim critical regions at 100%. The complete inherited
-Stage 00 through 09 run is still being checked after the catalog repairs.
+with all eight interim critical regions at 100%. That inherited run exposed
+stale catalogs; the final validation below includes the resumed checks.
 
 ### Reader and command-line boundaries
 
@@ -154,6 +154,46 @@ JOIN key duplication was rechecked against Appendix A.1. Its `csv(key,20)`
 grammar forbids duplicate canonical values, so the existing rejection is
 retained. The broader queue-ownership and command-authorization findings
 remain open.
+
+### Final local validation
+
+At `b2aa74760330b7a1c74fa0a1638402a5a20eba2d`,
+`cargo test --workspace --all-features --locked` passes 2,813 tests, including
+documentation tests, with zero failures and 21 ignored tests. The ignored
+set contains 19 qualification scenarios and two fixture generators. Live TLS,
+administration, federation, restart, WSS and both MLS client tests pass.
+
+Workspace Clippy with all targets and features and warnings denied, formatting,
+source policy and its 31 rejection cases, workspace policy, the requirement
+ledger and baseline checks pass. The 50 release-runner tests and the 31-job
+qualification inventory pass. Both x86_64 and AArch64 all-target compilation
+checks pass; native AArch64 execution remains outstanding.
+
+The 103 inherited Stage 00 through 09 commands were checked through the initial
+and resumed runs after the catalog and test repairs. The final Stage 07 through
+09 run passes its transcripts, bounded models, encrypted load and fuzz smoke
+checks. The optional-profile matrix passes four builds, nine admitted
+configurations, seven refusals before storage writes and retained-history
+restarts with history disabled. These are implementation checks. Full native
+release campaigns remain required.
+
+Fresh coverage is 75.09% branches and 91.46% lines. All eight interim critical
+regions and the three added reader/CLI regions reach 100%. The release check
+still fails its 90% branch floor and 672 of 1,061 critical regions, including
+regions without executable branch data. Both inventories bind all 765 current
+Rust source files; the thresholds remain unchanged.
+
+All three workflow files pass actionlint 1.7.12 syntax and expression checks,
+with its optional shellcheck and Pyflakes integrations disabled. The pinned
+checkout and upload action commits resolve. GitHub Actions still reports
+`startup_failure` before any job begins and supplies no actionable diagnostic.
+Hosted CI is not green.
+
+The isolated [upstream allocation probe](upstream/redb-allocation-probe/README.md)
+passes 424 host tests but cannot publish a transaction. Its required upstream
+container gates stop because Podman is unavailable. The normal-API fuzz smoke
+does not exercise the new probe API. Full bounded commit support, upstream
+acceptance and a published dependency remain open under STO-1.
 
 ## Required production evidence
 
