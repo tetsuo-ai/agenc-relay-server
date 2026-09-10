@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 765
-reviewed_source_sha256 = "367e6faa12a722b7998d1dea95a94508265a84ca7b275a92660b02dc2b65e6ba"
+reviewed_source_sha256 = "65922599e0947c6ac4fc7e057387bac12fd7d429307377a36b85dc75e256e3c8"
 deferred = []
 
 [[region]]
@@ -10561,3 +10561,23 @@ start_line = 2313
 end_line = 2315
 metric = "regions"
 reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected."
+
+[[region]]
+id = "storage-domain-envelope-decode"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/records.rs"
+source_sha256 = "8ebe4f2e5e5576eb1702464ba007f754c7b09810a5011d7948ab5fe2bf4644bc"
+start_line = 586
+end_line = 634
+metric = "branches"
+reason = "Canonical reference order and complete domain envelope validation protect sealed reads and reconstruction."
+
+[[region]]
+id = "storage-channel-authority-validation"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/domain_records.rs"
+source_sha256 = "fe631ead932e0f4ea71a0d3d9ecaea5b478422142a9b21aa3915f9dc2b33a2fc"
+start_line = 520
+end_line = 644
+metric = "branches"
+reason = "Durable channel authority, membership and canonical text validation must reject every invalid stored projection."

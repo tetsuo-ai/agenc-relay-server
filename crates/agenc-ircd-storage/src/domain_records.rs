@@ -14,11 +14,12 @@ use agenc_ircd_domain::{
     MAX_CONTACTS_PER_ACCOUNT, MAX_INVITES_PER_CHANNEL, MAX_MASK_ENTRIES_PER_LIST,
     MAX_MEMBERS_PER_CHANNEL, MAX_RESERVED_NICKNAMES, MAX_ROLE_GRANTS_PER_CHANNEL, ModerationAction,
     ModerationReasonCode, NicknameValue, PersistencePolicy, PresencePolicy, Principal, Role,
-    Visibility,
+    TopicText, Visibility,
 };
 use agenc_ircd_types::{
     AccountId, AccountRandomId, ChannelInstanceId, ControlPolicy, EntryId, Generation, InviteId,
-    MAX_TYPED_MASK_BYTES, MessageId, PublicCloak, Revision, ServerId, SessionId, UserId, UtcSecond,
+    MAX_TYPED_MASK_BYTES, MaskSubject, MessageId, PublicCloak, Revision, ServerId, SessionId,
+    TypedMask, UserId, UtcSecond,
 };
 
 use crate::StorageError;
@@ -517,6 +518,7 @@ fn decode_channel(decoder: &mut Decoder<'_>) -> Result<DurableChannel, StorageEr
 
 // agenc-review: focus owner=storage reviewed=2026-09-01 reason=complete-channel-cross-field-invariants-are-validated-in-one-closed-gate
 fn validate_channel(channel: &DurableChannel) -> Result<(), StorageError> {
+    validate_channel_text(channel)?;
     let durable_authority = channel.scope == ChannelScope::Global
         || channel.persistence == PersistencePolicy::Registered;
     let ordered_memberships = ascending(
@@ -602,6 +604,41 @@ fn validate_channel(channel: &DurableChannel) -> Result<(), StorageError> {
         if membership.effective_role != std::cmp::max(membership.session_role, grant) {
             return Err(StorageError::InvalidEncoding);
         }
+    }
+    Ok(())
+}
+
+fn validate_channel_text(channel: &DurableChannel) -> Result<(), StorageError> {
+    if let Some(topic) = &channel.topic {
+        TopicText::try_from_str(&topic.text, ControlPolicy::PermitHorizontalTab)
+            .map_err(|_| StorageError::InvalidEncoding)?;
+    }
+    for entries in [
+        &channel.bans,
+        &channel.exceptions,
+        &channel.invite_exceptions,
+    ] {
+        if entries.len() > MAX_MASK_ENTRIES_PER_LIST {
+            return Err(StorageError::InvalidEncoding);
+        }
+        for entry in entries {
+            validate_canonical_mask(&entry.mask)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_canonical_mask(text: &str) -> Result<(), StorageError> {
+    let mask = TypedMask::parse(text).map_err(|_| StorageError::InvalidEncoding)?;
+    let subject = text.strip_prefix("$q:").unwrap_or(text);
+    let value = subject.get(3..).ok_or(StorageError::InvalidEncoding)?;
+    let canonical = match mask.subject() {
+        MaskSubject::Account(id) => value == id.to_text(),
+        MaskSubject::User(id) => value == id.to_base64url(),
+        MaskSubject::Nickname(glob) | MaskSubject::Cloak(glob) => value == glob.pattern(),
+    };
+    if !canonical {
+        return Err(StorageError::InvalidEncoding);
     }
     Ok(())
 }

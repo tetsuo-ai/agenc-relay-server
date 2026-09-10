@@ -611,7 +611,13 @@ impl PersistentRecordValue {
             .try_reserve_exact(reference_count)
             .map_err(|_| StorageError::AllocationFailed)?;
         for _ in 0..reference_count {
-            references.push(RecordReference::decode(&mut decoder)?);
+            let reference = RecordReference::decode(&mut decoder)?;
+            if references.last().is_some_and(|previous| {
+                compare_references(previous, &reference) != std::cmp::Ordering::Less
+            }) {
+                return Err(StorageError::InvalidEncoding);
+            }
+            references.push(reference);
         }
         let body = decoder.vector_u32(MAX_DOMAIN_RECORD_BODY_BYTES)?.to_vec();
         decoder.finish()?;
@@ -939,6 +945,52 @@ mod tests {
         IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
         IntegrityRecordMutation, IntegrityRecordVersion, StorageSealContext,
     };
+
+    #[test]
+    fn domain_record_decoder_requires_strict_reference_order() -> Result<(), StorageError> {
+        let reference = |table, key| RecordReference::new(table, StoredKey::new(vec![key; 16])?);
+        let first = reference(TableId::Channel, 1)?;
+        let second = reference(TableId::Channel, 2)?;
+        let earlier_table = reference(TableId::AuthTransaction, 1)?;
+        let value = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            1,
+            1,
+            0,
+            None,
+            vec![second.clone(), first.clone()],
+            Vec::new(),
+        )?;
+        let canonical = value.encode()?;
+        assert_eq!(
+            PersistentRecordValue::decode(TableId::AuthTransaction, &canonical)?.encode()?,
+            canonical
+        );
+        for references in [
+            [second, first.clone()],
+            [first.clone(), first],
+            [reference(TableId::Channel, 1)?, earlier_table],
+        ] {
+            let mut encoder = Encoder::with_capacity(0, 1_024)?;
+            encoder.put_u16(DOMAIN_RECORD_VERSION)?;
+            encoder.put_u16(1)?;
+            encoder.put_u64(1)?;
+            encoder.put_u64(0)?;
+            encoder.put_u16(0)?;
+            encoder.put_u64(0)?;
+            encoder.put_u32(2)?;
+            for reference in references {
+                reference.encode(&mut encoder)?;
+            }
+            encoder.put_vector_u32(&[])?;
+            assert_eq!(
+                PersistentRecordValue::decode(TableId::AuthTransaction, &encoder.finish())
+                    .map(|_| ()),
+                Err(StorageError::InvalidEncoding)
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn domain_record_admission_stops_at_the_exact_sealed_plaintext_ceiling()

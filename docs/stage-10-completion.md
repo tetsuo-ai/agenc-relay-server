@@ -37,7 +37,7 @@ unsupported. The current-format backup and restore contract remains required.
 | CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
 | Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Open |
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Open |
-| Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Open |
+| Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding repaired; other items open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Open |
 | Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
 
@@ -76,6 +76,22 @@ The regression tests fail on the earlier verifier and pass with the repair.
 The existing capacity driver still runs 64 clients and therefore cannot
 produce passing production evidence. Implementing and running the full
 workload remains open.
+
+### Canonical storage evidence
+
+Channel body encoding and decoding now use the domain topic parser and
+require canonical typed masks in every list. Persisted reference decoding
+requires strictly increasing table/key pairs. Three regression tests reproduce
+the earlier acceptance failures. A fourth test preserves valid topic tabs,
+Unicode, each mask subject and quiet masks. The release inventory now includes
+the changed envelope and channel validation gates.
+
+Workspace Clippy passes with warnings denied. The all-feature workspace tests
+pass, including live TLS, administration, restart, WSS and both MLS clients.
+The first separate storage run refused its physical reserve probe because
+filesystem free space changed between samples on all five attempts. The same
+probe passes in the completed workspace run. Its exact boundary requirement
+and retry count are unchanged.
 
 ## Required production evidence
 

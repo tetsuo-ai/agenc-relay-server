@@ -1819,13 +1819,13 @@ None blocks the core-v1 gate.
 - [ ] `io_rejected` and `rustix_rejected` collapse every errno to
   `FilesystemRejected`, so a missing guard, EACCES, ENOSPC, and EIO are
   indistinguishable to operators and tests.
-- [ ] `domain_records.rs` decodes topic text and list-entry masks as bounded
-  raw strings while nicknames, channel names, away text, and display names go
-  through their domain parsers; persisted bytes could carry control
-  characters into the domain layer.
-- [ ] `PersistentRecordValue::decode` accepts references in any order and
-  re-sorts them, so two byte strings decode to one value although the module
-  documents the envelope as canonical. Reject unsorted input in `decode`.
+- [x] Channel body encoding and decoding validate topic text through the
+  domain parser and require canonical typed masks in all three lists.
+  Regressions reject controls, malformed masks and normalized aliases;
+  controls preserve topic tabs and Unicode, every mask subject and quiet masks.
+- [x] `PersistentRecordValue::decode` requires strictly ascending table/key
+  references before constructing the value. Regressions reject reversed keys,
+  reversed tables and duplicate references while preserving canonical output.
 - [ ] `project_channel` (`domain/projection.rs`) hides an unlisted (`+p`)
   channel from non-members, while the specification defines `+p` as
   list-hiding rather than existence-hiding. Confirm the intended reading.

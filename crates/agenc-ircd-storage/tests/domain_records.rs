@@ -172,6 +172,154 @@ fn minimal_sanction(seed: u8) -> Result<DurableSanction, StorageError> {
     })
 }
 
+fn replace_encoded_text(bytes: &mut [u8], before: &str, after: &str) -> Result<(), StorageError> {
+    assert_eq!(before.len(), after.len());
+    let offsets = bytes
+        .windows(before.len())
+        .enumerate()
+        .filter_map(|(offset, bytes)| (bytes == before.as_bytes()).then_some(offset))
+        .collect::<Vec<_>>();
+    assert_eq!(offsets.len(), 1);
+    let offset = *offsets.first().ok_or(StorageError::InvalidEncoding)?;
+    bytes
+        .get_mut(offset..offset + after.len())
+        .ok_or(StorageError::InvalidEncoding)?
+        .copy_from_slice(after.as_bytes());
+    Ok(())
+}
+
+#[test]
+fn channel_codec_rejects_invalid_topic_text() -> Result<(), StorageError> {
+    for invalid in [
+        "bad\ntext",
+        "bad\rtext",
+        "bad\0text",
+        "bad\u{1b}text",
+        "bad\u{7f}text",
+    ] {
+        let mut channel = minimal_channel(73)?;
+        let placeholder = "x".repeat(invalid.len());
+        channel.topic = Some(DurableTopic {
+            text: placeholder.clone(),
+            message_id: MessageId::from_bytes([74; 16]),
+            setter: UserId::from_bytes([75; 16]),
+            set_at: UtcSecond::from_unix_seconds(1),
+        });
+        let mut bytes = ChannelRecordBody::encode(&channel)?;
+        replace_encoded_text(&mut bytes, &placeholder, invalid)?;
+        assert_eq!(
+            ChannelRecordBody::decode(&bytes).map(|_| ()),
+            Err(StorageError::InvalidEncoding)
+        );
+        channel
+            .topic
+            .as_mut()
+            .ok_or(StorageError::InvalidEncoding)?
+            .text = invalid.to_owned();
+        assert!(ChannelRecordBody::encode(&channel).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn channel_codec_rejects_invalid_or_noncanonical_masks_in_every_list() -> Result<(), StorageError> {
+    for invalid in [
+        "$n:a\nb",
+        "$n:a\tb",
+        "$n:ABC",
+        "$n:a**b",
+        "$q:$n:ABC",
+        "$q:$c:a**b",
+        "$q:$q:$n:a",
+        "$x:abc",
+        "$a:bad",
+        "$u:bad",
+    ] {
+        for list in 0..3 {
+            let mut channel = minimal_channel(73)?;
+            let placeholder = format!("$n:{}", "x".repeat(invalid.len() - 3));
+            let entries = match list {
+                0 => &mut channel.bans,
+                1 => &mut channel.exceptions,
+                _ => &mut channel.invite_exceptions,
+            };
+            entries.push(DurableListEntry {
+                entry_id: EntryId::from_bytes([76; 16]),
+                mask: placeholder.clone(),
+                setter: channel.creator,
+                created_at: channel.created_at,
+            });
+            let mut bytes = ChannelRecordBody::encode(&channel)?;
+            replace_encoded_text(&mut bytes, &placeholder, invalid)?;
+            assert_eq!(
+                ChannelRecordBody::decode(&bytes).map(|_| ()),
+                Err(StorageError::InvalidEncoding)
+            );
+            let entries = match list {
+                0 => &mut channel.bans,
+                1 => &mut channel.exceptions,
+                _ => &mut channel.invite_exceptions,
+            };
+            entries
+                .first_mut()
+                .ok_or(StorageError::InvalidEncoding)?
+                .mask = invalid.to_owned();
+            assert!(ChannelRecordBody::encode(&channel).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn channel_codec_preserves_valid_topic_and_mask_forms() -> Result<(), Box<dyn Error>> {
+    let masks = [
+        format!("$a:{}", account_id(73).random().to_text()),
+        format!("$u:{}", UserId::from_bytes([74; 16]).to_base64url()),
+        "$n:a*b?".to_owned(),
+        "$c:AbC*".to_owned(),
+    ];
+    for topic in ["", "a\tb", "café"] {
+        for mask in masks
+            .iter()
+            .flat_map(|mask| [mask.clone(), format!("$q:{mask}")])
+        {
+            let mut channel = minimal_channel(73)?;
+            channel.topic = Some(DurableTopic {
+                text: topic.to_owned(),
+                message_id: MessageId::from_bytes([74; 16]),
+                setter: UserId::from_bytes([75; 16]),
+                set_at: channel.created_at,
+            });
+            channel.bans.push(DurableListEntry {
+                entry_id: EntryId::from_bytes([76; 16]),
+                mask: mask.clone(),
+                setter: channel.creator,
+                created_at: channel.created_at,
+            });
+            let encoded = ChannelRecordBody::encode(&channel)?;
+            let restored = ChannelRecordBody::decode(&encoded)?;
+            assert_eq!(
+                restored
+                    .topic
+                    .as_ref()
+                    .ok_or(StorageError::InvalidEncoding)?
+                    .text,
+                topic
+            );
+            assert_eq!(
+                restored
+                    .bans
+                    .first()
+                    .ok_or(StorageError::InvalidEncoding)?
+                    .mask,
+                mask
+            );
+            assert_eq!(ChannelRecordBody::encode(&restored)?, encoded);
+        }
+    }
+    Ok(())
+}
+
 fn full_account() -> Result<DurableAccount, Box<dyn Error>> {
     let mut contacts: Vec<AccountId> = (1..=3_u8).map(account_id).collect();
     contacts.sort();
