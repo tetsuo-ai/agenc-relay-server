@@ -27,6 +27,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Item | Required result | Status |
 | --- | --- | --- |
 | Repository history | Push the existing committed branch and open its review | Complete at the baseline commit |
+| Conformance maintenance | Bind the accepted current-format specification and preserve historical evidence | Baseline and requirement bindings repaired |
 | Storage initialization | Preserve every existing rollback guard and reject reused initialization directories | Implemented; 316 storage tests pass |
 | STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Open; upstream release required |
 | CAP-73 authority | Authenticate public state and its complete historical transitions without exposing private MLS context | Open |
@@ -101,6 +102,21 @@ original directory path, checks that the replacement's files remain intact,
 and repeats cleanup through the retained descriptor. It fails with the earlier
 path-based enumeration and passes with the repair. All 10 platform tests,
 the complete storage suite and workspace Clippy pass.
+
+### Specification and evidence bindings
+
+The specification baseline now names exact normative source commit
+`15acb53621e04b1aed87fa53033eb4b1f4628bd5`. Its six artifact bytes match that
+commit, including current-format admission, the audit export union and the
+client numeric corrections. The base and E2EE profile hashes are unchanged.
+No normative document or archived result was edited for this repair.
+
+Three current storage requirement bindings are added to the reviewed catalog.
+The replaced migration atomicity sentence remains an archive-only binding and
+is rejected for new closure. The catalog validates 382 bindings and all 1,000
+archived entries. Its 79 negative cases and explicit retired-closure checks
+pass. These catalog records identify required evidence; they do not provide
+new passing qualification artifacts.
 
 ## Required production evidence
 
