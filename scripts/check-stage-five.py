@@ -15,7 +15,6 @@ EXPECTED_MODULES = {
     "backup.rs", "codec.rs", "construction.rs", "construction_directory.rs",
     "construction_runtime.rs", "construction_schema.rs", "control.rs", "domain_records.rs", "engine.rs", "error.rs",
     "fault.rs", "e2ee_records.rs",
-    "migration.rs", "migration_command.rs", "migration_profile.rs", "migration_v2.rs", "migration_v3.rs",
     "federation_records.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",
     "mutation.rs", "owner.rs", "platform.rs", "qualification.rs", "qualification_workload.rs",
     "records.rs",

@@ -1,6 +1,6 @@
 schema_version = 1
 evidence_id = "EVID-S04-014-CONSTANT-TIME"
-reviewed_revision = "a2b27a30f3b3908e757c45163cbacc68ea5da4c6"
+reviewed_revision = "8daac95edcf5d7ba253ebeef66f41c40d5d39bdc"
 worktree_state = "dirty-source-hash-bound"
 conclusion = "Known and unknown account inputs converge on one OPAQUE server-start implementation with equal-size credential IDs and records. Secret digest and OPAQUE MAC comparisons use constant-time library operations."
 limit = "This review does not claim resistance to global timing analysis. The full account lookup path requires separate Stage 05 evidence for the fixed storage lookup schedule before AUTH-01 can close."
@@ -25,15 +25,15 @@ review = "Real and fake selections deserialize one exact-size record and execute
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/hash.rs"
-sha256 = "f07655fd51274827fdff2aa33bc5f21d1e0a8d0d748967d583a3c2fbcb686d76"
+sha256 = "e3d52975688de0d3029f706bb9e6ee5d808ac74ab26d14df0d7c4487994062ea"
 symbols = ["LoginIndexDigest::matches", "LoginIndexKey::key_id", "derive_fake_credential_id"]
-review = "Login digest equality uses subtle::ConstantTimeEq. The public login-index key identifier is a network-bound SHA-256 derivation over the secret key. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label."
+review = "Login digest equality uses subtle::ConstantTimeEq. The public login-index key identifier is a network-bound SHA-256 derivation over the secret key. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label. The 2026-09-10 re-review against 68defd5 found only the new unkeyed Sha256Stream adapter and the FederationSnapshotHash module export. Their production callers hash release artifacts and public federation snapshots; neither enters login selection, HMAC derivation or secret comparison. The new snapshot adapter bounds its declared input and requires complete consumption. The reviewed login functions are byte-for-byte unchanged."
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/storage.rs"
-sha256 = "ad6d3d082b2e45c1ccc0d16792c49802065da81bbc9bb76c96e5158e454c0f57"
+sha256 = "bf9c4423d5295b4723e115e170578577ad5900c9d8112e1b5be800875abda741"
 symbols = ["StorageIndex::matches", "StorageMasterKey::matches", "StorageMasterKey::source_operation_key_id", "StorageMasterKey::target_operation_key_id"]
-review = "Private storage-index and storage-master-key equality use subtle::ConstantTimeEq over all 32 bytes. Source- and target-role resumability IDs use separate domain labels and expose only a digest."
+review = "Private storage-index and storage-master-key equality use subtle::ConstantTimeEq over all 32 bytes. Source- and target-role resumability IDs use separate domain labels and expose only a digest. The 2026-09-10 re-review against 68defd5 found only DatabaseBinding::database_instance_id, a const accessor returning the existing public database identity. It adds no secret-dependent work or comparison. All four reviewed functions are byte-for-byte unchanged."
 
 [[surface]]
 path = "vendor/opaque-ke-4.0.1/src/opaque.rs"
@@ -49,4 +49,4 @@ review = "TripleDH compares the expected and supplied KE3 MAC with ConstantTimeE
 
 [gate]
 status = "evidence-only"
-reason = "The 2026-09-04 implementation review includes uncommitted changes bound by the source hashes above. This artifact does not claim gate closure or replace any qualification for an exact source revision."
+reason = "The 2026-09-10 implementation re-review binds the two changed crypto files by their source hashes. The four auth and vendored OPAQUE source hashes remain unchanged. This artifact does not claim gate closure or replace any qualification for an exact source revision."

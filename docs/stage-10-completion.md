@@ -118,6 +118,21 @@ archived entries. Its 79 negative cases and explicit retired-closure checks
 pass. These catalog records identify required evidence; they do not provide
 new passing qualification artifacts.
 
+The inherited gates exposed three additional stale catalogs. Stage 01 now
+pins the same architecture and decision-ledger bytes as the baseline. Stage 04
+records the review of two changed crypto files: unkeyed artifact/snapshot
+hash adapters and a public database-ID accessor. The reviewed login HMAC,
+OPAQUE paths and secret comparisons are unchanged. Stage 05 no longer
+requires the five legacy migration modules removed by the current-format
+decision. Each stage's catalog check and negative self-tests pass.
+
+At `8daac95`, the fresh all-feature workspace run passes 2,807 tests with
+zero failures and 21 ignored tests. The separate documentation run passes
+41 tests. Workspace Clippy, both target compile checks, dependency policy and
+the advisory check pass. Coverage is 75.0714% branches and 91.4550% lines,
+with all eight interim critical regions at 100%. The complete inherited
+Stage 00 through 09 run is still being checked after the catalog repairs.
+
 ## Required production evidence
 
 - [ ] Mandatory build and analysis checks on native x86_64 and AArch64.
