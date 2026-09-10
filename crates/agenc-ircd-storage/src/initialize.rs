@@ -144,6 +144,7 @@ fn initialize_storage_inner(
 ) -> Result<StorageInitializationOutcome, StorageError> {
     let limits = config.limits.validate()?;
     validate_initial_records(config.mode, &mut config.initial_records)?;
+    config.state_directory.require_absent_guard()?;
     let _capacity = config
         .state_directory
         .admit_transaction(limits.fixed_reserve_bytes, limits.reserve_percent)?;
@@ -392,7 +393,11 @@ fn initialize_storage_inner(
         }
     }
     let guard_bytes = guard.encode()?;
-    if config.state_directory.replace_guard(&guard_bytes).is_err() {
+    if config
+        .state_directory
+        .install_initial_guard(&guard_bytes)
+        .is_err()
+    {
         return Ok(StorageInitializationOutcome::Indeterminate);
     }
     Ok(StorageInitializationOutcome::Complete {

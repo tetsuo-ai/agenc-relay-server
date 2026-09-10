@@ -11,8 +11,38 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 765
-reviewed_source_sha256 = "3bdfd576690aa26e8fdf6380f4b8e3bf2a289d785c17222f15dcf17090d35547"
+reviewed_source_sha256 = "367e6faa12a722b7998d1dea95a94508265a84ca7b275a92660b02dc2b65e6ba"
 deferred = []
+
+[[region]]
+id = "storage-initialization-preserves-guard"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/initialize.rs"
+source_sha256 = "70796dddd59b4a6516747371aec6776dd2f13bc7a6b05cd833b9471a57c8df20"
+start_line = 142
+end_line = 409
+metric = "branches"
+reason = "Sequence-zero admission, nonce accounting, database commit and exclusive initial guard publication must preserve existing lineage and report uncertain durable outcomes."
+
+[[region]]
+id = "storage-initial-guard-absence"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/platform.rs"
+source_sha256 = "ea451ea354dcb6230bc584dc30d20fada91a1045576023859644953d40218cd4"
+start_line = 560
+end_line = 566
+metric = "branches"
+reason = "Every existing guard entry, including dangling symlinks, and every inspection error must refuse initialization before database creation."
+
+[[region]]
+id = "storage-guard-durable-publication"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/platform.rs"
+source_sha256 = "ea451ea354dcb6230bc584dc30d20fada91a1045576023859644953d40218cd4"
+start_line = 578
+end_line = 636
+metric = "branches"
+reason = "Initial no-replace publication and normal replacement retain the file-sync, rename, directory-sync and authenticated readback boundaries."
 
 [[region]]
 id = "client-message-error-enum-arms"

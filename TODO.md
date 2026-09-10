@@ -1794,11 +1794,11 @@ None blocks the core-v1 gate.
   `verify_backup` twice, all on the owner thread, so commit and read latency
   during a backup is O(database) rather than O(slice). Reuse the checkpoint
   slicing for the accounting pass and drop one post-write verification.
-- [ ] `initialize_storage` requires `database.redb` to be absent but installs
-  `rollback.guard` with a replacing rename (`initialize.rs`, `platform.rs`
-  `replace_guard`), so pointing initialization at a directory whose database
-  was removed silently overwrites the previous lineage's anti-rollback anchor.
-  Refuse when a guard already exists.
+- [x] Initialization refuses every existing rollback guard before creating the
+  database and publishes its first guard with an exclusive rename. Three
+  integration regressions reproduce the original overwrite and now pass;
+  platform tests cover a guard appearing after admission and later normal
+  replacement. The complete storage suite passes 316 tests.
 - [ ] Backup trust-key validity windows are checked against the header
   `created_at` that the same key signs (`backup.rs` `accepts_creation_time`),
   so a key compromised after `not_after` can still produce accepted backups

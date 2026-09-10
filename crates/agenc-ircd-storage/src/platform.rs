@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use agenc_ircd_crypto::OsEntropy;
 use rustix::fs::{
     AtFlags, CWD, Dir, FileType, Mode, OFlags, RenameFlags, StatVfs, fstat, fstatfs, fstatvfs,
-    fsync, openat, renameat, renameat_with, unlinkat,
+    fsync, openat, renameat_with, statat, unlinkat,
 };
 
 use crate::{
@@ -556,8 +556,26 @@ impl StateDirectory {
         Ok(bytes)
     }
 
+    /// Rejects every existing guard entry before sequence-zero initialization.
+    pub(crate) fn require_absent_guard(&self) -> Result<(), StorageError> {
+        match statat(&self.directory, GUARD_FILE, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            Ok(_) => Err(StorageError::FilesystemRejected),
+            Err(error) => Err(rustix_rejected(error)),
+        }
+    }
+
+    /// Publishes the first guard without replacing a concurrently created entry.
+    pub(crate) fn install_initial_guard(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        self.write_guard(bytes, RenameFlags::NOREPLACE)
+    }
+
     /// Replaces the guard with create-exclusive temporary, file sync, rename, and directory sync.
     pub fn replace_guard(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        self.write_guard(bytes, RenameFlags::empty())
+    }
+
+    fn write_guard(&self, bytes: &[u8], flags: RenameFlags) -> Result<(), StorageError> {
         let temporary_name = random_guard_temporary_name()?;
         self.faults.check(
             StorageFaultSite::GuardTemporaryCreate,
@@ -591,11 +609,12 @@ impl StateDirectory {
             .check(StorageFaultSite::GuardFileSync, StorageFaultBoundary::After)?;
         self.faults
             .check(StorageFaultSite::GuardRename, StorageFaultBoundary::Before)?;
-        renameat(
+        renameat_with(
             &self.directory,
             temporary_name.as_str(),
             &self.directory,
             GUARD_FILE,
+            flags,
         )
         .map_err(rustix_rejected)?;
         self.faults
@@ -1178,6 +1197,46 @@ mod tests {
             Err(StorageError::FilesystemRejected)
         );
         require_same_filesystem(directory.create_file("second", 0o600)?, file)?;
+        Ok(())
+    }
+
+    #[test]
+    fn initial_guard_publication_preserves_an_entry_created_after_admission()
+    -> Result<(), StorageError> {
+        let directory = TestDirectory::create("initial-guard-race")?;
+        let tuple = StateDirectory::probe(directory.path())?;
+        let qualification = StorageQualification::from_verified_report(tuple, 1).validate()?;
+        let state = StateDirectory::open(directory.path(), &[qualification])?;
+        state.require_absent_guard()?;
+        let mut previous = directory.create_file(GUARD_FILE, 0o600)?;
+        previous.write_all(b"previous").map_err(io_rejected)?;
+        assert_eq!(
+            state.install_initial_guard(b"replacement"),
+            Err(StorageError::FilesystemRejected)
+        );
+        assert_eq!(state.read_guard(8)?, b"previous");
+        assert_eq!(
+            state.require_absent_guard(),
+            Err(StorageError::FilesystemRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn first_guard_publication_preserves_later_normal_replacement() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("initial-guard")?;
+        let tuple = StateDirectory::probe(directory.path())?;
+        let qualification = StorageQualification::from_verified_report(tuple, 1).validate()?;
+        let state = StateDirectory::open(directory.path(), &[qualification])?;
+        state.require_absent_guard()?;
+        state.install_initial_guard(b"initial")?;
+        assert_eq!(state.read_guard(7)?, b"initial");
+        assert_eq!(
+            state.install_initial_guard(b"replacement"),
+            Err(StorageError::FilesystemRejected)
+        );
+        state.replace_guard(b"committed")?;
+        assert_eq!(state.read_guard(9)?, b"committed");
         Ok(())
     }
 
