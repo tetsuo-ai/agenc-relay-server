@@ -17,6 +17,10 @@ use crate::federation::coordinator::{
 };
 use crate::state_core::StateCoreContext;
 
+#[cfg(test)]
+#[path = "remote_accounts/tests/replay.rs"]
+mod tests;
+
 /// The characters of one carrier line's payload (spec 11.4).
 const CHUNK_CHARACTERS: usize = 400;
 /// The account carrier START and FINISH length token.
@@ -477,12 +481,26 @@ fn outcome(
             Some(arm) => (arm, replies),
             None => (not_allowed(), replies),
         },
-        FederationOpcode::CredentialChangeFinish => (not_allowed(), replies),
+        FederationOpcode::CredentialChangeFinish => (
+            credential_changed(context, lines).unwrap_or_else(not_allowed),
+            replies,
+        ),
         _ => match created(context, lines) {
             Some(arm) => (arm, replies),
             None => (not_allowed(), replies),
         },
     }
+}
+
+/// Only the trusted account owner's accepted terminal note selects success.
+fn credential_changed(context: &StateCoreContext, lines: &[String]) -> Option<ResultArm> {
+    let accepted = lines.iter().any(|line| {
+        captured_parts(line)
+            .is_some_and(|(command, middle)| command == "NOTE" && middle == ["ACCTCRED", "CHANGED"])
+    });
+    accepted.then_some(ResultArm::Committed {
+        resulting_state_generation: context.domain().revision().get(),
+    })
 }
 
 /// The `authenticated` arm of a virtual connection holding a live grant.

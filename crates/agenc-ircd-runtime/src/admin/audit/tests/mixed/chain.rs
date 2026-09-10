@@ -9,6 +9,73 @@ use crate::state_core::durable::{
 use agenc_ircd_types::TransactionId;
 
 #[tokio::test]
+async fn startup_audit_index_allows_retention_without_manual_row_insertion() -> TestResult {
+    let fixture = Fixture::new();
+    let events = fixture.chain()?;
+    let mut core = core(&events)?;
+    let mut authority = fixture.authority(&core)?;
+    let tbs = authority
+        .prepare_retention(80, 20)?
+        .run()?
+        .ok_or("expired prefix")?;
+    let checkpoint = authority.sign_retention(tbs)?;
+    let checkpoint_key =
+        StoredKey::new(checkpoint.tbs().checkpoint_sequence.to_be_bytes().to_vec())?;
+    let checkpoint_value = PersistentRecordValue::new(
+        TableId::AuditCheckpoint,
+        agenc_ircd_storage::LIVE_RECORD_KIND,
+        checkpoint
+            .tbs()
+            .checkpoint_sequence
+            .checked_add(1)
+            .ok_or("checkpoint revision")?,
+        0,
+        None,
+        Vec::new(),
+        checkpoint.encode()?,
+    )?;
+    let source = core.audit_source()?;
+    let projected = project_admin_audit_retention(
+        TransactionId::from_bytes([92; 16]),
+        &checkpoint,
+        core.context_mut()?.index(),
+        &source.keys,
+        source.head,
+        AccountingCeilings {
+            database_max_bytes: 1_073_741_824,
+            backup_max_bytes: 2_147_483_648,
+        },
+    )?;
+    let receipt = commit(&source.storage, projected.into_parts().0)?;
+    assert_eq!(receipt.state_generation, source.head.state_generation);
+    authority.commit_retention(&checkpoint)?;
+    drop(source);
+    core.audit_reopen()?;
+    let restored = fixture.authority(&core)?;
+    assert_eq!(restored.retained_first_sequence, 3);
+    assert_eq!(restored.next_checkpoint_sequence, 1);
+    // A subsequent startup also indexes the retained checkpoint so later
+    // projection uses its exact authenticated before-image.
+    let mut checkpoint_core = StateCoreFixture::with_registration_router_and_records(
+        vec![7; 65_536],
+        vec![InitialStorageRecord::new(
+            TableId::AuditCheckpoint,
+            checkpoint_key.clone(),
+            DOMAIN_RECORD_SCHEMA,
+            checkpoint_value.encode()?,
+        )?],
+    )?;
+    assert!(
+        checkpoint_core
+            .context_mut()?
+            .index()
+            .existing(TableId::AuditCheckpoint, &checkpoint_key,)?
+            .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn sealed_mixed_chain_reconstructs_twice_without_rewriting_historical_scope() -> TestResult {
     let fixture = Fixture::new();
     let events = fixture.chain()?;

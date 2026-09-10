@@ -1567,10 +1567,10 @@ the closure branch at review time.
   message pipelined behind a JOIN reaches the channel instead of drawing 403
   or SERVERBUSY. Gathering more than one plan per batch still needs a staged
   revision to plan against; the 1 ms gather window stays as specified.
-- [ ] A refused shutdown session close stays in `pending_closures`
-  (`channels.rs` `close_registered`) and is retried only on the next batch
-  event, so an idle server keeps the dead session and nickname (`STA-01`).
-  Retry from a timer or from connection-closed events.
+- [x] The minute maintenance event now reaches the registration router and
+  retries retained session closes even on an idle server (`STA-01`). The
+  regression retains a close behind competing durable work, then verifies
+  that maintenance stages removal and releases the nickname after its receipt.
 - [x] Account administration advances `account.revision` in both the durable
   after-image and live state. The regression checks suspension, restoration,
   matching after-images and refusal of stale confirmation revisions.
@@ -1578,11 +1578,10 @@ the closure branch at review time.
   `standard-replies` was not negotiated (`mutation_render.rs`), although
   Section 14.6 promises `NOTE ... UPDATED`; `CHATHISTORY` renders zero frames.
   Gate at the wire or fail closed with a bounded reply.
-- [ ] Audit rows written before the last restart are not indexed by
-  `reconstruct`, so retention deletes of those rows fail. The closure branch
-  maps that failure to `StorageUnavailable` instead of stopping the daemon;
-  the sweep still cannot delete pre-restart rows until `reconstruct` scans the
-  audit tables.
+- [x] Startup reconstructs durable before-images for audit events and retained
+  checkpoints. The retention regression uses that index without inserting
+  rows by hand, commits the expired prefix deletion and checks the reopened
+  audit authority and reconstructed checkpoint metadata.
 - [ ] Listener key `tls_ocsp_staple_file` is accepted by the configuration
   parser but absent from Appendix C.3, which closes the listener key set.
   Either add it to the specification as a protocol revision or reject it.

@@ -3634,7 +3634,10 @@ impl StateCore {
             self.context.counters.maintenance_events.saturating_add(1);
         match event {
             MaintenanceEvent::PrefixErasure => self.context.erase_idle_prefixes(),
-            MaintenanceEvent::ClockDriftCheck => self.context.check_drift(),
+            MaintenanceEvent::ClockDriftCheck => {
+                self.context.check_drift();
+                self.router.maintenance(&mut self.context, event);
+            }
             MaintenanceEvent::RetentionSweep | MaintenanceEvent::CheckpointDue => {
                 self.router.maintenance(&mut self.context, event);
             }

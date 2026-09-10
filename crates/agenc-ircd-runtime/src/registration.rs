@@ -2880,6 +2880,7 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         event: crate::state_core::inbox::MaintenanceEvent,
     ) {
+        self.retry_session_closes(context);
         if let Some(edge) = self.edge.as_mut() {
             edge.continue_request_journal(context);
         }
@@ -3756,6 +3757,10 @@ pub(crate) fn apply_ready_barrier(
         Err(_) => e2ee.fail_frame(context, edge),
     }
 }
+
+#[cfg(test)]
+#[path = "registration/tests/close.rs"]
+mod close_tests;
 
 #[cfg(test)]
 mod tests {

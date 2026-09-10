@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 774
-reviewed_source_sha256 = "0b060c5cfbfbe516fc992cfb9ac6f03c50dd71d652dd2a6fadc67c052e162ad7"
+reviewed_source_files = 776
+reviewed_source_sha256 = "0f91ee4798fb0ec5201d89a34841851a2ba7be0353aa1a385288d91b2b4bea12"
 deferred = []
 
 [[region]]
@@ -2906,9 +2906,9 @@ reason = "Exact timer generation/deadline protects replacement ownership; expire
 id = "cap81-request-answer-page"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/request.rs"
-source_sha256 = "c3fdd40de5779f0fb0642ff5d9b306359aeb529383c43ef5a2ce803892cc6fed"
-start_line = 592
-end_line = 615
+source_sha256 = "c740eafebdbf92cd3c56f3a75d406e2e56514ecf2393747e11f435fedac7d059"
+start_line = 607
+end_line = 630
 metric = "regions"
 reason = "Move the rendered page reservation through actual request-result staging."
 
@@ -2916,9 +2916,9 @@ reason = "Move the rendered page reservation through actual request-result stagi
 id = "cap81-request-settle-query-page"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/request.rs"
-source_sha256 = "c3fdd40de5779f0fb0642ff5d9b306359aeb529383c43ef5a2ce803892cc6fed"
-start_line = 617
-end_line = 633
+source_sha256 = "c740eafebdbf92cd3c56f3a75d406e2e56514ecf2393747e11f435fedac7d059"
+start_line = 632
+end_line = 648
 metric = "regions"
 reason = "Attach the reservation only to the newly staged request, or retire its successor immediately on staging refusal."
 
@@ -4636,7 +4636,7 @@ reason = "CAP84: infallible line-before-backing bundle precedes refusals. Existi
 id = "companion-mod-statecorecontext-backing-reservations"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "76d4b98ad2bb5e8ea65d432c8a7d8577b9559d73f0c7715db297a4a64c207dae"
+source_sha256 = "671bb68891a56fc07c744b681846fa85e7838dd3b1e6f9954bc30313fd3bb1a4"
 start_line = 837
 end_line = 839
 metric = "regions"
@@ -6226,9 +6226,9 @@ reason = "Queued ordinary events resume only from the explicit notification afte
 id = "cap13-registration-index-refreshed"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/registration.rs"
-source_sha256 = "7afcf62f01657b804a797fb0ee52379c2332cbb95d64e194d76b5dd075343e53"
-start_line = 3141
-end_line = 3146
+source_sha256 = "4f49c16231d651493d8caf03b694693aa0487c0e112db88e932d7c1e65820b65"
+start_line = 3142
+end_line = 3147
 metric = "regions"
 reason = "Route post-readback edge completions through the existing exact connection/result completion path after authenticated index installation."
 
@@ -6236,9 +6236,9 @@ reason = "Route post-readback edge completions through the existing exact connec
 id = "cap13-mod-complete-index-refresh"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "76d4b98ad2bb5e8ea65d432c8a7d8577b9559d73f0c7715db297a4a64c207dae"
-start_line = 3767
-end_line = 3809
+source_sha256 = "671bb68891a56fc07c744b681846fa85e7838dd3b1e6f9954bc30313fd3bb1a4"
+start_line = 3770
+end_line = 3812
 metric = "regions"
 reason = "Install and validate the entire authenticated readback, finish the original continuation, then notify the router only for Batch continuation; reload/admin continuations cannot reopen ordinary staging early."
 
@@ -10736,9 +10736,9 @@ reason = "Closing an internal authority removes only a user index owned by that 
 id = "remote-account-registered-carrier"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/remote_accounts.rs"
-source_sha256 = "ebdaee54706e8bf67031fd2e7b789784c89b1f01eda30075496607a8764725e2"
-start_line = 328
-end_line = 362
+source_sha256 = "48282fe7278be14a8c77961fb6a4b465f5b10214308d4cded94e00341c430604"
+start_line = 332
+end_line = 366
 metric = "branches"
 reason = "Registered account carriers recheck live session identity and account generation before binding internal authority."
 
@@ -10756,9 +10756,9 @@ reason = "Credential carriers render only the permitted challenge, committed com
 id = "edge-account-response-phase"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/registration.rs"
-source_sha256 = "7afcf62f01657b804a797fb0ee52379c2332cbb95d64e194d76b5dd075343e53"
-start_line = 3696
-end_line = 3733
+source_sha256 = "4f49c16231d651493d8caf03b694693aa0487c0e112db88e932d7c1e65820b65"
+start_line = 3697
+end_line = 3734
 metric = "branches"
 reason = "Account creation and credential replacement accept only matching operation and phase responses."
 
@@ -10771,3 +10771,43 @@ start_line = 20
 end_line = 44
 metric = "branches"
 reason = "Durable session removals close local clients while preserving an initiating account operation until its final result is covered."
+
+[[region]]
+id = "credential-replayed-terminal-outcome"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/remote_accounts.rs"
+source_sha256 = "48282fe7278be14a8c77961fb6a4b465f5b10214308d4cded94e00341c430604"
+start_line = 496
+end_line = 504
+metric = "branches"
+reason = "Only the trusted account owner accepted terminal note selects a successful credential replay."
+
+[[region]]
+id = "credential-replayed-completion-checkpoint"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/request.rs"
+source_sha256 = "c740eafebdbf92cd3c56f3a75d406e2e56514ecf2393747e11f435fedac7d059"
+start_line = 1193
+end_line = 1248
+metric = "branches"
+reason = "Replayed committed responses require a new atomic outer result and correlated completion at the checkpoint revision."
+
+[[region]]
+id = "revoked-remote-authentication-refusal"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/request.rs"
+source_sha256 = "c740eafebdbf92cd3c56f3a75d406e2e56514ecf2393747e11f435fedac7d059"
+start_line = 473
+end_line = 551
+metric = "branches"
+reason = "A live authority mismatch refuses the request durably without disconnecting unrelated clients on the edge."
+
+[[region]]
+id = "startup-audit-before-images"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-runtime/src/state_core/reconstruct.rs"
+source_sha256 = "57327f805f2267c6f099809c0e1a91eb2e5900627c74f4a3bd84c497d247ea1a"
+start_line = 518
+end_line = 595
+metric = "branches"
+reason = "Startup indexes authenticated sealed audit events and checkpoints before retention projects exact row deletions."

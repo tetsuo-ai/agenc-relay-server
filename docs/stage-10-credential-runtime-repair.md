@@ -29,6 +29,12 @@ the requesting connection. Other affected sessions close after their durable
 session-removal events. A refused transaction does not publish a successful
 replacement result.
 
+An accepted credential-finish replay preserves its success and sealed response.
+When it has no prepared outer result, its new checkpoint atomically records
+the outer response and a correlated completion at the checkpoint revision.
+An authentication request arriving after its declared session was revoked gets
+a durable refusal while the federation link stays available for other clients.
+
 The three-daemon regression creates an account, authenticates two sessions on
 separate edges, reauthenticates the registered requester, replaces its password,
 checks both connection closures, restarts the coordinator and authenticates
@@ -47,6 +53,13 @@ cryptography is exercised by the real OPAQUE daemon test.
 - A full or closed reload inbox reports a determinate refusal before submission.
   A lost reply after submission remains indeterminate. The admin owner waits
   for the failure audit record to commit before answering a refused REHASH.
+- The minute maintenance event reaches the registration router and retries
+  retained session closes. Removal remains gated on its storage receipt;
+  an idle node no longer needs unrelated client traffic to release the nickname.
+- Startup indexes audit events and checkpoints before retention can request
+  deletion. The audit owner still authenticates the complete chain before
+  listener admission. The regression uses the reconstructed before-images,
+  commits retention and verifies the reopened authority and checkpoint metadata.
 
 ## Validation
 
@@ -66,14 +79,24 @@ python3 scripts/check-coverage.py self-test conformance/critical-coverage.toml
 python3 scripts/check-coverage.py self-test conformance/release-critical-coverage.toml
 ```
 
-The locked all-feature workspace run passes 2,828 tests with no failures and
-21 ignored tests. Nineteen ignored tests are qualification scenarios; two
+The follow-up passes 2,833 tests with no failures and 21 ignored tests using
+`cargo test --workspace --all-features --locked -- --test-threads=1`.
+The concurrent run encountered changing free space in the physical storage
+reserve probe; the complete serial run passes with its limits unchanged.
+Formatting, all-target Clippy with warnings denied, independent feature builds
+and AArch64 compilation pass. Source policy accepts 917 Rust files, and both
+reviewed inventories bind 776 source files. The added regressions cover accepted
+credential replay, its correlated checkpoint, revoked-session refusal, idle
+cleanup and audit retention using the startup index.
+
+The initial commit `5a66088` passes 2,828 locked all-feature workspace tests with
+no failures and 21 ignored tests. Nineteen ignored tests are qualification scenarios; two
 generate deterministic fixtures. Both x86_64 and AArch64 all-target compilation,
 formatting, Clippy, dependency audit and deny checks pass. The source policy
 accepts 915 Rust files; the requirement ledger covers 240 records. Workspace,
 source and coverage-policy rejection self-tests pass.
 
-Coverage measures 75.11% branches and 91.54% lines; all eight interim critical
+Coverage at `5a66088` measures 75.11% branches and 91.54% lines; all eight interim critical
 regions reach 100%. The initial instrumented run encountered changing free
 disk space during the storage reserve-boundary measurement. The storage suite
 passed when rerun serially without concurrent builds, and the remaining crates
