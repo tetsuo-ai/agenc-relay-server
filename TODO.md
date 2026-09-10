@@ -1604,9 +1604,11 @@ the closure branch at review time.
 - [ ] A `JoinError` from one connection task cancels the shared accept and
   connection tokens (`listener/mod.rs`, `supervisor/mod.rs`), against
   Architecture 21.2. Unreachable while the panic hook exits the process.
-- [ ] `parsed_arena_bytes` is dead configuration: `connection/reader.rs`
-  accumulates `pending.bytes` but never compares it with `limits.arena_bytes`.
-  Refuse in the accumulator when the bound is exceeded.
+- [x] The reader now checks parsed byte and request bounds before parsing a
+  completed line and keeps refusal sticky. It drains each completed line before
+  framing another, including a maximum-sized line split across reads. The two
+  accumulator regressions fail with the earlier behavior; all 26 connection
+  tests pass, including exact bounds and the paused-time inbox stall case.
 - [ ] One recorded gate run closed a fresh guest connection after the TLS
   handshake and before its first reply
   (`production_daemon_credential_and_lookup_edges_fail_closed`), which the
@@ -1829,9 +1831,9 @@ None blocks the core-v1 gate.
 - [ ] `project_channel` (`domain/projection.rs`) hides an unlisted (`+p`)
   channel from non-members, while the specification defines `+p` as
   list-hiding rather than existence-hiding. Confirm the intended reading.
-- [ ] The JOIN key list in `client-wire` rejects the same key given for two
-  channels because its duplicate check compares key text rather than
-  channel-key pairs. Confirm whether the specification forbids reuse.
+- [x] Rechecked JOIN key reuse against Appendix A.1: `csv(T,N)` forbids
+  duplicate canonical values, and JOIN explicitly uses `csv(key,20)`. The
+  current duplicate-key rejection follows that grammar. No parser change.
 - [ ] `reserved_nickname_owner`, `validate_new_invite_id`, the invite purge
   in `apply_close_session`, and the `DeleteAccount` touched-entity walk scan
   their maps linearly per command (`domain/decision.rs`). Fine at Stage 06
@@ -1840,9 +1842,10 @@ None blocks the core-v1 gate.
   `local_uids = [0]` into the template, so the generated local admin listener
   admits only root until the operator edits it. Consider the invoking user's
   uid or an explicit `--admin-uid` option.
-- [ ] `account-invite create --expires-in` parses through `u64::from_str`,
-  which accepts a leading `+`; the other decimal inputs use the canonical
-  parser.
+- [x] `account-invite create --expires-in` rejects signs, leading zeroes,
+  whitespace, non-ASCII digits and overflow before reading protected inputs.
+  A subprocess regression reproduces the earlier acceptance of `+1` and
+  passes for all seven invalid spellings with the repair.
 ## Stage 07 — Base federation
 
 Outcome: one coordinator and its authenticated edges converge through bounded,

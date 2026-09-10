@@ -33,10 +33,6 @@ pub const DEFAULT_PARSED_ARENA_BYTES: usize = 32_768;
 pub const READ_STALL_BUDGET: Duration = Duration::from_secs(30);
 /// Bytes read from the transport per call: one complete physical line.
 pub const READ_CHUNK_BYTES: usize = MAX_PHYSICAL_LINE_BYTES;
-/// The shortest non-empty protocol line: one byte plus CRLF, so feeding
-/// `n * 3` bytes can produce at most `n` messages.
-const MIN_LINE_BYTES: usize = 3;
-
 /// Validated per-connection reader ceilings (Appendix C.6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReaderLimits {
@@ -88,12 +84,23 @@ struct Pending {
 }
 
 impl Pending {
-    fn accept(&mut self, line: FramedLine<'_>) {
+    fn accept(&mut self, line: FramedLine<'_>, limits: ReaderLimits) {
+        if self.rejected || line.as_str().trim_start_matches(' ').is_empty() {
+            return;
+        }
         let wire_bytes = line.as_str().len();
+        let Some(next_bytes) = self.bytes.checked_add(wire_bytes) else {
+            self.rejected = true;
+            return;
+        };
+        if self.messages.len() >= limits.requests || next_bytes > limits.arena_bytes {
+            self.rejected = true;
+            return;
+        }
         match parse_message(line) {
             Ok(Some(message)) => {
                 self.messages.push_back(Box::new(message));
-                self.bytes = self.bytes.saturating_add(wire_bytes);
+                self.bytes = next_bytes;
             }
             Ok(None) => {}
             Err(_) => self.rejected = true,
@@ -175,8 +182,8 @@ pub(crate) async fn run_reader_sequenced<R: AsyncRead + Unpin>(
     }
 }
 
-/// Feeds one read buffer in slices sized so the pending set never exceeds
-/// the request ceiling, forwarding after every slice.
+/// Forwards each completed line before framing another. A line retained from
+/// an earlier read can occupy the entire arena when its final bytes arrive.
 async fn feed_and_forward(
     bytes: &[u8],
     framer: &mut StreamFramer,
@@ -186,22 +193,15 @@ async fn feed_and_forward(
     inbox: &mpsc::Sender<StateCoreMessage>,
     token: &CancellationToken,
 ) -> Result<(), CloseReason> {
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let slice_bytes = limits
-            .requests
-            .saturating_mul(MIN_LINE_BYTES)
-            .min(limits.arena_bytes)
-            .min(bytes.len() - offset);
-        let end = offset.saturating_add(slice_bytes);
-        let Some(slice) = bytes.get(offset..end) else {
-            return Err(CloseReason::ProtocolError);
-        };
-        if framer.feed(slice, |line| pending.accept(line)).is_err() || pending.rejected {
+    for slice in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if framer
+            .feed(slice, |line| pending.accept(line, limits))
+            .is_err()
+            || pending.rejected
+        {
             return Err(CloseReason::ProtocolError);
         }
         forward_pending(pending, generation, inbox, token).await?;
-        offset = end;
     }
     Ok(())
 }
@@ -242,6 +242,145 @@ async fn forward_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending() -> Pending {
+        Pending {
+            messages: VecDeque::new(),
+            bytes: 0,
+            rejected: false,
+            accepted_lines: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_inbox_stalls_the_reader_without_accepting_following_lines()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let accepted = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&accepted);
+        let start = tokio::time::Instant::now();
+        let task = tokio::spawn(run_reader_sequenced(
+            &b"PING :one\r\nPING :two\r\nPING :three\r\n"[..],
+            ConnectionGeneration::new(7),
+            ReaderLimits::new(1, MAX_PHYSICAL_LINE_BYTES)?,
+            None,
+            sender,
+            CancellationToken::root(),
+            accepted,
+        ));
+        assert_eq!(task.await?, CloseReason::ReadStall);
+        assert_eq!(tokio::time::Instant::now() - start, READ_STALL_BUDGET);
+        assert_eq!(observed.load(Ordering::Relaxed), 1);
+        let StateCoreMessage::Line {
+            sequence, message, ..
+        } = receiver.try_recv()?
+        else {
+            return Err("unexpected inbox message".into());
+        };
+        assert_eq!(sequence, 1);
+        assert_eq!(message.trailing(), Some("one"));
+        assert!(receiver.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fragmented_maximum_line_drains_before_following_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = ReaderLimits::new(128, MAX_PHYSICAL_LINE_BYTES)?;
+        let mut framer = StreamFramer::new()?;
+        let mut pending = pending();
+        let (sender, mut receiver) = mpsc::channel(128);
+        let token = CancellationToken::root();
+        let generation = ConnectionGeneration::new(7);
+        let payload_bytes = MAX_PHYSICAL_LINE_BYTES - 8;
+        let line = format!("PING :{}\r\n", "c".repeat(payload_bytes));
+        assert_eq!(line.len(), MAX_PHYSICAL_LINE_BYTES);
+        let split = line.len() - 1;
+        feed_and_forward(
+            line.get(..split).ok_or("split")?.as_bytes(),
+            &mut framer,
+            &mut pending,
+            generation,
+            limits,
+            &sender,
+            &token,
+        )
+        .await
+        .map_err(|reason| format!("reader closed: {reason:?}"))?;
+        assert!(receiver.try_recv().is_err());
+        let tail = format!("\n{}", "PING :next\r\n".repeat(31));
+        feed_and_forward(
+            tail.as_bytes(),
+            &mut framer,
+            &mut pending,
+            generation,
+            limits,
+            &sender,
+            &token,
+        )
+        .await
+        .map_err(|reason| format!("reader closed: {reason:?}"))?;
+        for expected in 1..=32 {
+            let StateCoreMessage::Line {
+                sequence, message, ..
+            } = receiver.try_recv()?
+            else {
+                return Err("unexpected inbox message".into());
+            };
+            assert_eq!(sequence, expected);
+            assert_eq!(message.command(), "PING");
+            assert_eq!(
+                message.trailing().map(str::len),
+                Some(if expected == 1 { payload_bytes } else { 4 })
+            );
+        }
+        assert!(!pending.rejected);
+        assert_eq!(pending.bytes, 0);
+        assert!(pending.messages.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn parsed_arena_refuses_a_line_before_exceeding_its_byte_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = ReaderLimits::new(128, MAX_PHYSICAL_LINE_BYTES)?;
+        let mut pending = pending();
+        let line = format!("PING :{}", "a".repeat(494));
+        for _ in 0..17 {
+            pending.accept(FramedLine::new(&line)?, limits);
+        }
+        assert_eq!(pending.bytes, 8_500);
+        assert!(!pending.rejected);
+        pending.accept(FramedLine::new("PING :aa")?, limits);
+        let remaining = limits.arena_bytes() - pending.bytes;
+        let exact = format!("PING :{}", "b".repeat(remaining - 6));
+        pending.accept(FramedLine::new(&exact)?, limits);
+        assert_eq!(pending.bytes, limits.arena_bytes());
+        assert!(!pending.rejected);
+        pending.accept(FramedLine::new("PING")?, limits);
+        assert!(pending.rejected);
+        assert_eq!(pending.bytes, limits.arena_bytes());
+        assert_eq!(pending.messages.len(), 19);
+        pending.accept(FramedLine::new("PONG")?, limits);
+        assert_eq!(pending.messages.len(), 19);
+        Ok(())
+    }
+
+    #[test]
+    fn parsed_arena_refuses_the_first_request_above_the_count_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = ReaderLimits::new(1, MAX_PHYSICAL_LINE_BYTES)?;
+        let mut pending = pending();
+        pending.accept(FramedLine::new("")?, limits);
+        assert_eq!(pending.messages.len(), 0);
+        pending.accept(FramedLine::new("PING")?, limits);
+        assert!(!pending.rejected);
+        pending.accept(FramedLine::new("PONG")?, limits);
+        assert!(pending.rejected);
+        assert_eq!(pending.messages.len(), 1);
+        assert_eq!(pending.bytes, 4);
+        Ok(())
+    }
 
     #[test]
     fn reader_limits_follow_the_hard_maxima() {

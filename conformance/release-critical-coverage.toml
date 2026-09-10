@@ -11,8 +11,38 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 765
-reviewed_source_sha256 = "1132a66ebdfa94a7c3c37b4dffd05b612e5cf252f7842c021e235b94ae3db92b"
+reviewed_source_sha256 = "96ce0d13acee366ce8887a7408614ded8f7ffd7685c5ec901fe032606e5ac518"
 deferred = []
+
+[[region]]
+id = "reader-parsed-arena-admission"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-runtime/src/connection/reader.rs"
+source_sha256 = "8b02ec548c42ef6b3cdebeecaa2202e75558ed61614cca8a6874c349f1ed97ee"
+start_line = 87
+end_line = 108
+metric = "branches"
+reason = "Completed lines must fit both per-connection bounds before parsing or queueing; refusal remains sticky."
+
+[[region]]
+id = "reader-fragmented-line-drain"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-runtime/src/connection/reader.rs"
+source_sha256 = "8b02ec548c42ef6b3cdebeecaa2202e75558ed61614cca8a6874c349f1ed97ee"
+start_line = 187
+end_line = 207
+metric = "branches"
+reason = "A line completed from retained transport bytes must drain before another line enters the parsed arena; framing failures stop forwarding."
+
+[[region]]
+id = "cli-account-invite-expiry"
+category = "parser-error-discriminants"
+file = "crates/agenc-ircd/src/main.rs"
+source_sha256 = "5199c8dd1564762f8fd9882656d82ef720861d95c9b8d99a794db0a95654c668"
+start_line = 288
+end_line = 323
+metric = "branches"
+reason = "Account invitation expiry must be canonical ASCII decimal and fit u64 before protected descriptor or signing-key access."
 
 [[region]]
 id = "storage-initialization-preserves-guard"

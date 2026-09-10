@@ -306,7 +306,15 @@ fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
         .map_err(|()| CliFailure::usage(usage))?;
     let expires = parsed
         .required_text("--expires-in")
-        .and_then(|value| value.parse::<u64>().map_err(|_| ()))
+        .and_then(|value| {
+            if value.len() > 20
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || (value.len() > 1 && value.starts_with('0'))
+            {
+                return Err(());
+            }
+            value.parse::<u64>().map_err(|_| ())
+        })
         .map_err(|()| CliFailure::usage(usage))?;
     let envelope = create_account_invite(&descriptor, &key, expires)
         .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;

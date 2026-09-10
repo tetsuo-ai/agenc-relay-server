@@ -37,7 +37,7 @@ unsupported. The current-format backup and restore contract remains required.
 | CAP-101 | Select per-conversation credentials and retain exact old signers for unfinished records | Open |
 | CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
 | Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Open |
-| Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Open |
+| Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Parsed arena and CLI expiry repaired; other items open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding and temporary cleanup repaired; other items open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Open |
 | Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
@@ -132,6 +132,28 @@ zero failures and 21 ignored tests. The separate documentation run passes
 the advisory check pass. Coverage is 75.0714% branches and 91.4550% lines,
 with all eight interim critical regions at 100%. The complete inherited
 Stage 00 through 09 run is still being checked after the catalog repairs.
+
+### Reader and command-line boundaries
+
+The reader checks the pending parsed-byte and request counts before parsing
+each completed line. Refusal stops further accumulation. Forwarding now
+drains each complete line before feeding another, so a maximum-sized line
+retained from an earlier read can complete within the minimum arena. Two
+accumulator regressions fail with the earlier behavior. All 26 connection
+tests pass, including fragmented input, message ordering and the exact
+30-second inbox stall under a paused clock.
+
+Account invitation expiry now rejects noncanonical unsigned decimals before
+descriptor or signing-key access. The subprocess regression reproduces the
+earlier acceptance of `+1` and passes for seven invalid spellings after the
+repair. Workspace Clippy and source policy pass. The source-bound release
+inventory includes both reader gates and the CLI parser; its thresholds are
+unchanged.
+
+JOIN key duplication was rechecked against Appendix A.1. Its `csv(key,20)`
+grammar forbids duplicate canonical values, so the existing rejection is
+retained. The broader queue-ownership and command-authorization findings
+remain open.
 
 ## Required production evidence
 
