@@ -29,12 +29,16 @@ use crate::state_core::StateCoreContext;
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::inbox::CloseReason;
 
+#[cfg(test)]
+#[path = "tests/carrier_budget.rs"]
+mod budget_tests;
+
 /// The first virtual connection generation; real generations count up from
 /// one, so the top quarter of the space never collides with a socket.
 const VIRTUAL_BASE: u64 = 1 << 62;
 
-/// Remote carriers a coordinator serves at once.
-const MAX_REMOTE_CARRIERS: usize = 4_096;
+/// Remote carriers share the tracked-connection ceiling and memory admission.
+const MAX_REMOTE_CARRIERS: usize = crate::state_core::session::MAX_TRACKED_CONNECTIONS;
 
 /// A live grant consumed atomically with its remote session insertion.
 pub(crate) struct RemoteSessionGrant {
@@ -124,6 +128,9 @@ impl ClientSink for CaptureSink {
 
 /// One remote client connection served through a virtual connection.
 pub(crate) struct RemoteCarrier {
+    /// Covers the virtual connection, fixed carrier buffers and origin maps
+    /// through registration until origin deletion, link closure or shutdown.
+    _backing: crate::budget::MemoryPermit,
     /// The edge that hosts the client.
     pub peer: ServerId,
     /// The frames the account service delivered to the virtual connection.
@@ -142,6 +149,12 @@ pub(crate) struct InFlightCarrier {
     pub opcode: FederationOpcode,
     /// The carrier generation the account service reports back.
     pub carrier_generation: u64,
+}
+
+impl InFlightCarrier {
+    pub(crate) fn registered_session(&self) -> Option<crate::state_core::session::BoundSession> {
+        self.fresh.bound
+    }
 }
 
 /// Work the router performs with the account service on the coordinator's
@@ -199,6 +212,7 @@ impl RemoteAccounts {
     /// The virtual connection of one edge client, allocated on first use.
     fn carrier_for(
         &mut self,
+        context: &StateCoreContext,
         peer: ServerId,
         origin_id: [u8; 16],
     ) -> Result<(ConnectionGeneration, bool), Violation> {
@@ -208,6 +222,11 @@ impl RemoteAccounts {
         if self.carriers.len() >= MAX_REMOTE_CARRIERS {
             return Err(Violation::Ceiling);
         }
+        let capacity = usize::try_from(crate::budget::CLIENT_CONNECTION_BASE_BYTES)
+            .map_err(|_| Violation::Ceiling)?;
+        let backing = context
+            .reserve_output_backing(capacity)
+            .map_err(|_| Violation::Ceiling)?;
         let number = VIRTUAL_BASE
             .checked_add(self.next_virtual)
             .ok_or(Violation::Ceiling)?;
@@ -216,6 +235,7 @@ impl RemoteAccounts {
         self.carriers.insert(
             generation,
             RemoteCarrier {
+                _backing: backing,
                 peer,
                 sink: CaptureSink::new(generation),
                 sasl_started: false,
@@ -234,18 +254,116 @@ impl RemoteAccounts {
     }
 }
 
+fn validate_remote_principal(
+    context: &StateCoreContext,
+    peer: ServerId,
+    bound: crate::state_core::session::BoundSession,
+    principal: agenc_ircd_domain::federation::OriginPrincipal,
+    authentication: bool,
+) -> Result<(), Violation> {
+    let session = context
+        .domain()
+        .session(bound.user_id)
+        .ok_or(Violation::Origin)?;
+    let account = session
+        .account_id()
+        .map(|id| (id, session.account_session_generation()));
+    if principal.session != Some((bound.session_id, bound.user_id))
+        || session.session_id() != bound.session_id
+        || session.negotiated_capability_hash() != &bound.capability_hash
+        || session.home_server_id() != peer
+        || principal.account != account
+        || (!authentication && account.is_none())
+    {
+        return Err(Violation::Origin);
+    }
+    if let Some((id, generation)) = account
+        && !context
+            .domain()
+            .account(id)
+            .is_some_and(|account| account.session_generation() == generation)
+    {
+        return Err(Violation::Origin);
+    }
+    Ok(())
+}
+
 impl FederationCoordinator {
+    /// Rechecks the declared principal against the live session before a
+    /// sealed carrier can use its registered account authority.
+    pub(super) fn bind_remote_account_request(
+        &self,
+        context: &StateCoreContext,
+        peer: ServerId,
+        fresh: &mut FreshRequest,
+        opcode: FederationOpcode,
+        bound: Option<crate::state_core::session::BoundSession>,
+    ) -> Result<(), Violation> {
+        let principal = self
+            .origins
+            .origin(&fresh.key.origin)
+            .ok_or(Violation::Origin)?
+            .principal;
+        let authentication = matches!(
+            opcode,
+            FederationOpcode::OpaqueAuthStart | FederationOpcode::OpaqueAuthFinish
+        );
+        let bound = bound.or_else(|| {
+            let (session_id, user_id) = authentication.then_some(principal.session).flatten()?;
+            let session = context.domain().session(user_id)?;
+            Some(crate::state_core::session::BoundSession {
+                session_id,
+                user_id,
+                capability_hash: *session.negotiated_capability_hash(),
+            })
+        });
+        let Some(bound) = bound else {
+            if principal.session.is_some() || principal.account.is_some() {
+                return Err(Violation::Origin);
+            }
+            return Ok(());
+        };
+        validate_remote_principal(context, peer, bound, principal, authentication)?;
+        fresh.bound = Some(bound);
+        Ok(())
+    }
+
     /// Queues one remote carrier request for the router.
     pub(super) fn queue_remote_carrier(
         &mut self,
+        context: &mut StateCoreContext,
         link: LinkId,
         peer: ServerId,
         fresh: FreshRequest,
-        opcode: FederationOpcode,
         envelope: Vec<u8>,
     ) -> Result<(), Violation> {
+        if let Some(bound) = fresh.bound {
+            let principal = self
+                .origins
+                .origin(&fresh.key.origin)
+                .ok_or(Violation::Origin)?
+                .principal;
+            if principal.session != Some((bound.session_id, bound.user_id)) {
+                return Err(Violation::Origin);
+            }
+        }
+        let opcode = fresh.header.opcode;
         let origin_id = *fresh.header.replay_key.origin_id.as_bytes();
-        let (generation, _fresh) = self.remote_accounts.carrier_for(peer, origin_id)?;
+        let (generation, _fresh) = match self.remote_accounts.carrier_for(context, peer, origin_id)
+        {
+            Ok(carrier) => carrier,
+            Err(Violation::Ceiling) => {
+                return super::request::finish_failed(
+                    self,
+                    context,
+                    link,
+                    peer,
+                    fresh,
+                    agenc_ircd_domain::DomainError::ServerBusy,
+                );
+            }
+            Err(error) => return Err(error),
+        };
         let busy = self
             .remote_accounts
             .carriers
@@ -372,9 +490,11 @@ impl FederationCoordinator {
         let Some(account) = account else {
             return Ok(None);
         };
-        let (owner, _) = self
-            .remote_accounts
-            .carrier_for(peer, *fresh.header.replay_key.origin_id.as_bytes())?;
+        let (owner, _) = self.remote_accounts.carrier_for(
+            context,
+            peer,
+            *fresh.header.replay_key.origin_id.as_bytes(),
+        )?;
         match accounts.begin_account_deletion(context, owner, account) {
             Ok(writes) => Ok(Some((owner, writes))),
             Err(_) => {
@@ -468,6 +588,9 @@ impl FederationCoordinator {
         let carrier = self.remote_accounts.carriers.get_mut(&generation)?;
         let peer = carrier.peer;
         let in_flight = carrier.in_flight.take()?;
+        if in_flight.opcode == FederationOpcode::OpaqueAuthFinish {
+            carrier.sasl_started = false;
+        }
         let link = in_flight.link;
         let answered = (in_flight.opcode, in_flight.carrier_generation);
         if let Some(committed) = context.take_remote_account_result(generation) {
@@ -600,7 +723,7 @@ impl FederationCoordinator {
         self.remote_accounts.rejected_grant.take()
     }
 
-    /// Virtual connections whose edge link ended or whose session opened.
+    /// Virtual connections whose authority ended through origin or link closure.
     pub(crate) fn take_closed_remote_carriers(&mut self) -> Vec<ConnectionGeneration> {
         std::mem::take(&mut self.remote_accounts.closed)
     }
@@ -642,7 +765,6 @@ impl FederationCoordinator {
         }
         if let Some((generation, user_id)) = self.remote_accounts.pending_grant.take() {
             self.remote_accounts.committed_grant = Some((generation, user_id));
-            self.remote_accounts.closed.push(generation);
         }
     }
 

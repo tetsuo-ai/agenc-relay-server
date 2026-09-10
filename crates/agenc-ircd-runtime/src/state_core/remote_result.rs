@@ -1,9 +1,11 @@
 //! Exact federation responses joined to remote account-service transactions.
 
+use super::projector::RequestBinding;
 use super::{StateCoreContext, durable::AccountServiceDurableWrite};
 use crate::RuntimeError;
 use crate::connection::ConnectionGeneration;
 use crate::federation::codec::results::ResultArm;
+use agenc_ircd_federation_wire::RequestCorrelation;
 use agenc_ircd_federation_wire::{
     CanonicalEncode, FederationHash32, RequestHeader, ResultHeader, SchemaObject,
     federation_object_id, result_kind_permitted,
@@ -12,6 +14,7 @@ use agenc_ircd_storage::federation_records::{
     COORDINATOR_RESULT_KIND, CoordinatorResultRecord, request_result_key,
 };
 use agenc_ircd_storage::{PersistentRecordValue, StoredKey, TableId};
+use agenc_ircd_types::EventId;
 
 pub(crate) struct RemoteResultBinding {
     header: RequestHeader,
@@ -52,16 +55,29 @@ impl StateCoreContext {
         arm: &ResultArm,
         replies: Vec<SchemaObject>,
     ) -> Result<Vec<AccountServiceDurableWrite>, RuntimeError> {
-        let Some(binding) = self.remote_account_results.get_mut(&generation) else {
+        if !self.remote_account_results.contains_key(&generation) {
             return Ok(Vec::new());
+        }
+        let completion_event_id = if matches!(arm, ResultArm::Committed { .. }) {
+            let mut bytes = [0; 16];
+            self.entropy_mut()
+                .fill_exact(&mut bytes)
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            Some(EventId::from_bytes(bytes))
+        } else {
+            None
         };
-        let bytes = binding.encode_result(arm, replies)?;
+        let binding = self
+            .remote_account_results
+            .get_mut(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let bytes = binding.encode_result(arm, replies, completion_event_id)?;
         let record = CoordinatorResultRecord {
             request_id: *binding.header.request_id.as_bytes(),
             request_object_id: *binding.request_object_id.as_bytes(),
             result_object_id: *federation_object_id(&bytes).as_bytes(),
             result_object: bytes.clone(),
-            completion_event_id: None,
+            completion_event_id: completion_event_id.map(|id| *id.as_bytes()),
             resulting_state_generation: revision,
         };
         let result = row(
@@ -73,6 +89,17 @@ impl StateCoreContext {
         )?;
         let origin = binding.origin_at(revision)?;
         binding.prepared = Some((self.head.storage_commit_sequence, bytes));
+        if let Some(completion_event_id) = completion_event_id {
+            let header = binding.header;
+            self.set_request_binding(RequestBinding {
+                home: header.replay_key.home_server_id,
+                correlation: RequestCorrelation {
+                    replay_key: header.replay_key,
+                    request_id: header.request_id,
+                },
+                completion_event_id,
+            });
+        }
         Ok(vec![result, origin])
     }
 
@@ -148,6 +175,7 @@ impl RemoteResultBinding {
         &self,
         arm: &ResultArm,
         replies: Vec<SchemaObject>,
+        completion_event_id: Option<EventId>,
     ) -> Result<Vec<u8>, RuntimeError> {
         if !result_kind_permitted(self.header.opcode, arm.kind()) {
             return Err(RuntimeError::InvalidValue);
@@ -157,7 +185,7 @@ impl RemoteResultBinding {
             replay_key: self.header.replay_key,
             request_id: self.header.request_id,
             request_object_id: self.request_object_id,
-            completion_event_id: None,
+            completion_event_id,
             result_kind: arm.kind(),
         };
         let object = arm

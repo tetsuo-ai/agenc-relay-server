@@ -490,11 +490,31 @@ fn run_operation(
             coordinator.queue_remote_session_open(link, peer, fresh, *seed, grant_id);
             Ok(())
         }
-        ConvertedRequest::AccountService { opcode, envelope } => {
+        ConvertedRequest::AccountService {
+            opcode,
+            envelope,
+            bound,
+        } => {
             if context.is_quiescing() {
                 return Err(Violation::Phase);
             }
-            coordinator.queue_remote_carrier(link, peer, fresh, opcode, envelope)
+            if coordinator
+                .bind_remote_account_request(context, peer, &mut fresh, opcode, bound)
+                .is_err()
+            {
+                // A previously accepted origin can still name a session
+                // revoked before its edge applies SessionHidden. Refuse this
+                // operation durably without disconnecting the entire edge.
+                return finish_failed(
+                    coordinator,
+                    context,
+                    link,
+                    peer,
+                    fresh,
+                    DomainError::Forbidden,
+                );
+            }
+            coordinator.queue_remote_carrier(context, link, peer, fresh, envelope)
         }
         ConvertedRequest::SessionClose { user_id, kind } => {
             close_session(coordinator, context, link, peer, fresh, user_id, kind)
@@ -1179,6 +1199,32 @@ pub(super) fn finish_without_plan(
     arm: ResultArm,
     replies: Vec<agenc_ircd_federation_wire::SchemaObject>,
 ) -> Result<(), Violation> {
+    if matches!(arm, ResultArm::Committed { .. }) {
+        // The account owner may replay an already accepted finish. This new
+        // outer request still needs its own durable result and correlated
+        // completion before the edge can release the captured sealed reply.
+        let plan = context
+            .domain()
+            .plan_account_service_checkpoint()
+            .map_err(|_| Violation::Ceiling)?;
+        let arm = ResultArm::Committed {
+            resulting_state_generation: plan.resulting_revision().get(),
+        };
+        let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
+            .map_err(|_| Violation::Ceiling)?;
+        return stage_with_plan_and_writes(
+            coordinator,
+            context,
+            link,
+            peer,
+            fresh,
+            (arm, replies),
+            plan,
+            fanout,
+            Vec::new(),
+        )
+        .map(|_| ());
+    }
     let FreshRequest {
         key,
         header,

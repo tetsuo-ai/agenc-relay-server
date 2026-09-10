@@ -17,6 +17,10 @@ use crate::federation::coordinator::{
 };
 use crate::state_core::StateCoreContext;
 
+#[cfg(test)]
+#[path = "remote_accounts/tests/replay.rs"]
+mod tests;
+
 /// The characters of one carrier line's payload (spec 11.4).
 const CHUNK_CHARACTERS: usize = 400;
 /// The account carrier START and FINISH length token.
@@ -232,6 +236,7 @@ fn carrier(
     in_flight: Box<InFlightCarrier>,
 ) {
     let carrier_generation = in_flight.carrier_generation;
+    let bound = in_flight.registered_session();
     if federation
         .remote_carrier_started(context, generation, in_flight)
         .is_err()
@@ -263,6 +268,13 @@ fn carrier(
             return;
         }
     }
+    if let Some(bound) = bound
+        && bind_registered_carrier(context, generation, bound).is_err()
+    {
+        let _answered =
+            federation.finish_remote_carrier(context, generation, not_allowed(), Vec::new());
+        return;
+    }
     let Some(lines) = carrier_lines(federation, generation, opcode, envelope) else {
         let _answered = federation.finish_remote_carrier(context, generation, busy(), Vec::new());
         return;
@@ -282,7 +294,15 @@ fn carrier(
                 generation,
                 carrier_generation,
                 "*",
-                agenc_ircd_client_wire::AccountCarrierKind::Create,
+                if matches!(
+                    opcode,
+                    FederationOpcode::CredentialChangeStart
+                        | FederationOpcode::CredentialChangeFinish
+                ) {
+                    agenc_ircd_client_wire::AccountCarrierKind::Credentials
+                } else {
+                    agenc_ircd_client_wire::AccountCarrierKind::Create
+                },
                 message,
             ),
         };
@@ -309,6 +329,42 @@ fn carrier(
     let _answered = federation.finish_remote_carrier(context, generation, arm, replies);
 }
 
+fn bind_registered_carrier(
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    bound: crate::state_core::session::BoundSession,
+) -> Result<(), crate::RuntimeError> {
+    let session = context
+        .domain()
+        .session(bound.user_id)
+        .ok_or(crate::RuntimeError::InvalidValue)?;
+    if session.session_id() != bound.session_id {
+        return Err(crate::RuntimeError::InvalidValue);
+    }
+    if let Some(account_id) = session.account_id()
+        && !context.domain().account(account_id).is_some_and(|account| {
+            session.account_session_generation() == account.session_generation()
+        })
+    {
+        return Err(crate::RuntimeError::InvalidValue);
+    }
+    let current = context
+        .sessions()
+        .connection(generation)
+        .ok_or(crate::RuntimeError::InvalidValue)?
+        .session();
+    if let Some(current) = current {
+        return if current == bound {
+            Ok(())
+        } else {
+            Err(crate::RuntimeError::InvalidValue)
+        };
+    }
+    context
+        .sessions_mut()
+        .bind_virtual_session(generation, bound)
+}
+
 /// The exact carrier lines the edge client spoke, rebuilt from the
 /// envelope: the SASL mechanism selection once per virtual connection, or
 /// the account carrier START or FINISH header, then the payload chunks and
@@ -333,21 +389,35 @@ fn carrier_lines(
                 lines.push("AUTHENTICATE +".to_owned());
             }
         }
-        FederationOpcode::AccountCreateStart | FederationOpcode::AccountCreateFinish => {
-            let phase = if opcode == FederationOpcode::AccountCreateStart {
+        FederationOpcode::AccountCreateStart
+        | FederationOpcode::AccountCreateFinish
+        | FederationOpcode::CredentialChangeStart
+        | FederationOpcode::CredentialChangeFinish => {
+            let command = if matches!(
+                opcode,
+                FederationOpcode::CredentialChangeStart | FederationOpcode::CredentialChangeFinish
+            ) {
+                "ACCTCRED"
+            } else {
+                "ACCTCREATE"
+            };
+            let phase = if matches!(
+                opcode,
+                FederationOpcode::AccountCreateStart | FederationOpcode::CredentialChangeStart
+            ) {
                 "START"
             } else {
                 "FINISH"
             };
-            lines.push(format!("ACCTCREATE {phase} {ENVELOPE_LENGTH_TOKEN}"));
+            lines.push(format!("{command} {phase} {ENVELOPE_LENGTH_TOKEN}"));
             let encoded = encode_account_payload(envelope);
             for chunk in encoded.as_bytes().chunks(CHUNK_CHARACTERS) {
                 lines.push(format!(
-                    "ACCTCREATE DATA {}",
+                    "{command} DATA {}",
                     std::str::from_utf8(chunk).ok()?
                 ));
             }
-            lines.push("ACCTCREATE END".to_owned());
+            lines.push(format!("{command} END"));
         }
         _ => return None,
     }
@@ -367,7 +437,22 @@ fn outcome(
         opcode,
         FederationOpcode::OpaqueAuthStart | FederationOpcode::OpaqueAuthFinish
     );
-    let chunks = payload_chunks(lines, sasl);
+    let credentials = matches!(
+        opcode,
+        FederationOpcode::CredentialChangeStart | FederationOpcode::CredentialChangeFinish
+    );
+    let chunks = if credentials {
+        lines
+            .iter()
+            .filter_map(|line| {
+                let (command, middle) = captured_parts(line)?;
+                (command == "ACCTCRED" && middle.first().map(String::as_str) == Some("DATA"))
+                    .then(|| middle.get(1).cloned())?
+            })
+            .collect()
+    } else {
+        payload_chunks(lines, sasl)
+    };
     let bytes = if sasl {
         decode_sasl_payload(&chunks.concat())
     } else {
@@ -375,10 +460,18 @@ fn outcome(
     };
     let replies: Vec<WireMessage> = chunks
         .iter()
-        .filter_map(|chunk| chunk_frame(context.server_prefix(), sasl, chunk).ok())
+        .filter_map(|chunk| {
+            if credentials {
+                WireMessage::new(context.server_prefix(), "ACCTCRED", &["DATA", chunk], None).ok()
+            } else {
+                chunk_frame(context.server_prefix(), sasl, chunk).ok()
+            }
+        })
         .collect();
     match opcode {
-        FederationOpcode::OpaqueAuthStart | FederationOpcode::AccountCreateStart => {
+        FederationOpcode::OpaqueAuthStart
+        | FederationOpcode::AccountCreateStart
+        | FederationOpcode::CredentialChangeStart => {
             match bytes.as_deref().and_then(challenge_object) {
                 Some(object) => (ResultArm::AuthChallenge(object), Vec::new()),
                 None => (not_allowed(), replies),
@@ -388,11 +481,26 @@ fn outcome(
             Some(arm) => (arm, replies),
             None => (not_allowed(), replies),
         },
+        FederationOpcode::CredentialChangeFinish => (
+            credential_changed(context, lines).unwrap_or_else(not_allowed),
+            replies,
+        ),
         _ => match created(context, lines) {
             Some(arm) => (arm, replies),
             None => (not_allowed(), replies),
         },
     }
+}
+
+/// Only the trusted account owner's accepted terminal note selects success.
+fn credential_changed(context: &StateCoreContext, lines: &[String]) -> Option<ResultArm> {
+    let accepted = lines.iter().any(|line| {
+        captured_parts(line)
+            .is_some_and(|(command, middle)| command == "NOTE" && middle == ["ACCTCRED", "CHANGED"])
+    });
+    accepted.then_some(ResultArm::Committed {
+        resulting_state_generation: context.domain().revision().get(),
+    })
 }
 
 /// The `authenticated` arm of a virtual connection holding a live grant.
@@ -511,7 +619,9 @@ pub(crate) fn sealed_result(
 ) -> Result<(ResultArm, Vec<agenc_ircd_federation_wire::SchemaObject>), crate::RuntimeError> {
     if matches!(
         opcode,
-        FederationOpcode::OpaqueAuthStart | FederationOpcode::AccountCreateStart
+        FederationOpcode::OpaqueAuthStart
+            | FederationOpcode::AccountCreateStart
+            | FederationOpcode::CredentialChangeStart
     ) {
         let object = challenge_object(response).ok_or(crate::RuntimeError::InvalidValue)?;
         return Ok((ResultArm::AuthChallenge(object), Vec::new()));
@@ -525,8 +635,12 @@ pub(crate) fn sealed_result(
     let mut replies = Vec::new();
     for chunk in encoded.as_bytes().chunks(CHUNK_CHARACTERS) {
         let text = std::str::from_utf8(chunk).map_err(|_| crate::RuntimeError::InvalidValue)?;
-        let frame =
-            chunk_frame(prefix, sasl, text).map_err(|_| crate::RuntimeError::InvalidValue)?;
+        let frame = if opcode == FederationOpcode::CredentialChangeFinish {
+            WireMessage::new(prefix, "ACCTCRED", &["DATA", text], None)
+                .map_err(|_| crate::RuntimeError::InvalidValue)?
+        } else {
+            chunk_frame(prefix, sasl, text).map_err(|_| crate::RuntimeError::InvalidValue)?
+        };
         replies.push(
             crate::federation::codec::results::reply_object(&frame)
                 .map_err(|_| crate::RuntimeError::InvalidValue)?,

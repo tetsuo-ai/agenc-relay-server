@@ -774,8 +774,11 @@ impl ReloadPort {
             failure_event: Box::new(failure_event),
             reply,
         };
-        if self.sender.try_send(request).is_err() {
-            return AuditedReloadStart::Indeterminate;
+        if let Err(error) = self.sender.try_send(request) {
+            return AuditedReloadStart::Refused(match error {
+                mpsc::error::TrySendError::Full(_) => ReloadRejection::Busy,
+                mpsc::error::TrySendError::Closed(_) => ReloadRejection::StorageUnavailable,
+            });
         }
         response.await.unwrap_or(AuditedReloadStart::Indeterminate)
     }
@@ -810,10 +813,10 @@ impl ReloadPort {
         match self.sender.try_send(request) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                return ReloadAuditCommitOutcome::Indeterminate;
+                return ReloadAuditCommitOutcome::NotCommitted(ReloadRejection::Busy);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                return ReloadAuditCommitOutcome::Indeterminate;
+                return ReloadAuditCommitOutcome::NotCommitted(ReloadRejection::StorageUnavailable);
             }
         }
         tokio::select! {
@@ -980,6 +983,7 @@ pub(crate) fn reload_preparation_channel(
 
 #[cfg(test)]
 mod tests {
+    mod audited_admission;
     use agenc_ircd_admin::{OperatorRecord, OperatorRegistry};
     use agenc_ircd_config::{Config, LimitKey, PathResolver, ValidationDepth};
     use agenc_ircd_crypto::Ed25519SecretKey;

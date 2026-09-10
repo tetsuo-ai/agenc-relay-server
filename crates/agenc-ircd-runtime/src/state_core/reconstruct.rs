@@ -48,7 +48,7 @@ const INVITATION_TOMBSTONE_KIND: u16 = 2;
 /// decoded into the account service; the federation and E2EE tables are
 /// indexed for identity and sizing so later writes carry the right
 /// before-image, and their contents reload through bounded reads.
-pub const RECONSTRUCTED_TABLES: [TableId; 18] = [
+pub const RECONSTRUCTED_TABLES: [TableId; 20] = [
     TableId::Account,
     TableId::NicknameReservation,
     TableId::Channel,
@@ -67,6 +67,8 @@ pub const RECONSTRUCTED_TABLES: [TableId; 18] = [
     TableId::EdgeProjection,
     TableId::E2eeObject,
     TableId::E2eeState,
+    TableId::Audit,
+    TableId::AuditCheckpoint,
 ];
 
 /// Account-service rows needed before the first live request is accepted.
@@ -573,9 +575,9 @@ impl Scan {
             (TableId::RegistrationInvite, record_kind) => {
                 self.admit_registration_invite(&key, &value, record_kind)
             }
-            // Federation and E2EE rows are indexed for identity and sizing
-            // here; the federation router and the companion coordinator
-            // reload their contents through bounded reads.
+            // Federation, E2EE and audit rows are indexed for identity and
+            // sizing here. Their owners authenticate and reconstruct their
+            // contents through bounded reads before listener admission.
             (
                 TableId::RequestResult
                 | TableId::FederationPeer
@@ -583,7 +585,9 @@ impl Scan {
                 | TableId::EdgeOutbox
                 | TableId::EdgeProjection
                 | TableId::E2eeObject
-                | TableId::E2eeState,
+                | TableId::E2eeState
+                | TableId::Audit
+                | TableId::AuditCheckpoint,
                 _,
             ) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),

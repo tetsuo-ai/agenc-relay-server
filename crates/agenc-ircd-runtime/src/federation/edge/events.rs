@@ -283,6 +283,7 @@ fn apply_projection(
         completion,
         coverage,
         join_echo: join_echo.map(Box::new),
+        revoked: super::revocations::prepare(context, &projected),
     };
     stage_rows(
         edge,

@@ -97,6 +97,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "stage_eight_e2ee/close_authority.rs"]
 mod close_authority;
+#[path = "stage_eight_e2ee/credential_replacement.rs"]
+mod credential_replacement;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
 mod stage_ten_capacity;
 #[path = "stage_eight_e2ee/stage_ten_drills.rs"]
@@ -1490,12 +1492,14 @@ fn open_account_payload(
 #[derive(Clone, Copy)]
 enum AccountCarrier {
     Create,
+    Credentials,
 }
 
 impl AccountCarrier {
     const fn command(self) -> &'static str {
         match self {
             Self::Create => "ACCTCREATE",
+            Self::Credentials => "ACCTCRED",
         }
     }
 }

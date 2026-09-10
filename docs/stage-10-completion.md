@@ -6,16 +6,16 @@ production gate or qualify another source commit.
 
 ## Baseline
 
-The implementation starts at `365b9e0e196afb6f4ff4887054b25b001ed10c4a` on
-`stage-10-production`. Its 39 previously local commits are pushed, and
-[PR 27](https://github.com/tetsuo-ai/agenc-ircd/pull/27) is open as a draft.
+The earlier Stage 10 implementation and repairs merged through
+[PR 27](https://github.com/tetsuo-ai/agenc-ircd/pull/27). The credential and
+runtime follow-up starts at merge commit
+`fd7d39476302caae385e69bdea126d0a54164233`.
 
-The locked all-feature workspace run passes 2,797 tests with no failures and
-21 ignored tests. Nineteen ignored tests are separate qualification scenarios;
-two generate deterministic fixtures. The requirement, source and workspace
-checks pass. The release-runner suite passes 48 tests. Fresh coverage measures
-75.09% branches and 91.45% lines. All eight interim critical regions pass;
-667 of the 1,052 release-critical regions remain below 100%.
+The latest repair evidence is recorded in
+[the credential and runtime repair report](stage-10-credential-runtime-repair.md).
+Earlier test and coverage measurements apply to their recorded sources. The
+ignored qualification jobs and the external encrypted-profile review remain
+separate from the default workspace tests.
 
 The accepted constraints are current-format storage only, published upstream
 redb dependencies only, unchanged physical growth limits, and all five v1
@@ -26,7 +26,7 @@ unsupported. The current-format backup and restore contract remains required.
 
 | Item | Required result | Status |
 | --- | --- | --- |
-| Repository history | Push the existing committed branch and open its review | Complete at the baseline commit |
+| Repository history | Push the existing committed branch and open its review | PR 27 merged; follow-up implementation under review |
 | Conformance maintenance | Bind the accepted current-format specification and preserve historical evidence | Baseline and requirement bindings repaired |
 | Storage initialization | Preserve every existing rollback guard and reject reused initialization directories | Implemented; 316 storage tests pass |
 | STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Mutation/abort prototype prepared; full mechanism and upstream release open |
@@ -36,8 +36,8 @@ unsupported. The current-format backup and restore contract remains required.
 | CAP-86 | Bind ReInit admission and ACK signatures to the required old and continuing leaves | Open |
 | CAP-101 | Select per-conversation credentials and retain exact old signers for unfinished records | Open |
 | CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
-| Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Open |
-| Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Parsed arena and CLI expiry repaired; other items open |
+| Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Implemented; real daemon replacement, registered reauthentication, session revocation, restart and receipt-order tests pass |
+| Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired; other items open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding and temporary cleanup repaired; other items open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Open |
 | Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |

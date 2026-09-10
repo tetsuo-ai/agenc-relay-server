@@ -300,6 +300,28 @@ impl SessionTable {
         }))
     }
 
+    /// Associates an internal account carrier with registered authority without
+    /// making it a local chat recipient. Replies still address its generation.
+    pub(crate) fn bind_virtual_session(
+        &mut self,
+        generation: ConnectionGeneration,
+        session: BoundSession,
+    ) -> Result<(), RuntimeError> {
+        let entry = self
+            .connections
+            .get_mut(&generation)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if entry.physical
+            || entry.session.is_some()
+            || entry.capabilities.is_some()
+            || self.users.contains_key(&session.user_id)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        entry.session = Some(session);
+        Ok(())
+    }
+
     /// Binds a registered identity to a connection exactly once.
     pub fn bind_session(
         &mut self,
@@ -387,7 +409,9 @@ impl SessionTable {
     /// Removes a connection and its user binding.
     pub fn close(&mut self, generation: ConnectionGeneration) -> Option<ConnectionEntry> {
         let entry = self.connections.remove(&generation)?;
-        if let Some(session) = entry.session {
+        if let Some(session) = entry.session
+            && self.users.get(&session.user_id) == Some(&generation)
+        {
             self.users.remove(&session.user_id);
         }
         Some(entry)
@@ -762,6 +786,46 @@ mod tests {
         assert!(!table.has_physical_connections());
         assert_eq!(table.len(), 1);
         assert!(table.connection(virtual_carrier).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn virtual_authority_never_receives_chat_or_removes_a_later_local_binding()
+    -> Result<(), RuntimeError> {
+        let mut table = SessionTable::new();
+        let internal = ConnectionGeneration::new(2);
+        let physical = ConnectionGeneration::new(1);
+        let now = MonotonicTick::from_ticks(1);
+        let bound = BoundSession {
+            user_id: UserId::from_bytes([1; 16]),
+            session_id: SessionId::from_bytes([2; 16]),
+            capability_hash: [3; 32],
+        };
+        table.open_virtual(internal, sink(2), now)?;
+        table.bind_virtual_session(internal, bound)?;
+        assert_eq!(
+            table
+                .connection(internal)
+                .and_then(ConnectionEntry::session),
+            Some(bound)
+        );
+        assert!(table.sink_for_user(bound.user_id).is_none());
+        assert!(table.generation_for_user(bound.user_id).is_none());
+        assert!(table.sink_for_generation(internal).is_some());
+        assert!(table.bind_virtual_session(internal, bound).is_err());
+        table.open(
+            physical,
+            ListenerPurpose::ClientOnion,
+            SourceAddressKey::onion_listener(),
+            sink(1),
+            now,
+        )?;
+        assert!(table.bind_virtual_session(physical, bound).is_err());
+        table.bind_session(physical, bound, CapabilityState::default())?;
+        assert!(table.close(internal).is_some());
+        assert_eq!(table.generation_for_user(bound.user_id), Some(physical));
+        assert!(table.close(physical).is_some());
+        assert!(table.sink_for_user(bound.user_id).is_none());
         Ok(())
     }
 

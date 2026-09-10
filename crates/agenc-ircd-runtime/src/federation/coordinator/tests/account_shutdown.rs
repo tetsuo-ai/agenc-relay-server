@@ -177,13 +177,7 @@ async fn an_origin_del_closes_only_the_carrier_captured_by_its_durable_receipt()
     fresh.header.opcode = agenc_ircd_types::FederationOpcode::OpaqueAuthStart;
     fresh.command = None;
     coordinator
-        .queue_remote_carrier(
-            edge.link,
-            peer,
-            fresh,
-            agenc_ircd_types::FederationOpcode::OpaqueAuthStart,
-            Vec::new(),
-        )
+        .queue_remote_carrier(context, edge.link, peer, fresh, Vec::new())
         .map_err(|error| format!("carrier fixture: {error:?}"))?;
     let owner = coordinator
         .remote_carrier_for_origin(peer, *key.origin_id.as_bytes())

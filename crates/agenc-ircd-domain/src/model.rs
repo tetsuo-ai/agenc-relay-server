@@ -1801,6 +1801,7 @@ impl DomainState {
             .get_mut(&account_id)
             .ok_or(DomainError::NotFound)?;
         account.admin_suspension_expires_at = Some(expires_at);
+        account.revision = revision;
         self.revision = revision;
         Ok(())
     }
@@ -1815,6 +1816,7 @@ impl DomainState {
         if account.admin_suspension_expires_at.take().is_none() {
             return Err(DomainError::NotFound);
         }
+        account.revision = revision;
         self.revision = revision;
         Ok(())
     }

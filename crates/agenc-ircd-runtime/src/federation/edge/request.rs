@@ -25,6 +25,11 @@ use crate::state_core::StateCoreContext;
 
 /// What the router does when a request finishes.
 pub enum EdgeCompletion {
+    /// The coordinator durably revoked this local session.
+    SessionRevoked {
+        /// The invalidated client connection.
+        generation: ConnectionGeneration,
+    },
     /// The coordinator registered the session: bind it and run the welcome.
     SessionRegistered {
         /// The client connection.
@@ -110,6 +115,17 @@ pub enum EdgeCompletion {
         /// Whether this was the finish phase.
         finish: bool,
         /// What the coordinator answered.
+        outcome: RemoteCarrierOutcome,
+    },
+    /// A registered credential carrier was answered after durable completion coverage.
+    CredentialCarrier {
+        /// The client connection.
+        generation: ConnectionGeneration,
+        /// The exact pending carrier transfer.
+        carrier_generation: u64,
+        /// Whether this was FINISH.
+        finish: bool,
+        /// The sealed answer and committed outcome.
         outcome: RemoteCarrierOutcome,
     },
 }
@@ -543,7 +559,22 @@ pub(super) fn send_account_carrier(
     );
     let operation = FederatedOperation::AccountService {
         opcode,
-        session_id: None,
+        session_id: if matches!(
+            opcode,
+            agenc_ircd_types::FederationOpcode::CredentialChangeStart
+                | agenc_ircd_types::FederationOpcode::CredentialChangeFinish
+        ) {
+            Some(
+                edge.origins
+                    .get(&generation)
+                    .filter(|origin| !origin.deleted && origin.account.is_some())
+                    .and_then(|origin| origin.session)
+                    .ok_or(Violation::Phase)?
+                    .0,
+            )
+        } else {
+            None
+        },
         envelope,
     };
     let prepared = prepare_request(edge, context, generation, &operation)?;
@@ -1476,7 +1507,7 @@ fn completed_request(
         return Vec::new();
     };
     let generation = pending.generation;
-    match (pending.kind, result) {
+    let mut completions = match (pending.kind, result) {
         (
             PendingKind::SessionOpen {
                 event_generation,
@@ -1516,13 +1547,28 @@ fn completed_request(
                 carrier_generation,
             },
             result,
-        ) => vec![EdgeCompletion::AccountCarrier {
-            generation,
-            carrier_generation,
-            sasl,
-            finish,
-            outcome: carrier_outcome(result, &pending.replies, sasl),
-        }],
+        ) => {
+            if matches!(
+                pending.header.opcode,
+                agenc_ircd_types::FederationOpcode::CredentialChangeStart
+                    | agenc_ircd_types::FederationOpcode::CredentialChangeFinish
+            ) {
+                vec![EdgeCompletion::CredentialCarrier {
+                    generation,
+                    carrier_generation,
+                    finish,
+                    outcome: credential_outcome(result, &pending.replies),
+                }]
+            } else {
+                vec![EdgeCompletion::AccountCarrier {
+                    generation,
+                    carrier_generation,
+                    sasl,
+                    finish,
+                    outcome: carrier_outcome(result, &pending.replies, sasl),
+                }]
+            }
+        }
         (PendingKind::Command { message }, ResultArm::Failed { code, .. }) => {
             vec![EdgeCompletion::CommandFailed {
                 generation,
@@ -1595,7 +1641,15 @@ fn completed_request(
             message,
         }],
         (PendingKind::Close, _) => Vec::new(),
+    };
+    if edge
+        .origins
+        .get(&generation)
+        .is_some_and(|origin| origin.revoked)
+    {
+        completions.push(EdgeCompletion::SessionRevoked { generation });
     }
+    completions
 }
 
 fn is_committed_account_deletion(
@@ -1751,11 +1805,37 @@ pub enum RemoteCarrierOutcome {
         /// The sealed completion, as the relayed payload chunks.
         chunks: Vec<String>,
     },
+    /// Replacement and session revocation committed under the covered result.
+    CredentialChanged {
+        /// The exact sealed completion payload chunks.
+        chunks: Vec<String>,
+    },
     /// The account service refused; a sealed rejection may accompany it.
     Failed {
         /// The sealed rejection, as the relayed payload chunks.
         chunks: Vec<String>,
     },
+}
+
+fn credential_outcome(
+    result: ResultArm,
+    replies: &[agenc_ircd_client_wire::WireMessage],
+) -> RemoteCarrierOutcome {
+    if matches!(result, ResultArm::AuthChallenge(_)) {
+        return carrier_outcome(result, &[], false);
+    }
+    let chunks = replies
+        .iter()
+        .filter(|reply| {
+            reply.command() == "ACCTCRED"
+                && reply.middle().first().map(String::as_str) == Some("DATA")
+        })
+        .filter_map(|reply| reply.middle().get(1).cloned())
+        .collect();
+    match result {
+        ResultArm::Committed { .. } => RemoteCarrierOutcome::CredentialChanged { chunks },
+        _ => RemoteCarrierOutcome::Failed { chunks },
+    }
 }
 
 /// Maps one result and its relayed replies onto the carrier outcome.

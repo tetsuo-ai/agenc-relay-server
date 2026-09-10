@@ -51,6 +51,9 @@ mod away_results;
 #[path = "account_shutdown.rs"]
 mod account_shutdown;
 
+#[path = "credential_results.rs"]
+mod credential_results;
+
 #[path = "retained_resume.rs"]
 mod retained_resume;
 

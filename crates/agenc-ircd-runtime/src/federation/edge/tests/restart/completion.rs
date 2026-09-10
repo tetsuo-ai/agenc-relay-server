@@ -10,6 +10,9 @@ use agenc_ircd_types::{OriginId, RequestId};
 #[path = "deletion.rs"]
 mod deletion;
 
+#[path = "credentials.rs"]
+mod credentials;
+
 #[path = "retired_completion.rs"]
 mod retired_completion;
 

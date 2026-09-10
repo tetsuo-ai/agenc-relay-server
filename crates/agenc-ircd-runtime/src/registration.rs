@@ -167,6 +167,7 @@ pub struct RegistrationRouter {
 struct EdgeCarrier {
     sasl: agenc_ircd_client_wire::SaslTransport,
     creation: agenc_ircd_client_wire::AccountTransfer,
+    credentials: agenc_ircd_client_wire::AccountTransfer,
     grant: Option<(agenc_ircd_types::AccountId, u64, [u8; 32])>,
 }
 
@@ -177,6 +178,10 @@ impl EdgeCarrier {
                 .map_err(|_| RuntimeError::MemoryExhausted)?,
             creation: agenc_ircd_client_wire::AccountTransfer::new(AccountCarrierKind::Create)
                 .map_err(|_| RuntimeError::MemoryExhausted)?,
+            credentials: agenc_ircd_client_wire::AccountTransfer::new(
+                AccountCarrierKind::Credentials,
+            )
+            .map_err(|_| RuntimeError::MemoryExhausted)?,
             grant: None,
         })
     }
@@ -921,7 +926,7 @@ impl RegistrationRouter {
                 carrier,
                 message,
             } => {
-                if self.edge.is_some() && carrier != RegistrationAuthCarrier::AccountCredentials {
+                if self.edge.is_some() {
                     return self.route_edge_carrier(
                         context,
                         generation,
@@ -935,10 +940,7 @@ impl RegistrationRouter {
                         },
                     );
                 }
-                if self.edge.is_some() || self.accounts.is_none() {
-                    // Credential changes need the registered session's
-                    // account authority, which stays with the coordinator; an
-                    // edge answers them unavailable.
+                if self.accounts.is_none() {
                     record_result(result, ResultClass::Rejected);
                     let command = message.command().to_owned();
                     self.send_one(
@@ -1384,6 +1386,7 @@ impl RegistrationRouter {
                 close_transport(context, generation);
             }
             EdgeCompletion::Resync { generation } => self.resync_edge_client(context, generation),
+            EdgeCompletion::SessionRevoked { generation } => close_transport(context, generation),
             EdgeCompletion::AccountCarrier {
                 generation,
                 carrier_generation,
@@ -1394,9 +1397,30 @@ impl RegistrationRouter {
                 context,
                 generation,
                 carrier_generation,
-                (sasl, finish),
+                (
+                    if sasl {
+                        RegistrationAuthCarrier::Sasl
+                    } else {
+                        RegistrationAuthCarrier::AccountCreate
+                    },
+                    finish,
+                ),
                 outcome,
             ),
+            EdgeCompletion::CredentialCarrier {
+                generation,
+                carrier_generation,
+                finish,
+                outcome,
+            } => {
+                self.edge_carrier_answered(
+                    context,
+                    generation,
+                    carrier_generation,
+                    (RegistrationAuthCarrier::AccountCredentials, finish),
+                    outcome,
+                );
+            }
         }
     }
 
@@ -1441,7 +1465,13 @@ impl RegistrationRouter {
                     None => CarrierRoute::Close,
                 }
             }
-            RegistrationAuthCarrier::AccountCreate => {
+            RegistrationAuthCarrier::AccountCreate
+            | RegistrationAuthCarrier::AccountCredentials => {
+                let kind = if carrier == RegistrationAuthCarrier::AccountCredentials {
+                    AccountCarrierKind::Credentials
+                } else {
+                    AccountCarrierKind::Create
+                };
                 let has_tags = !message.tags().is_empty();
                 match message.take_parameter(0) {
                     Some(subcommand) => {
@@ -1450,7 +1480,7 @@ impl RegistrationRouter {
                             context,
                             generation,
                             carrier_generation,
-                            &prefix,
+                            (&prefix, kind),
                             (&subcommand, parameter.as_deref(), has_tags),
                             now,
                         )
@@ -1458,7 +1488,6 @@ impl RegistrationRouter {
                     None => CarrierRoute::Close,
                 }
             }
-            RegistrationAuthCarrier::AccountCredentials => CarrierRoute::Close,
         };
         self.complete_carrier_route(
             context,
@@ -1552,30 +1581,41 @@ impl RegistrationRouter {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         carrier_generation: u64,
-        prefix: &str,
+        prefix: (&str, AccountCarrierKind),
         line: (&str, Option<&str>, bool),
         now: u64,
     ) -> CarrierRoute {
         use agenc_ircd_client_wire::{AccountCarrierAction, AccountCarrierPhase};
+        let (prefix, kind) = prefix;
         let (subcommand, parameter, has_tags) = line;
         let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
-        let Ok(actions) = carrier
-            .creation
-            .client(subcommand, parameter, has_tags, now)
-        else {
-            return account_unavailable(prefix);
+        let transfer = match kind {
+            AccountCarrierKind::Create => &mut carrier.creation,
+            AccountCarrierKind::Credentials => &mut carrier.credentials,
+        };
+        let Ok(actions) = transfer.client(subcommand, parameter, has_tags, now) else {
+            return account_unavailable(prefix, kind);
         };
         let mut rendered = Vec::new();
         for action in actions {
             match action {
                 AccountCarrierAction::RequestEnvelope { phase, bytes } => {
                     let finish = phase == AccountCarrierPhase::Finish;
-                    let opcode = if finish {
-                        agenc_ircd_types::FederationOpcode::AccountCreateFinish
-                    } else {
-                        agenc_ircd_types::FederationOpcode::AccountCreateStart
+                    let opcode = match (kind, finish) {
+                        (AccountCarrierKind::Create, true) => {
+                            agenc_ircd_types::FederationOpcode::AccountCreateFinish
+                        }
+                        (AccountCarrierKind::Create, false) => {
+                            agenc_ircd_types::FederationOpcode::AccountCreateStart
+                        }
+                        (AccountCarrierKind::Credentials, true) => {
+                            agenc_ircd_types::FederationOpcode::CredentialChangeFinish
+                        }
+                        (AccountCarrierKind::Credentials, false) => {
+                            agenc_ircd_types::FederationOpcode::CredentialChangeStart
+                        }
                     };
                     let sent = self.edge.as_mut().is_some_and(|edge| {
                         edge.send_account_carrier(
@@ -1590,17 +1630,13 @@ impl RegistrationRouter {
                     if sent {
                         return CarrierRoute::Pending;
                     }
-                    carrier.creation.reject();
-                    return account_unavailable(prefix);
+                    transfer.reject();
+                    return account_unavailable(prefix, kind);
                 }
                 action => rendered.push(action),
             }
         }
-        match crate::account_service::render_account_actions(
-            prefix,
-            AccountCarrierKind::Create,
-            rendered,
-        ) {
+        match crate::account_service::render_account_actions(prefix, kind, rendered) {
             Ok(frames) => CarrierRoute::Finished {
                 frames,
                 result: ResultClass::Ok,
@@ -1617,10 +1653,14 @@ impl RegistrationRouter {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         carrier_generation: u64,
-        phase: (bool, bool),
+        phase: (RegistrationAuthCarrier, bool),
         outcome: crate::federation::edge::RemoteCarrierOutcome,
     ) {
-        let (sasl, finish) = phase;
+        let (kind, finish) = phase;
+        let changed = matches!(
+            &outcome,
+            crate::federation::edge::RemoteCarrierOutcome::CredentialChanged { .. }
+        );
         let now = context.now().get();
         let prefix = self.config.server_prefix.clone();
         let target = self
@@ -1630,18 +1670,33 @@ impl RegistrationRouter {
         let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
             return;
         };
-        let answered = if sasl {
-            edge_sasl_answer(carrier, (&prefix, &target), finish, outcome, now)
-        } else {
-            edge_account_answer(carrier, &prefix, finish, outcome, now)
+        let answered = match kind {
+            RegistrationAuthCarrier::Sasl => {
+                edge_sasl_answer(carrier, (&prefix, &target), finish, outcome, now)
+            }
+            RegistrationAuthCarrier::AccountCreate => edge_account_answer(
+                carrier,
+                &prefix,
+                (AccountCarrierKind::Create, finish),
+                outcome,
+                now,
+            ),
+            RegistrationAuthCarrier::AccountCredentials => edge_account_answer(
+                carrier,
+                &prefix,
+                (AccountCarrierKind::Credentials, finish),
+                outcome,
+                now,
+            ),
         };
         let completion = match answered {
             Some((frames, result)) => {
-                let _sent = context.send_to(generation, frames);
+                let sent = context.send_to(generation, frames).is_ok();
+                let result = if sent { result } else { ResultClass::Error };
                 CarrierCompletion {
                     generation,
                     carrier_generation,
-                    close: false,
+                    close: changed || !sent,
                     result,
                 }
             }
@@ -2825,6 +2880,7 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         event: crate::state_core::inbox::MaintenanceEvent,
     ) {
+        self.retry_session_closes(context);
         if let Some(edge) = self.edge.as_mut() {
             edge.continue_request_journal(context);
         }
@@ -3525,8 +3581,8 @@ fn reject_staged_origin(context: &mut StateCoreContext, origin: StagedOrigin) {
 }
 
 /// The `FAIL ACCTCREATE UNAVAILABLE` route of an edge carrier.
-fn account_unavailable(prefix: &str) -> CarrierRoute {
-    match crate::account_service::account_failure(prefix, AccountCarrierKind::Create) {
+fn account_unavailable(prefix: &str, kind: AccountCarrierKind) -> CarrierRoute {
+    match crate::account_service::account_failure(prefix, kind) {
         Ok(frame) => CarrierRoute::Finished {
             frames: vec![frame],
             result: ResultClass::Rejected,
@@ -3588,44 +3644,93 @@ fn edge_sasl_answer(
 fn edge_account_answer(
     carrier: &mut EdgeCarrier,
     prefix: &str,
-    finish: bool,
+    phase: (AccountCarrierKind, bool),
     outcome: crate::federation::edge::RemoteCarrierOutcome,
     now: u64,
 ) -> Option<(Vec<WireMessage>, ResultClass)> {
-    use crate::federation::edge::RemoteCarrierOutcome;
     use agenc_ircd_client_wire::AccountCarrierPhase;
-    let (actions, created) = match outcome {
-        RemoteCarrierOutcome::Challenge(bytes) if !finish => (
-            carrier
-                .creation
-                .server_response(AccountCarrierPhase::Start, &bytes, now)
-                .ok()?,
-            None,
-        ),
-        RemoteCarrierOutcome::Created { account_id, chunks } if finish => {
-            let bytes = agenc_ircd_client_wire::decode_account_payload(&chunks.concat())?;
-            (
-                carrier
-                    .creation
-                    .server_response(AccountCarrierPhase::Finish, &bytes, now)
-                    .ok()?,
-                Some(account_id),
-            )
-        }
-        _ => {
-            carrier.creation.reject();
-            let frame =
-                crate::account_service::account_failure(prefix, AccountCarrierKind::Create).ok()?;
-            return Some((vec![frame], ResultClass::Rejected));
-        }
+    let (kind, finish) = phase;
+    let transfer = match kind {
+        AccountCarrierKind::Create => &mut carrier.creation,
+        AccountCarrierKind::Credentials => &mut carrier.credentials,
     };
-    let mut frames =
-        crate::account_service::render_account_actions(prefix, AccountCarrierKind::Create, actions)
-            .ok()?;
-    if let Some(account_id) = created {
+    let Some(answer) = edge_account_payload(outcome, kind, finish) else {
+        transfer.reject();
+        let frame = crate::account_service::account_failure(prefix, kind).ok()?;
+        return Some((vec![frame], ResultClass::Rejected));
+    };
+    let phase = if finish {
+        AccountCarrierPhase::Finish
+    } else {
+        AccountCarrierPhase::Start
+    };
+    let actions = transfer.server_response(phase, &answer.bytes, now).ok()?;
+    let mut frames = crate::account_service::render_account_actions(prefix, kind, actions).ok()?;
+    if let Some(account_id) = answer.created {
         frames.push(crate::account_service::account_created_note(prefix, account_id).ok()?);
     }
+    if answer.changed {
+        frames.push(
+            WireMessage::new(
+                prefix,
+                "NOTE",
+                &["ACCTCRED", "CHANGED"],
+                Some("Account credential changed; reconnect required"),
+            )
+            .ok()?,
+        );
+    }
+    if answer.rejected {
+        frames.push(crate::account_service::account_failure(prefix, kind).ok()?);
+        return Some((frames, ResultClass::Rejected));
+    }
     Some((frames, ResultClass::Ok))
+}
+
+struct EdgeAccountPayload {
+    bytes: Vec<u8>,
+    created: Option<agenc_ircd_types::AccountId>,
+    changed: bool,
+    rejected: bool,
+}
+
+fn edge_account_payload(
+    outcome: crate::federation::edge::RemoteCarrierOutcome,
+    kind: AccountCarrierKind,
+    finish: bool,
+) -> Option<EdgeAccountPayload> {
+    use crate::federation::edge::RemoteCarrierOutcome;
+    let (chunks, created, changed, rejected) = match outcome {
+        RemoteCarrierOutcome::Challenge(bytes) if !finish => {
+            return Some(EdgeAccountPayload {
+                bytes,
+                created: None,
+                changed: false,
+                rejected: false,
+            });
+        }
+        RemoteCarrierOutcome::Created { account_id, chunks }
+            if finish && kind == AccountCarrierKind::Create =>
+        {
+            (chunks, Some(account_id), false, false)
+        }
+        RemoteCarrierOutcome::CredentialChanged { chunks }
+            if finish && kind == AccountCarrierKind::Credentials =>
+        {
+            (chunks, None, true, false)
+        }
+        RemoteCarrierOutcome::Failed { chunks } if finish && !chunks.is_empty() => {
+            (chunks, None, false, true)
+        }
+        _ => return None,
+    };
+    let bytes = agenc_ircd_client_wire::decode_account_payload(&chunks.concat())?;
+    Some(EdgeAccountPayload {
+        bytes,
+        created,
+        changed,
+        rejected,
+    })
 }
 
 /// Applies a complete cross-profile barrier: both halves commit in one
@@ -3652,6 +3757,10 @@ pub(crate) fn apply_ready_barrier(
         Err(_) => e2ee.fail_frame(context, edge),
     }
 }
+
+#[cfg(test)]
+#[path = "registration/tests/close.rs"]
+mod close_tests;
 
 #[cfg(test)]
 mod tests {
