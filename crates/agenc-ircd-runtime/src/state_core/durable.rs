@@ -136,7 +136,7 @@ impl KeyDeriver {
         &self,
         table: TableId,
         key: &StoredKey,
-        sealed: &SealedRecord,
+        sealed: &SealedRecord<'_>,
     ) -> Result<OpenedStoragePlaintext, RuntimeError> {
         Ok(sealed.open(
             &self.master_key,

@@ -929,7 +929,7 @@ impl<'a> BackupRecordVerification<'a> {
     fn observe_key_check(
         &mut self,
         record: &BackupRecord,
-        sealed: &SealedRecord,
+        sealed: &SealedRecord<'_>,
         plaintext: &[u8],
     ) -> Result<(), StorageError> {
         if record.table() != TableId::KeyCheck || record.stored_key().as_bytes() != KEY_CHECK_KEY {
@@ -955,7 +955,7 @@ impl<'a> BackupRecordVerification<'a> {
     fn observe_state_meta(
         &mut self,
         record: &BackupRecord,
-        sealed: &SealedRecord,
+        sealed: &SealedRecord<'_>,
         plaintext: &[u8],
     ) -> Result<(), StorageError> {
         if record.table() != TableId::StateMeta || record.stored_key().as_bytes() != STATE_META_KEY

@@ -1823,11 +1823,13 @@ None blocks the core-v1 gate.
   locked directory descriptor. A regression replaces its original path,
   preserves unrelated replacement-directory files, and verifies a fresh
   enumeration cursor on a second sweep.
-- [ ] `sealed.rs` `decode` copies the ciphertext with `to_vec` and `open`
-  clones it again, so every full scan pays two 16 MiB copies per record.
-- [ ] `construction_runtime.rs` `state.checkpoint_manifest_sequence + 1` is
-  the one unchecked add in the storage crate; safe under its guard but
-  outside the crate's checked-arithmetic convention.
+- [x] Sealed-record decode borrows ciphertext from the input envelope, and
+  authenticated opening borrows the same bytes through the crypto adapter.
+  Sealing transfers its owned allocation without another ciphertext copy.
+  Pointer-identity, boundary and authentication regressions cover the change;
+  see `docs/stage-10-storage-copy-repair.md`. STO-1 remains open.
+- [x] Reverse restore-manifest traversal uses checked addition for its first
+  sequence, preserving the existing guarded descending traversal.
 - [ ] `io_rejected` and `rustix_rejected` collapse every errno to
   `FilesystemRejected`, so a missing guard, EACCES, ENOSPC, and EIO are
   indistinguishable to operators and tests.
