@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 778
-reviewed_source_sha256 = "ea2d165d251cc6181943da9422a76209ca810e5787adb7a295ae595671ff96b9"
+reviewed_source_sha256 = "67722e0d35bec037ed20350580ee6781c46f3b20bb9d0548743cad20ae50a4ab"
 deferred = []
 
 [[region]]
@@ -161,9 +161,9 @@ reason = "Guest channel controls are refused before target existence can influen
 id = "federated-mask-argument-encoding"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-runtime/src/federation/codec/operations.rs"
-source_sha256 = "0e014189d628ce8878f537f399257b48d0ca0ca873d8b3e0d09cc4dcb4701d85"
-start_line = 731
-end_line = 739
+source_sha256 = "2f666a23d559f54d07d754830703759a386773a2142cabbd77f64d4a74ec3243"
+start_line = 732
+end_line = 769
 metric = "branches"
 reason = "Both mask and non-mask encoding decisions are exercised; schema construction owns validation and its fallible encoding preserves allocation errors."
 
@@ -171,8 +171,28 @@ reason = "Both mask and non-mask encoding decisions are exercised; schema constr
 id = "federated-mask-argument-decoding"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-runtime/src/federation/codec/operations.rs"
-source_sha256 = "0e014189d628ce8878f537f399257b48d0ca0ca873d8b3e0d09cc4dcb4701d85"
-start_line = 741
-end_line = 750
+source_sha256 = "2f666a23d559f54d07d754830703759a386773a2142cabbd77f64d4a74ec3243"
+start_line = 771
+end_line = 791
 metric = "branches"
 reason = "Both decode decisions are exercised after the validated schema boundary; typed masks reconstruct canonical text for coordinator authorization."
+
+[[region]]
+id = "supervised-task-failure-classification"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-runtime/src/supervisor/mod.rs"
+source_sha256 = "02922a56626732d8f103bc71734d0064288bb631f29e3cb284aaf5d8255af6ad"
+start_line = 213
+end_line = 246
+metric = "branches"
+reason = "Aborted and unwound tasks retain their registered identity and failure policy; only critical failures cancel the root."
+
+[[region]]
+id = "federated-mode-role-user-identity"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/federation/coordinator/convert.rs"
+source_sha256 = "4a7e9afe0834e566ac97cee2f86169497f24ac49e862da14c708d6ae1edf37de"
+start_line = 624
+end_line = 641
+metric = "branches"
+reason = "Role targets resolve by the exact transmitted User ID and cannot follow a nickname reassignment."

@@ -477,7 +477,7 @@ pub(super) fn rebuild_command(
             ..
         } => {
             let name = channel_name(domain, *channel_id)?;
-            let changes = channel_mode_changes(changes)?;
+            let changes = channel_mode_changes(domain, changes)?;
             CanonicalCommand::mode(name, changes).map_err(invalid)
         }
         FederatedOperation::UserMode {
@@ -590,7 +590,10 @@ const fn channel_mode_letter(code: u16) -> Option<char> {
     })
 }
 
-fn channel_mode_changes(changes: &[ModeChangeArg]) -> Result<Vec<ModeChange>, RuntimeError> {
+fn channel_mode_changes(
+    domain: &DomainState,
+    changes: &[ModeChangeArg],
+) -> Result<Vec<ModeChange>, RuntimeError> {
     let mut converted = Vec::new();
     converted
         .try_reserve_exact(changes.len())
@@ -601,8 +604,7 @@ fn channel_mode_changes(changes: &[ModeChangeArg]) -> Result<Vec<ModeChange>, Ru
             agenc_ircd_domain::federation::ModeDirection::Add => ModeOperation::Add,
             agenc_ircd_domain::federation::ModeDirection::Remove => ModeOperation::Remove,
         };
-        let argument =
-            std::str::from_utf8(&change.argument).map_err(|_| RuntimeError::InvalidValue)?;
+        let argument = channel_mode_text(domain, change)?;
         let arguments: Vec<&str> = if argument.is_empty() {
             Vec::new()
         } else {
@@ -617,6 +619,25 @@ fn channel_mode_changes(changes: &[ModeChangeArg]) -> Result<Vec<ModeChange>, Ru
         }
     }
     Ok(converted)
+}
+
+fn channel_mode_text<'a>(
+    domain: &'a DomainState,
+    change: &'a ModeChangeArg,
+) -> Result<&'a str, RuntimeError> {
+    if (12..=16).contains(&change.mode_code) {
+        let bytes = change
+            .argument
+            .as_slice()
+            .try_into()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let target = domain
+            .session(UserId::from_bytes(bytes))
+            .ok_or(RuntimeError::InvalidValue)?;
+        Ok(target.nickname().presentation())
+    } else {
+        std::str::from_utf8(&change.argument).map_err(|_| RuntimeError::InvalidValue)
+    }
 }
 
 fn user_mode_command(
@@ -948,6 +969,100 @@ mod user_mode_tests {
     use crate::test_support::{StateCoreFixture, seed_session};
     use agenc_ircd_domain::federation::ModeDirection;
     use agenc_ircd_domain::{CanonicalCommandView, ModeCommand};
+
+    #[test]
+    fn channel_roles_resolve_exact_user_ids_and_refuse_unknown_or_text_targets()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let target = seed_session(context, 2, "CurrentNick", None)?;
+        for (code, expected_role) in [
+            (12, agenc_ircd_domain::Role::Owner),
+            (13, agenc_ircd_domain::Role::Administrator),
+            (14, agenc_ircd_domain::Role::Operator),
+            (15, agenc_ircd_domain::Role::HalfOperator),
+            (16, agenc_ircd_domain::Role::Voice),
+        ] {
+            for (direction, operation) in [
+                (ModeDirection::Add, ModeOperation::Add),
+                (ModeDirection::Remove, ModeOperation::Remove),
+            ] {
+                let mut change = ModeChangeArg {
+                    direction,
+                    mode_code: code,
+                    argument: Zeroizing::new(target.user_id.as_bytes().to_vec()),
+                };
+                let converted = channel_mode_changes(context.domain(), &[change.clone()])?;
+                let [
+                    ModeChange::Role {
+                        operation: actual_operation,
+                        target,
+                        role,
+                    },
+                ] = converted.as_slice()
+                else {
+                    return Err("wrong role mode conversion".into());
+                };
+                assert_eq!(*actual_operation, operation);
+                assert_eq!(target.presentation(), "CurrentNick");
+                assert_eq!(*role, expected_role);
+                for invalid in [
+                    vec![255; 16],
+                    b"CurrentNick".to_vec(),
+                    b"UnknownNickname1".to_vec(),
+                ] {
+                    change.argument = Zeroizing::new(invalid);
+                    assert!(channel_mode_changes(context.domain(), &[change.clone()]).is_err());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decoded_keys_and_limits_reach_the_domain_and_crypto_worker_unchanged()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let operation = FederatedOperation::ChannelMode {
+            session_id: SessionId::from_bytes([1; 16]),
+            channel_id: ChannelInstanceId::from_bytes([2; 16]),
+            expected_channel_revision: 1,
+            changes: vec![
+                ModeChangeArg {
+                    direction: ModeDirection::Add,
+                    mode_code: 4,
+                    argument: Zeroizing::new(b"password".to_vec()),
+                },
+                ModeChangeArg {
+                    direction: ModeDirection::Add,
+                    mode_code: 5,
+                    argument: Zeroizing::new(b"65535".to_vec()),
+                },
+            ],
+        };
+        let decoded = FederatedOperation::from_object(operation.opcode(), &operation.to_object()?)?;
+        let FederatedOperation::ChannelMode { changes, .. } = &decoded else {
+            return Err("wrong decoded operation".into());
+        };
+        assert!(matches!(
+            channel_mode_changes(context.domain(), changes)?.as_slice(),
+            [
+                ModeChange::JoinKey(true),
+                ModeChange::MemberLimit(Some(65535))
+            ]
+        ));
+        let key = key_for(
+            &decoded,
+            &ExternalInputRequest::ChannelKeyConstruction {
+                request_sequence: 0,
+                change_index: 0,
+            },
+        )
+        .ok_or("key not supplied to crypto worker")?;
+        assert_eq!(key.as_slice(), b"password");
+        Ok(())
+    }
 
     #[test]
     fn pinned_user_mode_operations_preserve_direction_and_forced_invisibility()

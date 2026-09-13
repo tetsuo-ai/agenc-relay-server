@@ -11,12 +11,13 @@ pub mod panic;
 pub mod shutdown;
 pub mod signal;
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use tokio::task::JoinSet;
+use tokio::task::{Id, JoinSet};
 
 pub use panic::{CRASH_EXIT_CODE, CrashReporter, exit_process};
 pub use shutdown::{
@@ -116,10 +117,10 @@ pub struct ChildExit {
     pub outcome: Result<(), ChildFailure>,
 }
 
-struct RawExit {
+struct ChildRegistration {
     name: ChildName,
     kind: ChildKind,
-    outcome: Result<(), RuntimeError>,
+    token: CancellationToken,
 }
 
 /// The record of a bounded join.
@@ -134,7 +135,8 @@ pub struct JoinReport {
 /// The root of the owned task tree.
 pub struct Supervisor {
     root: CancellationToken,
-    children: JoinSet<RawExit>,
+    children: JoinSet<Result<(), RuntimeError>>,
+    registrations: BTreeMap<Id, ChildRegistration>,
 }
 
 impl Default for Supervisor {
@@ -150,6 +152,7 @@ impl Supervisor {
         Self {
             root: CancellationToken::root(),
             children: JoinSet::new(),
+            registrations: BTreeMap::new(),
         }
     }
 
@@ -177,13 +180,15 @@ impl Supervisor {
         }
         let token = self.root.child()?;
         let task = make(token.clone());
-        self.children.spawn(async move {
-            RawExit {
+        let handle = self.children.spawn(task);
+        self.registrations.insert(
+            handle.id(),
+            ChildRegistration {
                 name,
                 kind,
-                outcome: task.await,
-            }
-        });
+                token: token.clone(),
+            },
+        );
         Ok(token)
     }
 
@@ -206,22 +211,33 @@ impl Supervisor {
     /// Joins the next child, applying the failure policy; `None` when no
     /// child remains.
     pub async fn next_exit(&mut self) -> Option<ChildExit> {
-        let joined = self.children.join_next().await?;
-        let exit = match joined {
-            Ok(raw) => ChildExit {
-                name: raw.name,
-                kind: raw.kind,
-                outcome: raw.outcome.map_err(ChildFailure::Failed),
-            },
-            Err(error) => ChildExit {
-                name: ChildName::Connection,
-                kind: ChildKind::Critical,
-                outcome: Err(if error.is_cancelled() {
+        let joined = self.children.join_next_with_id().await?;
+        let (id, outcome) = match joined {
+            Ok((id, outcome)) => (id, outcome.map_err(ChildFailure::Failed)),
+            Err(error) => (
+                error.id(),
+                Err(if error.is_cancelled() {
                     ChildFailure::Cancelled
                 } else {
                     ChildFailure::Panicked
                 }),
-            },
+            ),
+        };
+        let exit = if let Some(registration) = self.registrations.remove(&id) {
+            registration.token.cancel();
+            ChildExit {
+                name: registration.name,
+                kind: registration.kind,
+                outcome,
+            }
+        } else {
+            // Only this owner can spawn or join; missing identity is an
+            // internal task-tree failure, never a client refusal.
+            ChildExit {
+                name: ChildName::Connection,
+                kind: ChildKind::Critical,
+                outcome: Err(ChildFailure::Failed(RuntimeError::InvalidValue)),
+            }
         };
         if exit.kind == ChildKind::Critical && exit.outcome.is_err() {
             self.root.cancel();
@@ -246,6 +262,79 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_missing_child_registration_is_a_critical_internal_failure()
+    -> Result<(), RuntimeError> {
+        let mut supervisor = Supervisor::new();
+        let root = supervisor.root_token();
+        supervisor.spawn(ChildName::Connection, ChildKind::Connection, |_| async {
+            Ok(())
+        })?;
+        supervisor.registrations.clear();
+        let exit = supervisor
+            .next_exit()
+            .await
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(exit.kind, ChildKind::Critical);
+        assert_eq!(
+            exit.outcome,
+            Err(ChildFailure::Failed(RuntimeError::InvalidValue))
+        );
+        assert!(root.is_cancelled());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aborted_tasks_retain_their_registered_name_and_failure_policy()
+    -> Result<(), RuntimeError> {
+        for (name, kind) in [
+            (ChildName::Connection, ChildKind::Connection),
+            (ChildName::StorageBridge, ChildKind::Critical),
+        ] {
+            let mut supervisor = Supervisor::new();
+            let root = supervisor.root_token();
+            let child = supervisor.spawn(name, kind, |_| std::future::pending())?;
+            supervisor.abort_all();
+            let exit = supervisor
+                .next_exit()
+                .await
+                .ok_or(RuntimeError::InvalidValue)?;
+            assert_eq!(exit.name, name);
+            assert_eq!(exit.kind, kind);
+            assert_eq!(exit.outcome, Err(ChildFailure::Cancelled));
+            assert!(child.is_cancelled());
+            assert_eq!(root.is_cancelled(), kind == ChildKind::Critical);
+            assert!(supervisor.registrations.is_empty());
+            assert_eq!(supervisor.live_children(), 0);
+            assert!(supervisor.next_exit().await.is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unwound_tasks_retain_their_registered_failure_policy() -> Result<(), RuntimeError> {
+        for kind in [ChildKind::Connection, ChildKind::Critical] {
+            let mut supervisor = Supervisor::new();
+            let root = supervisor.root_token();
+            let child = supervisor.spawn(ChildName::Connection, kind, |token| async move {
+                // Deliberately fail inside the task to exercise JoinError.
+                // This component fixture does not install the daemon hook.
+                assert!(token.is_cancelled(), "injected child assertion failure");
+                Ok(())
+            })?;
+            let exit = supervisor
+                .next_exit()
+                .await
+                .ok_or(RuntimeError::InvalidValue)?;
+            assert_eq!(exit.kind, kind);
+            assert_eq!(exit.outcome, Err(ChildFailure::Panicked));
+            assert!(child.is_cancelled());
+            assert_eq!(root.is_cancelled(), kind == ChildKind::Critical);
+            assert!(supervisor.registrations.is_empty());
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn a_critical_failure_cancels_the_tree_and_a_connection_failure_does_not()
