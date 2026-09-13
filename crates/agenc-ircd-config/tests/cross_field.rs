@@ -549,6 +549,69 @@ fn required_ocsp_staples_are_explicit_and_public_tls_only() {
 }
 
 #[test]
+#[cfg(feature = "wss")]
+fn required_ocsp_staples_support_enabled_websocket_listeners() {
+    let wss = mutate(
+        PUBLIC,
+        "purpose = \"client_tls\"",
+        "purpose = \"client_wss\"\nallowed_origins = [\"https://chat.example\"]",
+    );
+    let required = mutate(
+        &wss,
+        "require_ocsp_staple = false",
+        "require_ocsp_staple = true",
+    );
+    let report = parse(&required).err();
+    assert!(report.as_ref().is_some_and(|report| {
+        report.issues().iter().any(|issue| {
+            issue.key == SchemaKey::indexed("listeners.endpoint", 0, "tls_ocsp_staple_file")
+                && issue.error == ConfigError::MissingValue
+        })
+    }));
+    for text in [&wss, &required] {
+        let configured = mutate(
+            text,
+            "tls_certificate_file = \"/etc/agenc/tls/server.crt\"",
+            "tls_certificate_file = \"/etc/agenc/tls/server.crt\"\n\
+             tls_ocsp_staple_file = \"/etc/agenc/tls/server.ocsp\"",
+        );
+        let parsed = parse(&configured);
+        assert!(parsed.is_ok(), "WSS staple rejected: {parsed:?}");
+        assert!(parsed.ok().is_some_and(|config| {
+            config.listeners.first().is_some_and(|listener| {
+                listener.tls.as_ref().is_some_and(|tls| {
+                    tls.ocsp_staple_file.as_deref()
+                        == Some(std::path::Path::new("/etc/agenc/tls/server.ocsp"))
+                })
+            })
+        }));
+    }
+}
+
+#[test]
+fn ocsp_staples_remain_forbidden_for_non_public_listener_purposes() {
+    for purpose in ["client_onion", "federation", "admin_local", "admin_tls"] {
+        let text = mutate(
+            PUBLIC,
+            "purpose = \"client_tls\"",
+            &format!(
+                "purpose = \"{purpose}\"\ntls_ocsp_staple_file = \"/etc/agenc/tls/server.ocsp\""
+            ),
+        );
+        let report = parse(&text).err();
+        assert!(
+            report.as_ref().is_some_and(|report| {
+                report.issues().iter().any(|issue| {
+                    issue.key == SchemaKey::indexed("listeners.endpoint", 0, "tls_ocsp_staple_file")
+                        && issue.error == ConfigError::InvalidValue
+                })
+            }),
+            "{purpose} must reject a public OCSP staple"
+        );
+    }
+}
+
+#[test]
 fn cross_field_issues_accumulate_together() {
     let text = mutate(
         &mutate(
