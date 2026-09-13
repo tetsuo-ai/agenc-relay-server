@@ -33,7 +33,7 @@ unsupported. The current-format backup and restore contract remains required.
 
 | Item | Required result | Status |
 | --- | --- | --- |
-| Repository history | Push the existing committed branch and open its review | PR 27 merged; follow-up implementation under review |
+| Repository history | Push the existing committed branch and open its review | Repair branches pushed in PRs #29–#34; PRs #29–#33 merged, with the final queue repair and completed gate results in #34 |
 | Conformance maintenance | Bind the accepted current-format specification and preserve historical evidence | Baseline and requirement bindings repaired |
 | Storage initialization | Preserve every existing rollback guard and reject reused initialization directories | Implemented; 316 storage tests pass |
 | STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Mutation/abort prototype prepared; full mechanism and upstream release open |

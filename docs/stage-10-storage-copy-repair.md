@@ -28,9 +28,27 @@ The pointer-identity regression failed against the original decoder and
 passes with borrowed ciphertext. Tests check minimum/maximum ciphertext
 bounds, moving an owned allocation, materializing a borrowed value, exact
 encoded bytes and record IDs, and refusal of changed bindings and tags.
-The crypto suite passes. Storage, strict workspace lint and full implementation
-gate results will be recorded after completion. Coverage thresholds remain
-unchanged, with a reviewed critical region for the new borrowed input bound.
+The complete crypto and storage suites and strict workspace lint pass. The
+constant-time integration review was renewed: secret comparisons, key
+derivation and authenticated opening are unchanged.
+
+`RUST_TEST_THREADS=1 CARGO_INCREMENTAL=0 bash scripts/check-stage-nine.sh`
+passed for `3a0efdf64c7beb3040ef6cf7549f71737ed9629d` in a temporary
+memory-backed checkout. Workspace tests passed 2,872 tests with 21 existing
+ignored tests. Coverage reached 75.2373% branches and 91.6569% lines, with all
+20 interim critical regions at 100%, including the new borrowed input bound.
+Feature-matrix, model and fuzz checks passed. The reviewed Rust inventory is
+778 files, SHA-256
+`2986aad5579cf3fa584520ab596097e41fdc2d2dc24e8a6d331152cff278341a`.
+The later prerequisite merge changes only an earlier validation report.
+PR #33 merged this repair.
+
+Earlier host attempts refused changing filesystem free-space samples. The
+exact boundary checks, five-attempt limit and physical ceilings were retained.
+The workload completion test checks measurement and signability; its passing
+result does not mean observed growth is within the release ceiling. The full
+functional gate on the temporary filesystem is not native ext4 production
+qualification or an exact-revision stage closure.
 
 This repairs temporary ciphertext allocation. The redb physical-growth
 overrun (STO-1), checkpoint scratch capacity, backup scheduling/publication,

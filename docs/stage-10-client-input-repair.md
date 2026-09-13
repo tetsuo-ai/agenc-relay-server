@@ -41,10 +41,23 @@ first actor integration: a ready client queue delayed an already queued open
 notice behind 512 lines. The regression now requires admission after at most
 one client line. A separate single-worker test checks cooperative scheduling.
 
-The runtime unit suite passed 1,355 tests with one ignored test during
-implementation. Source checks pass; final lint and full implementation gate
-results will be recorded before merge. Coverage floors are unchanged, with
-an additional reviewed input-publication region.
+All 11 focused queue tests and strict workspace lint pass. The complete
+`RUST_TEST_THREADS=1 CARGO_INCREMENTAL=0 bash scripts/check-stage-nine.sh`
+passed for `a0a7508a2c3ce6a61490ba7aa9e9fc47af8bf0e0` in a temporary
+memory-backed checkout. Workspace tests passed 2,883 tests with 21 existing
+ignored tests, including 1,358 runtime unit tests with one ignored test.
+Coverage reached 75.2806% branches and 91.6783% lines, with all 21 interim
+critical regions at 100%. Feature-matrix, concurrency-model and fuzz checks
+passed. Coverage floors are unchanged.
+
+The reviewed Rust inventory is 782 files, SHA-256
+`a2437e3de728cbedff5a2ad5647d31400fb45f78698b502aabdc3ee751dd1012`.
+The earlier host run of the same implementation also passed workspace tests
+and coverage, then refused five changing free-space samples in its later
+storage pass. The exact boundary, retry count and physical ceilings were
+preserved. These functional checks do not establish native ext4 production
+qualification or close a stage for a new exact source revision. Subsequent
+main reconciliation and report edits do not change the implementation.
 
 Encrypted historical recovery, signing-key and encrypted-object ownership,
 STO-1 physical growth, service-user offline checks, checkpoint/backup capacity
