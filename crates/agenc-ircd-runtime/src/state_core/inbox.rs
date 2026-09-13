@@ -14,7 +14,7 @@ use crate::sync::Arc;
 pub const SIGNAL_EVENT_CAPACITY: usize = 64;
 /// Maintenance ticks have reserved capacity independent of client traffic.
 pub const MAINTENANCE_EVENT_CAPACITY: usize = 64;
-/// Aggregation bound in addition to each connection's request/byte limits.
+/// Connection-open/control notices and explicit in-process fixture input.
 pub const CLIENT_EVENT_CAPACITY: usize = 64;
 /// Lifecycle commands queued independently of the public protocol inbox.
 ///
@@ -108,10 +108,12 @@ pub(crate) struct PhysicalCloseNotice {
 }
 
 /// StateCore's closed response to one connection-open request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum ConnectionOpenOutcome {
     /// The session and its source-prefix state are installed.
     Accepted,
+    /// Session state and an independently bounded reader queue are installed.
+    AcceptedInput(super::client_input::ClientInputPort),
     /// The generation was refused without installing session state.
     Refused,
 }

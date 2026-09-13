@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 778
-reviewed_source_sha256 = "2986aad5579cf3fa584520ab596097e41fdc2d2dc24e8a6d331152cff278341a"
+reviewed_source_files = 782
+reviewed_source_sha256 = "a2437e3de728cbedff5a2ad5647d31400fb45f78698b502aabdc3ee751dd1012"
 deferred = []
 
 [[region]]
@@ -206,3 +206,13 @@ start_line = 248
 end_line = 253
 metric = "branches"
 reason = "Borrowing ciphertext retains the exact authentication-tag minimum and maximum record bound before AEAD opening."
+
+[[region]]
+id = "connection-input-publication"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/state_core/client_input.rs"
+source_sha256 = "4b18c16825dc5dca79e3120094930033e1898b93ad813cf8a3797b3fb46b327f"
+start_line = 60
+end_line = 90
+metric = "branches"
+reason = "Connection input publication checks generation, consumer lifetime and independent queue capacity before publishing one ready entry."

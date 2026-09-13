@@ -2573,6 +2573,11 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
             unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
         );
     }
+    if let Err(error) = live.state.install_client_inputs() {
+        return Err(
+            unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
+        );
+    }
     let mut supervisor = Supervisor::new();
     let (admin_lifecycle, admin_lifecycle_inbox) = admin_lifecycle_channel();
     if let Err(error) = spawn_admin_owner(

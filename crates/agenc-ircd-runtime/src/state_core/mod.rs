@@ -11,6 +11,7 @@
 
 pub(crate) mod admin;
 mod admin_history;
+pub mod client_input;
 pub mod durable;
 pub(crate) mod edge_checkpoint;
 pub mod fanout;
@@ -1857,6 +1858,7 @@ pub struct StateCore {
     federation_open: bool,
     maintenance_receiver: mpsc::Receiver<MaintenanceEvent>,
     maintenance_open: bool,
+    client_inputs: Option<client_input::ClientInputs>,
     reload_receiver: mpsc::Receiver<ReloadCoreRequest>,
     reload_open: bool,
     reload_handle: Option<RuntimeConfigHandle>,
@@ -2214,6 +2216,7 @@ impl StateCore {
             federation_open: false,
             maintenance_receiver,
             maintenance_open: false,
+            client_inputs: None,
             reload_receiver,
             reload_open: false,
             reload_handle: None,
@@ -2259,6 +2262,18 @@ impl StateCore {
         }
         self.federation_receiver = receiver;
         self.federation_open = true;
+        Ok(())
+    }
+
+    /// Prepares connection input capacity before listener admission starts.
+    pub(crate) fn install_client_inputs(&mut self) -> Result<(), RuntimeError> {
+        if self.client_inputs.is_some() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.client_inputs = Some(client_input::ClientInputs::new(
+            session::MAX_TRACKED_CONNECTIONS,
+            self.context.backing_reservations(),
+        )?);
         Ok(())
     }
 
@@ -3562,20 +3577,7 @@ impl StateCore {
                 source,
                 sink,
                 acknowledgement,
-            } => {
-                let outcome = if self
-                    .context
-                    .admit_connection(generation, purpose, source, sink)
-                    .is_ok()
-                {
-                    self.router.connection_opened(&mut self.context, generation);
-                    ConnectionOpenOutcome::Accepted
-                } else {
-                    ConnectionOpenOutcome::Refused
-                };
-                let _sent = acknowledgement.send(outcome);
-                None
-            }
+            } => self.open_connection(generation, purpose, source, sink, acknowledgement),
             StateCoreMessage::Line {
                 generation,
                 sequence,
@@ -3598,6 +3600,40 @@ impl StateCore {
             }
         };
         exit.or_else(|| self.step_batch())
+    }
+
+    fn open_connection(
+        &mut self,
+        generation: ConnectionGeneration,
+        purpose: crate::purpose::ListenerPurpose,
+        source: SourceAddressKey,
+        sink: Arc<dyn crate::connection::sink::ClientSink>,
+        acknowledgement: tokio::sync::oneshot::Sender<ConnectionOpenOutcome>,
+    ) -> Option<StateCoreExit> {
+        let Ok(input) = self
+            .client_inputs
+            .as_ref()
+            .map(|inputs| inputs.open(generation))
+            .transpose()
+        else {
+            let _sent = acknowledgement.send(ConnectionOpenOutcome::Refused);
+            return None;
+        };
+        let outcome = if self
+            .context
+            .admit_connection(generation, purpose, source, sink)
+            .is_ok()
+        {
+            self.router.connection_opened(&mut self.context, generation);
+            input.map_or(
+                ConnectionOpenOutcome::Accepted,
+                ConnectionOpenOutcome::AcceptedInput,
+            )
+        } else {
+            ConnectionOpenOutcome::Refused
+        };
+        let _sent = acknowledgement.send(outcome);
+        None
     }
 
     fn route_line(
@@ -3861,6 +3897,7 @@ impl StateCore {
         let mut cancellation_open = true;
         let mut lifecycle_open = true;
         let mut physical_closes_open = true;
+        let mut prefer_client_input = false;
         let mut cancellation_pending = false;
         let mut lifecycle_target = None;
         let mut lifecycle_completed = None;
@@ -3979,6 +4016,10 @@ impl StateCore {
             let wake = self.wake_instant();
             let prefix_wake = self.prefix_wake_instant();
             let whowas_wake = self.whowas_wake_instant();
+            // Alternate the two input lanes when both are ready. Checking the
+            // receiver here cannot lose a wake: a late control message waits
+            // behind at most the one client line selected in this iteration.
+            let prefer_control = !prefer_client_input && (!inbox.is_empty() || inbox.is_closed());
             let exit = tokio::select! {
                 biased;
                 () = token.cancelled(), if cancellation_open => {
@@ -4031,7 +4072,9 @@ impl StateCore {
                         );
                         observer.queue_depth(
                             QueueName::StateCoreInbox,
-                            usize_u64(inbox.len().saturating_add(physical_closes.len())),
+                            usize_u64(inbox.len().saturating_add(physical_closes.len()).saturating_add(
+                                self.client_inputs.as_ref().map_or(0, client_input::ClientInputs::len),
+                            )),
                         );
                         observer.queue_depth(
                             QueueName::StorageBatches,
@@ -4251,10 +4294,22 @@ impl StateCore {
                         }
                     }
                 },
-                message = inbox.recv(), if !hold_inbox && !activation_barrier => match message {
-                    Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
-                    Some(message) => self.step_message(message),
-                    None => Some(StateCoreExit::InboxClosed),
+                message = async {
+                    match &self.client_inputs {
+                        Some(inputs) => inputs.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.client_inputs.is_some() && !prefer_control && !hold_inbox && !activation_barrier => {
+                    prefer_client_input = false;
+                    self.step_message(message)
+                },
+                message = inbox.recv(), if !hold_inbox && !activation_barrier => {
+                    prefer_client_input = true;
+                    match message {
+                        Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
+                        Some(message) => self.step_message(message),
+                        None => Some(StateCoreExit::InboxClosed),
+                    }
                 },
                 _ = flush_poll.tick(), if waiting_for_shutdown_flush => None,
                 () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() && !refresh_in_flight && !provisional_barrier => {
@@ -4326,7 +4381,10 @@ mod lifecycle_tests {
             })
             .is_none()
         );
-        assert_eq!(accepted.try_recv()?, ConnectionOpenOutcome::Accepted);
+        assert!(matches!(
+            accepted.try_recv()?,
+            ConnectionOpenOutcome::Accepted
+        ));
         Ok(queue)
     }
 
@@ -4583,6 +4641,7 @@ mod lifecycle_tests {
 mod tests {
     mod account_shutdown;
     mod admin_revision;
+    mod client_input;
     mod local_join;
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use tokio::sync::{mpsc, oneshot};
@@ -5479,9 +5538,18 @@ mod tests {
             (1, "WAIT  001 "),
         ];
         let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
-        let (exit, (_open, sinks, stopped)) =
-            run_core(true, |inbox, lifecycle, _token| async move {
-                let _outcomes = open_connections(&inbox, &sinks).await?;
+        let (exit, (_open, sinks, stopped)) = run_core_with(
+            true,
+            |fixture| {
+                fixture.state_mut()?.install_client_inputs()?;
+                Ok(())
+            },
+            |inbox, lifecycle, _token, ()| async move {
+                let outcomes = open_connections(&inbox, &sinks).await?;
+                let Some(ConnectionOpenOutcome::AcceptedInput(port)) = outcomes.into_iter().next()
+                else {
+                    return Err("missing admitted input port".into());
+                };
                 drive_script(&inbox, &sinks, REGISTER).await?;
                 // AWAY stages a durable batch; the MONITOR sequence is ephemeral
                 // and arrives inside the gather window with no pacing at all.
@@ -5492,21 +5560,18 @@ mod tests {
                     (6, "MONITOR L"),
                 ] {
                     let message = parse_message(FramedLine::new(line)?)?.ok_or("empty line")?;
-                    send(
-                        &inbox,
-                        StateCoreMessage::Line {
-                            generation: ConnectionGeneration::new(1),
-                            sequence,
-                            message: Box::new(message),
-                        },
-                    )
-                    .await?;
+                    port.send(StateCoreMessage::Line {
+                        generation: ConnectionGeneration::new(1),
+                        sequence,
+                        message: Box::new(message),
+                    })?;
                 }
                 drive_script(&inbox, &sinks, &[(1, "WAIT  733 ")]).await?;
                 let stopped = lifecycle.request(LifecyclePhase::Stop).await;
                 Ok((inbox, sinks, stopped))
-            })
-            .await?;
+            },
+        )
+        .await?;
         assert!(stopped.is_ok());
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
         let lines = sinks.first().ok_or("no sink")?.lines();

@@ -135,15 +135,19 @@ pub async fn run_reader<R: AsyncRead + Unpin>(
     .await
 }
 
+pub(crate) mod inbox;
+use inbox::ReaderInbox;
+
 pub(crate) async fn run_reader_sequenced<R: AsyncRead + Unpin>(
     mut transport: R,
     generation: ConnectionGeneration,
     limits: ReaderLimits,
     runtime_config: Option<RuntimeConfigHandle>,
-    inbox: mpsc::Sender<StateCoreMessage>,
+    inbox: impl Into<ReaderInbox>,
     token: CancellationToken,
     accepted_lines: Arc<AtomicU64>,
 ) -> CloseReason {
+    let inbox = inbox.into();
     let Ok(mut framer) = StreamFramer::new() else {
         return CloseReason::Overload;
     };
@@ -199,7 +203,7 @@ async fn feed_and_forward(
     pending: &mut Pending,
     generation: ConnectionGeneration,
     limits: ReaderLimits,
-    inbox: &mpsc::Sender<StateCoreMessage>,
+    inbox: &ReaderInbox,
     token: &CancellationToken,
 ) -> Result<(), CloseReason> {
     for slice in bytes.split_inclusive(|byte| *byte == b'\n') {
@@ -239,7 +243,7 @@ async fn feed_and_forward(
 async fn forward_pending(
     pending: &mut Pending,
     generation: ConnectionGeneration,
-    inbox: &mpsc::Sender<StateCoreMessage>,
+    inbox: &ReaderInbox,
     token: &CancellationToken,
 ) -> Result<(), CloseReason> {
     while let Some(message) = pending.messages.pop_front() {
@@ -402,6 +406,7 @@ mod tests {
         let mut framer = StreamFramer::new()?;
         let mut pending = pending();
         let (sender, mut receiver) = mpsc::channel(128);
+        let sender = ReaderInbox::from(sender);
         let token = CancellationToken::root();
         let generation = ConnectionGeneration::new(7);
         let payload_bytes = MAX_PHYSICAL_LINE_BYTES - 8;

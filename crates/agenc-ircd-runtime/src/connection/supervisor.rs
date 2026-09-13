@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 
 use super::queue::{ClosePolicy, QueueLimits, WriterQueue};
-use super::reader::{ReaderLimits, run_reader_sequenced};
+use super::reader::{ReaderLimits, inbox::ReaderInbox, run_reader_sequenced};
 use super::sink::{ClientSink, ConnectionGeneration};
 use super::writer::run_writer;
 use crate::budget::{CLIENT_CONNECTION_BASE_BYTES, MemoryPermit, MemoryPermitBatch};
@@ -281,17 +281,21 @@ where
         () = token.cancelled() => None,
         outcome = tokio::time::timeout(INBOX_NOTICE_BUDGET, open_outcome) => outcome.ok(),
     };
-    let open_failure = match outcome {
-        Some(Ok(ConnectionOpenOutcome::Accepted)) => None,
-        Some(Ok(ConnectionOpenOutcome::Refused)) => Some(CloseReason::Overload),
-        Some(Err(_)) | None => Some(CloseReason::Shutdown),
+    let reader_inbox = match outcome {
+        Some(Ok(ConnectionOpenOutcome::Accepted)) => Ok(ReaderInbox::from(inbox)),
+        Some(Ok(ConnectionOpenOutcome::AcceptedInput(port))) => Ok(ReaderInbox::from(port)),
+        Some(Ok(ConnectionOpenOutcome::Refused)) => Err(CloseReason::Overload),
+        Some(Err(_)) | None => Err(CloseReason::Shutdown),
     };
-    if let Some(reason) = open_failure {
-        drop(transport);
-        drop((permits, global_slot, listener_slot, queue));
-        let _closed_at = lease.release(reason);
-        return connection_exit(&admitted, reason);
-    }
+    let reader_inbox = match reader_inbox {
+        Ok(inbox) => inbox,
+        Err(reason) => {
+            drop(transport);
+            drop((permits, global_slot, listener_slot, queue));
+            let _closed_at = lease.release(reason);
+            return connection_exit(&admitted, reason);
+        }
+    };
     let accepted_lines = Arc::new(AtomicU64::new(0));
     lease.assign_line_counter(Arc::clone(&accepted_lines));
     lease.arm();
@@ -300,7 +304,7 @@ where
         admitted.generation,
         &queue,
         policy,
-        &inbox,
+        reader_inbox,
         &token,
         accepted_lines,
     )
@@ -323,7 +327,7 @@ async fn supervise_tasks<T>(
     generation: ConnectionGeneration,
     queue: &Arc<WriterQueue>,
     policy: ConnectionPolicy,
-    inbox: &mpsc::Sender<StateCoreMessage>,
+    inbox: ReaderInbox,
     token: &CancellationToken,
     accepted_lines: Arc<AtomicU64>,
 ) -> CloseReason
@@ -339,7 +343,7 @@ where
         generation,
         policy.limits.reader,
         policy.runtime_config,
-        inbox.clone(),
+        inbox,
         reader_token.clone(),
         accepted_lines,
     );
