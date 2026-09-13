@@ -13,6 +13,9 @@ runtime follow-up starts at merge commit
 
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
+Independent connection scheduling and borrowed storage ciphertext are recorded
+in [the client input repair](stage-10-client-input-repair.md) and
+[the storage copy repair](stage-10-storage-copy-repair.md).
 The preceding operational changes are recorded in
 [the operational repair report](stage-10-operational-repair.md). Earlier credential
 and runtime repairs are recorded in
@@ -41,8 +44,8 @@ unsupported. The current-format backup and restore contract remains required.
 | CAP-101 | Select per-conversation credentials and retain exact old signers for unfinished records | Open |
 | CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
 | Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Implemented; real daemon replacement, registered reauthentication, session revocation, restart and receipt-order tests pass |
-| Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired. Capability refusals, channel privacy, per-connection accounting and maintenance isolation repaired; aggregation scheduling and other items open |
-| Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding and temporary cleanup repaired; other items open |
+| Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired. Capability refusals, channel privacy, per-connection accounting, maintenance isolation and independent round-robin input scheduling repaired; other items open |
+| Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding, temporary cleanup, borrowed ciphertext decoding/opening and reverse-manifest arithmetic repaired; checkpoint/backup capacity and publication remain open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Disabled material, same-class key sharing, generated administrator UID and OCSP schema/WSS admission repaired, preserving edge outbound TLS; service-user checks remain open |
 | Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
 
