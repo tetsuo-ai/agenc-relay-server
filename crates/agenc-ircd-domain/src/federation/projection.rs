@@ -2273,9 +2273,8 @@ fn scalar_mode_changes(
     post: &DurableChannel,
     changes: &mut Vec<ProjectedModeChange>,
 ) {
-    let key_before = pre.key_verifier.is_some();
     let key_after = post.key_verifier.is_some();
-    if key_before != key_after {
+    if pre.key_verifier != post.key_verifier {
         changes.push(ProjectedModeChange::Key {
             direction: direction_of(key_after),
             present: key_after,

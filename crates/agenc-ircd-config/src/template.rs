@@ -45,6 +45,8 @@ impl InitProfile {
 /// The generated operator record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperatorTemplate {
+    /// Effective UID of the operator that initializes this node.
+    pub local_uid: u32,
     /// Fresh operator identity.
     pub operator_id: OperatorId,
     /// Operator verification key.
@@ -305,7 +307,7 @@ fn render_admin_listener(out: &mut String, values: &InitValues) {
         out,
         "# OS user ids allowed to connect; every operator also proves its signing key."
     );
-    let _ = writeln!(out, "allowed_uids = [0]\n");
+    let _ = writeln!(out, "allowed_uids = [{}]\n", values.operator.local_uid);
 }
 
 fn render_tls_federation(out: &mut String, keys: &Path) {
@@ -484,7 +486,7 @@ fn render_moderation(out: &mut String, values: &InitValues, keys: &Path, trust: 
         out,
         "# OS user ids that may open the local admin socket as this operator."
     );
-    let _ = writeln!(out, "local_uids = [0]");
+    let _ = writeln!(out, "local_uids = [{}]", values.operator.local_uid);
     let _ = writeln!(
         out,
         "# Nonempty subset of observe, configure, sessions, accounts, channels,"

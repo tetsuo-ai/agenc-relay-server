@@ -18,6 +18,101 @@ type TestResult = Result<(), Box<dyn Error>>;
 const SESSION: SessionId = SessionId::from_bytes([3; 16]);
 const CHANNEL: ChannelInstanceId = ChannelInstanceId::from_bytes([4; 16]);
 
+#[test]
+fn projected_key_changes_carry_only_the_two_byte_presence_value() -> TestResult {
+    use crate::federation::codec::{projected_mode_change_object, projected_mode_change_of};
+    use agenc_ircd_domain::federation::ProjectedModeChange;
+    use agenc_ircd_federation_wire::{DecodeBudget, access::opaque_field};
+    for (direction, present, expected) in [
+        (ModeDirection::Add, true, [0, 1]),
+        (ModeDirection::Remove, false, [0, 0]),
+    ] {
+        let object =
+            projected_mode_change_object(&ProjectedModeChange::Key { direction, present })?;
+        assert_eq!(opaque_field(&object, "argument")?, expected);
+        let decoded = projected_mode_change_of(&object, &mut DecodeBudget::new(4096, 64))?;
+        assert!(
+            matches!(decoded, ProjectedModeChange::Key { direction: actual_direction, present: actual_present }
+            if actual_direction == direction && actual_present == present)
+        );
+    }
+    Ok(())
+}
+
+// Appendix B.4: keys have a uint16 prefix and limits are uint32 big endian.
+#[test]
+fn key_and_limit_modes_use_exact_binary_arguments_and_restore_client_values() -> TestResult {
+    use agenc_ircd_federation_wire::access::{opaque_field, vector};
+    for (mode_code, input, expected) in [
+        (4, b"password".to_vec(), b"\0\x08password".to_vec()),
+        (4, vec![b'x'; 256], [vec![1, 0], vec![b'x'; 256]].concat()),
+        (5, b"1".to_vec(), vec![0, 0, 0, 1]),
+        (5, b"65535".to_vec(), vec![0, 0, 255, 255]),
+    ] {
+        for direction in [ModeDirection::Add, ModeDirection::Remove] {
+            let argument = if direction == ModeDirection::Add {
+                input.clone()
+            } else {
+                Vec::new()
+            };
+            let operation = FederatedOperation::ChannelMode {
+                session_id: SESSION,
+                channel_id: CHANNEL,
+                expected_channel_revision: 9,
+                changes: vec![ModeChangeArg {
+                    direction,
+                    mode_code,
+                    argument: Zeroizing::new(argument),
+                }],
+            };
+            let object = operation.to_object()?;
+            let change = vector(&object, "changes")?
+                .first()
+                .ok_or("missing encoded mode")?;
+            let wire = opaque_field(change, "argument")?;
+            assert_eq!(
+                wire,
+                if direction == ModeDirection::Add {
+                    expected.as_slice()
+                } else {
+                    &[]
+                }
+            );
+            assert!(operation == FederatedOperation::from_object(operation.opcode(), &object)?);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_keys_and_noncanonical_or_out_of_range_limits_are_refused() {
+    for (mode_code, argument) in [
+        (4, vec![]),
+        (4, vec![b'x'; 7]),
+        (4, vec![b'x'; 257]),
+        (4, vec![255; 8]),
+        (5, b"0".to_vec()),
+        (5, b"65536".to_vec()),
+        (5, b"01".to_vec()),
+        (5, b"+1".to_vec()),
+        (5, b"1x".to_vec()),
+        (5, b"4294967296".to_vec()),
+        (5, vec![255]),
+    ] {
+        let operation = FederatedOperation::ChannelMode {
+            session_id: SESSION,
+            channel_id: CHANNEL,
+            expected_channel_revision: 9,
+            changes: vec![ModeChangeArg {
+                direction: ModeDirection::Add,
+                mode_code,
+                argument: Zeroizing::new(argument),
+            }],
+        };
+        assert!(operation.to_object().is_err());
+    }
+}
+
 // STA-10: typed mask arguments must survive the real federation schema boundary.
 #[test]
 fn mask_modes_round_trip_through_typed_wire_arguments() -> TestResult {

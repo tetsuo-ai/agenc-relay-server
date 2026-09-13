@@ -11,7 +11,9 @@ The earlier Stage 10 implementation and repairs merged through
 runtime follow-up starts at merge commit
 `fd7d39476302caae385e69bdea126d0a54164233`.
 
-The latest operational changes are recorded in
+Further task isolation, generated administrator identity and federated MODE
+repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
+The preceding operational changes are recorded in
 [the operational repair report](stage-10-operational-repair.md). Earlier credential
 and runtime repairs are recorded in
 [the credential and runtime repair report](stage-10-credential-runtime-repair.md).
@@ -41,7 +43,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Implemented; real daemon replacement, registered reauthentication, session revocation, restart and receipt-order tests pass |
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired. Capability refusals, channel privacy, per-connection accounting and maintenance isolation repaired; aggregation scheduling and other items open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding and temporary cleanup repaired; other items open |
-| Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Disabled material and same-class key sharing repaired, preserving edge outbound TLS; OCSP, service-user and generated admin access remain open |
+| Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Disabled material, same-class key sharing and generated administrator UID repaired, preserving edge outbound TLS; OCSP and service-user checks remain open |
 | Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
 
 Earlier findings remain in `TODO.md` and `stage-10-qualification.md`. A finding
