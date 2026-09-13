@@ -33,10 +33,42 @@ fn values(profile: InitProfile) -> Result<InitValues, Box<dyn std::error::Error>
             .transpose()?,
         account_service_hpke_public_key: [5; 32],
         operator: OperatorTemplate {
+            local_uid: 0,
             operator_id: OperatorId::from_bytes([4; 16]),
             signing_public_key: [6; 32],
         },
     })
+}
+
+#[test]
+fn generated_admin_admission_and_operator_identity_use_the_same_uid() -> TestResult {
+    for uid in [0, 1001, u32::MAX] {
+        let mut values = values(InitProfile::Public)?;
+        values.operator.local_uid = uid;
+        let text = render_template(&values)?.replace(
+            "enabled = false\npurpose = \"client_tls\"",
+            "enabled = true\npurpose = \"client_tls\"",
+        );
+        let config = parse(&text)?;
+        let local = config
+            .listeners
+            .iter()
+            .find_map(|listener| listener.local_admin.as_ref())
+            .ok_or("missing generated local administrator")?;
+        assert_eq!(local.allowed_uids, vec![uid]);
+        assert!(local.allowed_gids.is_empty());
+        let operator = config
+            .moderation
+            .operators
+            .first()
+            .ok_or("missing generated operator")?;
+        assert_eq!(operator.local_uids, vec![uid]);
+        assert_eq!(
+            operator.signing_public_key,
+            values.operator.signing_public_key
+        );
+    }
+    Ok(())
 }
 
 #[test]

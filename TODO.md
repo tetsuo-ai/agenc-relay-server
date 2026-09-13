@@ -1606,9 +1606,11 @@ the closure branch at review time.
   dispatch, enforcing each connection's limits before parsing, and maintenance
   has independent capacity. Paused-time and actor-loop regressions cover those
   repairs; the aggregation/scheduling topology remains open.
-- [ ] A `JoinError` from one connection task cancels the shared accept and
-  connection tokens (`listener/mod.rs`, `supervisor/mod.rs`), against
-  Architecture 21.2. Unreachable while the panic hook exits the process.
+- [x] Connection `JoinError` outcomes retain the registered task identity and
+  failure policy. They cancel only that child's token; listeners keep accepting
+  and existing clients remain usable. Critical task failures still cancel the
+  tree. Aborted/unwound child tests and a real TLS listener regression cover
+  isolation and permit release; the production panic hook still terminates.
 - [x] The reader now checks parsed byte and request bounds before parsing a
   completed line and keeps refusal sticky. It drains each completed line before
   framing another, including a maximum-sized line split across reads. The two
@@ -1843,10 +1845,10 @@ None blocks the core-v1 gate.
   in `apply_close_session`, and the `DeleteAccount` touched-entity walk scan
   their maps linearly per command (`domain/decision.rs`). Fine at Stage 06
   scale; index them before the limits table is raised.
-- [ ] `agenc-ircd init` writes `allowed_uids = [0]` and operator
-  `local_uids = [0]` into the template, so the generated local admin listener
-  admits only root until the operator edits it. Consider the invoking user's
-  uid or an explicit `--admin-uid` option.
+- [x] `agenc-ircd init` writes its effective UID into both the local listener's
+  `allowed_uids` and the operator's `local_uids`. Root initialization still
+  selects UID 0. Template and real initialization regressions check matching
+  admission identities while preserving signing-key proof requirements.
 - [x] `account-invite create --expires-in` rejects signs, leading zeroes,
   whitespace, non-ASCII digits and overflow before reading protected inputs.
   A subprocess regression reproduces the earlier acceptance of `+1` and

@@ -406,6 +406,7 @@ impl LiveFixture {
             dns_name: Some(DnsName::parse(DNS_NAME)?),
             account_service_hpke_public_key: *hpke.public_key()?.as_bytes(),
             operator: OperatorTemplate {
+                local_uid: 0,
                 operator_id,
                 signing_public_key: *Ed25519SecretKey::from_bytes(operator_signing)
                     .public_key()

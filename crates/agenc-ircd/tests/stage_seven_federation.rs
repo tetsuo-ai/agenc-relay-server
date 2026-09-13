@@ -343,6 +343,7 @@ impl NodeFixture {
             dns_name: Some(DnsName::parse(&dns_name)?),
             account_service_hpke_public_key: *hpke.public_key()?.as_bytes(),
             operator: OperatorTemplate {
+                local_uid: 0,
                 operator_id,
                 signing_public_key: *Ed25519SecretKey::from_bytes(operator_signing)
                     .public_key()
@@ -899,6 +900,7 @@ fn exercise_network(network: &Network, coordinator: &mut DaemonProcess) -> TestR
     alice.send("TOPIC #fed :federated topic")?;
     let topic = bob.read_until(|line| line.contains("TOPIC #fed :federated topic"))?;
     assert_contains(&topic, ":alice!")?;
+    exercise_federated_modes(&mut alice, &mut bob)?;
     alice.send("KICK #fed bob :moving on")?;
     let kicked = bob.read_until(|line| line.contains("KICK #fed bob :moving on"))?;
     assert_contains(&kicked, ":alice!")?;
@@ -943,7 +945,15 @@ fn exercise_network(network: &Network, coordinator: &mut DaemonProcess) -> TestR
         ("edge b", &network.edge_b),
     ] {
         let text = fixture.log_text();
-        for needle in ["alice", "bob", "carol", "dave", "#fed", "hello from edge b"] {
+        for needle in [
+            "alice",
+            "bob",
+            "carol",
+            "dave",
+            "#fed",
+            "hello from edge b",
+            "federated-key",
+        ] {
             if text.contains(needle) {
                 return Err(failure(format!("{label} log leaked {needle:?}")));
             }
@@ -955,6 +965,42 @@ fn exercise_network(network: &Network, coordinator: &mut DaemonProcess) -> TestR
                 "{label} log leaked the federation address"
             )));
         }
+    }
+    Ok(())
+}
+
+fn exercise_federated_modes(alice: &mut IrcClient, bob: &mut IrcClient) -> TestResult {
+    alice.send("CAP REQ :standard-replies")?;
+    alice.read_until(|line| line.contains(" ACK "))?;
+    for (command, expected) in [
+        ("MODE #fed +l 3", " MODE #fed +l 3"),
+        ("MODE #fed +v :bob", " MODE #fed +v bob"),
+        ("MODE #fed +k :federated-key", " MODE #fed +k "),
+        ("MODE #fed +k :federated-key-two", " MODE #fed +k "),
+    ] {
+        alice.send(command)?;
+        let acknowledged = alice
+            .read_until(|line| {
+                line.contains(" MODE #fed ") || line.contains(" FAIL ") || line.contains(" 4")
+            })
+            .map_err(|error| failure(format!("alice awaiting {expected:?}: {error}")))?;
+        assert_contains(&acknowledged, expected)?;
+        bob.read_until(|line| line.contains(expected))
+            .map_err(|error| failure(format!("bob awaiting {expected:?}: {error}")))?;
+    }
+    bob.send("PART #fed")?;
+    bob.read_until(|line| line.contains(" PART #fed"))?;
+    alice.read_until(|line| line.starts_with(":bob!") && line.contains(" PART #fed"))?;
+    bob.send("JOIN #fed federated-key-two")?;
+    bob.read_until(|line| line.contains(" 366 bob #fed "))?;
+    alice.read_until(|line| line.starts_with(":bob!") && line.contains(" JOIN #fed"))?;
+    for (command, expected) in [
+        ("MODE #fed -k", " MODE #fed -k"),
+        ("MODE #fed -l", " MODE #fed -l"),
+    ] {
+        alice.send(command)?;
+        bob.read_until(|line| line.contains(expected))?;
+        alice.read_until(|line| line.contains(expected))?;
     }
     Ok(())
 }

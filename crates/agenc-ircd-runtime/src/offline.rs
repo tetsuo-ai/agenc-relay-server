@@ -1266,6 +1266,7 @@ fn write_configuration(
         dns_name: request.dns_name.clone(),
         account_service_hpke_public_key,
         operator: OperatorTemplate {
+            local_uid: rustix::process::geteuid().as_raw(),
             operator_id: identity.operator_id,
             signing_public_key: signing_public(&secrets.operator_signing),
         },
@@ -2015,6 +2016,19 @@ mod tests {
         }
         enable_test_listener(&root.0)?;
         let config = load_config(&config_path, ValidationDepth::Document)?;
+        let uid = rustix::process::geteuid().as_raw();
+        let local = config
+            .listeners
+            .iter()
+            .find_map(|listener| listener.local_admin.as_ref())
+            .ok_or(OfflineError::InvalidRequest)?;
+        assert_eq!(local.allowed_uids, vec![uid]);
+        let operator = config
+            .moderation
+            .operators
+            .first()
+            .ok_or(OfflineError::InvalidRequest)?;
+        assert_eq!(operator.local_uids, vec![uid]);
         assert_eq!(
             agenc_ircd_config::load_backup_trust_manifest(
                 &config.storage.backup_trust_manifest_file,
