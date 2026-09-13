@@ -255,3 +255,26 @@ async fn concurrent_producers_and_consumer_preserve_every_line_without_lost_wake
     assert_eq!(inputs.len(), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn continuously_ready_input_yields_to_other_runtime_tasks() -> TestResult {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (inputs, _) = inputs(1)?;
+    let port = inputs.open(ConnectionGeneration::new(1))?;
+    port.send(line(1, 1)?)?;
+    let observed = Arc::new(AtomicBool::new(false));
+    let running = Arc::clone(&observed);
+    let task = tokio::spawn(async move {
+        running.store(true, Ordering::Release);
+    });
+    for sequence in 1..=512 {
+        assert_line(inputs.recv().await, 1, sequence)?;
+        port.send(line(1, sequence + 1)?)?;
+    }
+    assert!(
+        observed.load(Ordering::Acquire),
+        "ready input monopolized the runtime worker"
+    );
+    task.await?;
+    Ok(())
+}

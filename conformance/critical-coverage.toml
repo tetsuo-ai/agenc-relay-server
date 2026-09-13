@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 782
-reviewed_source_sha256 = "cd80f1cf9532e23cbd80e356316b62004106a885bfaf9b48011bf560756f0ed2"
+reviewed_source_sha256 = "a2437e3de728cbedff5a2ad5647d31400fb45f78698b502aabdc3ee751dd1012"
 deferred = []
 
 [[region]]
@@ -211,7 +211,7 @@ reason = "Borrowing ciphertext retains the exact authentication-tag minimum and 
 id = "connection-input-publication"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/state_core/client_input.rs"
-source_sha256 = "c424247f0d1345567b0417cdd1cff54e78285925c1ad612b96cbf8267ac05363"
+source_sha256 = "4b18c16825dc5dca79e3120094930033e1898b93ad813cf8a3797b3fb46b327f"
 start_line = 60
 end_line = 90
 metric = "branches"

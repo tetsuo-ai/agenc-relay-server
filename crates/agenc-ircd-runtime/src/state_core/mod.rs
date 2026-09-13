@@ -3897,6 +3897,7 @@ impl StateCore {
         let mut cancellation_open = true;
         let mut lifecycle_open = true;
         let mut physical_closes_open = true;
+        let mut prefer_client_input = false;
         let mut cancellation_pending = false;
         let mut lifecycle_target = None;
         let mut lifecycle_completed = None;
@@ -4015,6 +4016,10 @@ impl StateCore {
             let wake = self.wake_instant();
             let prefix_wake = self.prefix_wake_instant();
             let whowas_wake = self.whowas_wake_instant();
+            // Alternate the two input lanes when both are ready. Checking the
+            // receiver here cannot lose a wake: a late control message waits
+            // behind at most the one client line selected in this iteration.
+            let prefer_control = !prefer_client_input && (!inbox.is_empty() || inbox.is_closed());
             let exit = tokio::select! {
                 biased;
                 () = token.cancelled(), if cancellation_open => {
@@ -4294,11 +4299,17 @@ impl StateCore {
                         Some(inputs) => inputs.recv().await,
                         None => std::future::pending().await,
                     }
-                }, if self.client_inputs.is_some() && !hold_inbox && !activation_barrier => self.step_message(message),
-                message = inbox.recv(), if !hold_inbox && !activation_barrier => match message {
-                    Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
-                    Some(message) => self.step_message(message),
-                    None => Some(StateCoreExit::InboxClosed),
+                }, if self.client_inputs.is_some() && !prefer_control && !hold_inbox && !activation_barrier => {
+                    prefer_client_input = false;
+                    self.step_message(message)
+                },
+                message = inbox.recv(), if !hold_inbox && !activation_barrier => {
+                    prefer_client_input = true;
+                    match message {
+                        Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
+                        Some(message) => self.step_message(message),
+                        None => Some(StateCoreExit::InboxClosed),
+                    }
                 },
                 _ = flush_poll.tick(), if waiting_for_shutdown_flush => None,
                 () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() && !refresh_in_flight && !provisional_barrier => {

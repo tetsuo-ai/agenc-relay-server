@@ -6,7 +6,9 @@ each reader, but one busy connection could consume the shared input capacity.
 
 StateCore now prepares a queue for each admitted connection and returns its
 input port in the admission acknowledgement. One ready entry per connection
-supports round-robin dispatch with FIFO order within each queue. Open/control
+supports round-robin dispatch with FIFO order within each queue. Ready client
+and control input alternate, and queue receives spend Tokio cooperative task
+budget so continuous input cannot monopolize a worker. Open/control
 notices keep their bounded channel; maintenance keeps its separate channel.
 
 The existing reader ledger reserves configured request and wire-byte capacity
@@ -34,7 +36,10 @@ Eight concurrent producers deliver 1,024 messages without lost readiness.
 Paused-clock reader tests cover byte pressure, retention after dequeue,
 30-second stalls and wakeup when StateCore closes. Actor tests exercise
 admitted ports with a full control inbox and an ephemeral command queued
-behind a durable mutation.
+behind a durable mutation. Review also reproduced a starvation bug in the
+first actor integration: a ready client queue delayed an already queued open
+notice behind 512 lines. The regression now requires admission after at most
+one client line. A separate single-worker test checks cooperative scheduling.
 
 The runtime unit suite passed 1,355 tests with one ignored test during
 implementation. Source checks pass; final lint and full implementation gate

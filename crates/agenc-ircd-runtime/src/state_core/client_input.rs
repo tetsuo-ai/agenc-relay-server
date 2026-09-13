@@ -193,6 +193,9 @@ impl ClientInputs {
     }
 
     pub(crate) async fn recv(&self) -> StateCoreMessage {
+        // This custom queue must yield like Tokio's bounded channels when a
+        // producer continuously replenishes it on another runtime worker.
+        tokio::task::coop::consume_budget().await;
         loop {
             let available = self.shared.available.notified();
             if let Some(message) = self.take() {
