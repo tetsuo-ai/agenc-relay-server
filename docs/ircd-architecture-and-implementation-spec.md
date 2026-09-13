@@ -9078,6 +9078,7 @@ fields:
 | `max_connections` | integer, required | 1..applicable Section-19 hard maximum |
 | `tls_certificate_file` | optional path | required for every purpose except `admin_local` |
 | `tls_private_key_file` | optional path | required with certificate; secret-file rules |
+| `tls_ocsp_staple_file` | optional path, absent | only `client_tls`/`client_wss`; one operator-supplied OCSP response for the configured leaf certificate |
 | `client_ca_file` | optional path | required only for `federation`/`admin_tls` |
 | `allowed_origins` | string array, empty | only `client_wss`; 0..64 exact HTTPS origins |
 | `allow_missing_origin` | bool, false | only `client_wss`; requires a non-browser-only listener decision |
@@ -9106,6 +9107,21 @@ listener on a coordinator and none on an edge; when false, neither role has
 one. There is at most one admin-local and one admin-TLS listener. Listener
 enable/address/purpose is restart-only; a certificate chain with unchanged key
 identity and an Origin allowlist are reloadable after complete validation.
+
+When `tls.require_ocsp_staple=true`, every enabled `client_tls` and
+`client_wss` listener MUST provide `tls_ocsp_staple_file`; disabled listeners
+need no staple material until enabled. The key is forbidden for onion,
+federation, and admin purposes. A configured response MUST contain 1..65,536
+bytes and obey the protected public-file ownership, path, and write-permission
+rules. It contains the DER OCSP response itself, without PEM wrapping.
+
+The daemon supplies these bounded opaque bytes in the TLS handshake. Requiring
+a staple requires its presence; it does not assert that the daemon has checked
+the responder signature, certificate status, or validity interval. The operator
+MUST provision and refresh a response for the configured leaf; a peer relying
+on revocation status MUST validate it. Response bytes are reloadable under
+the same complete preparation and atomic activation rules as the certificate
+chain. A failed preparation preserves the active certificate and staple.
 
 ### C.4 TLS and federation
 
