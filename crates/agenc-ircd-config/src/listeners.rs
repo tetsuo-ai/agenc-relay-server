@@ -341,7 +341,9 @@ fn parse_ocsp_staple(
 ) -> Result<Option<PathBuf>, ConfigError> {
     let path = optional_string(row, "tls_ocsp_staple_file")?;
     match (purpose, path) {
-        (Some(ListenerPurpose::ClientTls), Some(path)) => resolver.resolve(path).map(Some),
+        (Some(ListenerPurpose::ClientTls | ListenerPurpose::ClientWss), Some(path)) => {
+            resolver.resolve(path).map(Some)
+        }
         (_, None) => Ok(None),
         _ => Err(ConfigError::InvalidValue),
     }

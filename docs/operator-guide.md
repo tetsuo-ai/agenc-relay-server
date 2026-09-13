@@ -34,6 +34,14 @@ Initialization prints a Tor fragment, the service-unit reminder, and certificate
 
 Place each certificate and private key at the path shown in the generated configuration. Check the certificate identity and the configured DNS name or onion pin. Set `enabled = true` only for listeners whose bind address, certificate, and transport purpose have been reviewed.
 
+For public `client_tls` or `client_wss` listeners, `tls_ocsp_staple_file`
+names a protected file containing the leaf certificate's DER OCSP response
+(1..65,536 bytes). Setting `[tls] require_ocsp_staple = true` requires that
+file for every enabled public listener. Provision a current response, refresh
+it before expiry, and use `REHASH` to activate it. The daemon transports the
+response as opaque bytes; the setting does not verify revocation status or
+freshness. Onion, federation and admin listeners reject this field.
+
 For an onion listener, install `deploy/tor/agenc-ircd.torrc.snippet` after checking the hidden-service and Unix-socket paths. Tor creates the onion identity. Copy the resulting onion address and the certificate SPKI hash into the paired configuration fields.
 
 Add the Tor service account to `agenc-ircd-sockets`, then restart Tor so its process receives the new supplementary group. Keep `/var/lib/tor/agenc-ircd` owned by the Tor service account and inaccessible to `agenc-ircd` and `agenc-ircd-sockets`. The shared group applies only to `/run/agenc-ircd` and the sockets below it.

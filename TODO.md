@@ -1585,9 +1585,12 @@ the closure branch at review time.
   checkpoints. The retention regression uses that index without inserting
   rows by hand, commits the expired prefix deletion and checks the reopened
   audit authority and reconstructed checkpoint metadata.
-- [ ] Listener key `tls_ocsp_staple_file` is accepted by the configuration
-  parser but absent from Appendix C.3, which closes the listener key set.
-  Either add it to the specification as a protocol revision or reject it.
+- [x] Appendix C.3 now declares `tls_ocsp_staple_file` in a separate normative
+  revision, with public TLS/WSS applicability, bounded protected-file input,
+  presence semantics and atomic reload. The parser accepts WSS staples,
+  resolving the contradiction with `tls.require_ocsp_staple`. Configuration
+  regressions cover optional/required WSS staples and forbidden purposes.
+  See `docs/stage-10-ocsp-repair.md`.
 - [ ] With euid 0, secret file checks accept only root-owned files, so root
   cannot run `print-onboarding`, `check-config`, or `account-invite create`
   against keys installed for the service account.
