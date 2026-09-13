@@ -8,6 +8,7 @@ use agenc_ircd_crypto::{
 
 use crate::codec::{Decoder, Encoder};
 use crate::{StorageError, StoredKey, TableId};
+use std::borrow::Cow;
 
 const ENVELOPE_VERSION: u16 = 1;
 const FIXED_ENVELOPE_BYTES: usize = 40;
@@ -48,7 +49,7 @@ impl<'a> StorageSealContext<'a> {
         nonce_bytes: [u8; 24],
         stored_key: &StoredKey,
         plaintext: &[u8],
-    ) -> Result<SealedRecord, StorageError> {
+    ) -> Result<SealedRecord<'static>, StorageError> {
         if plaintext.len() > MAX_STORAGE_PLAINTEXT_BYTES {
             return Err(StorageError::LimitExceeded);
         }
@@ -72,23 +73,23 @@ impl<'a> StorageSealContext<'a> {
             record_schema,
             key_generation: self.key_generation,
             nonce: nonce_bytes,
-            ciphertext: sealed.as_bytes().to_vec(),
+            ciphertext: Cow::Owned(sealed.into_bytes()),
         })
     }
 }
 
 /// A complete authenticated persistent envelope.
-pub struct SealedRecord {
+pub struct SealedRecord<'a> {
     table: TableId,
     record_schema: u32,
     key_generation: u32,
     nonce: [u8; 24],
-    ciphertext: Vec<u8>,
+    ciphertext: Cow<'a, [u8]>,
 }
 
-impl SealedRecord {
-    /// Parses a complete envelope without authenticating its plaintext.
-    pub fn decode(encoded: &[u8]) -> Result<Self, StorageError> {
+impl<'a> SealedRecord<'a> {
+    /// Borrows a complete envelope without copying ciphertext or authenticating plaintext.
+    pub fn decode(encoded: &'a [u8]) -> Result<Self, StorageError> {
         if !(MIN_SEALED_RECORD_BYTES..=MAX_SEALED_RECORD_BYTES).contains(&encoded.len()) {
             return Err(StorageError::LimitExceeded);
         }
@@ -103,7 +104,7 @@ impl SealedRecord {
             return Err(StorageError::InvalidEncoding);
         }
         let nonce = decoder.array()?;
-        let ciphertext = decoder.vector_u32(MAX_STORAGE_CIPHERTEXT_BYTES)?.to_vec();
+        let ciphertext = decoder.vector_u32(MAX_STORAGE_CIPHERTEXT_BYTES)?;
         decoder.finish()?;
         if ciphertext.len() < 16 {
             return Err(StorageError::InvalidEncoding);
@@ -113,7 +114,7 @@ impl SealedRecord {
             record_schema,
             key_generation,
             nonce,
-            ciphertext,
+            ciphertext: Cow::Borrowed(ciphertext),
         })
     }
 
@@ -136,7 +137,7 @@ impl SealedRecord {
         let table = StorageTable::new(self.table.as_u16())?;
         let key = derive_storage_record_key(master_key, binding, table, self.key_generation)?;
         let nonce = StorageNonce::from_reserved_bytes(self.nonce);
-        let ciphertext = SealedStorageRecord::from_bytes(self.ciphertext.clone())?;
+        let ciphertext = SealedStorageRecord::from_slice(&self.ciphertext)?;
         open_storage_record(
             &key,
             &nonce,
@@ -183,5 +184,59 @@ impl SealedRecord {
     #[must_use]
     pub const fn key_generation(&self) -> u32 {
         self.key_generation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agenc_ircd_crypto::DatabaseBinding;
+    use agenc_ircd_types::{DatabaseId, NetworkId, ServerId, ServerIncarnation};
+
+    #[test]
+    fn decoding_borrows_the_envelope_ciphertext_and_preserves_authentication()
+    -> Result<(), StorageError> {
+        let binding = DatabaseBinding::new(
+            NetworkId::from_bytes([1; 32]),
+            ServerId::from_bytes([2; 16]),
+            ServerIncarnation::from_bytes([3; 16]),
+            DatabaseId::from_bytes([4; 16]),
+        );
+        let master = StorageMasterKey::from_bytes([5; 32]);
+        let key = StoredKey::new(vec![6; 32])?;
+        let source = StorageSealContext::new(&master, binding, 1)?.seal(
+            TableId::Account,
+            1,
+            [7; 24],
+            &key,
+            b"borrowed storage record",
+        )?;
+        let encoded = source.encode()?;
+        let decoded = SealedRecord::decode(&encoded)?;
+        let ciphertext = encoded
+            .get(FIXED_ENVELOPE_BYTES..)
+            .ok_or(StorageError::InvalidEncoding)?;
+        assert_eq!(decoded.ciphertext.as_ptr(), ciphertext.as_ptr());
+        assert_eq!(decoded.encode()?, encoded);
+        assert_eq!(decoded.record_id()?, source.record_id()?);
+        let opened = decoded.open(&master, binding, TableId::Account, 1, 1, &key)?;
+        assert_eq!(
+            opened.expose_for_storage_codec(),
+            b"borrowed storage record"
+        );
+        assert!(
+            decoded
+                .open(&master, binding, TableId::Account, 2, 1, &key)
+                .is_err()
+        );
+        let mut tampered = encoded.clone();
+        let last = tampered.last_mut().ok_or(StorageError::InvalidEncoding)?;
+        *last ^= 1;
+        let decoded = SealedRecord::decode(&tampered)?;
+        assert!(matches!(
+            decoded.open(&master, binding, TableId::Account, 1, 1, &key),
+            Err(StorageError::AuthenticationFailed)
+        ));
+        Ok(())
     }
 }

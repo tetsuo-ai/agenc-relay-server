@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 778
-reviewed_source_sha256 = "5d6f10ee489d3f688f161c6c4096f489e9b5b9c2e07119936428fb084a24ccb6"
+reviewed_source_sha256 = "2986aad5579cf3fa584520ab596097e41fdc2d2dc24e8a6d331152cff278341a"
 deferred = []
 
 [[region]]
@@ -196,3 +196,13 @@ start_line = 624
 end_line = 641
 metric = "branches"
 reason = "Role targets resolve by the exact transmitted User ID and cannot follow a nickname reassignment."
+
+[[region]]
+id = "borrowed-storage-ciphertext-bounds"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-crypto/src/storage.rs"
+source_sha256 = "fe3381678abcffc908f5bc28296af1ef225fa6031a5b6d7b2656614f4f4c862b"
+start_line = 248
+end_line = 253
+metric = "branches"
+reason = "Borrowing ciphertext retains the exact authentication-tag minimum and maximum record bound before AEAD opening."

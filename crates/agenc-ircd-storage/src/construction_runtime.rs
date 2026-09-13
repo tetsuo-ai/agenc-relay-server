@@ -513,8 +513,11 @@ impl ConstructionPlanBuilder {
 
     fn reverse_restore_manifests(&self, state: StateMetaTbs) -> Result<(), StorageError> {
         if state.manifest_sequence > state.checkpoint_manifest_sequence {
-            for sequence in (state.checkpoint_manifest_sequence + 1..=state.manifest_sequence).rev()
-            {
+            let first = state
+                .checkpoint_manifest_sequence
+                .checked_add(1)
+                .ok_or(StorageError::Overflow)?;
+            for sequence in (first..=state.manifest_sequence).rev() {
                 self.reverse_restore_manifest(sequence)?;
             }
         }

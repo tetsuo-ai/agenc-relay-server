@@ -6,6 +6,7 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
+use std::borrow::Cow;
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
@@ -232,15 +233,29 @@ impl PartialEq for StorageIndex {
 impl Eq for StorageIndex {}
 
 /// Authenticated storage ciphertext with its full Poly1305 tag.
-pub struct SealedStorageRecord(Vec<u8>);
+pub struct SealedStorageRecord<'a>(Cow<'a, [u8]>);
 
-impl SealedStorageRecord {
+impl<'a> SealedStorageRecord<'a> {
     /// Constructs a ciphertext read from a bounded storage envelope.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, CryptoError> {
         if !(16..=MAX_STORAGE_CIPHERTEXT_BYTES).contains(&bytes.len()) {
             return Err(CryptoError::InvalidEncoding);
         }
-        Ok(Self(bytes))
+        Ok(Self(Cow::Owned(bytes)))
+    }
+
+    /// Borrows bounded ciphertext without copying it; opening still authenticates its tag.
+    pub fn from_slice(bytes: &'a [u8]) -> Result<Self, CryptoError> {
+        if !(16..=MAX_STORAGE_CIPHERTEXT_BYTES).contains(&bytes.len()) {
+            return Err(CryptoError::InvalidEncoding);
+        }
+        Ok(Self(Cow::Borrowed(bytes)))
+    }
+
+    /// Moves owned ciphertext out, copying only when this record borrows its input.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0.into_owned()
     }
 
     /// Borrows the complete ciphertext and tag.
@@ -353,7 +368,7 @@ pub fn seal_storage_record(
     record_schema: u32,
     stored_database_key: &[u8],
     plaintext: &[u8],
-) -> Result<SealedStorageRecord, CryptoError> {
+) -> Result<SealedStorageRecord<'static>, CryptoError> {
     validate_record_input(record_schema, stored_database_key, plaintext.len())?;
     let aad = record_aad(key, record_schema, stored_database_key)?;
     let cipher = XChaCha20Poly1305::new_from_slice(key.bytes.as_bytes())
@@ -378,7 +393,7 @@ pub fn open_storage_record(
     nonce: &StorageNonce,
     record_schema: u32,
     stored_database_key: &[u8],
-    ciphertext: &SealedStorageRecord,
+    ciphertext: &SealedStorageRecord<'_>,
 ) -> Result<OpenedStoragePlaintext, CryptoError> {
     let plaintext_len = ciphertext
         .as_bytes()
@@ -460,6 +475,67 @@ mod tests {
             ServerIncarnation::from_bytes([3_u8; 16]),
             DatabaseId::from_bytes([4_u8; 16]),
         )
+    }
+
+    #[test]
+    fn borrowed_ciphertext_preserves_bounds_and_uses_the_original_allocation()
+    -> Result<(), CryptoError> {
+        let bytes = vec![0; MAX_STORAGE_CIPHERTEXT_BYTES + 1];
+        for size in [
+            0,
+            15,
+            16,
+            MAX_STORAGE_CIPHERTEXT_BYTES,
+            MAX_STORAGE_CIPHERTEXT_BYTES + 1,
+        ] {
+            let input = bytes.get(..size).ok_or(CryptoError::InvalidEncoding)?;
+            let record = SealedStorageRecord::from_slice(input);
+            if (16..=MAX_STORAGE_CIPHERTEXT_BYTES).contains(&size) {
+                let record = record?;
+                assert_eq!(record.as_bytes().as_ptr(), input.as_ptr());
+                assert_eq!(record.as_bytes().len(), size);
+            } else {
+                assert!(matches!(record, Err(CryptoError::InvalidEncoding)));
+            }
+        }
+        let owned = vec![1; 16];
+        let original = owned.as_ptr();
+        let moved = SealedStorageRecord::from_bytes(owned)?.into_bytes();
+        assert_eq!(moved.as_ptr(), original);
+        let copied = SealedStorageRecord::from_slice(&moved)?.into_bytes();
+        assert_eq!(copied, moved);
+        assert_ne!(copied.as_ptr(), moved.as_ptr());
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_ciphertext_still_authenticates_the_record_binding_and_tag()
+    -> Result<(), CryptoError> {
+        let key = derive_storage_record_key(
+            &StorageMasterKey::from_bytes([7; 32]),
+            binding(),
+            StorageTable::new(3)?,
+            1,
+        )?;
+        let nonce = StorageNonce::from_reserved_bytes([8; 24]);
+        let sealed = seal_storage_record(&key, nonce, 1, b"key", b"borrowed plaintext")?;
+        let nonce = StorageNonce::from_reserved_bytes([8; 24]);
+        let borrowed = SealedStorageRecord::from_slice(sealed.as_bytes())?;
+        let opened = open_storage_record(&key, &nonce, 1, b"key", &borrowed)?;
+        assert_eq!(opened.expose_for_storage_codec(), b"borrowed plaintext");
+        assert!(matches!(
+            open_storage_record(&key, &nonce, 1, b"another-key", &borrowed),
+            Err(CryptoError::AuthenticationFailed)
+        ));
+        let mut tampered = sealed.into_bytes();
+        let last = tampered.last_mut().ok_or(CryptoError::InvalidEncoding)?;
+        *last ^= 1;
+        let borrowed = SealedStorageRecord::from_slice(&tampered)?;
+        assert!(matches!(
+            open_storage_record(&key, &nonce, 1, b"key", &borrowed),
+            Err(CryptoError::AuthenticationFailed)
+        ));
+        Ok(())
     }
 
     #[test]

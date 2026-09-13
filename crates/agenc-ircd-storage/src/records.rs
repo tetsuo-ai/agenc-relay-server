@@ -782,11 +782,11 @@ fn validate_companion_plaintext(key: &StoredKey, plaintext: &[u8]) -> Result<(),
 }
 
 /// Validates an encoded sealed record against the closed table/key/schema inventory.
-pub fn validate_sealed_record(
+pub fn validate_sealed_record<'a>(
     table: TableId,
     stored_key: &StoredKey,
-    encoded: &[u8],
-) -> Result<SealedRecord, StorageError> {
+    encoded: &'a [u8],
+) -> Result<SealedRecord<'a>, StorageError> {
     table_schema(table).validate_key(stored_key.as_bytes())?;
     let sealed = SealedRecord::decode(encoded)?;
     if sealed.table() != table || sealed.record_schema() != 1 {

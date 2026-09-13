@@ -31,9 +31,9 @@ review = "Login digest equality uses subtle::ConstantTimeEq. The public login-in
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/storage.rs"
-sha256 = "bf9c4423d5295b4723e115e170578577ad5900c9d8112e1b5be800875abda741"
+sha256 = "fe3381678abcffc908f5bc28296af1ef225fa6031a5b6d7b2656614f4f4c862b"
 symbols = ["StorageIndex::matches", "StorageMasterKey::matches", "StorageMasterKey::source_operation_key_id", "StorageMasterKey::target_operation_key_id"]
-review = "Private storage-index and storage-master-key equality use subtle::ConstantTimeEq over all 32 bytes. Source- and target-role resumability IDs use separate domain labels and expose only a digest. The 2026-09-10 re-review against 68defd5 found only DatabaseBinding::database_instance_id, a const accessor returning the existing public database identity. It adds no secret-dependent work or comparison. All four reviewed functions are byte-for-byte unchanged."
+review = "Private storage-index and storage-master-key equality use subtle::ConstantTimeEq over all 32 bytes. Source- and target-role resumability IDs use separate domain labels and expose only a digest. The 2026-09-10 re-review against 68defd5 found only DatabaseBinding::database_instance_id, a const accessor returning the existing public database identity. It adds no secret-dependent work or comparison. All four reviewed functions are byte-for-byte unchanged. The 2026-09-13 re-review against 5721b3d confirmed the same four functions remain unchanged. SealedStorageRecord now stores owned or borrowed ciphertext; the new constructor checks only public ciphertext length, and ownership selection determines whether materialization copies. Opening retains the same associated-data construction and XChaCha20Poly1305 decrypt call. No secret comparison, authentication selection, key derivation, or plaintext lifetime changed."
 
 [[surface]]
 path = "vendor/opaque-ke-4.0.1/src/opaque.rs"
@@ -49,4 +49,4 @@ review = "TripleDH compares the expected and supplied KE3 MAC with ConstantTimeE
 
 [gate]
 status = "evidence-only"
-reason = "The 2026-09-10 implementation re-review binds the two changed crypto files by their source hashes. The four auth and vendored OPAQUE source hashes remain unchanged. This artifact does not claim gate closure or replace any qualification for an exact source revision."
+reason = "The 2026-09-10 implementation re-review binds the two changed crypto files by their source hashes. The four auth and vendored OPAQUE source hashes remain unchanged. The 2026-09-13 ciphertext-ownership re-review updates only the storage adapter binding; all other source hashes remain unchanged. This artifact does not claim gate closure or replace any qualification for an exact source revision."
