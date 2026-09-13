@@ -549,6 +549,7 @@ fn required_ocsp_staples_are_explicit_and_public_tls_only() {
 }
 
 #[test]
+#[cfg(feature = "wss")]
 fn required_ocsp_staples_support_enabled_websocket_listeners() {
     let wss = mutate(
         PUBLIC,
