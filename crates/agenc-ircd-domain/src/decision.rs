@@ -1212,6 +1212,10 @@ fn duplicate_mode_change(change: &ModeChange) -> Result<ModeChange, DomainError>
             list: *list,
             entry_id: *entry_id,
         },
+        ModeChange::RemoveMaskValue { list, mask } => ModeChange::RemoveMaskValue {
+            list: *list,
+            mask: duplicate_typed_mask(mask)?,
+        },
     })
 }
 
@@ -4271,6 +4275,9 @@ impl DomainState {
             ModeChange::RemoveMask { list, entry_id } => {
                 mask_list_mut(channel, list).retain(|entry| entry.entry_id != entry_id);
             }
+            ModeChange::RemoveMaskValue { list, mask } => {
+                mask_list_mut(channel, list).retain(|entry| entry.mask != mask);
+            }
         }
     }
 
@@ -4864,6 +4871,12 @@ impl<'a> ModeValidationState<'a> {
             ModeChange::RemoveMask { list, entry_id } => {
                 self.apply_mask_remove(channel, actor_role, *list, *entry_id)?;
             }
+            ModeChange::RemoveMaskValue { list, mask } => {
+                let entry_id = self
+                    .entry_for_mask(channel, *list, mask)
+                    .ok_or(DomainError::InvalidArgument)?;
+                self.apply_mask_remove(channel, actor_role, *list, entry_id)?;
+            }
             ModeChange::InviteOnly(_)
             | ModeChange::Moderated(_)
             | ModeChange::TopicProtected(_)
@@ -4986,6 +4999,28 @@ impl<'a> ModeValidationState<'a> {
         found
     }
 
+    fn entry_for_mask(
+        &self,
+        channel: &'a crate::ChannelState,
+        list: MaskList,
+        mask: &TypedMask,
+    ) -> Option<EntryId> {
+        let original = mask_list(channel, list)
+            .iter()
+            .filter_map(|entry| (entry.mask == *mask).then_some(entry.entry_id));
+        let added = self.mask_deltas.iter().filter_map(|delta| match delta {
+            ModeMaskDelta::Added {
+                list: added_list,
+                entry_id,
+                mask: added_mask,
+            } if *added_list == list && **added_mask == *mask => Some(*entry_id),
+            _ => None,
+        });
+        original
+            .chain(added)
+            .find(|entry_id| self.mask_for_entry(channel, list, *entry_id).is_some())
+    }
+
     fn mask_is_present(
         &self,
         channel: &'a crate::ChannelState,
@@ -5096,7 +5131,7 @@ fn validate_mode_authority(
             }
             Ok(())
         }
-        ModeChange::AddMask { list, mask } => {
+        ModeChange::AddMask { list, mask } | ModeChange::RemoveMaskValue { list, mask } => {
             if mask.is_quiet() && *list != MaskList::Ban {
                 return Err(DomainError::InvalidArgument);
             }

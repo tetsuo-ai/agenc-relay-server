@@ -12,7 +12,9 @@ use agenc_ircd_federation_wire::access::{
     expect_schema, fixed, opaque, opaque_field, optional_fixed, structure, text, unsigned,
     unsigned_u16, vector,
 };
-use agenc_ircd_federation_wire::{CodecError, SchemaObject, WireValue, operation_schema_name};
+use agenc_ircd_federation_wire::{
+    CanonicalEncode, CodecError, DecodeBudget, SchemaObject, WireValue, operation_schema_name,
+};
 use agenc_ircd_types::{ChannelInstanceId, ConnectionId, FederationOpcode, SessionId, UserId};
 use zeroize::Zeroizing;
 
@@ -35,6 +37,7 @@ pub(crate) struct JoinTarget {
 }
 
 /// One requested mode change: the registered code plus its raw argument.
+/// Mask arguments are canonical client text here and typed objects on the wire.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ModeChangeArg {
     pub direction: ModeDirection,
@@ -700,7 +703,7 @@ fn mode_change_objects(changes: &[ModeChangeArg]) -> Result<Vec<SchemaObject>, C
                     ModeDirection::Remove => 2,
                 }),
                 unsigned_value(u64::from(change.mode_code)),
-                opaque(&change.argument)?,
+                mode_argument_object(change)?,
             ],
         )?);
     }
@@ -714,14 +717,36 @@ fn mode_changes_of(items: &[SchemaObject]) -> Result<Vec<ModeChangeArg>, CodecEr
         .map_err(|_| CodecError::AllocationFailed)?;
     for item in items {
         expect_schema(item, "FederationModeChange")?;
+        let mode_code = unsigned_u16(item, "mode_code")?;
         changes.push(ModeChangeArg {
             direction: direction_of_value(unsigned(item, "direction")?)
                 .ok_or(CodecError::UnknownDiscriminant)?,
-            mode_code: unsigned_u16(item, "mode_code")?,
-            argument: Zeroizing::new(opaque_field(item, "argument")?.to_vec()),
+            mode_code,
+            argument: Zeroizing::new(mode_argument_of(item, mode_code)?),
         });
     }
     Ok(changes)
+}
+
+fn mode_argument_object(change: &ModeChangeArg) -> Result<WireValue, CodecError> {
+    if (1..=3).contains(&change.mode_code) {
+        let mask = std::str::from_utf8(&change.argument).map_err(|_| CodecError::CrossReference)?;
+        let encoded = super::typed_mask_object(mask)?.encode_canonical()?;
+        opaque(encoded.as_slice())
+    } else {
+        opaque(&change.argument)
+    }
+}
+
+fn mode_argument_of(item: &SchemaObject, mode_code: u16) -> Result<Vec<u8>, CodecError> {
+    let argument = opaque_field(item, "argument")?;
+    if (1..=3).contains(&mode_code) {
+        let mut budget = DecodeBudget::new(4096, 16);
+        let mask = SchemaObject::decode_exact("FederationTypedMask", argument, &mut budget)?;
+        Ok(super::typed_mask_of(&mask)?.into_bytes())
+    } else {
+        Ok(argument.to_vec())
+    }
 }
 
 fn join_targets_of(items: &[SchemaObject]) -> Result<Vec<JoinTarget>, CodecError> {

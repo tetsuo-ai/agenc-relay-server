@@ -107,6 +107,7 @@ fn disabled_restart(
             line.contains("FAIL CHATHISTORY")
                 || (line.contains(" 421 ") && line.contains("CHATHISTORY"))
                 || line.contains(" 481 DisabledHistory :Command is unavailable")
+                || line.contains(" 481 DisabledHistory :Permission denied")
         }),
         "{output:?}"
     );

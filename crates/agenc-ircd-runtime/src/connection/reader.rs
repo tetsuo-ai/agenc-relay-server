@@ -8,6 +8,11 @@
 //! inbox cannot take them the reader stops reading the socket, and after 30
 //! seconds of stall it closes the connection.
 
+mod admission;
+
+use admission::Admission;
+pub use admission::ClientLinePermit;
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -81,6 +86,8 @@ struct Pending {
     bytes: usize,
     rejected: bool,
     accepted_lines: Arc<AtomicU64>,
+    admission: Arc<Admission>,
+    permit: Option<ClientLinePermit>,
 }
 
 impl Pending {
@@ -146,6 +153,8 @@ pub(crate) async fn run_reader_sequenced<R: AsyncRead + Unpin>(
         bytes: 0,
         rejected: false,
         accepted_lines,
+        admission: Arc::new(Admission::default()),
+        permit: None,
     };
     loop {
         let read = tokio::select! {
@@ -194,6 +203,23 @@ async fn feed_and_forward(
     token: &CancellationToken,
 ) -> Result<(), CloseReason> {
     for slice in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if slice.last() == Some(&b'\n') {
+            let bytes = framer
+                .buffered_bytes()
+                .checked_add(slice.len())
+                .and_then(|bytes| bytes.checked_sub(2))
+                .ok_or(CloseReason::ProtocolError)?;
+            if bytes > limits.arena_bytes() {
+                return Err(CloseReason::ProtocolError);
+            }
+            pending.permit = Some(tokio::select! {
+                () = token.cancelled() => return Err(CloseReason::Shutdown),
+                () = inbox.closed() => return Err(CloseReason::Shutdown),
+                permit = tokio::time::timeout(
+                    READ_STALL_BUDGET, pending.admission.reserve(bytes, limits),
+                ) => permit.map_err(|_| CloseReason::ReadStall)?,
+            });
+        }
         if framer
             .feed(slice, |line| pending.accept(line, limits))
             .is_err()
@@ -202,6 +228,8 @@ async fn feed_and_forward(
             return Err(CloseReason::ProtocolError);
         }
         forward_pending(pending, generation, inbox, token).await?;
+        // Empty lines consume no parsed request slot.
+        pending.permit = None;
     }
     Ok(())
 }
@@ -220,10 +248,11 @@ async fn forward_pending(
             .load(Ordering::Relaxed)
             .checked_add(1)
             .ok_or(CloseReason::Overload)?;
-        let line = StateCoreMessage::Line {
+        let line = StateCoreMessage::QueuedLine {
             generation,
             sequence,
             message,
+            permit: pending.permit.take().ok_or(CloseReason::ProtocolError)?,
         };
         let sent = tokio::select! {
             () = token.cancelled() => return Err(CloseReason::Shutdown),
@@ -249,6 +278,8 @@ mod tests {
             bytes: 0,
             rejected: false,
             accepted_lines: Arc::new(AtomicU64::new(0)),
+            admission: Arc::new(Admission::default()),
+            permit: None,
         }
     }
 
@@ -283,7 +314,7 @@ mod tests {
         assert_eq!(task.await?, CloseReason::ReadStall);
         assert_eq!(tokio::time::Instant::now() - start, READ_STALL_BUDGET);
         assert_eq!(observed.load(Ordering::Relaxed), 1);
-        let StateCoreMessage::Line {
+        let StateCoreMessage::QueuedLine {
             sequence, message, ..
         } = receiver.try_recv()?
         else {
@@ -292,6 +323,75 @@ mod tests {
         assert_eq!(sequence, 1);
         assert_eq!(message.trailing(), Some("one"));
         assert!(receiver.try_recv().is_err());
+        Ok(())
+    }
+
+    // STA-10: a roomy shared inbox must not bypass per-connection bounds.
+    #[tokio::test(start_paused = true)]
+    async fn connection_count_limit_holds_while_global_inbox_has_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::channel(128);
+        let result = run_reader(
+            &b"PING :one\r\nPING :two\r\n"[..],
+            ConnectionGeneration::new(7),
+            ReaderLimits::new(1, MAX_PHYSICAL_LINE_BYTES)?,
+            sender,
+            CancellationToken::root(),
+        )
+        .await;
+        assert_eq!(result, CloseReason::ReadStall);
+        assert_eq!(receiver.len(), 1);
+        let StateCoreMessage::QueuedLine { sequence, .. } = receiver.try_recv()? else {
+            return Err("unexpected inbox message".into());
+        };
+        assert_eq!(sequence, 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_byte_limit_includes_lines_already_in_statecore_inbox()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, receiver) = mpsc::channel(128);
+        let wire = format!(
+            "PING :{}\r\nPING :next\r\n",
+            "a".repeat(MAX_PHYSICAL_LINE_BYTES - 8)
+        );
+        let result = run_reader(
+            wire.as_bytes(),
+            ConnectionGeneration::new(7),
+            ReaderLimits::new(128, MAX_PHYSICAL_LINE_BYTES)?,
+            sender,
+            CancellationToken::root(),
+        )
+        .await;
+        assert_eq!(result, CloseReason::ReadStall);
+        assert_eq!(receiver.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn consuming_a_line_releases_capacity_and_closed_inbox_wakes_paused_reader()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::channel(128);
+        let task = tokio::spawn(run_reader(
+            &b"PING :one\r\nPING :two\r\nPING :three\r\n"[..],
+            ConnectionGeneration::new(7),
+            ReaderLimits::new(1, MAX_PHYSICAL_LINE_BYTES)?,
+            sender,
+            CancellationToken::root(),
+        ));
+        let first = receiver.recv().await.ok_or("missing first line")?;
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(receiver.try_recv().is_err());
+        assert!(!task.is_finished());
+        drop(first);
+        let second = receiver.recv().await.ok_or("missing second line")?;
+        assert!(matches!(
+            second,
+            StateCoreMessage::QueuedLine { sequence: 2, .. }
+        ));
+        drop(receiver);
+        assert_eq!(task.await?, CloseReason::Shutdown);
         Ok(())
     }
 
@@ -321,7 +421,7 @@ mod tests {
         .map_err(|reason| format!("reader closed: {reason:?}"))?;
         assert!(receiver.try_recv().is_err());
         let tail = format!("\n{}", "PING :next\r\n".repeat(31));
-        feed_and_forward(
+        let feed = feed_and_forward(
             tail.as_bytes(),
             &mut framer,
             &mut pending,
@@ -329,23 +429,31 @@ mod tests {
             limits,
             &sender,
             &token,
-        )
-        .await
-        .map_err(|reason| format!("reader closed: {reason:?}"))?;
-        for expected in 1..=32 {
-            let StateCoreMessage::Line {
-                sequence, message, ..
-            } = receiver.try_recv()?
-            else {
-                return Err("unexpected inbox message".into());
-            };
-            assert_eq!(sequence, expected);
-            assert_eq!(message.command(), "PING");
-            assert_eq!(
-                message.trailing().map(str::len),
-                Some(if expected == 1 { payload_bytes } else { 4 })
-            );
-        }
+        );
+        let consume = async {
+            for expected in 1..=32 {
+                let StateCoreMessage::QueuedLine {
+                    sequence,
+                    message,
+                    permit,
+                    ..
+                } = receiver.recv().await.ok_or("closed inbox")?
+                else {
+                    return Err("unexpected inbox message".into());
+                };
+                assert_eq!(sequence, expected);
+                assert_eq!(message.command(), "PING");
+                assert_eq!(
+                    message.trailing().map(str::len),
+                    Some(if expected == 1 { payload_bytes } else { 4 })
+                );
+                drop(permit);
+            }
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (fed, consumed) = tokio::join!(feed, consume);
+        fed.map_err(|reason| format!("reader closed: {reason:?}"))?;
+        consumed?;
         assert!(!pending.rejected);
         assert_eq!(pending.bytes, 0);
         assert!(pending.messages.is_empty());

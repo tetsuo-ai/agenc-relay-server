@@ -4500,6 +4500,10 @@ async fn resync_cleanup_cursor_commits_with_the_hide_and_restarts_in_session_ord
     let context = fixture
         .context_mut()
         .map_err(|error| format!("context: {error}"))?;
+    // This component test submits batches explicitly. Freeze its clock so the
+    // link-loss deadline and the exact timer assertion share the same instant.
+    let now = context.now().get();
+    context.set_monotonic_for_test(now);
     let mut coordinator = standalone_coordinator(peer);
     let (handle, _queue) = link_queue(1 << 20);
     coordinator.inbound(context, established(1, peer, incarnation, handle));

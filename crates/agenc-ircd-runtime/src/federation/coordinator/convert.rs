@@ -477,7 +477,7 @@ pub(super) fn rebuild_command(
             ..
         } => {
             let name = channel_name(domain, *channel_id)?;
-            let changes = channel_mode_changes(domain, &name, changes)?;
+            let changes = channel_mode_changes(changes)?;
             CanonicalCommand::mode(name, changes).map_err(invalid)
         }
         FederatedOperation::UserMode {
@@ -590,11 +590,7 @@ const fn channel_mode_letter(code: u16) -> Option<char> {
     })
 }
 
-fn channel_mode_changes(
-    domain: &DomainState,
-    channel: &ChannelNameValue,
-    changes: &[ModeChangeArg],
-) -> Result<Vec<ModeChange>, RuntimeError> {
+fn channel_mode_changes(changes: &[ModeChangeArg]) -> Result<Vec<ModeChange>, RuntimeError> {
     let mut converted = Vec::new();
     converted
         .try_reserve_exact(changes.len())
@@ -614,7 +610,7 @@ fn channel_mode_changes(
         };
         let mut index = 0;
         converted.push(crate::command_convert::mode_change_for(
-            domain, channel, operation, letter, &arguments, &mut index,
+            operation, letter, &arguments, &mut index,
         )?);
         if index != arguments.len() {
             return Err(RuntimeError::InvalidValue);

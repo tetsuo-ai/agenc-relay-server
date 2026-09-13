@@ -246,8 +246,8 @@ pub struct SecretSet {
 
 impl SecretSet {
     /// Opens every configured secret (stage 4), reporting each failure by key and
-    /// rejecting any two secrets that share a file identity or byte value
-    /// (spec 4303-4306).
+    /// rejecting shared secrets across purposes. TLS aliases within one
+    /// listener class are permitted by Appendix C.3.
     pub fn load(config: &Config) -> Result<Self, ConfigReport> {
         let mut sink = IssueSink::default();
         let mut loader = Loader::default();
@@ -417,11 +417,12 @@ struct OptionalKeys {
     sequencer_private: Option<Option<SecretBytes32>>,
 }
 
-/// Tracks identities and byte values so no two secrets coincide.
+/// Tracks secret identities and bytes with same-class TLS alias exceptions.
 #[derive(Default)]
 struct Loader {
     identities: Vec<FileIdentity>,
     values: Vec<Zeroizing<Vec<u8>>>,
+    tls_aliases: Vec<(u8, usize)>,
 }
 
 impl Loader {
@@ -433,6 +434,39 @@ impl Loader {
         }
         self.identities.push(identity);
         self.values.push(Zeroizing::new(bytes.to_vec()));
+        Ok(())
+    }
+
+    fn register_tls(
+        &mut self,
+        class: u8,
+        identity: FileIdentity,
+        bytes: &[u8],
+    ) -> Result<(), ConfigError> {
+        if let Some(index) = self.identities.iter().position(|seen| *seen == identity) {
+            return if self.tls_aliases.contains(&(class, index))
+                && self
+                    .values
+                    .get(index)
+                    .is_some_and(|value| value.as_slice() == bytes)
+            {
+                Ok(())
+            } else {
+                Err(ConfigError::InvalidValue)
+            };
+        }
+        if let Some(index) = self
+            .values
+            .iter()
+            .position(|value| value.as_slice() == bytes)
+            && !self.tls_aliases.contains(&(class, index))
+        {
+            return Err(ConfigError::InvalidValue);
+        }
+        let index = self.identities.len();
+        self.identities.push(identity);
+        self.values.push(Zeroizing::new(bytes.to_vec()));
+        self.tls_aliases.push((class, index));
         Ok(())
     }
 
@@ -593,6 +627,9 @@ impl Loader {
         let mut keys = Vec::new();
         let mut complete = true;
         for (index, listener) in config.listeners.iter().enumerate() {
+            if !config.listener_material_required(listener) {
+                continue;
+            }
             let Some(tls) = &listener.tls else {
                 continue;
             };
@@ -601,8 +638,12 @@ impl Loader {
                 crate::paths::index_u16(index),
                 "tls_private_key_file",
             );
-            match self.optional_blob(sink, key, Some(tls.private_key_file.as_path())) {
-                Some(Some(blob)) => keys.push((listener.name.clone(), blob)),
+            let result = secret_blob(&tls.private_key_file).and_then(|(blob, identity)| {
+                self.register_tls(listener.purpose.key_class(), identity, blob.expose())?;
+                Ok(blob)
+            });
+            match stage4(sink, key, result) {
+                Some(blob) => keys.push((listener.name.clone(), blob)),
                 _ => complete = false,
             }
         }
@@ -624,4 +665,31 @@ fn stage4<T>(sink: &mut IssueSink, key: SchemaKey, result: Result<T, ConfigError
 #[must_use]
 pub fn secret_paths(config: &Config) -> Vec<(SchemaKey, PathBuf)> {
     config.secret_paths()
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn a_tls_key_changed_between_alias_reads_is_rejected_without_replacing_the_first_key()
+    -> Result<(), ConfigError> {
+        let mut loader = Loader::default();
+        let identity = FileIdentity {
+            device: 1,
+            inode: 2,
+        };
+        loader.register_tls(0, identity, b"original key")?;
+        assert_eq!(
+            loader.register_tls(0, identity, b"replacement key"),
+            Err(ConfigError::InvalidValue)
+        );
+        loader.register_tls(0, identity, b"original key")?;
+        assert_eq!(loader.identities.len(), 1);
+        assert_eq!(
+            loader.values.first().map(|value| value.as_slice()),
+            Some(b"original key".as_slice())
+        );
+        Ok(())
+    }
 }

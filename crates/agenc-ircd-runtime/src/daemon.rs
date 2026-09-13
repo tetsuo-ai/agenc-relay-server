@@ -108,9 +108,10 @@ use crate::state_core::durable::{
     AccountingCeilings, KeyDeriver, PlanProjection, project_batch, read_back_record,
 };
 use crate::state_core::inbox::{
-    ConnectionCloseInbox, ConnectionClosePort, LifecycleControl, LifecycleFailure, LifecyclePhase,
-    MaintenanceEvent, SIGNAL_EVENT_CAPACITY, SignalEvent, StateCoreMessage,
-    connection_close_channel, lifecycle_channel,
+    CLIENT_EVENT_CAPACITY, ConnectionCloseInbox, ConnectionClosePort, LifecycleControl,
+    LifecycleFailure, LifecyclePhase, MAINTENANCE_EVENT_CAPACITY, MaintenanceEvent,
+    SIGNAL_EVENT_CAPACITY, SignalEvent, StateCoreMessage, connection_close_channel,
+    lifecycle_channel,
 };
 use crate::state_core::projector::FederationProjector;
 use crate::state_core::reconstruct::{Reconstruction, reconstruct};
@@ -1604,7 +1605,7 @@ fn insert_ca_identities(
     Ok(())
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one closed listener preparation pass validates every enabled and disabled TLS identity CA and admission profile before activation
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one closed listener preparation pass validates active listener and outbound TLS identities CA and admission profiles before activation
 async fn build_listener_specs(
     config: &Config,
     secrets: &SecretSet,
@@ -1721,7 +1722,11 @@ async fn build_listener_specs(
             local_admin,
         });
     }
-    for listener in config.listeners.iter().filter(|listener| !listener.enabled) {
+    for listener in config
+        .listeners
+        .iter()
+        .filter(|listener| !listener.enabled && config.listener_material_required(listener))
+    {
         if let Some(tls) = &listener.tls {
             let (chain, fingerprint) =
                 load_certificate_chain_material(tls.certificate_file.clone()).await?;
@@ -1761,7 +1766,11 @@ async fn build_listener_specs(
             }
         }
     }
-    for listener in &config.listeners {
+    for listener in config
+        .listeners
+        .iter()
+        .filter(|listener| config.listener_material_required(listener))
+    {
         if let Some(path) = listener.client_ca_file.clone()
             && !client_ca_fingerprints.contains_key(&listener.name)
         {
@@ -2115,7 +2124,11 @@ fn restart_material(
             secret.expose(),
         )?;
     }
-    for listener in &config.listeners {
+    for listener in config
+        .listeners
+        .iter()
+        .filter(|listener| config.listener_material_required(listener))
+    {
         if listener.tls.is_some() {
             let private = secrets
                 .tls_private_key(&listener.name)
@@ -2271,7 +2284,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
             .await);
         }
     };
-    let (inbox, inbox_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
+    let (inbox, inbox_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY);
     let (connection_closes, connection_close_inbox) = connection_close_channel();
     let admin_binding = AdminSessionBinding {
         network_id: config.network.network_id,
@@ -2542,18 +2555,24 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
     let StartOwnersInputs {
         specs,
         context,
-        live,
+        mut live,
         log_owner,
         startup_deadline,
         inbox_receiver,
         connection_close_inbox,
-        inbox,
+        inbox: _inbox,
         admission,
         admin,
         federation,
         readiness,
         liveness,
     } = inputs;
+    let (maintenance, maintenance_receiver) = mpsc::channel(MAINTENANCE_EVENT_CAPACITY);
+    if let Err(error) = live.state.install_maintenance_inbox(maintenance_receiver) {
+        return Err(
+            unwind_live_state_and_log(live, log_owner, startup_deadline, error.into()).await,
+        );
+    }
     let mut supervisor = Supervisor::new();
     let (admin_lifecycle, admin_lifecycle_inbox) = admin_lifecycle_channel();
     if let Err(error) = spawn_admin_owner(
@@ -2632,7 +2651,7 @@ async fn start_owners(inputs: StartOwnersInputs) -> Result<RunningOwners, Daemon
     }
     // Signal handlers are installed before any listener accepts, so a stop
     // request during startup always reaches the phased shutdown.
-    let background = match spawn_background_owners(&mut supervisor, &inbox, admission) {
+    let background = match spawn_background_owners(&mut supervisor, &maintenance, admission) {
         Ok(background) => background,
         Err(error) => {
             return Err(unwind_started_owners(
@@ -2804,7 +2823,7 @@ fn spawn_federation_owner(
 
 fn spawn_background_owners(
     supervisor: &mut Supervisor,
-    inbox: &mpsc::Sender<StateCoreMessage>,
+    inbox: &mpsc::Sender<MaintenanceEvent>,
     admission: Arc<TransportAdmission>,
 ) -> Result<BackgroundOwners, DaemonError> {
     let (signals, signal_receiver) = mpsc::channel(SIGNAL_EVENT_CAPACITY);
@@ -3689,7 +3708,7 @@ fn reload_prepare_failure(error: DaemonError) -> ReloadPrepareFailure {
 
 async fn run_maintenance(
     token: crate::cancel::CancellationToken,
-    inbox: mpsc::Sender<StateCoreMessage>,
+    inbox: mpsc::Sender<MaintenanceEvent>,
     admission: Arc<TransportAdmission>,
 ) -> Result<(), RuntimeError> {
     let mut minute = tokio::time::interval(MAINTENANCE_MINUTE);
@@ -3714,7 +3733,7 @@ async fn run_maintenance(
 
 async fn maintenance_iteration(
     token: &crate::cancel::CancellationToken,
-    inbox: &mpsc::Sender<StateCoreMessage>,
+    inbox: &mpsc::Sender<MaintenanceEvent>,
     admission: &TransportAdmission,
     minute: &mut tokio::time::Interval,
     retention: &mut tokio::time::Interval,
@@ -3741,7 +3760,7 @@ async fn maintenance_iteration(
                 return Ok(false);
             };
             let event = pending.take().ok_or(RuntimeError::InvalidValue)?;
-            permit.send(StateCoreMessage::Maintenance(event));
+            permit.send(event);
             Ok(true)
         },
     }
@@ -4132,9 +4151,7 @@ mod tests {
         let token = crate::cancel::CancellationToken::root();
         let (sender, mut receiver) = mpsc::channel(1);
         sender
-            .send(StateCoreMessage::Maintenance(
-                MaintenanceEvent::CheckpointDue,
-            ))
+            .send(MaintenanceEvent::CheckpointDue)
             .await
             .map_err(|_| RuntimeError::Cancelled)?;
         let mut minute = tokio::time::interval(Duration::from_secs(3_600));
@@ -4174,9 +4191,7 @@ mod tests {
         );
         assert!(matches!(
             receiver.recv().await,
-            Some(StateCoreMessage::Maintenance(
-                MaintenanceEvent::ClockDriftCheck
-            ))
+            Some(MaintenanceEvent::ClockDriftCheck)
         ));
         drop(receiver);
         assert!(

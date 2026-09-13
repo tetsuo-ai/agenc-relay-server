@@ -97,6 +97,12 @@ pub struct StreamFramer {
 }
 
 impl StreamFramer {
+    /// Bytes retained for the unfinished physical line, including a trailing CR.
+    #[must_use]
+    pub fn buffered_bytes(&self) -> usize {
+        self.buffer.len() + usize::from(self.pending_carriage_return)
+    }
+
     /// Allocates the one fixed-capacity framing buffer.
     pub fn new() -> Result<Self, FramingError> {
         let mut buffer = Vec::new();

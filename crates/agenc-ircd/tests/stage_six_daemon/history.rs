@@ -9,7 +9,7 @@ mod disabled;
 #[path = "history/purge.rs"]
 mod purge;
 
-fn enable_history(fixture: &LiveFixture) -> TestResult {
+pub(super) fn enable_history(fixture: &LiveFixture) -> TestResult {
     let mut config = fs::read_to_string(&fixture.config_path)?;
     replace_once(
         &mut config,
@@ -21,7 +21,7 @@ fn enable_history(fixture: &LiveFixture) -> TestResult {
 }
 
 fn capabilities(client: &mut IrcClient) -> TestResult {
-    let lines = client.send_until("CAP REQ :batch server-time message-tags message-ids draft/chathistory labeled-response account-tag standard-replies", " ACK ")?;
+    let lines = client.send_until("CAP REQ :batch server-time message-tags message-ids draft/chathistory labeled-response account-tag standard-replies agenc.ag/account-controls agenc.ag/channel-controls", " ACK ")?;
     assert_contains(&lines, "draft/chathistory")
 }
 

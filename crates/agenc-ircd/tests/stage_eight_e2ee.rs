@@ -1232,7 +1232,7 @@ const BOB_ROOT: u8 = 71;
 const BOB_DEVICE: u8 = 72;
 const GROUP: [u8; 32] = [77; 32];
 const DIRECT_GROUP: [u8; 32] = [78; 32];
-const E2EE_CAPS: &str = "sasl agenc.ag/account-create message-tags echo-message batch labeled-response standard-replies account-tag agenc.ag/e2ee-mls";
+const E2EE_CAPS: &str = "sasl agenc.ag/account-create message-tags echo-message batch labeled-response standard-replies agenc.ag/account-controls agenc.ag/channel-controls account-tag agenc.ag/e2ee-mls";
 
 /// Enables the encrypted profile: the coordinator names its sequencer key
 /// and the credentials document, every node names the credentials document.

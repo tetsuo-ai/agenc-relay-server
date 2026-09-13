@@ -5,6 +5,9 @@
 #[path = "stage_six_daemon/address_pool.rs"]
 mod address_pool;
 
+#[path = "stage_six_daemon/runtime_regressions.rs"]
+mod runtime_regressions;
+
 #[path = "stage_six_daemon/stage_ten.rs"]
 mod stage_ten;
 
@@ -1371,7 +1374,7 @@ impl IrcClient {
 
     fn register(&mut self) -> TestResult<Vec<String>> {
         self.send("CAP LS 302")?;
-        self.send("CAP REQ :account-notify account-tag away-notify batch cap-notify echo-message labeled-response message-ids message-tags server-time setname standard-replies")?;
+        self.send("CAP REQ :account-notify account-tag away-notify batch cap-notify echo-message labeled-response message-ids message-tags server-time setname standard-replies agenc.ag/account-controls agenc.ag/channel-controls")?;
         self.send("NICK LiveUser")?;
         self.send("USER live 0 * :Live User")?;
         self.send("CAP END")?;
@@ -2472,8 +2475,12 @@ fn production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion() -
     let mut client = IrcClient::connect(&fixture)?;
     client.negotiate_sasl()?;
     // Account control notes are standard replies.
-    let acknowledged = client.send_until("CAP REQ :standard-replies", " CAP * ACK ")?;
+    let acknowledged = client.send_until(
+        "CAP REQ :standard-replies agenc.ag/account-controls agenc.ag/channel-controls",
+        " CAP * ACK ",
+    )?;
     assert_contains(&acknowledged, "standard-replies")?;
+    assert_contains(&acknowledged, "agenc.ag/account-controls")?;
     authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 80, account_id)?;
     let registered = client.complete_registration("EdgeUser")?;
     assert_contains(&registered, " 001 EdgeUser ")?;
@@ -2497,8 +2504,12 @@ fn production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion() -
 
     let mut client = IrcClient::connect(&fixture)?;
     client.negotiate_sasl()?;
-    let acknowledged = client.send_until("CAP REQ :standard-replies", " CAP * ACK ")?;
+    let acknowledged = client.send_until(
+        "CAP REQ :standard-replies agenc.ag/account-controls agenc.ag/channel-controls",
+        " CAP * ACK ",
+    )?;
     assert_contains(&acknowledged, "standard-replies")?;
+    assert_contains(&acknowledged, "agenc.ag/account-controls")?;
     authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 82, account_id)?;
     assert_contains(
         &client.complete_registration("DeleteUser")?,
@@ -2813,9 +2824,13 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
         .negotiate_sasl()
         .map_err(|error| failure(format!("settings negotiate: {error}")))?;
     let acknowledged = settings
-        .send_until("CAP REQ :standard-replies", " CAP * ACK ")
+        .send_until(
+            "CAP REQ :standard-replies agenc.ag/account-controls agenc.ag/channel-controls",
+            " CAP * ACK ",
+        )
         .map_err(|error| failure(format!("settings cap: {error}")))?;
     assert_contains(&acknowledged, "standard-replies")?;
+    assert_contains(&acknowledged, "agenc.ag/account-controls")?;
     authenticate_live_account(&mut settings, &fixture, ACCOUNT_PASSWORD, 106, account_id)
         .map_err(|error| failure(format!("settings auth: {error}")))?;
     let registered = settings

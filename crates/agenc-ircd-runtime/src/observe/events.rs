@@ -238,6 +238,7 @@ impl PublicErrorCode {
             | RuntimeError::Overflow
             | RuntimeError::InvalidValue => Self::Internal,
             RuntimeError::LimitExceeded => Self::LimitExceeded,
+            RuntimeError::CommandRefused(_) => Self::AdmissionRefused,
             RuntimeError::MemoryExhausted => Self::MemoryExhausted,
             RuntimeError::Cancelled => Self::Cancelled,
             RuntimeError::Storage(_) => Self::StorageUnavailable,

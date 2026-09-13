@@ -933,11 +933,35 @@ impl RegistrationState {
                 RegisteredCommandHandoff::new(RegisteredCommandKind::Nickname, message),
             )),
             RegistrationCommand::PostRegistration(kind) => {
+                self.require_command_capabilities(kind)?;
                 one_action(RegistrationAction::ForwardRegisteredCommand(
                     RegisteredCommandHandoff::new(RegisteredCommandKind::Public(kind), message),
                 ))
             }
             RegistrationCommand::Quit => Ok(Vec::new()),
+        }
+    }
+
+    fn require_command_capabilities(
+        &self,
+        kind: PostRegistrationCommandKind,
+    ) -> Result<(), RegistrationError> {
+        let required: &[&str] = match kind {
+            PostRegistrationCommandKind::Account(_) => {
+                &["agenc.ag/account-controls", "standard-replies"]
+            }
+            PostRegistrationCommandKind::ChannelControl(_) => {
+                &["agenc.ag/channel-controls", "standard-replies"]
+            }
+            PostRegistrationCommandKind::ChatHistory(_) => &["draft/chathistory"],
+            _ => &[],
+        };
+        if required.iter().all(|name| self.cap.enabled(name)) {
+            Ok(())
+        } else {
+            Err(RegistrationError::Grammar(
+                RegistrationGrammarError::NoPrivileges,
+            ))
         }
     }
 

@@ -18,6 +18,50 @@ type TestResult = Result<(), Box<dyn Error>>;
 const SESSION: SessionId = SessionId::from_bytes([3; 16]);
 const CHANNEL: ChannelInstanceId = ChannelInstanceId::from_bytes([4; 16]);
 
+// STA-10: typed mask arguments must survive the real federation schema boundary.
+#[test]
+fn mask_modes_round_trip_through_typed_wire_arguments() -> TestResult {
+    for direction in [ModeDirection::Add, ModeDirection::Remove] {
+        for (mode_code, mask) in [
+            (1, "$n:alice"),
+            (1, "$q:$n:alice"),
+            (2, "$n:bob"),
+            (3, "$n:carol"),
+        ] {
+            let operation = FederatedOperation::ChannelMode {
+                session_id: SESSION,
+                channel_id: CHANNEL,
+                expected_channel_revision: 9,
+                changes: vec![ModeChangeArg {
+                    direction,
+                    mode_code,
+                    argument: Zeroizing::new(mask.as_bytes().to_vec()),
+                }],
+            };
+            let object = operation.to_object()?;
+            assert!(operation == FederatedOperation::from_object(operation.opcode(), &object)?);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_and_wrong_list_mask_arguments_are_refused_before_transmission() {
+    for (mode_code, mask) in [(1, &[0xff][..]), (1, b"not-a-mask"), (2, b"$q:$n:alice")] {
+        let operation = FederatedOperation::ChannelMode {
+            session_id: SESSION,
+            channel_id: CHANNEL,
+            expected_channel_revision: 9,
+            changes: vec![ModeChangeArg {
+                direction: ModeDirection::Remove,
+                mode_code,
+                argument: Zeroizing::new(mask.to_vec()),
+            }],
+        };
+        assert!(operation.to_object().is_err());
+    }
+}
+
 fn operations() -> Vec<FederatedOperation> {
     vec![
         FederatedOperation::SessionOpen {

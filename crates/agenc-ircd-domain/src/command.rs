@@ -514,6 +514,13 @@ pub enum ModeChange {
         /// Entry identity resolved from the canonical mask.
         entry_id: EntryId,
     },
+    /// Remove a canonical mask, resolving its entry only after authorization.
+    RemoveMaskValue {
+        /// Selected list.
+        list: MaskList,
+        /// Canonical typed mask supplied by the client.
+        mask: TypedMask,
+    },
 }
 
 /// One validated user or channel MODE operation.
@@ -1152,6 +1159,12 @@ fn same_vector_mode(left: &ModeChange, right: &ModeChange) -> bool {
                 && left_target == right_target
                 && left_role == right_role
         }
+        _ => same_mask_mode(left, right),
+    }
+}
+
+fn same_mask_mode(left: &ModeChange, right: &ModeChange) -> bool {
+    match (left, right) {
         (
             ModeChange::AddMask {
                 list: left_list,
@@ -1172,6 +1185,16 @@ fn same_vector_mode(left: &ModeChange, right: &ModeChange) -> bool {
                 entry_id: right_entry,
             },
         ) => left_list == right_list && left_entry == right_entry,
+        (
+            ModeChange::RemoveMaskValue {
+                list: left_list,
+                mask: left_mask,
+            },
+            ModeChange::RemoveMaskValue {
+                list: right_list,
+                mask: right_mask,
+            },
+        ) => left_list == right_list && left_mask == right_mask,
         _ => false,
     }
 }

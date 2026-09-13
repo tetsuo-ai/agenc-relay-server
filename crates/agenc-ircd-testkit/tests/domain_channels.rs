@@ -599,6 +599,278 @@ fn apply_mask_modes(
 }
 
 #[test]
+fn mask_value_removal_checks_authority_before_lookup_and_preserves_ordered_batches()
+-> Result<(), Box<dyn Error>> {
+    let mut state = agenc_ircd_domain::DomainState::new()?;
+    let account = create_account(&mut state, 61, 1)?;
+    let owner = open_session(&mut state, 61, "MaskOwner", Some(account))?;
+    let outsider = open_session(&mut state, 62, "MaskOutsider", None)?;
+    let name = "#private-masks";
+    join_new(&mut state, owner, name, 61)?;
+    apply_modes(
+        &mut state,
+        owner,
+        name,
+        vec![ModeChange::Visibility {
+            operation: ModeOperation::Add,
+            mode: VisibilityMode::Secret,
+        }],
+    )?;
+    for channel in [name, "#absent"] {
+        for mask in ["$n:blocked", "$n:absent"] {
+            let command = CanonicalCommand::mode(
+                ChannelNameValue::parse(channel)?,
+                vec![ModeChange::RemoveMaskValue {
+                    list: MaskList::Ban,
+                    mask: TypedMask::parse(mask)?,
+                }],
+            )?;
+            assert_eq!(
+                plan(
+                    &state,
+                    outsider,
+                    command,
+                    &registered_admission(outsider.user_id)?,
+                    None
+                )
+                .err(),
+                Some(DomainError::SecretUnavailable)
+            );
+        }
+    }
+    apply_mask_modes(
+        &mut state,
+        owner,
+        name,
+        vec![
+            ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:blocked")?,
+            },
+            ModeChange::RemoveMaskValue {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:blocked")?,
+            },
+        ],
+        vec![EntryId::from_bytes(bytes(61))],
+    )?;
+    assert!(
+        state
+            .channel(channel_id(61))
+            .ok_or("missing channel")?
+            .mask_list(MaskList::Ban)
+            .is_empty()
+    );
+    apply_mask_modes(
+        &mut state,
+        owner,
+        name,
+        vec![ModeChange::AddMask {
+            list: MaskList::Ban,
+            mask: TypedMask::parse("$n:blocked")?,
+        }],
+        vec![EntryId::from_bytes(bytes(62))],
+    )?;
+    let entries = state
+        .channel(channel_id(61))
+        .ok_or("missing channel")?
+        .mask_list(MaskList::Ban);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries.first().ok_or("missing mask")?.entry_id(),
+        EntryId::from_bytes(bytes(62))
+    );
+    let invalid_batch = CanonicalCommand::mode(
+        ChannelNameValue::parse(name)?,
+        vec![
+            ModeChange::RemoveMaskValue {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:blocked")?,
+            },
+            ModeChange::RemoveMaskValue {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:absent")?,
+            },
+        ],
+    )?;
+    assert_eq!(
+        plan(
+            &state,
+            owner,
+            invalid_batch,
+            &registered_admission(owner.user_id)?,
+            None
+        )
+        .err(),
+        Some(DomainError::InvalidArgument)
+    );
+    assert_eq!(
+        state
+            .channel(channel_id(61))
+            .ok_or("missing channel")?
+            .mask_list(MaskList::Ban)
+            .len(),
+        1
+    );
+    apply_modes(
+        &mut state,
+        owner,
+        name,
+        vec![ModeChange::RemoveMaskValue {
+            list: MaskList::Ban,
+            mask: TypedMask::parse("$n:blocked")?,
+        }],
+    )?;
+    assert!(
+        state
+            .channel(channel_id(61))
+            .ok_or("missing channel")?
+            .mask_list(MaskList::Ban)
+            .is_empty()
+    );
+    state.validate()?;
+    Ok(())
+}
+
+#[test]
+fn ordered_mask_removals_resolve_the_right_value_and_list_among_uncommitted_additions()
+-> Result<(), Box<dyn Error>> {
+    let mut state = agenc_ircd_domain::DomainState::new()?;
+    let account = create_account(&mut state, 70, 1)?;
+    let owner = open_session(&mut state, 70, "ListOwner", Some(account))?;
+    let name = "#lists";
+    join_new(&mut state, owner, name, 70)?;
+    apply_mask_modes(
+        &mut state,
+        owner,
+        name,
+        vec![
+            ModeChange::AddMask {
+                list: MaskList::Exception,
+                mask: TypedMask::parse("$n:same")?,
+            },
+            ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:other")?,
+            },
+            ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:same")?,
+            },
+            ModeChange::RemoveMaskValue {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:same")?,
+            },
+        ],
+        vec![
+            EntryId::from_bytes(bytes(71)),
+            EntryId::from_bytes(bytes(72)),
+            EntryId::from_bytes(bytes(73)),
+        ],
+    )?;
+    let channel = state.channel(channel_id(70)).ok_or("missing channel")?;
+    assert_eq!(channel.mask_list(MaskList::Ban).len(), 1);
+    assert_eq!(channel.mask_list(MaskList::Exception).len(), 1);
+    assert_eq!(
+        channel
+            .mask_list(MaskList::Ban)
+            .first()
+            .ok_or("missing ban")?
+            .entry_id(),
+        EntryId::from_bytes(bytes(72))
+    );
+    assert_eq!(
+        channel
+            .mask_list(MaskList::Exception)
+            .first()
+            .ok_or("missing exception")?
+            .entry_id(),
+        EntryId::from_bytes(bytes(71))
+    );
+    state.validate()?;
+    Ok(())
+}
+
+// PRV-01: quiet-mask authority is determined from the request before entry lookup.
+#[test]
+fn quiet_mask_value_removal_checks_operator_role_even_when_the_entry_is_absent()
+-> Result<(), Box<dyn Error>> {
+    let mut state = agenc_ircd_domain::DomainState::new()?;
+    let account = create_account(&mut state, 64, 1)?;
+    let owner = open_session(&mut state, 64, "QuietOwner", Some(account))?;
+    let half = open_session(&mut state, 65, "Half", None)?;
+    let name = "#quiet";
+    join_new(&mut state, owner, name, 64)?;
+    join_existing(&mut state, half, name)?;
+    apply_modes(
+        &mut state,
+        owner,
+        name,
+        vec![ModeChange::Role {
+            operation: ModeOperation::Add,
+            target: agenc_ircd_domain::NicknameValue::parse("Half")?,
+            role: Role::HalfOperator,
+        }],
+    )?;
+    apply_mask_modes(
+        &mut state,
+        owner,
+        name,
+        vec![ModeChange::AddMask {
+            list: MaskList::Ban,
+            mask: TypedMask::parse("$q:$n:blocked")?,
+        }],
+        vec![EntryId::from_bytes(bytes(66))],
+    )?;
+    for mask in ["$q:$n:blocked", "$q:$n:absent"] {
+        let command = CanonicalCommand::mode(
+            ChannelNameValue::parse(name)?,
+            vec![ModeChange::RemoveMaskValue {
+                list: MaskList::Ban,
+                mask: TypedMask::parse(mask)?,
+            }],
+        )?;
+        assert_eq!(
+            plan(
+                &state,
+                half,
+                command,
+                &registered_admission(half.user_id)?,
+                None
+            )
+            .err(),
+            Some(DomainError::Forbidden)
+        );
+    }
+    assert_eq!(
+        state
+            .channel(channel_id(64))
+            .ok_or("missing channel")?
+            .mask_list(MaskList::Ban)
+            .len(),
+        1
+    );
+    apply_modes(
+        &mut state,
+        owner,
+        name,
+        vec![ModeChange::RemoveMaskValue {
+            list: MaskList::Ban,
+            mask: TypedMask::parse("$q:$n:blocked")?,
+        }],
+    )?;
+    assert!(
+        state
+            .channel(channel_id(64))
+            .ok_or("missing channel")?
+            .mask_list(MaskList::Ban)
+            .is_empty()
+    );
+    state.validate()?;
+    Ok(())
+}
+
+#[test]
 fn e2ee_proofs_reject_empty_oversized_and_duplicate_rosters() -> Result<(), Box<dyn Error>> {
     let channel = channel_id(200);
     let current_revision = revision(1)?;

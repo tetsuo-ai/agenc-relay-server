@@ -10,17 +10,17 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 776
-reviewed_source_sha256 = "0f91ee4798fb0ec5201d89a34841851a2ba7be0353aa1a385288d91b2b4bea12"
+reviewed_source_files = 778
+reviewed_source_sha256 = "ea2d165d251cc6181943da9422a76209ca810e5787adb7a295ae595671ff96b9"
 deferred = []
 
 [[region]]
 id = "reader-parsed-arena-admission"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/connection/reader.rs"
-source_sha256 = "d53b4ecb585ffc23e7054017dd00e2877eb4668625abf998d880d0645ace0cad"
-start_line = 87
-end_line = 108
+source_sha256 = "da240c4f8a6479c2e18cc93c2d2722abd0c2f3c2cd4d5321b537b3bde935fd5a"
+start_line = 94
+end_line = 115
 metric = "branches"
 reason = "Completed lines must fit both per-connection bounds before parsing or queueing; refusal remains sticky."
 
@@ -28,9 +28,9 @@ reason = "Completed lines must fit both per-connection bounds before parsing or 
 id = "reader-fragmented-line-drain"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/connection/reader.rs"
-source_sha256 = "d53b4ecb585ffc23e7054017dd00e2877eb4668625abf998d880d0645ace0cad"
-start_line = 187
-end_line = 207
+source_sha256 = "da240c4f8a6479c2e18cc93c2d2722abd0c2f3c2cd4d5321b537b3bde935fd5a"
+start_line = 196
+end_line = 235
 metric = "branches"
 reason = "A line completed from retained transport bytes must drain before another line enters the parsed arena; framing failures stop forwarding."
 
@@ -98,7 +98,7 @@ reason = "Every closed TagError discriminant must be observed by an error report
 id = "client-framing-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-client-wire/src/framing.rs"
-source_sha256 = "cf8a5e12020f83c1760329b718da14ccf6cd0067fa814cc0078dc4092d4f6ee1"
+source_sha256 = "6690c43ec76a548976a52aa9cdcaeb63e147058f24ce447ffb0573a05c11ce8d"
 start_line = 40
 end_line = 55
 metric = "regions"
@@ -128,7 +128,7 @@ reason = "Every closed TextCarrierError discriminant must be observed by an erro
 id = "client-registration-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-client-wire/src/registration.rs"
-source_sha256 = "563ee478ced475e020292674e2d3deffcd383a363b3ea81f49969ae0f33afe3a"
+source_sha256 = "b75a5736698957b46a129e84f4379047a77dcb14b60021c4b6101136a9f3f366"
 start_line = 357
 end_line = 374
 metric = "regions"
@@ -298,9 +298,9 @@ reason = "Every accepted and rejected syntax path must be exercised at the clien
 id = "domain-authorize"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2008
-end_line = 2030
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2012
+end_line = 2034
 metric = "regions"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -308,9 +308,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-inner"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2193
-end_line = 2218
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2197
+end_line = 2222
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -318,9 +318,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-command"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2220
-end_line = 2263
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2224
+end_line = 2267
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -328,9 +328,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-topic-change"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2300
-end_line = 2319
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2304
+end_line = 2323
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -338,9 +338,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-kick"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2321
-end_line = 2334
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2325
+end_line = 2338
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -348,9 +348,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-channel-message"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2336
-end_line = 2356
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2340
+end_line = 2360
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -358,9 +358,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-e2ee-channel-message"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2358
-end_line = 2387
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2362
+end_line = 2391
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -368,9 +368,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-direct-message"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2389
-end_line = 2410
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2393
+end_line = 2414
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -378,9 +378,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-history"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2412
-end_line = 2433
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2416
+end_line = 2437
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -388,9 +388,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-message-target"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 2551
-end_line = 2577
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 2555
+end_line = 2581
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -398,9 +398,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-direct-policy"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 4408
-end_line = 4427
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 4415
+end_line = 4434
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -408,9 +408,9 @@ reason = "Session fences, admission, and command authority are security decision
 id = "domain-authorize-sanction"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-domain/src/decision.rs"
-source_sha256 = "629b1fe5d86f1b0e1fc519b0e7b0f2845c6a418697ba7f56813a50d336603e65"
-start_line = 5559
-end_line = 5607
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 5594
+end_line = 5642
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
 
@@ -1077,9 +1077,9 @@ reason = "A committed JOIN snapshot may only be opened for its original bound co
 id = "runtime-edge-user-mode-identity"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/edge/request.rs"
-source_sha256 = "b4ce40a9116626558e90d05826c3c33a72d9afd7b811933718da088f49183f81"
-start_line = 1090
-end_line = 1113
+source_sha256 = "2eef59ae8bdb4046c1525d81500d6bf4b3a81666b19ea01c70c05dfa405fb73e"
+start_line = 1099
+end_line = 1122
 metric = "branches"
 reason = "A user-mode mutation may target only the requesting session nickname."
 
@@ -1087,9 +1087,9 @@ reason = "A user-mode mutation may target only the requesting session nickname."
 id = "runtime-edge-local-user-mode-authority"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/edge/request.rs"
-source_sha256 = "b4ce40a9116626558e90d05826c3c33a72d9afd7b811933718da088f49183f81"
-start_line = 723
-end_line = 773
+source_sha256 = "2eef59ae8bdb4046c1525d81500d6bf4b3a81666b19ea01c70c05dfa405fb73e"
+start_line = 730
+end_line = 780
 metric = "branches"
 reason = "Local user-mode reads retain their own-session authority during federation partitions."
 
@@ -1097,9 +1097,9 @@ reason = "Local user-mode reads retain their own-session authority during federa
 id = "runtime-coordinator-user-mode-decode"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-runtime/src/federation/coordinator/convert.rs"
-source_sha256 = "085da3b8830be0508023e467adf7aeec7baf1ad9c3056d357b6509ee466ed89a"
-start_line = 626
-end_line = 646
+source_sha256 = "8d4c53804ef95899400399468aa7f73951cc31e9a6243c5536a8a47e36870b5a"
+start_line = 622
+end_line = 642
 metric = "branches"
 reason = "The user-mode decoder admits only the closed mode code, direction, and empty argument shape."
 
@@ -1996,7 +1996,7 @@ reason = "Scan every ordered 256-row page at the exact current storage commit, s
 id = "cap5-secrets-secretset-load-for-login-index-start"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-config/src/secrets.rs"
-source_sha256 = "8275ddc72bcc767ddf62fb938a72918656fe0ec12582673ac8157584fbb92e0a"
+source_sha256 = "5d9e60773ed169b6b53ae0f272d6c28c3e3cb254208bd3749fdd997e2aa17f00"
 start_line = 266
 end_line = 288
 metric = "branches"
@@ -3196,9 +3196,9 @@ reason = "Cloned reservation-only handles share the existing Arc budget; checked
 id = "companion-daemon-attach-coordinator-role"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/daemon.rs"
-source_sha256 = "d225bc4e588fad0722f45948d3613a293a222609090ed1da9874c425a16c18c5"
-start_line = 1258
-end_line = 1298
+source_sha256 = "848b45d4a8bd8f092ec2af789c40f6058c06bd7a28b33545139b04a4f0580f80"
+start_line = 1259
+end_line = 1299
 metric = "regions"
 reason = "Composition passes validated persistent local incarnation to companion installation before serving."
 
@@ -4636,7 +4636,7 @@ reason = "CAP84: infallible line-before-backing bundle precedes refusals. Existi
 id = "companion-mod-statecorecontext-backing-reservations"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "671bb68891a56fc07c744b681846fa85e7838dd3b1e6f9954bc30313fd3bb1a4"
+source_sha256 = "b00ccadfa0ee0fadd7f9a2fbd10f8688760b6964bd9892281a9a75394d0db3ac"
 start_line = 837
 end_line = 839
 metric = "regions"
@@ -6236,9 +6236,9 @@ reason = "Route post-readback edge completions through the existing exact connec
 id = "cap13-mod-complete-index-refresh"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "671bb68891a56fc07c744b681846fa85e7838dd3b1e6f9954bc30313fd3bb1a4"
-start_line = 3770
-end_line = 3812
+source_sha256 = "b00ccadfa0ee0fadd7f9a2fbd10f8688760b6964bd9892281a9a75394d0db3ac"
+start_line = 3799
+end_line = 3841
 metric = "regions"
 reason = "Install and validate the entire authenticated readback, finish the original continuation, then notify the router only for Batch continuation; reload/admin continuations cannot reopen ordinary staging early."
 
@@ -10746,9 +10746,9 @@ reason = "Registered account carriers recheck live session identity and account 
 id = "edge-credential-result-kind"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-runtime/src/federation/edge/request.rs"
-source_sha256 = "b4ce40a9116626558e90d05826c3c33a72d9afd7b811933718da088f49183f81"
-start_line = 1820
-end_line = 1839
+source_sha256 = "2eef59ae8bdb4046c1525d81500d6bf4b3a81666b19ea01c70c05dfa405fb73e"
+start_line = 1829
+end_line = 1848
 metric = "branches"
 reason = "Credential carriers render only the permitted challenge, committed completion or sealed refusal."
 
@@ -10811,3 +10811,93 @@ start_line = 518
 end_line = 595
 metric = "branches"
 reason = "Startup indexes authenticated sealed audit events and checkpoints before retention projects exact row deletions."
+
+[[region]]
+id = "registered-control-capability-admission"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-client-wire/src/registration.rs"
+source_sha256 = "b75a5736698957b46a129e84f4379047a77dcb14b60021c4b6101136a9f3f366"
+start_line = 945
+end_line = 966
+metric = "branches"
+reason = "Control mutations and history cannot be admitted without their response capabilities."
+
+[[region]]
+id = "reader-outstanding-request-reservation"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/connection/reader/admission.rs"
+source_sha256 = "1ab444b9fb6712f29fe39d1caff80b2b3a43784a1066c8d00a0a1f6a0f12340c"
+start_line = 37
+end_line = 54
+metric = "branches"
+reason = "Count and wire-byte charges include commands already queued at StateCore."
+
+[[region]]
+id = "reader-outstanding-request-release"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-ircd-runtime/src/connection/reader/admission.rs"
+source_sha256 = "1ab444b9fb6712f29fe39d1caff80b2b3a43784a1066c8d00a0a1f6a0f12340c"
+start_line = 65
+end_line = 72
+metric = "regions"
+reason = "Each non-cloneable parsed request reservation is released exactly once after dispatch or abandonment."
+
+[[region]]
+id = "config-used-listener-material"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-config/src/config.rs"
+source_sha256 = "2e9c9319eeccd20d03d4ea039b43999accfcdd6295f6792e5babd2ab53694afa"
+start_line = 84
+end_line = 89
+metric = "branches"
+reason = "Disabled client listeners need no material while outbound federation retains its required identity."
+
+[[region]]
+id = "config-tls-alias-separation"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-config/src/secrets.rs"
+source_sha256 = "5d9e60773ed169b6b53ae0f272d6c28c3e3cb254208bd3749fdd997e2aa17f00"
+start_line = 440
+end_line = 471
+metric = "branches"
+reason = "TLS aliases are admitted only within one purpose class and never alias another secret purpose."
+
+[[region]]
+id = "mode-mask-lookup-after-authorization"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-domain/src/decision.rs"
+source_sha256 = "e088cbf8195d98241123633820a86287022e32724a123b21dd81eab186ebf0a9"
+start_line = 5002
+end_line = 5022
+metric = "branches"
+reason = "Authorized mask removal resolves original entries and ordered additions while respecting earlier removals."
+
+[[region]]
+id = "guest-control-before-name-lookup"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/command_convert.rs"
+source_sha256 = "6d68ae4b8394fd15f23f8aa4fc23be2b5db5213882a761dd5d68008f0771ce31"
+start_line = 34
+end_line = 46
+metric = "branches"
+reason = "Guest channel controls are refused before target existence can influence their public response."
+
+[[region]]
+id = "federated-mask-argument-encoding"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-runtime/src/federation/codec/operations.rs"
+source_sha256 = "0e014189d628ce8878f537f399257b48d0ca0ca873d8b3e0d09cc4dcb4701d85"
+start_line = 731
+end_line = 739
+metric = "branches"
+reason = "Both mask and non-mask encoding decisions are exercised; schema construction owns validation and its fallible encoding preserves allocation errors."
+
+[[region]]
+id = "federated-mask-argument-decoding"
+category = "protocol-enum-arms"
+file = "crates/agenc-ircd-runtime/src/federation/codec/operations.rs"
+source_sha256 = "0e014189d628ce8878f537f399257b48d0ca0ca873d8b3e0d09cc4dcb4701d85"
+start_line = 741
+end_line = 750
+metric = "branches"
+reason = "Both decode decisions are exercised after the validated schema boundary; typed masks reconstruct canonical text for coordinator authorization."
