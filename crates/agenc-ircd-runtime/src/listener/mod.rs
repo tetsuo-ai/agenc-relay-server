@@ -301,7 +301,8 @@ pub struct ListenerExit {
     /// Sockets refused before a connection existed, handshake failures
     /// included.
     pub refused: u64,
-    /// A connection task panicked or was aborted.
+    /// A connection task panicked or was aborted; diagnostic only. The
+    /// listener continues serving other connections.
     pub task_failed: bool,
 }
 
@@ -597,11 +598,7 @@ async fn run_listener(
         match step {
             ListenerStep::Stop => break,
             ListenerStep::Joined(outcome) => {
-                if record_outcome(&shared, spec.purpose, outcome, &mut exit) {
-                    accept_token.cancel();
-                    connection_token.cancel();
-                    break;
-                }
+                record_outcome(&shared, spec.purpose, outcome, &mut exit);
             }
             ListenerStep::Accepted(Some(accepted)) => {
                 admit(
@@ -619,7 +616,7 @@ async fn run_listener(
     drop(listener);
     accept_barrier.arrived();
     while let Some(outcome) = connections.join_next().await {
-        let _failed = record_outcome(&shared, spec.purpose, outcome, &mut exit);
+        record_outcome(&shared, spec.purpose, outcome, &mut exit);
     }
     shared.observer.listener_closed(spec.purpose);
     exit
@@ -630,23 +627,20 @@ fn record_outcome(
     purpose: ListenerPurpose,
     outcome: Result<ConnectionOutcome, JoinError>,
     exit: &mut ListenerExit,
-) -> bool {
+) {
     match outcome {
         Ok(ConnectionOutcome::Served(connection)) => {
             exit.admitted = exit.admitted.saturating_add(1);
             shared.observer.closed(&connection);
-            false
         }
         Ok(ConnectionOutcome::Refused(reason)) => {
             exit.refused = exit.refused.saturating_add(1);
             shared.observer.refused(purpose, reason);
-            false
         }
         Err(_error) => {
             exit.refused = exit.refused.saturating_add(1);
             exit.task_failed = true;
             shared.observer.refused(purpose, RefusalReason::TaskTree);
-            true
         }
     }
 }

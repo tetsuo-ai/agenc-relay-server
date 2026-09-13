@@ -36,8 +36,9 @@ pub(crate) struct JoinTarget {
     pub join_key: Zeroizing<Vec<u8>>,
 }
 
-/// One requested mode change: the registered code plus its raw argument.
-/// Mask arguments are canonical client text here and typed objects on the wire.
+/// One requested mode change. Masks, keys and limits use client text here;
+/// the codec supplies their Appendix B binary framing. Role targets carry
+/// exact User ID bytes, never nicknames that could be reassigned in transit.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ModeChangeArg {
     pub direction: ModeDirection,
@@ -729,23 +730,63 @@ fn mode_changes_of(items: &[SchemaObject]) -> Result<Vec<ModeChangeArg>, CodecEr
 }
 
 fn mode_argument_object(change: &ModeChangeArg) -> Result<WireValue, CodecError> {
-    if (1..=3).contains(&change.mode_code) {
-        let mask = std::str::from_utf8(&change.argument).map_err(|_| CodecError::CrossReference)?;
-        let encoded = super::typed_mask_object(mask)?.encode_canonical()?;
-        opaque(encoded.as_slice())
-    } else {
-        opaque(&change.argument)
+    match (change.mode_code, change.direction) {
+        (1..=3, _) => {
+            let mask =
+                std::str::from_utf8(&change.argument).map_err(|_| CodecError::CrossReference)?;
+            let encoded = super::typed_mask_object(mask)?.encode_canonical()?;
+            opaque(encoded.as_slice())
+        }
+        (4, ModeDirection::Add) => {
+            if !(8..=256).contains(&change.argument.len()) {
+                return Err(CodecError::CrossReference);
+            }
+            let length =
+                u16::try_from(change.argument.len()).map_err(|_| CodecError::CrossReference)?;
+            let mut encoded = Zeroizing::new(Vec::new());
+            encoded
+                .try_reserve_exact(
+                    usize::from(length)
+                        .checked_add(2)
+                        .ok_or(CodecError::Overflow)?,
+                )
+                .map_err(|_| CodecError::AllocationFailed)?;
+            encoded.extend_from_slice(&length.to_be_bytes());
+            encoded.extend_from_slice(&change.argument);
+            opaque(&encoded)
+        }
+        (5, ModeDirection::Add) => {
+            let text =
+                std::str::from_utf8(&change.argument).map_err(|_| CodecError::CrossReference)?;
+            let limit: u32 = text.parse().map_err(|_| CodecError::CrossReference)?;
+            if text != limit.to_string() {
+                return Err(CodecError::CrossReference);
+            }
+            opaque(&limit.to_be_bytes())
+        }
+        _ => opaque(&change.argument),
     }
 }
 
 fn mode_argument_of(item: &SchemaObject, mode_code: u16) -> Result<Vec<u8>, CodecError> {
     let argument = opaque_field(item, "argument")?;
-    if (1..=3).contains(&mode_code) {
-        let mut budget = DecodeBudget::new(4096, 16);
-        let mask = SchemaObject::decode_exact("FederationTypedMask", argument, &mut budget)?;
-        Ok(super::typed_mask_of(&mask)?.into_bytes())
-    } else {
-        Ok(argument.to_vec())
+    match mode_code {
+        1..=3 => {
+            let mut budget = DecodeBudget::new(4096, 16);
+            let mask = SchemaObject::decode_exact("FederationTypedMask", argument, &mut budget)?;
+            Ok(super::typed_mask_of(&mask)?.into_bytes())
+        }
+        4 if !argument.is_empty() => Ok(argument
+            .get(2..)
+            .ok_or(CodecError::CrossReference)?
+            .to_vec()),
+        5 if !argument.is_empty() => {
+            let bytes = argument
+                .try_into()
+                .map_err(|_| CodecError::CrossReference)?;
+            Ok(u32::from_be_bytes(bytes).to_string().into_bytes())
+        }
+        _ => Ok(argument.to_vec()),
     }
 }
 

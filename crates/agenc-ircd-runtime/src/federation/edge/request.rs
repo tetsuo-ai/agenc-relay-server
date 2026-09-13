@@ -1084,7 +1084,7 @@ fn mode_operation(
                 session_id,
                 channel_id,
                 expected_channel_revision: revision,
-                changes: channel_mode_args(changes, &arguments),
+                changes: channel_mode_args(edge, changes, &arguments)?,
             })
         }
         ModeCommand::UserOperatorNotices(target, enabled) => {
@@ -1122,15 +1122,29 @@ fn user_mode_operation(
 }
 
 /// Pairs each change with the client argument it consumes, in order.
-fn channel_mode_args(changes: &[ModeChange], arguments: &[&str]) -> Vec<ModeChangeArg> {
+fn channel_mode_args(
+    edge: &EdgeFederation,
+    changes: &[ModeChange],
+    arguments: &[&str],
+) -> Result<Vec<ModeChangeArg>, DomainError> {
     let mut converted = Vec::new();
     let mut argument_index = 0;
     for change in changes {
         let (direction, mode_code, needs_argument) = mode_change_parts(change);
         let argument = if needs_argument {
-            let value = arguments.get(argument_index).copied().unwrap_or("");
+            let value = arguments
+                .get(argument_index)
+                .copied()
+                .ok_or(DomainError::InvalidArgument)?;
             argument_index = argument_index.saturating_add(1);
-            value.as_bytes().to_vec()
+            if let ModeChange::Role { target, .. } = change {
+                user_by_nickname(edge, target)
+                    .ok_or(DomainError::NotFound)?
+                    .as_bytes()
+                    .to_vec()
+            } else {
+                value.as_bytes().to_vec()
+            }
         } else {
             Vec::new()
         };
@@ -1140,7 +1154,7 @@ fn channel_mode_args(changes: &[ModeChange], arguments: &[&str]) -> Vec<ModeChan
             argument: Zeroizing::new(argument),
         });
     }
-    converted
+    Ok(converted)
 }
 
 const fn direction(operation: ModeOperation) -> ModeDirection {

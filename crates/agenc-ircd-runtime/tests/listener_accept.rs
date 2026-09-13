@@ -13,7 +13,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -53,6 +53,9 @@ use tokio::sync::{Semaphore, mpsc};
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 type ClientOutcome = Result<Vec<u8>, String>;
 
+#[path = "listener_accept/task_isolation.rs"]
+mod task_isolation;
+
 const DNS_NAME: &str = "node.test";
 const BUDGET_BYTES: u64 = 64 * 1_048_576;
 const INBOX_CAPACITY: usize = 16;
@@ -68,6 +71,7 @@ enum Observed {
 #[derive(Default)]
 struct Recorder {
     events: Mutex<Vec<Observed>>,
+    unwind_next_admission: AtomicBool,
 }
 
 impl Recorder {
@@ -81,6 +85,11 @@ impl Recorder {
 
 impl ConnectionObserver for Recorder {
     fn admitted(&self, connection: &AdmittedConnection) {
+        // This listener fixture does not install the daemon panic hook.
+        assert!(
+            !self.unwind_next_admission.swap(false, Ordering::SeqCst),
+            "injected admission assertion failure"
+        );
         if let Ok(mut events) = self.events.lock() {
             events.push(Observed::Admitted(connection.purpose, connection.peer));
         }

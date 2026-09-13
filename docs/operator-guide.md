@@ -38,7 +38,7 @@ For an onion listener, install `deploy/tor/agenc-ircd.torrc.snippet` after check
 
 Add the Tor service account to `agenc-ircd-sockets`, then restart Tor so its process receives the new supplementary group. Keep `/var/lib/tor/agenc-ircd` owned by the Tor service account and inaccessible to `agenc-ircd` and `agenc-ircd-sockets`. The shared group applies only to `/run/agenc-ircd` and the sockets below it.
 
-Add each approved local administrator login to the same group and start a new login session. Put each administrator's exact numeric UID in the local listener's `allowed_uids`, and keep the shared group GID out of `allowed_gids`. The group grants directory traversal and socket connection. Administrative access still requires UID admission and the configured Ed25519 operator proof.
+Initialization puts its effective UID in both the local listener's `allowed_uids` and the generated operator's `local_uids`. Root initialization therefore selects UID 0. Add each approved local administrator login to the same group and start a new login session. Put each administrator's exact numeric UID in both admission lists, and keep the shared group GID out of `allowed_gids`. The group grants directory traversal and socket connection. Administrative access still requires UID admission and the configured Ed25519 operator proof.
 
 At each daemon start, the service gives `agenc-ircd-sockets` traverse access to the mode-0750 runtime directory and installs a default read-write ACL for new mode-0660 sockets. Verify the resulting modes and named ACL entries with the commands in `deploy/README.md` before enabling the onion listener or local administration.
 

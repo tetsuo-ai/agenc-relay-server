@@ -2751,12 +2751,8 @@ fn spawn_listener_owner(
         |_token| async move {
             let exits = listeners.join().await;
             let _sent = listener_exit.send(());
-            let exits = exits?;
-            if exits.iter().any(|exit| exit.task_failed) {
-                Err(RuntimeError::InvalidValue)
-            } else {
-                Ok(())
-            }
+            let _diagnostics = exits?;
+            Ok(())
         },
     )?;
     Ok(listener_exited)

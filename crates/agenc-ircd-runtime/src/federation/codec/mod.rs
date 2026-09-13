@@ -687,7 +687,7 @@ pub(crate) fn projected_mode_change_object(
             .encode_canonical()?
             .as_slice()
             .to_vec(),
-        ProjectedModeChange::Key { present, .. } => vec![u8::from(*present)],
+        ProjectedModeChange::Key { present, .. } => u16::from(*present).to_be_bytes().to_vec(),
         ProjectedModeChange::Limit { limit, .. } => limit.to_be_bytes().to_vec(),
         ProjectedModeChange::Simple { .. } => Vec::new(),
         ProjectedModeChange::Prefix { view, .. } => membership_view_object(view)?
@@ -726,8 +726,8 @@ pub(crate) fn projected_mode_change_of(
         4 => ProjectedModeChange::Key {
             direction,
             present: match argument {
-                [0] => false,
-                [1] => true,
+                [0, 0] => false,
+                [0, 1] => true,
                 _ => return Err(CodecError::CrossReference),
             },
         },
