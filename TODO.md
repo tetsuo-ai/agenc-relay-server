@@ -1603,12 +1603,13 @@ the closure branch at review time.
   inbox refusal from a lost reply after acceptance. A refused REHASH now
   commits its failure audit before replying. Tests cover full-queue retry,
   closed inboxes, lost replies and the admin audit receipt boundary.
-- [ ] Client ingestion still aggregates into a process-wide 64-slot channel
-  with Opened notices instead of independently scheduled per-connection inboxes
-  (Architecture 21.3). Request-count and parsed-byte charges now survive until
-  dispatch, enforcing each connection's limits before parsing, and maintenance
-  has independent capacity. Paused-time and actor-loop regressions cover those
-  repairs; the aggregation/scheduling topology remains open.
+- [x] Production client readers receive independently bounded input queues at
+  admission and StateCore dispatches ready connections round-robin (Architecture
+  21.3). Open/control notices retain their separate 64-slot channel. Request and
+  byte reservations survive dequeue until dispatch finishes; queue backing is
+  reserved before allocation. Boundary, concurrent-producer, shutdown, actor
+  admission and durable-command ordering regressions cover the new path.
+  See `docs/stage-10-client-input-repair.md` for validation and limits.
 - [x] Connection `JoinError` outcomes retain the registered task identity and
   failure policy. They cancel only that child's token; listeners keep accepting
   and existing clients remain usable. Critical task failures still cancel the
