@@ -42,8 +42,24 @@ origin receives confirmation even when key presence remains true.
 Focused supervisor, live TLS listener, generated-template, initialization,
 edge request, wire codec and coordinator conversion tests cover positive and
 negative paths. Exact binary key/limit vectors, all role codes and directions,
-trailing IRC arguments and missing role targets are included. The full gate,
-coverage and live federation results will be recorded after their final run.
+trailing IRC arguments and missing role targets are included. The live
+three-daemon transcript passes key creation/replacement, keyed rejoining,
+limit and voice changes, removals, coordinator restart and partition behavior.
+
+`RUST_TEST_THREADS=1 CARGO_INCREMENTAL=0 bash scripts/check-stage-nine.sh`
+completed with exit 0 for implementation commit
+`99cfa80bbb71c7a7ccbd1e417d18e944d776c1ca` on 2026-09-13. The all-feature
+workspace reported 2,867 passed and 21 ignored tests; documentation tests
+passed. Coverage measured 75.2415% branches and 91.6499% lines, with all 19
+reviewed interim critical regions at 100%. Thresholds are unchanged.
+The inventory covers 778 production sources with digest
+`67722e0d35bec037ed20350580ee6781c46f3b20bb9d0548743cad20ae50a4ab`.
+The full local log is `/tmp/agenc-runtime-followup-stage-nine.log`.
+
+GitHub Actions failed before starting jobs. The independent Bugbot rerun
+found no issues, and the security review passed. This local implementation
+gate includes x86_64/AArch64 compilation; it does not establish native
+qualification on both targets or an exact-SHA stage closure.
 
 Encrypted historical recovery, retained witnesses, old MLS leaf authority,
 conversation signing-key ownership, encrypted-object cleanup, STO-1, remaining
