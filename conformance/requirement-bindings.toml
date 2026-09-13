@@ -1,6 +1,6 @@
 # Reviewed implementation ownership; normative text remains generated separately.
 schema_version = 1
-binding_count = 240
+binding_count = 244
 
 [[binding]]
 id = "ARCH-AUTH-01"
@@ -542,6 +542,13 @@ evidence_ids = ["EVID-ARCH-REQ-1F847B93E38E57D5492E"]
 status = "implemented"
 
 [[binding]]
+id = "ARCH-REQ-2164BA56183A7397BEF9"
+target_crates = ["agenc-ircd"]
+task_ids = ["S10-009"]
+evidence_ids = ["EVID-ARCH-REQ-2164BA56183A7397BEF9"]
+status = "unimplemented"
+
+[[binding]]
 id = "ARCH-REQ-239F20852008EFEBC14C"
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S06-004"]
@@ -554,6 +561,13 @@ target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-013"]
 evidence_ids = ["EVID-ARCH-REQ-29DE85F5026ADD8EF114"]
 status = "implemented"
+
+[[binding]]
+id = "ARCH-REQ-2AD5BC7E92C08FF0EF35"
+target_crates = ["agenc-ircd"]
+task_ids = ["S10-009"]
+evidence_ids = ["EVID-ARCH-REQ-2AD5BC7E92C08FF0EF35"]
+status = "unimplemented"
 
 [[binding]]
 id = "ARCH-REQ-2B7287527206F6EE909C"
@@ -843,6 +857,13 @@ evidence_ids = ["EVID-ARCH-REQ-CAFA64060EE32DC7419D"]
 status = "implemented"
 
 [[binding]]
+id = "ARCH-REQ-CF380647FF4610FFAEBD"
+target_crates = ["agenc-ircd"]
+task_ids = ["S10-009"]
+evidence_ids = ["EVID-ARCH-REQ-CF380647FF4610FFAEBD"]
+status = "unimplemented"
+
+[[binding]]
 id = "ARCH-REQ-D621F68B6C389E5B7660"
 target_crates = ["agenc-ircd-storage"]
 task_ids = ["S05-004"]
@@ -890,6 +911,13 @@ target_crates = ["agenc-ircd-storage"]
 task_ids = ["S06-008"]
 evidence_ids = ["EVID-ARCH-REQ-DE27E4D7727B11384C1F"]
 status = "implemented"
+
+[[binding]]
+id = "ARCH-REQ-E079DE3BAF773D2AA0A9"
+target_crates = ["agenc-ircd"]
+task_ids = ["S10-009"]
+evidence_ids = ["EVID-ARCH-REQ-E079DE3BAF773D2AA0A9"]
+status = "unimplemented"
 
 [[binding]]
 id = "ARCH-REQ-E592762A378E0D95835A"
