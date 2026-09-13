@@ -20,15 +20,29 @@ use agenc_ircd_types::{AccountDeletionToken, AccountId, ControlPolicy, TypedMask
 use crate::RuntimeError;
 
 pub(crate) fn convert(
-    domain: &DomainState,
     channels: &dyn ChannelResolver,
     kind: RegisteredCommandKind,
     message: &agenc_ircd_client_wire::ParsedMessage,
 ) -> Result<CanonicalCommand, RuntimeError> {
     match kind {
         RegisteredCommandKind::Nickname => nickname(message),
-        RegisteredCommandKind::Public(kind) => convert_public(domain, channels, kind, message),
+        RegisteredCommandKind::Public(kind) => convert_public(channels, kind, message),
     }
+}
+
+/// Rejects guest controls before their target name can affect the reply.
+pub(crate) fn require_channel_control_account(
+    kind: RegisteredCommandKind,
+    has_account: bool,
+) -> Result<(), agenc_ircd_domain::DomainError> {
+    if matches!(
+        kind,
+        RegisteredCommandKind::Public(PostRegistrationCommandKind::ChannelControl(_))
+    ) && !has_account
+    {
+        return Err(agenc_ircd_domain::DomainError::RegistrationRequired);
+    }
+    Ok(())
 }
 
 /// Resolves a canonical channel name to its instance: the authoritative
@@ -50,7 +64,6 @@ impl ChannelResolver for DomainState {
 
 // agenc-review: focus owner=runtime reviewed=2026-08-29 reason=exhaustive closed wire-to-domain union with each family delegated to a bounded converter
 fn convert_public(
-    domain: &DomainState,
     channels: &dyn ChannelResolver,
     kind: PostRegistrationCommandKind,
     message: &agenc_ircd_client_wire::ParsedMessage,
@@ -60,7 +73,7 @@ fn convert_public(
         PostRegistrationCommandKind::JoinChannels => join(message),
         PostRegistrationCommandKind::Part => part(message),
         PostRegistrationCommandKind::ModeQuery => mode_query(message),
-        PostRegistrationCommandKind::ModeChange => mode_change(domain, message),
+        PostRegistrationCommandKind::ModeChange => mode_change(message),
         PostRegistrationCommandKind::TopicQuery => topic_query(message),
         PostRegistrationCommandKind::TopicSet => topic_set(message),
         PostRegistrationCommandKind::NamesAll => {
@@ -140,14 +153,13 @@ fn mode_query(
 }
 
 fn mode_change(
-    domain: &DomainState,
     message: &agenc_ircd_client_wire::ParsedMessage,
 ) -> Result<CanonicalCommand, RuntimeError> {
     let target = message.middle().first().ok_or(RuntimeError::InvalidValue)?;
     if !target.starts_with(['#', '&']) {
         return user_mode_change(message);
     }
-    channel_mode_change(domain, message, target)
+    channel_mode_change(message, target)
 }
 
 fn user_mode_change(
@@ -167,7 +179,6 @@ fn user_mode_change(
 }
 
 fn channel_mode_change(
-    domain: &DomainState,
     message: &agenc_ircd_client_wire::ParsedMessage,
     target: &str,
 ) -> Result<CanonicalCommand, RuntimeError> {
@@ -177,13 +188,11 @@ fn channel_mode_change(
     if let Some(list) = list_query(mode_string, arguments.as_slice())? {
         return Ok(CanonicalCommand::channel_mode_list(channel, list));
     }
-    let changes = parse_mode_changes(domain, &channel, mode_string, &arguments)?;
+    let changes = parse_mode_changes(mode_string, &arguments)?;
     CanonicalCommand::mode(channel, changes).map_err(closed)
 }
 
 fn parse_mode_changes(
-    domain: &DomainState,
-    channel: &ChannelNameValue,
     mode_string: &str,
     arguments: &[&str],
 ) -> Result<Vec<ModeChange>, RuntimeError> {
@@ -195,8 +204,6 @@ fn parse_mode_changes(
             '+' => operation = Some(ModeOperation::Add),
             '-' => operation = Some(ModeOperation::Remove),
             _ => changes.push(mode_change_for(
-                domain,
-                channel,
                 operation.ok_or(RuntimeError::InvalidValue)?,
                 letter,
                 arguments,
@@ -265,8 +272,6 @@ fn mode_letter_consumes_parameter(
 }
 
 pub(crate) fn mode_change_for(
-    domain: &DomainState,
-    channel: &ChannelNameValue,
     operation: ModeOperation,
     letter: char,
     arguments: &[&str],
@@ -308,8 +313,6 @@ pub(crate) fn mode_change_for(
             role: role_for(letter)?,
         }),
         'b' | 'e' | 'I' => mask_change(
-            domain,
-            channel,
             operation,
             list_for(letter)?,
             take_argument(arguments, argument_index)?,
@@ -319,8 +322,6 @@ pub(crate) fn mode_change_for(
 }
 
 fn mask_change(
-    domain: &DomainState,
-    channel: &ChannelNameValue,
     operation: ModeOperation,
     list: MaskList,
     text: &str,
@@ -329,21 +330,7 @@ fn mask_change(
     if operation == ModeOperation::Add {
         return Ok(ModeChange::AddMask { list, mask });
     }
-    let channel_id = domain
-        .resolve_channel(channel)
-        .ok_or(RuntimeError::InvalidValue)?;
-    let channel = domain
-        .channel(channel_id)
-        .ok_or(RuntimeError::InvalidValue)?;
-    let entry = channel
-        .mask_list(list)
-        .iter()
-        .find(|entry| entry.mask() == &mask)
-        .ok_or(RuntimeError::InvalidValue)?;
-    Ok(ModeChange::RemoveMask {
-        list,
-        entry_id: entry.entry_id(),
-    })
+    Ok(ModeChange::RemoveMaskValue { list, mask })
 }
 
 fn topic_query(
@@ -567,7 +554,9 @@ fn channel_control(
     let channel = parse_channel(parameter(message, 1)?)?;
     let channel_id = channels
         .channel_id_of(&channel)
-        .ok_or(RuntimeError::InvalidValue)?;
+        .ok_or(RuntimeError::CommandRefused(
+            agenc_ircd_domain::DomainError::Forbidden,
+        ))?;
     let command = match operation {
         ChannelControlCommand::Register => ChannelCommand::Register(channel_id),
         ChannelControlCommand::Unregister => ChannelCommand::Unregister(channel_id),
@@ -595,7 +584,9 @@ fn chathistory(
     let channel = parse_channel(parameter(message, 1)?)?;
     let channel_id = channels
         .channel_id_of(&channel)
-        .ok_or(RuntimeError::InvalidValue)?;
+        .ok_or(RuntimeError::CommandRefused(
+            agenc_ircd_domain::DomainError::Forbidden,
+        ))?;
     Ok(CanonicalCommand::history_query(
         channel_id,
         history::query(message)?,
@@ -790,7 +781,6 @@ mod tests {
                 .map_err(|error| io::Error::other(format!("{line}: grammar failed: {error}")))?;
             let command = convert(
                 &domain,
-                &domain,
                 RegisteredCommandKind::Public(proof.kind()),
                 &message,
             )
@@ -840,7 +830,6 @@ mod tests {
             assert_eq!(
                 convert(
                     &domain,
-                    &domain,
                     RegisteredCommandKind::Public(proof.kind()),
                     &message,
                 )
@@ -870,10 +859,58 @@ mod tests {
         let proof = validate_post_registration_command(&message)?;
         Ok(convert(
             domain,
-            domain,
             RegisteredCommandKind::Public(proof.kind()),
             &message,
         )?)
+    }
+
+    #[test]
+    fn mask_removal_conversion_does_not_disclose_channel_or_entry_existence()
+    -> Result<(), Box<dyn Error>> {
+        let domain = DomainState::new()?;
+        for line in [
+            "MODE #absent -b $n:blocked",
+            "MODE #absent -e $n:blocked",
+            "MODE #absent -I $n:blocked",
+        ] {
+            let command = converted(&domain, line)?;
+            let CanonicalCommandView::Mode(ModeCommand::ChannelChange(_, changes)) = command.view()
+            else {
+                return Err(test_error("expected a channel mode change").into());
+            };
+            assert!(matches!(
+                changes.as_slice(),
+                [agenc_ircd_domain::ModeChange::RemoveMaskValue { .. }]
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn absent_control_and_history_channels_use_the_authorization_refusal()
+    -> Result<(), Box<dyn Error>> {
+        let domain = DomainState::new()?;
+        for line in [
+            "CHANCTL REGISTER #absent",
+            "CHANCTL HISTORY #absent OFF",
+            "CHATHISTORY LATEST #absent * 1",
+        ] {
+            let message = parsed(line)?;
+            let proof = validate_post_registration_command(&message)?;
+            assert_eq!(
+                convert(
+                    &domain,
+                    RegisteredCommandKind::Public(proof.kind()),
+                    &message
+                )
+                .err(),
+                Some(RuntimeError::CommandRefused(
+                    agenc_ircd_domain::DomainError::Forbidden
+                )),
+                "{line}"
+            );
+        }
+        Ok(())
     }
 
     fn parsed(line: &str) -> Result<agenc_ircd_client_wire::ParsedMessage, Box<dyn Error>> {

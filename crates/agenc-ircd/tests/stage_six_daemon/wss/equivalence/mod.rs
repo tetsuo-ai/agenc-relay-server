@@ -9,7 +9,7 @@ mod transcript;
 
 use transcript::Transcript;
 
-const CAPABILITIES: &str = "agenc.ag/account-create agenc.ag/account-credentials sasl echo-message message-tags message-ids server-time standard-replies";
+const CAPABILITIES: &str = "agenc.ag/account-create agenc.ag/account-credentials sasl echo-message message-tags message-ids server-time standard-replies agenc.ag/account-controls agenc.ag/channel-controls";
 
 #[derive(Debug, Eq, PartialEq)]
 struct Outcome {

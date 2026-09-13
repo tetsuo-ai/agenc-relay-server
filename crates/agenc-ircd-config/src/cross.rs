@@ -222,13 +222,15 @@ fn ocsp_staple_policy(config: &Config, sink: &mut IssueSink) {
         return;
     }
     for (index, listener) in config.listeners.iter().enumerate() {
-        if matches!(
-            listener.purpose,
-            ListenerPurpose::ClientTls | ListenerPurpose::ClientWss
-        ) && listener
-            .tls
-            .as_ref()
-            .is_none_or(|tls| tls.ocsp_staple_file.is_none())
+        if listener.enabled
+            && matches!(
+                listener.purpose,
+                ListenerPurpose::ClientTls | ListenerPurpose::ClientWss
+            )
+            && listener
+                .tls
+                .as_ref()
+                .is_none_or(|tls| tls.ocsp_staple_file.is_none())
         {
             sink.push(
                 ValidationStage::ListenerUnion,

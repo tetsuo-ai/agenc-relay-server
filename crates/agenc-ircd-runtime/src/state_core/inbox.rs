@@ -12,6 +12,10 @@ use crate::sync::Arc;
 
 /// Signal and maintenance events queued ahead of StateCore (spec line 4086).
 pub const SIGNAL_EVENT_CAPACITY: usize = 64;
+/// Maintenance ticks have reserved capacity independent of client traffic.
+pub const MAINTENANCE_EVENT_CAPACITY: usize = 64;
+/// Aggregation bound in addition to each connection's request/byte limits.
+pub const CLIENT_EVENT_CAPACITY: usize = 64;
 /// Lifecycle commands queued independently of the public protocol inbox.
 ///
 /// The dedicated channel remains selectable while a durable batch is in
@@ -341,7 +345,7 @@ pub enum StateCoreMessage {
         /// Completed only after StateCore accepts or rejects the generation.
         acknowledgement: oneshot::Sender<ConnectionOpenOutcome>,
     },
-    /// One complete parsed line from an admitted connection.
+    /// One complete parsed line injected by a trusted in-process caller.
     Line {
         /// The queue generation the line arrived on.
         generation: ConnectionGeneration,
@@ -349,6 +353,17 @@ pub enum StateCoreMessage {
         sequence: u64,
         /// The parsed message; boxed to keep the inbox item small.
         message: Box<ParsedMessage>,
+    },
+    /// A transport line retaining its per-connection charge through dispatch.
+    QueuedLine {
+        /// The queue generation the line arrived on.
+        generation: ConnectionGeneration,
+        /// Per-connection order assigned after inbox acceptance.
+        sequence: u64,
+        /// Bounded parsed message.
+        message: Box<ParsedMessage>,
+        /// Request and arena charge acquired before parsing.
+        permit: crate::connection::reader::ClientLinePermit,
     },
     /// A process signal.
     Signal(SignalEvent),

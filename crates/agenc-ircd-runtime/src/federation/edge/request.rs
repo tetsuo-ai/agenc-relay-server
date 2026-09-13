@@ -634,10 +634,17 @@ pub(super) fn send_command(
     if must_defer_command(edge, generation) {
         return defer_command(edge, context, generation, kind, message);
     }
-    let Ok(command) =
-        crate::command_convert::convert(context.domain(), &edge.replica, kind, &message)
-    else {
-        return Err((message, DomainError::InvalidArgument));
+    let has_account = edge
+        .replica
+        .session(user_id)
+        .is_some_and(|session| session.account.is_some());
+    if let Err(error) = crate::command_convert::require_channel_control_account(kind, has_account) {
+        return Err((message, error));
+    }
+    let command = match crate::command_convert::convert(&edge.replica, kind, &message) {
+        Ok(command) => command,
+        Err(crate::RuntimeError::CommandRefused(error)) => return Err((message, error)),
+        Err(_) => return Err((message, DomainError::InvalidArgument)),
     };
     if let CanonicalCommandView::Mode(ModeCommand::UserQuery(target)) = command.view() {
         return local_user_modes(edge, context, generation, user_id, &message, target)
@@ -1064,12 +1071,14 @@ fn mode_operation(
 ) -> Result<FederatedOperation, DomainError> {
     match mode {
         ModeCommand::ChannelChange(name, changes) => {
-            let (channel_id, revision) = channel_of(edge, name)?;
+            let (channel_id, revision) =
+                channel_of(edge, name).map_err(|_| DomainError::SecretUnavailable)?;
             let arguments: Vec<&str> = message
                 .middle()
                 .iter()
                 .skip(2)
                 .map(String::as_str)
+                .chain(message.trailing())
                 .collect();
             Ok(FederatedOperation::ChannelMode {
                 session_id,
@@ -1179,7 +1188,9 @@ const fn mode_change_parts(change: &ModeChange) -> (ModeDirection, u16, bool) {
             true,
         ),
         ModeChange::AddMask { list, .. } => (ModeDirection::Add, mask_code(*list), true),
-        ModeChange::RemoveMask { list, .. } => (ModeDirection::Remove, mask_code(*list), true),
+        ModeChange::RemoveMask { list, .. } | ModeChange::RemoveMaskValue { list, .. } => {
+            (ModeDirection::Remove, mask_code(*list), true)
+        }
     }
 }
 
@@ -1720,9 +1731,7 @@ fn send_directory_query(
         return false;
     };
     let kind = RegisteredCommandKind::Public(proof.kind());
-    let Ok(command) =
-        crate::command_convert::convert(context.domain(), &edge.replica, kind, &message)
-    else {
+    let Ok(command) = crate::command_convert::convert(&edge.replica, kind, &message) else {
         return false;
     };
     let Ok(operation) = super::directory::operation(session_id, &command, cursor) else {

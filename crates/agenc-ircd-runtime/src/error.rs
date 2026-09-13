@@ -22,6 +22,8 @@ pub enum RuntimeError {
     LimitExceeded,
     /// A value violated an invariant that its constructor must enforce.
     InvalidValue,
+    /// A valid client command was refused before its state-dependent conversion.
+    CommandRefused(agenc_ircd_domain::DomainError),
     /// The process-wide memory budget refused a permit batch.
     MemoryExhausted,
     /// The owning token was cancelled before the operation completed.
@@ -42,6 +44,7 @@ impl fmt::Display for RuntimeError {
             Self::Overflow => formatter.write_str("runtime size calculation overflowed"),
             Self::LimitExceeded => formatter.write_str("runtime ceiling exceeded"),
             Self::InvalidValue => formatter.write_str("runtime value violates its invariant"),
+            Self::CommandRefused(_) => formatter.write_str("client command refused"),
             Self::MemoryExhausted => formatter.write_str("memory budget exhausted"),
             Self::Cancelled => formatter.write_str("runtime operation cancelled"),
             Self::Storage(error) => write!(formatter, "storage owner failed: {error}"),
@@ -68,12 +71,13 @@ impl From<StorageError> for RuntimeError {
 mod tests {
     use super::*;
 
-    const ALL: [RuntimeError; 8] = [
+    const ALL: [RuntimeError; 9] = [
         RuntimeError::BudgetArithmetic,
         RuntimeError::BudgetBelowWorkingSet,
         RuntimeError::Overflow,
         RuntimeError::LimitExceeded,
         RuntimeError::InvalidValue,
+        RuntimeError::CommandRefused(agenc_ircd_domain::DomainError::Forbidden),
         RuntimeError::MemoryExhausted,
         RuntimeError::Cancelled,
         RuntimeError::Storage(StorageError::Unavailable),

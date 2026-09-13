@@ -1555,11 +1555,14 @@ the closure branch at review time.
   invalidate the result; changed session or channel authority still refuses
   it. Deferred JOIN, MODE, changed-key and disconnected-session regressions
   cover the repair.
-- [ ] `CHANCTL`, `CHATHISTORY`, and `MODE -b` resolve the channel name before
-  authorization (`command_convert.rs`), so an unknown name answers 461 while an
-  existing secret channel answers 481. Map an unresolved name to the same
-  public error the domain gives for an unauthorized existing channel
-  (`PRV-01`, `STA-10`).
+- [x] CHANCTL and CHATHISTORY unresolved names now return the same public
+  refusal as inaccessible channels. MODE mask removal resolves the canonical
+  mask after domain authorization, including quiet-mask role checks. Guest
+  CHANCTL account checks precede name lookup on standalone and edge nodes.
+  Missing edge MODE targets return SecretUnavailable, and mask arguments cross
+  the existing typed federation schema correctly. Live TLS, edge and domain regressions
+  cover secret/absent targets and ordered mutation behavior (`PRV-01`, `STA-10`).
+  See `docs/stage-10-operational-repair.md`.
 - [x] Batch gathering from Architecture 21.5 is unreachable: every plan uses
   the committed revision, so `pending.rs` never chains a second plan. The
   state core now holds its inbox while a batch is pending, so batch size one
@@ -1574,10 +1577,10 @@ the closure branch at review time.
 - [x] Account administration advances `account.revision` in both the durable
   after-image and live state. The regression checks suspension, restoration,
   matching after-images and refusal of stale confirmation revisions.
-- [ ] Committed `ACCT` and `CHANCTL` mutations emit no reply when
-  `standard-replies` was not negotiated (`mutation_render.rs`), although
-  Section 14.6 promises `NOTE ... UPDATED`; `CHATHISTORY` renders zero frames.
-  Gate at the wire or fail closed with a bounded reply.
+- [x] ACCT and CHANCTL require their vendor capability and standard-replies
+  before mutation; CHATHISTORY requires draft/chathistory. Missing capabilities
+  receive a bounded numeric refusal. Wire and live-server tests cover capability
+  removal, unchanged state on refusal, successful NOTE replies and history batches.
 - [x] Startup reconstructs durable before-images for audit events and retained
   checkpoints. The retention regression uses that index without inserting
   rows by hand, commits the expired prefix deletion and checks the reopened
@@ -1588,17 +1591,21 @@ the closure branch at review time.
 - [ ] With euid 0, secret file checks accept only root-owned files, so root
   cannot run `print-onboarding`, `check-config`, or `account-invite create`
   against keys installed for the service account.
-- [ ] Disabled listeners still load TLS material, and `listener_key_reuse`
-  and the runtime disagree about same-path key sharing. Decide one policy.
+- [x] Unused disabled listeners no longer load TLS material; the disabled
+  federation entry on an enabled edge still supplies its outbound identity.
+  Same-class TLS aliases are allowed consistently; cross-class and other secret
+  reuse is rejected. Config, stopped-runtime and real federation restart tests
+  cover both paths.
 - [x] Reload activation and outcome submission distinguish full or closed
   inbox refusal from a lost reply after acceptance. A refused REHASH now
   commits its failure audit before replying. Tests cover full-queue retry,
   closed inboxes, lost replies and the admin audit receipt boundary.
-- [ ] The connection reader to StateCore channel is one process-wide 64-slot
-  mpsc sized with the signal constant and shared with `Opened` notices and
-  maintenance events (`daemon.rs`), so the per-connection
-  `requests_per_connection` bound and the separate maintenance channel of
-  Architecture 21.3 do not exist as specified.
+- [ ] Client ingestion still aggregates into a process-wide 64-slot channel
+  with Opened notices instead of independently scheduled per-connection inboxes
+  (Architecture 21.3). Request-count and parsed-byte charges now survive until
+  dispatch, enforcing each connection's limits before parsing, and maintenance
+  has independent capacity. Paused-time and actor-loop regressions cover those
+  repairs; the aggregation/scheduling topology remains open.
 - [ ] A `JoinError` from one connection task cancels the shared accept and
   connection tokens (`listener/mod.rs`, `supervisor/mod.rs`), against
   Architecture 21.2. Unreachable while the panic hook exits the process.

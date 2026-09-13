@@ -16,6 +16,82 @@ use support::{DUAL, PUBLIC, Sandbox, mutate};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn disabled_listener_material_is_not_required_until_enablement() -> TestResult {
+    let sandbox = Sandbox::create()?;
+    sandbox.populate_host_layout()?;
+    let text = format!(
+        "{PUBLIC}\n[[listeners.endpoint]]\nname = \"dormant\"\nenabled = false\npurpose = \"client_tls\"\nbind = \"127.0.0.1:6698\"\nmax_connections = 1\ntls_certificate_file = \"/etc/agenc/tls/dormant.crt\"\ntls_private_key_file = \"/etc/agenc/tls/dormant.key\"\n"
+    );
+    let config = host_config(&sandbox, &text)?;
+    let secrets = SecretSet::load(&config)?;
+    assert!(
+        secrets
+            .tls_private_key(&agenc_ircd_config::ListenerName::parse("dormant")?)
+            .is_none()
+    );
+    let enabled = mutate(
+        &text,
+        "name = \"dormant\"\nenabled = false",
+        "name = \"dormant\"\nenabled = true",
+    );
+    assert!(host_config(&sandbox, &enabled).is_err());
+    Ok(())
+}
+
+#[test]
+fn same_class_tls_key_aliases_preserve_cross_purpose_secret_separation() -> TestResult {
+    let sandbox = Sandbox::create()?;
+    sandbox.populate_host_layout()?;
+    let text = mutate(
+        DUAL,
+        "/etc/agenc/tls/onion.key",
+        "/etc/agenc/tls/server.key",
+    );
+    let config = host_config(&sandbox, &text)?;
+    let secrets = SecretSet::load(&config)?;
+    let public = agenc_ircd_config::ListenerName::parse("public")?;
+    let onion = agenc_ircd_config::ListenerName::parse("onion")?;
+    assert_eq!(
+        secrets
+            .tls_private_key(&public)
+            .ok_or("missing public key")?
+            .expose(),
+        secrets
+            .tls_private_key(&onion)
+            .ok_or("missing onion key")?
+            .expose()
+    );
+    // A copied key is the same TLS identity even when the files have distinct inodes.
+    sandbox.file("etc/tls/onion.key", &[0x70; 48], 0o600)?;
+    let copied = host_config(&sandbox, DUAL)?;
+    assert!(SecretSet::load(&copied).is_ok());
+    // The loader also enforces separation for callers holding an edited typed config.
+    let mut cross_class = config.clone();
+    let public_path = cross_class
+        .listeners
+        .iter()
+        .find(|listener| listener.name == public)
+        .and_then(|listener| listener.tls.as_ref())
+        .ok_or("missing public TLS material")?
+        .private_key_file
+        .clone();
+    cross_class
+        .listeners
+        .iter_mut()
+        .find(|listener| listener.purpose == agenc_ircd_config::ListenerPurpose::Federation)
+        .and_then(|listener| listener.tls.as_mut())
+        .ok_or("missing federation TLS material")?
+        .private_key_file = public_path;
+    assert!(SecretSet::load(&cross_class).is_err());
+    sandbox.file("etc/tls/federation.key", &[0x70; 48], 0o600)?;
+    assert!(SecretSet::load(&config).is_err());
+    sandbox.file("etc/tls/federation.key", &[0x72; 48], 0o600)?;
+    sandbox.file("etc/tls/server.key", &[1; 32], 0o600)?;
+    assert!(SecretSet::load(&config).is_err());
+    Ok(())
+}
+
+#[test]
 fn secret_files_must_be_private_regular_and_exactly_sized() -> TestResult {
     let sandbox = Sandbox::create()?;
     let good = sandbox.file("keys/good.key", &[7; 32], 0o600)?;

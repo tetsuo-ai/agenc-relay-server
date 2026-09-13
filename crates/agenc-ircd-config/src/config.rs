@@ -78,6 +78,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether this identity is used by a listener or an outbound federation link.
+    /// Edge federation listeners stay disabled while supplying the dialer's TLS identity.
+    #[must_use]
+    pub fn listener_material_required(&self, listener: &ListenerConfig) -> bool {
+        listener.enabled
+            || (self.federation.enabled
+                && self.network.role == crate::NodeRole::Edge
+                && listener.purpose == ListenerPurpose::Federation)
+    }
+
     /// Parses and validates one document in the C.8 stage order.
     ///
     /// Structural failure (stages 1 and 2) returns before any later stage runs;
@@ -170,6 +180,9 @@ impl Config {
             self.e2ee.sequencer_private_key_file.as_ref(),
         );
         for (index, listener) in self.listeners.iter().enumerate() {
+            if !self.listener_material_required(listener) {
+                continue;
+            }
             let key = SchemaKey::indexed(
                 "listeners.endpoint",
                 paths::index_u16(index),
@@ -239,6 +252,9 @@ impl Config {
     pub(crate) fn listener_material_paths(&self) -> Vec<(SchemaKey, PathBuf)> {
         let mut paths = Vec::new();
         for (index, listener) in self.listeners.iter().enumerate() {
+            if !self.listener_material_required(listener) {
+                continue;
+            }
             let key =
                 |field| SchemaKey::indexed("listeners.endpoint", paths::index_u16(index), field);
             if let Some(tls) = &listener.tls {

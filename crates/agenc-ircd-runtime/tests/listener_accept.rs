@@ -330,7 +330,7 @@ async fn expect_line(
     generation: ConnectionGeneration,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
     match next_message(inbox).await? {
-        StateCoreMessage::Line {
+        StateCoreMessage::QueuedLine {
             generation: line_generation,
             message,
             ..

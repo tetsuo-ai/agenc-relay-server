@@ -1855,6 +1855,8 @@ pub struct StateCore {
     )>,
     federation_receiver: mpsc::Receiver<FederationInbound>,
     federation_open: bool,
+    maintenance_receiver: mpsc::Receiver<MaintenanceEvent>,
+    maintenance_open: bool,
     reload_receiver: mpsc::Receiver<ReloadCoreRequest>,
     reload_open: bool,
     reload_handle: Option<RuntimeConfigHandle>,
@@ -2162,6 +2164,8 @@ impl StateCore {
         drop(unused_reload);
         let (unused_federation, federation_receiver) = mpsc::channel(1);
         drop(unused_federation);
+        let (unused_maintenance, maintenance_receiver) = mpsc::channel(1);
+        drop(unused_maintenance);
         let bucket_budget = Arc::clone(&inputs.budget);
         let prefix_budget = Arc::clone(&inputs.budget);
         let mut state = Self {
@@ -2208,6 +2212,8 @@ impl StateCore {
             history_purge_reply: None,
             federation_receiver,
             federation_open: false,
+            maintenance_receiver,
+            maintenance_open: false,
             reload_receiver,
             reload_open: false,
             reload_handle: None,
@@ -2253,6 +2259,19 @@ impl StateCore {
         }
         self.federation_receiver = receiver;
         self.federation_open = true;
+        Ok(())
+    }
+
+    /// Installs maintenance capacity independent of the client inbox.
+    pub(crate) fn install_maintenance_inbox(
+        &mut self,
+        receiver: mpsc::Receiver<MaintenanceEvent>,
+    ) -> Result<(), RuntimeError> {
+        if self.maintenance_open {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.maintenance_receiver = receiver;
+        self.maintenance_open = true;
         Ok(())
     }
 
@@ -3562,6 +3581,16 @@ impl StateCore {
                 sequence,
                 message,
             } => self.route_line(generation, sequence, *message),
+            StateCoreMessage::QueuedLine {
+                generation,
+                sequence,
+                message,
+                permit,
+            } => {
+                let exit = self.route_line(generation, sequence, *message);
+                drop(permit);
+                exit
+            }
             StateCoreMessage::Signal(signal) => self.step_signal(signal),
             StateCoreMessage::Maintenance(event) => {
                 self.step_maintenance(event);
@@ -4210,6 +4239,18 @@ impl StateCore {
                     }
                     None
                 },
+                event = self.maintenance_receiver.recv(), if self.maintenance_open && !hold_inbox && !activation_barrier => {
+                    match event {
+                        Some(event) => {
+                            self.step_maintenance(event);
+                            self.step_batch()
+                        }
+                        None => {
+                            self.maintenance_open = false;
+                            None
+                        }
+                    }
+                },
                 message = inbox.recv(), if !hold_inbox && !activation_barrier => match message {
                     Some(StateCoreMessage::Opened { .. }) if self.context.quiescing => None,
                     Some(message) => self.step_message(message),
@@ -4799,6 +4840,72 @@ mod tests {
         .await?;
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
         assert!(reply.is_ok());
+        Ok(())
+    }
+
+    struct MaintenanceProbe(mpsc::Sender<MaintenanceEvent>);
+
+    impl super::CommandRouter for MaintenanceProbe {
+        fn route(
+            &mut self,
+            context: &mut super::StateCoreContext,
+            generation: ConnectionGeneration,
+            message: agenc_ircd_client_wire::ParsedMessage,
+            observation: super::CommandObservation,
+        ) -> super::RouteOutcome {
+            super::DefaultRouter.route(context, generation, message, observation)
+        }
+
+        fn maintenance(&mut self, _context: &mut super::StateCoreContext, event: MaintenanceEvent) {
+            let _sent = self.0.try_send(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn dedicated_maintenance_is_admitted_and_dispatched_with_a_full_client_queue()
+    -> TestResult {
+        let (exit, _open) = run_core_with(
+            false,
+            |fixture| {
+                let (maintenance, receiver) = mpsc::channel(64);
+                let (observed, observation) = mpsc::channel(1);
+                let state = fixture.state_mut()?;
+                state.install_maintenance_inbox(receiver)?;
+                state.router = Box::new(MaintenanceProbe(observed));
+                Ok((maintenance, observation))
+            },
+            |inbox, lifecycle, _token, (maintenance, mut observation)| async move {
+                while inbox.capacity() != 0 {
+                    inbox
+                        .try_send(StateCoreMessage::Line {
+                            generation: ConnectionGeneration::new(99),
+                            sequence: 1,
+                            message: Box::new(
+                                agenc_ircd_client_wire::parse_message(
+                                    agenc_ircd_client_wire::FramedLine::new("PING :busy")?,
+                                )?
+                                .ok_or("missing parsed message")?,
+                            ),
+                        })
+                        .map_err(|_| "client inbox prematurely closed")?;
+                }
+                maintenance
+                    .try_send(MaintenanceEvent::RetentionSweep)
+                    .map_err(|_| "maintenance blocked by client queue")?;
+                assert!(matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), observation.recv())
+                        .await?,
+                    Some(MaintenanceEvent::RetentionSweep)
+                ));
+                lifecycle
+                    .request(LifecyclePhase::Stop)
+                    .await
+                    .map_err(|_| "stop")?;
+                Ok(inbox)
+            },
+        )
+        .await?;
+        assert!(matches!(exit, StateCoreExit::Stopped));
         Ok(())
     }
 

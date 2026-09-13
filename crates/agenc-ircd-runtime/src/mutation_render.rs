@@ -812,7 +812,9 @@ fn has_reconnectable_mask_change(
     changes: &[ModeChange],
 ) -> bool {
     changes.iter().any(|change| match change {
-        ModeChange::AddMask { mask, .. } => is_reconnectable_mask(mask),
+        ModeChange::AddMask { mask, .. } | ModeChange::RemoveMaskValue { mask, .. } => {
+            is_reconnectable_mask(mask)
+        }
         ModeChange::RemoveMask { list, entry_id } => channel
             .mask_list(*list)
             .iter()
@@ -898,6 +900,11 @@ fn mode_change_text(
                 Some(typed_mask_text(entry.mask())),
             )
         }
+        ModeChange::RemoveMaskValue { list, mask } => (
+            ModeOperation::Remove,
+            list_letter(*list),
+            Some(typed_mask_text(mask)),
+        ),
     };
     Ok(value)
 }

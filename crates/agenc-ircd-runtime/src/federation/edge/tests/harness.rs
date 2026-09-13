@@ -44,6 +44,7 @@ use crate::test_support::{FrameSink, StateCoreFixture};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+mod command_privacy;
 mod durability;
 mod journal_retry;
 mod ordinary_batch;
