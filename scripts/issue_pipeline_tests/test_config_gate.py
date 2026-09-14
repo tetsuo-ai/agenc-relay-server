@@ -7,6 +7,7 @@ from pathlib import Path
 import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -46,6 +47,8 @@ class ConfigTests(unittest.TestCase):
         values = ["version = true", "version = 1\nmax_sessions = true",
                   "version = 1\nunknown = 3", "version = 1\nmax_sessions = 9",
                   "version = 1\nmax_issues = 4\nmax_sessions = 2",
+                  "version = 1\nmax_issues = 3\nmax_sessions = 4",
+                  "version = 1\nmax_issues = 4\nmax_sessions = 4",
                   "version = 1\ngate_timeout_seconds = 0", "version = 1\nmodel = ' '",
                   "version = 1\nstate_dir = ''", "version = 1\nstate_dir = 'relative'",
                   "version = 1\nstate_dir = '/'", "version = 1\nbase_branch = 'main/'",
@@ -84,6 +87,174 @@ class PolicyRepo:
 
 
 class PolicyTests(unittest.TestCase):
+    @staticmethod
+    def coverage(source, first=2, last=4):
+        import hashlib
+        return {"required_categories": ["authorization-decisions"], "deferred": [], "region": [{
+            "id": "fixture-critical", "category": "authorization-decisions",
+            "file": "crates/example/src/lib.rs", "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            "start_line": first, "end_line": last, "metric": "branches", "reason": "Preserve the authorization paths."}]}
+
+    @staticmethod
+    def coverage_text(value):
+        lines = [FLOORS]
+        for key, item in value.items():
+            if key == "region":
+                continue
+            if key == "deferred":
+                text = "[" + ", ".join("{" + ", ".join(field + " = " + json.dumps(data)
+                                                         for field, data in row.items()) + "}" for row in item) + "]"
+            else:
+                text = json.dumps(item)
+            lines.append(key + " = " + text)
+        for row in value.get("region", []):
+            lines.append("\n[[region]]")
+            lines.extend(key + " = " + json.dumps(item) for key, item in row.items())
+        return "\n".join(lines) + "\n"
+
+    def coverage_repo(self, old_source, new_source, before=None, after=None, diff=None):
+        import difflib
+        before = self.coverage_text(self.coverage(old_source) if before is None else before)
+        after = self.coverage_text(self.coverage(new_source) if after is None else after)
+        patch = "".join(difflib.unified_diff(old_source.splitlines(keepends=True),
+                                            new_source.splitlines(keepends=True), n=0)) if diff is None else diff
+        class SourceRepo:
+            def __init__(self):
+                self.calls = []
+            def run(self, argv):
+                self.calls.append(argv)
+                if argv[0] == "diff":
+                    return "" if "--name-only" in argv else patch
+                revision, path = argv[1].split(":", 1)
+                if path == "conformance/gates.toml":
+                    return MANIFEST
+                if path == "crates/example/src/lib.rs":
+                    return old_source if revision == BASE else new_source
+                return before if revision == BASE else after
+        return SourceRepo()
+
+    def test_critical_region_deletion_renaming_or_reclassification_cannot_keep_numeric_floors(self):
+        source = "header\na\nb\nc\nfooter\n"
+        baseline = self.coverage(source)
+        variants = [{**baseline, "region": []}]
+        for field, value in (("id", "replacement-id"), ("category", "parser-error-discriminants"),
+                             ("file", "crates/example/src/other.rs"), ("metric", "regions")):
+            changed = copy.deepcopy(baseline)
+            changed["region"][0][field] = value
+            variants.append(changed)
+        for after in variants:
+            with self.subTest(after=after), self.assertRaises(GateFailure):
+                check_policy(self.coverage_repo(source, source, baseline, after), BASE, SOURCE)
+
+    def test_unchanged_source_must_keep_entire_span_but_can_expand_it(self):
+        source = "header\na\nb\nc\nfooter\n"
+        for first, last in ((3, 4), (2, 3)):
+            with self.subTest(first=first, last=last), self.assertRaisesRegex(GateFailure, "narrows"):
+                check_policy(self.coverage_repo(source, source, after=self.coverage(source, first, last)), BASE, SOURCE)
+        self.assertEqual(len(check_policy(self.coverage_repo(source, source, after=self.coverage(source, 1, 5)), BASE, SOURCE)), 2)
+
+    def test_required_categories_and_deferrals_cannot_reduce_critical_obligations(self):
+        source = "header\na\nb\nc\nfooter\n"
+        baseline = self.coverage(source)
+        missing = copy.deepcopy(baseline)
+        missing.pop("required_categories")
+        deferred = copy.deepcopy(baseline)
+        deferred["deferred"] = [{"category": "authorization-decisions", "until_task": "REL-13", "reason": "Later"}]
+        for after in (missing, {**baseline, "required_categories": []}, deferred):
+            with self.assertRaises(GateFailure):
+                check_policy(self.coverage_repo(source, source, baseline, after), BASE, SOURCE)
+        delayed = copy.deepcopy(deferred)
+        delayed["deferred"][0]["until_task"] = "REL-99"
+        with self.assertRaisesRegex(GateFailure, "deferral"):
+            check_policy(self.coverage_repo(source, source, deferred, delayed), BASE, SOURCE)
+        self.assertEqual(len(check_policy(self.coverage_repo(source, source, deferred, baseline), BASE, SOURCE)), 2)
+
+    def test_shifted_spans_and_hash_refreshes_preserve_covered_lines_with_cached_mapping(self):
+        old = "header\na\nb\nc\nfooter\n"
+        new = "preface\n" + old
+        after = self.coverage(new, 3, 5)
+        after.update(reviewed_source_files=999, reviewed_source_sha256="f" * 64)
+        repo = self.coverage_repo(old, new, after=after)
+        self.assertEqual(len(check_policy(repo, BASE, SOURCE)), 2)
+        self.assertEqual(sum("--unified=0" in argv for argv in repo.calls), 1)
+        self.assertEqual(sum(argv[0] == "show" and argv[1].endswith(":crates/example/src/lib.rs") for argv in repo.calls), 2)
+        with self.assertRaisesRegex(GateFailure, "narrows"):
+            check_policy(self.coverage_repo(old, new, after=self.coverage(new, 2, 4)), BASE, SOURCE)
+        outside = old.replace("header", "updated preamble")
+        self.assertEqual(len(check_policy(self.coverage_repo(old, outside), BASE, SOURCE)), 2)
+
+    def test_replacement_hunks_must_keep_every_replacement_and_retained_line(self):
+        old = "header\na\nb\nc\nfooter\n"
+        new = "header\na\nnew_one\nnew_two\nc\nfooter\n"
+        self.assertEqual(len(check_policy(self.coverage_repo(old, new, after=self.coverage(new, 2, 5)), BASE, SOURCE)), 2)
+        for first, last in ((2, 4), (3, 5)):
+            with self.subTest(first=first, last=last), self.assertRaisesRegex(GateFailure, "narrows"):
+                check_policy(self.coverage_repo(old, new, after=self.coverage(new, first, last)), BASE, SOURCE)
+        before = self.coverage(old, 3, 3)
+        with self.assertRaisesRegex(GateFailure, "narrows"):
+            check_policy(self.coverage_repo(old, new, before, self.coverage(new, 3, 3)), BASE, SOURCE)
+        self.assertEqual(len(check_policy(self.coverage_repo(old, new, before, self.coverage(new, 3, 4)), BASE, SOURCE)), 2)
+
+    def test_shorter_rewrites_and_partial_deletion_can_refresh_coverage(self):
+        old = "header\na\nb\nc\nfooter\n"
+        rewritten = "header\nfixed_authorization\nfooter\n"
+        self.assertEqual(len(check_policy(self.coverage_repo(old, rewritten, after=self.coverage(rewritten, 2, 2)), BASE, SOURCE)), 2)
+        partial = "header\na\nc\nfooter\n"
+        self.assertEqual(len(check_policy(self.coverage_repo(old, partial, after=self.coverage(partial, 2, 3)), BASE, SOURCE)), 2)
+        removed = "header\nfooter\n"
+        with self.assertRaisesRegex(GateFailure, "entirely deleted"):
+            check_policy(self.coverage_repo(old, removed, after=self.coverage(removed, 1, 2)), BASE, SOURCE)
+
+    def test_forged_source_hash_duplicate_id_and_unprovable_diff_are_refused(self):
+        source = "header\na\nb\nc\nfooter\n"
+        wrong = self.coverage(source)
+        wrong["region"][0]["source_sha256"] = "f" * 64
+        with self.assertRaisesRegex(GateFailure, "stale source"):
+            check_policy(self.coverage_repo(source, source, after=wrong), BASE, SOURCE)
+        duplicate = self.coverage(source)
+        duplicate["region"] *= 2
+        with self.assertRaisesRegex(GateFailure, "duplicate"):
+            check_policy(self.coverage_repo(source, source, after=duplicate), BASE, SOURCE)
+        shifted = "preface\n" + source
+        with self.assertRaisesRegex(GateFailure, "mapping is unproven"):
+            check_policy(self.coverage_repo(source, shifted, after=self.coverage(shifted, 3, 5), diff=""), BASE, SOURCE)
+
+    def test_real_git_line_mapping_keeps_critical_replacements_and_rejects_omitted_tail(self):
+        from issue_pipeline.gitops import GitRepo
+        with tempfile.TemporaryDirectory(prefix="agenc-policy-git-") as temporary:
+            root = Path(temporary)
+            def git(*argv):
+                return subprocess.check_output(["git", "-c", "core.hooksPath=/dev/null", *argv], cwd=root,
+                                               text=True, stderr=subprocess.DEVNULL).strip()
+            git("init", "--initial-branch=main")
+            git("config", "user.name", "Policy Test")
+            git("config", "user.email", "policy@example.invalid")
+            (root / "conformance").mkdir()
+            file = root / "crates/example/src/lib.rs"
+            file.parent.mkdir(parents=True)
+            old = "header\na\nb\nc\nfooter\n"
+            file.write_text(old)
+            (root / "conformance/gates.toml").write_text(MANIFEST)
+            policies = [root / "conformance" / name for name in ("critical-coverage.toml", "release-critical-coverage.toml")]
+            for path in policies:
+                path.write_text(self.coverage_text(self.coverage(old)))
+            git("add", ".")
+            git("commit", "-m", "Initial critical inventory")
+            base = git("rev-parse", "HEAD")
+            new = "preface\nheader\na\nnew_one\nnew_two\nc\nfooter\n"
+            file.write_text(new)
+            for path in policies:
+                path.write_text(self.coverage_text(self.coverage(new, 3, 6)))
+            git("add", ".")
+            git("commit", "-m", "Preserve complete replacement coverage")
+            repo = GitRepo(root, worktree_root=root / "worktrees")
+            self.assertEqual(len(check_policy(repo, base, git("rev-parse", "HEAD"))), 2)
+            policies[0].write_text(self.coverage_text(self.coverage(new, 3, 5)))
+            git("add", "conformance/critical-coverage.toml")
+            git("commit", "-m", "Attempt to omit the retained critical tail")
+            with self.assertRaisesRegex(GateFailure, "narrows"):
+                check_policy(repo, base, git("rev-parse", "HEAD"))
+
     def test_existing_gate_and_added_check_pass(self):
         self.assertEqual(len(check_policy(PolicyRepo(), BASE, SOURCE)), 2)
         added = MANIFEST + '\n[[gate.stage-nine-implementation.command]]\nargv = ["cargo", "fmt", "--check"]\n'
@@ -173,6 +344,20 @@ class ArtifactTests(unittest.TestCase):
     def test_complete_exact_source_record_is_validated_by_real_isolated_checker(self):
         self.assertEqual(self.validate(self.value)["source"], self.source)
 
+    def test_candidate_modules_cannot_shadow_host_validator_standard_library(self):
+        marker = Path(self.temporary.name) / "candidate-imported-on-host"
+        payload = "from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\nraise RuntimeError('candidate import executed')\n"
+        shadows = [self.root / "scripts" / name for name in ("copy.py", "tomllib.py")]
+        try:
+            for shadow in shadows:
+                self.assertFalse(shadow.exists())
+                shadow.write_text(payload)
+            self.assertEqual(self.validate(self.value)["source"], self.source)
+            self.assertFalse(marker.exists())
+        finally:
+            for shadow in shadows:
+                shadow.unlink(missing_ok=True)
+
     def test_wrong_sha_schema_and_boolean_exit_refused(self):
         for field, value in (("source_commit", "f" * 40), ("schema_version", 2.0),
                              ("schema_version", True), ("exit_code", False),
@@ -225,6 +410,9 @@ class RunnerTests(unittest.TestCase):
         self.stop_timeout = False
 
     def process(self, argv, **kwargs):
+        if argv[0] == "/usr/bin/prlimit":
+            self.assertEqual(argv[1], "--fsize=67108864:67108864")
+            argv = argv[3:]
         self.calls.append(argv)
         if argv[0] == "systemd-run":
             recorded = json.loads((self.output / "unit.json").read_text())
@@ -250,9 +438,38 @@ class RunnerTests(unittest.TestCase):
                 mock.patch("issue_pipeline.gate.filesystem_command", return_value=["/bin/true"]), \
                 mock.patch("issue_pipeline.gate.subprocess.run", side_effect=self.process), \
                 mock.patch("issue_pipeline.gate.subprocess.Popen", side_effect=self.popen), \
+                mock.patch.object(self.runner, "_wait_for_gate", side_effect=lambda launcher, root: launcher.wait(timeout=1)), \
                 mock.patch("issue_pipeline.gate.validate_artifact", side_effect=GateFailure("bad evidence")), \
                 mock.patch("issue_pipeline.gate.shutil.disk_usage", return_value=shutil._ntuple_diskusage(2**40, 0, 2**40)):
             return self.runner.run(self.repo, self.root, SOURCE, BASE, self.output)
+
+    def test_disk_reserve_failure_still_quiesces_the_gate(self):
+        def wait(launcher, root):
+            with mock.patch("issue_pipeline.gate.shutil.disk_usage", return_value=shutil._ntuple_diskusage(2**40, 2**40, 0)):
+                return GateRunner._wait_for_gate(self.runner, launcher, root)
+        # This fixture exercises the production monitor and its run() finally
+        # cleanup; only Docker/systemd are mocked at their external boundaries.
+        with mock.patch("issue_pipeline.gate.check_policy", return_value=[]), \
+             mock.patch("issue_pipeline.gate.filesystem_command", return_value=["/bin/true"]), \
+             mock.patch("issue_pipeline.gate.subprocess.run", side_effect=self.process), \
+             mock.patch("issue_pipeline.gate.subprocess.Popen", side_effect=self.popen), \
+             mock.patch.object(self.runner, "_wait_for_gate", side_effect=wait):
+            with self.assertRaisesRegex(GateFailure, "free-disk reserve"):
+                self.runner.run(self.repo, self.root, SOURCE, BASE, self.output)
+        self.assertTrue(any("show" in argv for argv in self.calls))
+        self.assertFalse(self.runner._active)
+        self.assertFalse(self.runner._launchers)
+
+    @unittest.skipUnless(Path("/usr/bin/prlimit").exists(), "native Linux file-size control")
+    def test_native_file_size_control_bounds_noisy_launcher_output(self):
+        path = self.root / "bounded-log"
+        limit = 64 * 1024
+        with path.open("xb") as log:
+            result = subprocess.run(["/usr/bin/prlimit", f"--fsize={limit}:{limit}", "--", sys.executable,
+                                     "-I", "-B", "-c", "import os; [os.write(1, b'x'*8192) for _ in range(100)]"],
+                                    stdout=log, stderr=subprocess.DEVNULL, timeout=10, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLessEqual(path.stat().st_size, limit)
 
     def popen(self, argv, **kwargs):
         self.assertTrue(self.runner._active_lock.locked(), "spawn must share the cancellation barrier")

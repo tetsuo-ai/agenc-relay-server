@@ -112,6 +112,9 @@ with tempfile.TemporaryFile(dir=request["scratch"]) as stream:
     stream.seek(0)
     if stream.read() != b"benign gate writable canary":
         raise RuntimeError("private writable scratch failed its positive control")
+if (os.stat(request["scratch"]).st_dev != request["scratch_device"]
+        or os.statvfs(request["scratch"]).f_flag != request["scratch_mount_flags"]):
+    raise RuntimeError("private scratch changed its bound filesystem tuple")
 if os.getuid() != request["uid"] or os.getgid() != request["gid"]:
     raise RuntimeError("gate changed the caller's UID/GID")
 if os.statvfs(request["home"]).f_flag != request["home_mount_flags"]:
@@ -126,7 +129,7 @@ home_scratch.mkdir(mode=0o700)
 if (home_scratch / "canary").read_text() != "benign private HOME fixture canary\n":
     raise RuntimeError("private HOME fixture scratch failed its positive control")
 for command in (["git", "write-tree"], ["cargo", "--version"],
-                ["rustc", "--version"], ["python3", "--version"]):
+                ["rustc", "--version"], ["cc", "--version"], ["python3", "--version"]):
     subprocess.run(command, cwd=request["worktree"], check=True, timeout=30)
 print("agenc-pipeline filesystem isolation verified", flush=True)
 if not request["probe_only"]:
@@ -226,7 +229,9 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
                             "/var/run/docker.sock", "/run/user/" + str(os.getuid()) + "/bus"],
                  "readonly": [str(readonly), str(worktree / "scripts/check-stage-nine.sh"),
                               str(output / "unit.json"), *dependency_canaries],
-                 "scratch": str(scratch), "home": str(home), "home_scratch": str(home_scratch),
+                 "scratch": "/tmp", "scratch_device": os.stat(scratch).st_dev,
+                 "scratch_mount_flags": os.statvfs(scratch).f_flag,
+                 "home": str(home), "home_scratch": str(home_scratch),
                  "home_mount_flags": os.statvfs(private_home).f_flag,
                  "home_device": os.stat(private_home).st_dev,
                  "uid": os.getuid(), "gid": os.getgid(),
@@ -243,11 +248,15 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
             raise SandboxFailure("unsafe container bind path")
         mounts[str(target)] = {"source": str(path), "target": str(target), "readonly": readonly}
     bind(private_home, home, readonly=False)
+    # Unix socket fixtures append unique names; expose the disk-backed scratch
+    # at a short private path so their names remain below Linux sun_path limits.
+    bind(scratch, Path("/tmp"), readonly=False)
     for parent in readonly_parents:
         virtual = private_home / parent.relative_to(home)
         virtual.mkdir(parents=True, exist_ok=True, mode=0o700)
         bind(virtual, parent)
-    for path in (Path("/usr"), Path("/etc/ssl/certs"), *readable):
+    # Host compiler entrypoints such as /usr/bin/cc resolve through alternatives.
+    for path in (Path("/usr"), Path("/etc/alternatives"), Path("/etc/ssl/certs"), *readable):
         bind(path)
     for path in (administration, cargo_home, scratch, *generated):
         bind(path, readonly=False)
@@ -274,12 +283,12 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
     ordered = [mounts[target] for target in sorted(mounts, key=lambda p: (len(Path(p).parts), p))]
     _record(output / "filesystem-policy.json", {"backend": "docker", "image": IMAGE,
             "mounts": ordered, "bootstrap": bootstrap})
-    argv = [str(executable), "--host", DOCKER_HOST, "create", "--pull=never", "--name", name,
+    argv = [str(executable), "--host", DOCKER_HOST, "create", "--pull=never", "--log-driver=none", "--name", name,
             "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", "--read-only", "--pids-limit=4096",
             "--memory=" + str(config.gate_memory_gib) + "g",
             "--cpus=" + str(config.gate_cpu_percent / 100),
-            "--tmpfs", "/tmp:rw,nosuid,nodev", "--tmpfs", "/run:rw,nosuid,nodev",
+            "--tmpfs", "/run:rw,nosuid,nodev",
             "--tmpfs", "/var/tmp:rw,nosuid,nodev"]
     for key, value in labels.items():
         argv += ["--label", key + "=" + value]
@@ -290,7 +299,7 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
              "PATH=" + os.environ.get("PATH", "/usr/bin:/bin"),
              "HOME=" + str(Path.home()), "USER=" + os.environ.get("USER", ""),
              "CARGO_HOME=" + str(cargo_home), "RUSTUP_HOME=" + str(rustup),
-             "TMPDIR=" + str(scratch), "AGENC_IRCD_RECORD_GATE=1",
+             "TMPDIR=/tmp", "AGENC_IRCD_RECORD_GATE=1",
              "/usr/bin/python3", "-I", "-B", "-c", _FILESYSTEM_BOOTSTRAP,
              json.dumps(bootstrap, separators=(",", ":"))]
     # Creation is inert. A lost response can never authorize candidate execution.

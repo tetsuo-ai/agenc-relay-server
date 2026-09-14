@@ -59,7 +59,7 @@ class Config:
                      "gate_cpu_percent", "gate_memory_gib"):
             if getattr(result, name) < 1:
                 raise ValueError(name + " must be positive")
-        if result.max_issues > 4 or result.max_sessions > 4 or result.max_phases > 8 or result.max_attempts > 10:
+        if result.max_issues > 2 or result.max_sessions > 4 or result.max_phases > 8 or result.max_attempts > 10:
             raise ValueError("controller concurrency/retry safety ceiling exceeded")
         if result.max_sessions < result.max_issues:
             raise ValueError("max_sessions must cover max_issues")

@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 import uuid
 
@@ -23,6 +24,7 @@ from .gitops import GitError, _process
 GATE = "stage-nine-implementation"
 ARTIFACT_PREFIX = "conformance/evidence/artifacts/"
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+MAX_GATE_LOG_BYTES = 64 * 1024 * 1024
 PROTECTED_PATHS = frozenset({
     "scripts/run-gate.py", "scripts/check-stage-nine.sh", "scripts/check-evidence.py",
     "scripts/check-source.py", "scripts/check-coverage.py", "scripts/check-ci.py",
@@ -82,6 +84,118 @@ def commands(manifest: dict, name: str = GATE, stack: tuple = ()) -> list[dict]:
     return result
 
 
+def _critical_regions(policy: dict) -> dict[str, dict]:
+    """Read the closed region inventory before comparing inherited obligations."""
+    raw = policy.get("region", [])
+    if type(raw) is not list:
+        raise GateFailure("critical region inventory must be an array")
+    result = {}
+    fields = {"id", "category", "file", "source_sha256", "start_line", "end_line", "metric", "reason"}
+    for region in raw:
+        if (type(region) is not dict or set(region) != fields
+                or any(type(region[key]) is not str or not region[key].strip()
+                       for key in ("id", "category", "file", "source_sha256", "metric", "reason"))
+                or re.fullmatch(r"[0-9a-f]{64}", region["source_sha256"]) is None
+                or region["metric"] not in {"branches", "regions"}
+                or type(region["start_line"]) is not int or type(region["end_line"]) is not int
+                or not 1 <= region["start_line"] <= region["end_line"]):
+            raise GateFailure("critical region has invalid fields or line bounds")
+        path = Path(region["file"])
+        if (path.is_absolute() or ".." in path.parts or str(path) != region["file"]
+                or any(ord(char) < 32 for char in region["file"])):
+            raise GateFailure("critical region source path must be canonical and repository-relative")
+        if region["id"] in result:
+            raise GateFailure("critical region inventory contains duplicate IDs")
+        result[region["id"]] = region
+    return result
+
+
+def _preserve_critical_policy(repo, base: str, candidate: str, before: dict, after: dict,
+                              source_cache: dict, diff_cache: dict) -> None:
+    """Keep inherited critical obligations while allowing provable line shifts.
+
+    Source digests and line counts are cached per file across both inventories;
+    a changed file's zero-context diff is read once. Every retained covered line
+    and the full replacement of any overlapping hunk must remain covered.
+    """
+    import hashlib
+
+    categories = []
+    for policy in (before, after):
+        values = policy.get("required_categories", [])
+        if (type(values) is not list or any(type(item) is not str or not item for item in values)
+                or len(set(values)) != len(values)):
+            raise GateFailure("critical categories must be distinct strings")
+        categories.append(set(values))
+    if not categories[0] <= categories[1]:
+        raise GateFailure("candidate removes a required critical coverage category")
+    deferrals = []
+    for policy in (before, after):
+        values = policy.get("deferred", [])
+        if type(values) is not list or any(type(item) is not dict for item in values):
+            raise GateFailure("critical coverage deferrals must be an array of records")
+        deferrals.append(Counter(json.dumps(item, sort_keys=True, allow_nan=False) for item in values))
+    if deferrals[1] - deferrals[0]:
+        raise GateFailure("candidate adds or changes a critical coverage deferral")
+    old_regions, new_regions = _critical_regions(before), _critical_regions(after)
+    if not old_regions.keys() <= new_regions.keys():
+        raise GateFailure("candidate removes an inherited critical coverage region")
+    for identifier, old in old_regions.items():
+        new = new_regions[identifier]
+        if any(old[key] != new[key] for key in ("category", "file", "metric")):
+            raise GateFailure("candidate changes inherited critical region identity: " + identifier)
+        file = old["file"]
+        if file not in source_cache:
+            values = []
+            for revision in (base, candidate):
+                text = repo.run(["show", revision + ":" + file])
+                values.append((hashlib.sha256(text.encode()).hexdigest(), len(text.splitlines())))
+            source_cache[file] = values
+        (old_hash, old_lines), (new_hash, new_lines) = source_cache[file]
+        if (old["source_sha256"] != old_hash or new["source_sha256"] != new_hash
+                or old["end_line"] > old_lines or new["end_line"] > new_lines):
+            raise GateFailure("critical region has stale source identity or bounds: " + identifier)
+        first, last = old["start_line"], old["end_line"]
+        if old_hash != new_hash:
+            if file not in diff_cache:
+                diff = repo.run(["diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                                 "--unified=0", base, candidate, "--", file])
+                hunks = []
+                for line in diff.splitlines():
+                    match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+                    if match:
+                        start, count, new_start, added = match.groups()
+                        hunks.append((int(start), int(count or "1"), int(new_start), int(added or "1")))
+                if not hunks or sum(added - count for _, count, _, added in hunks) != new_lines - old_lines:
+                    raise GateFailure("critical source mapping is unproven; explicit policy review is required: " + file)
+                diff_cache[file] = hunks
+            hunks = diff_cache[file]
+            def mapped(line):
+                return line + sum(added - count for start, count, _, added in hunks
+                                  if (line > start if count == 0 else line >= start + count))
+            retained = []
+            cursor = first
+            for start, count, new_start, added in hunks:
+                if not count or start > last or start + count <= first:
+                    continue
+                if cursor < start:
+                    retained.append((mapped(cursor), mapped(min(last, start - 1))))
+                if added:
+                    # If a replacement overlaps even part of a covered span,
+                    # preserve its entire replacement. Fine-grained attribution
+                    # would otherwise let policy edits omit new failure arms.
+                    retained.append((new_start, new_start + added - 1))
+                cursor = max(cursor, start + count)
+            if cursor <= last:
+                retained.append((mapped(cursor), mapped(last)))
+            if not retained:
+                raise GateFailure("critical region was entirely deleted; explicit policy review is required: " + identifier)
+            first = min(start for start, _ in retained)
+            last = max(end for _, end in retained)
+        if not new["start_line"] <= first <= last <= new["end_line"]:
+            raise GateFailure("candidate narrows inherited critical coverage: " + identifier)
+
+
 def check_policy(repo, base: str, candidate: str) -> list[dict]:
     """Ordinary workers cannot weaken policy or rewrite trusted gate machinery."""
     old = tomllib.loads(repo.run(["show", base + ":conformance/gates.toml"]))
@@ -104,6 +218,7 @@ def check_policy(repo, base: str, candidate: str) -> list[dict]:
         if (path in protected or path.startswith("scripts/issue_pipeline")
                 or path in {"scripts/issue-pipeline.py", "scripts/test-issue-pipeline.py"}):
             raise GateFailure("candidate changes trusted validation/controller code: " + path)
+    source_cache, diff_cache = {}, {}
     for path in ("conformance/critical-coverage.toml", "conformance/release-critical-coverage.toml"):
         before = tomllib.loads(repo.run(["show", base + ":" + path]))
         after = tomllib.loads(repo.run(["show", candidate + ":" + path]))
@@ -114,15 +229,19 @@ def check_policy(repo, base: str, candidate: str) -> list[dict]:
                         or type(floor) not in (int, float) or not math.isfinite(floor)
                         or not value <= floor <= 100):
                     raise GateFailure("candidate lowers or invalidates coverage policy: " + path + ":" + key)
+        _preserve_critical_policy(repo, base, candidate, before, after, source_cache, diff_cache)
     return proposed
 
 
-# Isolated imports prevent another checkout's cached requirements module from
-# substituting policy. check_policy protects the imported files against edits.
+# Load only exact protected policy files. Candidate directories must never join
+# Python's host import search path: a new copy.py could shadow the standard library.
 _VALIDATE = r'''
-import json, pathlib, runpy, sys, tempfile
+import importlib.util, json, pathlib, runpy, sys, tempfile
 root = pathlib.Path(sys.argv[1])
-sys.path.insert(0, str(root / "scripts"))
+spec = importlib.util.spec_from_file_location("requirements", root / "scripts/requirements.py")
+ledger = importlib.util.module_from_spec(spec)
+sys.modules["requirements"] = ledger
+spec.loader.exec_module(ledger)
 policy = runpy.run_path(str(root / "scripts/check-evidence.py"), run_name="pipeline_evidence")
 request = json.load(sys.stdin)
 source, tree = request["source"], request["tree"]
@@ -319,6 +438,22 @@ class GateRunner:
         except GitError as error:
             raise GateFailure("gate changed tracked source") from error
 
+    def _wait_for_gate(self, launcher, worktree: Path) -> int:
+        """Keep a disk reserve while candidate build outputs are being written."""
+        deadline = time.monotonic() + self.config.gate_timeout_seconds + 45
+        while True:
+            if shutil.disk_usage(worktree).free < self.config.minimum_free_gib * 2**30:
+                raise GateFailure("gate stopped because writable outputs reached the free-disk reserve")
+            if self._cancelled.is_set():
+                raise GateFailure("controller stopped during gate")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(launcher.args, self.config.gate_timeout_seconds + 45)
+            try:
+                return launcher.wait(timeout=min(1, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+
     def run(self, repo, worktree: Path, source: str, base: str, output: Path) -> dict:
         with self._lock:
             if self._cancelled.is_set():
@@ -364,7 +499,13 @@ class GateRunner:
                     "-p", "RuntimeMaxSec=" + str(self.config.gate_timeout_seconds),
                     "-p", "CPUQuota=" + str(self.config.gate_cpu_percent) + "%",
                     "-p", "MemoryMax=" + str(self.config.gate_memory_gib) + "G",
+                    "-p", "LimitFSIZE=" + str(MAX_GATE_LOG_BYTES),
                     "--working-directory=" + str(worktree), *sandboxed]
+            # Bound both possible log writers: systemd-run's local forwarding
+            # process and the transient unit's Docker attach client. Docker's
+            # separately created candidate processes do not inherit this limit.
+            argv = ["/usr/bin/prlimit", "--fsize=" + str(MAX_GATE_LOG_BYTES) + ":" + str(MAX_GATE_LOG_BYTES),
+                    "--", *argv]
             with self._active_lock:
                 self._active.add(unit)
                 if (output / "container.json").exists():
@@ -387,10 +528,12 @@ class GateRunner:
                             launcher = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=stream,
                                                         stderr=subprocess.STDOUT, start_new_session=True)
                             self._launchers[unit] = launcher
-                        returncode = launcher.wait(timeout=self.config.gate_timeout_seconds + 45)
+                        returncode = self._wait_for_gate(launcher, worktree)
                         stream.flush()
                         os.fsync(stream.fileno())
                     if returncode:
+                        if log.stat().st_size >= MAX_GATE_LOG_BYTES:
+                            raise GateFailure("gate output exceeded its 64-MiB log limit; log " + str(log))
                         raise GateFailure(f"mandatory gate failed (exit {returncode}); log {log}")
                 except subprocess.TimeoutExpired as error:
                     raise GateFailure("mandatory gate timed out: " + str(log)) from error

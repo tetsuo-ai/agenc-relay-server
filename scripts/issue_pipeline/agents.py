@@ -7,13 +7,16 @@ descendant that calls setsid(). Structured results are claims, never gate author
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import selectors
 import shutil
 import signal
 import subprocess
+import stat
 import threading
 import time
 import uuid
@@ -289,11 +292,177 @@ def _private_file(path, mode="wb"):
     return os.fdopen(descriptor, mode)
 
 
+class SessionLifecycleError(RuntimeError):
+    """Durable session launch/quiescence authority is missing or inconsistent."""
+
+
+def _session_record(path, *, required=False):
+    """Read bounded private records without following links or accepting ambiguity."""
+    path = Path(path)
+    try:
+        if (not path.is_absolute() or str(path) != str(path.resolve())
+                or any(item.is_symlink() for item in (path, *path.parents))):
+            raise SessionLifecycleError("session records require canonical nonsymlink paths")
+        parent = path.parent.stat()
+        if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o077):
+            raise SessionLifecycleError("session record directory must be private and caller-owned")
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            if not required:
+                return None
+            raise
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or metadata.st_mode & 0o077 or metadata.st_nlink != 1 or metadata.st_size > 128 * 1024):
+                raise SessionLifecycleError("session record must be a bounded private ordinary file")
+            raw = stream.read(128 * 1024 + 1)
+        if len(raw) > 128 * 1024:
+            raise SessionLifecycleError("session record exceeds its bound")
+        value = _json(raw)
+        if type(value) is not dict:
+            raise SessionLifecycleError("session record must be a closed JSON object")
+        return value, hashlib.sha256(raw).hexdigest()
+    except (OSError, ValueError) as error:
+        raise SessionLifecycleError("cannot read session lifecycle record safely") from error
+
+
+def _session_identity(output_dir):
+    request, digest = _session_record(Path(output_dir) / "request.json", required=True)
+    if (set(request) != {"lifecycle_version", "role", "review_purpose", "argv", "systemd_unit"}
+            or type(request["lifecycle_version"]) is not int or request["lifecycle_version"] != 1):
+        raise SessionLifecycleError("legacy or invalid session request requires explicit reconciliation")
+    try:
+        _enum(request["role"], _ROLES, "session role")
+        # These are controller-built CLI policy arguments, including compact
+        # filesystem grants, not the separately bounded model command proposals.
+        _list(request["argv"], "session argv", maximum=256, minimum=1)
+        for argument in request["argv"]:
+            _string(argument, "session argv", 64 * 1024)
+            if any(ord(char) < 32 for char in argument):
+                raise ValueError("session argv contains a control character")
+        if sum(len(argument.encode()) for argument in request["argv"]) > 96 * 1024:
+            raise ValueError("session argv exceeds its byte bound")
+        if request["role"] == "reviewer":
+            _enum(request["review_purpose"], {"candidate", "plan", "discovery"}, "session review purpose")
+        elif request["review_purpose"] is not None:
+            raise ValueError("non-reviewer request has a review purpose")
+    except ValueError as error:
+        raise SessionLifecycleError("session request has invalid role policy") from error
+    unit = request["systemd_unit"]
+    if (type(unit) is not str or re.fullmatch(r"agenc-ircd-agent-[0-9a-f]{32}\.service", unit) is None):
+        raise SessionLifecycleError("session request has no valid production unit")
+    return {"unit": unit, "request_sha256": digest}
+
+
+def _lifecycle_value(identity, state):
+    return {"version": 1, **identity, "state": state}
+
+
+def _write_session_receipt(output_dir, filename, state):
+    identity = _session_identity(output_dir)
+    value = _lifecycle_value(identity, state)
+    path = Path(output_dir) / filename
+    existing = _session_record(path)
+    if existing is not None and existing[0] != value:
+        raise SessionLifecycleError("session lifecycle receipt conflicts with its request")
+    try:
+        if existing is None:
+            with _private_file(path, "w") as stream:
+                json.dump(value, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+        else:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        descriptor = os.open(output_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise SessionLifecycleError("cannot durably publish session lifecycle receipt") from error
+
+
+def session_lifecycle(output_dir: Path) -> dict:
+    """Return validated launch authority without subprocesses or state mutations.
+
+    States are not_dispatched, unresolved, registered, and quiescent. Legacy
+    requests are never silently adopted. An unresolved launch remains uncertain
+    after an absent-unit snapshot: SIGKILL may have interrupted registration.
+    Receipts bind the exact immutable request bytes, not only a reusable pathname.
+    """
+    identity = _session_identity(output_dir)
+    receipts = []
+    for filename, state in (("launch-intent.json", "dispatching"),
+                            ("launch-registered.json", "registered"),
+                            ("launch-quiescent.json", "quiescent")):
+        item = _session_record(Path(output_dir) / filename)
+        if item is not None and (item[0] != _lifecycle_value(identity, state)
+                                 or type(item[0].get("version")) is not int):
+            raise SessionLifecycleError("session lifecycle receipt differs from its exact request")
+        receipts.append(item is not None)
+    intent, registered, terminal = receipts
+    if (registered and not intent) or (terminal and not registered):
+        raise SessionLifecycleError("session lifecycle receipts have a missing prerequisite")
+    state = "quiescent" if terminal else "registered" if registered else "unresolved" if intent else "not_dispatched"
+    return {**identity, "state": state}
+
+
+def record_session_quiescent(output_dir: Path, *, observed_registered: bool = False) -> None:
+    """Record external recovery proof after the caller stops and verifies the unit.
+
+    The caller MUST prove successful unit/PID/cgroup quiescence and ensure no
+    local launcher can dispatch another request. Set observed_registered only
+    when the exact unit was observed loaded; absence alone grants no authority.
+    This helper validates/publishes receipts and performs no process cleanup.
+    """
+    if type(observed_registered) is not bool:
+        raise SessionLifecycleError("observed registration proof must be boolean")
+    state = session_lifecycle(output_dir)["state"]
+    if state == "quiescent":
+        return
+    if state == "not_dispatched" or (state == "unresolved" and not observed_registered):
+        raise SessionLifecycleError("session launch registration remains unresolved")
+    if state == "unresolved":
+        _write_session_receipt(output_dir, "launch-registered.json", "registered")
+    _write_session_receipt(output_dir, "launch-quiescent.json", "quiescent")
+
+
+def _permissions(worktree, output_dir, role, codex_path, *, evidence_paths=()):
+    from .permissions import prepare_permissions
+    return prepare_permissions(worktree, output_dir, role, codex_path, evidence_paths=evidence_paths)
+
+
+_PERMISSION_BOOTSTRAP = r'''
+import json, os, subprocess, sys
+print(json.dumps({"type": "pipeline.unit.started"}), flush=True)
+descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(descriptor, "wb") as stream:
+    try:
+        result = subprocess.run(json.loads(sys.argv[2]), stdin=subprocess.DEVNULL,
+                                stdout=stream, stderr=subprocess.STDOUT, timeout=30)
+        code = result.returncode
+    except subprocess.TimeoutExpired:
+        stream.write(b"permission controls exceeded their 30-second deadline\n")
+        code = 78
+    stream.flush()
+    os.fsync(stream.fileno())
+if code:
+    raise SystemExit(78)
+os.execv(sys.argv[3], sys.argv[3:])
+'''
+
+
 class CodexRunner:
     """Run isolated roles; at most four sessions exist across all runner instances."""
 
     def __init__(self, codex_path, model, reasoning_effort, max_sessions=4,
-                 timeout_seconds=7200, use_systemd=False):
+                 timeout_seconds=7200, use_systemd=False, minimum_free_gib=1):
         if type(max_sessions) is not int or not 1 <= max_sessions <= 4:
             raise ValueError("max_sessions must be an integer in 1..4")
         if (type(timeout_seconds) not in {int, float} or not math.isfinite(timeout_seconds)
@@ -306,6 +475,8 @@ class CodexRunner:
               "reasoning_effort")
         if type(use_systemd) is not bool:
             raise ValueError("use_systemd must be boolean")
+        if type(minimum_free_gib) is not int or minimum_free_gib < 1:
+            raise ValueError("minimum_free_gib must be a positive integer")
         executable = shutil.which(str(codex_path))
         if not executable:
             raise ValueError("Codex executable is unavailable")
@@ -314,6 +485,7 @@ class CodexRunner:
         self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
         self.use_systemd = use_systemd
+        self.minimum_free_gib = minimum_free_gib
         self._slots = threading.BoundedSemaphore(max_sessions)
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
@@ -353,11 +525,10 @@ class CodexRunner:
             if semaphore.acquire(timeout=min(0.05, remaining)):
                 return
 
-    def _argv(self, role, worktree, result_path):
-        sandbox = "workspace-write" if role == "worker" else "read-only"
+    def _argv(self, role, worktree, result_path, permission_args=()):
         return [self.codex_path, "exec", "--ignore-user-config",
                 "--strict-config", "--ephemeral", "--model", self.model,
-                "--sandbox", sandbox, "--json", "--cd", str(worktree),
+                "--json", "--cd", str(worktree),
                 "--output-schema", str(_SCHEMAS / f"{role}.json"),
                 "--output-last-message", str(result_path),
                 "-c", f"model_reasoning_effort={json.dumps(self.reasoning_effort)}",
@@ -366,7 +537,7 @@ class CodexRunner:
                 "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
                 "-c", "features.plugins=false", "-c", "features.hooks=false",
                 "-c", "features.apps=false", "-c", "features.remote_plugin=false",
-                "-c", "features.skill_mcp_dependency_install=false", "-"]
+                "-c", "features.skill_mcp_dependency_install=false", *permission_args, "-"]
 
     def _contained_argv(self, argv, env, unit):
         if not self.use_systemd:
@@ -429,13 +600,15 @@ class CodexRunner:
             if not registered and properties["LoadState"] == "not-found":
                 self._uncertain_registration(unit, output_dir)
                 raise AgentRunError("cleanup", "launcher registration is ambiguous; preserve the session for reconciliation", output_dir)
+            return properties["LoadState"] == "loaded"
         except (OSError, subprocess.TimeoutExpired, ValueError) as error:
             raise AgentRunError("cleanup", "cannot stop/verify owned systemd unit", output_dir) from error
 
-    def _stream(self, process, events, errors, deadline, output_dir):
+    def _stream(self, process, events, errors, deadline, output_dir, worktree):
         pending = bytearray()
         total = 0
         completed = False
+        next_disk_check = 0.0
         with selectors.DefaultSelector() as selector:
             for stream, kind in ((process.stdout, "events"), (process.stderr, "stderr")):
                 os.set_blocking(stream.fileno(), False)
@@ -443,8 +616,17 @@ class CodexRunner:
             while selector.get_map() or process.poll() is None:
                 if self._cancelled.is_set():
                     raise AgentRunError("cancelled", "agent runner cancelled", output_dir)
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= deadline:
                     raise AgentRunError("timeout", "agent session timed out", output_dir)
+                if now >= next_disk_check:
+                    next_disk_check = now + 1.0
+                    try:
+                        free = shutil.disk_usage(worktree).free
+                    except OSError as error:
+                        raise AgentRunError("resource", "cannot verify the agent free-disk reserve", output_dir) from error
+                    if free < self.minimum_free_gib * 2**30:
+                        raise AgentRunError("resource", "agent session crossed the configured free-disk reserve", output_dir)
                 for key, _ in selector.select(timeout=0.05):
                     chunk = os.read(key.fd, 65536)
                     if not chunk:
@@ -469,9 +651,14 @@ class CodexRunner:
                             kind = _event_type(raw)
                         except ValueError as error:
                             raise AgentRunError("event_json", "invalid agent JSONL event", output_dir) from error
-                        # A real Codex event proves the transient service has
-                        # executed; merely starting its systemd-run client does not.
+                        # A Codex or trusted bootstrap event proves the transient
+                        # service executed; starting its systemd-run client does not.
                         with self._lock:
+                            if self.use_systemd and process not in self._registered:
+                                try:
+                                    _write_session_receipt(output_dir, "launch-registered.json", "registered")
+                                except SessionLifecycleError as error:
+                                    raise AgentRunError("cleanup", "cannot persist observed session registration", output_dir) from error
                             self._registered.add(process)
                         if kind in {"error", "turn.failed"}:
                             raise AgentRunError("agent_failure", "Codex emitted a failure event", output_dir)
@@ -491,7 +678,7 @@ class CodexRunner:
                 raise AgentRunError("event_json", "Codex emitted no completed turn", output_dir)
 
     def run(self, role: str, worktree: Path, prompt: str, output_dir: Path, *,
-            review_purpose: str = "candidate") -> dict:
+            review_purpose: str = "candidate", evidence_paths: tuple[Path, ...] = ()) -> dict:
         """Run a fresh process and return a validated claim object, or fail closed.
 
         output_dir must be outside the source worktree and unused for any previous
@@ -511,14 +698,28 @@ class CodexRunner:
         if output_dir.stat().st_uid != os.getuid():
             raise ValueError("output directory must belong to the current user")
         output_dir.chmod(0o700)
+        if type(evidence_paths) is not tuple or len(evidence_paths) > 32:
+            raise ValueError("trusted evidence paths must be a tuple of at most 32 files")
+        for path in evidence_paths:
+            if (not isinstance(path, Path) or not path.is_absolute() or not path.is_file()
+                    or any(item.is_symlink() for item in (path, *path.parents))
+                    or str(path) != str(path.resolve())):
+                raise ValueError("trusted evidence paths must name exact canonical ordinary files")
+        profile = _permissions(worktree, output_dir, role, self.codex_path, evidence_paths=evidence_paths)
+        if (set(profile.environment) != {"TMPDIR", "CARGO_HOME", "RUSTUP_HOME"}
+                or any(type(value) is not str or not value for value in profile.environment.values())):
+            raise ValueError("permission preparation may override only private temporary/Cargo paths and the existing Rust toolchain")
         env = _child_environment()
+        env.update(profile.environment)
         deadline = time.monotonic() + self.timeout_seconds
         result_path = output_dir / "result.json"
-        argv = self._argv(role, worktree, result_path)
+        argv = self._argv(role, worktree, result_path, profile.argv)
         unit = f"agenc-ircd-agent-{uuid.uuid4().hex}.service" if self.use_systemd else None
-        actual_argv = self._contained_argv(argv, env, unit)
+        bootstrap = ["/usr/bin/python3", "-I", "-B", "-c", _PERMISSION_BOOTSTRAP,
+                     str(output_dir / "permissions-probe.log"), json.dumps(profile.probe_argv), *argv]
+        actual_argv = self._contained_argv(bootstrap, env, unit)
         with _private_file(output_dir / "request.json", "w") as stream:
-            json.dump({"role": role, "review_purpose": review_purpose if role == "reviewer" else None,
+            json.dump({"lifecycle_version": 1, "role": role, "review_purpose": review_purpose if role == "reviewer" else None,
                        "argv": argv, "systemd_unit": unit}, stream)
             stream.flush()
             os.fsync(stream.fileno())
@@ -545,6 +746,11 @@ class CodexRunner:
                 with self._lock:
                     if self._cancelled.is_set():
                         raise AgentRunError("cancelled", "agent runner cancelled before launch", output_dir)
+                    if unit is not None:
+                        try:
+                            _write_session_receipt(output_dir, "launch-intent.json", "dispatching")
+                        except SessionLifecycleError as error:
+                            raise AgentRunError("cleanup", "cannot persist session launch intent", output_dir) from error
                     try:
                         process = subprocess.Popen(actual_argv, stdin=source, stdout=subprocess.PIPE,
                                                    stderr=subprocess.PIPE, cwd=worktree, env=env,
@@ -552,7 +758,7 @@ class CodexRunner:
                     except OSError as error:
                         raise AgentRunError("spawn", "cannot start Codex session", output_dir) from error
                     self._active.add(process)
-                self._stream(process, events, errors, deadline, output_dir)
+                self._stream(process, events, errors, deadline, output_dir, worktree)
             try:
                 return load_result(role, result_path, worktree)
             except (OSError, ValueError) as error:
@@ -581,7 +787,12 @@ class CodexRunner:
                     try:
                         with self._lock:
                             registered = process in self._registered
-                        self._stop_unit(unit, env, output_dir, registered=registered)
+                        observed = self._stop_unit(unit, env, output_dir, registered=registered)
+                        if unit is not None:
+                            try:
+                                record_session_quiescent(output_dir, observed_registered=observed)
+                            except SessionLifecycleError as error:
+                                raise AgentRunError("cleanup", "cannot persist verified session quiescence", output_dir) from error
                     finally:
                         with self._lock:
                             self._active.discard(process)

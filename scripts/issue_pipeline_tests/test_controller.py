@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from issue_pipeline.config import Config, digest_file
-from issue_pipeline.controller import Controller, PipelineBlocked, body_hash
+from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, task_hash
 from issue_pipeline.gate import GateFailure
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.graph import Graph
@@ -274,6 +274,208 @@ class ControllerTests(unittest.TestCase):
         self.controller.log = mock.Mock()
         self.task = self.github.graph.by_issue[36]
         self.issue = self.github.issue(36)
+
+    def graph_record(self):
+        return json.loads(self.github.issues[35]["body"].split("```json\n", 1)[1].split("\n```", 1)[0])
+
+    def replace_graph(self, value):
+        self.github.issues[35]["body"] = "```json\n" + json.dumps(value) + "\n```\n"
+        self.github.graph = Graph.from_master(self.github.issues[35]["body"])
+        self.github.dependencies = {task.issue: set(task.depends_on) for task in self.github.graph.tasks}
+        self.github.dependencies[13] = set(value["legacy_umbrella"]["depends_on"])
+        self.github.child_links[35] = {13, *(task.issue for task in self.github.graph.tasks)}
+        for task in self.github.graph.tasks:
+            self.github.issues.setdefault(task.issue, {"number": task.issue, "id": task.issue + 1000,
+                                                       "state": "open", "title": "Fixture prerequisite",
+                                                       "body": "Accepted fixture requirements."})
+
+    def accepted_fixture(self, number):
+        """Create a real immutable receipt for a scripted qualification fixture."""
+        self.github.issues[number]["state"] = "closed"
+        self.controller.state.set_task(number, "complete", {})
+        return self.controller.record(number, "completion", self.base, self.base,
+                                      {"issue_hash": body_hash(self.github.issue(number))})
+
+    def chain(self):
+        value = self.graph_record()
+        value["tasks"][1].update(depends_on=[36], level=1)
+        value["tasks"][2].update(depends_on=[41], level=2)
+        self.replace_graph(value)
+
+    def test_reopened_or_edited_ancestor_invalidates_descendant_and_live_preconditions(self):
+        self.chain()
+        self.accepted_fixture(36)
+        self.accepted_fixture(41)
+        final = self.github.graph.by_issue[86]
+        final_hash = body_hash(self.github.issue(86))
+        self.assertTrue(self.controller.verified(41, self.base))
+        self.controller.live_preconditions(final, final_hash)
+        original = self.github.issues[36]["body"]
+        for state, body in (("open", original), ("closed", "Changed ancestor requirements")):
+            with self.subTest(state=state, body=body):
+                self.github.issues[36].update(state=state, body=body)
+                self.assertFalse(self.controller.verified(41, self.base))
+                with self.assertRaisesRegex(PipelineBlocked, "ancestor"):
+                    self.controller.live_preconditions(final, final_hash)
+        self.github.issues[36].update(state="closed", body=original)
+        self.assertTrue(self.controller.verified(41, self.base))
+        self.github.issues[41]["state"] = "open"
+        self.assertFalse(self.controller.verified(41, self.base))
+
+    def test_changed_direct_dependencies_require_a_new_graph_bound_completion(self):
+        self.accepted_fixture(36)
+        old = self.accepted_fixture(41)
+        self.assertTrue(self.controller.verified(41, self.base))
+        self.chain()
+        self.assertNotEqual(old["data"]["task_hash"], task_hash(self.github.graph.by_issue[41]))
+        self.assertFalse(self.controller.verified(41, self.base))
+        self.accepted_fixture(41)
+        self.assertTrue(self.controller.verified(41, self.base))
+
+    def test_changed_ancestor_dependencies_invalidate_unchanged_descendant_binding(self):
+        value = self.graph_record()
+        value["tasks"][0].update(depends_on=[100], level=1)
+        value["tasks"][1].update(depends_on=[36], level=2)
+        value["tasks"][2].update(depends_on=[41, 101], level=3)
+        value["tasks"] += [{"key": "FIX-01", "issue": 100, "depends_on": [], "locks": ["one"], "external_gate": False, "level": 0},
+                           {"key": "FIX-02", "issue": 101, "depends_on": [], "locks": ["two"], "external_gate": False, "level": 0}]
+        self.replace_graph(value)
+        for number in (100, 101, 36, 41, 86):
+            self.accepted_fixture(number)
+        descendant = task_hash(self.github.graph.by_issue[41])
+        self.assertTrue(self.controller.verified(86, self.base))
+        value["tasks"][0]["depends_on"] = [100, 101]
+        self.replace_graph(value)
+        self.assertEqual(task_hash(self.github.graph.by_issue[41]), descendant)
+        self.assertFalse(self.controller.verified(41, self.base))
+        self.assertFalse(self.controller.verified(86, self.base))
+
+    def test_unrelated_task_or_master_prose_change_keeps_existing_task_proofs_valid(self):
+        self.accepted_fixture(36)
+        self.accepted_fixture(41)
+        value = self.graph_record()
+        value["tasks"].append({"key": "FIX-01", "issue": 100, "depends_on": [],
+                               "locks": ["unrelated"], "external_gate": False, "level": 0})
+        value["tasks"][2]["depends_on"].append(100)
+        self.replace_graph(value)
+        self.github.issues[35]["body"] += "\nUpdated operator status, without changed requirements.\n"
+        self.assertTrue(self.controller.verified(36, self.base))
+        self.assertTrue(self.controller.verified(41, self.base))
+
+    def test_shared_ancestors_are_verified_once_from_one_snapshot_without_provider_reads(self):
+        value = self.graph_record()
+        value["tasks"][1].update(depends_on=[36], level=1)
+        value["tasks"][2].update(depends_on=[41, 100], level=2)
+        value["tasks"].append({"key": "FIX-01", "issue": 100, "depends_on": [36],
+                               "locks": ["diamond"], "external_gate": False, "level": 1})
+        self.replace_graph(value)
+        for number in (36, 41, 100, 86):
+            self.accepted_fixture(number)
+        graph, issues = self.controller.snapshot()
+        with mock.patch.object(self.github, "issue", wraps=self.github.issue) as provider:
+            with mock.patch.object(self.controller.state, "receipts", wraps=self.controller.state.receipts) as receipts:
+                self.assertEqual(self.controller.verified_tasks(graph, issues, self.base), {36, 41, 100, 86})
+                self.assertEqual(sorted(call.args for call in receipts.call_args_list),
+                                 [(36, "completion"), (41, "completion"), (86, "completion"), (100, "completion")])
+            provider.assert_not_called()
+        self.github.issues[36]["state"] = "open"
+        graph, issues = self.controller.snapshot()
+        self.assertEqual(self.controller.verified_tasks(graph, issues, self.base), set())
+
+    def test_requalified_ancestor_receipt_invalidates_descendant_without_body_or_graph_change(self):
+        self.chain()
+        ancestor = self.accepted_fixture(36)
+        descendant = self.accepted_fixture(41)
+        self.assertEqual(descendant["data"]["dependency_receipts"], {"36": ancestor["digest"]})
+        (self.config.clone / "qualified.txt").write_text("new prerequisite qualification source\n")
+        git(self.config.clone, "add", "qualified.txt")
+        git(self.config.clone, "commit", "-m", "Qualify changed prerequisite source")
+        git(self.config.clone, "push", "origin", "main")
+        tip = self.repo.fetch()
+        current = self.controller.record(36, "completion", tip, tip,
+                                         {"issue_hash": body_hash(self.github.issue(36))})
+        self.assertNotEqual(current["digest"], ancestor["digest"])
+        self.assertTrue(self.controller.receipt_valid(descendant))
+        self.assertTrue(self.repo.is_ancestor(descendant["source"], tip))
+        self.assertTrue(self.controller.verified(36, tip))
+        self.assertFalse(self.controller.verified(41, tip))
+
+    def test_newest_matching_rejection_revokes_ancestor_and_descendant_receipts(self):
+        self.chain()
+        accepted = self.accepted_fixture(36)
+        self.accepted_fixture(41)
+        self.assertTrue(self.controller.verified(41, self.base))
+        rejected = self.controller.record(36, "completion", self.base, self.base,
+                                          {"issue_hash": body_hash(self.github.issue(36)),
+                                           "reason": "Qualification was found inadequate."}, accepted=False)
+        self.assertEqual(rejected["data"]["task_hash"], accepted["data"]["task_hash"])
+        self.assertEqual(rejected["data"]["dependency_receipts"], accepted["data"]["dependency_receipts"])
+        self.assertFalse(self.controller.verified(36, self.base))
+        self.assertFalse(self.controller.verified(41, self.base))
+        with self.assertRaisesRegex(PipelineBlocked, "ancestor"):
+            self.controller.live_preconditions(self.github.graph.by_issue[86], body_hash(self.github.issue(86)))
+        self.accepted_fixture(36)
+        self.assertTrue(self.controller.verified(36, self.base))
+        # A new positive ancestor proof still needs dependent requalification.
+        self.assertFalse(self.controller.verified(41, self.base))
+
+    def test_closure_cannot_attach_changed_prerequisite_receipts_to_older_final_review(self):
+        self.chain()
+        old = self.accepted_fixture(36)
+        self.controller.state.set_task(41, "working", {})
+        data = {"plan": copy.deepcopy(PLAN), "issue_hash": body_hash(self.github.issue(41)),
+                "dependency_receipts": {"36": old["digest"]},
+                "merged_phases": [{"phase_index": 0, "source": self.base, "base": self.base, "pr": 90}]}
+        self.accepted_fixture(36)
+        with self.assertRaisesRegex(PipelineBlocked, "changed after final review"):
+            self.controller.complete(self.github.graph.by_issue[41], data)
+        self.assertEqual(self.github.issue(41)["state"], "open")
+        self.assertEqual(self.controller.state.receipts(41, "completion"), [])
+        self.assertNotIn(41, self.github.close_calls)
+
+    def test_completion_source_cannot_predate_current_prerequisite_even_with_its_new_digest(self):
+        self.chain()
+        self.accepted_fixture(36)
+        self.accepted_fixture(41)
+        (self.config.clone / "qualified.txt").write_text("prerequisite changed after dependent source\n")
+        git(self.config.clone, "add", "qualified.txt")
+        git(self.config.clone, "commit", "-m", "Advance prerequisite qualification source")
+        git(self.config.clone, "push", "origin", "main")
+        tip = self.repo.fetch()
+        prerequisite = self.controller.record(36, "completion", tip, tip,
+                                              {"issue_hash": body_hash(self.github.issue(36))})
+        value = {"issue_hash": body_hash(self.github.issue(41)),
+                 "task_hash": task_hash(self.github.graph.by_issue[41]),
+                 "dependency_receipts": {"36": prerequisite["digest"]}}
+        with self.assertRaisesRegex(PipelineBlocked, "predates"):
+            self.controller.record(41, "completion", self.base, self.base, value)
+        # Even a forged historical receipt carrying current binding strings
+        # cannot evade the independent prerequisite-source ancestry check.
+        forged = self.controller.record(41, "forged-fixture", self.base, self.base, value)
+        self.controller.state.add_receipt(41, "completion", forged["source"], forged["tree"], forged["base"],
+                                           forged["artifact_hashes"], "accepted", forged["data"])
+        self.assertTrue(self.controller.receipt_valid(forged))
+        self.assertFalse(self.controller.verified(41, tip))
+
+    def test_unbound_historical_completion_is_not_silently_adopted(self):
+        number = 41
+        self.github.issues[number]["state"] = "closed"
+        self.controller.state.set_task(number, "complete", {})
+        old = self.controller.record(number, "historical-fixture", self.base, self.base,
+                                     {"issue_hash": body_hash(self.github.issue(number))})
+        receipt = self.controller.state.add_receipt(number, "completion", old["source"], old["tree"],
+                                                     old["base"], old["artifact_hashes"], "accepted", old["data"])
+        self.assertTrue(self.controller.receipt_valid(receipt))
+        self.assertFalse(self.controller.verified(number, self.base))
+
+    def test_completion_record_rejects_a_stale_caller_graph_binding(self):
+        binding = task_hash(self.github.graph.by_issue[41])
+        self.controller.state.set_task(41, "complete", {})
+        self.chain()
+        with self.assertRaisesRegex(PipelineBlocked, "task definition changed"):
+            self.controller.record(41, "completion", self.base, self.base,
+                                   {"issue_hash": body_hash(self.github.issue(41)), "task_hash": binding})
+        self.assertEqual(self.controller.state.receipts(41, "completion"), [])
 
     def execute(self):
         self.controller.execute(self.task, self.github.issue(36))

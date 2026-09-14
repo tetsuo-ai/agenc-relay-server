@@ -19,7 +19,8 @@ import threading
 import time
 import uuid
 
-from .agents import AgentRunError, CodexRunner, validate_result
+from .agents import (AgentRunError, CodexRunner, SessionLifecycleError, record_session_quiescent,
+                     session_lifecycle, validate_result)
 from .config import Config, digest_file, private_directory
 from .gitops import GitRepo, GitError
 from .github import Github
@@ -44,6 +45,11 @@ def encode(value: object) -> str:
 
 def body_hash(issue: dict) -> str:
     return hashlib.sha256(encode({"title": issue.get("title"), "body": issue.get("body")}).encode()).hexdigest()
+
+
+def task_hash(task: Task) -> str:
+    """Bind completion to this task's current dependencies, route and scopes."""
+    return hashlib.sha256(encode({**asdict(task), "route": task.route}).encode()).hexdigest()
 
 
 def write_record(path: Path, value: object) -> str:
@@ -91,6 +97,8 @@ def halt_children(state_dir: Path) -> None:
     owned = set()
     gates = {}
     requests = {}
+    lifecycles = {}
+    lifecycle_errors = []
     for pattern, field in (("sessions/*/request.json", "systemd_unit"), ("gates/*/unit.json", "unit")):
         for path in state_dir.glob(pattern):
             if (any(parent.is_symlink() for parent in (path, *path.parents))
@@ -103,11 +111,21 @@ def halt_children(state_dir: Path) -> None:
             if unit is not None:
                 if not isinstance(unit, str) or not UNIT.fullmatch(unit):
                     raise PipelineBlocked("invalid owned process unit identity")
-                owned.add(unit)
                 if field == "unit":
+                    owned.add(unit)
                     gates[path.parent] = value
                 else:
                     requests[path.parent] = unit
+                    try:
+                        lifecycle = session_lifecycle(path.parent)
+                        lifecycles[path.parent] = lifecycle
+                        if lifecycle["unit"] != unit:
+                            raise SessionLifecycleError("session unit differs from its request")
+                        if lifecycle["state"] not in {"not_dispatched", "quiescent"}:
+                            owned.add(unit)
+                    except SessionLifecycleError as error:
+                        owned.add(unit)
+                        lifecycle_errors.append(str(path.parent) + ": " + str(error))
     containers = []
     try:
         for path in state_dir.glob("gates/*/container.json"):
@@ -124,6 +142,20 @@ def halt_children(state_dir: Path) -> None:
     for unit in units:
         subprocess.run(["systemctl", "--user", "stop", unit], check=True, capture_output=True, timeout=60)
         verify_quiet(unit)
+    for directory, lifecycle in lifecycles.items():
+        unit, state = lifecycle["unit"], lifecycle["state"]
+        if state in {"not_dispatched", "quiescent"}:
+            continue
+        if state == "unresolved" and unit not in units:
+            lifecycle_errors.append(str(directory) + ": service registration remains unresolved")
+            continue
+        if unit not in units:
+            verify_quiet(unit)
+        try:
+            record_session_quiescent(directory, observed_registered=unit in units)
+            lifecycle["state"] = "quiescent"
+        except SessionLifecycleError as error:
+            lifecycle_errors.append(str(directory) + ": " + str(error))
     # Docker daemon children are outside the launcher's cgroup. An absent unit
     # does not prove its container stopped, and cleanup must follow launcher
     # quiescence so an in-flight create cannot race an absence observation.
@@ -138,6 +170,8 @@ def halt_children(state_dir: Path) -> None:
     # request. A later absent-unit snapshot does not settle that uncertainty.
     # Stop all other known children above, then retain the handoff across restart.
     for path in state_dir.glob("sessions/*/cleanup-uncertain.json"):
+        if lifecycles.get(path.parent, {}).get("state") == "quiescent":
+            continue
         if (any(parent.is_symlink() for parent in (path, *path.parents))
                 or not path.resolve().is_relative_to(state_dir.resolve())):
             raise PipelineBlocked("unsafe agent registration recovery marker")
@@ -157,6 +191,8 @@ def halt_children(state_dir: Path) -> None:
                 or value["reason"] != "launcher registration was not confirmed before cancellation"):
             raise PipelineBlocked("agent registration recovery marker has no matching request")
         raise PipelineBlocked("agent service registration remains uncertain; preserve and reconcile " + str(path.parent))
+    if lifecycle_errors:
+        raise PipelineBlocked("agent launch recovery requires reconciliation: " + "; ".join(lifecycle_errors))
 
 
 def ensure_clone(config: Config) -> GitRepo:
@@ -193,7 +229,7 @@ class Controller:
         self.runner = runner if runner is not None else CodexRunner(
             config.executable(), config.model, config.reasoning_effort,
             max_sessions=config.max_sessions, timeout_seconds=config.agent_timeout_seconds,
-            use_systemd=config.use_systemd)
+            use_systemd=config.use_systemd, minimum_free_gib=config.minimum_free_gib)
         if gate is None:
             from .gate import GateRunner
             gate = GateRunner(config)
@@ -227,25 +263,64 @@ class Controller:
             graph.validate_native_links([row["number"] for row in self.github.children(graph.master_issue)], blockers)
             return graph, issues
 
-    def verified(self, number: int, tip: str) -> bool:
-        """Closed labels alone never satisfy a dependency."""
-        record = self.state.get_task(number)
-        if record is None or record["status"] != "complete":
-            return False
-        issue = self.github.issue(number)
-        for receipt in reversed(self.state.receipts(number, "completion")):
-            if receipt["status"] == "accepted" and receipt["data"].get("issue_hash") == body_hash(issue):
-                if not self.receipt_valid(receipt) or not self.repo.is_ancestor(receipt["source"], tip):
-                    return False
+    def verified_receipts(self, graph: Graph, issues: dict[int, dict], tip: str) -> dict[int, dict]:
+        """Verify a validated DAG in one topological pass against one live snapshot.
+
+        A task is accepted only after every prerequisite has passed the same
+        current closure, requirement, graph-binding and source-evidence checks.
+        Each issue's receipts are checked once, including shared ancestors; no
+        recursive provider lookups or persistent stale verification cache exist.
+        """
+        completed = {}
+        ancestry = {}
+        def reachable(ancestor, descendant):
+            pair = (ancestor, descendant)
+            if pair not in ancestry:
+                ancestry[pair] = self.repo.is_ancestor(ancestor, descendant)
+            return ancestry[pair]
+        for task in sorted(graph.tasks, key=lambda item: (item.level, item.issue)):
+            issue = issues.get(task.issue)
+            if (issue is None or issue.get("state") != "closed"
+                    or not set(task.depends_on) <= completed.keys()):
+                continue
+            record = self.state.get_task(task.issue)
+            if record is None or record["status"] != "complete":
+                continue
+            issue_binding, definition_binding = body_hash(issue), task_hash(task)
+            prerequisites = {str(dep): completed[dep]["digest"] for dep in task.depends_on}
+            for receipt in reversed(self.state.receipts(task.issue, "completion")):
+                if (receipt["data"].get("issue_hash") != issue_binding
+                        or receipt["data"].get("task_hash") != definition_binding
+                        or receipt["data"].get("dependency_receipts") != prerequisites):
+                    continue
+                if (receipt["status"] != "accepted" or not self.receipt_valid(receipt)
+                        or not reachable(receipt["source"], tip)
+                        or any(not reachable(completed[dep]["source"], receipt["source"])
+                               for dep in task.depends_on)):
+                    break
                 try:
                     for phase in receipt["data"].get("merged_phases", []):
-                        self.require_candidate_receipts(number, phase["source"], phase["base"])
-                        if not self.repo.is_ancestor(phase["source"], tip):
-                            return False
+                        self.require_candidate_receipts(task.issue, phase["source"], phase["base"])
+                        if not reachable(phase["source"], tip):
+                            raise PipelineBlocked("merged phase source is no longer accepted")
                 except PipelineBlocked:
-                    return False
-                return True
-        return False
+                    break
+                completed[task.issue] = receipt
+                break
+        return completed
+
+    def verified_tasks(self, graph: Graph, issues: dict[int, dict], tip: str) -> set[int]:
+        """Return accepted task identities from one current transitive proof pass."""
+        return set(self.verified_receipts(graph, issues, tip))
+
+    def verified(self, number: int, tip: str, *, snapshot=None) -> bool:
+        """Verify one task and all ancestors against a fresh validated snapshot.
+
+        Batch callers should use verified_tasks with their already fetched graph
+        and issue snapshot instead of repeating this convenience operation.
+        """
+        graph, issues = self.snapshot() if snapshot is None else snapshot
+        return number in self.verified_tasks(graph, issues, tip)
 
     def receipt_valid(self, receipt: dict) -> bool:
         paths = receipt.get("data", {}).get("artifacts", {})
@@ -259,6 +334,23 @@ class Controller:
         return self.repo.tree(receipt["source"]) == receipt["tree"]
 
     def record(self, number: int, kind: str, source: str, base: str, value: dict, *, accepted=True) -> dict:
+        if kind == "completion":
+            graph, issues = self.snapshot()
+            task = graph.by_issue.get(number)
+            if task is None:
+                raise PipelineBlocked("completion issue is absent from the current validated graph")
+            binding = task_hash(task)
+            if value.get("task_hash", binding) != binding:
+                raise PipelineBlocked("completion task definition changed before receipt publication")
+            proofs = self.verified_receipts(graph, issues, self.fetch())
+            if not set(task.depends_on) <= proofs.keys():
+                raise PipelineBlocked("completion prerequisites lack current accepted receipts")
+            prerequisites = {str(dep): proofs[dep]["digest"] for dep in task.depends_on}
+            if value.get("dependency_receipts", prerequisites) != prerequisites:
+                raise PipelineBlocked("completion prerequisite evidence changed before receipt publication")
+            if any(not self.repo.is_ancestor(proofs[dep]["source"], source) for dep in task.depends_on):
+                raise PipelineBlocked("completion source predates its accepted prerequisite sources")
+            value = {**value, "task_hash": binding, "dependency_receipts": prerequisites}
         path = self.config.state / "receipts" / str(number) / (kind + "-" + uuid.uuid4().hex + ".json")
         hashes = {"record": write_record(path, value)}
         paths = {"record": str(path)}
@@ -282,7 +374,7 @@ class Controller:
                                       {**value, "artifacts": paths})
 
     def session(self, role: str, source: str, task: dict, *, writable: Path | None = None,
-                review_purpose="candidate") -> tuple[dict, str]:
+                review_purpose="candidate", evidence_paths: tuple[Path, ...] = ()) -> tuple[dict, str]:
         identity = role + "-" + uuid.uuid4().hex
         worktree = writable if writable is not None else self.config.worktrees / identity
         output = self.config.state / "sessions" / identity
@@ -290,7 +382,10 @@ class Controller:
             with self.git_lock:
                 self.repo.add_worktree(worktree, None, source)
         try:
-            result = self.runner.run(role, worktree, encode(task), output, review_purpose=review_purpose)
+            arguments = {"review_purpose": review_purpose}
+            if evidence_paths:
+                arguments["evidence_paths"] = evidence_paths
+            result = self.runner.run(role, worktree, encode(task), output, **arguments)
         except AgentRunError as error:
             if error.kind == "cleanup":
                 self.stop.set()
@@ -308,18 +403,22 @@ class Controller:
                 self.repo.cleanup_owned(worktree, None, source)
         return result, str(output / "result.json")
 
-    def live_preconditions(self, task: Task, expected_hash: str, *, allow_closed=False) -> None:
+    def live_preconditions(self, task: Task, expected_hash: str, *, allow_closed=False) -> dict[str, str]:
         graph, issues = self.snapshot()
         if graph.by_issue.get(task.issue) != task:
             raise PipelineBlocked("task dependency/scope definition changed; replan required")
         if (not allow_closed and issues[task.issue]["state"] != "open") or body_hash(issues[task.issue]) != expected_hash:
             raise PipelineBlocked("issue content or state changed; replan required")
         tip = self.fetch()
-        if any(issues[dep]["state"] != "closed" or not self.verified(dep, tip) for dep in task.depends_on):
-            raise PipelineBlocked("a prerequisite lacks accepted completion evidence")
+        completed = self.verified_receipts(graph, issues, tip)
+        if not set(task.depends_on) <= completed.keys():
+            raise PipelineBlocked("a prerequisite or ancestor lacks accepted current completion evidence")
+        return {str(dep): completed[dep]["digest"] for dep in task.depends_on}
 
     def review_pair(self, task: Task, data: dict, phase: dict, candidate: str, base: str) -> list[dict]:
-        self.checkpoint(task.issue, "reviewing", data, candidate=candidate, base=base)
+        prerequisites = self.live_preconditions(task, data["issue_hash"])
+        self.checkpoint(task.issue, "reviewing", data, candidate=candidate, base=base,
+                        dependency_receipts=prerequisites)
         task_data = {"issue": data["issue"], "phase": phase, "plan": data["plan"],
                      "candidate": candidate, "base": base, "original_base": data["original_base"],
                      "previous_merged_phases": data.get("merged_phases", []),
@@ -332,7 +431,7 @@ class Controller:
                            "Independent acceptance, specification and test adequacy review",
                            "Independent security, crash/restart, resource bounds and adversarial failure review")]
             reports = [future.result() for future in futures]
-        value = {"reviews": [item[0] for item in reports],
+        value = {"reviews": [item[0] for item in reports], "dependency_receipts": prerequisites,
                  "artifacts": {"review-" + str(index): item[1] for index, item in enumerate(reports)}}
         approved = all(item[0]["verdict"] == "approve" for item in reports)
         receipt = self.record(task.issue, "review", candidate, base, value, accepted=approved)
@@ -344,7 +443,9 @@ class Controller:
     def publish_and_promote(self, task: Task, data: dict, phase: dict) -> None:
         candidate, base = data["candidate"], data["base"]
         self.require_candidate_receipts(task.issue, candidate, base)
-        self.live_preconditions(task, data["issue_hash"])
+        prerequisites = self.live_preconditions(task, data["issue_hash"])
+        if prerequisites != data.get("dependency_receipts", {}):
+            raise PipelineBlocked("prerequisite evidence changed; fresh reviews and gate are required")
         if self.fetch() != base:
             raise PipelineBlocked("main advanced after validation; candidate needs fresh review and gate")
         title = f"{task.key}: {phase['name']}"[:256]
@@ -377,7 +478,9 @@ class Controller:
         self.record(task.issue, "hosted-checks", candidate, base, checks, accepted=not checks["blocking"])
         if checks["blocking"]:
             raise PipelineBlocked("hosted check evidence blocks promotion: " + checks["state"])
-        self.live_preconditions(task, data["issue_hash"])
+        prerequisites = self.live_preconditions(task, data["issue_hash"])
+        if prerequisites != data.get("dependency_receipts", {}):
+            raise PipelineBlocked("prerequisite evidence changed; fresh reviews and gate are required")
         pr = self.github.pr(data["pr"])
         if (pr["head"]["sha"] != candidate or pr["base"]["ref"] != self.config.base_branch
                 or pr["base"]["repo"]["full_name"] != self.config.repository or pr["state"] != "open"):
@@ -443,7 +546,9 @@ class Controller:
         phases = data.get("merged_phases", [])
         if sorted(item["phase_index"] for item in phases) != list(range(len(data["plan"]["phases"]))):
             raise PipelineBlocked("not every planned phase has merged")
-        self.live_preconditions(task, data["issue_hash"], allow_closed=data.get("remote_action") == "close-issue")
+        prerequisites = self.live_preconditions(task, data["issue_hash"], allow_closed=data.get("remote_action") == "close-issue")
+        if prerequisites != data.get("dependency_receipts", {}):
+            raise PipelineBlocked("prerequisite evidence changed after final review; new acceptance review is required")
         tip = self.fetch()
         proof_ids = []
         for phase in phases:
@@ -462,9 +567,12 @@ class Controller:
         existing = [r for r in self.state.receipts(task.issue, "completion")
                     if r["source"] == last["source"] and r["base"] == last["base"]
                     and r["data"].get("issue_hash") == data["issue_hash"]
+                    and r["data"].get("task_hash") == task_hash(task)
+                    and r["data"].get("dependency_receipts") == prerequisites
                     and r["data"].get("merged_phases") == phases and self.receipt_valid(r)]
         receipt = existing[-1] if existing else self.record(task.issue, "completion", last["source"], last["base"],
-                              {"issue_hash": data["issue_hash"], "merged_phases": phases, "proof_receipts": proof_ids,
+                              {"issue_hash": data["issue_hash"], "task_hash": task_hash(task),
+                               "dependency_receipts": prerequisites, "merged_phases": phases, "proof_receipts": proof_ids,
                                "acceptance": [phase["acceptance"] for phase in data["plan"]["phases"]]})
         self.checkpoint(task.issue, "merging", data, remote_action="close-issue")
         self.comment_once(task.issue, "<!-- agenc-pipeline-completion:" + receipt["digest"] + " -->",
@@ -716,7 +824,7 @@ class Controller:
                     if not (self.config.state / "PAUSED").exists():
                         graph, issues = self.snapshot()
                         tip = self.fetch()
-                        completed = {task.issue for task in graph.tasks if issues[task.issue]["state"] == "closed" and self.verified(task.issue, tip)}
+                        completed = self.verified_tasks(graph, issues, tip)
                         # Remote intent reconciliation is independent of issue-open readiness.
                         for row in self.state.list_tasks():
                             number = row["issue"]
@@ -753,7 +861,7 @@ class Controller:
         with self.graph_lock:
             graph, issues = self.snapshot()
             tip = self.fetch()
-            completed = {task.issue for task in graph.tasks if issues[task.issue]["state"] == "closed" and self.verified(task.issue, tip)}
+            completed = self.verified_tasks(graph, issues, tip)
             marker = "<!-- agenc-pipeline-live-status -->"
             records = {row["issue"]: row for row in self.state.list_tasks()}
             lines = [marker, "Automated execution status (accepted receipts are required for completion).", ""]

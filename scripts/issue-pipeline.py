@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 sys.dont_write_bytecode = True
 
 from issue_pipeline.config import Config, digest_file, private_directory
-from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, encode, halt_children, write_record
+from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, encode, halt_children, task_hash, write_record
 from issue_pipeline.github import Github
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.graph import Graph
@@ -51,7 +51,7 @@ def parser():
 
 def doctor(config: Config) -> dict:
     commands = {}
-    for name in ("git", "gh", "systemctl", "systemd-run", "docker", "cargo", "rustup", "bash", "python3"):
+    for name in ("git", "gh", "systemctl", "systemd-run", "docker", "prlimit", "cargo", "rustup", "bash", "python3"):
         path = shutil.which(name)
         if not path:
             raise PipelineBlocked("missing executable: " + name)
@@ -268,12 +268,19 @@ def accept_external(controller: Controller, number: int, evidence: Path) -> dict
     tip = controller.fetch()
     if not controller.repo.is_ancestor(value["source"], tip):
         raise PipelineBlocked("qualified source is not on remote main")
-    if any(issues[n]["state"] != "closed" or not controller.verified(n, tip) for n in task.depends_on):
+    proofs = controller.verified_receipts(graph, issues, tip)
+    if any(issues[n]["state"] != "closed" or n not in proofs for n in task.depends_on):
         raise PipelineBlocked("qualification prerequisites lack accepted completion evidence")
+    if any(not controller.repo.is_ancestor(proofs[n]["source"], value["source"]) for n in task.depends_on):
+        raise PipelineBlocked("qualification source predates its prerequisite evidence")
+    binding = task_hash(task)
+    prerequisites = {str(n): proofs[n]["digest"] for n in task.depends_on}
     identity = hashlib.sha256(encode(value).encode()).hexdigest()
     old = controller.state.get_task(number)
     previous = old["data"].get("external_import") if old else None
-    if previous and old["status"] != "complete" and (previous["identity"] != identity or previous["issue_hash"] != issue_hash):
+    if previous and old["status"] != "complete" and (
+            previous["identity"] != identity or previous["issue_hash"] != issue_hash
+            or previous.get("task_hash") != binding or previous.get("dependency_receipts") != prerequisites):
         raise PipelineBlocked("unfinished external import differs; reconcile its original evidence and issue first")
     destination = controller.config.state / "imports" / identity
     private_directory(destination)
@@ -285,26 +292,31 @@ def accept_external(controller: Controller, number: int, evidence: Path) -> dict
                                     min(IMPORT_ARTIFACT_LIMIT, IMPORT_TOTAL_LIMIT - total))
         artifacts[str(index)] = str(target)
     data = dict(old["data"]) if old else {}
-    data.update({"external_import": {"identity": identity, "source": value["source"], "issue_hash": issue_hash},
+    data.update({"external_import": {"identity": identity, "source": value["source"], "issue_hash": issue_hash,
+                                     "task_hash": binding, "dependency_receipts": prerequisites},
                  "remote_action": "external-import", "reason": "External qualification import awaits verified closure; repeat accept-external with the original evidence JSON."})
     controller.state.set_task(number, "blocked", data)
     receipts = [receipt for receipt in controller.state.receipts(number, "completion")
                 if receipt["source"] == value["source"] and receipt["status"] == "accepted"
-                and receipt["data"].get("operator_import") == value and receipt["data"].get("issue_hash") == issue_hash]
+                and receipt["data"].get("operator_import") == value and receipt["data"].get("issue_hash") == issue_hash
+                and receipt["data"].get("task_hash") == binding and receipt["data"].get("dependency_receipts") == prerequisites]
     if receipts:
         receipt = receipts[-1]
         if not controller.receipt_valid(receipt):
             raise PipelineBlocked("retained external completion receipt differs")
     else:
         receipt = controller.record(number, "completion", value["source"], value["source"],
-                                     {"issue_hash": issue_hash, "operator_import": value, "artifacts": artifacts})
+                                     {"issue_hash": issue_hash, "operator_import": value, "artifacts": artifacts,
+                                      "task_hash": binding, "dependency_receipts": prerequisites})
     # Recheck the live issue, graph and dependency proofs after potentially long
     # artifact copying; a receipt for stale requirements cannot close new work.
     latest_graph, latest_issues = controller.snapshot()
     tip = controller.fetch()
+    latest_proofs = controller.verified_receipts(latest_graph, latest_issues, tip)
     if (latest_graph.by_issue.get(number) != task or body_hash(latest_issues[number]) != issue_hash
             or not controller.repo.is_ancestor(value["source"], tip)
-            or any(latest_issues[n]["state"] != "closed" or not controller.verified(n, tip) for n in task.depends_on)):
+            or any(latest_issues[n]["state"] != "closed" or n not in latest_proofs
+                   or latest_proofs[n]["digest"] != prerequisites[str(n)] for n in task.depends_on)):
         raise PipelineBlocked("qualification issue, source or prerequisite evidence changed during import")
     controller.comment_once(number, "<!-- agenc-pipeline-external:" + identity + " -->",
         "Specialized qualification imported by the operator. This is an external attestation, not a generic model/test pass.\n\n"

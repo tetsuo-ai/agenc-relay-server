@@ -52,6 +52,12 @@ TASK_DATA_JSON. Edit only its declared source files in this worktree. Focused ch
 may create disposable, untracked Cargo build outputs only under this worktree's
 target/ and fuzz/target/ directories. This permission never covers tracked files,
 symlinked output roots, paths escaping the worktree, or writes to another cache.
+Focused tools may use the controller-provided TMPDIR and CARGO_HOME for private
+temporary files and Cargo metadata. Shared dependency packages remain read-only.
+Native socket/storage fixtures that require qualified filesystem properties run
+in the controller's Docker gate. Report a focused check that cannot run within
+this session's permissions as unexecuted or failed with its exact observed cause;
+never change fixtures, weaken policy or invent a pass to hide that limitation.
 Implement every
 phase acceptance criterion fully, preserving its normative contract and independent
 gate. Run appropriate available focused checks. Provide an acceptance-to-evidence

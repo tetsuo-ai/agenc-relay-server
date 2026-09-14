@@ -72,6 +72,7 @@ class SandboxPlanTests(unittest.TestCase):
         self.assertEqual(record["labels"]["agenc-ircd.pipeline.repository"], self.config.repository)
         self.assertEqual(command[command.index("--host") + 1], DOCKER_HOST)
         self.assertIn("--pull=never", command)
+        self.assertIn("--log-driver=none", command)
         self.assertIn("--cap-drop=ALL", command)
         self.assertIn("--security-opt=no-new-privileges", command)
         self.assertNotIn("--privileged", command)
@@ -91,6 +92,20 @@ class SandboxPlanTests(unittest.TestCase):
         self.assertFalse((self.output / "container-id.json").exists())
         self.assertIn("create", self.created)
         self.assertNotIn("start", self.created)
+
+    def test_short_private_tmp_path_binds_the_existing_disk_scratch(self):
+        self.command()
+        policy = json.loads((self.output / "filesystem-policy.json").read_text())
+        mounts = {entry["target"]: entry for entry in policy["mounts"]}
+        scratch = self.config.state / "gate-cache" / "tmp"
+        self.assertEqual(mounts["/tmp"], {"source": str(scratch), "target": "/tmp", "readonly": False})
+        self.assertEqual(policy["bootstrap"]["scratch"], "/tmp")
+        self.assertEqual(policy["bootstrap"]["scratch_device"], scratch.stat().st_dev)
+        self.assertEqual(policy["bootstrap"]["scratch_mount_flags"], os.statvfs(scratch).f_flag)
+        self.assertIn("TMPDIR=/tmp", self.created)
+        self.assertNotIn("/tmp:rw,nosuid,nodev", self.created)
+        self.assertEqual(mounts["/etc/alternatives"], {
+            "source": "/etc/alternatives", "target": "/etc/alternatives", "readonly": True})
 
     def test_only_private_home_backs_home_and_protected_mount_ancestors_are_immutable(self):
         self.command()

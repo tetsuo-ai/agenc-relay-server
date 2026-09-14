@@ -30,6 +30,13 @@ class ProcessRecoveryTests(unittest.TestCase):
         completed = mock.patch("issue_pipeline.controller.container_cleanup_complete", return_value=False)
         self.completed = completed.start()
         self.addCleanup(completed.stop)
+        lifecycle = mock.patch("issue_pipeline.controller.session_lifecycle", return_value={
+            "unit": self.owned_agent, "state": "registered", "request_sha256": "a" * 64})
+        self.lifecycle = lifecycle.start()
+        self.addCleanup(lifecycle.stop)
+        receipt = mock.patch("issue_pipeline.controller.record_session_quiescent")
+        self.quiet_receipt = receipt.start()
+        self.addCleanup(receipt.stop)
 
     def record_gate(self, root, unit, *, claimed_state=None):
         path = root / "gates" / "attempt" / "unit.json"
@@ -196,10 +203,37 @@ class ProcessRecoveryTests(unittest.TestCase):
                                     "reason": "launcher registration was not confirmed before cancellation"}))
         marker.chmod(0o600)
         self.active.remove(self.owned_agent)
+        self.lifecycle.return_value["state"] = "unresolved"
         with self.assertRaisesRegex(PipelineBlocked, "registration remains uncertain"):
             self.halt()
         self.assertIn(self.owned_gate, self.stopped)
         self.assertTrue(marker.exists())
+
+    def test_unresolved_intent_without_exception_marker_still_blocks_restart(self):
+        session = self.state / "sessions" / "abrupt-death"
+        session.mkdir(parents=True)
+        (session / "request.json").write_text(json.dumps({"systemd_unit": self.owned_agent}))
+        self.active.remove(self.owned_agent)
+        self.lifecycle.return_value["state"] = "unresolved"
+        with self.assertRaisesRegex(PipelineBlocked, "requires reconciliation"):
+            self.halt()
+        self.quiet_receipt.assert_not_called()
+
+    def test_observed_registered_unit_can_complete_its_interrupted_cleanup(self):
+        session = self.state / "sessions" / "abrupt-death"
+        session.mkdir(parents=True)
+        (session / "request.json").write_text(json.dumps({"systemd_unit": self.owned_agent}))
+        self.lifecycle.return_value["state"] = "unresolved"
+        self.halt()
+        self.quiet_receipt.assert_called_once_with(session, observed_registered=True)
+
+    def test_collected_registered_unit_still_gets_quiescence_receipt(self):
+        session = self.state / "sessions" / "registered"
+        session.mkdir(parents=True)
+        (session / "request.json").write_text(json.dumps({"systemd_unit": self.owned_agent}))
+        self.active.remove(self.owned_agent)
+        self.halt()
+        self.quiet_receipt.assert_called_once_with(session, observed_registered=False)
 
 
 if __name__ == "__main__":

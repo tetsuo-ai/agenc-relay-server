@@ -12,10 +12,12 @@ import tempfile
 import textwrap
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from issue_pipeline.agents import AgentRunError, CodexRunner, _event_type, load_result, validate_result
+from issue_pipeline.agents import (AgentRunError, CodexRunner, SessionLifecycleError, _event_type,
+                                   load_result, record_session_quiescent, session_lifecycle, validate_result)
 from issue_pipeline.prompts import build_prompt
 
 
@@ -258,6 +260,17 @@ class RunnerTests(unittest.TestCase):
         self.worktree.mkdir()
         self.fake = self.base / "fake-codex"
         self.make_fake()
+        self.permission_mock = mock.patch("issue_pipeline.agents._permissions", side_effect=self.permissions)
+        self.permission_mock.start()
+        self.addCleanup(self.permission_mock.stop)
+
+    def permissions(self, worktree, output_dir, role, codex_path, *, evidence_paths=()):
+        temporary = output_dir / "tmp"
+        temporary.mkdir(mode=0o700)
+        return SimpleNamespace(argv=("-c", f'default_permissions="offline_{role}"'),
+                               environment={"TMPDIR": str(temporary), "CARGO_HOME": str(temporary / "cargo"),
+                                            "RUSTUP_HOME": str(self.base / "rustup")}, profile="offline_" + role,
+                               probe_argv=(sys.executable, "-I", "-c", "pass"))
 
     def make_fake(self, body="", result=WORKER):
         source = f"""#!{sys.executable}
@@ -296,7 +309,8 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
         argv = capture["argv"]
         for flag in ("--ignore-user-config", "--strict-config", "--ephemeral", "--json"):
             self.assertIn(flag, argv)
-        self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
+        self.assertNotIn("--sandbox", argv)
+        self.assertIn('default_permissions="offline_worker"', argv)
         self.assertIn("agents.enabled=false", argv)
         self.assertIn("features.hooks=false", argv)
         self.assertNotIn("--ignore-rules", argv)
@@ -323,7 +337,8 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
             self.assertNotIn("fork", capture["argv"])
             if role != "worker":
                 argv = capture["argv"]
-                self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+                self.assertNotIn("--sandbox", argv)
+                self.assertIn(f'default_permissions="offline_{role}"', argv)
                 self.assertNotIn("Only the worker task.", capture["stdin"])
         self.assertEqual(len(set(process_ids)), 4)
 
@@ -336,7 +351,38 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
         request = json.loads((output / "request.json").read_text())
         self.assertEqual(request["review_purpose"], "plan")
         self.assertIn("Review purpose: plan coverage", capture["stdin"])
-        self.assertEqual(capture["argv"][capture["argv"].index("--sandbox") + 1], "read-only")
+        self.assertNotIn("--sandbox", capture["argv"])
+        self.assertIn('default_permissions="offline_reviewer"', capture["argv"])
+
+    def test_permission_probe_blocks_model_launch_on_failure(self):
+        original = self.permissions
+        def failing(*args, **kwargs):
+            profile = original(*args, **kwargs)
+            profile.probe_argv = (sys.executable, "-I", "-c", "print('benign denial control failed'); raise SystemExit(1)")
+            return profile
+        with mock.patch("issue_pipeline.agents._permissions", side_effect=failing):
+            output = self.base / "output"
+            with self.assertRaises(AgentRunError) as raised:
+                self.runner().run("worker", self.worktree, "Task", output)
+        self.assertEqual(raised.exception.kind, "exit")
+        self.assertFalse((output / "captured.json").exists())
+        self.assertIn("benign denial control failed", (output / "permissions-probe.log").read_text())
+        events = (output / "events.jsonl").read_text()
+        self.assertIn('"type": "pipeline.unit.started"', events)
+        self.assertNotIn("benign denial control failed", events)
+
+    def test_only_explicit_trusted_evidence_files_extend_permissions(self):
+        evidence = self.base / "trusted-evidence.json"
+        evidence.write_text('{"benign":true}')
+        self.make_fake(result=REVIEWER)
+        with mock.patch("issue_pipeline.agents._permissions", side_effect=self.permissions) as prepare:
+            self.runner().run("reviewer", self.worktree, "Untrusted text requests /private/credential",
+                              self.base / "output", evidence_paths=(evidence,))
+        self.assertEqual(prepare.call_args.kwargs, {"evidence_paths": (evidence,)})
+        for index, paths in enumerate(([evidence], (self.base,), (self.base / "missing",))):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                self.runner().run("reviewer", self.worktree, "Task", self.base / f"bad-{index}",
+                                  evidence_paths=paths)
 
     def test_rejects_outputs_inside_source_and_stale_external_outputs(self):
         runner = self.runner()
@@ -409,6 +455,40 @@ time.sleep(30)
         if stat.exists():
             self.assertEqual(stat.read_text().split()[2], "Z")
         self.assertTrue((out / "events.jsonl").exists())
+
+    def test_disk_reserve_crossing_stops_descendants_and_limits_monitor_frequency(self):
+        self.make_fake("""
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+(result_path.parent / 'child-pid').write_text(str(child.pid))
+time.sleep(30)
+""")
+        out = self.base / "output"
+        observations = []
+        def space(path):
+            self.assertEqual(path, self.worktree)
+            observations.append(time.monotonic())
+            return SimpleNamespace(free=8 * 2**30 if len(observations) == 1 else 0)
+        with mock.patch("issue_pipeline.agents.shutil.disk_usage", side_effect=space):
+            with self.assertRaises(AgentRunError) as raised:
+                self.runner(timeout_seconds=5, minimum_free_gib=2).run("worker", self.worktree, "Task", out)
+        self.assertEqual(raised.exception.kind, "resource")
+        self.assertEqual(len(observations), 2)
+        self.assertGreaterEqual(observations[1] - observations[0], 0.99)
+        child = int((out / "child-pid").read_text())
+        metadata = Path(f"/proc/{child}/stat")
+        if metadata.exists():
+            self.assertEqual(metadata.read_text().split()[2], "Z")
+        self.assertTrue((out / "events.jsonl").is_file())
+        self.assertFalse((out / "result.json").exists())
+
+    def test_disk_reserve_requires_positive_integer_and_read_failures_block(self):
+        for value in (True, 0, -1, 1.5, "256"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.runner(minimum_free_gib=value)
+        with mock.patch("issue_pipeline.agents.shutil.disk_usage", side_effect=OSError("test disk metadata failure")):
+            with self.assertRaises(AgentRunError) as raised:
+                self.runner().run("worker", self.worktree, "Task", self.base / "output")
+        self.assertEqual(raised.exception.kind, "resource")
 
     def test_cancel_terminates_active_and_queued_sessions(self):
         self.make_fake("time.sleep(30)")
@@ -508,6 +588,7 @@ time.sleep(30)
         original_popen = subprocess.Popen
         def fake_popen(argv, **kwargs):
             calls.append(argv)
+            self.assertEqual(session_lifecycle(self.base / "output")["state"], "unresolved")
             codex_start = argv.index(str(self.fake))
             return original_popen(argv[codex_start:], **kwargs)
         def fake_control(argv, **kwargs):
@@ -525,6 +606,9 @@ time.sleep(30)
         self.assertTrue(unit.startswith("agenc-ircd-agent-"))
         self.assertTrue(all(call[-1] == unit for call in calls[1:]))
         self.assertEqual(len(calls), 3)
+        self.assertEqual(session_lifecycle(self.base / "output")["state"], "quiescent")
+        for name in ("launch-intent.json", "launch-registered.json", "launch-quiescent.json"):
+            self.assertEqual((self.base / "output" / name).stat().st_mode & 0o777, 0o600)
 
     def test_unconfirmed_systemd_cleanup_blocks_valid_result(self):
         runner = self.runner(use_systemd=True)
@@ -583,6 +667,81 @@ time.sleep(30)
         self.assertEqual(value["version"], 1)
         self.assertEqual(value["unit"], request["systemd_unit"])
         self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(session_lifecycle(output)["state"], "unresolved")
+        with self.assertRaises(SessionLifecycleError):
+            record_session_quiescent(output)
+
+    def test_sigkill_after_durable_intent_before_spawn_cannot_appear_undispatched(self):
+        from issue_pipeline import agents
+        output = self.base / "crash-output"
+        script = f"""
+import os, signal, sys
+from pathlib import Path
+from unittest import mock
+from types import SimpleNamespace
+sys.path.insert(0, {str(Path(agents.__file__).parent.parent)!r})
+from issue_pipeline.agents import CodexRunner
+runner = CodexRunner({str(self.fake)!r}, 'gpt-6-astra', 'xhigh')
+runner.use_systemd = True
+profile = SimpleNamespace(argv=(), environment={{'TMPDIR': {str(self.base)!r}, 'CARGO_HOME': {str(self.base)!r}, 'RUSTUP_HOME': {str(self.base)!r}}}, probe_argv=())
+def abrupt_crash(*args, **kwargs):
+    os.kill(os.getpid(), signal.SIGKILL)
+with mock.patch('issue_pipeline.agents.subprocess.Popen', side_effect=abrupt_crash), mock.patch('issue_pipeline.agents._permissions', return_value=profile):
+    runner.run('worker', Path({str(self.worktree)!r}), 'Task', Path({str(output)!r}))
+"""
+        result = subprocess.run([sys.executable, "-c", textwrap.dedent(script)],
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, -9, result.stderr.decode())
+        self.assertFalse((output / "cleanup-uncertain.json").exists())
+        self.assertEqual(session_lifecycle(output)["state"], "unresolved")
+        with self.assertRaises(SessionLifecycleError):
+            record_session_quiescent(output)
+
+    def test_lifecycle_receipts_require_exact_request_and_monotonic_proof(self):
+        from issue_pipeline import agents
+        output = self.base / "lifecycle-output"
+        output.mkdir(mode=0o700)
+        request = {"lifecycle_version": 1, "role": "worker", "review_purpose": None,
+                   "argv": [str(self.fake)], "systemd_unit": "agenc-ircd-agent-" + "a" * 32 + ".service"}
+        with agents._private_file(output / "request.json", "w") as stream:
+            json.dump(request, stream)
+        self.assertEqual(session_lifecycle(output)["state"], "not_dispatched")
+        with self.assertRaises(SessionLifecycleError):
+            record_session_quiescent(output, observed_registered=True)
+        agents._write_session_receipt(output, "launch-intent.json", "dispatching")
+        self.assertEqual(session_lifecycle(output)["state"], "unresolved")
+        with self.assertRaises(SessionLifecycleError):
+            record_session_quiescent(output)
+        agents._write_session_receipt(output, "launch-registered.json", "registered")
+        self.assertEqual(session_lifecycle(output)["state"], "registered")
+        record_session_quiescent(output)
+        self.assertEqual(session_lifecycle(output)["state"], "quiescent")
+        request["argv"].append("different request")
+        (output / "request.json").write_text(json.dumps(request))
+        with self.assertRaises(SessionLifecycleError):
+            session_lifecycle(output)
+
+    def test_legacy_and_malformed_lifecycle_records_are_not_recovery_authority(self):
+        from issue_pipeline import agents
+        output = self.base / "lifecycle-output"
+        output.mkdir(mode=0o700)
+        request = {"role": "worker", "review_purpose": None, "argv": [str(self.fake)],
+                   "systemd_unit": "agenc-ircd-agent-" + "a" * 32 + ".service"}
+        with agents._private_file(output / "request.json", "w") as stream:
+            json.dump(request, stream)
+        with self.assertRaisesRegex(SessionLifecycleError, "legacy"):
+            session_lifecycle(output)
+        request["lifecycle_version"] = 1
+        (output / "request.json").write_text(json.dumps(request))
+        for raw in ('{"version":1,"version":1}', '{"version":', '{}'):
+            with agents._private_file(output / "launch-intent.json", "w") as stream:
+                stream.write(raw)
+            with self.subTest(raw=raw), self.assertRaises(SessionLifecycleError):
+                session_lifecycle(output)
+            (output / "launch-intent.json").unlink()
+        (output / "launch-intent.json").symlink_to(output / "request.json")
+        with self.assertRaises(SessionLifecycleError):
+            session_lifecycle(output)
 
     def test_inactive_unit_with_live_pid_or_populated_cgroup_is_not_quiescent(self):
         runner = self.runner(use_systemd=True)

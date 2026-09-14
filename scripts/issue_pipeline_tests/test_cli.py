@@ -262,7 +262,7 @@ class ExternalImportTests(unittest.TestCase):
         controller.repo.is_ancestor.return_value = True
         controller.repo.tree.return_value = TREE
         controller.fetch = mock.Mock(return_value=TIP)
-        controller.verified = mock.Mock(return_value=True)
+        controller.verified_receipts = mock.Mock(return_value={36: {"digest": "d" * 64, "source": SOURCE}})
         self.graph = Graph.from_master(graph_body())
         self.issues = {36: {"number": 36, "state": "closed", "body": "Prerequisite", "title": "Contract"},
                        43: {"number": 43, "state": "open", "body": "Host qualification", "title": "Host"}}
@@ -341,7 +341,7 @@ class ExternalImportTests(unittest.TestCase):
         with self.assertRaisesRegex(PipelineBlocked, "prerequisites"):
             self.accept()
         self.issues[36]["state"] = "closed"
-        self.controller.verified.return_value = False
+        self.controller.verified_receipts.return_value = {}
         with self.assertRaisesRegex(PipelineBlocked, "prerequisites"):
             self.accept()
         self.controller.github.close_issue.assert_not_called()
@@ -355,6 +355,31 @@ class ExternalImportTests(unittest.TestCase):
             self.accept({**self.value, "artifacts": [{"path": str(link), "sha256": digest_file(self.artifact)}]})
         self.controller.github.close_issue.assert_not_called()
         self.assertIsNone(self.controller.state.get_task(43))
+
+    def test_qualification_source_must_include_prerequisite_source(self):
+        self.controller.repo.is_ancestor.side_effect = lambda first, last: last == TIP
+        with self.assertRaisesRegex(PipelineBlocked, "predates"):
+            self.accept()
+        self.controller.github.close_issue.assert_not_called()
+
+    def test_reimport_cannot_rebind_an_unfinished_attestation_to_new_prerequisite_proof(self):
+        self.controller.github.close_issue.side_effect = RuntimeError("response lost")
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            self.accept()
+        self.controller.verified_receipts.return_value = {36: {"digest": "e" * 64, "source": SOURCE}}
+        self.controller.github.close_issue.reset_mock()
+        with self.assertRaisesRegex(PipelineBlocked, "unfinished external import"):
+            self.accept()
+        self.controller.github.close_issue.assert_not_called()
+
+    def test_import_refuses_prerequisite_receipt_change_during_copy(self):
+        self.controller.verified_receipts.side_effect = [
+            {36: {"digest": "d" * 64, "source": SOURCE}},
+            {36: {"digest": "e" * 64, "source": SOURCE}},
+        ]
+        with self.assertRaisesRegex(PipelineBlocked, "prerequisite evidence changed"):
+            self.accept()
+        self.controller.github.close_issue.assert_not_called()
 
     def test_explicit_reimport_repairs_ambiguous_remote_closure_without_losing_evidence(self):
         def closed_then_disconnected(number):
