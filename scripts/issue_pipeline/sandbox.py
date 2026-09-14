@@ -16,6 +16,7 @@ from .containers import ContainerError, record_created_container
 from .gitops import GitError, _process
 
 ARTIFACT_PREFIX = "conformance/evidence/artifacts/"
+STORAGE_FIXTURE_TARGET = "crates/agenc-ircd-storage/target"
 IMAGE = "sha256:a6f81fb630d51837271b89f8193810a5fc493fa4f30a55d7ebcdb3a66f3cc63a"
 DOCKER_HOST = "unix:///var/run/docker.sock"
 
@@ -196,6 +197,21 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
         if path.is_symlink() or not path.resolve().is_relative_to(worktree):
             raise SandboxFailure("gate generated directory escapes its worktree")
         path.mkdir(parents=True, exist_ok=True)
+    # Cargo runs a package's test binaries from that package directory. Storage
+    # fixtures create current_dir()/target, independently of Cargo's build target.
+    # Keep the package source immutable and put only that exact scratch directory
+    # on the existing disk-backed generated root. Never mask tracked inputs or
+    # adopt files left at an unowned package-local destination.
+    fixture_target = worktree / STORAGE_FIXTURE_TARGET
+    if (any(path.is_symlink() for path in (fixture_target, *fixture_target.parents))
+            or not fixture_target.parent.is_dir()
+            or repo.run(["ls-files", "--", STORAGE_FIXTURE_TARGET], cwd=worktree).strip()
+            or (fixture_target.exists()
+                and (not fixture_target.is_dir() or any(fixture_target.iterdir())))):
+        raise SandboxFailure("storage fixture mount would mask source or unowned files")
+    fixture_target.mkdir(exist_ok=True)
+    fixture_backing = generated[0] / (".issue-pipeline-storage-fixtures-" + uuid.uuid4().hex)
+    private_directory(fixture_backing)
     # The source artifact directory may contain historic tracked receipts; protect
     # every existing file while allowing the runner's new exact-source artifact.
     existing_artifacts = [path for path in generated[-1].rglob("*") if path.is_file()]
@@ -251,6 +267,7 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
     # Unix socket fixtures append unique names; expose the disk-backed scratch
     # at a short private path so their names remain below Linux sun_path limits.
     bind(scratch, Path("/tmp"), readonly=False)
+    bind(fixture_backing, fixture_target, readonly=False)
     for parent in readonly_parents:
         virtual = private_home / parent.relative_to(home)
         virtual.mkdir(parents=True, exist_ok=True, mode=0o700)

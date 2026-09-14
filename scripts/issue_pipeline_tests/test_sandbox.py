@@ -9,7 +9,8 @@ import unittest
 from unittest import mock
 
 from issue_pipeline.config import Config
-from issue_pipeline.sandbox import DOCKER_HOST, IMAGE, SandboxFailure, filesystem_command
+from issue_pipeline.sandbox import (DOCKER_HOST, IMAGE, STORAGE_FIXTURE_TARGET,
+                                    SandboxFailure, filesystem_command)
 
 
 class SandboxPlanTests(unittest.TestCase):
@@ -27,6 +28,7 @@ class SandboxPlanTests(unittest.TestCase):
         self.cargo_bin = self.home / ".cargo" / "bin"
         for path in (self.worktree, self.output, self.admin, self.cargo, self.rustup, self.cargo_bin):
             path.mkdir(parents=True)
+        (self.worktree / STORAGE_FIXTURE_TARGET).parent.mkdir(parents=True)
         for name in ("HEAD", "gitdir", "commondir"):
             (self.admin / name).write_text("benign fixture\n")
         self.source = "a" * 40
@@ -39,7 +41,9 @@ class SandboxPlanTests(unittest.TestCase):
         (self.output / "unit.json").write_text(json.dumps(self.unit_record))
         self.repo = mock.Mock()
         self.repo.head.return_value = self.source
-        self.repo.run.side_effect = lambda argv, **kw: str(self.admin if "--absolute-git-dir" in argv else self.common)
+        self.tracked_fixture = ""
+        self.repo.run.side_effect = lambda argv, **kw: (self.tracked_fixture if argv[0] == "ls-files"
+            else str(self.admin if "--absolute-git-dir" in argv else self.common))
 
     def command(self):
         def which(name):
@@ -106,6 +110,42 @@ class SandboxPlanTests(unittest.TestCase):
         self.assertNotIn("/tmp:rw,nosuid,nodev", self.created)
         self.assertEqual(mounts["/etc/alternatives"], {
             "source": "/etc/alternatives", "target": "/etc/alternatives", "readonly": True})
+
+    def test_storage_package_fixture_mount_uses_only_private_generated_disk_output(self):
+        self.command()
+        policy = json.loads((self.output / "filesystem-policy.json").read_text())
+        mounts = {entry["target"]: entry for entry in policy["mounts"]}
+        target = self.worktree / STORAGE_FIXTURE_TARGET
+        backing = Path(mounts[str(target)]["source"])
+        self.assertEqual(backing.parent, self.worktree / "target")
+        self.assertTrue(backing.name.startswith(".issue-pipeline-storage-fixtures-"))
+        self.assertFalse(mounts[str(target)]["readonly"])
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(list(backing.iterdir()), [])
+        self.assertEqual(backing.stat().st_dev, (self.worktree / "target").stat().st_dev)
+        self.assertNotIn(str(target.parent), mounts)
+
+    def test_storage_fixture_mount_refuses_tracked_inputs(self):
+        self.tracked_fixture = STORAGE_FIXTURE_TARGET + "/reviewed-fixture\n"
+        with self.assertRaisesRegex(SandboxFailure, "mask source or unowned files"):
+            self.command()
+        self.assertIsNone(self.created)
+
+    def test_storage_fixture_mount_refuses_existing_unowned_files(self):
+        target = self.worktree / STORAGE_FIXTURE_TARGET
+        target.mkdir()
+        sentinel = target / "unowned-fixture"
+        sentinel.write_text("preserve me\n")
+        with self.assertRaisesRegex(SandboxFailure, "mask source or unowned files"):
+            self.command()
+        self.assertEqual(sentinel.read_text(), "preserve me\n")
+        self.assertIsNone(self.created)
+
+    def test_storage_fixture_mount_refuses_symlink_destination(self):
+        (self.worktree / STORAGE_FIXTURE_TARGET).symlink_to(self.output, target_is_directory=True)
+        with self.assertRaisesRegex(SandboxFailure, "mask source or unowned files"):
+            self.command()
+        self.assertIsNone(self.created)
 
     def test_only_private_home_backs_home_and_protected_mount_ancestors_are_immutable(self):
         self.command()
