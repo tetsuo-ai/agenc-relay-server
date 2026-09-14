@@ -87,6 +87,9 @@ fn replace(client: &mut IrcClient, fixture: &NodeFixture, account_id: AccountId)
 fn exercise(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
     wait_for_link(&network.edge_a, 0)?;
     wait_for_link(&network.edge_b, 0)?;
+    // Established transports still synchronize before account carriers are available.
+    super::stage_ten_drills::wait_for_account_authority(&network.edge_a)?;
+    super::stage_ten_drills::wait_for_account_authority(&network.edge_b)?;
     let account = {
         let mut client = IrcClient::connect(&network.edge_a)?;
         client.negotiate_sasl()?;
@@ -171,14 +174,16 @@ fn exercise(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
 #[test]
 fn edge_credential_replacement_survives_coordinator_restart() -> TestResult {
     let network = build_network()?;
-    // The post-restart readiness check uses Edge B's signed local admin socket.
-    let mut config = fs::read_to_string(&network.edge_b.config_path)?;
-    replace_once(
-        &mut config,
-        "enabled = false\npurpose = \"admin_local\"",
-        "enabled = true\npurpose = \"admin_local\"",
-    )?;
-    fs::write(&network.edge_b.config_path, config)?;
+    // Initial and post-restart readiness checks use the edges' signed admin sockets.
+    for fixture in [&network.edge_a, &network.edge_b] {
+        let mut config = fs::read_to_string(&fixture.config_path)?;
+        replace_once(
+            &mut config,
+            "enabled = false\npurpose = \"admin_local\"",
+            "enabled = true\npurpose = \"admin_local\"",
+        )?;
+        fs::write(&fixture.config_path, config)?;
+    }
     let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
     let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
     let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
