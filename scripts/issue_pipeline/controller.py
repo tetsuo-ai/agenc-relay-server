@@ -554,6 +554,13 @@ class Controller:
                 or pr["base"]["repo"]["full_name"] != self.config.repository or pr["state"] != "open"):
             raise PipelineBlocked("pull request identity changed before promotion")
         self.require_candidate_receipts(task.issue, candidate, base)
+        # Prerequisite/PR reads and artifact hashing can outlive the earlier
+        # hosted snapshot. Archive and enforce the current result at the final
+        # promotion boundary; an earlier nonblocking receipt cannot authorize it.
+        checks = self.github.hosted_checks(candidate)
+        self.record(task.issue, "hosted-checks", candidate, base, checks, accepted=not checks["blocking"])
+        if checks["blocking"]:
+            raise PipelineBlocked("hosted check evidence blocks promotion: " + checks["state"])
         if self.stop.is_set() or not self.config.auto_merge:
             raise PipelineBlocked("promotion paused by controller policy")
         self.checkpoint(task.issue, "merging", data, remote_action="promote")
