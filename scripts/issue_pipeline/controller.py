@@ -22,6 +22,7 @@ import uuid
 from .agents import (AgentRunError, CodexRunner, SessionLifecycleError, record_session_quiescent,
                      session_lifecycle, validate_result)
 from .config import Config, digest_file, private_directory
+from .comments import CommentPublicationError, ensure_comment
 from .gitops import GitRepo, GitError
 from .github import Github, GithubIdentityError, issue_identity, native_issue_numbers
 from .graph import Graph, GraphError, Task
@@ -607,8 +608,11 @@ class Controller:
                 "```\n\nRemaining work: " + ("later phases in the parent issue" if data["phase_index"] + 1 < len(data["plan"]["phases"]) else "none within this issue after final acceptance") + ".\n")
 
     def comment_once(self, number: int, marker: str, body: str) -> None:
-        if not any(marker in (item.get("body") or "") for item in self.github.comments(number)):
-            self.github.comment(number, body + "\n\n" + marker)
+        with self.graph_lock:
+            try:
+                ensure_comment(self.github, self.config.state, number, marker, body + "\n\n" + marker, self.fetch)
+            except CommentPublicationError as error:
+                raise PipelineBlocked(str(error)) from error
 
     def completion_preconditions(self, task: Task, expected_hash: str, receipt: dict,
                                  *, require_closed=False) -> dict:
@@ -1429,7 +1433,7 @@ class Controller:
             if errors:
                 raise PipelineBlocked("aggregate closure reconciliation required: " + "; ".join(errors))
 
-    def write_master_status(self, graph, completed, *, blocked=False):
+    def write_master_status(self, graph, completed, *, blocked=False, source=None):
         marker = "<!-- agenc-pipeline-live-status -->"
         records = {row["issue"]: row for row in self.state.list_tasks()}
         lines = [marker, "Automated execution status (accepted receipts are required for completion).", ""]
@@ -1443,14 +1447,14 @@ class Controller:
             reason = row.get("data", {}).get("reason", "")
             lines.append(f"- [{'x' if task.issue in completed else ' '}] #{task.issue} {task.key}: {status}" + (" — " + reason.splitlines()[0][:240] if reason else ""))
         body = "\n".join(lines) + "\n"
-        matches = [row for row in self.github.comments(self.config.master_issue) if marker in (row.get("body") or "")]
-        if len(matches) > 1:
-            raise PipelineBlocked("duplicate controller master status comments")
-        if matches:
-            if matches[0]["body"] != body:
-                self.github.api(f"issues/comments/{matches[0]['id']}", "PATCH", {"body": body})
-        else:
-            self.github.comment(self.config.master_issue, body)
+        with self.graph_lock:
+            try:
+                comment = ensure_comment(self.github, self.config.state, self.config.master_issue,
+                                         marker, body, source or self.fetch, mutable=True)
+            except CommentPublicationError as error:
+                raise PipelineBlocked(str(error)) from error
+            if comment["body"] != body:
+                self.github.api(f"issues/comments/{comment['id']}", "PATCH", {"body": body})
 
     def update_master(self, graph: Graph, issues: dict, completed: set[int]) -> None:
         """Update only the controller-owned status comment; do not race-edit the DAG."""
@@ -1464,7 +1468,7 @@ class Controller:
                     binding = self.aggregate_binding(kind, context)
                     if binding is not None:
                         self.prepare_aggregate(binding, tip)
-                self.write_master_status(graph, set(proofs))
+                self.write_master_status(graph, set(proofs), source=tip)
                 self.reconcile_aggregates()
             except PipelineBlocked:
                 # Replace stale checkboxes without preparing new closure intent.
@@ -1474,7 +1478,8 @@ class Controller:
                 except Exception:
                     status_graph, status_proofs = None, set()
                 try:
-                    self.write_master_status(status_graph, status_proofs, blocked=True)
+                    self.write_master_status(status_graph, status_proofs, blocked=True,
+                                             source=current[3] if status_graph is not None else None)
                 except Exception as error:
                     self.log("aggregate blocked status publication failed", error=type(error).__name__)
                 try:
