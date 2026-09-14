@@ -26,7 +26,7 @@ from .gitops import GitRepo, GitError
 from .github import Github
 from .graph import Graph, Task
 from .state import ClaimConflict, State, SupervisorLock
-from .gate import GateFailure
+from .gate import GateCleanupUncertain, GateFailure, GateStopped
 from .containers import (ContainerError, container_cleanup_complete, load_container_record,
                          stop_owned_container)
 
@@ -695,6 +695,16 @@ class Controller:
         self.checkpoint(task.issue, "blocked", data, dependency_replan=True,
                         pending_discoveries=None, remote_action=None)
 
+    def assert_gate_available(self) -> None:
+        """Called while integration is held, before shared validation mutation."""
+        if self.stop.is_set():
+            raise GateStopped("controller stopped; source and checkpoints retained")
+        try:
+            self.gate.assert_available()
+        except GateStopped:
+            self.stop.set()
+            raise
+
     def execute(self, task: Task, issue: dict) -> None:
         saved = self.state.get_task(task.issue)
         data = dict(saved["data"]) if saved else {}
@@ -702,6 +712,8 @@ class Controller:
         try:
             if saved is None:
                 self.state.set_task(task.issue, "pending", data)
+            if self.stop.is_set():
+                raise GateStopped("controller stopped; source and checkpoints retained")
             self.state.claim(task.issue, scopes=task.locks, owner=str(task.issue))
             claimed = True
             self.state.set_task(task.issue, "planning", data)
@@ -825,8 +837,10 @@ class Controller:
                         raise PipelineBlocked("phase produced no committed change; completion needs explicit evidence")
                 self.checkpoint(task.issue, "working", data, candidate=candidate,
                                 base=merge_base or data["base"], pending_merge_base=None, merge_changed_paths=[])
+                output = None
                 try:
                     with self.integration:
+                        self.assert_gate_available()
                         newest = self.fetch()
                         if newest != data["base"]:
                             if not self.repo.rebase(path, newest):
@@ -843,9 +857,17 @@ class Controller:
                         self.review_pair(task, data, phase, candidate, data["base"])
                         self.checkpoint(task.issue, "gating", data)
                         validation = self.config.worktrees / "validation"
+                        self.assert_gate_available()
                         self.repo.prepare_validation_worktree(validation, candidate)
                         output = self.config.state / "gates" / uuid.uuid4().hex
-                        proof = self.gate.run(self.repo, validation, candidate, data["base"], output)
+                        try:
+                            proof = self.gate.run(self.repo, validation, candidate, data["base"], output)
+                        except GateStopped:
+                            # Set the global stop before releasing integration:
+                            # a queued issue must not mutate a checkout that an
+                            # unconfirmed prior container may still be using.
+                            self.stop.set()
+                            raise
                         if (proof.get("source") != candidate or proof.get("base") != data["base"]
                                 or proof.get("tree") != self.repo.tree(candidate) or proof.get("result") != "passed"):
                             raise PipelineBlocked("gate response does not prove this candidate/base/tree")
@@ -859,10 +881,18 @@ class Controller:
                 except (PipelineBlocked, GateFailure) as error:
                     if data.get("remote_action") in ("promote", "cleanup"):
                         raise
+                    if isinstance(error, GateStopped):
+                        # Preserve live output in place. It is unsafe to treat
+                        # uncertain cleanup as worker repair feedback or proof.
+                        self.record(task.issue, "gate", candidate, data["base"],
+                                    {"failure": str(error), "controller_stopped": True,
+                                     "cleanup_uncertain": isinstance(error, GateCleanupUncertain),
+                                     "output": str(output) if output is not None else None}, accepted=False)
+                        raise
                     feedback = str(error)
                     if isinstance(error, GateFailure):
                         value = {"failure": str(error), "artifacts": {}}
-                        if output.exists() and (output / "full-gate.log").is_file():
+                        if output is not None and output.exists() and (output / "full-gate.log").is_file():
                             log = output / "full-gate.log"
                             value["artifacts"]["log"] = str(log)
                             with log.open("rb") as stream:

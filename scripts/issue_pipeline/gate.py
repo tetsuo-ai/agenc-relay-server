@@ -36,6 +36,14 @@ class GateFailure(RuntimeError):
     """A check failed or evidence could not be authenticated to the source."""
 
 
+class GateStopped(GateFailure):
+    """This runner cannot admit another candidate in the current controller."""
+
+
+class GateCleanupUncertain(GateStopped):
+    """Owned processes or container creation must be reconciled before reuse."""
+
+
 def filesystem_command(config: Config, repo, worktree: Path, output: Path,
                        *, probe_only: bool = False) -> list[str]:
     """Prepare the qualified sandbox while retaining the gate's failure API."""
@@ -351,6 +359,19 @@ class GateRunner:
         self._containers: dict[str, Path] = {}
         self._launchers: dict[str, subprocess.Popen] = {}
         self._cancelled = threading.Event()
+        self._cleanup_uncertain = threading.Event()
+
+    def assert_available(self) -> None:
+        """Check before changing the shared checkout, under the integration lock.
+
+        This is also checked by run(), but that check alone is too late: an
+        uncertain previous container can still mount the validation checkout.
+        Recovery must prove quiescence before constructing a fresh runner.
+        """
+        if self._cleanup_uncertain.is_set():
+            raise GateCleanupUncertain("prior gate cleanup is uncertain; controller recovery is required")
+        if self._cancelled.is_set():
+            raise GateStopped("controller stopping; no further gate candidate may be prepared")
 
     def _stop_unit(self, unit: str) -> None:
         # The local systemd client may not have registered its unit yet. Quiesce
@@ -366,8 +387,9 @@ class GateRunner:
                     pass
                 launcher.wait(timeout=10)
         except (OSError, subprocess.TimeoutExpired) as error:
+            self._cleanup_uncertain.set()
             self._cancelled.set()
-            raise GateFailure("gate launcher cleanup is uncertain; further execution is blocked") from error
+            raise GateCleanupUncertain("gate launcher cleanup is uncertain; further execution is blocked") from error
         try:
             result = subprocess.run(["systemctl", "--user", "stop", unit], timeout=30,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -412,8 +434,9 @@ class GateRunner:
                 if scratch.exists() or scratch.is_symlink():
                     raise GateFailure("sandbox scratch escaped into the real HOME")
         except (OSError, subprocess.TimeoutExpired, GateFailure, ContainerError, ValueError, KeyError) as error:
+            self._cleanup_uncertain.set()
             self._cancelled.set()
-            raise GateFailure("gate cleanup is uncertain; further execution is blocked: " + unit) from error
+            raise GateCleanupUncertain("gate cleanup is uncertain; further execution is blocked: " + unit) from error
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -426,7 +449,7 @@ class GateRunner:
             except GateFailure as error:
                 failures.append(str(error))
         if failures:
-            raise GateFailure("; ".join(failures))
+            raise GateCleanupUncertain("; ".join(failures))
 
     @staticmethod
     def _clean_source(repo, worktree: Path, source: str) -> None:
@@ -445,7 +468,7 @@ class GateRunner:
             if shutil.disk_usage(worktree).free < self.config.minimum_free_gib * 2**30:
                 raise GateFailure("gate stopped because writable outputs reached the free-disk reserve")
             if self._cancelled.is_set():
-                raise GateFailure("controller stopped during gate")
+                self.assert_available()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(launcher.args, self.config.gate_timeout_seconds + 45)
@@ -456,8 +479,7 @@ class GateRunner:
 
     def run(self, repo, worktree: Path, source: str, base: str, output: Path) -> dict:
         with self._lock:
-            if self._cancelled.is_set():
-                raise GateFailure("controller stopping or prior gate cleanup uncertain")
+            self.assert_available()
             if shutil.disk_usage(worktree).free < self.config.minimum_free_gib * 2**30:
                 raise GateFailure("insufficient free disk for the isolated full gate")
             if repo.head(worktree) != source or repo.run(["status", "--porcelain"], cwd=worktree):
@@ -487,11 +509,13 @@ class GateRunner:
                 os.close(directory)
             try:
                 sandboxed = filesystem_command(self.config, repo, worktree, output)
-            except GateFailure:
+            except GateFailure as error:
                 # An unresolved inert create cannot run code, but its durable
                 # ownership must be reconciled before another gate is admitted.
                 if (output / "container.json").exists():
+                    self._cleanup_uncertain.set()
                     self._cancelled.set()
+                    raise GateCleanupUncertain("gate container preparation is unresolved; controller recovery is required") from error
                 raise
             argv = ["systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
                     "--service-type=exec", "--expand-environment=no", "--unit=" + unit,
@@ -516,7 +540,7 @@ class GateRunner:
                 with self._active_lock:
                     self._active.discard(unit)
                     self._containers.pop(unit, None)
-                raise GateFailure("controller stopped before gate launch")
+                raise GateStopped("controller stopped before gate launch")
             quiescent = False
             retained: Path | None = None
             try:
@@ -524,7 +548,7 @@ class GateRunner:
                     with log.open("xb") as stream:
                         with self._active_lock:
                             if self._cancelled.is_set():
-                                raise GateFailure("controller stopped before gate launch")
+                                raise GateStopped("controller stopped before gate launch")
                             launcher = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=stream,
                                                         stderr=subprocess.STDOUT, start_new_session=True)
                             self._launchers[unit] = launcher
@@ -543,7 +567,7 @@ class GateRunner:
                     self._stop_unit(unit)
                     quiescent = True
                 if self._cancelled.is_set():
-                    raise GateFailure("controller stopped during gate")
+                    self.assert_available()
                 self._clean_source(repo, worktree, source)
                 if not artifact.exists() and not artifact.is_symlink():
                     raise GateFailure("successful exit did not produce exact-source gate evidence")

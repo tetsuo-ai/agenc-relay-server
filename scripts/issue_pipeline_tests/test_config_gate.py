@@ -15,7 +15,7 @@ from unittest import mock
 
 from issue_pipeline.config import Config, digest_file, private_directory
 from issue_pipeline.containers import ContainerError
-from issue_pipeline.gate import GATE, ARTIFACT_PREFIX, GateFailure, GateRunner
+from issue_pipeline.gate import GATE, ARTIFACT_PREFIX, GateCleanupUncertain, GateFailure, GateRunner, GateStopped
 from issue_pipeline.gate import check_policy, commands, validate_artifact
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -537,7 +537,7 @@ class RunnerTests(unittest.TestCase):
                 runner = GateRunner(self.runner.config)
                 with mock.patch("issue_pipeline.gate.subprocess.run", return_value=
                                 subprocess.CompletedProcess([], code, stdout=output)):
-                    with self.assertRaisesRegex(GateFailure, "cleanup is uncertain"):
+                    with self.assertRaisesRegex(GateCleanupUncertain, "cleanup is uncertain"):
                         runner._stop_unit("agenc-ircd-pipeline-gate-" + "a" * 32 + ".service")
                 self.assertTrue(runner._cancelled.is_set())
 
@@ -548,6 +548,7 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(self.artifact.exists())
         self.assertEqual((self.output / "gate-artifact-failed.json").read_bytes(), self.payload)
         self.assertFalse(self.runner._active)
+        self.runner.assert_available()
 
     def test_invalid_evidence_is_retained_as_failure_and_does_not_poison_retry_worktree(self):
         with self.assertRaises(GateFailure):
@@ -567,15 +568,50 @@ class RunnerTests(unittest.TestCase):
 
     def test_unconfirmed_cleanup_permanently_blocks_runner_and_preserves_work(self):
         self.active = True
-        with self.assertRaisesRegex(GateFailure, "cleanup is uncertain"):
+        with self.assertRaisesRegex(GateCleanupUncertain, "cleanup is uncertain"):
             self.invoke()
         self.assertTrue(self.artifact.exists())
         self.assertTrue(self.runner._active)
         self.assertTrue(self.runner._cancelled.is_set())
         self.calls.clear()
-        with self.assertRaises(GateFailure):
+        with self.assertRaises(GateCleanupUncertain):
             self.invoke()
         self.assertFalse(any(argv[0] == "systemd-run" for argv in self.calls))
+        with self.assertRaises(GateCleanupUncertain):
+            self.runner.assert_available()
+
+    def test_successful_later_cleanup_does_not_silently_resume_stopped_controller(self):
+        self.active = True
+        with self.assertRaises(GateCleanupUncertain):
+            self.invoke()
+        self.active = False
+        with mock.patch("issue_pipeline.gate.subprocess.run", side_effect=self.process):
+            self.runner.cancel()
+        with self.assertRaises(GateCleanupUncertain):
+            self.runner.assert_available()
+        self.assertTrue(self.artifact.exists())
+
+    def test_unresolved_container_creation_is_a_typed_nonrepairable_stop(self):
+        def unresolved(config, repo, worktree, output):
+            (output / "container.json").write_text("unresolved inert create intent")
+            raise GateFailure("Docker create response was lost")
+
+        with mock.patch("issue_pipeline.gate.check_policy", return_value=[]), \
+                mock.patch("issue_pipeline.gate.filesystem_command", side_effect=unresolved), \
+                mock.patch("issue_pipeline.gate.subprocess.Popen") as launch, \
+                mock.patch("issue_pipeline.gate.shutil.disk_usage", return_value=shutil._ntuple_diskusage(2**40, 0, 2**40)):
+            with self.assertRaisesRegex(GateCleanupUncertain, "preparation is unresolved"):
+                self.runner.run(self.repo, self.root, SOURCE, BASE, self.output)
+        launch.assert_not_called()
+        self.assertTrue((self.output / "container.json").exists())
+        with self.assertRaises(GateCleanupUncertain):
+            self.runner.assert_available()
+
+    def test_cancelled_runner_is_distinct_from_cleanup_uncertainty(self):
+        self.runner.cancel()
+        with self.assertRaises(GateStopped) as raised:
+            self.runner.assert_available()
+        self.assertNotIsInstance(raised.exception, GateCleanupUncertain)
 
     def test_container_cleanup_follows_launcher_quiescence_and_removes_active_authority(self):
         self.output.mkdir()
@@ -601,7 +637,7 @@ class RunnerTests(unittest.TestCase):
         self.output.mkdir()
         (self.output / "container.json").write_text("benign mocked ownership record")
         with mock.patch("issue_pipeline.gate.stop_owned_container", side_effect=ContainerError("daemon unavailable")):
-            with self.assertRaisesRegex(GateFailure, "cleanup is uncertain"):
+            with self.assertRaisesRegex(GateCleanupUncertain, "cleanup is uncertain"):
                 self.invoke()
         self.assertTrue(self.artifact.exists())
         self.assertTrue(self.runner._containers)

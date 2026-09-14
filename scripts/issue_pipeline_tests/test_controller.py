@@ -6,13 +6,14 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from issue_pipeline.config import Config, digest_file
 from issue_pipeline.backlog import Backlog
 from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, encode, task_hash
-from issue_pipeline.gate import GateFailure
+from issue_pipeline.gate import GateCleanupUncertain, GateFailure, GateRunner, GateStopped
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.graph import Graph
 
@@ -197,6 +198,11 @@ class ScriptedGate:
         self.failures = 0
         self.wrong_source = False
         self.wrong_hash = False
+        self.stopped_error = None
+
+    def assert_available(self):
+        if self.stopped_error is not None:
+            raise self.stopped_error
 
     def cancel(self):
         pass
@@ -568,6 +574,95 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.state.get_task(36)["status"], "complete")
         self.assertEqual(len(self.gate.calls), 2)
         self.assertEqual(sum(role == "worker" for role, *_ in self.runner.calls), 2)
+
+    def test_uncertain_cleanup_stops_waiting_candidate_before_shared_checkout_changes(self):
+        entered_gate, waiting_for_integration = threading.Event(), threading.Event()
+        integration = threading.Lock()
+        stopped_before_unlock = []
+        controller = self.controller
+
+        class ObservedIntegration:
+            def __enter__(self):
+                if threading.current_thread().name == "second-candidate":
+                    waiting_for_integration.set()
+                integration.acquire()
+
+            def __exit__(self, kind, error, traceback):
+                if isinstance(error, GateCleanupUncertain):
+                    stopped_before_unlock.append(controller.stop.is_set())
+                integration.release()
+
+        self.controller.integration = ObservedIntegration()
+        original_agent = self.runner.run
+
+        def scoped_agent(role, worktree, prompt, output, **kwargs):
+            result = original_agent(role, worktree, prompt, output, **kwargs)
+            if role == "planner" and json.loads(prompt)["issue"]["number"] == 41:
+                result["phases"][0]["files"] = ["src/other.rs"]
+                (output / "result.json").write_text(json.dumps(result))
+            return result
+
+        def uncertain_gate(repo, worktree, source, base, output):
+            self.gate.calls.append((source, base))
+            output.mkdir(parents=True)
+            (output / "full-gate.log").write_text("Gate writer may still be alive.\n")
+            entered_gate.set()
+            if not waiting_for_integration.wait(15):
+                raise AssertionError("second candidate never reached the integration queue")
+            self.gate.stopped_error = GateCleanupUncertain("owned container removal could not be confirmed")
+            raise self.gate.stopped_error
+
+        first = threading.Thread(target=self.execute, name="first-candidate")
+        second = threading.Thread(target=lambda: self.controller.execute(
+            self.github.graph.by_issue[41], self.github.issue(41)), name="second-candidate")
+        with mock.patch.object(self.runner, "run", side_effect=scoped_agent), \
+                mock.patch.object(self.gate, "run", side_effect=uncertain_gate), \
+                mock.patch.object(self.repo, "prepare_validation_worktree",
+                                  wraps=self.repo.prepare_validation_worktree) as prepare:
+            first.start()
+            self.assertTrue(entered_gate.wait(15))
+            second.start()
+            first.join(20)
+            second.join(20)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(stopped_before_unlock, [True])
+        self.assertTrue(self.controller.stop.is_set())
+        self.assertEqual(len(self.gate.calls), 1)
+        self.assertEqual(sum(role == "worker" for role, *_ in self.runner.calls), 2)
+        self.assertEqual(self.repo.head(self.config.worktrees / "validation"), self.gate.calls[0][0])
+        for number in (36, 41):
+            record = self.controller.state.get_task(number)
+            self.assertEqual(record["status"], "blocked", record)
+            self.assertTrue(Path(record["data"]["worktree"]).exists())
+            self.assertEqual(record["data"]["attempt"], 1)
+        self.assertTrue(self.controller.state.claims())
+        rejected = self.controller.state.receipts(36, "gate")
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["status"], "rejected")
+        self.assertTrue(rejected[0]["data"]["cleanup_uncertain"])
+        self.assertEqual(self.repo.fetch(), self.base)
+        self.assertFalse(self.github.prs)
+        self.assertFalse(self.github.close_calls)
+
+    def test_previously_stopped_gate_blocks_before_any_validation_preparation(self):
+        runner = GateRunner(self.config)
+        runner.cancel()
+        self.controller.gate = runner
+        with mock.patch.object(self.repo, "prepare_validation_worktree") as prepare, \
+                mock.patch.object(runner, "run") as run:
+            self.execute()
+        prepare.assert_not_called()
+        run.assert_not_called()
+        self.assertTrue(self.controller.stop.is_set())
+        self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
+        self.assertFalse((self.config.worktrees / "validation").exists())
+        calls = len(self.runner.calls)
+        self.controller.execute(self.github.graph.by_issue[41], self.github.issue(41))
+        self.assertEqual(len(self.runner.calls), calls)
+        self.assertEqual(self.controller.state.get_task(41)["status"], "blocked")
+        self.assertFalse(self.github.prs)
 
     def test_wrong_source_gate_result_cannot_be_rebound_to_candidate(self):
         self.gate.wrong_source = True
