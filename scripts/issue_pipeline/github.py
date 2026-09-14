@@ -18,6 +18,10 @@ class GithubError(RuntimeError):
     """GitHub transport or response validation failed without exposing credentials."""
 
 
+class GithubIdentityError(GithubError):
+    """A successfully read issue identity is invalid; this is not transport uncertainty."""
+
+
 def _positive(number: int) -> int:
     if type(number) is not int or number < 1:
         raise GithubError("GitHub issue or run number must be a positive integer")
@@ -40,6 +44,14 @@ def _unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def issue_identity(value: Any, repository: str, number: int | None = None) -> tuple[int, int, str]:
+    """Validate read issue identities while retaining a distinct failure type."""
+    try:
+        return _issue_identity(value, repository, number)
+    except GithubError as error:
+        raise GithubIdentityError(str(error)) from error
+
+
+def _issue_identity(value: Any, repository: str, number: int | None = None) -> tuple[int, int, str]:
     """Validate one REST issue's repository, canonical URLs and immutable IDs.
 
     Native relationships may legitimately cross repositories. Their issue
@@ -75,7 +87,7 @@ def native_issue_numbers(
     bounded local-issue reader. No relationship row is its own identity proof.
     """
     if not isinstance(rows, list) or len(rows) > MAX_PAGES * PAGE_SIZE:
-        raise GithubError("native issue relationships exceed their array bound")
+        raise GithubIdentityError("native issue relationships exceed their array bound")
     seen: set[int] = set()
     ids: set[int] = set()
     nodes: set[str] = set()
@@ -84,10 +96,10 @@ def native_issue_numbers(
         identity = issue_identity(row, repository)
         number, stable_id, node = identity
         if number in seen or stable_id in ids or node in nodes:
-            raise GithubError("native relationships contain duplicate issue identities")
+            raise GithubIdentityError("native relationships contain duplicate issue identities")
         local = issues(number) if callable(issues) else issues.get(number)
         if issue_identity(local, repository, number) != identity:
-            raise GithubError("native relationship differs from the local immutable issue identity")
+            raise GithubIdentityError("native relationship differs from the local immutable issue identity")
         seen.add(number)
         ids.add(stable_id)
         nodes.add(node)

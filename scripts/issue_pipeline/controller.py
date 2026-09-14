@@ -23,8 +23,8 @@ from .agents import (AgentRunError, CodexRunner, SessionLifecycleError, record_s
                      session_lifecycle, validate_result)
 from .config import Config, digest_file, private_directory
 from .gitops import GitRepo, GitError
-from .github import Github, issue_identity, native_issue_numbers
-from .graph import Graph, Task
+from .github import Github, GithubIdentityError, issue_identity, native_issue_numbers
+from .graph import Graph, GraphError, Task
 from .state import ClaimConflict, State, SupervisorLock
 from .gate import GateCleanupUncertain, GateFailure, GateStopped
 from .containers import (ContainerError, container_cleanup_complete, load_container_record,
@@ -1069,6 +1069,7 @@ class Controller:
                     raise PipelineBlocked("incomplete discovery journal has no matching approved pending queue entry; preserve "
                                           + descriptor["path"] + " and reconcile its original proof")
             backlog.reconcile()
+        self.reconcile_aggregates()
         for record in self.state.recover_interrupted():
             self.state.release(record["issue"])
             self.log("recovered durable task checkpoint", issue=record["issue"], stage=record["interrupted_from"])
@@ -1151,36 +1152,325 @@ class Controller:
                         return
                     self.stop.wait(self.config.poll_seconds)
 
+    def aggregate_context(self):
+        try:
+            graph, issues = self.snapshot()
+        except (GraphError, GithubIdentityError) as error:
+            raise PipelineBlocked("aggregate graph or native dependencies are no longer valid") from error
+        tip = self.fetch()
+        proofs = self.verified_receipts(graph, issues, tip)
+        master = self.github.issue(graph.master_issue)
+        try:
+            current_graph = Graph.from_master(master["body"])
+        except GraphError as error:
+            raise PipelineBlocked("aggregate master graph is no longer valid") from error
+        if current_graph != graph:
+            raise PipelineBlocked("aggregate graph changed during its snapshot")
+        return graph, issues, proofs, tip, master
+
+    def aggregate_binding(self, kind, context):
+        graph, issues, proofs, _, master = context
+        legacy = int(graph.legacy_umbrella["issue"])
+        required = set(graph.legacy_umbrella["depends_on"]) if kind == "legacy" else set(graph.by_issue)
+        if not required <= proofs.keys():
+            return None
+        return {"version": 1, "repository": self.config.repository, "kind": kind,
+                "issue": legacy if kind == "legacy" else graph.master_issue,
+                "master": graph.master_issue, "legacy": legacy,
+                "graph_hash": hashlib.sha256(encode(asdict(graph)).encode()).hexdigest(),
+                "master_hash": body_hash(master), "legacy_hash": body_hash(issues[legacy]),
+                "legacy_definition": hashlib.sha256(encode(graph.legacy_umbrella).encode()).hexdigest(),
+                "prerequisites": {str(n): proofs[n]["digest"] for n in sorted(required)}}
+
+    def aggregate_receipt(self, number, kind, source, payload):
+        matches = [r for r in self.state.receipts(number, kind)
+                   if r["source"] == source and r["base"] == source
+                   and r["status"] == "accepted" and r["data"].get("aggregate") == payload
+                   and self.receipt_valid(r)]
+        return matches[-1] if matches else self.record(number, kind, source, source, {"aggregate": payload})
+
+    def prepare_aggregate(self, binding, source):
+        number = binding["issue"]
+        old = self.state.get_task(number)
+        if old is not None:
+            if "aggregate_closure" not in old["data"]:
+                raise PipelineBlocked("aggregate has unrelated retained state; reconcile manually")
+            return
+        entry = {"version": 1, "binding": binding, "source": source, "preparation": None,
+                 "intent": None, "legacy_terminal": None, "terminal": None,
+                 "stage": "prepared", "close_attempted": False}
+        self.state.set_task(number, "blocked", {"aggregate_closure": entry,
+                            "remote_action": "aggregate-closure"})
+        self.load_aggregate(number)  # Finish immutable preparation before any remote write.
+
+    def load_aggregate(self, number):
+        row = self.state.get_task(number)
+        if row is None or "aggregate_closure" not in row["data"]:
+            raise PipelineBlocked("aggregate has no controller closure provenance")
+        data = row["data"]
+        entry = data["aggregate_closure"]
+        if (type(entry) is not dict or set(entry) != {"version", "binding", "source", "preparation",
+                "intent", "legacy_terminal", "terminal", "stage", "close_attempted"}
+                or type(entry["version"]) is not int or entry["version"] != 1
+                or type(entry["close_attempted"]) is not bool
+                or entry["stage"] not in {"prepared", "commenting", "commented", "closing", "complete", "reopening", "invalidated"}):
+            raise PipelineBlocked("aggregate closure journal is malformed; preserve it")
+        binding = entry["binding"]
+        if (type(binding) is not dict or set(binding) != {"version", "repository", "kind", "issue", "master",
+                "legacy", "graph_hash", "master_hash", "legacy_hash", "legacy_definition", "prerequisites"}
+                or binding["version"] != 1 or binding["repository"] != self.config.repository
+                or binding["master"] != self.config.master_issue or binding["kind"] not in {"legacy", "master"}
+                or binding["issue"] != number
+                or number != (binding["legacy"] if binding["kind"] == "legacy" else self.config.master_issue)):
+            raise PipelineBlocked("aggregate closure journal belongs to another managed identity")
+        if entry["preparation"] is None:
+            if entry["stage"] != "prepared" or entry["close_attempted"] or entry["intent"] is not None:
+                raise PipelineBlocked("aggregate write has no immutable preparation")
+            receipt = self.aggregate_receipt(number, "aggregate-preparation", entry["source"], binding)
+            entry["preparation"] = receipt["digest"]
+            self.state.set_task(number, "blocked", data)
+        self.aggregate_proof(number, "aggregate-preparation", entry["preparation"], entry["source"], binding)
+        if entry["close_attempted"] and entry["intent"] is None:
+            raise PipelineBlocked("aggregate close authority has no immutable intent")
+        if entry["intent"] is not None:
+            self.aggregate_proof(number, "aggregate-intent", entry["intent"], entry["source"],
+                                 {"preparation": entry["preparation"], "legacy_terminal": entry["legacy_terminal"]})
+        return row, data, entry
+
+    def aggregate_proof(self, number, kind, digest, source, payload):
+        matches = [r for r in self.state.receipts(number, kind) if r["digest"] == digest]
+        if (len(matches) != 1 or matches[0]["source"] != source or matches[0]["base"] != source
+                or matches[0]["status"] != "accepted" or matches[0]["data"].get("aggregate") != payload
+                or not self.receipt_valid(matches[0])):
+            raise PipelineBlocked("aggregate immutable evidence is missing or differs; preserve its journal")
+        return matches[0]
+
+    def check_aggregate(self, entry, *, closed=False):
+        expected = entry["binding"]
+        context = self.aggregate_context()
+        current = self.aggregate_binding(expected["kind"], context)
+        terminal_legacy = expected["kind"] == "legacy" and entry["stage"] == "complete"
+        compared = set(expected) - ({"graph_hash", "master_hash"} if terminal_legacy else set())
+        if current is None or any(current[field] != expected[field] for field in compared):
+            raise PipelineBlocked("aggregate graph, requirements or prerequisite evidence changed")
+        _, _, proofs, tip, _ = context
+        if (not self.repo.is_ancestor(entry["source"], tip)
+                or any(not self.repo.is_ancestor(proofs[int(n)]["source"], entry["source"])
+                       for n in expected["prerequisites"])):
+            raise PipelineBlocked("aggregate source no longer contains its accepted prerequisites")
+        if expected["kind"] == "master" and entry["legacy_terminal"] is not None:
+            _, _, legacy = self.load_aggregate(expected["legacy"])
+            if legacy["stage"] != "complete" or legacy["terminal"] != entry["legacy_terminal"]:
+                raise PipelineBlocked("master aggregate lost its exact accepted legacy closure")
+            self.check_aggregate(legacy, closed=True)
+            self.aggregate_proof(expected["legacy"], "aggregate-completion", legacy["terminal"],
+                                 legacy["source"], {"intent": legacy["intent"]})
+        # Read aggregate bodies/states after slow graph and proof validation.
+        if expected["kind"] == "legacy":
+            master = self.github.issue(expected["master"])
+            legacy_issue = self.github.issue(expected["legacy"])
+        else:
+            legacy_issue = self.github.issue(expected["legacy"])
+            master = self.github.issue(expected["master"])
+        if (not terminal_legacy and body_hash(master) != expected["master_hash"]) or body_hash(legacy_issue) != expected["legacy_hash"]:
+            raise PipelineBlocked("aggregate body changed during final readback")
+        observed = legacy_issue if expected["kind"] == "legacy" else master
+        if (closed and observed["state"] != "closed") or (
+                expected["kind"] == "master" and entry["legacy_terminal"] is not None
+                and legacy_issue["state"] != "closed"):
+            raise PipelineBlocked("aggregate closure state changed during final readback")
+        return observed
+
+    def reopen_aggregate(self, number, data, entry):
+        # Preparation alone never authorizes reopening someone else's closure.
+        if not entry["close_attempted"]:
+            entry["stage"] = "invalidated"
+            self.state.set_task(number, "blocked", data)
+            return
+        self.load_aggregate(number)  # Recheck immutable close provenance before compensation.
+        entry["stage"] = "reopening"
+        data["remote_action"] = "aggregate-reopen"
+        self.state.set_task(number, "blocked", data)
+        if self.github.issue(number)["state"] != "open":
+            try:
+                self.github.api(f"issues/{number}", "PATCH", {"state": "open"})
+            except Exception:
+                if self.github.issue(number)["state"] != "open":
+                    raise
+        if self.github.issue(number)["state"] != "open":
+            raise PipelineBlocked("owned aggregate reopen remains uncertain")
+        entry["stage"] = "invalidated"
+        self.state.set_task(number, "blocked", data)
+
+    def resume_aggregate(self, number):
+        row, data, entry = self.load_aggregate(number)
+        if entry["stage"] == "reopening":
+            self.reopen_aggregate(number, data, entry)
+        if entry["stage"] == "invalidated" and row["status"] != "pending":
+            # A previously uncertain close may apply after the last open
+            # readback. Retained ownership still requires reconciliation.
+            self.reopen_aggregate(number, data, entry)
+            raise PipelineBlocked("aggregate acceptance invalidated; stop service, reconcile original evidence, then retry")
+        try:
+            observed = self.check_aggregate(entry, closed=entry["stage"] == "complete")
+            if entry["stage"] == "complete":
+                receipt = self.aggregate_proof(number, "aggregate-completion", entry["terminal"],
+                                              entry["source"], {"intent": entry["intent"]})
+                self.state.set_task(number, "complete", data)
+                return receipt
+            if observed["state"] == "closed" and not entry["close_attempted"]:
+                raise PipelineBlocked("refusing to adopt an unowned preexisting aggregate closure")
+            if entry["binding"]["kind"] == "master" and entry["legacy_terminal"] is None:
+                _, _, legacy = self.load_aggregate(entry["binding"]["legacy"])
+                if legacy["stage"] != "complete":
+                    if legacy["stage"] in {"invalidated", "reopening"}:
+                        raise PipelineBlocked("master requires a verified legacy terminal receipt")
+                    raise RuntimeError("master awaits reconciliation of the original legacy closure intent")
+                self.check_aggregate(legacy, closed=True)
+                self.aggregate_proof(entry["binding"]["legacy"], "aggregate-completion", legacy["terminal"],
+                                     legacy["source"], {"intent": legacy["intent"]})
+                entry["legacy_terminal"] = legacy["terminal"]
+            if entry["intent"] is None:
+                intent = self.aggregate_receipt(number, "aggregate-intent", entry["source"],
+                        {"preparation": entry["preparation"], "legacy_terminal": entry["legacy_terminal"]})
+                entry["intent"] = intent["digest"]
+                self.state.set_task(number, "blocked", data)
+            if entry["stage"] == "invalidated":
+                entry["stage"] = "prepared"
+                self.state.set_task(number, "blocked", data)
+            marker = "<!-- agenc-pipeline-aggregate:" + entry["intent"] + " -->"
+            text = ("Aggregate closure evidence snapshot. The immutable intent binds the graph, requirements "
+                    "and accepted prerequisite receipts; current acceptance is rechecked before closure.\n\n"
+                    f"Source: `{entry['source']}`. Intent: `{entry['intent']}`.\n\n" + marker)
+            matches = [r for r in self.github.comments(number) if marker in (r.get("body") or "")]
+            if len(matches) > 1 or (matches and matches[0]["body"] != text):
+                raise PipelineBlocked("aggregate intent comment changed or is duplicated")
+            if not matches:
+                if entry["stage"] != "prepared":
+                    raise RuntimeError("aggregate comment publication remains ambiguous; reconcile its exact marker")
+                entry["stage"] = "commenting"
+                self.state.set_task(number, "blocked", data)
+                self.github.comment(number, text)
+                matches = [r for r in self.github.comments(number) if marker in (r.get("body") or "")]
+                if len(matches) != 1 or matches[0]["body"] != text:
+                    raise RuntimeError("aggregate comment publication lacks exact readback")
+            entry["stage"] = "commented"
+            self.state.set_task(number, "blocked", data)
+            observed = self.check_aggregate(entry)
+            if observed["state"] == "closed" and not entry["close_attempted"]:
+                raise PipelineBlocked("aggregate was closed externally before controller close dispatch")
+            if observed["state"] != "closed":
+                entry["stage"] = "closing"
+                entry["close_attempted"] = True
+                self.state.set_task(number, "blocked", data)
+                self.github.close_issue(number)
+            self.check_aggregate(entry, closed=True)
+            terminal = self.aggregate_receipt(number, "aggregate-completion", entry["source"], {"intent": entry["intent"]})
+            self.check_aggregate(entry, closed=True)
+            entry.update(stage="complete", terminal=terminal["digest"])
+            data["remote_action"] = None
+            self.state.set_task(number, "complete", data)
+            return terminal
+        except PipelineBlocked as error:
+            data["reason"] = str(error)
+            self.state.set_task(number, "blocked", data)
+            self.reopen_aggregate(number, data, entry)
+            raise
+
+    def reconcile_aggregates(self, *, recheck_only=False):
+        """Drain both independently owned aggregates before reporting a failure."""
+        with self.graph_lock:
+            rows = [row for row in self.state.list_tasks() if "aggregate_closure" in row["data"]]
+            rows.sort(key=lambda row: row["issue"] == self.config.master_issue)
+            errors = []
+            for row in rows:
+                try:
+                    if recheck_only and row["data"]["aggregate_closure"].get("stage") not in {
+                            "complete", "reopening", "invalidated"}:
+                        _, data, entry = self.load_aggregate(row["issue"])
+                        try:
+                            self.check_aggregate(entry)
+                        except PipelineBlocked:
+                            self.reopen_aggregate(row["issue"], data, entry)
+                            raise
+                    else:
+                        self.resume_aggregate(row["issue"])
+                except Exception as error:
+                    current = self.state.get_task(row["issue"])
+                    data = current["data"]
+                    data["reason"] = str(error)
+                    self.state.set_task(row["issue"], "blocked", data)
+                    errors.append(f"#{row['issue']}: {error}")
+            # A later master write can invalidate a legacy terminal accepted
+            # earlier in this pass. Drain those owned closures before failing.
+            for row in rows:
+                current = self.state.get_task(row["issue"])
+                if current["data"]["aggregate_closure"].get("stage") != "complete":
+                    continue
+                try:
+                    self.resume_aggregate(row["issue"])
+                except Exception as error:
+                    current = self.state.get_task(row["issue"])
+                    data = current["data"]
+                    data["reason"] = str(error)
+                    self.state.set_task(row["issue"], "blocked", data)
+                    errors.append(f"#{row['issue']}: {error}")
+            if errors:
+                raise PipelineBlocked("aggregate closure reconciliation required: " + "; ".join(errors))
+
+    def write_master_status(self, graph, completed, *, blocked=False):
+        marker = "<!-- agenc-pipeline-live-status -->"
+        records = {row["issue"]: row for row in self.state.list_tasks()}
+        lines = [marker, "Automated execution status (accepted receipts are required for completion).", ""]
+        if blocked:
+            lines += ["Aggregate completion is blocked pending evidence reconciliation.", ""]
+        for task in sorted(graph.tasks if graph else (), key=lambda task: (task.level, task.issue)):
+            row = records.get(task.issue, {})
+            status = "complete" if task.issue in completed else (
+                "completion evidence invalid" if row.get("status") == "complete"
+                else row.get("status", "waiting for prerequisites"))
+            reason = row.get("data", {}).get("reason", "")
+            lines.append(f"- [{'x' if task.issue in completed else ' '}] #{task.issue} {task.key}: {status}" + (" — " + reason.splitlines()[0][:240] if reason else ""))
+        body = "\n".join(lines) + "\n"
+        matches = [row for row in self.github.comments(self.config.master_issue) if marker in (row.get("body") or "")]
+        if len(matches) > 1:
+            raise PipelineBlocked("duplicate controller master status comments")
+        if matches:
+            if matches[0]["body"] != body:
+                self.github.api(f"issues/comments/{matches[0]['id']}", "PATCH", {"body": body})
+        else:
+            self.github.comment(self.config.master_issue, body)
+
     def update_master(self, graph: Graph, issues: dict, completed: set[int]) -> None:
         """Update only the controller-owned status comment; do not race-edit the DAG."""
         with self.graph_lock:
-            graph, issues = self.snapshot()
-            tip = self.fetch()
-            completed = self.verified_tasks(graph, issues, tip)
-            marker = "<!-- agenc-pipeline-live-status -->"
-            records = {row["issue"]: row for row in self.state.list_tasks()}
-            lines = [marker, "Automated execution status (accepted receipts are required for completion).", ""]
-            for task in sorted(graph.tasks, key=lambda task: (task.level, task.issue)):
-                row = records.get(task.issue, {})
-                status = "complete" if task.issue in completed else row.get("status", "waiting for prerequisites")
-                reason = row.get("data", {}).get("reason", "")
-                lines.append(f"- [{'x' if task.issue in completed else ' '}] #{task.issue} {task.key}: {status}" + (" — " + reason.splitlines()[0][:240] if reason else ""))
-            body = "\n".join(lines) + "\n"
-            matches = [row for row in self.github.comments(graph.master_issue) if marker in (row.get("body") or "")]
-            if len(matches) > 1:
-                raise PipelineBlocked("duplicate controller master status comments")
-            if matches:
-                if matches[0]["body"] != body:
-                    self.github.api(f"issues/comments/{matches[0]['id']}", "PATCH", {"body": body})
-            else:
-                self.github.comment(graph.master_issue, body)
-            legacy = int(graph.legacy_umbrella["issue"])
-            if set(graph.legacy_umbrella["depends_on"]) <= completed and issues[legacy]["state"] == "open":
-                self.comment_once(legacy, "<!-- agenc-pipeline-legacy-complete -->", "Every prerequisite now has accepted completion evidence: " + ", ".join("#" + str(n) for n in graph.legacy_umbrella["depends_on"]) + ".")
-                self.github.close_issue(legacy)
-            if len(completed) == len(graph.tasks) and self.github.issue(legacy)["state"] == "closed":
-                self.comment_once(graph.master_issue, "<!-- agenc-pipeline-master-complete -->", "Every task in the validated dependency graph has accepted completion evidence, including external and final release qualification.")
-                self.github.close_issue(graph.master_issue)
+            try:
+                self.reconcile_aggregates()
+                context = self.aggregate_context()
+                graph, issues, proofs, tip, _ = context
+                # Pin BOTH eligible closures before even the live-status comment.
+                for kind in ("legacy", "master"):
+                    binding = self.aggregate_binding(kind, context)
+                    if binding is not None:
+                        self.prepare_aggregate(binding, tip)
+                self.write_master_status(graph, set(proofs))
+                self.reconcile_aggregates()
+            except PipelineBlocked:
+                # Replace stale checkboxes without preparing new closure intent.
+                try:
+                    current = self.aggregate_context()
+                    status_graph, status_proofs = current[0], set(current[2])
+                except Exception:
+                    status_graph, status_proofs = None, set()
+                try:
+                    self.write_master_status(status_graph, status_proofs, blocked=True)
+                except Exception as error:
+                    self.log("aggregate blocked status publication failed", error=type(error).__name__)
+                try:
+                    self.reconcile_aggregates(recheck_only=True)
+                except Exception:
+                    pass  # Every original intent and new compensation failure stays blocked.
+                raise
 
     def shutdown(self) -> None:
         self.stop.set()
