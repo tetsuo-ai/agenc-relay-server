@@ -263,18 +263,21 @@ class Backlog:
         blockers = self._master_blockers()
         # A lost create response may precede legitimate native links. Only its
         # exact owned issue can extend the master; it must itself remain a leaf.
-        child = journal["child"]
-        if child is None and journal["create_started"]:
-            matches = self._find_marker(journal["marker"])
-            if len(matches) == 1:
-                child = matches[0]
         admitted = None
-        if child is not None:
-            prospective = self.github.issue(child)
-            if (prospective["state"] == "open" and prospective.get("body") == journal["child_body"]
-                    and prospective.get("title") == journal["title"]):
-                admitted = child
-                members.add(child)
+        try:
+            child = journal["child"]
+            if child is None and journal["create_started"]:
+                matches = self._find_marker(journal["marker"])
+                if len(matches) == 1:
+                    child = matches[0]
+            if child is not None:
+                prospective = self.github.issue(child)
+                if (prospective["state"] == "open" and prospective.get("body") == journal["child_body"]
+                        and prospective.get("title") == journal["title"]):
+                    admitted = child
+                    members.add(child)
+        except GithubIdentityError as error:
+            raise NativeChildrenInvalid("discovery child resolution returned an invalid identity; preserve the journal") from error
         if not blockers <= members:
             raise MasterBlockerInvalid(f"native master blocker is outside this approved managed graph; preserve {path} and reconcile manually")
         if complete and admitted != journal["child"]:

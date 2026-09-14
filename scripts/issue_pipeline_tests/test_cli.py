@@ -346,6 +346,9 @@ class ExternalImportTests(unittest.TestCase):
         controller.snapshot = mock.Mock(side_effect=lambda: (self.graph, self.issues))
         controller.github = mock.Mock()
         controller.github.issue.side_effect = lambda number: copy.deepcopy(self.issues[number])
+        children = {35: [issue_row(n, config.repository) for n in (36, 43, 13)],
+                    36: [], 43: [], 13: []}
+        controller.github.children.side_effect = lambda number: copy.deepcopy(children[number])
         controller.github.close_issue.side_effect = lambda number: self.issues[number].update(state="closed")
         controller.comment_once = mock.Mock()
         self.controller = controller
