@@ -35,16 +35,39 @@ Confirmed container removal has a terminal receipt bound to its immutable ID; re
 
 ## Installation and operation
 
-Install from the clean, committed source revision that passed the full gate:
+Keep the service stopped throughout release verification and installation. The setup or upgrade PR must receive two independent approvals and the complete recorded Stage 09 gate on its exact candidate, then merge before activation. A clean local commit and a successful installer result do not prove that this merge happened.
+
+Retain the reviewed candidate SHA, accepted review/gate hashes and PR number. Read the PR back from GitHub before installing:
 
 ```sh
-python3 scripts/test-issue-pipeline.py
-python3 scripts/issue-pipeline.py --config .codex/issue-pipeline.toml doctor
-python3 scripts/issue-pipeline.py --config .codex/issue-pipeline.toml install --source-commit "$(git rev-parse HEAD)"
+pipeline_source=FULL_REVIEWED_40_CHARACTER_SHA
+pipeline_pr=SETUP_OR_UPGRADE_PR_NUMBER
+gh api "repos/tetsuo-ai/agenc-ircd/pulls/$pipeline_pr" \
+  --jq '{merged, merge_commit_sha, head_sha: .head.sha, head_repo: .head.repo.full_name, base_ref: .base.ref, base_repo: .base.repo.full_name}'
+git fetch origin main
+git merge-base --is-ancestor "$pipeline_source" origin/main
+```
+
+Require `merged=true`, `head_sha` equal to the retained reviewed SHA, both repositories equal to `tetsuo-ai/agenc-ircd`, and `base_ref=main`. Resolve the returned `merge_commit_sha` locally and require its tree to equal the reviewed candidate's tree. Require the reviewed candidate to remain an ancestor of the current remote `main`. Preserve the readback and stop if any identity, merge state, tree or acceptance evidence differs. Check out that exact reviewed source in a clean release worktree; do not infer approval from whatever `HEAD` currently names.
+
+From that release worktree, install with the separately reviewed policy and preserve the JSON installation receipt outside the checkout:
+
+```sh
+umask 077
+pipeline_install_receipt=$(mktemp)
+python3 scripts/issue-pipeline.py --config /absolute/path/to/reviewed-policy.toml install \
+  --source-root "$PWD" --source-commit "$pipeline_source" > "$pipeline_install_receipt"
+```
+
+The installer creates a content-addressed bundle under `~/.local/share/agenc-ircd-pipeline/releases/`, a private configuration file, and a stopped user service. It neither verifies GitHub merge state nor changes credentials or activates itself. Before enabling, independently verify that the receipt's `source_commit` equals the reviewed and merged SHA; the installed `manifest.json` names that source and tree; its canonical digest equals `bundle_sha256` and the release directory name; and every installed file matches its manifest hash. Verify that the installed private configuration equals the reviewed policy and that the stopped service's `ExecStart` names that exact installed CLI and configuration. Retain these checks with the merged-PR readback. This machine uses `poll_seconds=1800` in its reviewed private policy; the repository example remains 300.
+
+Only after all merge and installed-source checks succeed, enable the service:
+
+```sh
 systemctl --user enable --now agenc-ircd-issue-pipeline.service
 ```
 
-The installer creates a content-addressed bundle under `~/.local/share/agenc-ircd-pipeline/releases/`, a private configuration file, and a stopped user service. It neither changes account credentials nor activates itself. Installation does not establish test evidence: the setup/upgrade PR must receive its own independent review and full gate before activation. Controller/policy upgrades require this same explicit release procedure and cannot self-install through ordinary issue work.
+Verify sustained service execution and newly claimed, permission-qualified issue sessions before closing the setup/upgrade issue. Controller and policy upgrades require this same explicit release procedure and cannot self-install through ordinary issue work.
 
 At startup, the controller holds the supervisor lock, reconciles owned children, and prepares `state_dir/gate-cache/cargo` before admitting its first agent session. It seeds only public crates.io registry data from the existing Cargo cache and creates the exact read-only permission controls; host credentials, Cargo configuration and private dependencies are excluded. No earlier gate or manual cache initialization is required. Repeated starts validate the controls without copying the host cache again. Invalid controls or an interrupted `.seed-*` copy block dispatch and remain available for inspection. Keep the service stopped while investigating a retained partial copy; only remove that partial staging directory after confirming no owned child or cache-copy process is still running. Preparation bounds each registry inventory and the total copy deadline, so automatic service restarts cannot accumulate partial copies.
 
