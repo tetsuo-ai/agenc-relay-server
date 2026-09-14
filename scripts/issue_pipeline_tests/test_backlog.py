@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from issue_pipeline.backlog import Backlog, BacklogError
 from issue_pipeline.graph import Graph
@@ -157,12 +158,54 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(journal["status"], "complete")
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
-    def test_repeated_registration_and_changed_source_do_not_create_duplicates(self):
+    def test_exact_registration_replays_but_changed_source_or_review_is_refused(self):
         number = self.register()
         mutations = copy.deepcopy(self.github.mutations)
-        self.assertEqual(self.register(source="c" * 40), number)
+        self.assertEqual(self.register(), number)
+        for arguments in ({"source": "c" * 40}, {"review": {**REVIEW, "summary": "Another approval"}}):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(BacklogError, "different approved intent"):
+                self.register(**arguments)
         self.assertEqual(self.github.mutations, mutations)
         self.assertEqual(self.backlog.reconcile(), [])
+
+    def prepare_unpublished_registration(self):
+        with mock.patch.object(self.backlog, "_resume", side_effect=Crash("prepared, before publication")):
+            with self.assertRaises(Crash):
+                self.register()
+        self.assertEqual(self.github.mutations, [])
+        return self.journal()
+
+    def test_fresh_registration_cannot_replay_another_prepared_journal_after_coverage_review(self):
+        path, _ = self.prepare_unpublished_registration()
+        raw = path.read_bytes()
+        original_issues = copy.deepcopy(self.github.issues)
+        with self.assertRaisesRegex(BacklogError, "reconcile existing discovery journals"):
+            self.register(discovery={**DISCOVERY, "title": "A separately reviewed proposed prerequisite"})
+        self.assertEqual(self.github.issues, original_issues)
+        self.assertEqual(self.github.mutations, [])
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertEqual(list(self.backlog.directory.glob("*.json")), [path])
+        # The exact original approval remains resumable; refusal did not adopt,
+        # rewrite or abandon its durable publication intent.
+        self.assertEqual(self.register(), 90)
+        self.assert_registration()
+
+    def test_pending_descriptors_are_read_only_and_bound_to_exact_approved_identity(self):
+        path, journal = self.prepare_unpublished_registration()
+        raw = path.read_bytes()
+        self.assertEqual(self.backlog.pending_registrations(), [{"path": str(path), "parent": 41,
+            "discovery": DISCOVERY, "source": SOURCE, "review": REVIEW}])
+        self.assertEqual(path.read_bytes(), raw)
+        for changes in ({"source": "HEAD"}, {"parent": True}, {"status": "unknown"},
+                        {"discovery": {**DISCOVERY, "title": "Another identity"}},
+                        {"review": {**REVIEW, "verdict": "request_changes", "acceptance_complete": False}}):
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps({**journal, **changes}))
+                changed = path.read_bytes()
+                with self.assertRaises(BacklogError):
+                    self.backlog.pending_registrations()
+                self.assertEqual(path.read_bytes(), changed)
+        self.assertEqual(self.github.mutations, [])
 
     def test_registration_started_is_read_only_and_bound_to_original_approval(self):
         self.assertFalse(self.backlog.registration_started(41, DISCOVERY, SOURCE, REVIEW))

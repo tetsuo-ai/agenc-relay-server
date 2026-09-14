@@ -45,6 +45,25 @@ def _body(value):
     return value
 
 
+def _approved_registration(parent_issue, discovery, source, review):
+    """Validate the exact bounded intent that an approving review authorizes."""
+    _positive(parent_issue)
+    try:
+        validate_result("reviewer", review)
+    except ValueError as error:
+        raise BacklogError("discovery review is malformed") from error
+    if review["verdict"] != "approve":
+        raise BacklogError("a fresh approving discovery review is required")
+    if (type(discovery) is not dict or set(discovery) != {"title", "description", "acceptance"}
+            or type(discovery["title"]) is not str or not discovery["title"].strip()
+            or len(discovery["title"]) > 180 or "\n" in discovery["title"] or "\r" in discovery["title"]
+            or type(discovery["description"]) is not str or not discovery["description"].strip()
+            or type(discovery["acceptance"]) is not list or not 1 <= len(discovery["acceptance"]) <= 64
+            or any(type(item) is not str or not item.strip() or len(item) > 2048 for item in discovery["acceptance"])
+            or type(source) is not str or re.fullmatch(r"[0-9a-f]{40}", source) is None):
+        raise BacklogError("discovery requires bounded title/description/acceptance and an exact source SHA")
+
+
 def _numbers(rows):
     if type(rows) is not list:
         raise BacklogError("native relationship read is not an array")
@@ -234,27 +253,38 @@ class Backlog:
             self._conflict(path, "existing registration belongs to a different approved intent")
         return True
 
+    def pending_registrations(self) -> list[dict]:
+        """Read every incomplete journal's exact approval identity without replay.
+
+        The controller must bind all returned intents to their durable queue
+        entries and source/catalog receipts before calling reconcile(). Callers
+        hold the graph lock through validation and replay.
+        """
+        pending = []
+        for path in sorted(self.directory.glob("*.json")):
+            journal = self._load(path)
+            if journal.get("status") == "complete":
+                continue
+            if journal.get("status") != "pending":
+                self._conflict(path, "invalid discovery journal status")
+            descriptor = {field: journal.get(field) for field in ("parent", "discovery", "source", "review")}
+            _approved_registration(descriptor["parent"], descriptor["discovery"],
+                                   descriptor["source"], descriptor["review"])
+            identity, expected = self._identity_path(descriptor["parent"], descriptor["discovery"])
+            if path != expected or journal.get("marker") != f"<!-- issue-pipeline-discovery:{identity} -->":
+                self._conflict(path, "discovery journal identity differs from its approved intent")
+            pending.append({"path": str(path), **descriptor})
+        return pending
+
     def register(self, parent_issue: int, discovery: dict, source: str, review: dict) -> int:
         """Create/link one verified prerequisite or resume its exact prior journal."""
         parent_issue = _positive(parent_issue)
-        try:
-            validate_result("reviewer", review)
-        except ValueError as error:
-            raise BacklogError("discovery review is malformed") from error
-        if review["verdict"] != "approve":
-            raise BacklogError("a fresh approving discovery review is required")
-        if (type(discovery) is not dict or set(discovery) != {"title", "description", "acceptance"}
-                or type(discovery["title"]) is not str or not discovery["title"].strip()
-                or len(discovery["title"]) > 180 or "\n" in discovery["title"] or "\r" in discovery["title"]
-                or type(discovery["description"]) is not str or not discovery["description"].strip()
-                or type(discovery["acceptance"]) is not list or not 1 <= len(discovery["acceptance"]) <= 64
-                or any(type(item) is not str or not item.strip() or len(item) > 2048 for item in discovery["acceptance"])
-                or type(source) is not str or re.fullmatch(r"[0-9a-f]{40}", source) is None):
-            raise BacklogError("discovery requires bounded title/description/acceptance and an exact source SHA")
+        _approved_registration(parent_issue, discovery, source, review)
         identity, path = self._identity_path(parent_issue, discovery)
-        if path.exists():
+        if self.registration_started(parent_issue, discovery, source, review):
             return self._resume(self._load(path), path)
-        self.reconcile()  # No new operation while an old one is unresolved.
+        if self.pending_registrations():
+            raise BacklogError("reconcile existing discovery journals with their original approval before reviewing a new registration")
         master = self.github.issue(self.master_issue)
         parent = self.github.issue(parent_issue)
         original = _body(master.get("body"))

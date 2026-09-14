@@ -704,7 +704,12 @@ class Controller:
                 or receipt["data"].get("backlog_hash") != receipt["artifact_hashes"].get("backlog")
                 or not self.receipt_valid(receipt)):
             raise PipelineBlocked("pending discovery lacks its accepted source-bound review artifact or managed backlog snapshot")
-        validate_result("reviewer", receipt["data"]["review"])
+        try:
+            validate_result("reviewer", receipt["data"]["review"])
+        except ValueError as error:
+            raise PipelineBlocked("pending discovery has a malformed approval") from error
+        if receipt["data"]["review"]["verdict"] != "approve":
+            raise PipelineBlocked("pending discovery lacks an approving review")
         return receipt
 
     def resume_discoveries(self, task: Task, data: dict) -> None:
@@ -997,7 +1002,10 @@ class Controller:
         from .backlog import Backlog
         with self.graph_lock:
             # Backlog.reconcile can publish an interrupted operation. Validate
-            # its queued approval and catalog before permitting that recovery.
+            # every journal against its queued approval and catalog before any
+            # replay, including journals whose parent has no current queue.
+            backlog = Backlog(self.github, self.config.state, self.config.master_issue)
+            approved = {}
             for row in self.state.list_tasks():
                 data = row["data"]
                 pending = data.get("pending_discoveries")
@@ -1006,11 +1014,18 @@ class Controller:
                 entry = pending["entries"][pending["cursor"]]
                 if "review_receipt" in entry:
                     try:
-                        self.discovery_receipt(row["issue"], pending["source"], entry)
+                        receipt = self.discovery_receipt(row["issue"], pending["source"], entry)
+                        approved[row["issue"]] = {"parent": row["issue"], "source": pending["source"],
+                            "discovery": entry["discovery"], "review": receipt["data"]["review"]}
                     except PipelineBlocked as error:
                         self.checkpoint(row["issue"], "blocked", data, remote_action=None, reason=str(error))
                         raise
-            Backlog(self.github, self.config.state, self.config.master_issue).reconcile()
+            for descriptor in backlog.pending_registrations():
+                identity = {field: descriptor[field] for field in ("parent", "source", "discovery", "review")}
+                if approved.get(descriptor["parent"]) != identity:
+                    raise PipelineBlocked("incomplete discovery journal has no matching approved pending queue entry; preserve "
+                                          + descriptor["path"] + " and reconcile its original proof")
+            backlog.reconcile()
         for record in self.state.recover_interrupted():
             self.state.release(record["issue"])
             self.log("recovered durable task checkpoint", issue=record["issue"], stage=record["interrupted_from"])

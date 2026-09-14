@@ -956,6 +956,84 @@ class ControllerTests(unittest.TestCase):
     def test_discovery_restart_between_entries_preserves_remaining_discoveries(self):
         self.assert_discovery_restart_completes("between-entries")
 
+    def assert_discovery_recovery_refuses_without_publication(self, expected="no matching approved pending queue"):
+        issues = copy.deepcopy(self.github.issues)
+        dependencies = copy.deepcopy(self.github.dependencies)
+        children = copy.deepcopy(self.github.child_links)
+        journals = {path: path.read_bytes() for path in (self.config.state / "backlog").glob("*.json")}
+        with mock.patch("issue_pipeline.controller.halt_children") as halt, \
+                mock.patch.object(self.github, "api", wraps=self.github.api) as api:
+            with self.assertRaisesRegex(PipelineBlocked, expected):
+                self.controller.recover()
+        halt.assert_called_once_with(self.config.state)
+        self.assertTrue(all((call.args[1] if len(call.args) > 1 else call.kwargs.get("method", "GET")) == "GET"
+                            for call in api.call_args_list))
+        self.assertEqual(self.github.issues, issues)
+        self.assertEqual(self.github.dependencies, dependencies)
+        self.assertEqual(self.github.child_links, children)
+        self.assertEqual({path: path.read_bytes() for path in journals}, journals)
+
+    def test_recovery_rejects_legacy_orphan_journal_without_queue_proof(self):
+        self.interrupt_discovery_registration("during-register")
+        row = self.controller.state.get_task(36)
+        row["data"].pop("pending_discoveries")
+        self.controller.state.set_task(36, "blocked", row["data"])
+        self.assert_discovery_recovery_refuses_without_publication()
+
+    def test_recovery_rejects_pending_journal_without_its_queue_approval(self):
+        self.interrupt_discovery_registration("during-register")
+        row = self.controller.state.get_task(36)
+        del row["data"]["pending_discoveries"]["entries"][0]["review_receipt"]
+        self.controller.state.set_task(36, "blocked", row["data"])
+        self.assert_discovery_recovery_refuses_without_publication()
+
+    def test_recovery_rejects_journal_source_or_review_differing_from_valid_queue_receipt(self):
+        self.interrupt_discovery_registration("during-register")
+        path = next((self.config.state / "backlog").glob("*.json"))
+        journal = json.loads(path.read_text())
+        for changes in ({"source": self.base}, {"review": {**journal["review"], "summary": "Different approval"}}):
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps({**journal, **changes}))
+                self.assert_discovery_recovery_refuses_without_publication()
+
+    def test_every_pending_journal_is_validated_before_any_recovery_replay(self):
+        self.interrupt_discovery_registration("during-register")
+        backlog = Backlog(self.github, self.config.state, self.config.master_issue)
+        original_path = next(backlog.directory.glob("*.json"))
+        original = json.loads(original_path.read_text())
+        # Simulate a second inherited journal whose queue proof is missing.
+        # Put it after the valid operation in replay order so streaming
+        # validate/replay would already have changed GitHub before refusing it.
+        for index in range(1000):
+            discovery = {**original["discovery"], "title": f"Orphan operation {index}"}
+            identity, orphan_path = backlog._identity_path(41, discovery)
+            if orphan_path.name > original_path.name:
+                break
+        else:
+            self.fail("could not construct deterministic journal replay ordering")
+        orphan = {**original, "parent": 41, "discovery": discovery,
+                  "marker": f"<!-- issue-pipeline-discovery:{identity} -->"}
+        orphan_path.write_text(json.dumps(orphan))
+        orphan_path.chmod(0o600)
+        self.assert_discovery_recovery_refuses_without_publication()
+
+    def test_matching_interrupted_journal_replays_original_review_without_new_catalog_approval(self):
+        self.interrupt_discovery_registration("during-register")
+        reviews = self.controller.state.receipts(36, "discovery-review")
+        self.assertNotIn(100, self.github.graph.by_issue)
+        calls = len(self.runner.calls)
+        with mock.patch("issue_pipeline.controller.halt_children"):
+            self.controller.recover()
+        self.assertIn(100, self.github.graph.by_issue)
+        self.assertEqual(self.github.next_issue, 101)
+        self.assertEqual(len(self.runner.calls), calls)
+        row = self.controller.state.get_task(36)
+        self.controller.resume_discoveries(self.github.graph.by_issue[36], row["data"])
+        self.assertIsNone(self.controller.state.get_task(36)["data"]["pending_discoveries"])
+        self.assertEqual(self.controller.state.receipts(36, "discovery-review"), reviews)
+        self.assertEqual(self.github.next_issue, 101)
+        self.assertEqual(len(self.runner.calls), calls)
+
     def test_discovery_restart_refuses_missing_approved_review_artifact(self):
         retained, _ = self.interrupt_discovery_registration("before-register")
         receipt = self.controller.state.receipts(36, "discovery-review")[0]
