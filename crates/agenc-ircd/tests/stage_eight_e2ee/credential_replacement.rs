@@ -150,6 +150,7 @@ fn exercise(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
     assert!(coordinator.stop()?.success());
     *coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
     wait_for_link(&network.edge_b, links_b)?;
+    super::stage_ten_drills::wait_for_account_authority(&network.edge_b)?;
     let mut replacement = IrcClient::connect(&network.edge_b)?;
     replacement.negotiate_sasl()?;
     step(

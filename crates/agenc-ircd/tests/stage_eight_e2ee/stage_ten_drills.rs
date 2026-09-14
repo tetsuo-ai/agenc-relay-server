@@ -751,7 +751,7 @@ fn account_login_named(
     }
 }
 
-fn wait_for_account_authority(fixture: &NodeFixture) -> TestResult {
+pub(super) fn wait_for_account_authority(fixture: &NodeFixture) -> TestResult {
     let identity = admin_identity(fixture);
     let deadline = Instant::now() + NETWORK_WAIT;
     while Instant::now() < deadline {
