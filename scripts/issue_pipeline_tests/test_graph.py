@@ -118,7 +118,7 @@ class GraphTests(unittest.TestCase):
             Graph.from_master("no graph")
 
     def test_native_edges_must_match_including_legacy(self):
-        children = [36, 41, 86, 13]
+        children = {35: [36, 41, 86, 13], 36: [], 41: [], 86: [], 13: []}
         blockers = {35: [], 36: [], 41: [], 86: [41, 36], 13: [36]}
         self.graph.validate_native_links(children, blockers)
         for observed in ({35: [], 36: [], 41: [], 86: [36], 13: [36]},
@@ -128,10 +128,10 @@ class GraphTests(unittest.TestCase):
                 with self.assertRaises(GraphError):
                     self.graph.validate_native_links(children, observed)
         with self.assertRaises(GraphError):
-            self.graph.validate_native_links([36, 41, 86], blockers)
+            self.graph.validate_native_links({**children, 35: [36, 41, 86]}, blockers)
 
     def test_master_blocker_input_is_required_and_allows_only_distinct_managed_members(self):
-        children = [36, 41, 86, 13]
+        children = {35: [36, 41, 86, 13], 36: [], 41: [], 86: [], 13: []}
         blockers = {36: [], 41: [], 86: [41, 36], 13: [36]}
         with self.assertRaisesRegex(GraphError, "include every child and the master"):
             self.graph.validate_native_links(children, blockers)
@@ -140,6 +140,19 @@ class GraphTests(unittest.TestCase):
         for master_blockers in ([99], [35], [36, 36], [True]):
             with self.subTest(blockers=master_blockers), self.assertRaises(GraphError):
                 self.graph.validate_native_links(children, {**blockers, 35: master_blockers})
+
+    def test_flat_hierarchy_requires_every_child_collection_and_rejects_nested_children(self):
+        children = {35: [36, 41, 86, 13], 36: [], 41: [], 86: [], 13: []}
+        blockers = {35: [], 36: [], 41: [], 86: [36, 41], 13: [36]}
+        self.graph.validate_native_links(children, blockers)
+        for owner in children:
+            with self.subTest(missing=owner), self.assertRaises(GraphError):
+                self.graph.validate_native_links({k: v for k, v in children.items() if k != owner}, blockers)
+        for owner in (36, 41, 86, 13):
+            with self.subTest(nested=owner), self.assertRaises(GraphError):
+                self.graph.validate_native_links({**children, owner: [36]}, blockers)
+        with self.assertRaises(GraphError):
+            self.graph.validate_native_links(children[35], blockers)
 
     def test_specialized_routing_is_not_inferred_from_external_flag_alone(self):
         expected = {

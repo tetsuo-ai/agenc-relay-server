@@ -24,7 +24,7 @@ from .agents import (AgentRunError, CodexRunner, SessionLifecycleError, record_s
 from .config import Config, digest_file, private_directory
 from .comments import CommentPublicationError, CommentPublicationInvalid, ensure_comment
 from .gitops import GitRepo, GitError
-from .github import Github, GithubIdentityError, issue_identity, native_issue_numbers
+from .github import Github, GithubIdentityError, MAX_PAGES, PAGE_SIZE, issue_identity, native_issue_numbers
 from .graph import Graph, GraphError, Task
 from .state import ClaimConflict, State, SupervisorLock
 from .gate import GateCleanupUncertain, GateFailure, GateStopped
@@ -331,8 +331,9 @@ class Controller:
                 blocker_owners = [*numbers, graph.master_issue]
                 blockers = dict(zip(blocker_owners, pool.map(
                     lambda n: native_issue_numbers(self.github.blockers(n), self.config.repository, issues), blocker_owners)))
-            graph.validate_native_links(native_issue_numbers(
-                self.github.children(graph.master_issue), self.config.repository, issues), blockers)
+                children = dict(zip(blocker_owners, pool.map(
+                    lambda n: native_issue_numbers(self.github.children(n), self.config.repository, issues), blocker_owners)))
+            graph.validate_native_links(children, blockers)
             return graph, issues
 
     def verified_receipts(self, graph: Graph, issues: dict[int, dict], tip: str) -> dict[int, dict]:
@@ -651,6 +652,7 @@ class Controller:
                 raise PipelineBlocked("completion phase source is no longer on remote main")
         # Native graph/proof reads may take time. End with the actual issue
         # readback; GitHub does not provide an atomic cross-issue snapshot.
+        self.check_native_children(graph, issues, task.issue)
         observed = self.github.issue(task.issue)
         if (body_hash(observed) != expected_hash
                 or (require_closed and observed["state"] != "closed")):
@@ -1106,7 +1108,7 @@ class Controller:
     def recover(self) -> None:
         if self.config.use_systemd:
             halt_children(self.config.state)
-        from .backlog import MasterBlockerInvalid, ReviewedCatalogChanged
+        from .backlog import MasterBlockerInvalid, NativeChildrenInvalid, ReviewedCatalogChanged
         with self.graph_lock:
             # Backlog.reconcile can publish an interrupted operation. Validate
             # every journal against its queued approval and catalog before any
@@ -1136,13 +1138,13 @@ class Controller:
                                           + descriptor["path"] + " and reconcile its original proof")
             try:
                 backlog.reconcile()
-            except (MasterBlockerInvalid, ReviewedCatalogChanged) as error:
+            except (MasterBlockerInvalid, NativeChildrenInvalid, ReviewedCatalogChanged) as error:
                 # Confirmed changed requirements revoke owned closures
                 # even while an approved graph journal is pending. Ordinary
                 # transport/partial-publication uncertainty must repair first.
                 try:
                     self.reconcile_aggregates(recheck_only=True,
-                                              preserve_valid_legacy=isinstance(error, ReviewedCatalogChanged))
+                                              preserve_valid_legacy=isinstance(error, (NativeChildrenInvalid, ReviewedCatalogChanged)))
                 except Exception:
                     pass  # Original journals and compensation failures remain blocked.
                 raise
@@ -1229,6 +1231,16 @@ class Controller:
                         return
                     self.stop.wait(self.config.poll_seconds)
 
+    def check_native_children(self, graph, issues, number):
+        """Recheck the target hierarchy after slow proof work, before its body read."""
+        try:
+            observed = native_issue_numbers(self.github.children(number), self.config.repository, issues)
+            expected = set(graph.by_issue) | {int(graph.legacy_umbrella["issue"])} if number == graph.master_issue else set()
+            if set(observed) != expected:
+                raise GraphError("native target children differ from the approved flat scheduling graph")
+        except (GraphError, GithubIdentityError) as error:
+            raise PipelineBlocked("completion target native children are no longer valid") from error
+
     def aggregate_context(self, *, legacy_scope=False):
         try:
             if not legacy_scope:
@@ -1247,7 +1259,18 @@ class Controller:
                         required.add(number)
                         pending.extend(graph.by_issue[number].depends_on)
                 issues = {n: self.github.issue(n) for n in sorted(required | {legacy})}
+                # An unrelated prospective child may already be attached during
+                # repair. The legacy and every own prerequisite must still be
+                # exact, independently identified direct children of the master.
+                rows = self.github.children(graph.master_issue)
+                if type(rows) is not list or len(rows) > MAX_PAGES * PAGE_SIZE:
+                    raise GithubIdentityError("invalid scoped master child collection")
+                scoped = [row for row in rows if issue_identity(row, self.config.repository)[0] in issues]
+                if set(native_issue_numbers(scoped, self.config.repository, issues)) != set(issues):
+                    raise GraphError("legacy native master membership changed during discovery repair")
                 for number in sorted(required | {legacy}):
+                    if native_issue_numbers(self.github.children(number), self.config.repository, issues):
+                        raise GraphError("legacy native nested children changed during discovery repair")
                     expected = graph.legacy_umbrella["depends_on"] if number == legacy else graph.by_issue[number].depends_on
                     observed = native_issue_numbers(self.github.blockers(number), self.config.repository, issues)
                     if set(observed) != set(expected):
@@ -1352,7 +1375,7 @@ class Controller:
         compared = set(expected) - ({"graph_hash", "master_hash"} if terminal_legacy else set())
         if current is None or any(current[field] != expected[field] for field in compared):
             raise PipelineBlocked("aggregate graph, requirements or prerequisite evidence changed")
-        _, _, proofs, tip, _ = context
+        graph, issues, proofs, tip, _ = context
         if (not self.repo.is_ancestor(entry["source"], tip)
                 or any(not self.repo.is_ancestor(proofs[int(n)]["source"], entry["source"])
                        for n in expected["prerequisites"])):
@@ -1367,9 +1390,11 @@ class Controller:
         # Read aggregate bodies/states after slow graph and proof validation.
         if expected["kind"] == "legacy":
             master = self.github.issue(expected["master"])
+            self.check_native_children(graph, issues, expected["legacy"])
             legacy_issue = self.github.issue(expected["legacy"])
         else:
             legacy_issue = self.github.issue(expected["legacy"])
+            self.check_native_children(graph, issues, expected["master"])
             master = self.github.issue(expected["master"])
         if (not terminal_legacy and body_hash(master) != expected["master_hash"]) or body_hash(legacy_issue) != expected["legacy_hash"]:
             raise PipelineBlocked("aggregate body changed during final readback")

@@ -195,6 +195,7 @@ class DoctorTests(CommandFixture, unittest.TestCase):
         self.github.issue.side_effect = lambda number: issue_row(
             number, self.config.repository, body=graph_body() if number == 35 else "Task requirements")
         self.github.children.return_value = [self.github.issue(n) for n in (36, 43, 13)]
+        self.github.children.side_effect = lambda number: self.github.children.return_value if number == 35 else []
         self.github.blockers.side_effect = lambda number: [self.github.issue(n) for n in {35: [], 36: [], 43: [36], 13: [36]}[number]]
         self.secret = "DOCTOR_AUTH_OUTPUT_MUST_NOT_BE_LOGGED"
         self.patches = [
@@ -252,6 +253,24 @@ class DoctorTests(CommandFixture, unittest.TestCase):
             self.github.blockers.side_effect = lambda number: rows if number == 35 else blockers(number)
             with self.subTest(rows=rows), self.assertRaises(GithubError):
                 cli.doctor(self.config)
+        self.assertFalse(self.config.state.exists())
+        self.github.comment.assert_not_called()
+
+    def test_doctor_reads_every_leaf_collection_and_refuses_nested_or_unreadable_children(self):
+        reader = self.github.children.side_effect
+        cli.doctor(self.config)
+        self.assertEqual(sorted(c.args[0] for c in self.github.children.call_args_list), [13, 35, 36, 43])
+        for owner in (13, 36, 43):
+            for rows in ([self.github.issue(36)], [issue_row(99, self.config.repository)],
+                         [issue_row(36, "foreign/private")],
+                         [issue_row(36, self.config.repository, id=9000)],
+                         [issue_row(36, self.config.repository, node_id="I_foreign")]):
+                self.github.children.side_effect = lambda n: rows if n == owner else reader(n)
+                with self.subTest(owner=owner, rows=rows), self.assertRaises((GithubError, ValueError)):
+                    cli.doctor(self.config)
+        self.github.children.side_effect = GithubError("child collection transport unavailable")
+        with self.assertRaises(GithubError):
+            cli.doctor(self.config)
         self.assertFalse(self.config.state.exists())
         self.github.comment.assert_not_called()
 

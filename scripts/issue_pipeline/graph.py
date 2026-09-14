@@ -214,15 +214,21 @@ class Graph:
         ]
 
     def validate_native_links(
-        self, subissues: Iterable[int], blockers: Mapping[int, Iterable[int]]
+        self, subissues: Mapping[int, Iterable[int]], blockers: Mapping[int, Iterable[int]]
     ) -> None:
-        """Require the task/legacy mirror and validated redundant master blockers."""
-        children = tuple(_integer(number, "native subissue") for number in subissues)
+        """Require the complete flat child hierarchy and exact dependency mirror."""
         legacy_issue = int(self.legacy_umbrella["issue"])
         expected = {task.issue: set(task.depends_on) for task in self.tasks}
         expected[legacy_issue] = set(self.legacy_umbrella["depends_on"])
+        if (not isinstance(subissues, Mapping) or any(type(number) is not int for number in subissues)
+                or set(subissues) != set(expected) | {self.master_issue}):
+            raise GraphError("native child records must include every task, legacy and master")
+        children = tuple(_integer(number, "native subissue") for number in subissues[self.master_issue])
         if len(children) != len(set(children)) or set(children) != set(expected):
             raise GraphError("native subissues differ from the scheduling graph")
+        for number in expected:
+            if tuple(_integer(child, "native nested child") for child in subissues[number]):
+                raise GraphError(f"native nested children for #{number} are not authorized by the flat scheduling graph")
         if any(type(number) is not int for number in blockers) or set(blockers) != set(expected) | {self.master_issue}:
             raise GraphError("native blocker records must include every child and the master")
         self.validate_master_blockers(blockers[self.master_issue])

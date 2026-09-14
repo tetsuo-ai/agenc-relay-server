@@ -101,7 +101,6 @@ def doctor(config: Config) -> dict:
     graph = Graph.from_master(master["body"])
     if graph.master_issue != config.master_issue:
         raise PipelineBlocked("master graph identity changed")
-    children = github.children(config.master_issue)
     from concurrent.futures import ThreadPoolExecutor
     numbers = [task.issue for task in graph.tasks] + [int(graph.legacy_umbrella["issue"])]
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -109,7 +108,9 @@ def doctor(config: Config) -> dict:
         blocker_owners = [*numbers, graph.master_issue]
         blockers = dict(zip(blocker_owners, pool.map(
             lambda n: native_issue_numbers(github.blockers(n), config.repository, issues), blocker_owners)))
-    graph.validate_native_links(native_issue_numbers(children, config.repository, issues), blockers)
+        children = dict(zip(blocker_owners, pool.map(
+            lambda n: native_issue_numbers(github.children(n), config.repository, issues), blocker_owners)))
+    graph.validate_native_links(children, blockers)
     return {"result": "prerequisites and live native DAG verified", "repository": config.repository,
             "master_issue": config.master_issue, "tasks": len(graph.tasks),
             "dependency_edges": sum(len(task.depends_on) for task in graph.tasks),

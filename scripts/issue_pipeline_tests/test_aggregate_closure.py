@@ -217,7 +217,8 @@ class AggregateClosureTests(unittest.TestCase):
 
         def foreign(number):
             rows = children(number)
-            rows[0]["node_id"] = "I_foreign_identity"
+            if rows:
+                rows[0]["node_id"] = "I_foreign_identity"
             return rows
 
         with mock.patch.object(self.github, "children", side_effect=foreign):

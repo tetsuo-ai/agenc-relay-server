@@ -38,6 +38,10 @@ class ReviewedCatalogChanged(BacklogError):
     """Confirmed live coverage drift requires review and owned-proof reconciliation."""
 
 
+class NativeChildrenInvalid(BacklogError):
+    """A confirmed child hierarchy differs from the approved flat scheduling DAG."""
+
+
 def _encode(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
@@ -234,26 +238,48 @@ class Backlog:
                 raise MasterBlockerInvalid("native master blocker is outside the managed graph; preserve the discovery journal") from error
         return blockers
 
-    def _guard(self, journal, path):
+    def _children(self, graph, issues=None, *, prospective=None, complete=False):
+        """Validate every managed child collection, including an exact owned discovery."""
+        if graph.master_issue != self.master_issue:
+            raise NativeChildrenInvalid("native child hierarchy names a different master")
+        original = set(graph.by_issue) | {int(graph.legacy_umbrella["issue"])}
+        members = original | ({prospective} if prospective is not None else set())
+        try:
+            snapshots = issues if issues is not None else {n: self.github.issue(n) for n in sorted(members)}
+            children = {n: native_issue_numbers(self.github.children(n), self.github.repo, snapshots)
+                        for n in sorted(members | {self.master_issue})}
+        except GithubIdentityError as error:
+            raise NativeChildrenInvalid("native child has a foreign or inconsistent issue identity; preserve the discovery journal") from error
+        for owner in members:
+            if children[owner]:
+                raise NativeChildrenInvalid(f"native nested children for #{owner} are not authorized by the flat scheduling graph")
+        if set(children[self.master_issue]) not in ((members,) if complete else (original, members)):
+            raise NativeChildrenInvalid("native master children differ from the approved graph and its exact prospective discovery")
+        return children
+
+    def _guard(self, journal, path, *, complete=False):
         graph = Graph.from_master(journal["master_before"])
         members = set(graph.by_issue) | {int(graph.legacy_umbrella["issue"])}
         blockers = self._master_blockers()
-        if blockers - members:
-            # A lost create response may precede an otherwise legitimate native
-            # link to this journal's prospective child. Verify its exact owned
-            # content before allowing graph repair; no other new member is admitted.
-            child = journal["child"]
-            if child is None and journal["create_started"]:
-                matches = self._find_marker(journal["marker"])
-                if len(matches) == 1:
-                    child = matches[0]
-            if child is not None:
-                prospective = self.github.issue(child)
-                if (prospective["state"] == "open" and prospective.get("body") == journal["child_body"]
-                        and prospective.get("title") == journal["title"]):
-                    members.add(child)
-            if not blockers <= members:
-                raise MasterBlockerInvalid(f"native master blocker is outside this approved managed graph; preserve {path} and reconcile manually")
+        # A lost create response may precede legitimate native links. Only its
+        # exact owned issue can extend the master; it must itself remain a leaf.
+        child = journal["child"]
+        if child is None and journal["create_started"]:
+            matches = self._find_marker(journal["marker"])
+            if len(matches) == 1:
+                child = matches[0]
+        admitted = None
+        if child is not None:
+            prospective = self.github.issue(child)
+            if (prospective["state"] == "open" and prospective.get("body") == journal["child_body"]
+                    and prospective.get("title") == journal["title"]):
+                admitted = child
+                members.add(child)
+        if not blockers <= members:
+            raise MasterBlockerInvalid(f"native master blocker is outside this approved managed graph; preserve {path} and reconcile manually")
+        if complete and admitted != journal["child"]:
+            self._conflict(path, "final discovery child no longer has its exact approved identity")
+        self._children(graph, prospective=admitted, complete=complete)
         if self.publication_guard is not None:
             self.publication_guard(journal, path)
         # Keep issue acceptance/state reads after the potentially slow native
@@ -345,7 +371,7 @@ class Backlog:
         expected_children = set(graph.by_issue) | {graph.legacy_umbrella["issue"]}
         issues = {number: self.github.issue(number) for number in expected_children}
         try:
-            graph.validate_native_links(_numbers(self.github.children(self.master_issue), self.github, issues),
+            graph.validate_native_links(self._children(graph, issues),
                                         {**{number: _numbers(self.github.blockers(number), self.github, issues)
                                             for number in expected_children},
                                          self.master_issue: self._master_blockers(graph, issues)})
@@ -454,6 +480,7 @@ class Backlog:
             child = self.github.issue(number)
             graph = Graph.from_master(self.github.issue(self.master_issue).get("body") or "")
             self._master_blockers(graph)
+            self._children(graph)
             if (journal["marker"] not in (child.get("body") or "") or number not in graph.by_issue
                     or number not in graph.by_issue[journal["parent"]].depends_on):
                 self._conflict(path, "completed discovery registration no longer exists in the live graph")
@@ -501,13 +528,13 @@ class Backlog:
         graph = Graph.from_master(self.github.issue(self.master_issue)["body"])
         all_numbers = set(graph.by_issue) | {graph.legacy_umbrella["issue"]}
         issues = {issue: self.github.issue(issue) for issue in all_numbers}
-        graph.validate_native_links(_numbers(self.github.children(self.master_issue), self.github, issues),
+        graph.validate_native_links(self._children(graph, issues),
                                     {**{issue: _numbers(self.github.blockers(issue), self.github, issues)
                                         for issue in all_numbers},
                                      self.master_issue: self._master_blockers(graph, issues)})
         if self.github.issue(number).get("body") != journal["child_body"]:
             self._conflict(path, "discovery body changed before final readback")
-        self._guard(journal, path)
+        self._guard(journal, path, complete=True)
         journal.update(status="complete", intent="readback_verified")
         self._save(path, journal)
         return number

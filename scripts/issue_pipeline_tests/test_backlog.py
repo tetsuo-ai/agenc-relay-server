@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from issue_pipeline.backlog import Backlog, BacklogError, MasterBlockerInvalid
+from issue_pipeline.backlog import Backlog, BacklogError, MasterBlockerInvalid, NativeChildrenInvalid
 from issue_pipeline.graph import Graph
 from issue_pipeline_tests.test_github import issue_row
 
@@ -138,7 +138,16 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(self.github.dependencies[41], {36, number})
         self.assertIn(number, self.github.child_links[35])
         self.assertIn(f"FIX-01 #{number} must close", self.github.issues[41]["body"])
-        graph.validate_native_links(self.github.child_links[35], self.github.dependencies)
+        graph.validate_native_links({n: self.github.child_links.get(n, set()) for n in {*graph.by_issue, 13, 35}}, self.github.dependencies)
+
+    def test_admission_requires_empty_children_for_every_original_managed_leaf(self):
+        for owner in (13, 36, 41, 86):
+            self.github.child_links[owner] = {36}
+            with self.subTest(owner=owner), self.assertRaises(NativeChildrenInvalid):
+                self.register()
+            self.github.child_links[owner] = set()
+        self.assertEqual(self.github.mutations, [])
+        self.assertEqual(list((self.state / "backlog").glob("*.json")), [])
 
     def test_registers_detailed_reviewed_child_and_synchronized_master(self):
         self.assertEqual(self.register(), 90)
@@ -451,7 +460,7 @@ class BacklogTests(unittest.TestCase):
                 self.assertEqual(len(github.mutations), 6)
                 self.assertEqual(restarted.reconcile(), [])
                 graph = Graph.from_master(github.issues[35]["body"])
-                graph.validate_native_links(github.child_links[35], github.dependencies)
+                graph.validate_native_links({n: github.child_links.get(n, set()) for n in {*graph.by_issue, 13, 35}}, github.dependencies)
 
     def test_unknown_create_outcome_without_visible_marker_never_repeats_post(self):
         self.github.before = lambda *args: (_ for _ in ()).throw(ConnectionError("request may not have reached server"))

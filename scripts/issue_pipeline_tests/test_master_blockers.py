@@ -202,9 +202,9 @@ class MasterBlockerTests(unittest.TestCase):
         guard, blockers = Backlog._guard, self.github.blockers
         final_guard_seen = False
 
-        def guarded(backlog, journal, path):
+        def guarded(backlog, journal, path, **kwargs):
             nonlocal final_guard_seen
-            guard(backlog, journal, path)
+            guard(backlog, journal, path, **kwargs)
             if 100 in self.github.graph.by_issue:
                 final_guard_seen = True
 
