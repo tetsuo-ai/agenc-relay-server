@@ -34,6 +34,10 @@ class MasterBlockerInvalid(BacklogError):
     """A confirmed master dependency revokes acceptance even during graph repair."""
 
 
+class ReviewedCatalogChanged(BacklogError):
+    """Confirmed live coverage drift requires review and owned-proof reconciliation."""
+
+
 def _encode(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
@@ -172,9 +176,12 @@ def _render_master(original, repo, parent, number, key, title):
 class Backlog:
     """Register only independently approved discoveries under an external graph lock."""
 
-    def __init__(self, github, state_dir: Path, master_issue: int):
+    def __init__(self, github, state_dir: Path, master_issue: int, *, publication_guard=None):
         self.github = github
         self.master_issue = _positive(master_issue)
+        # Controller supplies its immutable review/queue binding. Keep this
+        # check at every publication boundary, including interrupted replay.
+        self.publication_guard = publication_guard
         self.directory = Path(state_dir) / "backlog"
         if self.directory.is_symlink():
             raise BacklogError("backlog journal directory cannot be a symlink")
@@ -247,6 +254,8 @@ class Backlog:
                     members.add(child)
             if not blockers <= members:
                 raise MasterBlockerInvalid(f"native master blocker is outside this approved managed graph; preserve {path} and reconcile manually")
+        if self.publication_guard is not None:
+            self.publication_guard(journal, path)
         # Keep issue acceptance/state reads after the potentially slow native
         # identity reads and before the next durable publication intent.
         for number, old, new in ((self.master_issue, journal["master_before"], journal.get("master_after")),
@@ -279,8 +288,8 @@ class Backlog:
     def registration_started(self, parent_issue: int, discovery: dict, source: str, review: dict) -> bool:
         """Whether this exact approved intent already owns a durable journal.
 
-        Its original review context remains authoritative during idempotent
-        recovery: the operation's own publication changes the live catalog.
+        Its original review context must still pass the publication guard during
+        recovery; only this operation's exact changes may differ from the catalog.
         This is read-only and does not infer an intent from a matching title.
         """
         _, path = self._identity_path(parent_issue, discovery)
@@ -437,6 +446,10 @@ class Backlog:
     def _finish(self, journal, path):
         if journal["status"] == "complete":
             # Later legitimate graph edits need not match this historical snapshot.
+            # A controller still replaying an uncheckpointed queue entry must
+            # validate that entry's original approval before adopting completion.
+            if self.publication_guard is not None:
+                self.publication_guard(journal, path)
             number = _positive(journal["child"])
             child = self.github.issue(number)
             graph = Graph.from_master(self.github.issue(self.master_issue).get("body") or "")
@@ -444,6 +457,8 @@ class Backlog:
             if (journal["marker"] not in (child.get("body") or "") or number not in graph.by_issue
                     or number not in graph.by_issue[journal["parent"]].depends_on):
                 self._conflict(path, "completed discovery registration no longer exists in the live graph")
+            if self.publication_guard is not None:
+                self.publication_guard(journal, path)
             return number
         self._guard(journal, path)
         if journal["child"] is None:
@@ -492,6 +507,7 @@ class Backlog:
                                      self.master_issue: self._master_blockers(graph, issues)})
         if self.github.issue(number).get("body") != journal["child_body"]:
             self._conflict(path, "discovery body changed before final readback")
+        self._guard(journal, path)
         journal.update(status="complete", intent="readback_verified")
         self._save(path, journal)
         return number
