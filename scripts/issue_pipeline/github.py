@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from .gitops import GitError, MAX_OUTPUT, SHA, _process
 
@@ -37,6 +37,62 @@ def _unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise GithubError("scheduling graph contains duplicate JSON fields")
         result[key] = value
     return result
+
+
+def issue_identity(value: Any, repository: str, number: int | None = None) -> tuple[int, int, str]:
+    """Validate one REST issue's repository, canonical URLs and immutable IDs.
+
+    Native relationships may legitimately cross repositories. Their issue
+    numbers alone are therefore not identities, even on a repository-scoped
+    endpoint. Redirected/transferred issues and pull requests are also refused.
+    """
+    value = _object(value, "issue identity")
+    observed = _positive(value.get("number"))
+    if (number is not None and observed != _positive(number)) or "pull_request" in value:
+        raise GithubError("GitHub returned another issue or a pull request")
+    identity = _positive(value.get("id"))
+    node = value.get("node_id")
+    if (not isinstance(node, str) or not 1 <= len(node) <= 512
+            or any(character.isspace() or ord(character) < 32 for character in node)):
+        raise GithubError("GitHub issue has no bounded immutable node identity")
+    expected = {"repository_url": f"https://api.github.com/repos/{repository}",
+                "url": f"https://api.github.com/repos/{repository}/issues/{observed}",
+                "html_url": f"https://github.com/{repository}/issues/{observed}"}
+    for field, wanted in expected.items():
+        actual = value.get(field)
+        if not isinstance(actual, str) or actual.casefold() != wanted.casefold():
+            raise GithubError("GitHub issue identity crosses the configured repository or issue URL")
+    return observed, identity, node
+
+
+def native_issue_numbers(
+    rows: list[dict[str, Any]], repository: str,
+    issues: Mapping[int, dict[str, Any]] | Callable[[int], dict[str, Any]],
+) -> tuple[int, ...]:
+    """Project native links only after matching independently read local IDs.
+
+    Callers with a DAG snapshot reuse its mapping; reconciliation may supply a
+    bounded local-issue reader. No relationship row is its own identity proof.
+    """
+    if not isinstance(rows, list) or len(rows) > MAX_PAGES * PAGE_SIZE:
+        raise GithubError("native issue relationships exceed their array bound")
+    seen: set[int] = set()
+    ids: set[int] = set()
+    nodes: set[str] = set()
+    numbers = []
+    for row in rows:
+        identity = issue_identity(row, repository)
+        number, stable_id, node = identity
+        if number in seen or stable_id in ids or node in nodes:
+            raise GithubError("native relationships contain duplicate issue identities")
+        local = issues(number) if callable(issues) else issues.get(number)
+        if issue_identity(local, repository, number) != identity:
+            raise GithubError("native relationship differs from the local immutable issue identity")
+        seen.add(number)
+        ids.add(stable_id)
+        nodes.add(node)
+        numbers.append(number)
+    return tuple(numbers)
 
 
 class Github:
@@ -115,8 +171,7 @@ class Github:
     def issue(self, number: int) -> dict[str, Any]:
         """Read the live issue, including body, state, labels and update identity."""
         value = _object(self.api(f"issues/{_positive(number)}"), "issue")
-        if type(value.get("number")) is not int or value.get("number") != number or "pull_request" in value:
-            raise GithubError("GitHub returned another issue or a pull request")
+        issue_identity(value, self.repo, number)
         if value.get("state") not in ("open", "closed") or not isinstance(value.get("body"), (str, type(None))):
             raise GithubError("GitHub returned an invalid issue state/body")
         return value
@@ -140,11 +195,17 @@ class Github:
 
     def children(self, number: int) -> list[dict[str, Any]]:
         """Read all native child-issue rows, including the legacy umbrella when present."""
-        return self._pages(f"issues/{_positive(number)}/sub_issues")
+        rows = self._pages(f"issues/{_positive(number)}/sub_issues")
+        for row in rows:
+            issue_identity(row, self.repo)
+        return rows
 
     def blockers(self, number: int) -> list[dict[str, Any]]:
         """Read all native blocked-by issue relationships."""
-        return self._pages(f"issues/{_positive(number)}/dependencies/blocked_by")
+        rows = self._pages(f"issues/{_positive(number)}/dependencies/blocked_by")
+        for row in rows:
+            issue_identity(row, self.repo)
+        return rows
 
     def comments(self, number: int) -> list[dict[str, Any]]:
         """Read bounded, paginated issue comments for idempotent receipt reconciliation."""

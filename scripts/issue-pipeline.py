@@ -19,7 +19,7 @@ sys.dont_write_bytecode = True
 
 from issue_pipeline.config import Config, digest_file, private_directory
 from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, encode, halt_children, task_hash, write_record
-from issue_pipeline.github import Github
+from issue_pipeline.github import Github, issue_identity, native_issue_numbers
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.graph import Graph
 from issue_pipeline.state import State, SupervisorLock
@@ -96,15 +96,19 @@ def doctor(config: Config) -> dict:
     if free < config.minimum_free_gib:
         raise PipelineBlocked("free disk is below the configured floor")
     github = Github(config.repository)
-    graph = Graph.from_master(github.issue(config.master_issue)["body"])
+    master = github.issue(config.master_issue)
+    issue_identity(master, config.repository, config.master_issue)
+    graph = Graph.from_master(master["body"])
     if graph.master_issue != config.master_issue:
         raise PipelineBlocked("master graph identity changed")
     children = github.children(config.master_issue)
     from concurrent.futures import ThreadPoolExecutor
-    numbers = [row["number"] for row in children]
+    numbers = [task.issue for task in graph.tasks] + [int(graph.legacy_umbrella["issue"])]
     with ThreadPoolExecutor(max_workers=4) as pool:
-        blockers = dict(zip(numbers, pool.map(lambda n: [row["number"] for row in github.blockers(n)], numbers)))
-    graph.validate_native_links(numbers, blockers)
+        issues = dict(zip(numbers, pool.map(github.issue, numbers)))
+        blockers = dict(zip(numbers, pool.map(
+            lambda n: native_issue_numbers(github.blockers(n), config.repository, issues), numbers)))
+    graph.validate_native_links(native_issue_numbers(children, config.repository, issues), blockers)
     return {"result": "prerequisites and live native DAG verified", "repository": config.repository,
             "master_issue": config.master_issue, "tasks": len(graph.tasks),
             "dependency_edges": sum(len(task.depends_on) for task in graph.tasks),

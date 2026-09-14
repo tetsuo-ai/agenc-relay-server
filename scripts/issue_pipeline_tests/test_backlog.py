@@ -9,6 +9,7 @@ from unittest import mock
 
 from issue_pipeline.backlog import Backlog, BacklogError
 from issue_pipeline.graph import Graph
+from issue_pipeline_tests.test_github import issue_row
 
 
 REVIEW = {"verdict": "approve", "summary": "Independent source inspection confirms the missing bound.",
@@ -66,7 +67,7 @@ class FakeGithub:
         self.next_issue = 90
 
     def issue(self, number):
-        return copy.deepcopy(self.issues[number])
+        return {**issue_row(number, self.repo), **copy.deepcopy(self.issues[number])}
 
     def children(self, number):
         return [self.issue(child) for child in sorted(self.child_links.get(number, set()))]
@@ -288,6 +289,61 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(self.register(), 90)
         self.assert_registration()
         self.assertEqual(len(self.github.mutations), 6)
+
+    def test_registration_rejects_foreign_or_wrong_id_links_before_any_write(self):
+        for relationship in ("children", "blockers"):
+            reader = getattr(self.github, relationship)
+            for replacement in (issue_row(36, "foreign/private"), issue_row(36, id=9000),
+                                issue_row(36, node_id="I_another_issue")):
+                def altered(number):
+                    return [replacement if row["number"] == 36 else row for row in reader(number)]
+                with self.subTest(relationship=relationship, replacement=replacement), \
+                        mock.patch.object(self.github, relationship, side_effect=altered):
+                    with self.assertRaisesRegex(BacklogError, "identity"):
+                        self.register()
+                self.assertEqual(self.github.mutations, [])
+                self.assertEqual(list(self.backlog.directory.iterdir()), [])
+
+    def test_restart_does_not_adopt_matching_number_with_foreign_or_changed_identity(self):
+        for replacement in (issue_row(90, "foreign/private"), issue_row(90, id=9000),
+                            issue_row(90, node_id="I_another_issue")):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as directory:
+                github = FakeGithub()
+                backlog = Backlog(github, Path(directory), 35)
+                github.after = lambda *args: (_ for _ in ()).throw(Crash())
+                with self.assertRaises(Crash):
+                    backlog.register(41, DISCOVERY, SOURCE, REVIEW)
+                github.after = None
+                children = github.children
+                with mock.patch.object(github, "children", side_effect=lambda number: children(number) + [replacement]):
+                    with self.assertRaisesRegex(BacklogError, "identity"):
+                        Backlog(github, Path(directory), 35).reconcile()
+                self.assertEqual(len(github.mutations), 1)
+                journal = json.loads(next(backlog.directory.glob("*.json")).read_text())
+                self.assertEqual(journal["status"], "pending")
+                self.assertNotIn(90, github.child_links[35])
+
+    def test_lost_link_response_requires_the_exact_pinned_target_identity(self):
+        for replacement in (issue_row(90, "foreign/private"), issue_row(90, id=9000),
+                            issue_row(90, node_id="I_another_issue")):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as directory:
+                github = FakeGithub()
+                backlog = Backlog(github, Path(directory), 35)
+                attempted = []
+                def failed_link(path, method, data):
+                    if path.endswith("sub_issues"):
+                        attempted.append(path)
+                        raise ConnectionError("ambiguous link response")
+                github.before = failed_link
+                children = github.children
+                with mock.patch.object(github, "children", side_effect=lambda number: children(number) + (
+                        [replacement] if attempted else [])):
+                    with self.assertRaisesRegex(BacklogError, "identity"):
+                        backlog.register(41, DISCOVERY, SOURCE, REVIEW)
+                self.assertEqual([entry[0] for entry in github.mutations], ["issues", "issues/35/sub_issues"])
+                journal = json.loads(next(backlog.directory.glob("*.json")).read_text())
+                self.assertEqual(journal["status"], "pending")
+                self.assertNotIn(90, github.child_links[35])
 
     def test_restart_recovers_after_each_remote_mutation_boundary(self):
         for boundary in range(1, 7):

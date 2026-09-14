@@ -23,7 +23,7 @@ from .agents import (AgentRunError, CodexRunner, SessionLifecycleError, record_s
                      session_lifecycle, validate_result)
 from .config import Config, digest_file, private_directory
 from .gitops import GitRepo, GitError
-from .github import Github
+from .github import Github, issue_identity, native_issue_numbers
 from .graph import Graph, Task
 from .state import ClaimConflict, State, SupervisorLock
 from .gate import GateCleanupUncertain, GateFailure, GateStopped
@@ -321,14 +321,17 @@ class Controller:
     def snapshot(self) -> tuple[Graph, dict[int, dict]]:
         with self.graph_lock:
             master = self.github.issue(self.config.master_issue)
+            issue_identity(master, self.config.repository, self.config.master_issue)
             graph = Graph.from_master(master["body"])
             if graph.master_issue != self.config.master_issue:
                 raise PipelineBlocked("master graph identity changed")
             numbers = [task.issue for task in graph.tasks] + [int(graph.legacy_umbrella["issue"])]
             with ThreadPoolExecutor(max_workers=4) as pool:
                 issues = dict(zip(numbers, pool.map(self.github.issue, numbers)))
-                blockers = dict(zip(numbers, pool.map(lambda n: [row["number"] for row in self.github.blockers(n)], numbers)))
-            graph.validate_native_links([row["number"] for row in self.github.children(graph.master_issue)], blockers)
+                blockers = dict(zip(numbers, pool.map(
+                    lambda n: native_issue_numbers(self.github.blockers(n), self.config.repository, issues), numbers)))
+            graph.validate_native_links(native_issue_numbers(
+                self.github.children(graph.master_issue), self.config.repository, issues), blockers)
             return graph, issues
 
     def verified_receipts(self, graph: Graph, issues: dict[int, dict], tip: str) -> dict[int, dict]:

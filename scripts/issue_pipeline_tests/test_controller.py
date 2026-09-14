@@ -16,6 +16,8 @@ from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, en
 from issue_pipeline.gate import GateCleanupUncertain, GateFailure, GateRunner, GateStopped
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.graph import Graph
+from issue_pipeline.github import GithubError
+from issue_pipeline_tests.test_github import issue_row
 
 
 REVIEW = {"verdict": "approve", "summary": "All declared criteria were inspected.",
@@ -68,7 +70,7 @@ class ScriptedGithub:
         self.block_hosted = False
 
     def issue(self, number):
-        return copy.deepcopy(self.issues[number])
+        return {**issue_row(number, self.repo), **copy.deepcopy(self.issues[number])}
 
     def children(self, number):
         return [self.issue(child) for child in sorted(self.child_links.get(number, set()))]
@@ -325,6 +327,23 @@ class ControllerTests(unittest.TestCase):
         value["tasks"][1].update(depends_on=[36], level=1)
         value["tasks"][2].update(depends_on=[41], level=2)
         self.replace_graph(value)
+
+    def test_snapshot_refuses_foreign_and_mismatched_native_issue_identities(self):
+        for relationship in ("children", "blockers"):
+            reader = getattr(self.github, relationship)
+            for replacement in (issue_row(36, "foreign/private"),
+                                issue_row(36, self.config.repository, id=9000),
+                                issue_row(36, self.config.repository, node_id="I_foreign")):
+                def altered(number):
+                    return [replacement if row["number"] == 36 else row for row in reader(number)]
+                with self.subTest(relationship=relationship, replacement=replacement), \
+                        mock.patch.object(self.github, relationship, side_effect=altered):
+                    with self.assertRaises(GithubError):
+                        self.controller.snapshot()
+                self.assertEqual(self.github.close_calls, [])
+                self.assertEqual(self.github.statuses, [])
+        graph, issues = self.controller.snapshot()
+        self.assertEqual(set(issues), set(graph.by_issue) | {13})
 
     def test_reopened_or_edited_ancestor_invalidates_descendant_and_live_preconditions(self):
         self.chain()

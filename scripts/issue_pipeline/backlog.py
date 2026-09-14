@@ -18,6 +18,7 @@ import tempfile
 
 from .agents import validate_result
 from .graph import Graph
+from .github import GithubError, issue_identity, native_issue_numbers
 
 
 MAX_BODY_BYTES = 60000
@@ -64,13 +65,12 @@ def _approved_registration(parent_issue, discovery, source, review):
         raise BacklogError("discovery requires bounded title/description/acceptance and an exact source SHA")
 
 
-def _numbers(rows):
-    if type(rows) is not list:
-        raise BacklogError("native relationship read is not an array")
-    numbers = [_positive(row.get("number")) for row in rows if type(row) is dict]
-    if len(numbers) != len(rows) or len(numbers) != len(set(numbers)):
-        raise BacklogError("native relationships contain malformed or duplicate identities")
-    return set(numbers)
+def _numbers(rows, github, issues=None):
+    try:
+        return set(native_issue_numbers(rows, github.repo,
+                                        github.issue if issues is None else issues))
+    except GithubError as error:
+        raise BacklogError("native relationship has a foreign or inconsistent issue identity") from error
 
 
 def _graph_record(body):
@@ -295,9 +295,10 @@ class Backlog:
             raise BacklogError("master and affected parent must be open; completed acceptance needs manual invalidation")
         task = graph.by_issue[parent_issue]
         expected_children = set(graph.by_issue) | {graph.legacy_umbrella["issue"]}
+        issues = {number: self.github.issue(number) for number in expected_children}
         try:
-            graph.validate_native_links(_numbers(self.github.children(self.master_issue)),
-                                        {number: _numbers(self.github.blockers(number))
+            graph.validate_native_links(_numbers(self.github.children(self.master_issue), self.github, issues),
+                                        {number: _numbers(self.github.blockers(number), self.github, issues)
                                          for number in expected_children})
         except ValueError as error:
             raise BacklogError("native master links differ from the prepared graph") from error
@@ -359,17 +360,23 @@ class Backlog:
 
     def _link(self, journal, path, owner, child, kind):
         reader = self.github.children if kind == "sub_issues" else self.github.blockers
-        if child in _numbers(reader(owner)):
-            return
         target = self.github.issue(child)
+        identity = issue_identity(target, self.github.repo, child)
+        def linked():
+            # Pin this target across the mutation and ambiguous-response readback.
+            def local(number):
+                return target if number == child else self.github.issue(number)
+            return child in _numbers(reader(owner), self.github, local)
+        if linked():
+            return
         self._intent(journal, path, f"link:{owner}:{kind}:{child}")
-        payload = {"sub_issue_id" if kind == "sub_issues" else "issue_id": _positive(target.get("id"))}
+        payload = {"sub_issue_id" if kind == "sub_issues" else "issue_id": identity[1]}
         try:
             self.github.api(f"issues/{owner}/{kind}", "POST", payload)
         except Exception:
-            if child not in _numbers(reader(owner)):
+            if not linked():
                 raise
-        if child not in _numbers(reader(owner)):
+        if not linked():
             self._conflict(path, f"native {kind} link #{owner} to #{child} did not persist")
 
     def _patch_body(self, journal, path, number, before, after):
@@ -437,8 +444,10 @@ class Backlog:
         self._guard(journal, path)
         graph = Graph.from_master(self.github.issue(self.master_issue)["body"])
         all_numbers = set(graph.by_issue) | {graph.legacy_umbrella["issue"]}
-        graph.validate_native_links(_numbers(self.github.children(self.master_issue)),
-                                    {issue: _numbers(self.github.blockers(issue)) for issue in all_numbers})
+        issues = {issue: self.github.issue(issue) for issue in all_numbers}
+        graph.validate_native_links(_numbers(self.github.children(self.master_issue), self.github, issues),
+                                    {issue: _numbers(self.github.blockers(issue), self.github, issues)
+                                     for issue in all_numbers})
         if self.github.issue(number).get("body") != journal["child_body"]:
             self._conflict(path, "discovery body changed before final readback")
         journal.update(status="complete", intent="readback_verified")

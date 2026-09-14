@@ -21,6 +21,8 @@ from unittest import mock
 from issue_pipeline.config import Config, digest_file, private_directory
 from issue_pipeline.controller import Controller, PipelineBlocked
 from issue_pipeline.graph import Graph, Task
+from issue_pipeline.github import GithubError
+from issue_pipeline_tests.test_github import issue_row
 from issue_pipeline.state import ClaimConflict, State, SupervisorLock
 
 CLI_PATH = Path(__file__).resolve().parents[1] / "issue-pipeline.py"
@@ -189,9 +191,10 @@ class DoctorTests(CommandFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.github = mock.Mock()
-        self.github.issue.return_value = {"body": graph_body()}
-        self.github.children.return_value = [{"number": n} for n in (36, 43, 13)]
-        self.github.blockers.side_effect = lambda number: [{"number": n} for n in {36: [], 43: [36], 13: [36]}[number]]
+        self.github.issue.side_effect = lambda number: issue_row(
+            number, self.config.repository, body=graph_body() if number == 35 else "Task requirements")
+        self.github.children.return_value = [self.github.issue(n) for n in (36, 43, 13)]
+        self.github.blockers.side_effect = lambda number: [self.github.issue(n) for n in {36: [], 43: [36], 13: [36]}[number]]
         self.secret = "DOCTOR_AUTH_OUTPUT_MUST_NOT_BE_LOGGED"
         self.patches = [
             mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/bin/" + command),
@@ -218,6 +221,23 @@ class DoctorTests(CommandFixture, unittest.TestCase):
             self.assertTrue(call.kwargs["capture_output"])
             self.assertLessEqual(call.kwargs["timeout"], 30)
         self.github.comment.assert_not_called()
+
+    def test_doctor_refuses_foreign_and_mismatched_native_identities(self):
+        children = copy.deepcopy(self.github.children.return_value)
+        blockers = self.github.blockers.side_effect
+        for replacement in (issue_row(36, "foreign/private"),
+                            issue_row(36, self.config.repository, id=9000),
+                            issue_row(36, self.config.repository, node_id="I_foreign")):
+            for relationship in ("children", "blockers"):
+                self.github.children.return_value = [replacement if row["number"] == 36 else row
+                                                     for row in children] if relationship == "children" else children
+                self.github.blockers.side_effect = (lambda number: [
+                    replacement if row["number"] == 36 else row for row in blockers(number)
+                ]) if relationship == "blockers" else blockers
+                with self.subTest(relationship=relationship, replacement=replacement), self.assertRaises(GithubError):
+                    cli.doctor(self.config)
+                self.assertFalse(self.config.state.exists())
+                self.github.comment.assert_not_called()
 
     def test_doctor_checks_global_identity_for_new_clone_and_reads_existing_clone_only(self):
         cli.doctor(self.config)

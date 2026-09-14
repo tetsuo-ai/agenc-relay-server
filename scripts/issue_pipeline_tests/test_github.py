@@ -7,10 +7,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from issue_pipeline.github import Github, GithubError
+from issue_pipeline.github import Github, GithubError, issue_identity, native_issue_numbers
 
 SHA = "a" * 40
 OTHER = "b" * 40
+
+
+def issue_row(number, repository="example/private", **fields):
+    """REST issue identity fields present on actual issue and relationship rows."""
+    return {"number": number, "id": number + 1000, "node_id": f"I_fixture_{number}",
+            "repository_url": f"https://api.github.com/repos/{repository}",
+            "url": f"https://api.github.com/repos/{repository}/issues/{number}",
+            "html_url": f"https://github.com/{repository}/issues/{number}",
+            "state": "open", "body": "", **fields}
 
 
 class GithubTests(unittest.TestCase):
@@ -49,7 +58,7 @@ class GithubTests(unittest.TestCase):
 
     def test_master_graph_requires_one_matching_json_graph(self) -> None:
         graph = {"version": 1, "master_issue": 35, "tasks": []}
-        issue = {"number": 35, "state": "open", "body": "text\n```json\n" + json.dumps(graph) + "\n```\n"}
+        issue = issue_row(35, body="text\n```json\n" + json.dumps(graph) + "\n```\n")
         with patch.object(self.github, "api", return_value=issue):
             self.assertEqual(self.github.master_graph(35), graph)
             issue["body"] *= 2
@@ -76,8 +85,8 @@ class GithubTests(unittest.TestCase):
                 self.github.issue(35)
 
     def test_native_child_dependency_and_comment_pagination(self) -> None:
-        page = [{"number": number} for number in range(1, 101)]
-        with patch.object(self.github, "api", side_effect=[page, [{"number": 101}]]) as api:
+        page = [issue_row(number) for number in range(1, 101)]
+        with patch.object(self.github, "api", side_effect=[page, [issue_row(101)]]) as api:
             self.assertEqual(len(self.github.children(35)), 101)
         self.assertEqual(api.call_args_list[0].args[0], "issues/35/sub_issues?per_page=100&page=1")
         self.assertEqual(api.call_args_list[1].args[0], "issues/35/sub_issues?per_page=100&page=2")
@@ -86,6 +95,41 @@ class GithubTests(unittest.TestCase):
             self.assertIn("dependencies/blocked_by", api.call_args.args[0])
             self.assertEqual(self.github.comments(40), [])
             self.assertIn("/comments", api.call_args.args[0])
+
+    def test_issue_and_native_endpoints_reject_foreign_or_malformed_identities(self):
+        invalid = [issue_row(36, "foreign/private")]
+        for field, value in (("repository_url", "https://api.github.com/repos/foreign/private"),
+                             ("url", "https://api.github.com/repos/example/private/issues/37"),
+                             ("html_url", "https://github.com/example/private/pull/36"),
+                             ("id", True), ("id", 0), ("node_id", ""),
+                             ("node_id", None), ("pull_request", {})):
+            invalid.append(issue_row(36, **{field: value}))
+        for field in ("repository_url", "url", "html_url", "id", "node_id"):
+            value = issue_row(36)
+            del value[field]
+            invalid.append(value)
+        for value in invalid:
+            for method in ("issue", "children", "blockers"):
+                with self.subTest(value=value, method=method), patch.object(
+                        self.github, "api", return_value=value if method == "issue" else [value]):
+                    with self.assertRaises(GithubError):
+                        getattr(self.github, method)(36)
+
+    def test_native_rows_must_match_local_numeric_and_node_ids_before_projection(self):
+        local = {36: issue_row(36)}
+        self.assertEqual(native_issue_numbers([issue_row(36)], self.github.repo, local), (36,))
+        self.assertEqual(issue_identity(issue_row(36, "EXAMPLE/Private"), self.github.repo),
+                         (36, 1036, "I_fixture_36"))
+        for row in (issue_row(36, "foreign/private"), issue_row(36, id=9000),
+                    issue_row(36, node_id="I_another_issue"), issue_row(37)):
+            with self.subTest(row=row), self.assertRaises(GithubError):
+                native_issue_numbers([row], self.github.repo, local)
+        with self.assertRaises(GithubError):
+            native_issue_numbers([issue_row(36), issue_row(36)], self.github.repo, local)
+        with patch.object(self.github, "issue") as resolve:
+            with self.assertRaises(GithubError):
+                native_issue_numbers([issue_row(36, "foreign/private")], self.github.repo, resolve)
+            resolve.assert_not_called()
 
     def test_pagination_refuses_exhaustion_or_malformed_page(self) -> None:
         with patch("issue_pipeline.github.MAX_PAGES", 2), \
