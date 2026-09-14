@@ -171,6 +171,14 @@ fn exercise(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
 #[test]
 fn edge_credential_replacement_survives_coordinator_restart() -> TestResult {
     let network = build_network()?;
+    // The post-restart readiness check uses Edge B's signed local admin socket.
+    let mut config = fs::read_to_string(&network.edge_b.config_path)?;
+    replace_once(
+        &mut config,
+        "enabled = false\npurpose = \"admin_local\"",
+        "enabled = true\npurpose = \"admin_local\"",
+    )?;
+    fs::write(&network.edge_b.config_path, config)?;
     let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
     let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
     let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
