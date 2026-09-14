@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -297,6 +298,7 @@ class ExternalImportTests(unittest.TestCase):
         private_directory(config.state)
         controller = Controller.__new__(Controller)
         controller.config = config
+        controller.graph_lock = threading.RLock()
         controller.state = State(config.state / "state.sqlite3")
         self.addCleanup(controller.state.close)
         controller.repo = mock.Mock()
@@ -505,6 +507,69 @@ class ExternalImportTests(unittest.TestCase):
         with self.assertRaisesRegex(PipelineBlocked, "readback"):
             self.accept()
         self.assertNotEqual(self.controller.state.get_task(43)["status"], "complete")
+
+    def assert_import_publication_mutation_is_retained(self, boundary, change):
+        def mutate():
+            if change == "body":
+                self.issues[43]["body"] += " Additional unqualified requirement."
+            elif change == "task":
+                tasks = tuple(Task(task.key, task.issue, task.depends_on,
+                                   (*task.locks, "new-host-scope") if task.issue == 43 else task.locks,
+                                   task.external_gate, task.level) for task in self.graph.tasks)
+                self.graph = Graph(self.graph.source, 35, 43, self.graph.lock_policy,
+                                   self.graph.legacy_umbrella, tasks)
+            else:
+                self.controller.verified_receipts.return_value = {36: {"digest": "e" * 64, "source": SOURCE}}
+
+        def publish(*args):
+            if boundary == "comment":
+                mutate()
+
+        def close_then_change(number):
+            self.issues[number]["state"] = "closed"
+            if boundary == "close":
+                mutate()
+
+        self.controller.state.set_task(43, "blocked")
+        self.controller.state.claim(43, scopes=self.graph.by_issue[43].locks)
+        claims = self.controller.state.claims()
+        self.controller.comment_once.side_effect = publish
+        self.controller.github.close_issue.side_effect = close_then_change
+        with self.assertRaises(PipelineBlocked):
+            self.accept()
+        row = self.controller.state.get_task(43)
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["data"]["remote_action"], "external-import")
+        self.assertEqual(self.controller.state.claims(), claims)
+        self.assertEqual(self.issues[43]["state"], "open" if boundary == "comment" else "closed")
+        receipts = self.controller.state.receipts(43, "completion")
+        self.assertEqual(len(receipts), 1)
+        self.controller.comment_once.reset_mock(side_effect=True)
+        self.controller.github.close_issue.reset_mock(side_effect=True)
+        with self.assertRaisesRegex(PipelineBlocked, "unfinished external import"):
+            self.accept()
+        self.controller.comment_once.assert_not_called()
+        self.controller.github.close_issue.assert_not_called()
+        self.assertEqual(self.controller.state.receipts(43, "completion"), receipts)
+        self.assertEqual(self.controller.state.claims(), claims)
+
+    def test_import_comment_requirement_edit_preserves_attestation_binding(self):
+        self.assert_import_publication_mutation_is_retained("comment", "body")
+
+    def test_import_close_requirement_edit_preserves_attestation_binding(self):
+        self.assert_import_publication_mutation_is_retained("close", "body")
+
+    def test_import_comment_task_edit_preserves_attestation_binding(self):
+        self.assert_import_publication_mutation_is_retained("comment", "task")
+
+    def test_import_close_task_edit_preserves_attestation_binding(self):
+        self.assert_import_publication_mutation_is_retained("close", "task")
+
+    def test_import_comment_prerequisite_change_preserves_attestation_binding(self):
+        self.assert_import_publication_mutation_is_retained("comment", "prerequisite")
+
+    def test_import_close_prerequisite_change_preserves_attestation_binding(self):
+        self.assert_import_publication_mutation_is_retained("close", "prerequisite")
 
 
 if __name__ == "__main__":

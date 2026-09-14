@@ -904,6 +904,121 @@ class ControllerTests(unittest.TestCase):
         markers = [row for row in self.github.comments(36) if "agenc-pipeline-completion:" in row["body"]]
         self.assertEqual(len(markers), 1)
 
+    def assert_closure_mutation_is_retained(self, boundary, change):
+        if change == "prerequisite":
+            graph = self.graph_record()
+            graph["tasks"][0].update(depends_on=[41], level=1)
+            graph["tasks"][2]["level"] = 2
+            self.replace_graph(graph)
+            self.task = self.github.graph.by_issue[36]
+            self.accepted_fixture(41)
+
+        def mutate():
+            if change in ("body", "title"):
+                self.github.issues[36][change] += " Changed after final acceptance."
+            elif change == "task":
+                graph = self.graph_record()
+                graph["tasks"][0]["locks"].append("new-scope")
+                self.replace_graph(graph)
+            else:
+                # Even another accepted proof for unchanged prerequisite text
+                # must not be attached to the older dependent final review.
+                self.accepted_fixture(41)
+
+        comment, close = self.github.comment, self.github.close_issue
+
+        def publish(number, body):
+            result = comment(number, body)
+            if boundary == "comment" and number == 36 and "agenc-pipeline-completion:" in body:
+                mutate()
+            return result
+
+        def close_then_change(number):
+            result = close(number)
+            if boundary == "close" and number == 36:
+                mutate()
+            return result
+
+        with mock.patch.object(self.github, "comment", side_effect=publish), \
+                mock.patch.object(self.github, "close_issue", side_effect=close_then_change):
+            self.execute()
+        row = self.controller.state.get_task(36)
+        self.assertEqual(row["status"], "blocked", row)
+        self.assertEqual(row["data"]["remote_action"], "close-issue")
+        receipts = self.controller.state.receipts(36, "completion")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(row["data"]["completion_receipt"], receipts[0]["digest"])
+        self.assertEqual(self.github.issue(36)["state"], "open" if boundary == "comment" else "closed")
+        self.assertFalse(self.controller.verified(36, self.repo.fetch()))
+        self.assertTrue(any(claim["issue"] == 36 for claim in self.controller.state.claims()))
+        closes, comments = len(self.github.close_calls), len(self.github.comments(36))
+
+        # A fresh controller receives the *new* task definition on restart.
+        # It must retain the original intent, not mint a newly bound receipt.
+        self.controller = Controller(self.config, repo=self.repo, github=self.github,
+                                     runner=self.runner, gate=self.gate)
+        self.addCleanup(self.controller.state.close)
+        self.controller.log = mock.Mock()
+        self.controller.execute(self.github.graph.by_issue[36], self.github.issue(36))
+        restarted = self.controller.state.get_task(36)
+        self.assertEqual(restarted["status"], "blocked", restarted)
+        self.assertEqual(restarted["data"]["completion_receipt"], receipts[0]["digest"])
+        self.assertEqual(self.controller.state.receipts(36, "completion"), receipts)
+        self.assertEqual(len(self.github.close_calls), closes)
+        self.assertEqual(len(self.github.comments(36)), comments)
+        self.assertTrue(any(claim["issue"] == 36 for claim in self.controller.state.claims()))
+
+    def test_comment_requirement_edit_preserves_original_closure_intent(self):
+        self.assert_closure_mutation_is_retained("comment", "body")
+
+    def test_comment_title_edit_preserves_original_closure_intent(self):
+        self.assert_closure_mutation_is_retained("comment", "title")
+
+    def test_close_requirement_edit_cannot_finalize_or_rebind_on_restart(self):
+        self.assert_closure_mutation_is_retained("close", "body")
+
+    def test_comment_task_edit_cannot_rebind_original_closure_receipt_on_restart(self):
+        self.assert_closure_mutation_is_retained("comment", "task")
+
+    def test_close_task_edit_cannot_rebind_original_closure_receipt_on_restart(self):
+        self.assert_closure_mutation_is_retained("close", "task")
+
+    def test_comment_prerequisite_proof_change_blocks_closure_and_restart(self):
+        self.assert_closure_mutation_is_retained("comment", "prerequisite")
+
+    def test_close_prerequisite_proof_change_blocks_finalization_and_restart(self):
+        self.assert_closure_mutation_is_retained("close", "prerequisite")
+
+    def test_final_issue_readback_follows_slow_prerequisite_verification(self):
+        verify = self.controller.verified_receipts
+
+        def verify_then_edit(*args):
+            result = verify(*args)
+            if 36 in self.github.close_calls:
+                self.github.issues[36]["body"] += " Requirement changed during final proof reads."
+            return result
+
+        with mock.patch.object(self.controller, "verified_receipts", side_effect=verify_then_edit):
+            self.execute()
+        row = self.controller.state.get_task(36)
+        self.assertEqual(row["status"], "blocked", row)
+        self.assertIn("final readback", row["data"]["reason"])
+        self.assertEqual(row["data"]["remote_action"], "close-issue")
+        self.assertTrue(self.controller.state.claims())
+
+    def test_legacy_close_intent_without_pinned_receipt_cannot_be_adopted(self):
+        self.github.lose_close_response = True
+        self.execute()
+        data = self.controller.state.get_task(36)["data"]
+        del data["completion_receipt"]
+        self.controller.state.set_task(36, "blocked", data)
+        self.execute()
+        row = self.controller.state.get_task(36)
+        self.assertEqual(row["status"], "blocked")
+        self.assertIn("original completion receipt", row["data"]["reason"])
+        self.assertEqual(len(self.controller.state.receipts(36, "completion")), 1)
+        self.assertEqual(self.github.close_calls, [36])
+
     def test_specialized_ready_issue_gets_handoff_without_generic_agent(self):
         body = self.github.issues[35]["body"].replace('"ENC-12"', '"STO-01"')
         self.github.issues[35]["body"] = body

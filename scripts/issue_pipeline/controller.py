@@ -609,11 +609,50 @@ class Controller:
         if not any(marker in (item.get("body") or "") for item in self.github.comments(number)):
             self.github.comment(number, body + "\n\n" + marker)
 
+    def completion_preconditions(self, task: Task, expected_hash: str, receipt: dict,
+                                 *, require_closed=False) -> dict:
+        """Revalidate the original acceptance binding at a closure boundary."""
+        graph, issues = self.snapshot()
+        live = issues.get(task.issue)
+        if (graph.by_issue.get(task.issue) != task
+                or receipt["data"].get("task_hash") != task_hash(task)):
+            raise PipelineBlocked("completion task definition changed; preserve the original closure receipt")
+        if (live is None or body_hash(live) != expected_hash
+                or receipt["data"].get("issue_hash") != expected_hash
+                or (require_closed and live["state"] != "closed")):
+            raise PipelineBlocked("completion issue content or closure readback state changed; reconcile the original acceptance")
+        tip = self.fetch()
+        proofs = self.verified_receipts(graph, issues, tip)
+        if (not set(task.depends_on) <= proofs.keys()
+                or {str(dep): proofs[dep]["digest"] for dep in task.depends_on}
+                    != receipt["data"].get("dependency_receipts")
+                or any(not self.repo.is_ancestor(proofs[dep]["source"], receipt["source"])
+                       for dep in task.depends_on)):
+            raise PipelineBlocked("completion prerequisite evidence changed; reconcile the original acceptance")
+        if (receipt["issue"] != task.issue or receipt["kind"] != "completion"
+                or receipt["status"] != "accepted" or not self.receipt_valid(receipt)
+                or not self.repo.is_ancestor(receipt["source"], tip)):
+            raise PipelineBlocked("completion receipt or merged source is no longer valid")
+        for phase in receipt["data"].get("merged_phases", []):
+            self.require_candidate_receipts(task.issue, phase["source"], phase["base"])
+            if not self.repo.is_ancestor(phase["source"], tip):
+                raise PipelineBlocked("completion phase source is no longer on remote main")
+        # Native graph/proof reads may take time. End with the actual issue
+        # readback; GitHub does not provide an atomic cross-issue snapshot.
+        observed = self.github.issue(task.issue)
+        if (body_hash(observed) != expected_hash
+                or (require_closed and observed["state"] != "closed")):
+            raise PipelineBlocked("completion issue content or closure state changed during final readback")
+        return observed
+
     def complete(self, task: Task, data: dict) -> None:
+        closing = data.get("remote_action") == "close-issue"
+        if closing and not data.get("completion_receipt"):
+            raise PipelineBlocked("closure intent lacks its original completion receipt; reconcile manually")
         phases = data.get("merged_phases", [])
         if sorted(item["phase_index"] for item in phases) != list(range(len(data["plan"]["phases"]))):
             raise PipelineBlocked("not every planned phase has merged")
-        prerequisites = self.live_preconditions(task, data["issue_hash"], allow_closed=data.get("remote_action") == "close-issue")
+        prerequisites = self.live_preconditions(task, data["issue_hash"], allow_closed=closing)
         if prerequisites != data.get("dependency_receipts", {}):
             raise PipelineBlocked("prerequisite evidence changed after final review; new acceptance review is required")
         tip = self.fetch()
@@ -632,26 +671,31 @@ class Controller:
         if body_hash(live) != data["issue_hash"]:
             raise PipelineBlocked("issue changed before closure")
         existing = [r for r in self.state.receipts(task.issue, "completion")
-                    if r["source"] == last["source"] and r["base"] == last["base"]
+                    if r["status"] == "accepted" and r["source"] == last["source"] and r["base"] == last["base"]
                     and r["data"].get("issue_hash") == data["issue_hash"]
                     and r["data"].get("task_hash") == task_hash(task)
                     and r["data"].get("dependency_receipts") == prerequisites
                     and r["data"].get("merged_phases") == phases and self.receipt_valid(r)]
+        if closing:
+            existing = [r for r in existing if r["digest"] == data["completion_receipt"]]
+            if not existing:
+                raise PipelineBlocked("closure intent no longer matches its original completion receipt")
         receipt = existing[-1] if existing else self.record(task.issue, "completion", last["source"], last["base"],
                               {"issue_hash": data["issue_hash"], "task_hash": task_hash(task),
                                "dependency_receipts": prerequisites, "merged_phases": phases, "proof_receipts": proof_ids,
                                "acceptance": [phase["acceptance"] for phase in data["plan"]["phases"]]})
-        self.checkpoint(task.issue, "merging", data, remote_action="close-issue")
+        self.checkpoint(task.issue, "merging", data, remote_action="close-issue", completion_receipt=receipt["digest"])
         self.comment_once(task.issue, "<!-- agenc-pipeline-completion:" + receipt["digest"] + " -->",
                           "All planned phases merged and passed the full local gate and two independent reviews on their exact source commits.\n\n" +
                           "\n".join(f"- Phase {item['phase_index'] + 1}: PR #{item['pr']}, `{item['source']}`." for item in data["merged_phases"]) +
                           f"\n\nCompletion receipt: `{receipt['digest']}`. Original issue acceptance was reviewed in the final phase. External qualification remains governed by its separate dependency issues.")
-        if live["state"] != "closed":
-            self.github.close_issue(task.issue)
-        if self.github.issue(task.issue)["state"] != "closed":
-            raise PipelineBlocked("issue closure readback failed")
-        self.checkpoint(task.issue, "complete", data, remote_action=None)
-        self.state.release(task.issue)
+        with self.graph_lock:
+            live = self.completion_preconditions(task, data["issue_hash"], receipt)
+            if live["state"] != "closed":
+                self.github.close_issue(task.issue)
+            self.completion_preconditions(task, data["issue_hash"], receipt, require_closed=True)
+            self.checkpoint(task.issue, "complete", data, remote_action=None)
+            self.state.release(task.issue, owner=str(task.issue))
         self.log("issue completed", issue=task.issue)
 
     def discoveries(self, task: Task, data: dict, worker: dict, source: str) -> None:
@@ -991,7 +1035,7 @@ class Controller:
         except Exception as error:
             self.checkpoint(task.issue, "blocked", data, reason=str(error))
             # No cleanup on failure: uncertain source and remote actions remain reviewable.
-            if claimed and not self.stop.is_set():
+            if claimed and not self.stop.is_set() and data.get("remote_action") != "close-issue":
                 self.state.release(task.issue, owner=str(task.issue))
             self.log("issue blocked", issue=task.issue, reason=str(error))
 

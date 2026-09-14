@@ -326,13 +326,13 @@ def accept_external(controller: Controller, number: int, evidence: Path) -> dict
         "Specialized qualification imported by the operator. This is an external attestation, not a generic model/test pass.\n\n"
         f"Approver: {value['approver']}\n\nEvidence: {value['qualification_url']}\n\nSource: `{value['source']}`\n\nReceipt: `{receipt['digest']}`\n\n" +
         "\n".join("- " + row["criterion"] + ": " + row["evidence"] for row in value["acceptance"]))
-    if controller.github.issue(number)["state"] != "closed":
-        controller.github.close_issue(number)
-    observed = controller.github.issue(number)
-    if observed["state"] != "closed" or body_hash(observed) != issue_hash:
-        raise PipelineBlocked("external qualification closure readback failed")
-    controller.state.set_task(number, "complete", {"operator_import": identity, "external_import": data["external_import"]})
-    controller.state.release(number)
+    with controller.graph_lock:
+        observed = controller.completion_preconditions(task, issue_hash, receipt)
+        if observed["state"] != "closed":
+            controller.github.close_issue(number)
+        controller.completion_preconditions(task, issue_hash, receipt, require_closed=True)
+        controller.state.set_task(number, "complete", {"operator_import": identity, "external_import": data["external_import"]})
+        controller.state.release(number)
     return {"issue": number, "status": "complete", "receipt": receipt["digest"]}
 
 
