@@ -119,16 +119,27 @@ class GraphTests(unittest.TestCase):
 
     def test_native_edges_must_match_including_legacy(self):
         children = [36, 41, 86, 13]
-        blockers = {36: [], 41: [], 86: [41, 36], 13: [36]}
+        blockers = {35: [], 36: [], 41: [], 86: [41, 36], 13: [36]}
         self.graph.validate_native_links(children, blockers)
-        for observed in ({36: [], 41: [], 86: [36], 13: [36]},
-                         {36: [], 41: [], 86: [36, 41]},
-                         {36: [], 41: [], 86: [36, 41], 13: []}):
+        for observed in ({35: [], 36: [], 41: [], 86: [36], 13: [36]},
+                         {35: [], 36: [], 41: [], 86: [36, 41]},
+                         {35: [], 36: [], 41: [], 86: [36, 41], 13: []}):
             with self.subTest(observed=observed):
                 with self.assertRaises(GraphError):
                     self.graph.validate_native_links(children, observed)
         with self.assertRaises(GraphError):
             self.graph.validate_native_links([36, 41, 86], blockers)
+
+    def test_master_blocker_input_is_required_and_allows_only_distinct_managed_members(self):
+        children = [36, 41, 86, 13]
+        blockers = {36: [], 41: [], 86: [41, 36], 13: [36]}
+        with self.assertRaisesRegex(GraphError, "include every child and the master"):
+            self.graph.validate_native_links(children, blockers)
+        for master_blockers in ([], [36], [36, 41, 86, 13]):
+            self.graph.validate_native_links(children, {**blockers, 35: master_blockers})
+        for master_blockers in ([99], [35], [36, 36], [True]):
+            with self.subTest(blockers=master_blockers), self.assertRaises(GraphError):
+                self.graph.validate_native_links(children, {**blockers, 35: master_blockers})
 
     def test_specialized_routing_is_not_inferred_from_external_flag_alone(self):
         expected = {

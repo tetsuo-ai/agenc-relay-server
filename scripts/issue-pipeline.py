@@ -106,8 +106,9 @@ def doctor(config: Config) -> dict:
     numbers = [task.issue for task in graph.tasks] + [int(graph.legacy_umbrella["issue"])]
     with ThreadPoolExecutor(max_workers=4) as pool:
         issues = dict(zip(numbers, pool.map(github.issue, numbers)))
-        blockers = dict(zip(numbers, pool.map(
-            lambda n: native_issue_numbers(github.blockers(n), config.repository, issues), numbers)))
+        blocker_owners = [*numbers, graph.master_issue]
+        blockers = dict(zip(blocker_owners, pool.map(
+            lambda n: native_issue_numbers(github.blockers(n), config.repository, issues), blocker_owners)))
     graph.validate_native_links(native_issue_numbers(children, config.repository, issues), blockers)
     return {"result": "prerequisites and live native DAG verified", "repository": config.repository,
             "master_issue": config.master_issue, "tasks": len(graph.tasks),

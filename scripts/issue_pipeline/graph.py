@@ -216,16 +216,24 @@ class Graph:
     def validate_native_links(
         self, subissues: Iterable[int], blockers: Mapping[int, Iterable[int]]
     ) -> None:
-        """Require an exact native subissue/blocker mirror, including legacy."""
+        """Require the task/legacy mirror and validated redundant master blockers."""
         children = tuple(_integer(number, "native subissue") for number in subissues)
         legacy_issue = int(self.legacy_umbrella["issue"])
         expected = {task.issue: set(task.depends_on) for task in self.tasks}
         expected[legacy_issue] = set(self.legacy_umbrella["depends_on"])
         if len(children) != len(set(children)) or set(children) != set(expected):
             raise GraphError("native subissues differ from the scheduling graph")
-        if any(type(number) is not int for number in blockers) or set(blockers) != set(expected):
-            raise GraphError("native blocker records are incomplete or contain unknown children")
+        if any(type(number) is not int for number in blockers) or set(blockers) != set(expected) | {self.master_issue}:
+            raise GraphError("native blocker records must include every child and the master")
+        self.validate_master_blockers(blockers[self.master_issue])
         for number, wanted in expected.items():
             observed = tuple(_integer(dep, "native blocker") for dep in blockers[number])
             if len(observed) != len(set(observed)) or set(observed) != wanted:
                 raise GraphError(f"native blockers for #{number} differ from the scheduling graph")
+
+    def validate_master_blockers(self, blockers: Iterable[int]) -> None:
+        """Master closure already requires every task and the legacy umbrella."""
+        observed = tuple(_integer(dep, "native master blocker") for dep in blockers)
+        managed = set(self.by_issue) | {int(self.legacy_umbrella["issue"])}
+        if len(observed) != len(set(observed)) or not set(observed) <= managed:
+            raise GraphError("native master blockers must be distinct managed tasks or the legacy umbrella")

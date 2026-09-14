@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from issue_pipeline.backlog import Backlog, BacklogError
+from issue_pipeline.backlog import Backlog, BacklogError, MasterBlockerInvalid
 from issue_pipeline.graph import Graph
 from issue_pipeline_tests.test_github import issue_row
 
@@ -60,7 +60,7 @@ class FakeGithub:
                        for number in (13, 35, 36, 41, 86)}
         self.issues[35]["body"] = master_body()
         self.child_links = {35: {13, 36, 41, 86}}
-        self.dependencies = {13: {36}, 36: set(), 41: {36}, 86: {41}}
+        self.dependencies = {35: set(), 13: {36}, 36: set(), 41: {36}, 86: {41}}
         self.mutations = []
         self.after = None
         self.before = None
@@ -158,6 +158,95 @@ class BacklogTests(unittest.TestCase):
         path, journal = self.journal()
         self.assertEqual(journal["status"], "complete")
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_managed_master_blockers_are_valid_during_registration(self):
+        self.github.dependencies[35] = {13, 36, 86}
+        self.assertEqual(self.register(), 90)
+        self.assert_registration()
+
+    def add_unmanaged_master_blocker(self):
+        self.github.issues[99] = {"number": 99, "id": 1099, "state": "open", "title": "Unmanaged", "body": "Additional acceptance"}
+        self.github.dependencies[35] = {99}
+
+    def test_unmanaged_master_blocker_prevents_new_registration(self):
+        self.add_unmanaged_master_blocker()
+        with self.assertRaises(BacklogError):
+            self.register()
+        self.assertEqual(self.github.mutations, [])
+        self.assertEqual(list(self.backlog.directory.glob("*.json")), [])
+
+    def test_master_blocker_inserted_after_creation_stops_replay_before_further_writes(self):
+        def change(path, method, data):
+            if path == "issues":
+                self.add_unmanaged_master_blocker()
+        self.github.after = change
+        with self.assertRaisesRegex(BacklogError, "master blocker"):
+            self.register()
+        self.github.after = None
+        self.assertEqual([m[0] for m in self.github.mutations], ["issues"])
+        with self.assertRaisesRegex(BacklogError, "master blocker"):
+            Backlog(self.github, self.state, 35).reconcile()
+        self.assertEqual([m[0] for m in self.github.mutations], ["issues"])
+        self.github.dependencies[35] = set()
+        self.assertEqual(Backlog(self.github, self.state, 35).reconcile(), [90])
+        self.assert_registration()
+
+    def test_master_blocker_added_at_final_body_write_prevents_completed_journal(self):
+        def change(path, method, data):
+            if path == "issues/35" and method == "PATCH":
+                self.add_unmanaged_master_blocker()
+        self.github.after = change
+        with self.assertRaisesRegex(BacklogError, "master blocker"):
+            self.register()
+        self.assertEqual(self.journal()[1]["status"], "pending")
+        self.github.after = None
+        self.github.dependencies[35] = set()
+        count = len(self.github.mutations)
+        self.assertEqual(Backlog(self.github, self.state, 35).reconcile(), [90])
+        self.assertEqual(len(self.github.mutations), count)
+        self.assert_registration()
+
+    def test_lost_create_response_allows_exact_prospective_child_as_master_blocker(self):
+        def crash(path, method, data):
+            if path == "issues":
+                self.github.dependencies[35] = {90}
+                self.github.child_links[35].add(90)
+                raise Crash()
+        self.github.after = crash
+        with self.assertRaises(Crash):
+            self.register()
+        self.assertIsNone(self.journal()[1]["child"])
+        self.github.after = None
+        self.assertEqual(Backlog(self.github, self.state, 35).reconcile(), [90])
+        self.assertEqual(sum(m[0] == "issues" for m in self.github.mutations), 1)
+        self.assert_registration()
+
+    def test_changed_prospective_child_does_not_authorize_a_new_master_blocker(self):
+        def crash(path, method, data):
+            if path == "issues":
+                self.github.dependencies[35] = {90}
+                self.github.issues[90]["body"] += " Unreviewed additional requirements."
+                raise Crash()
+        self.github.after = crash
+        with self.assertRaises(Crash):
+            self.register()
+        self.github.after = None
+        with self.assertRaisesRegex(BacklogError, "master blocker"):
+            Backlog(self.github, self.state, 35).reconcile()
+        self.assertEqual(len(self.github.mutations), 1)
+
+    def test_confirmed_master_identity_revocation_is_typed_during_pending_replay(self):
+        self.github.after = lambda *args: (_ for _ in ()).throw(Crash())
+        with self.assertRaises(Crash):
+            self.register()
+        self.github.after = None
+        blockers = self.github.blockers
+        for rows in ([issue_row(36, "foreign/private")], [self.github.issue(36), self.github.issue(36)],
+                     [issue_row(36, self.github.repo, node_id="I_other")]):
+            with self.subTest(rows=rows), mock.patch.object(self.github, "blockers", side_effect=lambda n: rows if n == 35 else blockers(n)):
+                with self.assertRaises(MasterBlockerInvalid):
+                    Backlog(self.github, self.state, 35).reconcile()
+        self.assertEqual(len(self.github.mutations), 1)
 
     def test_exact_registration_replays_but_changed_source_or_review_is_refused(self):
         number = self.register()

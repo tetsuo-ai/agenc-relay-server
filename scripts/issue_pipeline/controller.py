@@ -327,8 +327,9 @@ class Controller:
             numbers = [task.issue for task in graph.tasks] + [int(graph.legacy_umbrella["issue"])]
             with ThreadPoolExecutor(max_workers=4) as pool:
                 issues = dict(zip(numbers, pool.map(self.github.issue, numbers)))
-                blockers = dict(zip(numbers, pool.map(
-                    lambda n: native_issue_numbers(self.github.blockers(n), self.config.repository, issues), numbers)))
+                blocker_owners = [*numbers, graph.master_issue]
+                blockers = dict(zip(blocker_owners, pool.map(
+                    lambda n: native_issue_numbers(self.github.blockers(n), self.config.repository, issues), blocker_owners)))
             graph.validate_native_links(native_issue_numbers(
                 self.github.children(graph.master_issue), self.config.repository, issues), blockers)
             return graph, issues
@@ -1042,7 +1043,7 @@ class Controller:
     def recover(self) -> None:
         if self.config.use_systemd:
             halt_children(self.config.state)
-        from .backlog import Backlog
+        from .backlog import Backlog, MasterBlockerInvalid
         with self.graph_lock:
             # Backlog.reconcile can publish an interrupted operation. Validate
             # every journal against its queued approval and catalog before any
@@ -1068,7 +1069,17 @@ class Controller:
                 if approved.get(descriptor["parent"]) != identity:
                     raise PipelineBlocked("incomplete discovery journal has no matching approved pending queue entry; preserve "
                                           + descriptor["path"] + " and reconcile its original proof")
-            backlog.reconcile()
+            try:
+                backlog.reconcile()
+            except MasterBlockerInvalid:
+                # A confirmed new master requirement revokes owned closures
+                # even while an approved graph journal is pending. Ordinary
+                # transport/partial-publication uncertainty must repair first.
+                try:
+                    self.reconcile_aggregates(recheck_only=True)
+                except Exception:
+                    pass  # Original journals and compensation failures remain blocked.
+                raise
         self.reconcile_aggregates()
         for record in self.state.recover_interrupted():
             self.state.release(record["issue"])

@@ -195,7 +195,7 @@ class DoctorTests(CommandFixture, unittest.TestCase):
         self.github.issue.side_effect = lambda number: issue_row(
             number, self.config.repository, body=graph_body() if number == 35 else "Task requirements")
         self.github.children.return_value = [self.github.issue(n) for n in (36, 43, 13)]
-        self.github.blockers.side_effect = lambda number: [self.github.issue(n) for n in {36: [], 43: [36], 13: [36]}[number]]
+        self.github.blockers.side_effect = lambda number: [self.github.issue(n) for n in {35: [], 36: [], 43: [36], 13: [36]}[number]]
         self.secret = "DOCTOR_AUTH_OUTPUT_MUST_NOT_BE_LOGGED"
         self.patches = [
             mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/bin/" + command),
@@ -239,6 +239,21 @@ class DoctorTests(CommandFixture, unittest.TestCase):
                     cli.doctor(self.config)
                 self.assertFalse(self.config.state.exists())
                 self.github.comment.assert_not_called()
+
+    def test_doctor_reads_master_blockers_and_rejects_unmanaged_or_mismatched_identities(self):
+        blockers = self.github.blockers.side_effect
+        for rows in ([self.github.issue(36), self.github.issue(13)], []):
+            self.github.blockers.side_effect = lambda number: rows if number == 35 else blockers(number)
+            cli.doctor(self.config)
+        for rows in ([issue_row(99, self.config.repository)], [self.github.issue(35)],
+                     [issue_row(36, "foreign/private")], [issue_row(36, self.config.repository, id=9000)],
+                     [issue_row(36, self.config.repository, node_id="I_foreign")],
+                     [self.github.issue(36), self.github.issue(36)]):
+            self.github.blockers.side_effect = lambda number: rows if number == 35 else blockers(number)
+            with self.subTest(rows=rows), self.assertRaises(GithubError):
+                cli.doctor(self.config)
+        self.assertFalse(self.config.state.exists())
+        self.github.comment.assert_not_called()
 
     def test_doctor_checks_global_identity_for_new_clone_and_reads_existing_clone_only(self):
         cli.doctor(self.config)
