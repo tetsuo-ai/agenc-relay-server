@@ -1,0 +1,203 @@
+"""Mock-network tests for exact GitHub requests and fail-closed hosted evidence."""
+
+from __future__ import annotations
+
+import json
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from issue_pipeline.github import Github, GithubError
+
+SHA = "a" * 40
+OTHER = "b" * 40
+
+
+class GithubTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.github = Github("example/private", cwd=Path("/tmp"))
+
+    def test_exact_json_body_uses_stdin_without_shell_or_interpolation(self) -> None:
+        body = "first line\n`literal` $(touch nope)\nUnicode: é"
+        with patch("issue_pipeline.github._process", return_value=(0, '{"id":1}')) as process:
+            self.github.comment(35, body)
+        args = process.call_args.args
+        self.assertEqual(args[0][0:3], ["gh", "api", "repos/example/private/issues/35/comments"])
+        self.assertIn("--input", args[0])
+        self.assertEqual(args[0][-1], "-")
+        self.assertEqual(json.loads(args[3]), {"body": body})
+        self.assertNotIn(body, args[0])
+
+    def test_mutation_failure_is_not_retried_or_echoed(self) -> None:
+        with patch("issue_pipeline.github._process", return_value=(1, "SECRET_CREDENTIAL")) as process:
+            with self.assertRaises(GithubError) as captured:
+                self.github.comment(35, "receipt")
+        self.assertEqual(process.call_count, 1)
+        self.assertNotIn("SECRET_CREDENTIAL", str(captured.exception))
+
+    def test_cross_repository_nonfinite_or_oversized_api_inputs_are_refused(self) -> None:
+        with patch("issue_pipeline.github._process") as process:
+            with self.assertRaises(GithubError):
+                self.github.api("repos/other/private/issues/35")
+            with self.assertRaises(GithubError):
+                self.github.api("issues/../35")
+            with self.assertRaises(GithubError):
+                self.github.api("issues/35", "POST", {"number": float("nan")})
+            with self.assertRaises(GithubError):
+                self.github.comment(35, "x" * (1024 * 1024 + 1))
+        process.assert_not_called()
+
+    def test_master_graph_requires_one_matching_json_graph(self) -> None:
+        graph = {"version": 1, "master_issue": 35, "tasks": []}
+        issue = {"number": 35, "state": "open", "body": "text\n```json\n" + json.dumps(graph) + "\n```\n"}
+        with patch.object(self.github, "api", return_value=issue):
+            self.assertEqual(self.github.master_graph(35), graph)
+            issue["body"] *= 2
+            with self.assertRaises(GithubError):
+                self.github.master_graph(35)
+            issue["body"] = "```json\n{\"master_issue\":36,\"tasks\":[]}\n```"
+            with self.assertRaises(GithubError):
+                self.github.master_graph(35)
+            issue["body"] = "```json\n{broken\n```"
+            with self.assertRaises(GithubError):
+                self.github.master_graph(35)
+            issue["body"] = '```json\n{"master_issue":35,"tasks":[],"tasks":[1]}\n```'
+            with self.assertRaises(GithubError):
+                self.github.master_graph(35)
+
+    def test_issue_refuses_pr_bool_number_and_wrong_identity(self) -> None:
+        with self.assertRaises(GithubError):
+            self.github.issue(True)
+        with patch.object(self.github, "api", return_value={"number": 36, "state": "open", "body": ""}):
+            with self.assertRaises(GithubError):
+                self.github.issue(35)
+        with patch.object(self.github, "api", return_value={"number": 35, "pull_request": {}}):
+            with self.assertRaises(GithubError):
+                self.github.issue(35)
+
+    def test_native_child_dependency_and_comment_pagination(self) -> None:
+        page = [{"number": number} for number in range(1, 101)]
+        with patch.object(self.github, "api", side_effect=[page, [{"number": 101}]]) as api:
+            self.assertEqual(len(self.github.children(35)), 101)
+        self.assertEqual(api.call_args_list[0].args[0], "issues/35/sub_issues?per_page=100&page=1")
+        self.assertEqual(api.call_args_list[1].args[0], "issues/35/sub_issues?per_page=100&page=2")
+        with patch.object(self.github, "api", return_value=[]) as api:
+            self.assertEqual(self.github.blockers(40), [])
+            self.assertIn("dependencies/blocked_by", api.call_args.args[0])
+            self.assertEqual(self.github.comments(40), [])
+            self.assertIn("/comments", api.call_args.args[0])
+
+    def test_pagination_refuses_exhaustion_or_malformed_page(self) -> None:
+        with patch("issue_pipeline.github.MAX_PAGES", 2), \
+                patch.object(self.github, "api", return_value=[{}] * 100):
+            with self.assertRaises(GithubError):
+                self.github.children(35)
+        with patch.object(self.github, "api", return_value={"items": []}):
+            with self.assertRaises(GithubError):
+                self.github.comments(35)
+        with patch("issue_pipeline.github.MAX_OUTPUT", 10), \
+                patch.object(self.github, "api", return_value=[{"body": "long response"}]):
+            with self.assertRaises(GithubError):
+                self.github.comments(35)
+
+    def test_create_pr_and_status_use_exact_structured_payloads(self) -> None:
+        with patch.object(self.github, "api", return_value={"number": 90}) as api:
+            self.github.create_pr("pipeline/issue-40", "Resolve #40", "first\nsecond")
+            self.assertEqual(api.call_args.args,
+                             ("pulls", "POST", {"head": "pipeline/issue-40", "base": "main", "title": "Resolve #40",
+                                                "body": "first\nsecond", "draft": False}))
+            self.github.set_status(SHA, "success", "agenc/pipeline", "Reviewed exact commit", "https://example.invalid/receipt")
+            self.assertEqual(api.call_args.args[0], f"statuses/{SHA}")
+            self.assertEqual(api.call_args.args[2]["state"], "success")
+        with self.assertRaises(GithubError):
+            self.github.set_status("HEAD", "success", "agenc/pipeline", "bad SHA")
+
+    def test_merged_pr_readback_refuses_closed_unmerged_or_changed_head(self) -> None:
+        value = {"number": 90, "state": "closed", "merged": False, "head": {"sha": SHA},
+                 "base": {"sha": OTHER}, "merge_commit_sha": SHA}
+        with patch.object(self.github, "api", return_value=value):
+            with self.assertRaises(GithubError):
+                self.github.merged_pr(90, SHA)
+            value["merged"] = True
+            with self.assertRaises(GithubError):
+                self.github.merged_pr(90, OTHER)
+            self.assertTrue(self.github.merged_pr(90, SHA)["merged"])
+            value["merge_commit_sha"] = None
+            with self.assertRaises(GithubError):
+                self.github.merged_pr(90, SHA)
+
+    def test_close_and_add_labels_never_replace_unrelated_labels(self) -> None:
+        with patch.object(self.github, "api", return_value={"state": "closed"}) as api:
+            self.github.close_issue(35)
+            self.assertEqual(api.call_args.args, ("issues/35", "PATCH", {"state": "closed", "state_reason": "completed"}))
+            self.github.add_labels(35, ["pipeline:blocked"])
+            self.assertEqual(api.call_args.args, ("issues/35/labels", "POST", {"labels": ["pipeline:blocked"]}))
+
+    def checks(self, *, checks=None, statuses=None, workflows=None, jobs=None, ignored=()):
+        def response(path, member=None):
+            if "/check-runs" in path:
+                return checks or []
+            if "/statuses" in path:
+                return statuses or []
+            if "/jobs" in path:
+                return jobs or []
+            if path.startswith("actions/runs?"):
+                return workflows or []
+            self.fail(f"unexpected path {path}")
+        with patch.object(self.github, "_pages", side_effect=response):
+            return self.github.hosted_checks(SHA, ignored)
+
+    def test_empty_hosted_state_is_never_passing(self) -> None:
+        summary = self.checks()
+        self.assertEqual(summary["state"], "empty")
+        self.assertFalse(summary["blocking"])
+
+    def test_zero_job_startup_failure_is_retained_and_never_passing(self) -> None:
+        workflow = {"id": 123, "head_sha": SHA, "status": "completed", "conclusion": "startup_failure"}
+        summary = self.checks(workflows=[workflow])
+        self.assertEqual(summary["state"], "startup_failure")
+        self.assertFalse(summary["blocking"])
+        self.assertEqual(summary["startup_failures"], [workflow])
+        self.assertEqual(self.checks(workflows=[workflow], jobs=[{"id": 1}])["state"], "failed")
+
+    def test_actual_failed_checks_block_even_with_startup_failure(self) -> None:
+        workflow = {"id": 123, "head_sha": SHA, "status": "completed", "conclusion": "startup_failure"}
+        check = {"name": "test", "head_sha": SHA, "status": "completed", "conclusion": "failure"}
+        summary = self.checks(checks=[check], workflows=[workflow])
+        self.assertEqual(summary["state"], "failed")
+        self.assertTrue(summary["blocking"])
+        self.assertEqual(len(summary["startup_failures"]), 1)
+
+    def test_successful_workflow_without_actual_jobs_is_not_passing(self) -> None:
+        workflow = {"id": 123, "head_sha": SHA, "status": "completed", "conclusion": "success"}
+        self.assertEqual(self.checks(workflows=[workflow])["state"], "incomplete")
+        job = {"id": 1, "status": "completed", "conclusion": "success"}
+        self.assertEqual(self.checks(workflows=[workflow], jobs=[job])["state"], "passed")
+        job["conclusion"] = "failure"
+        self.assertEqual(self.checks(workflows=[workflow], jobs=[job])["state"], "failed")
+
+    def test_pending_skipped_and_successful_checks_are_distinct(self) -> None:
+        check = {"name": "test", "head_sha": SHA, "status": "in_progress", "conclusion": None}
+        self.assertEqual(self.checks(checks=[check])["state"], "pending")
+        check.update(status="completed", conclusion="skipped")
+        self.assertEqual(self.checks(checks=[check])["state"], "incomplete")
+        check["conclusion"] = "success"
+        self.assertEqual(self.checks(checks=[check])["state"], "passed")
+
+    def test_status_context_selects_latest_and_can_ignore_controller_marker(self) -> None:
+        statuses = [{"context": "ci", "state": "success"}, {"context": "ci", "state": "failure"},
+                    {"context": "agenc/pipeline", "state": "pending"}]
+        self.assertEqual(self.checks(statuses=statuses)["state"], "pending")
+        summary = self.checks(statuses=statuses, ignored=["agenc/pipeline"])
+        self.assertEqual(summary["state"], "passed")
+        self.assertEqual(len(summary["statuses"]), 1)
+
+    def test_mismatched_check_or_workflow_sha_fails_closed(self) -> None:
+        with self.assertRaises(GithubError):
+            self.checks(checks=[{"name": "test", "head_sha": OTHER}])
+        with self.assertRaises(GithubError):
+            self.checks(workflows=[{"id": 1, "head_sha": OTHER}])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,79 @@
+# Automated issue execution
+
+The controller follows the dependency graph in [master issue #35](https://github.com/tetsuo-ai/agenc-ircd/issues/35). It runs two issue pipelines concurrently, with at most four fresh Codex sessions and one full validation/merge lane. The installed policy is a private, fixed copy of `.codex/issue-pipeline.toml`; editing a candidate checkout cannot replace the running controller.
+
+The initial deployment uses this Linux machine and its existing `codex login` and `gh auth` credentials. It uses `codex exec`, the supported noninteractive CLI interface. Codex's removed MCP-server interface is not a dependency. No additional API key is required for the existing login. Usage is charged against that account's limits; timeouts, bounded attempts and concurrency limits bound individual runs, not total subscription usage.
+
+## Execution and acceptance
+
+1. Read and validate the live master JSON DAG and every native child/blocker relationship. Closed prerequisites also need accepted, source-bound completion receipts. Labels alone are insufficient.
+2. Claim the issue's integration scopes. A planner in a detached read-only worktree reads the complete issue, requirements, code and tests. A fresh reviewer checks the plan covers every acceptance criterion. Claim the exact proposed files atomically; overlapping files or scopes wait.
+3. Run each phase in its own branch and worktree. Normative contracts merge before dependent implementation phases. A worker edits only declared files, runs focused checks and supplies an acceptance matrix. The controller commits those edits. Workers do not own GitHub mutations, commits or merges.
+4. Serialize integration. Refresh `main`, resolve changes and obtain two fresh reviews on the committed candidate: acceptance/specification and security/failure behavior. Rebased or changed source requires new reviews and new gate evidence.
+5. Run `AGENC_IRCD_RECORD_GATE=1 bash scripts/check-stage-nine.sh` in one persistent detached validation worktree. Validate the entire recorded artifact, including source, toolchain, manifest, commands and timings, with the repository's evidence checker. Retain the artifact and complete log outside all agent worktrees. Ordinary candidates cannot rewrite the controller, mandatory checker programs or toolchain policy, remove/reorder checks, or lower coverage floors.
+6. Publish a PR with receipt hashes only after both reviews and the recorded full gate pass. Evaluate hosted checks separately. Actual failed or pending jobs block merging. This repository currently has zero-job Actions startup failures and no private-plan branch protection; an empty check list is never called passing. The local recorded gate is the configured merge authority while issue #41 tracks hosted CI qualification.
+7. Verify the issue/dependencies, candidate and evidence again. Prove the candidate descends from the expected `main` commit, then push with an exact expected-old-ref lease. That compare-and-swap refuses a concurrent base change and cannot rewrite main history. Verify GitHub reports the PR merged at the reviewed source before closing anything.
+8. Close the issue only after all phase PRs merge and final acceptance covers the whole issue. Retain immutable receipts and update the master execution-status comment. Delete only the controller-owned, merged branch and worktree. `target/` and `fuzz/target/` are disposable build outputs; unknown files, foreign refs and uncertain work are preserved.
+
+Each model runs in a systemd cgroup with a two-hour timeout, 64 GiB memory ceiling and eight CPU equivalents. The full gate has a three-hour timeout, 256 GiB ceiling and sixteen CPU equivalents. Limits are configurable. The controller stops and checks the entire cgroup before using its output. It never falls back to an unrestricted sandbox. Separate subagents are separate CLI sessions and worktrees; nested uncontrolled fan-out is disabled.
+
+The full gate also requires the installed root-owned setuid Firejail helper. It hides account credentials and unrelated home directories, makes candidate source and existing dependency packages read-only, and exposes only the required toolchain, private Cargo cache and controlled build/artifact paths. Before every gate, harmless positive and denial controls verify that the restrictions actually work. Unsupported or ineffective containment blocks execution. New dependency packages require preparation of the private cache before they can be built; candidate code cannot make existing package bodies writable. `HOME` stays unchanged.
+
+The controller stores SQLite WAL checkpoints, claims, model transcripts, proof hashes and remote-action intent under `~/.local/state/agenc-ircd-pipeline`. On restart it stops owned transient units before reconciling checkpoints. Ambiguous remote responses are read back; an uncertain PR creation or merge pauses its issue instead of blindly repeating it. Failed checks get at most three worker attempts per phase. Exhausted or ambiguous work remains inspectable and appears in the master status comment. It is not deleted or called complete.
+
+Branch pushes and deletion have durable local journals, including recovery after a worktree has already been removed. An interruption between a new worktree, commit or rebase and its ownership-ledger update is preserved for inspection; the controller does not adopt an unexpectedly changed Git head. This is an explicit recovery handoff, rather than permission to discard unverified work.
+
+## Installation and operation
+
+Install from the clean, committed source revision that passed the full gate:
+
+```sh
+python3 scripts/test-issue-pipeline.py
+python3 scripts/issue-pipeline.py --config .codex/issue-pipeline.toml doctor
+python3 scripts/issue-pipeline.py --config .codex/issue-pipeline.toml install --source-commit "$(git rev-parse HEAD)"
+systemctl --user enable --now agenc-ircd-issue-pipeline.service
+```
+
+The installer creates a content-addressed bundle under `~/.local/share/agenc-ircd-pipeline/releases/`, a private configuration file, and a stopped user service. It neither changes account credentials nor activates itself. Installation does not establish test evidence: the setup/upgrade PR must receive its own independent review and full gate before activation. Controller/policy upgrades require this same explicit release procedure and cannot self-install through ordinary issue work.
+
+Useful commands from a repository checkout:
+
+```sh
+python3 scripts/issue-pipeline.py status
+python3 scripts/issue-pipeline.py plan
+python3 scripts/issue-pipeline.py pause
+python3 scripts/issue-pipeline.py resume
+journalctl --user -u agenc-ircd-issue-pipeline.service -f
+systemctl --user stop agenc-ircd-issue-pipeline.service
+python3 scripts/issue-pipeline.py retry 36
+systemctl --user start agenc-ircd-issue-pipeline.service
+```
+
+`pause` stops dispatching new tasks; `stop` cancels current sessions and retains checkpoints. Stop the service before retrying a blocked issue or importing specialized qualification evidence. User services survive logout/reboot only if the account's user manager remains running (for example, user lingering is enabled). Disk must remain above the configured 256 GiB floor; the persistent full gate cache can itself exceed 200 GiB. Do not place it in `/tmp` or delete its active files. Back up the state directory: GitHub issue closure is deliberately insufficient to reconstruct lost acceptance receipts.
+
+## Specialized qualification and new discoveries
+
+Upstream redb fixes, native release runs, service-user checks, independent encryption review and signing tasks use explicit specialized routes. Their handoff includes the live issue and source. The controller does not substitute a generic repository PR or a model's opinion for the required environment, external review or signature. It continues unrelated ready work and keeps the qualification issue open.
+
+After an operator has obtained and checked the actual qualification, `accept-external ISSUE --evidence FILE` imports an explicit attestation. This command is never called by an agent. Its JSON schema is:
+
+```json
+{
+  "version": 1,
+  "issue": 43,
+  "route": "host",
+  "source": "FULL_40_CHARACTER_COMMIT_SHA",
+  "approver": "Name and qualification role",
+  "qualification_url": "https://github.com/tetsuo-ai/agenc-ircd/issues/43#issuecomment-EVIDENCE",
+  "acceptance": [{"criterion": "Exact issue acceptance requirement", "evidence": "Observed result and artifact location"}],
+  "artifacts": [{"path": "/absolute/path/to/qualification.json", "sha256": "FULL_SHA256"}]
+}
+```
+
+Every acceptance requirement must be included. JSON is limited to 1 MiB, with at most 64 artifacts, 8 GiB per artifact and 32 GiB total. Artifact paths must be absolute ordinary files with lowercase SHA-256 hashes. The importer checks the task route, dependency proof, source ancestry and artifact hashes, preserves the artifacts, and explicitly identifies the human attestation on GitHub. These structural checks cannot establish the scientific or security adequacy of an external review: that remains the named approver's responsibility. Keep release-bound evidence tied to the release candidate specified by the issue. If an import is interrupted or its GitHub response is uncertain, leave the service stopped and repeat `python3 scripts/issue-pipeline.py accept-external ISSUE --evidence /absolute/path/to/the-original-import.json`. Use the identical JSON; its retained artifacts and receipt are reused, and an already-closed issue is read back. The task stays blocked until this explicit import completes. Ordinary `retry ISSUE` does not resume an import. Interrupted copies never publish partial final artifacts; mismatched retained evidence is preserved and rejected for operator inspection.
+
+Workers report newly required work as discoveries. A fresh reviewer verifies each claim against source before the controller creates a detailed prerequisite, adds native links, and updates master ordering, locks and counts. A durable journal makes each step reconcilable. Our writers share one graph lock; GitHub issue-body edits have no atomic version precondition, so unrelated writers must not concurrently edit the master during a graph update. Detected divergent edits stop reconciliation and preserve the journal. Vulnerability reports still follow `SECURITY.md`.
+
+## Limits of automation
+
+Passing checks and model reviews do not prove absence of defects. Independent reviews use separate contexts but may share a model's blind spots. The pipeline enforces evidence and ordering; it cannot manufacture native machines, upstream authority, third-party review or release-signing authority. Blocked issues and retained diagnostics are explicit handoffs, not silent success. The server becomes production-ready only when the final release issue and all its prerequisites have actual accepted qualification evidence.
