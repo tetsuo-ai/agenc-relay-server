@@ -94,6 +94,27 @@ class LocalCommandTests(CommandFixture, unittest.TestCase):
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["data"], {**data, "attempt": 0, "reason": None, "retry_after": 0})
 
+    def test_retry_resets_only_remaining_discovery_budgets_and_preserves_approval_bindings(self):
+        private_directory(self.config.state)
+        data = {"attempt": 3, "reason": "discovery review budget exhausted", "retry_after": 999,
+                "worktree": "/retained/worktree", "candidate": SOURCE, "phase_index": 2,
+                "plan": {"phases": ["retained"]}, "remote_action": None, "dependency_replan": True,
+                "pending_discoveries": {"source": SOURCE, "cursor": 1, "entries": [
+                    {"discovery": {"title": "Already registered"}, "review_receipt": 11, "review_attempts": 1},
+                    {"discovery": {"title": "Approved pending registration"}, "review_receipt": 12, "review_attempts": 3},
+                    {"discovery": {"title": "Unreviewed pending entry"}, "review_attempts": 3}]}}
+        expected = copy.deepcopy(data)
+        expected.update(attempt=0, reason=None, retry_after=0, remote_action="register-discoveries")
+        for entry in expected["pending_discoveries"]["entries"][1:]:
+            entry["review_attempts"] = 0
+        with State(self.config.state / "state.sqlite3") as state:
+            state.set_task(43, "blocked", data)
+        self.invoke("retry", "43")
+        with State(self.config.state / "state.sqlite3") as state:
+            row = state.get_task(43)
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["data"], expected)
+
     def test_retry_refuses_unknown_active_complete_tasks_and_live_supervisor(self):
         private_directory(self.config.state)
         with State(self.config.state / "state.sqlite3") as state:

@@ -164,6 +164,30 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(self.github.mutations, mutations)
         self.assertEqual(self.backlog.reconcile(), [])
 
+    def test_registration_started_is_read_only_and_bound_to_original_approval(self):
+        self.assertFalse(self.backlog.registration_started(41, DISCOVERY, SOURCE, REVIEW))
+        self.assertEqual(self.github.mutations, [])
+        self.register()
+        mutations = copy.deepcopy(self.github.mutations)
+        self.assertTrue(self.backlog.registration_started(41, DISCOVERY, SOURCE, REVIEW))
+        self.assertFalse(self.backlog.registration_started(41, {**DISCOVERY, "title": "Different work"}, SOURCE, REVIEW))
+        for source, review in (("c" * 40, REVIEW), (SOURCE, {**REVIEW, "summary": "Another review"})):
+            with self.subTest(source=source, review=review):
+                with self.assertRaisesRegex(BacklogError, "different approved intent"):
+                    self.backlog.registration_started(41, DISCOVERY, source, review)
+        self.assertEqual(self.github.mutations, mutations)
+
+    def test_registration_started_recognizes_prepared_journal_without_remote_mutations(self):
+        def before(path, method, data):
+            raise Crash("before the provider applied creation")
+        self.github.before = before
+        with self.assertRaises(Crash):
+            self.register()
+        self.assertEqual(self.github.next_issue, 90)
+        mutations = copy.deepcopy(self.github.mutations)
+        self.assertTrue(self.backlog.registration_started(41, DISCOVERY, SOURCE, REVIEW))
+        self.assertEqual(self.github.mutations, mutations)
+
     def test_different_discovery_gets_next_key_and_preserves_audit_snapshot(self):
         self.register()
         discovery = {**DISCOVERY, "title": "Bound response encoding"}

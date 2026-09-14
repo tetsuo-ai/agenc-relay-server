@@ -213,6 +213,27 @@ class Backlog:
                 return matches
         raise BacklogError("issue listing exceeds reconciliation bound; locate the exact marker manually")
 
+    def _identity_path(self, parent_issue, discovery):
+        identity = hashlib.sha256(_encode([self.github.repo, self.master_issue,
+                                          _positive(parent_issue), discovery]).encode()).hexdigest()
+        return identity, self.directory / f"{identity}.json"
+
+    def registration_started(self, parent_issue: int, discovery: dict, source: str, review: dict) -> bool:
+        """Whether this exact approved intent already owns a durable journal.
+
+        Its original review context remains authoritative during idempotent
+        recovery: the operation's own publication changes the live catalog.
+        This is read-only and does not infer an intent from a matching title.
+        """
+        _, path = self._identity_path(parent_issue, discovery)
+        if not path.exists():
+            return False
+        journal = self._load(path)
+        if (journal.get("parent") != parent_issue or journal.get("discovery") != discovery
+                or journal.get("source") != source or journal.get("review") != review):
+            self._conflict(path, "existing registration belongs to a different approved intent")
+        return True
+
     def register(self, parent_issue: int, discovery: dict, source: str, review: dict) -> int:
         """Create/link one verified prerequisite or resume its exact prior journal."""
         parent_issue = _positive(parent_issue)
@@ -230,8 +251,7 @@ class Backlog:
                 or any(type(item) is not str or not item.strip() or len(item) > 2048 for item in discovery["acceptance"])
                 or type(source) is not str or re.fullmatch(r"[0-9a-f]{40}", source) is None):
             raise BacklogError("discovery requires bounded title/description/acceptance and an exact source SHA")
-        identity = hashlib.sha256(_encode([self.github.repo, self.master_issue, parent_issue, discovery]).encode()).hexdigest()
-        path = self.directory / f"{identity}.json"
+        identity, path = self._identity_path(parent_issue, discovery)
         if path.exists():
             return self._resume(self._load(path), path)
         self.reconcile()  # No new operation while an old one is unresolved.

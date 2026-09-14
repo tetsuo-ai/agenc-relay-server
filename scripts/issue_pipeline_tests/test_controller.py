@@ -11,7 +11,7 @@ from unittest import mock
 
 from issue_pipeline.config import Config, digest_file
 from issue_pipeline.backlog import Backlog
-from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, task_hash
+from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, encode, task_hash
 from issue_pipeline.gate import GateFailure
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.graph import Graph
@@ -773,6 +773,7 @@ class ControllerTests(unittest.TestCase):
         self.controller.runner = self.runner
         self.github.issues[41]["state"] = "closed"
         original = Backlog.register
+        original_api = self.github.api
 
         def interrupted_register(backlog, *args, **kwargs):
             if boundary == "before-register":
@@ -786,10 +787,17 @@ class ControllerTests(unittest.TestCase):
             if boundary == "between-entries" and message == "registered verified prerequisite":
                 raise SystemExit("crash after first cursor checkpoint, before next review")
 
+        def interrupted_api(endpoint, method="GET", payload=None):
+            result = original_api(endpoint, method, payload)
+            if boundary == "during-register" and endpoint == "issues" and method == "POST":
+                raise SystemExit("crash after creation, before linking the new child")
+            return result
+
         with mock.patch.object(Backlog, "register", interrupted_register):
             with mock.patch.object(self.controller, "log", side_effect=interrupted_log):
-                with self.assertRaises(SystemExit):
-                    self.execute()
+                with mock.patch.object(self.github, "api", side_effect=interrupted_api):
+                    with self.assertRaises(SystemExit):
+                        self.execute()
         record = self.controller.state.get_task(36)
         pending = record["data"]["pending_discoveries"]
         self.assertEqual(record["data"]["remote_action"], "register-discoveries")
@@ -801,6 +809,9 @@ class ControllerTests(unittest.TestCase):
         if boundary == "before-register":
             self.assertEqual(list((self.config.state / "backlog").glob("*.json")), [])
             self.assertNotIn(100, self.github.issues)
+        elif boundary == "during-register":
+            self.assertIn(100, self.github.issues)
+            self.assertNotIn(100, self.github.graph.by_issue)
         else:
             self.assertIn(100, self.github.graph.by_issue[36].depends_on)
         # New controller and SQLite connection exercise actual restart recovery;
@@ -837,6 +848,9 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(reviews), count)
         self.assertTrue(all(item["status"] == "accepted" and self.controller.receipt_valid(item)
                             for item in reviews))
+        original_catalog = json.loads(Path(reviews[0]["data"]["artifacts"]["backlog"]).read_text())
+        self.assertNotIn(100, {item["number"] for item in original_catalog["issues"]})
+        self.assertIn(100, self.github.graph.by_issue)
 
     def test_discovery_restart_after_remote_registration_replans_parent(self):
         self.assert_discovery_restart_completes("after-register")
@@ -853,8 +867,9 @@ class ControllerTests(unittest.TestCase):
         Path(receipt["data"]["artifacts"]["review"]).unlink()
         calls = len(self.runner.calls)
         with mock.patch("issue_pipeline.controller.halt_children"):
-            self.controller.run(once=True)
-            self.controller.run(once=True)
+            for _ in range(2):
+                with self.assertRaisesRegex(PipelineBlocked, "source-bound review artifact"):
+                    self.controller.run(once=True)
         parent = self.controller.state.get_task(36)
         self.assertEqual(parent["status"], "blocked")
         self.assertIn("source-bound review artifact", parent["data"]["reason"])
@@ -863,6 +878,132 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.github.next_issue, 100)
         self.assertTrue(retained.exists())
         self.assertEqual(len(self.runner.calls), calls)
+
+    def test_discovery_snapshot_is_complete_and_granted_as_one_exact_readonly_evidence_file(self):
+        self.runner = DiscoveryAgents()
+        self.controller.runner = self.runner
+        self.github.issues[41].update(state="closed", body="Complete existing acceptance.\n" * 1000 + "FULL-BODY-END")
+        expected = {number: self.github.issue(number) for number in (13, 36, 41, 86)}
+        original = self.runner.run
+        observed = []
+
+        def inspect_context(role, worktree, prompt, output, **kwargs):
+            request = json.loads(prompt)
+            if kwargs.get("review_purpose") == "discovery":
+                reference = request["managed_backlog"]
+                path = Path(reference["path"])
+                # session forwards one trusted exact file to the permission
+                # profile, whose evidence-path rule grants read access only.
+                self.assertEqual(kwargs["evidence_paths"], (path,))
+                self.assertTrue(path.is_file())
+                self.assertFalse(path.is_relative_to(worktree))
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(digest_file(path), reference["sha256"])
+                self.assertLess(len(prompt.encode()), 512 * 1024)
+                catalog = json.loads(path.read_text())
+                self.assertEqual(reference["issue_count"], 4)
+                self.assertEqual(catalog["master"]["number"], 35)
+                self.assertEqual({item["issue"] for item in catalog["graph"]["tasks"]}, {36, 41, 86})
+                self.assertEqual({item["number"] for item in catalog["issues"]}, set(expected))
+                for row in catalog["issues"]:
+                    for field in ("title", "body", "state"):
+                        self.assertEqual(row[field], expected[row["number"]][field])
+                    self.assertIn("locks", row)
+                    self.assertIn("depends_on", row)
+                self.assertIn("outside this managed backlog are not included", catalog["scope"])
+                observed.append(path)
+            return original(role, worktree, prompt, output, **kwargs)
+
+        with mock.patch.object(self.runner, "run", side_effect=inspect_context):
+            self.execute()
+        self.assertEqual(len(observed), 1)
+        receipt = self.controller.state.receipts(36, "discovery-review")[0]
+        self.assertEqual(receipt["data"]["artifacts"]["backlog"], str(observed[0]))
+        self.assertEqual(receipt["artifact_hashes"]["backlog"], receipt["data"]["backlog_hash"])
+        self.assertTrue(self.controller.receipt_valid(receipt))
+
+    def test_stale_discovery_catalog_gets_fresh_review_before_any_publication(self):
+        self.runner = DiscoveryAgents()
+        self.controller.runner = self.runner
+        original = self.runner.run
+        catalogs = []
+
+        def change_coverage(role, worktree, prompt, output, **kwargs):
+            result = original(role, worktree, prompt, output, **kwargs)
+            if kwargs.get("review_purpose") == "discovery":
+                reference = json.loads(prompt)["managed_backlog"]
+                catalogs.append(json.loads(Path(reference["path"]).read_text()))
+                if len(catalogs) == 1:
+                    self.github.issues[41]["body"] += "\nExisting issue covers the proposed prerequisite."
+                else:
+                    existing = next(item for item in catalogs[-1]["issues"] if item["number"] == 41)
+                    self.assertIn("covers the proposed prerequisite", existing["body"])
+                    result.update(verdict="request_changes", acceptance_complete=False,
+                                  summary="Issue41 already covers this proposed prerequisite.")
+                    (output / "result.json").write_text(json.dumps(result))
+            return result
+
+        with mock.patch.object(self.runner, "run", side_effect=change_coverage):
+            with mock.patch.object(Backlog, "register") as register:
+                self.execute()
+                register.assert_not_called()
+        self.assertEqual(len(catalogs), 2)
+        self.assertEqual(self.github.next_issue, 100)
+        self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
+        reviews = self.controller.state.receipts(36, "discovery-review")
+        self.assertEqual([item["status"] for item in reviews], ["accepted", "rejected"])
+        self.assertNotEqual(reviews[0]["data"]["backlog_hash"], reviews[1]["data"]["backlog_hash"])
+
+    def test_repeated_catalog_changes_exhaust_bounded_review_budget_without_publication(self):
+        self.runner = DiscoveryAgents()
+        self.controller.runner = self.runner
+        original = self.runner.run
+
+        def change_every_review(role, worktree, prompt, output, **kwargs):
+            result = original(role, worktree, prompt, output, **kwargs)
+            if kwargs.get("review_purpose") == "discovery":
+                self.github.issues[41]["body"] += "\nChanged requirement."
+            return result
+
+        with mock.patch.object(self.runner, "run", side_effect=change_every_review):
+            with mock.patch.object(Backlog, "register") as register:
+                self.execute()
+                register.assert_not_called()
+        self.assertEqual(len(self.controller.state.receipts(36, "discovery-review")), self.config.max_attempts)
+        self.assertIn("review budget exhausted", self.controller.state.get_task(36)["data"]["reason"])
+        self.assertEqual(self.github.next_issue, 100)
+
+    def test_damaged_catalog_blocks_recovery_before_incomplete_backlog_publication(self):
+        self.interrupt_discovery_registration("during-register")
+        receipt = self.controller.state.receipts(36, "discovery-review")[0]
+        snapshot = Path(receipt["data"]["artifacts"]["backlog"])
+        snapshot.write_text(snapshot.read_text() + "\ncorrupted")
+        issues = copy.deepcopy(self.github.issues)
+        dependencies = copy.deepcopy(self.github.dependencies)
+        with mock.patch("issue_pipeline.controller.halt_children"):
+            for _ in range(2):
+                with self.assertRaisesRegex(PipelineBlocked, "managed backlog snapshot"):
+                    self.controller.recover()
+        self.assertEqual(self.github.issues, issues)
+        self.assertEqual(self.github.dependencies, dependencies)
+        self.assertNotIn(100, self.github.graph.by_issue)
+        self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
+
+    def test_complete_catalog_size_bound_is_exact_and_never_truncates(self):
+        catalog, digest = self.controller.managed_backlog()
+        size = len(encode(catalog).encode())
+        with mock.patch("issue_pipeline.controller.MAX_MANAGED_BACKLOG_BYTES", size):
+            self.assertEqual(self.controller.managed_backlog(), (catalog, digest))
+        with mock.patch("issue_pipeline.controller.MAX_MANAGED_BACKLOG_BYTES", size - 1):
+            with self.assertRaisesRegex(PipelineBlocked, "snapshot byte bound"):
+                self.controller.managed_backlog()
+        self.runner = DiscoveryAgents()
+        self.controller.runner = self.runner
+        with mock.patch("issue_pipeline.controller.MAX_MANAGED_BACKLOG_BYTES", 1):
+            self.execute()
+        self.assertEqual(self.github.next_issue, 100)
+        self.assertFalse((self.config.state / "backlog-reviews").exists())
+        self.assertFalse(any("discovery" in request for _, _, request in self.runner.calls))
 
     def test_rejected_later_discovery_cannot_be_skipped_when_first_prerequisite_completes(self):
         self.runner = MultipleDiscoveryAgents()

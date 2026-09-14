@@ -375,6 +375,12 @@ def main() -> int:
             if data.get("remote_action") == "external-import":
                 raise PipelineBlocked("repeat accept-external with the original evidence JSON to reconcile this import")
             data.update({"attempt": 0, "reason": None, "retry_after": 0})
+            pending = data.get("pending_discoveries")
+            if pending:
+                for entry in pending["entries"][pending["cursor"]:]:
+                    if "review_attempts" in entry:
+                        entry["review_attempts"] = 0
+                data["remote_action"] = "register-discoveries"
             state.set_task(args.issue, "pending", data)
             print(encode({"issue": args.issue, "status": "pending", "note": "restart the service to reconcile and retry"}))
     elif args.command == "accept-external":
