@@ -208,6 +208,54 @@ def _json(raw):
         raise ValueError("invalid JSON encoding or nesting") from error
 
 
+class _EventObject(list):
+    """Preserve event object pairs so telemetry cannot hide envelope ambiguity."""
+
+
+def _event_type(raw):
+    """Read control events strictly, tolerating one observed Codex telemetry quirk.
+
+    Codex 0.154 emits two string ``item.id`` keys for web-search item events:
+    its item identifier and the flattened search identifier. Neither identifier
+    grants authority here. Preserve the raw log, ignore both identifiers, and
+    reject every other duplicate, including envelope/turn-status fields. Final
+    role results always use the separate, recursively strict ``_json`` parser.
+    """
+    try:
+        event = json.loads(raw, object_pairs_hook=_EventObject, parse_constant=_invalid_constant)
+        if type(event) is not _EventObject:
+            raise ValueError("event requires an object")
+        envelope = _closed_pairs(event)
+        if type(envelope.get("type")) is not str:
+            raise ValueError("event requires a string type")
+        kind = envelope["type"]
+
+        def check(node, path):
+            if type(node) is _EventObject:
+                fields = {}
+                for key, value in node:
+                    fields.setdefault(key, []).append(value)
+                for key, values in fields.items():
+                    if len(values) > 1 and not (
+                        path == ("item",) and key == "id" and len(values) == 2
+                        and all(type(value) is str for value in values)
+                        and fields.get("type") == ["web_search"]
+                        and kind in {"item.started", "item.updated", "item.completed"}
+                    ):
+                        raise ValueError("duplicate JSON event object key")
+                for key, value in node:
+                    check(value, (*path, key))
+            elif type(node) is list:
+                for value in node:
+                    check(value, (*path, None))
+
+        for key, value in envelope.items():
+            check(value, (key,))
+        return kind
+    except (UnicodeError, RecursionError) as error:
+        raise ValueError("invalid JSON event encoding or nesting") from error
+
+
 def load_result(role: str, path: Path, worktree: Path | None = None) -> dict:
     """Read a bounded regular final JSON file without following a final symlink."""
     import stat
@@ -270,6 +318,7 @@ class CodexRunner:
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
         self._active = set()
+        self._registered = set()
         self._systemd_run = shutil.which("systemd-run") if use_systemd else None
         self._systemctl = shutil.which("systemctl") if use_systemd else None
         self._env_binary = shutil.which("env") if use_systemd else None
@@ -331,20 +380,57 @@ class CodexRunner:
                 f"--setenv=PATH={env['PATH']}", "--", self._env_binary, "-i",
                 *[f"{key}={value}" for key, value in sorted(env.items())], *argv]
 
-    def _stop_unit(self, unit, env, output_dir):
+    def _uncertain_registration(self, unit, output_dir):
+        # Recovery must not turn one later absent-unit observation into proof
+        # that a previously submitted StartTransientUnit RPC cannot still apply.
+        with _private_file(output_dir / "cleanup-uncertain.json", "w") as stream:
+            json.dump({"version": 1, "unit": unit,
+                       "reason": "launcher registration was not confirmed before cancellation"}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        descriptor = os.open(output_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _stop_unit(self, unit, env, output_dir, *, registered=False):
         if unit is None:
             return
         try:
             subprocess.run([self._systemctl, "--user", "stop", unit], env=env,
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=20, check=False)
-            state = subprocess.run([self._systemctl, "--user", "is-active", unit], env=env,
+            state = subprocess.run([self._systemctl, "--user", "show",
+                                    "--property=LoadState,ActiveState,MainPID,ControlPID,ControlGroup", unit], env=env,
                                    stdin=subprocess.DEVNULL, capture_output=True,
                                    timeout=5, check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
+            properties = {}
+            for line in state.stdout.decode("utf-8", errors="strict").splitlines():
+                key, separator, value = line.partition("=")
+                if not separator or key in properties:
+                    raise ValueError("invalid systemd property response")
+                properties[key] = value
+            quiet = (state.returncode == 0 and properties.get("LoadState") in {"loaded", "not-found"}
+                     and properties.get("ActiveState") in {"inactive", "failed"}
+                     and properties.get("MainPID") == "0" and properties.get("ControlPID") == "0")
+            group = properties.get("ControlGroup")
+            if group is None:
+                quiet = False
+            elif group:
+                if not group.startswith("/") or ".." in Path(group).parts:
+                    quiet = False
+                else:
+                    events = Path("/sys/fs/cgroup") / group.lstrip("/") / "cgroup.events"
+                    if events.exists() and "populated 0" not in events.read_text().splitlines():
+                        quiet = False
+            if not quiet:
+                raise AgentRunError("cleanup", "owned systemd unit is not confirmed quiescent", output_dir)
+            if not registered and properties["LoadState"] == "not-found":
+                self._uncertain_registration(unit, output_dir)
+                raise AgentRunError("cleanup", "launcher registration is ambiguous; preserve the session for reconciliation", output_dir)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
             raise AgentRunError("cleanup", "cannot stop/verify owned systemd unit", output_dir) from error
-        if state.returncode not in {3, 4} or state.stdout.strip() not in {b"inactive", b"failed", b"unknown"}:
-            raise AgentRunError("cleanup", "owned systemd unit is not confirmed inactive", output_dir)
 
     def _stream(self, process, events, errors, deadline, output_dir):
         pending = bytearray()
@@ -380,14 +466,16 @@ class CodexRunner:
                         if len(raw) > MAX_EVENT_BYTES:
                             raise AgentRunError("event_limit", "agent event exceeds configured bound", output_dir)
                         try:
-                            event = _json(raw)
-                            if type(event) is not dict or type(event.get("type")) is not str:
-                                raise ValueError("event requires a string type")
+                            kind = _event_type(raw)
                         except ValueError as error:
                             raise AgentRunError("event_json", "invalid agent JSONL event", output_dir) from error
-                        if event["type"] in {"error", "turn.failed"}:
+                        # A real Codex event proves the transient service has
+                        # executed; merely starting its systemd-run client does not.
+                        with self._lock:
+                            self._registered.add(process)
+                        if kind in {"error", "turn.failed"}:
                             raise AgentRunError("agent_failure", "Codex emitted a failure event", output_dir)
-                        if event["type"] == "turn.completed":
+                        if kind == "turn.completed":
                             completed = True
                     if len(pending) > MAX_EVENT_BYTES:
                         raise AgentRunError("event_limit", "agent event exceeds configured bound", output_dir)
@@ -454,13 +542,15 @@ class CodexRunner:
             with (open(output_dir / "prompt.txt", "rb") as source,
                   _private_file(output_dir / "events.jsonl") as events,
                   _private_file(output_dir / "stderr.log") as errors):
-                try:
-                    process = subprocess.Popen(actual_argv, stdin=source, stdout=subprocess.PIPE,
-                                               stderr=subprocess.PIPE, cwd=worktree, env=env,
-                                               start_new_session=True)
-                except OSError as error:
-                    raise AgentRunError("spawn", "cannot start Codex session", output_dir) from error
                 with self._lock:
+                    if self._cancelled.is_set():
+                        raise AgentRunError("cancelled", "agent runner cancelled before launch", output_dir)
+                    try:
+                        process = subprocess.Popen(actual_argv, stdin=source, stdout=subprocess.PIPE,
+                                                   stderr=subprocess.PIPE, cwd=worktree, env=env,
+                                                   start_new_session=True)
+                    except OSError as error:
+                        raise AgentRunError("spawn", "cannot start Codex session", output_dir) from error
                     self._active.add(process)
                 self._stream(process, events, errors, deadline, output_dir)
             try:
@@ -470,11 +560,9 @@ class CodexRunner:
         finally:
             try:
                 if process is not None:
-                    # Stop the whole production cgroup even after a successful
-                    # main process exit; never review with live descendants.
+                    # Quiesce the local launcher before checking its remote unit;
+                    # it must not submit a new start after the inactive readback.
                     try:
-                        self._stop_unit(unit, env, output_dir)
-                    finally:
                         self._signal_group(process, signal.SIGTERM)
                         try:
                             process.wait(timeout=1)
@@ -482,11 +570,22 @@ class CodexRunner:
                             pass
                         self._signal_group(process, signal.SIGKILL)
                         process.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        if unit is not None:
+                            self._uncertain_registration(unit, output_dir)
+                        raise AgentRunError("cleanup", "local launcher is not confirmed stopped", output_dir) from error
+                    finally:
                         for pipe in (process.stdout, process.stderr):
                             if pipe is not None:
                                 pipe.close()
+                    try:
+                        with self._lock:
+                            registered = process in self._registered
+                        self._stop_unit(unit, env, output_dir, registered=registered)
+                    finally:
                         with self._lock:
                             self._active.discard(process)
+                            self._registered.discard(process)
             finally:
                 for semaphore in reversed(acquired):
                     semaphore.release()

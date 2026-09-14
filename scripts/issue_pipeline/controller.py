@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -25,6 +26,8 @@ from .github import Github
 from .graph import Graph, Task
 from .state import ClaimConflict, State, SupervisorLock
 from .gate import GateFailure
+from .containers import (ContainerError, container_cleanup_complete, load_container_record,
+                         stop_owned_container)
 
 
 CONTEXTS = ("agenc-pipeline/recorded-gate", "agenc-pipeline/independent-review")
@@ -61,10 +64,33 @@ def write_record(path: Path, value: object) -> str:
 
 
 def halt_children(state_dir: Path) -> None:
-    """Stop only this controller's UUID-named transient units, including descendants."""
+    """Stop recorded launchers, then their separately supervised Docker children."""
+    def verify_quiet(unit: str) -> None:
+        status = subprocess.run(["systemctl", "--user", "show", unit,
+                                 "--property=LoadState,ActiveState,MainPID,ControlPID,ControlGroup"],
+                                check=True, capture_output=True, text=True, timeout=15)
+        pairs = [line.split("=", 1) for line in status.stdout.splitlines()]
+        if any(len(pair) != 2 for pair in pairs):
+            raise PipelineBlocked("invalid pipeline process quiescence response")
+        properties = dict(pairs)
+        if (len(pairs) != 5 or set(properties) != {"LoadState", "ActiveState", "MainPID", "ControlPID", "ControlGroup"}
+                or properties["LoadState"] not in {"loaded", "not-found"}
+                or properties["ActiveState"] not in {"inactive", "failed"}
+                or properties["MainPID"] != "0" or properties["ControlPID"] != "0"):
+            raise PipelineBlocked("pipeline child unit is not quiescent: " + unit)
+        group = properties["ControlGroup"]
+        if group:
+            if not group.startswith("/") or ".." in Path(group).parts:
+                raise PipelineBlocked("invalid pipeline process cgroup")
+            events = Path("/sys/fs/cgroup") / group.lstrip("/") / "cgroup.events"
+            if events.exists() and "populated 0" not in events.read_text().splitlines():
+                raise PipelineBlocked("pipeline child cgroup is still populated: " + unit)
+
     result = subprocess.run(["systemctl", "--user", "list-units", "--all", "--no-legend",
                              "--plain", "--no-pager"], check=True, capture_output=True, text=True, timeout=30)
     owned = set()
+    gates = {}
+    requests = {}
     for pattern, field in (("sessions/*/request.json", "systemd_unit"), ("gates/*/unit.json", "unit")):
         for path in state_dir.glob(pattern):
             if (any(parent.is_symlink() for parent in (path, *path.parents))
@@ -78,13 +104,59 @@ def halt_children(state_dir: Path) -> None:
                 if not isinstance(unit, str) or not UNIT.fullmatch(unit):
                     raise PipelineBlocked("invalid owned process unit identity")
                 owned.add(unit)
+                if field == "unit":
+                    gates[path.parent] = value
+                else:
+                    requests[path.parent] = unit
+    containers = []
+    try:
+        for path in state_dir.glob("gates/*/container.json"):
+            container = load_container_record(path, state_dir)
+            gate = gates.get(path.parent)
+            if gate is None or any(container[field] != gate.get(field)
+                                   for field in ("unit", "source", "repository", "state_dir")):
+                raise PipelineBlocked("container has no matching durable launcher record")
+            if not container_cleanup_complete(path, state_dir):
+                containers.append((path, container["unit"]))
+    except (ContainerError, OSError, ValueError) as error:
+        raise PipelineBlocked("invalid container ownership record") from error
     units = [line.split()[0] for line in result.stdout.splitlines() if line.split() and line.split()[0] in owned]
     for unit in units:
         subprocess.run(["systemctl", "--user", "stop", unit], check=True, capture_output=True, timeout=60)
-        status = subprocess.run(["systemctl", "--user", "show", unit, "--property=ActiveState", "--value"],
-                                check=True, capture_output=True, text=True, timeout=15)
-        if status.stdout.strip() not in ("inactive", "failed"):
-            raise PipelineBlocked("pipeline child unit is not quiescent: " + unit)
+        verify_quiet(unit)
+    # Docker daemon children are outside the launcher's cgroup. An absent unit
+    # does not prove its container stopped, and cleanup must follow launcher
+    # quiescence so an in-flight create cannot race an absence observation.
+    for path, unit in containers:
+        if unit not in units:
+            verify_quiet(unit)
+        try:
+            stop_owned_container(path, state_dir)
+        except (ContainerError, OSError, ValueError) as error:
+            raise PipelineBlocked("owned gate container cleanup could not be verified") from error
+    # An interrupted agent launch can leave an in-flight service-registration
+    # request. A later absent-unit snapshot does not settle that uncertainty.
+    # Stop all other known children above, then retain the handoff across restart.
+    for path in state_dir.glob("sessions/*/cleanup-uncertain.json"):
+        if (any(parent.is_symlink() for parent in (path, *path.parents))
+                or not path.resolve().is_relative_to(state_dir.resolve())):
+            raise PipelineBlocked("unsafe agent registration recovery marker")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or metadata.st_mode & 0o077 or metadata.st_size > 4096):
+                raise PipelineBlocked("invalid agent registration recovery marker")
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            raise PipelineBlocked("oversized agent registration recovery marker")
+        value = json.loads(raw)
+        if (type(value) is not dict or set(value) != {"version", "unit", "reason"}
+                or type(value["version"]) is not int or value["version"] != 1
+                or value["unit"] != requests.get(path.parent)
+                or value["reason"] != "launcher registration was not confirmed before cancellation"):
+            raise PipelineBlocked("agent registration recovery marker has no matching request")
+        raise PipelineBlocked("agent service registration remains uncertain; preserve and reconcile " + str(path.parent))
 
 
 def ensure_clone(config: Config) -> GitRepo:

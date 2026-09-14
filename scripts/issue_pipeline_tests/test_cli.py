@@ -180,6 +180,8 @@ class DoctorTests(CommandFixture, unittest.TestCase):
             mock.patch.object(cli, "Github", return_value=self.github),
         ]
         self.mocks = [patch.start() for patch in self.patches]
+        self.mocks[3].side_effect = lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, cli.IMAGE if "inspect" in argv else self.secret, self.secret)
         for patch in self.patches:
             self.addCleanup(patch.stop)
 
@@ -229,13 +231,19 @@ class DoctorTests(CommandFixture, unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError) as error:
             cli.doctor(self.config)
         self.assertNotIn(self.secret, str(error.exception))
-        self.mocks[3].side_effect = None
+        self.mocks[3].side_effect = lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, cli.IMAGE if "inspect" in argv else self.secret, self.secret)
         self.mocks[2].return_value = SimpleNamespace(free=0)
         with self.assertRaisesRegex(PipelineBlocked, "free disk"):
             cli.doctor(self.config)
         self.mocks[2].return_value = SimpleNamespace(free=512 * 2**30)
         self.github.blockers.side_effect = lambda _number: []
         with self.assertRaises(ValueError):
+            cli.doctor(self.config)
+
+    def test_doctor_rejects_wrong_gate_image(self):
+        self.mocks[3].side_effect = None
+        with self.assertRaisesRegex(PipelineBlocked, "pinned gate image"):
             cli.doctor(self.config)
 
 

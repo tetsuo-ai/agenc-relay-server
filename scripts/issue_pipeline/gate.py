@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -16,6 +17,7 @@ import tomllib
 import uuid
 
 from .config import Config, digest_file, private_directory
+from .containers import ContainerError, stop_owned_container
 from .gitops import GitError, _process
 
 GATE = "stage-nine-implementation"
@@ -32,204 +34,14 @@ class GateFailure(RuntimeError):
     """A check failed or evidence could not be authenticated to the source."""
 
 
-def prepare_cargo_cache(config: Config) -> Path:
-    """Seed a private cache from public crates.io data, never user configuration.
-
-    Host registry sources remain read-only inputs to this one-time copy. Package
-    bodies are read-only during candidate execution; index/advisory metadata uses
-    this dedicated cache. Missing dependencies require separate trusted prefetch.
-    """
-    cargo_home = config.state / "gate-cache" / "cargo"
-    private_directory(cargo_home)
-    marker = cargo_home / ".public-registry-seeded"
-    if marker.exists():
-        if marker.is_symlink() or marker.read_text() != "public-crates-io-only-v1\n":
-            raise GateFailure("private Cargo cache seed marker is invalid")
-        return cargo_home
-    original = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
-    for category in ("cache", "src", "index"):
-        source = original / "registry" / category
-        destination = cargo_home / "registry" / category
-        private_directory(destination)
-        if source.is_dir() and not source.is_symlink():
-            for registry in sorted(source.iterdir()):
-                if (registry.is_symlink() or not registry.is_dir()
-                        or not (registry.name.startswith("index.crates.io-")
-                                or registry.name == "github.com-1ecc6299db9ec823")):
-                    continue
-                target = destination / registry.name
-                if not target.exists():
-                    staged = destination / (".seed-" + uuid.uuid4().hex)
-                    result = subprocess.run(["cp", "--archive", "--reflink=auto", "--", str(registry), str(staged)],
-                                            stdin=subprocess.DEVNULL, capture_output=True,
-                                            timeout=180, check=False)
-                    if result.returncode:
-                        raise GateFailure("public Cargo cache seeding failed; retain partial cache for diagnosis")
-                    staged.rename(target)
-    for name in ("git", "advisory-db"):
-        private_directory(cargo_home / name)
-    with marker.open("x") as stream:
-        stream.write("public-crates-io-only-v1\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    return cargo_home
-
-
-# This bootstrap executes before *any* candidate Python, Rust, test or build script.
-# Its controls use only files created by this controller containing benign text.
-# Successfully parsing sandbox options is insufficient: some user-systemd builds
-# accept filesystem restrictions without enforcing them on the child.
-_FILESYSTEM_BOOTSTRAP = r'''
-import errno, json, os, pathlib, subprocess, sys, tempfile
-request = json.loads(sys.argv[1])
-for denied in request["denied"]:
-    try:
-        fd = os.open(denied, os.O_RDONLY)
-    except OSError as error:
-        if error.errno not in (errno.EACCES, errno.EPERM, errno.ENOENT, errno.ENOTDIR):
-            raise RuntimeError("unexpected denial-control failure") from error
-    else:
-        os.close(fd)
-        raise RuntimeError("filesystem isolation did not hide the controller canary")
-for readonly in request["readonly"]:
-    try:
-        fd = os.open(readonly, os.O_WRONLY)
-    except OSError as error:
-        if error.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
-            raise RuntimeError("unexpected read-only-control failure") from error
-    else:
-        os.close(fd)
-        raise RuntimeError("filesystem isolation permits writes to protected source/receipts")
-if pathlib.Path(request["readonly"][0]).read_text() != "benign gate read-only canary\n":
-    raise RuntimeError("read-only positive control is not visible")
-with tempfile.TemporaryFile(dir=request["scratch"]) as stream:
-    stream.write(b"benign gate writable canary")
-    stream.seek(0)
-    if stream.read() != b"benign gate writable canary":
-        raise RuntimeError("private writable scratch failed its positive control")
-for command in (["git", "write-tree"], ["cargo", "--version"],
-                ["rustc", "--version"], ["python3", "--version"]):
-    subprocess.run(command, cwd=request["worktree"], check=True, timeout=30)
-print("agenc-pipeline filesystem isolation verified", flush=True)
-if not request["probe_only"]:
-    os.execvp("bash", ["bash", "scripts/check-stage-nine.sh"])
-'''
-
-
 def filesystem_command(config: Config, repo, worktree: Path, output: Path,
                        *, probe_only: bool = False) -> list[str]:
-    """Build the mandatory host-toolchain sandbox command, with executable controls.
-
-    On this host user-systemd mount properties were accepted but silently ignored;
-    a root-owned setuid Firejail helper enforces mount/PID isolation inside the
-    systemd resource/cleanup unit instead. There is no unsandboxed fallback.
-    HOME is unchanged; only explicitly allowed tool/source/cache paths are visible.
-    """
-    firejail = shutil.which("firejail")
-    if firejail is None:
-        raise GateFailure("qualified gate filesystem containment requires installed Firejail")
-    executable = Path(firejail).resolve(strict=True)
-    info = executable.stat()
-    if info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or not info.st_mode & stat.S_ISUID:
-        raise GateFailure("gate requires the qualified root-owned setuid Firejail helper")
-    home = Path.home().resolve(strict=True)
-    worktree, output = Path(worktree).resolve(strict=True), Path(output).resolve(strict=True)
-    common = Path(repo.run(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=worktree).strip()).resolve(strict=True)
-    administration = Path(repo.run(["rev-parse", "--absolute-git-dir"], cwd=worktree).strip()).resolve(strict=True)
-    if (not administration.is_relative_to(common / "worktrees")
-            or not worktree.is_relative_to(config.worktrees.resolve())
-            or not output.is_relative_to(config.state)):
-        raise GateFailure("gate sandbox requires this controller's detached validation worktree")
-    cargo_home = prepare_cargo_cache(config)
-    dependency_sources = [cargo_home / "registry/src", cargo_home / "registry/cache",
-                          cargo_home / "git/checkouts", cargo_home / "git/db"]
-    dependency_canaries = []
-    for path in dependency_sources:
-        private_directory(path)
-        canary_path = path / ".gate-readonly-canary"
-        if not canary_path.exists():
-            with canary_path.open("x") as stream:
-                stream.write("benign dependency read-only canary\n")
-        if canary_path.is_symlink() or not canary_path.is_file():
-            raise GateFailure("dependency cache read-only control is unsafe")
-        dependency_canaries.append(str(canary_path))
-    private_directory(cargo_home / "registry/index")
-    scratch = config.state / "gate-cache" / "tmp"
-    private_directory(scratch)
-    rustup_executable = shutil.which("rustup")
-    if rustup_executable is None:
-        raise GateFailure("qualified gate filesystem containment requires rustup")
-    cargo_bin = Path(rustup_executable).absolute().parent
-    rustup = Path(os.environ.get("RUSTUP_HOME", str(home / ".rustup"))).resolve(strict=True)
-    python_root = Path(sys.base_prefix).resolve(strict=True)
-    # Whitelisting HOME itself or its broad ancestors would disclose credentials.
-    readable = [cargo_bin, rustup, common, worktree, output, cargo_home, scratch]
-    if python_root.is_relative_to(home):
-        readable.append(python_root)
-    for path in readable:
-        if (not path.is_relative_to(home) or path == home or path.is_symlink()
-                or any(char in str(path) for char in "\n\r*?[],")):
-            raise GateFailure("gate sandbox paths must be explicit nonsymlink paths beneath the existing home")
-    generated = [worktree / "target", worktree / "fuzz/target", worktree / ARTIFACT_PREFIX]
-    for path in generated:
-        if path.is_symlink() or not path.resolve().is_relative_to(worktree):
-            raise GateFailure("gate generated directory escapes its worktree")
-        path.mkdir(parents=True, exist_ok=True)
-    # The source artifact directory may contain historic tracked receipts; protect
-    # every existing file while allowing the runner's new exact-source artifact.
-    existing_artifacts = [path for path in generated[-1].rglob("*") if path.is_file()]
-    if any(path.is_symlink() for path in generated[-1].rglob("*")):
-        raise GateFailure("gate artifact directory contains a symlink")
-    canary = config.state / ("gate-hidden-canary-" + uuid.uuid4().hex)
-    with canary.open("x") as stream:
-        stream.write("benign gate hidden canary\n")
-    readonly = output / "readonly-canary"
-    with readonly.open("x") as stream:
-        stream.write("benign gate read-only canary\n")
-    bootstrap = {"denied": [str(canary), f"/proc/{os.getpid()}/root{canary}"],
-                 "readonly": [str(readonly), str(worktree / "scripts/check-stage-nine.sh"),
-                              str(output / "unit.json"), *dependency_canaries],
-                 "scratch": str(scratch), "worktree": str(worktree), "probe_only": probe_only}
-    # This exact policy is retained alongside the owned-unit record before launch.
-    with (output / "filesystem-policy.json").open("x") as stream:
-        json.dump({"backend": "firejail", "readable": list(map(str, readable)),
-                   "writable": list(map(str, [administration, cargo_home, scratch, *generated])),
-                   "bootstrap": bootstrap}, stream, sort_keys=True)
-        stream.flush()
-        os.fsync(stream.fileno())
-    argv = [str(executable), "--quiet", "--noprofile", "--caps.drop=all", "--nonewprivs",
-            "--nogroups", "--private-dev", "--private-tmp"]
-    argv += ["--whitelist=" + str(path) for path in readable]
-    argv += ["--read-only=" + str(home), "--read-only=" + str(common),
-             "--read-only=" + str(worktree), "--read-only=" + str(output)]
-    argv += ["--read-write=" + str(path) for path in [administration, cargo_home, scratch, *generated]]
-    # Package bodies and archives are trusted prefetch inputs. Missing packages
-    # must be fetched in a separate qualified preparation step, never by allowing
-    # candidate build scripts to poison dependency inputs reused by later gates.
-    # Protect ancestors too: otherwise a writable Cargo root could rename the
-    # registry directory and replace the path with attacker-controlled sources.
-    argv += ["--read-only=" + str(cargo_home / "registry"),
-             "--read-write=" + str(cargo_home / "registry/index"),
-             "--read-only=" + str(cargo_home / "git")]
-    argv += ["--read-only=" + str(path) for path in dependency_sources]
-    # git write-tree needs the worktree index lock, not permission to redirect
-    # HEAD, gitdir or commondir and influence later controller Git operations.
-    argv += ["--read-only=" + str(administration / name) for name in ("HEAD", "gitdir", "commondir")
-             if (administration / name).is_file()]
-    argv += ["--read-only=" + str(path) for path in existing_artifacts]
-    argv += ["--blacklist=" + path for path in (f"/run/user/{os.getuid()}", "/run/dbus",
-                                               "/run/docker.sock", "/var/run/docker.sock",
-                                               "/var/tmp", "/mnt", "/media", "/srv")]
-    argv += ["--", "/usr/bin/env", "-i", "PATH=" + os.environ.get("PATH", "/usr/bin:/bin"),
-             "HOME=" + str(Path.home()), "USER=" + os.environ.get("USER", ""),
-             "CARGO_HOME=" + str(cargo_home), "RUSTUP_HOME=" + str(rustup),
-             "TMPDIR=" + str(scratch), "AGENC_IRCD_RECORD_GATE=1",
-             "/usr/bin/python3", "-I", "-B", "-c", _FILESYSTEM_BOOTSTRAP,
-             json.dumps(bootstrap, separators=(",", ":"))]
-    # Clear credentials before the privileged sandbox helper as well as before
-    # its child, so a supervisor's inherited environment cannot become a leak.
-    return ["/usr/bin/env", "-i", "PATH=" + os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME=" + str(Path.home()), "USER=" + os.environ.get("USER", ""), *argv]
+    """Prepare the qualified sandbox while retaining the gate's failure API."""
+    from .sandbox import SandboxFailure, filesystem_command as build
+    try:
+        return build(config, repo, worktree, output, probe_only=probe_only)
+    except (SandboxFailure, ValueError, OSError) as error:
+        raise GateFailure("gate filesystem containment failed: " + str(error)) from error
 
 
 def commands(manifest: dict, name: str = GATE, stack: tuple = ()) -> list[dict]:
@@ -417,9 +229,26 @@ class GateRunner:
         self._lock = threading.Lock()
         self._active_lock = threading.Lock()
         self._active: set[str] = set()
+        self._containers: dict[str, Path] = {}
+        self._launchers: dict[str, subprocess.Popen] = {}
         self._cancelled = threading.Event()
 
     def _stop_unit(self, unit: str) -> None:
+        # The local systemd client may not have registered its unit yet. Quiesce
+        # that client first; otherwise it could submit a start after an absence
+        # check. Known container-ID removal also defeats an already queued start.
+        with self._active_lock:
+            launcher = self._launchers.get(unit)
+        try:
+            if launcher is not None and launcher.poll() is None:
+                try:
+                    os.killpg(launcher.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                launcher.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self._cancelled.set()
+            raise GateFailure("gate launcher cleanup is uncertain; further execution is blocked") from error
         try:
             result = subprocess.run(["systemctl", "--user", "stop", unit], timeout=30,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -437,8 +266,13 @@ class GateRunner:
             result = subprocess.run(["systemctl", "--user", "show", unit,
                                      "--property=LoadState,ActiveState,MainPID,ControlPID,ControlGroup"],
                                     timeout=10, capture_output=True, text=True, check=False)
-            props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-            quiet = (props.get("ActiveState") in {"inactive", "failed"}
+            rows = [line.split("=", 1) for line in result.stdout.splitlines()]
+            valid_rows = all(len(row) == 2 for row in rows)
+            props = dict(rows) if valid_rows else {}
+            expected = {"LoadState", "ActiveState", "MainPID", "ControlPID", "ControlGroup"}
+            quiet = (result.returncode == 0 and valid_rows and len(rows) == len(expected)
+                     and set(props) == expected and props.get("LoadState") in {"loaded", "not-found"}
+                     and props.get("ActiveState") in {"inactive", "failed"}
                      and props.get("MainPID") == "0" and props.get("ControlPID") == "0")
             group = props.get("ControlGroup", "")
             if group:
@@ -450,11 +284,17 @@ class GateRunner:
                         quiet = False
             if not quiet:
                 raise GateFailure("gate process group is not confirmed inactive")
-        except (OSError, subprocess.TimeoutExpired, GateFailure) as error:
+            with self._active_lock:
+                container_record = self._containers.get(unit)
+            if container_record is not None:
+                stop_owned_container(container_record, self.config.state)
+                policy = json.loads(container_record.with_name("filesystem-policy.json").read_text())
+                scratch = Path(policy["bootstrap"]["home_scratch"])
+                if scratch.exists() or scratch.is_symlink():
+                    raise GateFailure("sandbox scratch escaped into the real HOME")
+        except (OSError, subprocess.TimeoutExpired, GateFailure, ContainerError, ValueError, KeyError) as error:
             self._cancelled.set()
             raise GateFailure("gate cleanup is uncertain; further execution is blocked: " + unit) from error
-        with self._active_lock:
-            self._active.discard(unit)
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -510,7 +350,14 @@ class GateRunner:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-            sandboxed = filesystem_command(self.config, repo, worktree, output)
+            try:
+                sandboxed = filesystem_command(self.config, repo, worktree, output)
+            except GateFailure:
+                # An unresolved inert create cannot run code, but its durable
+                # ownership must be reconciled before another gate is admitted.
+                if (output / "container.json").exists():
+                    self._cancelled.set()
+                raise
             argv = ["systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
                     "--service-type=exec", "--expand-environment=no", "--unit=" + unit,
                     "-p", "KillMode=control-group", "-p", "TimeoutStopSec=15s",
@@ -519,23 +366,36 @@ class GateRunner:
                     "-p", "MemoryMax=" + str(self.config.gate_memory_gib) + "G",
                     "--working-directory=" + str(worktree), *sandboxed]
             with self._active_lock:
-                if self._cancelled.is_set():
-                    raise GateFailure("controller stopped before gate launch")
                 self._active.add(unit)
+                if (output / "container.json").exists():
+                    self._containers[unit] = output / "container.json"
+                cancelled = self._cancelled.is_set()
+            if cancelled:
+                self._stop_unit(unit)
+                with self._active_lock:
+                    self._active.discard(unit)
+                    self._containers.pop(unit, None)
+                raise GateFailure("controller stopped before gate launch")
             quiescent = False
             retained: Path | None = None
             try:
                 try:
                     with log.open("xb") as stream:
-                        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=stream,
-                                                stderr=subprocess.STDOUT,
-                                                timeout=self.config.gate_timeout_seconds + 45, check=False)
+                        with self._active_lock:
+                            if self._cancelled.is_set():
+                                raise GateFailure("controller stopped before gate launch")
+                            launcher = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=stream,
+                                                        stderr=subprocess.STDOUT, start_new_session=True)
+                            self._launchers[unit] = launcher
+                        returncode = launcher.wait(timeout=self.config.gate_timeout_seconds + 45)
                         stream.flush()
                         os.fsync(stream.fileno())
-                    if result.returncode:
-                        raise GateFailure(f"mandatory gate failed (exit {result.returncode}); log {log}")
+                    if returncode:
+                        raise GateFailure(f"mandatory gate failed (exit {returncode}); log {log}")
                 except subprocess.TimeoutExpired as error:
                     raise GateFailure("mandatory gate timed out: " + str(log)) from error
+                except OSError as error:
+                    raise GateFailure("mandatory gate launcher failed: " + str(log)) from error
                 finally:
                     self._stop_unit(unit)
                     quiescent = True
@@ -559,6 +419,11 @@ class GateRunner:
                     "artifact": str(retained), "log": str(log)})
                 return receipt
             finally:
+                if quiescent:
+                    with self._active_lock:
+                        self._active.discard(unit)
+                        self._containers.pop(unit, None)
+                        self._launchers.pop(unit, None)
                 # Preserve partial/malformed output as diagnostics, never proof.
                 # Only remove our exact new regular file after process quiescence.
                 if quiescent and retained is None and (artifact.exists() or artifact.is_symlink()):

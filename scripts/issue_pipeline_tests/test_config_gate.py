@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 from issue_pipeline.config import Config, digest_file, private_directory
+from issue_pipeline.containers import ContainerError
 from issue_pipeline.gate import GATE, ARTIFACT_PREFIX, GateFailure, GateRunner
 from issue_pipeline.gate import check_policy, commands, validate_artifact
 
@@ -248,9 +249,80 @@ class RunnerTests(unittest.TestCase):
         with mock.patch("issue_pipeline.gate.check_policy", return_value=[]), \
                 mock.patch("issue_pipeline.gate.filesystem_command", return_value=["/bin/true"]), \
                 mock.patch("issue_pipeline.gate.subprocess.run", side_effect=self.process), \
+                mock.patch("issue_pipeline.gate.subprocess.Popen", side_effect=self.popen), \
                 mock.patch("issue_pipeline.gate.validate_artifact", side_effect=GateFailure("bad evidence")), \
                 mock.patch("issue_pipeline.gate.shutil.disk_usage", return_value=shutil._ntuple_diskusage(2**40, 0, 2**40)):
             return self.runner.run(self.repo, self.root, SOURCE, BASE, self.output)
+
+    def popen(self, argv, **kwargs):
+        self.assertTrue(self.runner._active_lock.locked(), "spawn must share the cancellation barrier")
+        try:
+            result = self.process(argv, **kwargs)
+        except subprocess.TimeoutExpired:
+            result = subprocess.CompletedProcess(argv, 0)
+        launcher = mock.Mock()
+        launcher.pid = 987654321
+        launcher.poll.return_value = result.returncode
+        if self.timeout:
+            launcher.wait.side_effect = subprocess.TimeoutExpired(argv, 1)
+        else:
+            launcher.wait.return_value = result.returncode
+        return launcher
+
+    def test_cancellation_after_registration_before_spawn_never_launches(self):
+        original_open = Path.open
+
+        def opening(path, *args, **kwargs):
+            result = original_open(path, *args, **kwargs)
+            if path == self.output / "full-gate.log":
+                self.assertTrue(self.runner._active)
+                self.runner.cancel()
+            return result
+
+        with mock.patch.object(Path, "open", opening):
+            with self.assertRaisesRegex(GateFailure, "stopped before gate launch"):
+                self.invoke()
+        self.assertFalse(any(argv[0] == "systemd-run" for argv in self.calls))
+        self.assertFalse(self.runner._active)
+        self.assertFalse(self.runner._launchers)
+
+    def test_timeout_quiesces_local_launcher_before_unit_reconciliation(self):
+        launcher = mock.Mock()
+        launcher.pid = 987654321
+        launcher.poll.return_value = None
+        launcher.wait.side_effect = [subprocess.TimeoutExpired("systemd-run", 1), -9]
+
+        def spawn(argv, **kwargs):
+            self.process(argv, **kwargs)
+            self.assertTrue(self.runner._active_lock.locked())
+            return launcher
+
+        def kill(pid, sig):
+            self.assertEqual(pid, launcher.pid)
+            self.assertFalse(any("show" in argv for argv in self.calls))
+
+        with mock.patch.object(self, "popen", side_effect=spawn), \
+                mock.patch("issue_pipeline.gate.os.killpg", side_effect=kill) as killed:
+            with self.assertRaisesRegex(GateFailure, "timed out"):
+                self.invoke()
+        killed.assert_called_once()
+        self.assertEqual(launcher.wait.call_count, 2)
+        self.assertFalse(self.runner._active)
+        self.assertFalse(self.runner._launchers)
+        self.assertTrue((self.output / "gate-artifact-failed.json").exists())
+
+    def test_error_or_partial_systemd_output_cannot_prove_quiescence(self):
+        complete = "LoadState=loaded\nActiveState=inactive\nMainPID=0\nControlPID=0\nControlGroup=\n"
+        for code, output in ((1, complete), (0, complete.replace("ControlGroup=\n", "")),
+                             (0, complete + "MainPID=0\n"),
+                             (0, complete.replace("LoadState=loaded", "LoadState=error"))):
+            with self.subTest(code=code, output=output):
+                runner = GateRunner(self.runner.config)
+                with mock.patch("issue_pipeline.gate.subprocess.run", return_value=
+                                subprocess.CompletedProcess([], code, stdout=output)):
+                    with self.assertRaisesRegex(GateFailure, "cleanup is uncertain"):
+                        runner._stop_unit("agenc-ircd-pipeline-gate-" + "a" * 32 + ".service")
+                self.assertTrue(runner._cancelled.is_set())
 
     def test_nonzero_gate_preserves_failed_artifact_outside_worktree(self):
         self.exit_code = 1
@@ -287,6 +359,38 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(GateFailure):
             self.invoke()
         self.assertFalse(any(argv[0] == "systemd-run" for argv in self.calls))
+
+    def test_container_cleanup_follows_launcher_quiescence_and_removes_active_authority(self):
+        self.output.mkdir()
+        container = self.output / "container.json"
+        container.write_text("benign mocked ownership record")
+        (self.output / "filesystem-policy.json").write_text(json.dumps({
+            "bootstrap": {"home_scratch": str(self.root / "absent-private-home-canary")}}))
+
+        def cleanup(path, state):
+            self.assertEqual(path, container)
+            self.assertEqual(state, self.runner.config.state)
+            self.assertTrue(any("show" in argv for argv in self.calls))
+
+        with mock.patch("issue_pipeline.gate.stop_owned_container", side_effect=cleanup) as stop:
+            with self.assertRaises(GateFailure):
+                self.invoke()
+        stop.assert_called_once()
+        self.assertFalse(self.runner._containers)
+        self.assertFalse(self.runner._active)
+        self.assertTrue((self.output / "gate-artifact-failed.json").exists())
+
+    def test_daemon_failure_blocks_retry_and_preserves_artifact_after_launcher_stops(self):
+        self.output.mkdir()
+        (self.output / "container.json").write_text("benign mocked ownership record")
+        with mock.patch("issue_pipeline.gate.stop_owned_container", side_effect=ContainerError("daemon unavailable")):
+            with self.assertRaisesRegex(GateFailure, "cleanup is uncertain"):
+                self.invoke()
+        self.assertTrue(self.artifact.exists())
+        self.assertTrue(self.runner._containers)
+        self.assertTrue(self.runner._active)
+        self.assertTrue(self.runner._cancelled.is_set())
+        self.assertFalse((self.output / "gate-artifact-failed.json").exists())
 
     def test_missing_evidence_cannot_become_success(self):
         self.payload = None

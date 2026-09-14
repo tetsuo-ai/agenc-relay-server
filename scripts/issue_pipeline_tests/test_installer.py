@@ -84,7 +84,9 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('"--config"', unit)
         self.assertIn('"halt-children"', unit)
         self.assertIn("KillMode=control-group", unit)
-        self.assertIn("TimeoutStopSec=90", unit)
+        # The service must let bounded cleanup stop four model launchers and a
+        # gate launcher plus its separately supervised Docker container.
+        self.assertIn("TimeoutStopSec=900\n", unit)
         self.assertIn("Restart=on-failure", unit)
         self.assertIn("/current/cargo/bin:/current/nvm/bin:/usr/bin", unit)
         self.assertNotIn("SECRET_SENTINEL", unit)

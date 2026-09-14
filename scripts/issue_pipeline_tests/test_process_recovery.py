@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from issue_pipeline.controller import PipelineBlocked, halt_children
+from issue_pipeline.containers import ContainerError
 
 
 class ProcessRecoveryTests(unittest.TestCase):
@@ -24,6 +25,11 @@ class ProcessRecoveryTests(unittest.TestCase):
         self.active = [self.owned_gate, self.foreign_gate, self.owned_agent, "unrelated.service"]
         self.stopped = []
         self.observed_state = "inactive\n"
+        self.main_pid = "0"
+        self.control_group = ""
+        completed = mock.patch("issue_pipeline.controller.container_cleanup_complete", return_value=False)
+        self.completed = completed.start()
+        self.addCleanup(completed.stop)
 
     def record_gate(self, root, unit, *, claimed_state=None):
         path = root / "gates" / "attempt" / "unit.json"
@@ -41,7 +47,9 @@ class ProcessRecoveryTests(unittest.TestCase):
             self.stopped.append(argv[-1])
             return subprocess.CompletedProcess(argv, 0, stdout="")
         if "show" in argv:
-            return subprocess.CompletedProcess(argv, 0, stdout=self.observed_state)
+            return subprocess.CompletedProcess(argv, 0, stdout="LoadState=not-found\nActiveState="
+                + self.observed_state.strip() + "\nMainPID=" + self.main_pid
+                + "\nControlPID=0\nControlGroup=" + self.control_group + "\n")
         raise AssertionError(argv)
 
     def halt(self):
@@ -97,6 +105,101 @@ class ProcessRecoveryTests(unittest.TestCase):
                 self.observed_state = status
                 with self.assertRaises(PipelineBlocked):
                     self.halt()
+
+    def container_fixture(self):
+        unit_path = self.record_gate(self.state, self.owned_gate)
+        path = unit_path.with_name("container.json")
+        path.write_text("{}")
+        return path, json.loads(unit_path.read_text())
+
+    def test_inactive_recovery_unit_with_live_pid_or_descendants_is_rejected(self):
+        self.record_gate(self.state, self.owned_gate)
+        self.main_pid = "42"
+        with self.assertRaises(PipelineBlocked):
+            self.halt()
+        self.main_pid = "0"
+        self.control_group = "/owned-cgroup"
+        events = Path("/sys/fs/cgroup/owned-cgroup/cgroup.events")
+        original_exists, original_read = Path.exists, Path.read_text
+        with mock.patch.object(Path, "exists", autospec=True,
+                               side_effect=lambda path: True if path == events else original_exists(path)), \
+             mock.patch.object(Path, "read_text", autospec=True,
+                               side_effect=lambda path: "populated 1\n" if path == events else original_read(path)):
+            with self.assertRaisesRegex(PipelineBlocked, "still populated"):
+                self.halt()
+
+    def test_container_cleanup_follows_launcher_stop(self):
+        path, record = self.container_fixture()
+        def cleanup(observed_path, state):
+            self.assertEqual((observed_path, state), (path, self.state))
+            self.assertIn(self.owned_gate, self.stopped)
+        with mock.patch("issue_pipeline.controller.load_container_record", return_value=record), \
+             mock.patch("issue_pipeline.controller.stop_owned_container", side_effect=cleanup) as stop:
+            self.halt()
+        stop.assert_called_once()
+
+    def test_container_cleanup_runs_even_after_launcher_unit_was_collected(self):
+        path, record = self.container_fixture()
+        self.active.remove(self.owned_gate)
+        with mock.patch("issue_pipeline.controller.load_container_record", return_value=record), \
+             mock.patch("issue_pipeline.controller.stop_owned_container") as stop:
+            self.halt()
+        stop.assert_called_once_with(path, self.state)
+        self.assertEqual(self.stopped, [])
+
+    def test_container_cleanup_does_not_run_before_launcher_quiescence(self):
+        _, record = self.container_fixture()
+        self.active.remove(self.owned_gate)
+        self.observed_state = "active\n"
+        with mock.patch("issue_pipeline.controller.load_container_record", return_value=record), \
+             mock.patch("issue_pipeline.controller.stop_owned_container") as stop:
+            with self.assertRaises(PipelineBlocked):
+                self.halt()
+        stop.assert_not_called()
+
+    def test_container_without_matching_launcher_record_is_preserved(self):
+        _, record = self.container_fixture()
+        record["source"] = "b" * 40
+        with mock.patch("issue_pipeline.controller.load_container_record", return_value=record), \
+             mock.patch("issue_pipeline.controller.stop_owned_container") as stop:
+            with self.assertRaises(PipelineBlocked):
+                self.halt()
+        stop.assert_not_called()
+        self.assertEqual(self.stopped, [])
+
+    def test_unverified_container_cleanup_blocks_recovery(self):
+        _, record = self.container_fixture()
+        with mock.patch("issue_pipeline.controller.load_container_record", return_value=record), \
+             mock.patch("issue_pipeline.controller.stop_owned_container", side_effect=ContainerError("daemon unavailable")):
+            with self.assertRaisesRegex(PipelineBlocked, "cleanup could not be verified"):
+                self.halt()
+
+    def test_completed_immutable_id_does_not_require_another_service_or_daemon_query(self):
+        path, record = self.container_fixture()
+        self.active.remove(self.owned_gate)
+        self.completed.return_value = True
+        self.observed_state = "active\n"
+        with mock.patch("issue_pipeline.controller.load_container_record", return_value=record), \
+             mock.patch("issue_pipeline.controller.stop_owned_container") as stop:
+            self.halt()
+        self.completed.assert_called_once_with(path, self.state)
+        stop.assert_not_called()
+        self.assertEqual(self.stopped, [])
+
+    def test_ambiguous_agent_registration_survives_restart_after_other_children_stop(self):
+        self.record_gate(self.state, self.owned_gate)
+        session = self.state / "sessions" / "session"
+        session.mkdir(parents=True)
+        (session / "request.json").write_text(json.dumps({"systemd_unit": self.owned_agent}))
+        marker = session / "cleanup-uncertain.json"
+        marker.write_text(json.dumps({"version": 1, "unit": self.owned_agent,
+                                    "reason": "launcher registration was not confirmed before cancellation"}))
+        marker.chmod(0o600)
+        self.active.remove(self.owned_agent)
+        with self.assertRaisesRegex(PipelineBlocked, "registration remains uncertain"):
+            self.halt()
+        self.assertIn(self.owned_gate, self.stopped)
+        self.assertTrue(marker.exists())
 
 
 if __name__ == "__main__":

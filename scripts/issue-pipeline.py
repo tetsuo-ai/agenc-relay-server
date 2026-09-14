@@ -23,6 +23,7 @@ from issue_pipeline.github import Github
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.graph import Graph
 from issue_pipeline.state import State, SupervisorLock
+from issue_pipeline.sandbox import IMAGE, DOCKER_HOST
 
 
 def parser():
@@ -50,7 +51,7 @@ def parser():
 
 def doctor(config: Config) -> dict:
     commands = {}
-    for name in ("git", "gh", "systemctl", "systemd-run", "firejail", "cargo", "rustup", "bash", "python3"):
+    for name in ("git", "gh", "systemctl", "systemd-run", "docker", "cargo", "rustup", "bash", "python3"):
         path = shutil.which(name)
         if not path:
             raise PipelineBlocked("missing executable: " + name)
@@ -60,6 +61,13 @@ def doctor(config: Config) -> dict:
                  ["systemctl", "--user", "show-environment"]):
         # Authentication/environment output is deliberately not returned or logged.
         subprocess.run(argv, check=True, capture_output=True, timeout=30)
+    docker_env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
+                  "DOCKER_HOST": DOCKER_HOST, "DOCKER_CLI_HINTS": "false"}
+    image = subprocess.run([commands["docker"], "--host", DOCKER_HOST, "image", "inspect",
+                            "--format", "{{.Id}}", IMAGE], check=True, capture_output=True,
+                           text=True, timeout=30, env=docker_env)
+    if image.stdout.strip() != IMAGE:
+        raise PipelineBlocked("local Docker daemon does not provide the qualified pinned gate image")
     if config.clone.exists():
         if config.clone.is_symlink():
             raise PipelineBlocked("controller clone must not be a symlink")
@@ -101,6 +109,7 @@ def doctor(config: Config) -> dict:
             "master_issue": config.master_issue, "tasks": len(graph.tasks),
             "dependency_edges": sum(len(task.depends_on) for task in graph.tasks),
             "free_disk_gib": round(free, 1), "executables": commands,
+            "gate_container": {"daemon": DOCKER_HOST, "image": IMAGE},
             "limits": {"issues": config.max_issues, "codex_sessions": config.max_sessions, "full_gates": 1},
             "note": "This does not qualify a source revision or prove external/native requirements."}
 

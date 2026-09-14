@@ -271,7 +271,9 @@ def _unit(cli: Path, config: Path, state: Path, captured_path: str) -> bytes:
             + "Environment=PYTHONDONTWRITEBYTECODE=1\nEnvironment=PYTHONNOUSERSITE=1\n"
             + "UnsetEnvironment=PYTHONPATH PYTHONHOME PYTHONSTARTUP\n"
             + f"ExecStart={start}\nExecStopPost={stop}\n"
-            + "Restart=on-failure\nRestartSec=15\nKillMode=control-group\nTimeoutStopSec=90\nUMask=0077\n"
+            # Allow all four bounded model cleanups, gate cleanup and the
+            # recovery pass to finish before systemd terminates this service.
+            + "Restart=on-failure\nRestartSec=15\nKillMode=control-group\nTimeoutStopSec=900\nUMask=0077\n"
             + "\n[Install]\nWantedBy=default.target\n").encode()
 
 
