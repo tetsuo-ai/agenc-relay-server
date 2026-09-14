@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from issue_pipeline.config import Config, digest_file
+from issue_pipeline.backlog import Backlog
 from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, task_hash
 from issue_pipeline.gate import GateFailure
 from issue_pipeline.gitops import GitRepo
@@ -240,6 +241,20 @@ class DiscoveryAgents(ScriptedAgents):
                               "src/fix.rs is absent. The fixture contract requires a separate prerequisite before the parent correction can be accepted.",
                               "acceptance": ["Create the prerequisite fixture before parent acceptance."]}])
             (output / "result.json").write_text(json.dumps(result))
+        return result
+
+
+class MultipleDiscoveryAgents(DiscoveryAgents):
+    def run(self, role, worktree, prompt, output, **kwargs):
+        result = super().run(role, worktree, prompt, output, **kwargs)
+        if role == "worker" and result["discoveries"]:
+            result["discoveries"].append({
+                "title": "Add the other required fixture prerequisite",
+                "description": "src/other_fix.rs is also absent and required by the parent contract.",
+                "acceptance": ["Create the other prerequisite before parent acceptance."]})
+        if role == "planner" and json.loads(prompt)["issue"]["number"] == 101:
+            result["phases"][0]["files"] = ["src/other_fix.rs"]
+        (output / "result.json").write_text(json.dumps(result))
         return result
 
 
@@ -752,6 +767,134 @@ class ControllerTests(unittest.TestCase):
             self.controller.run(once=True)
         self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
         self.assertEqual(len(self.runner.calls), calls)
+
+    def interrupt_discovery_registration(self, boundary):
+        self.runner = MultipleDiscoveryAgents() if boundary == "between-entries" else DiscoveryAgents()
+        self.controller.runner = self.runner
+        self.github.issues[41]["state"] = "closed"
+        original = Backlog.register
+
+        def interrupted_register(backlog, *args, **kwargs):
+            if boundary == "before-register":
+                raise SystemExit("crash before Backlog creates its journal")
+            number = original(backlog, *args, **kwargs)
+            if boundary == "after-register":
+                raise SystemExit("crash after remote registration, before cursor checkpoint")
+            return number
+
+        def interrupted_log(message, **kwargs):
+            if boundary == "between-entries" and message == "registered verified prerequisite":
+                raise SystemExit("crash after first cursor checkpoint, before next review")
+
+        with mock.patch.object(Backlog, "register", interrupted_register):
+            with mock.patch.object(self.controller, "log", side_effect=interrupted_log):
+                with self.assertRaises(SystemExit):
+                    self.execute()
+        record = self.controller.state.get_task(36)
+        pending = record["data"]["pending_discoveries"]
+        self.assertEqual(record["data"]["remote_action"], "register-discoveries")
+        self.assertTrue(record["data"]["dependency_replan"])
+        self.assertEqual(pending["cursor"], 1 if boundary == "between-entries" else 0)
+        retained = Path(record["data"]["worktree"])
+        self.assertEqual(self.repo.head(retained), pending["source"])
+        self.assertEqual(self.repo.changed_paths(retained), [])
+        if boundary == "before-register":
+            self.assertEqual(list((self.config.state / "backlog").glob("*.json")), [])
+            self.assertNotIn(100, self.github.issues)
+        else:
+            self.assertIn(100, self.github.graph.by_issue[36].depends_on)
+        # New controller and SQLite connection exercise actual restart recovery;
+        # native child containment is the only recovery boundary mocked here.
+        self.controller = Controller(self.config, repo=self.repo, github=self.github,
+                                     runner=self.runner, gate=self.gate)
+        self.controller.log = mock.Mock()
+        self.addCleanup(self.controller.state.close)
+        return retained, len(pending["entries"])
+
+    def assert_discovery_restart_completes(self, boundary):
+        retained, count = self.interrupt_discovery_registration(boundary)
+        with mock.patch("issue_pipeline.controller.halt_children"):
+            # First dispatch reconciles intent; then each dependency and the
+            # parent complete in DAG order with real local Git promotion.
+            for _ in range(count + 2):
+                self.controller.run(once=True)
+        parent = self.controller.state.get_task(36)
+        self.assertEqual(parent["status"], "complete", parent)
+        self.assertFalse(parent["data"].get("pending_discoveries"))
+        self.assertIsNone(parent["data"].get("remote_action"))
+        self.assertEqual(self.github.next_issue, 100 + count)
+        self.assertFalse(retained.exists())
+        for number in range(100, 100 + count):
+            self.assertEqual(self.controller.state.get_task(number)["status"], "complete")
+            self.assertTrue(self.controller.verified(number, self.repo.fetch()))
+        plans = [request for role, _, request in self.runner.calls
+                 if role == "planner" and request["issue"]["number"] == 36]
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(plans[-1]["retained_unmerged_paths"], ["src/service.rs"])
+        self.assertEqual(body_hash(plans[-1]["issue"]), body_hash(self.github.issue(36)))
+        self.assertNotEqual(body_hash(plans[0]["issue"]), body_hash(plans[-1]["issue"]))
+        reviews = self.controller.state.receipts(36, "discovery-review")
+        self.assertEqual(len(reviews), count)
+        self.assertTrue(all(item["status"] == "accepted" and self.controller.receipt_valid(item)
+                            for item in reviews))
+
+    def test_discovery_restart_after_remote_registration_replans_parent(self):
+        self.assert_discovery_restart_completes("after-register")
+
+    def test_discovery_restart_before_backlog_journal_still_registers_prerequisite(self):
+        self.assert_discovery_restart_completes("before-register")
+
+    def test_discovery_restart_between_entries_preserves_remaining_discoveries(self):
+        self.assert_discovery_restart_completes("between-entries")
+
+    def test_discovery_restart_refuses_missing_approved_review_artifact(self):
+        retained, _ = self.interrupt_discovery_registration("before-register")
+        receipt = self.controller.state.receipts(36, "discovery-review")[0]
+        Path(receipt["data"]["artifacts"]["review"]).unlink()
+        calls = len(self.runner.calls)
+        with mock.patch("issue_pipeline.controller.halt_children"):
+            self.controller.run(once=True)
+            self.controller.run(once=True)
+        parent = self.controller.state.get_task(36)
+        self.assertEqual(parent["status"], "blocked")
+        self.assertIn("source-bound review artifact", parent["data"]["reason"])
+        self.assertIsNone(parent["data"].get("remote_action"))
+        self.assertTrue(parent["data"]["pending_discoveries"])
+        self.assertEqual(self.github.next_issue, 100)
+        self.assertTrue(retained.exists())
+        self.assertEqual(len(self.runner.calls), calls)
+
+    def test_rejected_later_discovery_cannot_be_skipped_when_first_prerequisite_completes(self):
+        self.runner = MultipleDiscoveryAgents()
+        self.controller.runner = self.runner
+        self.github.issues[41]["state"] = "closed"
+        original = self.runner.run
+
+        def reject_second(role, worktree, prompt, output, **kwargs):
+            result = original(role, worktree, prompt, output, **kwargs)
+            request = json.loads(prompt)
+            if (kwargs.get("review_purpose") == "discovery"
+                    and request["discovery"]["title"] == "Add the other required fixture prerequisite"):
+                result.update(verdict="request_changes", acceptance_complete=False,
+                              summary="The second proposed prerequisite is not supported.")
+                (output / "result.json").write_text(json.dumps(result))
+            return result
+
+        with mock.patch.object(self.runner, "run", side_effect=reject_second):
+            self.execute()
+        parent = self.controller.state.get_task(36)
+        self.assertEqual(parent["data"]["pending_discoveries"]["cursor"], 1)
+        self.assertTrue(parent["data"]["dependency_replan"])
+        self.assertIsNone(parent["data"].get("remote_action"))
+        with mock.patch("issue_pipeline.controller.halt_children"):
+            self.controller.run(once=True)
+            self.controller.run(once=True)
+        self.assertEqual(self.controller.state.get_task(100)["status"], "complete")
+        self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
+        self.assertEqual(self.github.next_issue, 101)
+        parent_plans = [request for role, _, request in self.runner.calls
+                        if role == "planner" and request["issue"]["number"] == 36]
+        self.assertEqual(len(parent_plans), 1)
 
 
 if __name__ == "__main__":

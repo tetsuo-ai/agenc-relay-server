@@ -588,20 +588,49 @@ class Controller:
         self.log("issue completed", issue=task.issue)
 
     def discoveries(self, task: Task, data: dict, worker: dict, source: str) -> None:
+        # Preserve every entry before reviewing or publishing any of them. A
+        # crash between entries must not discard the rest of the worker report.
+        self.checkpoint(task.issue, "working", data, remote_action="register-discoveries",
+                        pending_discoveries={"source": source, "cursor": 0,
+                            "entries": [{"discovery": item} for item in worker["discoveries"]]})
+        self.resume_discoveries(task, data)
+
+    def resume_discoveries(self, task: Task, data: dict) -> None:
         from .backlog import Backlog
-        for discovery in worker["discoveries"]:
-            review, artifact = self.session("reviewer", source, {
-                "issue": data["issue"], "discovery": discovery,
-                "review_instruction": "Verify whether this proposed blocking issue is correct, necessary, actionable and not already covered. Approve only when its claimed defect and all proposed acceptance criteria are supported by source. This review approves issue registration, not code completion."}, review_purpose="discovery")
-            self.record(task.issue, "discovery-review", source, source,
-                        {"discovery": discovery, "review": review, "artifacts": {"review": artifact}},
-                        accepted=review["verdict"] == "approve")
-            if review["verdict"] != "approve":
-                raise PipelineBlocked("proposed discovery did not pass independent verification")
+        pending = data["pending_discoveries"]
+        source = pending["source"]
+        while pending["cursor"] < len(pending["entries"]):
+            entry = pending["entries"][pending["cursor"]]
+            discovery = entry["discovery"]
+            if "review_receipt" not in entry:
+                review, artifact = self.session("reviewer", source, {
+                    "issue": data["issue"], "discovery": discovery,
+                    "review_instruction": "Verify whether this proposed blocking issue is correct, necessary, actionable and not already covered. Approve only when its claimed defect and all proposed acceptance criteria are supported by source. This review approves issue registration, not code completion."}, review_purpose="discovery")
+                receipt = self.record(task.issue, "discovery-review", source, source,
+                            {"discovery": discovery, "review": review, "artifacts": {"review": artifact}},
+                            accepted=review["verdict"] == "approve")
+                if review["verdict"] != "approve":
+                    self.checkpoint(task.issue, "blocked", data, remote_action=None)
+                    raise PipelineBlocked("proposed discovery did not pass independent verification")
+                entry["review_receipt"] = receipt["id"]
+                # This durable intent precedes even Backlog's first journal
+                # write, so both sides of its publication boundary recover.
+                self.checkpoint(task.issue, "working", data, dependency_replan=True)
+            receipt = next((item for item in self.state.receipts(task.issue, "discovery-review")
+                            if item["id"] == entry["review_receipt"]), None)
+            if (receipt is None or receipt["status"] != "accepted" or receipt["source"] != source
+                    or receipt["data"].get("discovery") != discovery or not self.receipt_valid(receipt)):
+                self.checkpoint(task.issue, "blocked", data, remote_action=None)
+                raise PipelineBlocked("pending discovery lacks its accepted source-bound review artifact")
+            review = receipt["data"]["review"]
+            validate_result("reviewer", review)
             with self.graph_lock:
                 number = Backlog(self.github, self.config.state, self.config.master_issue).register(task.issue, discovery, source, review)
+            pending["cursor"] += 1
+            self.checkpoint(task.issue, "working", data)
             self.log("registered verified prerequisite", issue=task.issue, prerequisite=number)
-        self.checkpoint(task.issue, "blocked", data, dependency_replan=True)
+        self.checkpoint(task.issue, "blocked", data, dependency_replan=True,
+                        pending_discoveries=None, remote_action=None)
 
     def execute(self, task: Task, issue: dict) -> None:
         saved = self.state.get_task(task.issue)
@@ -613,6 +642,9 @@ class Controller:
             self.state.claim(task.issue, scopes=task.locks, owner=str(task.issue))
             claimed = True
             self.state.set_task(task.issue, "planning", data)
+            if data.get("pending_discoveries"):
+                self.resume_discoveries(task, data)
+                raise PipelineBlocked("registered discovered prerequisites; waiting for accepted completion evidence")
             if data.get("dependency_replan"):
                 data["completed_plan_phases"] = data["plan"]["phases"][:data["phase_index"]]
                 data["plan"] = None
@@ -829,12 +861,13 @@ class Controller:
                         for row in self.state.list_tasks():
                             number = row["issue"]
                             if (number in graph.by_issue and number not in active and row["status"] != "complete"
-                                    and row["data"].get("remote_action") in ("push-branch", "create-pr", "promote", "cleanup", "close-issue")
+                                    and row["data"].get("remote_action") in ("register-discoveries", "push-branch", "create-pr", "promote", "cleanup", "close-issue")
                                     and len(active) < self.config.max_issues):
                                 active[number] = pool.submit(self.execute, graph.by_issue[number], issues[number])
                         for task in graph.ready(issues, completed):
                             record = self.state.get_task(task.issue)
-                            if record and record["data"].get("dependency_replan"):
+                            if (record and record["data"].get("dependency_replan")
+                                    and not record["data"].get("pending_discoveries")):
                                 self.state.set_task(task.issue, "pending", record["data"])
                                 record = self.state.get_task(task.issue)
                             if task.issue in active or (record and (record["status"] in ("blocked", "complete") or record["data"].get("retry_after", 0) > time.time())):
