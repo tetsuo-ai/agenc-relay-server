@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from issue_pipeline.config import Config
-from issue_pipeline.sandbox import (DOCKER_HOST, IMAGE, STORAGE_FIXTURE_TARGET,
+from issue_pipeline.sandbox import (DOCKER_HOST, IMAGE, STORAGE_FIXTURE_TARGET, FUZZ_ARTIFACT_TARGET,
                                     SandboxFailure, filesystem_command)
 
 
@@ -42,7 +42,9 @@ class SandboxPlanTests(unittest.TestCase):
         self.repo = mock.Mock()
         self.repo.head.return_value = self.source
         self.tracked_fixture = ""
-        self.repo.run.side_effect = lambda argv, **kw: (self.tracked_fixture if argv[0] == "ls-files"
+        self.tracked_fuzz_artifact = ""
+        self.repo.run.side_effect = lambda argv, **kw: ((self.tracked_fuzz_artifact
+            if argv[-1] == FUZZ_ARTIFACT_TARGET else self.tracked_fixture) if argv[0] == "ls-files"
             else str(self.admin if "--absolute-git-dir" in argv else self.common))
 
     def command(self):
@@ -144,6 +146,43 @@ class SandboxPlanTests(unittest.TestCase):
     def test_storage_fixture_mount_refuses_symlink_destination(self):
         (self.worktree / STORAGE_FIXTURE_TARGET).symlink_to(self.output, target_is_directory=True)
         with self.assertRaisesRegex(SandboxFailure, "mask source or unowned files"):
+            self.command()
+        self.assertIsNone(self.created)
+
+    def test_fuzz_artifacts_use_exact_empty_mountpoint_and_private_generated_backing(self):
+        self.command()
+        policy = json.loads((self.output / "filesystem-policy.json").read_text())
+        mounts = {entry["target"]: entry for entry in policy["mounts"]}
+        target = self.worktree / FUZZ_ARTIFACT_TARGET
+        backing = Path(mounts[str(target)]["source"])
+        self.assertEqual(backing.parent, self.worktree / "target")
+        self.assertTrue(backing.name.startswith(".issue-pipeline-fuzz-fixtures-"))
+        self.assertFalse(mounts[str(target)]["readonly"])
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(list(backing.iterdir()), [])
+        self.assertNotIn(str(target.parent), mounts)
+
+    def test_fuzz_artifact_mount_refuses_tracked_inputs(self):
+        self.tracked_fuzz_artifact = FUZZ_ARTIFACT_TARGET + "/reviewed-crash\n"
+        with self.assertRaisesRegex(SandboxFailure, "fuzz fixture mount would mask source"):
+            self.command()
+        self.assertIsNone(self.created)
+
+    def test_fuzz_artifact_mount_refuses_existing_unowned_files(self):
+        target = self.worktree / FUZZ_ARTIFACT_TARGET
+        target.mkdir(parents=True)
+        sentinel = target / "unowned-crash"
+        sentinel.write_text("preserve me\n")
+        with self.assertRaisesRegex(SandboxFailure, "fuzz fixture mount would mask source"):
+            self.command()
+        self.assertEqual(sentinel.read_text(), "preserve me\n")
+        self.assertIsNone(self.created)
+
+    def test_fuzz_artifact_mount_refuses_symlink_destination(self):
+        target = self.worktree / FUZZ_ARTIFACT_TARGET
+        target.parent.mkdir()
+        target.symlink_to(self.output, target_is_directory=True)
+        with self.assertRaisesRegex(SandboxFailure, "fuzz fixture mount would mask source"):
             self.command()
         self.assertIsNone(self.created)
 
