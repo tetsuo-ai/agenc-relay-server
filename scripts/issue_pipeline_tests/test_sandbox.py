@@ -64,10 +64,10 @@ class SandboxPlanTests(unittest.TestCase):
             return self.create_result, self.identity
         with mock.patch("issue_pipeline.sandbox.Path.home", return_value=self.home), \
                 mock.patch("issue_pipeline.sandbox.shutil.which", side_effect=which), \
-                mock.patch("issue_pipeline.sandbox.prepare_cargo_cache", return_value=self.cargo), \
                 mock.patch("issue_pipeline.sandbox._process", side_effect=create), \
                 mock.patch("issue_pipeline.sandbox.record_created_container", return_value=self.identity), \
-                mock.patch.dict(os.environ, {"RUSTUP_HOME": str(self.rustup)}):
+                mock.patch.dict(os.environ, {"RUSTUP_HOME": str(self.rustup),
+                                            "CARGO_HOME": str(self.home / "public-cargo")}):
             return filesystem_command(self.config, self.repo, self.worktree, self.output, probe_only=True)
 
     def test_exact_owned_pinned_local_container_and_identity_are_recorded_before_launch(self):

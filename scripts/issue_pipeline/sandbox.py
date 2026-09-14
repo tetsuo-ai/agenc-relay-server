@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 from .config import Config, private_directory
@@ -22,6 +23,11 @@ QUALIFICATION_TEMP_TARGETS = ("target/tmp", "target/llvm-cov-target/tmp")
 QUALIFICATION_TEMP_BYTES = 8 * 1024 ** 3
 IMAGE = "sha256:a6f81fb630d51837271b89f8193810a5fc493fa4f30a55d7ebcdb3a66f3cc63a"
 DOCKER_HOST = "unix:///var/run/docker.sock"
+DEPENDENCY_CACHE_PATHS = ("registry/src", "registry/cache", "git/checkouts", "git/db")
+CACHE_CONTROL_TEXT = "benign dependency read-only canary\n"
+CACHE_SEED_TEXT = "public-crates-io-only-v1\n"
+CACHE_SEED_SECONDS = 180
+MAX_REGISTRY_ROOTS = 32
 
 
 class SandboxFailure(RuntimeError):
@@ -41,46 +47,124 @@ def _record(path: Path, value: dict) -> None:
         os.close(directory)
 
 
+def _private_cache_directory(path: Path) -> None:
+    if any(component.is_symlink() for component in (path, *path.parents)):
+        raise SandboxFailure("private Cargo cache must not traverse symlinks")
+    try:
+        private_directory(path)
+    except (OSError, ValueError) as error:
+        raise SandboxFailure("private Cargo cache directory is unsafe") from error
+
+
+def _cache_control_valid(path: Path, expected: str) -> bool:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise SandboxFailure("private Cargo cache control cannot be safely opened") from error
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1 or metadata.st_mode & 0o022
+                or metadata.st_size != len(expected.encode())
+                or stream.read(len(expected.encode()) + 1) != expected.encode()):
+            raise SandboxFailure("private Cargo cache control is invalid; preserve it for inspection")
+    return True
+
+
+def _ensure_cache_control(path: Path, expected: str) -> None:
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        if not _cache_control_valid(path, expected):
+            raise SandboxFailure("private Cargo cache control disappeared")
+        return
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(expected.encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _registry_inventory(path: Path, deadline: float):
+    with os.scandir(path) as entries:
+        count = 0
+        for entry in entries:
+            if entry.name != ".gate-readonly-canary":
+                count += 1
+            if count > MAX_REGISTRY_ROOTS:
+                raise SandboxFailure("Cargo registry inventory exceeds its startup bound")
+            if time.monotonic() >= deadline:
+                raise SandboxFailure("public Cargo cache seeding exceeded its startup deadline")
+            yield Path(entry.path)
+
+
 def prepare_cargo_cache(config: Config) -> Path:
-    """Seed a private cache from public crates.io data, never user configuration.
+    """Prepare all first-session and gate cache inputs after owned child cleanup.
 
     Host registry sources remain read-only inputs to this one-time copy. Package
     bodies are read-only during candidate execution; index/advisory metadata uses
-    this dedicated cache. Missing dependencies require separate trusted prefetch.
+    this dedicated cache. No host configuration, credentials, bin, git sources or
+    private registries are copied. Missing packages require trusted prefetch.
     """
+    deadline = time.monotonic() + CACHE_SEED_SECONDS
     cargo_home = config.state / "gate-cache" / "cargo"
-    private_directory(cargo_home)
+    _private_cache_directory(cargo_home)
     marker = cargo_home / ".public-registry-seeded"
-    if marker.exists():
-        if marker.is_symlink() or marker.read_text() != "public-crates-io-only-v1\n":
-            raise SandboxFailure("private Cargo cache seed marker is invalid")
-        return cargo_home
-    original = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
+    seeded = _cache_control_valid(marker, CACHE_SEED_TEXT)
+    for relative in (*DEPENDENCY_CACHE_PATHS, "registry/index", "advisory-db"):
+        _private_cache_directory(cargo_home / relative)
     for category in ("cache", "src", "index"):
-        source = original / "registry" / category
-        destination = cargo_home / "registry" / category
-        private_directory(destination)
-        if source.is_dir() and not source.is_symlink():
-            for registry in sorted(source.iterdir()):
-                if (registry.is_symlink() or not registry.is_dir()
-                        or not (registry.name.startswith("index.crates.io-")
-                                or registry.name == "github.com-1ecc6299db9ec823")):
+        for path in _registry_inventory(cargo_home / "registry" / category, deadline):
+            if path.name.startswith(".seed-"):
+                raise SandboxFailure("interrupted public Cargo seed remains; stop the service and inspect the retained .seed-* directory before retry")
+    if not seeded:
+        original = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))).absolute()
+        if any(path.is_symlink() for path in (original, *original.parents)):
+            raise SandboxFailure("public Cargo source must not traverse symlinks")
+        for category in ("cache", "src", "index"):
+            source = original / "registry" / category
+            destination = cargo_home / "registry" / category
+            if any(path.is_symlink() for path in (source, source.parent)):
+                raise SandboxFailure("public Cargo registry source must not traverse symlinks")
+            if not source.exists():
+                continue
+            if not source.is_dir():
+                raise SandboxFailure("public Cargo registry source is not a directory")
+            for registry in _registry_inventory(source, deadline):
+                if not (re.fullmatch(r"index\.crates\.io-[0-9a-f]{16}", registry.name)
+                        or registry.name == "github.com-1ecc6299db9ec823"):
                     continue
+                if registry.is_symlink() or not registry.is_dir():
+                    raise SandboxFailure("public Cargo registry root is unsafe")
                 target = destination / registry.name
-                if not target.exists():
-                    staged = destination / (".seed-" + uuid.uuid4().hex)
+                if target.exists() or target.is_symlink():
+                    _private_cache_directory(target)
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SandboxFailure("public Cargo cache seeding exceeded its startup deadline")
+                staged = destination / (".seed-" + uuid.uuid4().hex)
+                try:
                     result = subprocess.run(["cp", "--archive", "--reflink=auto", "--", str(registry), str(staged)],
                                             stdin=subprocess.DEVNULL, capture_output=True,
-                                            timeout=180, check=False)
-                    if result.returncode:
-                        raise SandboxFailure("public Cargo cache seeding failed; retain partial cache for diagnosis")
-                    staged.rename(target)
-    for name in ("git", "advisory-db"):
-        private_directory(cargo_home / name)
-    with marker.open("x") as stream:
-        stream.write("public-crates-io-only-v1\n")
-        stream.flush()
-        os.fsync(stream.fileno())
+                                            timeout=remaining, check=False)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    raise SandboxFailure("public Cargo cache seeding failed; retain partial cache for diagnosis") from error
+                if result.returncode:
+                    raise SandboxFailure("public Cargo cache seeding failed; retain partial cache for diagnosis")
+                if not staged.is_dir() or staged.is_symlink():
+                    raise SandboxFailure("public Cargo cache copy did not produce its owned directory")
+                _private_cache_directory(staged)
+                staged.rename(target)
+    for relative in DEPENDENCY_CACHE_PATHS:
+        _ensure_cache_control(cargo_home / relative / ".gate-readonly-canary", CACHE_CONTROL_TEXT)
+    _ensure_cache_control(marker, CACHE_SEED_TEXT)
     return cargo_home
 
 
@@ -203,19 +287,8 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
             or output.parent != config.state / "gates"):
         raise SandboxFailure("gate sandbox requires this controller's detached validation worktree")
     cargo_home = prepare_cargo_cache(config)
-    dependency_sources = [cargo_home / "registry/src", cargo_home / "registry/cache",
-                          cargo_home / "git/checkouts", cargo_home / "git/db"]
-    dependency_canaries = []
-    for path in dependency_sources:
-        private_directory(path)
-        canary_path = path / ".gate-readonly-canary"
-        if not canary_path.exists():
-            with canary_path.open("x") as stream:
-                stream.write("benign dependency read-only canary\n")
-        if canary_path.is_symlink() or not canary_path.is_file():
-            raise SandboxFailure("dependency cache read-only control is unsafe")
-        dependency_canaries.append(str(canary_path))
-    private_directory(cargo_home / "registry/index")
+    dependency_sources = [cargo_home / relative for relative in DEPENDENCY_CACHE_PATHS]
+    dependency_canaries = [str(path / ".gate-readonly-canary") for path in dependency_sources]
     scratch = config.state / "gate-cache" / "tmp"
     private_directory(scratch)
     rustup_executable = shutil.which("rustup")

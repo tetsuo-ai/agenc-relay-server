@@ -1035,6 +1035,8 @@ class Controller:
             raise PipelineBlocked("unattended execution requires systemd cgroup containment")
         with SupervisorLock(self.config.state / "supervisor.lock"):
             self.recover()
+            from .sandbox import prepare_cargo_cache
+            prepare_cargo_cache(self.config)
             with ThreadPoolExecutor(max_workers=self.config.max_issues) as pool:
                 active = {}
                 while not self.stop.is_set():

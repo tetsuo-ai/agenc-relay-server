@@ -44,6 +44,8 @@ systemctl --user enable --now agenc-ircd-issue-pipeline.service
 
 The installer creates a content-addressed bundle under `~/.local/share/agenc-ircd-pipeline/releases/`, a private configuration file, and a stopped user service. It neither changes account credentials nor activates itself. Installation does not establish test evidence: the setup/upgrade PR must receive its own independent review and full gate before activation. Controller/policy upgrades require this same explicit release procedure and cannot self-install through ordinary issue work.
 
+At startup, the controller holds the supervisor lock, reconciles owned children, and prepares `state_dir/gate-cache/cargo` before admitting its first agent session. It seeds only public crates.io registry data from the existing Cargo cache and creates the exact read-only permission controls; host credentials, Cargo configuration and private dependencies are excluded. No earlier gate or manual cache initialization is required. Repeated starts validate the controls without copying the host cache again. Invalid controls or an interrupted `.seed-*` copy block dispatch and remain available for inspection. Keep the service stopped while investigating a retained partial copy; only remove that partial staging directory after confirming no owned child or cache-copy process is still running. Preparation bounds each registry inventory and the total copy deadline, so automatic service restarts cannot accumulate partial copies.
+
 Useful commands from a repository checkout:
 
 ```sh

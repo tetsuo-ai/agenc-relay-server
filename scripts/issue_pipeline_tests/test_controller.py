@@ -270,6 +270,9 @@ class ControllerTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         parent = Path(self.temporary.name)
         self.config = Config(state_dir=str(parent / "state"), max_attempts=2, max_issues=1)
+        cache_environment = mock.patch.dict("os.environ", {"CARGO_HOME": str(parent / "public-cargo")})
+        cache_environment.start()
+        self.addCleanup(cache_environment.stop)
         self.config.state.mkdir()
         self.remote, seed = parent / "remote.git", parent / "seed"
         git(parent, "init", "--bare", "--initial-branch=main", str(self.remote))
