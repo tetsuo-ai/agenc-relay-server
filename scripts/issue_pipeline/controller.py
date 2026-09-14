@@ -768,7 +768,6 @@ class Controller:
         return receipt
 
     def resume_discoveries(self, task: Task, data: dict) -> None:
-        from .backlog import Backlog
         pending = data["pending_discoveries"]
         source = pending["source"]
         while pending["cursor"] < len(pending["entries"]):
@@ -808,7 +807,7 @@ class Controller:
                 raise
             review = receipt["data"]["review"]
             with self.graph_lock:
-                backlog = Backlog(self.github, self.config.state, self.config.master_issue)
+                backlog = self.discovery_backlog({task.issue: (source, entry)})
                 if not backlog.registration_started(task.issue, discovery, source, review):
                     _, current_hash = self.managed_backlog()
                     if current_hash != receipt["data"]["backlog_hash"]:
@@ -821,6 +820,59 @@ class Controller:
             self.log("registered verified prerequisite", issue=task.issue, prerequisite=number)
         self.checkpoint(task.issue, "blocked", data, dependency_replan=True,
                         pending_discoveries=None, remote_action=None)
+
+    def discovery_backlog(self, approvals: dict):
+        """Bind publication/recovery to the original complete reviewed catalog.
+
+        Full snapshot() cannot admit partially applied native graph writes.
+        Compare every original managed issue directly instead, allowing only
+        the exact parent/master body changes owned by this registration journal.
+        The journal still validates native ownership and the final repaired DAG.
+        """
+        from .backlog import Backlog, BacklogError, ReviewedCatalogChanged
+
+        def guard(journal, path):
+            binding = approvals.get(journal["parent"])
+            if binding is None:
+                raise BacklogError(f"discovery has no original catalog approval; preserve {path}")
+            source, entry = binding
+            receipt = self.discovery_receipt(journal["parent"], source, entry)
+            if (journal["source"] != source or journal["discovery"] != entry["discovery"]
+                    or journal["review"] != receipt["data"]["review"]):
+                raise BacklogError(f"discovery differs from its original catalog approval; preserve {path}")
+            catalog = json.loads(Path(receipt["data"]["artifacts"]["backlog"]).read_text())
+            graph = Graph.from_master(journal["master_before"])
+            rows = {row["number"]: row for row in catalog["issues"]}
+            if (catalog["repository"] != self.config.repository
+                    or catalog["master"]["number"] != self.config.master_issue
+                    or catalog["master"]["body"] != journal["master_before"]
+                    or encode(catalog["graph"]) != encode(asdict(graph))
+                    or set(rows) != set(graph.by_issue) | {graph.legacy_umbrella["issue"]}
+                    or len(rows) != len(catalog["issues"])
+                    or rows[journal["parent"]]["body"] != journal["parent_before"]):
+                raise BacklogError(f"discovery journal differs from its original reviewed catalog; preserve {path}")
+            # Finish with parent/master reads, after the remaining full bodies.
+            ordered = [row for number, row in sorted(rows.items()) if number != journal["parent"]]
+            ordered += [rows[journal["parent"]], catalog["master"]]
+            for expected in ordered:
+                number = expected["number"]
+                try:
+                    live = self.github.issue(number)
+                except GithubIdentityError as error:
+                    raise ReviewedCatalogChanged(f"reviewed managed backlog issue #{number} has an invalid identity; "
+                                                 f"preserve {path} and its original approval") from error
+                allowed_bodies = {expected["body"]}
+                after = (journal.get("master_after") if number == self.config.master_issue else
+                         journal.get("parent_after") if number == journal["parent"] else None)
+                if after is not None:
+                    allowed_bodies.add(after)
+                if (live["title"] != expected["title"] or live["state"] != expected["state"]
+                        or live["body"] not in allowed_bodies):
+                    raise ReviewedCatalogChanged(f"reviewed managed backlog issue #{number} changed outside this discovery; "
+                                                 f"preserve {path} and its original approval for manual reconciliation")
+
+        return Backlog(self.github, self.config.state, self.config.master_issue,
+                       publication_guard=guard)
 
     def assert_gate_available(self) -> None:
         """Called while integration is held, before shared validation mutation."""
@@ -1054,12 +1106,13 @@ class Controller:
     def recover(self) -> None:
         if self.config.use_systemd:
             halt_children(self.config.state)
-        from .backlog import Backlog, MasterBlockerInvalid
+        from .backlog import MasterBlockerInvalid, ReviewedCatalogChanged
         with self.graph_lock:
             # Backlog.reconcile can publish an interrupted operation. Validate
             # every journal against its queued approval and catalog before any
             # replay, including journals whose parent has no current queue.
-            backlog = Backlog(self.github, self.config.state, self.config.master_issue)
+            review_entries = {}
+            backlog = self.discovery_backlog(review_entries)
             approved = {}
             for row in self.state.list_tasks():
                 data = row["data"]
@@ -1072,6 +1125,7 @@ class Controller:
                         receipt = self.discovery_receipt(row["issue"], pending["source"], entry)
                         approved[row["issue"]] = {"parent": row["issue"], "source": pending["source"],
                             "discovery": entry["discovery"], "review": receipt["data"]["review"]}
+                        review_entries[row["issue"]] = (pending["source"], entry)
                     except PipelineBlocked as error:
                         self.checkpoint(row["issue"], "blocked", data, remote_action=None, reason=str(error))
                         raise
@@ -1082,12 +1136,13 @@ class Controller:
                                           + descriptor["path"] + " and reconcile its original proof")
             try:
                 backlog.reconcile()
-            except MasterBlockerInvalid:
-                # A confirmed new master requirement revokes owned closures
+            except (MasterBlockerInvalid, ReviewedCatalogChanged) as error:
+                # Confirmed changed requirements revoke owned closures
                 # even while an approved graph journal is pending. Ordinary
                 # transport/partial-publication uncertainty must repair first.
                 try:
-                    self.reconcile_aggregates(recheck_only=True)
+                    self.reconcile_aggregates(recheck_only=True,
+                                              preserve_valid_legacy=isinstance(error, ReviewedCatalogChanged))
                 except Exception:
                     pass  # Original journals and compensation failures remain blocked.
                 raise
@@ -1174,9 +1229,29 @@ class Controller:
                         return
                     self.stop.wait(self.config.poll_seconds)
 
-    def aggregate_context(self):
+    def aggregate_context(self, *, legacy_scope=False):
         try:
-            graph, issues = self.snapshot()
+            if not legacy_scope:
+                graph, issues = self.snapshot()
+            else:
+                # During a blocked approved discovery, its partial native child
+                # mirror cannot disprove an unrelated terminal legacy receipt.
+                # Validate that legacy's exact transitive native prerequisites;
+                # this scoped observation never authorizes a new closure.
+                graph = Graph.from_master(self.github.issue(self.config.master_issue)["body"])
+                legacy = int(graph.legacy_umbrella["issue"])
+                required, pending = set(), list(graph.legacy_umbrella["depends_on"])
+                while pending:
+                    number = pending.pop()
+                    if number not in required:
+                        required.add(number)
+                        pending.extend(graph.by_issue[number].depends_on)
+                issues = {n: self.github.issue(n) for n in sorted(required | {legacy})}
+                for number in sorted(required | {legacy}):
+                    expected = graph.legacy_umbrella["depends_on"] if number == legacy else graph.by_issue[number].depends_on
+                    observed = native_issue_numbers(self.github.blockers(number), self.config.repository, issues)
+                    if set(observed) != set(expected):
+                        raise GraphError("legacy native prerequisites changed during discovery repair")
         except (GraphError, GithubIdentityError) as error:
             raise PipelineBlocked("aggregate graph or native dependencies are no longer valid") from error
         tip = self.fetch()
@@ -1267,11 +1342,13 @@ class Controller:
             raise PipelineBlocked("aggregate immutable evidence is missing or differs; preserve its journal")
         return matches[0]
 
-    def check_aggregate(self, entry, *, closed=False):
+    def check_aggregate(self, entry, *, closed=False, legacy_scope=False):
         expected = entry["binding"]
-        context = self.aggregate_context()
-        current = self.aggregate_binding(expected["kind"], context)
         terminal_legacy = expected["kind"] == "legacy" and entry["stage"] == "complete"
+        if legacy_scope and not terminal_legacy:
+            raise PipelineBlocked("scoped discovery read cannot authorize an aggregate closure")
+        context = self.aggregate_context(legacy_scope=True) if legacy_scope else self.aggregate_context()
+        current = self.aggregate_binding(expected["kind"], context)
         compared = set(expected) - ({"graph_hash", "master_hash"} if terminal_legacy else set())
         if current is None or any(current[field] != expected[field] for field in compared):
             raise PipelineBlocked("aggregate graph, requirements or prerequisite evidence changed")
@@ -1399,14 +1476,28 @@ class Controller:
             self.reopen_aggregate(number, data, entry)
             raise
 
-    def reconcile_aggregates(self, *, recheck_only=False):
+    def reconcile_aggregates(self, *, recheck_only=False, preserve_valid_legacy=False):
         """Drain both independently owned aggregates before reporting a failure."""
         with self.graph_lock:
             rows = [row for row in self.state.list_tasks() if "aggregate_closure" in row["data"]]
             rows.sort(key=lambda row: row["issue"] == self.config.master_issue)
             errors = []
+            scoped = set()
             for row in rows:
                 try:
+                    retained = row["data"]["aggregate_closure"]
+                    if (recheck_only and preserve_valid_legacy and retained.get("stage") == "complete"
+                            and retained["binding"]["kind"] == "legacy"):
+                        scoped.add(row["issue"])
+                        _, _, entry = self.load_aggregate(row["issue"])
+                        try:
+                            self.check_aggregate(entry, closed=True, legacy_scope=True)
+                            self.aggregate_proof(row["issue"], "aggregate-completion", entry["terminal"],
+                                                 entry["source"], {"intent": entry["intent"]})
+                        except PipelineBlocked:
+                            pass  # Confirmed own-scope revocation uses normal owned compensation.
+                        else:
+                            continue
                     if recheck_only and row["data"]["aggregate_closure"].get("stage") not in {
                             "complete", "reopening", "invalidated"}:
                         _, data, entry = self.load_aggregate(row["issue"])
@@ -1430,7 +1521,17 @@ class Controller:
                 if current["data"]["aggregate_closure"].get("stage") != "complete":
                     continue
                 try:
-                    self.resume_aggregate(row["issue"])
+                    if row["issue"] in scoped:
+                        _, data, entry = self.load_aggregate(row["issue"])
+                        try:
+                            self.check_aggregate(entry, closed=True, legacy_scope=True)
+                            self.aggregate_proof(row["issue"], "aggregate-completion", entry["terminal"],
+                                                 entry["source"], {"intent": entry["intent"]})
+                        except PipelineBlocked:
+                            self.reopen_aggregate(row["issue"], data, entry)
+                            raise
+                    else:
+                        self.resume_aggregate(row["issue"])
                 except Exception as error:
                     current = self.state.get_task(row["issue"])
                     data = current["data"]
