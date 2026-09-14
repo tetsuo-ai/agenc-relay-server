@@ -1033,6 +1033,19 @@ class Controller:
             self.state.release(record["issue"])
             self.log("recovered durable task checkpoint", issue=record["issue"], stage=record["interrupted_from"])
 
+    def dispatch_conflicts(self, task: Task, reservations: dict[int, tuple[str, ...]]) -> bool:
+        """Keep conflicting work out of executor slots; State.claim still enforces ownership."""
+        scopes = set(task.locks)
+        if any(number != task.issue and scopes.intersection(locks) for number, locks in reservations.items()):
+            return True
+        owner = str(task.issue)
+        for claim in self.state.claims():
+            if claim["issue"] == task.issue and claim["owner"] == owner:
+                continue
+            if claim["issue"] == task.issue or (claim["kind"] == "scope" and claim["value"] in scopes):
+                return True
+        return False
+
     def run(self, *, once=False) -> None:
         if not self.config.use_systemd:
             raise PipelineBlocked("unattended execution requires systemd cgroup containment")
@@ -1042,11 +1055,26 @@ class Controller:
             prepare_cargo_cache(self.config)
             with ThreadPoolExecutor(max_workers=self.config.max_issues) as pool:
                 active = {}
+                # Preserve the original submitted locks across graph refreshes,
+                # including the interval before a worker acquires durable claims.
+                reservations = {}
+
+                def submit(task, issue):
+                    if task.issue in active or self.dispatch_conflicts(task, reservations):
+                        return
+                    reservations[task.issue] = task.locks
+                    try:
+                        active[task.issue] = pool.submit(self.execute, task, issue)
+                    except BaseException:
+                        del reservations[task.issue]
+                        raise
+
                 while not self.stop.is_set():
                     for number, future in list(active.items()):
                         if future.done():
                             future.result()
                             del active[number]
+                            del reservations[number]
                     if not (self.config.state / "PAUSED").exists():
                         graph, issues = self.snapshot()
                         tip = self.fetch()
@@ -1057,7 +1085,7 @@ class Controller:
                             if (number in graph.by_issue and number not in active and row["status"] != "complete"
                                     and row["data"].get("remote_action") in ("register-discoveries", "push-branch", "create-pr", "promote", "cleanup", "close-issue")
                                     and len(active) < self.config.max_issues):
-                                active[number] = pool.submit(self.execute, graph.by_issue[number], issues[number])
+                                submit(graph.by_issue[number], issues[number])
                         for task in graph.ready(issues, completed):
                             record = self.state.get_task(task.issue)
                             if (record and record["data"].get("dependency_replan")
@@ -1075,7 +1103,7 @@ class Controller:
                                 continue
                             if len(active) >= self.config.max_issues:
                                 break
-                            active[task.issue] = pool.submit(self.execute, task, issues[task.issue])
+                            submit(task, issues[task.issue])
                         self.update_master(graph, issues, completed)
                     if once:
                         for future in active.values():
