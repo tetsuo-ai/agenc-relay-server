@@ -18,6 +18,8 @@ from .gitops import GitError, _process
 ARTIFACT_PREFIX = "conformance/evidence/artifacts/"
 STORAGE_FIXTURE_TARGET = "crates/agenc-ircd-storage/target"
 FUZZ_ARTIFACT_TARGET = "fuzz/artifacts"
+QUALIFICATION_TEMP_TARGETS = ("target/tmp", "target/llvm-cov-target/tmp")
+QUALIFICATION_TEMP_BYTES = 8 * 1024 ** 3
 IMAGE = "sha256:a6f81fb630d51837271b89f8193810a5fc493fa4f30a55d7ebcdb3a66f3cc63a"
 DOCKER_HOST = "unix:///var/run/docker.sock"
 
@@ -87,7 +89,7 @@ def prepare_cargo_cache(config: Config) -> Path:
 # Successfully parsing sandbox options is insufficient: some user-systemd builds
 # accept filesystem restrictions without enforcing them on the child.
 _FILESYSTEM_BOOTSTRAP = r'''
-import errno, json, os, pathlib, subprocess, sys, tempfile
+import errno, json, os, pathlib, stat, subprocess, sys, tempfile
 request = json.loads(sys.argv[1])
 for denied in request["denied"]:
     try:
@@ -125,6 +127,43 @@ if os.stat(request["home"]).st_dev != request["home_device"]:
     raise RuntimeError("private HOME is not on the bound host filesystem")
 if str(pathlib.Path.home()) != request["home"]:
     raise RuntimeError("gate changed the caller's HOME environment")
+temporary_devices = set()
+mountinfo = pathlib.Path("/proc/self/mountinfo").read_text().splitlines()
+for temporary in request["temporary_mounts"]:
+    path = temporary["path"]
+    metadata = os.stat(path)
+    capacity = os.statvfs(path)
+    if (metadata.st_dev in request["disk_devices"] or metadata.st_dev in temporary_devices
+            or metadata.st_uid != request["uid"] or metadata.st_gid != request["gid"]
+            or stat.S_IMODE(metadata.st_mode) != 0o700):
+        raise RuntimeError("qualification scratch is not an independent private filesystem")
+    if capacity.f_blocks * capacity.f_frsize != temporary["size_bytes"]:
+        raise RuntimeError("qualification scratch does not have its exact bounded capacity")
+    required_flags = os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC
+    if capacity.f_flag & required_flags != required_flags:
+        raise RuntimeError("qualification scratch lacks its restrictive mount flags")
+    entries = []
+    for line in mountinfo:
+        left, separator, right = line.partition(" - ")
+        fields = left.split()
+        if not separator or len(fields) < 6:
+            raise RuntimeError("invalid private mount inventory")
+        target = fields[4]
+        for escaped, value in ((r"\040", " "), (r"\011", "\t"), (r"\012", "\n"), (r"\134", "\\")):
+            target = target.replace(escaped, value)
+        if target == path:
+            entries.append(right.split()[0])
+    if entries != ["tmpfs"]:
+        raise RuntimeError("qualification scratch is not the exact tmpfs mount")
+    with tempfile.TemporaryFile(dir=path) as stream:
+        stream.write(b"benign isolated qualification fixture")
+        stream.seek(0)
+        if stream.read() != b"benign isolated qualification fixture":
+            raise RuntimeError("isolated qualification fixture write failed")
+    temporary_devices.add(metadata.st_dev)
+    print("agenc-pipeline private qualification scratch " + json.dumps({
+        "path": path, "device": metadata.st_dev, "size_bytes": temporary["size_bytes"],
+        "mode": oct(stat.S_IMODE(metadata.st_mode)), "mount_flags": capacity.f_flag}), flush=True)
 home_scratch = pathlib.Path(request["home_scratch"])
 home_scratch.mkdir(mode=0o700)
 (home_scratch / "canary").write_text("benign private HOME fixture canary\n")
@@ -217,6 +256,17 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
         fixture_backing = generated[0] / (".issue-pipeline-" + label + "-fixtures-" + uuid.uuid4().hex)
         private_directory(fixture_backing)
         fixture_mounts.append((fixture_backing, fixture_target))
+    # Qualification tests compare filesystem-wide free-space samples. Isolate
+    # their compile-time Cargo temporary roots from unrelated host disk writes.
+    temporary_mounts = []
+    for relative in QUALIFICATION_TEMP_TARGETS:
+        path = worktree / relative
+        if (any(parent.is_symlink() for parent in (path, *path.parents))
+                or repo.run(["ls-files", "--", relative], cwd=worktree).strip()
+                or (path.exists() and (not path.is_dir() or any(path.iterdir())))):
+            raise SandboxFailure("qualification temporary mount would mask source or unowned files")
+        path.mkdir(parents=True, exist_ok=True)
+        temporary_mounts.append({"path": str(path), "size_bytes": QUALIFICATION_TEMP_BYTES})
     # The source artifact directory may contain historic tracked receipts; protect
     # every existing file while allowing the runner's new exact-source artifact.
     existing_artifacts = [path for path in generated[-1].rglob("*") if path.is_file()]
@@ -255,6 +305,9 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
                  "home": str(home), "home_scratch": str(home_scratch),
                  "home_mount_flags": os.statvfs(private_home).f_flag,
                  "home_device": os.stat(private_home).st_dev,
+                 "temporary_mounts": temporary_mounts,
+                 "disk_devices": sorted({os.stat(path).st_dev for path in
+                     (private_home, scratch, worktree, output, *generated)}),
                  "uid": os.getuid(), "gid": os.getgid(),
                  "worktree": str(worktree), "probe_only": probe_only}
     # Mount private empty ancestors read-only, not host HOME ancestors. This also
@@ -305,7 +358,7 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
     # Persist the exact mounts and controls alongside the immutable ownership.
     ordered = [mounts[target] for target in sorted(mounts, key=lambda p: (len(Path(p).parts), p))]
     _record(output / "filesystem-policy.json", {"backend": "docker", "image": IMAGE,
-            "mounts": ordered, "bootstrap": bootstrap})
+            "mounts": ordered, "temporary_mounts": temporary_mounts, "bootstrap": bootstrap})
     argv = [str(executable), "--host", DOCKER_HOST, "create", "--pull=never", "--log-driver=none", "--name", name,
             "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", "--read-only", "--pids-limit=4096",
@@ -318,6 +371,10 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
     for mount in ordered:
         value = "type=bind,source=" + mount["source"] + ",target=" + mount["target"]
         argv += ["--mount", value + (",readonly" if mount["readonly"] else "")]
+    for temporary in temporary_mounts:
+        argv += ["--tmpfs", temporary["path"] + ":rw,nosuid,nodev,noexec,size="
+                 + str(temporary["size_bytes"]) + ",uid=" + str(os.getuid())
+                 + ",gid=" + str(os.getgid()) + ",mode=0700"]
     argv += ["--workdir", str(worktree), IMAGE, "/usr/bin/env", "-i",
              "PATH=" + os.environ.get("PATH", "/usr/bin:/bin"),
              "HOME=" + str(Path.home()), "USER=" + os.environ.get("USER", ""),

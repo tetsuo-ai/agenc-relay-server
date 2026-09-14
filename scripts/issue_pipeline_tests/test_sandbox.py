@@ -10,6 +10,7 @@ from unittest import mock
 
 from issue_pipeline.config import Config
 from issue_pipeline.sandbox import (DOCKER_HOST, IMAGE, STORAGE_FIXTURE_TARGET, FUZZ_ARTIFACT_TARGET,
+                                    QUALIFICATION_TEMP_TARGETS, QUALIFICATION_TEMP_BYTES,
                                     SandboxFailure, filesystem_command)
 
 
@@ -43,8 +44,11 @@ class SandboxPlanTests(unittest.TestCase):
         self.repo.head.return_value = self.source
         self.tracked_fixture = ""
         self.tracked_fuzz_artifact = ""
+        self.tracked_temporary = {}
         self.repo.run.side_effect = lambda argv, **kw: ((self.tracked_fuzz_artifact
-            if argv[-1] == FUZZ_ARTIFACT_TARGET else self.tracked_fixture) if argv[0] == "ls-files"
+            if argv[-1] == FUZZ_ARTIFACT_TARGET else self.tracked_fixture
+            if argv[-1] == STORAGE_FIXTURE_TARGET else self.tracked_temporary.get(argv[-1], ""))
+            if argv[0] == "ls-files"
             else str(self.admin if "--absolute-git-dir" in argv else self.common))
 
     def command(self):
@@ -183,6 +187,46 @@ class SandboxPlanTests(unittest.TestCase):
         target.parent.mkdir()
         target.symlink_to(self.output, target_is_directory=True)
         with self.assertRaisesRegex(SandboxFailure, "fuzz fixture mount would mask source"):
+            self.command()
+        self.assertIsNone(self.created)
+
+    def test_qualification_scratch_has_exact_private_bounded_tmpfs_mounts(self):
+        self.command()
+        policy = json.loads((self.output / "filesystem-policy.json").read_text())
+        expected = [{"path": str(self.worktree / relative), "size_bytes": QUALIFICATION_TEMP_BYTES}
+                    for relative in QUALIFICATION_TEMP_TARGETS]
+        self.assertEqual(policy["temporary_mounts"], expected)
+        self.assertEqual(policy["bootstrap"]["temporary_mounts"], expected)
+        for temporary in expected:
+            self.assertIn(temporary["path"] + ":rw,nosuid,nodev,noexec,size=8589934592,uid="
+                          + str(os.getuid()) + ",gid=" + str(os.getgid()) + ",mode=0700", self.created)
+            self.assertEqual(list(Path(temporary["path"]).iterdir()), [])
+        self.assertIn(self.worktree.stat().st_dev, policy["bootstrap"]["disk_devices"])
+        mounts = {entry["target"]: entry for entry in policy["mounts"]}
+        self.assertFalse(mounts[str(self.home)]["readonly"])
+        self.assertEqual(mounts["/tmp"]["source"], str(self.config.state / "gate-cache/tmp"))
+
+    def test_qualification_temporary_mount_refuses_tracked_inputs(self):
+        self.tracked_temporary[QUALIFICATION_TEMP_TARGETS[0]] = "target/tmp/tracked-fixture\n"
+        with self.assertRaisesRegex(SandboxFailure, "qualification temporary mount would mask source"):
+            self.command()
+        self.assertIsNone(self.created)
+
+    def test_qualification_temporary_mount_refuses_existing_unowned_files(self):
+        target = self.worktree / QUALIFICATION_TEMP_TARGETS[1]
+        target.mkdir(parents=True)
+        sentinel = target / "unowned-fixture"
+        sentinel.write_text("preserve me\n")
+        with self.assertRaisesRegex(SandboxFailure, "qualification temporary mount would mask source"):
+            self.command()
+        self.assertEqual(sentinel.read_text(), "preserve me\n")
+        self.assertIsNone(self.created)
+
+    def test_qualification_temporary_mount_refuses_symlink_ancestor(self):
+        target = self.worktree / QUALIFICATION_TEMP_TARGETS[1]
+        target.parent.parent.mkdir()
+        target.parent.symlink_to(self.output, target_is_directory=True)
+        with self.assertRaisesRegex(SandboxFailure, "qualification temporary mount would mask source"):
             self.command()
         self.assertIsNone(self.created)
 
