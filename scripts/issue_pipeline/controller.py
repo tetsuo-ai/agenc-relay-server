@@ -31,7 +31,6 @@ from .containers import (ContainerError, container_cleanup_complete, load_contai
                          stop_owned_container)
 
 
-CONTEXTS = ("agenc-pipeline/recorded-gate", "agenc-pipeline/independent-review")
 UNIT = re.compile(r"agenc-ircd-(?:agent|pipeline-gate)-[0-9a-f]{32}\.service\Z")
 MAX_MANAGED_BACKLOG_BYTES = 16 * 1024 * 1024
 
@@ -538,12 +537,9 @@ class Controller:
             self.checkpoint(task.issue, "publishing", data, remote_action=None)
         else:
             self.github.api(f"pulls/{data['pr']}", "PATCH", {"title": title, "body": body})
-        url = f"https://github.com/{self.config.repository}/pull/{data['pr']}"
-        publications = [self.github.set_status(candidate, "success", context,
-                        "Accepted exact-source local evidence; see PR", url) for context in CONTEXTS]
         deadline = time.monotonic() + 1800
         while True:
-            checks = self.github.hosted_checks(candidate, published_statuses=publications)
+            checks = self.github.hosted_checks(candidate)
             if checks["state"] != "pending" or self.stop.wait(15) or time.monotonic() > deadline:
                 break
         self.record(task.issue, "hosted-checks", candidate, base, checks, accepted=not checks["blocking"])

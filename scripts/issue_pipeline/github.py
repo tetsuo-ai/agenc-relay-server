@@ -249,65 +249,6 @@ class Github:
             raise GithubError("merged pull request has no exact merge commit")
         return value
 
-    def set_status(self, sha: str, state: str, context: str, description: str,
-                   target_url: str | None = None) -> dict[str, Any]:
-        """Return a source-bound publication receipt after validating GitHub's reply."""
-        if not isinstance(sha, str) or not SHA.fullmatch(sha) or state not in ("pending", "success", "failure", "error"):
-            raise GithubError("invalid commit status identity/state")
-        if (not isinstance(context, str) or not context or len(context) > 100
-                or not isinstance(description, str) or len(description) > 140):
-            raise GithubError("invalid commit status text")
-        data = {"state": state, "context": context, "description": description}
-        if target_url is not None:
-            if not isinstance(target_url, str) or not target_url.startswith("https://") or len(target_url) > 2048:
-                raise GithubError("status target must be a bounded HTTPS URL")
-            data["target_url"] = target_url
-        reply = _object(self.api(f"statuses/{sha}", "POST", data), "commit status")
-        if (reply.get("state") != state or reply.get("context") != context
-                or reply.get("description") != description or reply.get("target_url") != target_url):
-            raise GithubError("published commit status reply differs from the exact request")
-        creator = _object(reply.get("creator"), "commit status creator")
-        return {"version": 1, "repository": self.repo, "sha": sha,
-                "id": _positive(reply.get("id")), "creator_id": _positive(creator.get("id")),
-                "state": state, "context": context, "description": description, "target_url": target_url}
-
-    def _status_publications(self, sha: str, publications: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Validate bounded trusted receipts; task text or context names are not authority."""
-        result = []
-        identities, contexts = set(), set()
-        for item in publications:
-            if len(result) >= 2 or type(item) is not dict or set(item) != {
-                    "version", "repository", "sha", "id", "creator_id", "state", "context", "description", "target_url"}:
-                raise GithubError("controller status publications must be at most two closed receipts")
-            if (type(item["version"]) is not int or item["version"] != 1
-                    or item["repository"] != self.repo or item["sha"] != sha
-                    or type(item["state"]) is not str or item["state"] not in {"pending", "success", "failure", "error"}
-                    or type(item["context"]) is not str or not 1 <= len(item["context"]) <= 100
-                    or type(item["description"]) is not str or len(item["description"]) > 140
-                    or (item["target_url"] is not None and (type(item["target_url"]) is not str
-                        or not item["target_url"].startswith("https://") or len(item["target_url"]) > 2048))):
-                raise GithubError("controller status publication has a different source or invalid identity")
-            identity = _positive(item["id"])
-            _positive(item["creator_id"])
-            if identity in identities or item["context"] in contexts:
-                raise GithubError("controller status publication identity or context is duplicated")
-            identities.add(identity)
-            contexts.add(item["context"])
-            result.append(dict(item))
-        return result
-
-    @staticmethod
-    def _published_success(status: dict[str, Any], publications: list[dict[str, Any]]) -> bool:
-        """Only an exact successful publication can be excluded from hosted evidence."""
-        creator = status.get("creator")
-        if (status.get("state") != "success" or type(status.get("id")) is not int
-                or type(creator) is not dict or type(creator.get("id")) is not int):
-            return False
-        return any(item["state"] == "success" and item["id"] == status["id"]
-                   and item["creator_id"] == creator["id"]
-                   and all(item[field] == status.get(field) for field in ("context", "description", "target_url"))
-                   for item in publications)
-
     def close_issue(self, number: int) -> dict[str, Any]:
         """Close an issue after caller-owned completion receipts have been accepted."""
         return _object(self.api(f"issues/{_positive(number)}", "PATCH",
@@ -338,19 +279,18 @@ class Github:
             raise GithubError("an exact workflow commit SHA is required")
         return self._pages(f"actions/runs?head_sha={sha}", "workflow_runs")
 
-    def hosted_checks(self, sha: str, *, published_statuses: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
+    def hosted_checks(self, sha: str) -> dict[str, Any]:
         """Classify actual hosted evidence, retaining empty/startup failures as nonpasses.
 
         The controller's accepted local gate can authorize a merge when GitHub
         has no jobs or only the known zero-job startup failure; this method does
         not call either situation passing. Real failures and unfinished checks
-        block. Only exact successful commit status publications returned by
-        set_status are excluded from hosted evidence. A context name grants no
-        exemption; every check run and every latest adverse status is classified.
+        block. Every check run and latest commit status is classified. Local
+        gate/review receipts are carried in the PR body; the controller never
+        publishes commit statuses that could supersede external evidence.
         """
         if not isinstance(sha, str) or not SHA.fullmatch(sha):
             raise GithubError("an exact check commit SHA is required")
-        publications = self._status_publications(sha, published_statuses)
         checks = self._pages(f"commits/{sha}/check-runs?filter=latest", "check_runs")
         statuses = self._pages(f"commits/{sha}/statuses")
         workflows = self.workflow_runs(sha)
@@ -361,12 +301,7 @@ class Github:
             if not isinstance(name, str) or not name:
                 raise GithubError("commit status has no context")
             latest_statuses.setdefault(name, status)  # API returns most recent first.
-        classified_statuses, excluded_statuses = [], []
         for status in latest_statuses.values():
-            if self._published_success(status, publications):
-                excluded_statuses.append(status)
-                continue
-            classified_statuses.append(status)
             state = status.get("state")
             conclusions.append("passed" if state == "success" else "failed" if state in ("failure", "error") else "pending")
         for check in checks:
@@ -391,9 +326,8 @@ class Github:
         if state is None:
             state = "startup_failure" if startup_failures else "passed" if conclusions else "empty"
         return {"sha": sha, "state": state, "blocking": state in ("failed", "pending", "incomplete"),
-                "checks": checks, "statuses": classified_statuses, "workflows": workflows,
-                "startup_failures": startup_failures, "controller_status_publications": publications,
-                "excluded_controller_statuses": excluded_statuses}
+                "checks": checks, "statuses": list(latest_statuses.values()), "workflows": workflows,
+                "startup_failures": startup_failures}
 
     @staticmethod
     def _conclusion(row: dict[str, Any]) -> str:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import subprocess
@@ -12,7 +13,7 @@ from unittest import mock
 
 from issue_pipeline.config import Config, digest_file
 from issue_pipeline.backlog import Backlog
-from issue_pipeline.controller import CONTEXTS, Controller, PipelineBlocked, body_hash, encode, task_hash
+from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, encode, task_hash
 from issue_pipeline.gate import GateCleanupUncertain, GateFailure, GateRunner, GateStopped
 from issue_pipeline.gitops import GitRepo
 from issue_pipeline.github import Github
@@ -28,6 +29,7 @@ PHASE = {"name": "Apply the fixture change", "kind": "implementation",
          "validation": [["python3", "-c", "assert True"]]}
 PLAN = {"status": "planned", "summary": "Cover the entire fixture issue.",
         "phases": [PHASE], "blockers": []}
+EXTERNAL_STATUS_NAMES = ("agenc-pipeline/recorded-gate", "agenc-pipeline/independent-review")
 
 
 def git(path, *args):
@@ -138,10 +140,7 @@ class ScriptedGithub:
 
     def set_status(self, *args):
         self.statuses.append(args)
-        source, state, context, description, target_url = args
-        return {"version": 1, "repository": self.repository, "sha": source, "id": len(self.statuses),
-                "creator_id": 100, "state": state, "context": context,
-                "description": description, "target_url": target_url}
+        raise AssertionError("controller must not publish commit statuses")
 
     def hosted_checks(self, source, **kwargs):
         return {"state": "failed" if self.block_hosted else "absent", "blocking": self.block_hosted}
@@ -712,42 +711,71 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.repo.fetch(), self.base)
         self.assertFalse(self.github.close_calls)
 
-    def assert_same_named_external_evidence_blocks(self, kind, state, context):
+    @contextmanager
+    def mutable_hosted_evidence(self, kind, state, context, *, external_arrives_last=False):
+        """A status write changes latest-by-context order, just as the provider does."""
         provider = Github(self.github.repository)
+        foreign = {"id": 99, "creator": {"id": 999}, "state": state, "context": context,
+                   "description": "External hosted result", "target_url": "https://example.invalid/ci"}
+        evidence = {"statuses": [foreign] if kind == "status" else [], "writes": [], "reads": []}
+        original_api = self.github.api
 
-        def classify(source, *, published_statuses):
-            self.assertEqual({row["context"] for row in published_statuses}, set(CONTEXTS))
-            self.assertEqual({row["sha"] for row in published_statuses}, {source})
-            statuses = [{"id": row["id"], "creator": {"id": row["creator_id"]},
-                         **{field: row[field] for field in ("state", "context", "description", "target_url")}}
-                        for row in published_statuses]
-            checks = []
-            if kind == "check":
-                checks = [{"name": context, "head_sha": source,
-                           "status": "in_progress" if state == "pending" else "completed",
-                           "conclusion": None if state == "pending" else "failure"}]
-            else:
-                foreign = next(dict(row) for row in statuses if row["context"] == context)
-                foreign.update(id=9999, creator={"id": 999}, state=state)
-                statuses.insert(0, foreign)
+        def publish(source, payload):
+            row = {"id": 100 + len(evidence["writes"]), "creator": {"id": 100}, **payload}
+            evidence["writes"].append({"source": source, "payload": copy.deepcopy(payload)})
+            evidence["statuses"].insert(0, row)
+            if kind == "status" and external_arrives_last:
+                evidence["statuses"].remove(foreign)
+                evidence["statuses"].insert(0, foreign)
+            return row
+
+        def legacy_set_status(source, value, name, description, target_url):
+            # Keep the old entry point only in this mutation-sensitive fixture,
+            # so the regression demonstrates the original overwrite failure.
+            row = publish(source, {"state": value, "context": name, "description": description,
+                                   "target_url": target_url})
+            return {"version": 1, "repository": self.github.repository, "sha": source,
+                    "id": row["id"], "creator_id": row["creator"]["id"],
+                    **{field: row[field] for field in ("state", "context", "description", "target_url")}}
+
+        def api(endpoint, method="GET", payload=None):
+            relative = endpoint.removeprefix("repos/" + self.github.repository + "/")
+            if relative.startswith("statuses/") and method == "POST":
+                return publish(relative.split("/", 1)[1], payload)
+            return original_api(endpoint, method, payload)
+
+        def classify(source, **kwargs):
+            checks = [] if kind != "check" else [
+                {"name": context, "head_sha": source,
+                 "status": "in_progress" if state == "pending" else "completed",
+                 "conclusion": None if state == "pending" else "failure"}]
 
             def pages(path, member=None):
                 if "/check-runs" in path:
-                    return checks
+                    return copy.deepcopy(checks)
                 if "/statuses" in path:
-                    return statuses
+                    return copy.deepcopy(evidence["statuses"])
                 if path.startswith("actions/runs?"):
                     return []
                 self.fail("unexpected classifier endpoint: " + path)
 
             with mock.patch.object(provider, "_pages", side_effect=pages):
-                return provider.hosted_checks(source, published_statuses=published_statuses)
+                result = provider.hosted_checks(source, **kwargs)
+            evidence["reads"].append(copy.deepcopy(result))
+            return result
 
-        with mock.patch.object(self.github, "hosted_checks", side_effect=classify), \
+        with mock.patch.object(self.github, "set_status", side_effect=legacy_set_status), \
+                mock.patch.object(self.github, "api", side_effect=api), \
+                mock.patch.object(self.github, "hosted_checks", side_effect=classify):
+            yield evidence
+
+    def assert_same_named_external_evidence_blocks(self, kind, state, context, *, external_arrives_last=False):
+        with self.mutable_hosted_evidence(kind, state, context, external_arrives_last=external_arrives_last) as evidence, \
                 mock.patch.object(self.controller.stop, "wait", return_value=True), \
                 mock.patch.object(self.repo, "atomic_promote", wraps=self.repo.atomic_promote) as promote:
             self.execute()
             promote.assert_not_called()
+        self.assertEqual(evidence["writes"], [])
         self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
         self.assertEqual(self.repo.fetch(), self.base)
         self.assertFalse(self.github.close_calls)
@@ -756,16 +784,46 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(hosted[-1]["data"]["state"], "pending" if state == "pending" else "failed")
 
     def test_failed_check_named_for_recorded_gate_blocks_actual_promotion(self):
-        self.assert_same_named_external_evidence_blocks("check", "failure", CONTEXTS[0])
+        self.assert_same_named_external_evidence_blocks("check", "failure", EXTERNAL_STATUS_NAMES[0])
 
     def test_pending_check_named_for_review_blocks_actual_promotion(self):
-        self.assert_same_named_external_evidence_blocks("check", "pending", CONTEXTS[1])
+        self.assert_same_named_external_evidence_blocks("check", "pending", EXTERNAL_STATUS_NAMES[1])
 
-    def test_foreign_failed_status_named_for_recorded_gate_blocks_actual_promotion(self):
-        self.assert_same_named_external_evidence_blocks("status", "failure", CONTEXTS[0])
+    def test_preexisting_foreign_failure_cannot_be_overwritten_before_promotion(self):
+        self.assert_same_named_external_evidence_blocks("status", "failure", EXTERNAL_STATUS_NAMES[0])
 
-    def test_foreign_pending_status_named_for_review_blocks_actual_promotion(self):
-        self.assert_same_named_external_evidence_blocks("status", "pending", CONTEXTS[1])
+    def test_preexisting_foreign_pending_cannot_be_overwritten_before_promotion(self):
+        self.assert_same_named_external_evidence_blocks("status", "pending", EXTERNAL_STATUS_NAMES[1])
+
+    def test_later_foreign_failure_blocks_without_status_writes(self):
+        self.assert_same_named_external_evidence_blocks("status", "failure", EXTERNAL_STATUS_NAMES[1],
+                                                       external_arrives_last=True)
+
+    def test_later_foreign_pending_blocks_without_status_writes(self):
+        self.assert_same_named_external_evidence_blocks("status", "pending", EXTERNAL_STATUS_NAMES[0],
+                                                       external_arrives_last=True)
+
+    def test_successful_local_proof_promotes_without_writing_commit_statuses(self):
+        with self.mutable_hosted_evidence("empty", None, EXTERNAL_STATUS_NAMES[0]) as evidence:
+            self.execute()
+        self.assertEqual(evidence["writes"], [])
+        self.assertEqual(self.controller.state.get_task(36)["status"], "complete")
+        self.assertNotEqual(self.repo.fetch(), self.base)
+        self.assertEqual(evidence["reads"][-1]["state"], "empty")
+        self.assertFalse(evidence["reads"][-1]["blocking"])
+        self.assertEqual(len(self.github.prs), 1)
+        pr = next(iter(self.github.prs.values()))
+        candidate = pr["head"]["sha"]
+        self.assertIn("Source `" + candidate + "`; base `" + self.base + "`", pr["body"])
+        published = json.loads(pr["body"].split("```json\n", 1)[1].split("\n```", 1)[0])
+        receipts = [row for row in self.controller.state.receipts(36)
+                    if row["source"] == candidate and row["kind"] in {"review", "gate"}
+                    and row["status"] == "accepted"]
+        self.assertEqual(published, [{"kind": row["kind"], "receipt": row["digest"],
+                                      "artifacts": row["artifact_hashes"]} for row in receipts])
+        self.assertEqual({row["kind"] for row in receipts}, {"review", "gate"})
+        review = next(row for row in receipts if row["kind"] == "review")
+        self.assertEqual(len(review["data"]["reviews"]), 2)
 
     def test_scope_conflict_preserves_other_issue_claims(self):
         self.controller.state.set_task(41, "working")
