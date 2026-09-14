@@ -286,6 +286,27 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
             or not worktree.is_relative_to(config.worktrees.resolve())
             or output.parent != config.state / "gates"):
         raise SandboxFailure("gate sandbox requires this controller's detached validation worktree")
+    # These whole-directory writable binds are disposable outputs. A clean
+    # committed file beneath either root is still source and cannot be exposed
+    # writable; literal NUL-delimited Git inventory includes root gitlinks too.
+    if repo.run(["ls-files", "--cached", "-z", "--", ":(literal)target", ":(literal)fuzz/target"], cwd=worktree):
+        raise SandboxFailure("gate writable build roots contain tracked source")
+    # Historic receipt files keep exact read-only file binds. Nested tracked
+    # paths would leave a writable renameable parent, and gitlinks have no
+    # ordinary file to bind. Only direct regular files are supported here.
+    for entry in repo.run(["ls-files", "--stage", "-z", "--", ":(literal)" + ARTIFACT_PREFIX.rstrip("/")], cwd=worktree).split("\0"):
+        if not entry:
+            continue
+        metadata, separator, name = entry.partition("\t")
+        fields = metadata.split()
+        if (not separator or len(fields) != 3 or fields[0] not in {"100644", "100755"}
+                or fields[2] != "0" or not name.startswith(ARTIFACT_PREFIX)
+                or not name[len(ARTIFACT_PREFIX):] or "/" in name[len(ARTIFACT_PREFIX):]):
+            raise SandboxFailure("gate tracked artifacts must be direct regular receipt files")
+    for relative in ("target", "fuzz/target", ARTIFACT_PREFIX):
+        path = worktree / relative
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            raise SandboxFailure("gate generated directory traverses a symlink")
     cargo_home = prepare_cargo_cache(config)
     dependency_sources = [cargo_home / relative for relative in DEPENDENCY_CACHE_PATHS]
     dependency_canaries = [str(path / ".gate-readonly-canary") for path in dependency_sources]
@@ -342,6 +363,8 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
         temporary_mounts.append({"path": str(path), "size_bytes": QUALIFICATION_TEMP_BYTES})
     # The source artifact directory may contain historic tracked receipts; protect
     # every existing file while allowing the runner's new exact-source artifact.
+    if any(path.is_symlink() or not path.is_file() for path in generated[-1].iterdir()):
+        raise SandboxFailure("gate existing artifacts must be direct regular nonsymlink files")
     existing_artifacts = [path for path in generated[-1].rglob("*") if path.is_file()]
     if any(path.is_symlink() for path in generated[-1].rglob("*")):
         raise SandboxFailure("gate artifact directory contains a symlink")
