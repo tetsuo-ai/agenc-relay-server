@@ -150,9 +150,13 @@ class GithubTests(unittest.TestCase):
             self.assertEqual(api.call_args.args,
                              ("pulls", "POST", {"head": "pipeline/issue-40", "base": "main", "title": "Resolve #40",
                                                 "body": "first\nsecond", "draft": False}))
-            self.github.set_status(SHA, "success", "agenc/pipeline", "Reviewed exact commit", "https://example.invalid/receipt")
+            api.return_value = self.status()
+            proof = self.github.set_status(SHA, "success", "agenc/pipeline", "Reviewed exact commit", "https://example.invalid/receipt")
             self.assertEqual(api.call_args.args[0], f"statuses/{SHA}")
             self.assertEqual(api.call_args.args[2]["state"], "success")
+            self.assertEqual(proof, {"version": 1, "repository": self.github.repo, "sha": SHA,
+                                    "id": 17, "creator_id": 23, "context": "agenc/pipeline", "state": "success",
+                                    "description": "Reviewed exact commit", "target_url": "https://example.invalid/receipt"})
         with self.assertRaises(GithubError):
             self.github.set_status("HEAD", "success", "agenc/pipeline", "bad SHA")
 
@@ -177,7 +181,17 @@ class GithubTests(unittest.TestCase):
             self.github.add_labels(35, ["pipeline:blocked"])
             self.assertEqual(api.call_args.args, ("issues/35/labels", "POST", {"labels": ["pipeline:blocked"]}))
 
-    def checks(self, *, checks=None, statuses=None, workflows=None, jobs=None, ignored=()):
+    @staticmethod
+    def status(context="agenc/pipeline", state="success", identity=17, creator=23):
+        return {"id": identity, "creator": {"id": creator}, "context": context, "state": state,
+                "description": "Reviewed exact commit", "target_url": "https://example.invalid/receipt"}
+
+    def publication(self, status):
+        with patch.object(self.github, "api", return_value=status):
+            return self.github.set_status(SHA, status["state"], status["context"],
+                                          status["description"], status["target_url"])
+
+    def checks(self, *, checks=None, statuses=None, workflows=None, jobs=None, publications=()):
         def response(path, member=None):
             if "/check-runs" in path:
                 return checks or []
@@ -189,7 +203,7 @@ class GithubTests(unittest.TestCase):
                 return workflows or []
             self.fail(f"unexpected path {path}")
         with patch.object(self.github, "_pages", side_effect=response):
-            return self.github.hosted_checks(SHA, ignored)
+            return self.github.hosted_checks(SHA, published_statuses=publications)
 
     def test_empty_hosted_state_is_never_passing(self) -> None:
         summary = self.checks()
@@ -228,13 +242,95 @@ class GithubTests(unittest.TestCase):
         check["conclusion"] = "success"
         self.assertEqual(self.checks(checks=[check])["state"], "passed")
 
-    def test_status_context_selects_latest_and_can_ignore_controller_marker(self) -> None:
+    def test_status_context_selects_latest_and_exempts_only_exact_publication(self) -> None:
         statuses = [{"context": "ci", "state": "success"}, {"context": "ci", "state": "failure"},
                     {"context": "agenc/pipeline", "state": "pending"}]
         self.assertEqual(self.checks(statuses=statuses)["state"], "pending")
-        summary = self.checks(statuses=statuses, ignored=["agenc/pipeline"])
+        statuses[-1] = self.status()
+        proof = self.publication(statuses[-1])
+        summary = self.checks(statuses=statuses, publications=[proof])
         self.assertEqual(summary["state"], "passed")
         self.assertEqual(len(summary["statuses"]), 1)
+        self.assertEqual(summary["excluded_controller_statuses"], [statuses[-1]])
+
+    def test_proven_local_success_preserves_empty_and_startup_failure_nonpasses(self) -> None:
+        marker = self.status()
+        proof = self.publication(marker)
+        summary = self.checks(statuses=[marker], publications=[proof])
+        self.assertEqual(summary["state"], "empty")
+        self.assertFalse(summary["blocking"])
+        self.assertEqual(summary["controller_status_publications"], [proof])
+        workflow = {"id": 123, "head_sha": SHA, "status": "completed", "conclusion": "startup_failure"}
+        summary = self.checks(statuses=[marker], publications=[proof], workflows=[workflow])
+        self.assertEqual(summary["state"], "startup_failure")
+        self.assertFalse(summary["blocking"])
+
+    def test_same_named_check_runs_are_always_classified_and_source_checked(self) -> None:
+        for name in ("agenc-pipeline/recorded-gate", "agenc-pipeline/independent-review"):
+            marker = self.status(context=name)
+            proof = self.publication(marker)
+            for status, conclusion, expected in (("completed", "failure", "failed"),
+                                                   ("in_progress", None, "pending"),
+                                                   ("completed", "skipped", "incomplete"),
+                                                   ("completed", "success", "passed")):
+                with self.subTest(name=name, status=status, conclusion=conclusion):
+                    check = {"name": name, "head_sha": SHA, "status": status, "conclusion": conclusion}
+                    summary = self.checks(checks=[check], statuses=[marker], publications=[proof])
+                    self.assertEqual(summary["state"], expected)
+                    self.assertEqual(summary["blocking"], expected != "passed")
+                    self.assertEqual(summary["checks"], [check])
+            with self.subTest(name=name, source="foreign"), self.assertRaises(GithubError):
+                self.checks(checks=[{"name": name, "head_sha": OTHER}], publications=[proof])
+
+    def test_foreign_same_named_statuses_cannot_use_controller_exemption(self) -> None:
+        for name in ("agenc-pipeline/recorded-gate", "agenc-pipeline/independent-review"):
+            marker = self.status(context=name)
+            proof = self.publication(marker)
+            for state, expected in (("pending", "pending"), ("failure", "failed"), ("error", "failed"), ("success", "passed")):
+                for identity, creator in ((18, 23), (17, 24)):
+                    with self.subTest(name=name, state=state, identity=identity, creator=creator):
+                        foreign = self.status(context=name, state=state, identity=identity, creator=creator)
+                        summary = self.checks(statuses=[foreign, marker], publications=[proof])
+                        self.assertEqual(summary["state"], expected)
+                        self.assertEqual(summary["blocking"], state != "success")
+                        self.assertEqual(summary["statuses"], [foreign])
+                        self.assertFalse(summary["excluded_controller_statuses"])
+
+    def test_proof_never_exempts_pending_failed_or_changed_status(self) -> None:
+        for state, expected in (("pending", "pending"), ("failure", "failed"), ("error", "failed")):
+            marker = self.status(state=state)
+            proof = self.publication(marker)
+            with self.subTest(state=state):
+                summary = self.checks(statuses=[marker], publications=[proof])
+                self.assertEqual(summary["state"], expected)
+                self.assertTrue(summary["blocking"])
+        marker = self.status()
+        proof = self.publication(marker)
+        for field, changed in (("target_url", "https://example.invalid/foreign"),
+                               ("description", "Different publication"), ("id", True), ("state", "failure")):
+            with self.subTest(changed_field=field):
+                summary = self.checks(statuses=[{**marker, field: changed}], publications=[proof])
+                self.assertFalse(summary["excluded_controller_statuses"])
+
+    def test_publication_reply_must_prove_actual_identity_and_requested_fields(self) -> None:
+        expected = self.status()
+        for change in ({"id": None}, {"id": True}, {"creator": {"id": True}}, {"creator": {}},
+                       {"context": "foreign"}, {"state": "pending"}, {"description": "changed"}, {"target_url": None}):
+            with self.subTest(change=change), patch.object(self.github, "api", return_value={**expected, **change}):
+                with self.assertRaises(GithubError):
+                    self.github.set_status(SHA, "success", expected["context"], expected["description"], expected["target_url"])
+
+    def test_publication_proof_is_closed_bounded_and_exact_source(self) -> None:
+        proof = self.publication(self.status())
+        invalid = [[{**proof, "sha": OTHER}], [{**proof, "repository": "foreign/repo"}],
+                   [{**proof, "version": True}], [{**proof, "id": True}], [{**proof, "creator_id": True}],
+                   [{**proof, "extra": "field"}], [proof, proof],
+                   [{**proof, "id": n + 1, "context": str(n)} for n in range(3)], ["agenc/pipeline"]]
+        for rows in invalid:
+            with self.subTest(proofs=rows), patch.object(self.github, "_pages") as pages:
+                with self.assertRaises(GithubError):
+                    self.github.hosted_checks(SHA, published_statuses=rows)
+                pages.assert_not_called()
 
     def test_mismatched_check_or_workflow_sha_fails_closed(self) -> None:
         with self.assertRaises(GithubError):

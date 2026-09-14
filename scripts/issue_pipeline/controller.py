@@ -539,11 +539,11 @@ class Controller:
         else:
             self.github.api(f"pulls/{data['pr']}", "PATCH", {"title": title, "body": body})
         url = f"https://github.com/{self.config.repository}/pull/{data['pr']}"
-        for context in CONTEXTS:
-            self.github.set_status(candidate, "success", context, "Accepted exact-source local evidence; see PR", url)
+        publications = [self.github.set_status(candidate, "success", context,
+                        "Accepted exact-source local evidence; see PR", url) for context in CONTEXTS]
         deadline = time.monotonic() + 1800
         while True:
-            checks = self.github.hosted_checks(candidate, ignore_contexts=CONTEXTS)
+            checks = self.github.hosted_checks(candidate, published_statuses=publications)
             if checks["state"] != "pending" or self.stop.wait(15) or time.monotonic() > deadline:
                 break
         self.record(task.issue, "hosted-checks", candidate, base, checks, accepted=not checks["blocking"])

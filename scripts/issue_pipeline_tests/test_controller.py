@@ -12,9 +12,10 @@ from unittest import mock
 
 from issue_pipeline.config import Config, digest_file
 from issue_pipeline.backlog import Backlog
-from issue_pipeline.controller import Controller, PipelineBlocked, body_hash, encode, task_hash
+from issue_pipeline.controller import CONTEXTS, Controller, PipelineBlocked, body_hash, encode, task_hash
 from issue_pipeline.gate import GateCleanupUncertain, GateFailure, GateRunner, GateStopped
 from issue_pipeline.gitops import GitRepo
+from issue_pipeline.github import Github
 from issue_pipeline.graph import Graph
 from issue_pipeline.github import GithubError
 from issue_pipeline_tests.test_github import issue_row
@@ -137,6 +138,10 @@ class ScriptedGithub:
 
     def set_status(self, *args):
         self.statuses.append(args)
+        source, state, context, description, target_url = args
+        return {"version": 1, "repository": self.repository, "sha": source, "id": len(self.statuses),
+                "creator_id": 100, "state": state, "context": context,
+                "description": description, "target_url": target_url}
 
     def hosted_checks(self, source, **kwargs):
         return {"state": "failed" if self.block_hosted else "absent", "blocking": self.block_hosted}
@@ -706,6 +711,61 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
         self.assertEqual(self.repo.fetch(), self.base)
         self.assertFalse(self.github.close_calls)
+
+    def assert_same_named_external_evidence_blocks(self, kind, state, context):
+        provider = Github(self.github.repository)
+
+        def classify(source, *, published_statuses):
+            self.assertEqual({row["context"] for row in published_statuses}, set(CONTEXTS))
+            self.assertEqual({row["sha"] for row in published_statuses}, {source})
+            statuses = [{"id": row["id"], "creator": {"id": row["creator_id"]},
+                         **{field: row[field] for field in ("state", "context", "description", "target_url")}}
+                        for row in published_statuses]
+            checks = []
+            if kind == "check":
+                checks = [{"name": context, "head_sha": source,
+                           "status": "in_progress" if state == "pending" else "completed",
+                           "conclusion": None if state == "pending" else "failure"}]
+            else:
+                foreign = next(dict(row) for row in statuses if row["context"] == context)
+                foreign.update(id=9999, creator={"id": 999}, state=state)
+                statuses.insert(0, foreign)
+
+            def pages(path, member=None):
+                if "/check-runs" in path:
+                    return checks
+                if "/statuses" in path:
+                    return statuses
+                if path.startswith("actions/runs?"):
+                    return []
+                self.fail("unexpected classifier endpoint: " + path)
+
+            with mock.patch.object(provider, "_pages", side_effect=pages):
+                return provider.hosted_checks(source, published_statuses=published_statuses)
+
+        with mock.patch.object(self.github, "hosted_checks", side_effect=classify), \
+                mock.patch.object(self.controller.stop, "wait", return_value=True), \
+                mock.patch.object(self.repo, "atomic_promote", wraps=self.repo.atomic_promote) as promote:
+            self.execute()
+            promote.assert_not_called()
+        self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
+        self.assertEqual(self.repo.fetch(), self.base)
+        self.assertFalse(self.github.close_calls)
+        hosted = self.controller.state.receipts(36, "hosted-checks")
+        self.assertEqual(hosted[-1]["status"], "rejected")
+        self.assertEqual(hosted[-1]["data"]["state"], "pending" if state == "pending" else "failed")
+
+    def test_failed_check_named_for_recorded_gate_blocks_actual_promotion(self):
+        self.assert_same_named_external_evidence_blocks("check", "failure", CONTEXTS[0])
+
+    def test_pending_check_named_for_review_blocks_actual_promotion(self):
+        self.assert_same_named_external_evidence_blocks("check", "pending", CONTEXTS[1])
+
+    def test_foreign_failed_status_named_for_recorded_gate_blocks_actual_promotion(self):
+        self.assert_same_named_external_evidence_blocks("status", "failure", CONTEXTS[0])
+
+    def test_foreign_pending_status_named_for_review_blocks_actual_promotion(self):
+        self.assert_same_named_external_evidence_blocks("status", "pending", CONTEXTS[1])
 
     def test_scope_conflict_preserves_other_issue_claims(self):
         self.controller.state.set_task(41, "working")
