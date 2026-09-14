@@ -22,7 +22,7 @@ import uuid
 from .agents import (AgentRunError, CodexRunner, SessionLifecycleError, record_session_quiescent,
                      session_lifecycle, validate_result)
 from .config import Config, digest_file, private_directory
-from .comments import CommentPublicationError, ensure_comment
+from .comments import CommentPublicationError, CommentPublicationInvalid, ensure_comment
 from .gitops import GitRepo, GitError
 from .github import Github, GithubIdentityError, issue_identity, native_issue_numbers
 from .graph import Graph, GraphError, Task
@@ -1432,27 +1432,20 @@ class Controller:
             if entry["intent"] is None:
                 intent = self.aggregate_receipt(number, "aggregate-intent", entry["source"],
                         {"preparation": entry["preparation"], "legacy_terminal": entry["legacy_terminal"]})
+                marker, text = self.aggregate_comment(entry["source"], intent["digest"])
+                # Persist the comment's own identity before the aggregate can
+                # retain an intent or dispatch a POST. Stage changes cannot
+                # erase this separate durable publication/ambiguity boundary.
+                self.ensure_aggregate_comment(number, marker, text, entry["source"], prepare_only=True)
                 entry["intent"] = intent["digest"]
                 self.state.set_task(number, "blocked", data)
             if entry["stage"] == "invalidated":
                 entry["stage"] = "prepared"
                 self.state.set_task(number, "blocked", data)
-            marker = "<!-- agenc-pipeline-aggregate:" + entry["intent"] + " -->"
-            text = ("Aggregate closure evidence snapshot. The immutable intent binds the graph, requirements "
-                    "and accepted prerequisite receipts; current acceptance is rechecked before closure.\n\n"
-                    f"Source: `{entry['source']}`. Intent: `{entry['intent']}`.\n\n" + marker)
-            matches = [r for r in self.github.comments(number) if marker in (r.get("body") or "")]
-            if len(matches) > 1 or (matches and matches[0]["body"] != text):
-                raise PipelineBlocked("aggregate intent comment changed or is duplicated")
-            if not matches:
-                if entry["stage"] != "prepared":
-                    raise RuntimeError("aggregate comment publication remains ambiguous; reconcile its exact marker")
-                entry["stage"] = "commenting"
-                self.state.set_task(number, "blocked", data)
-                self.github.comment(number, text)
-                matches = [r for r in self.github.comments(number) if marker in (r.get("body") or "")]
-                if len(matches) != 1 or matches[0]["body"] != text:
-                    raise RuntimeError("aggregate comment publication lacks exact readback")
+            marker, text = self.aggregate_comment(entry["source"], entry["intent"])
+            entry["stage"] = "commenting"
+            self.state.set_task(number, "blocked", data)
+            self.ensure_aggregate_comment(number, marker, text, entry["source"], require_prepared=True)
             entry["stage"] = "commented"
             self.state.set_task(number, "blocked", data)
             observed = self.check_aggregate(entry)
@@ -1475,6 +1468,22 @@ class Controller:
             self.state.set_task(number, "blocked", data)
             self.reopen_aggregate(number, data, entry)
             raise
+
+    def ensure_aggregate_comment(self, number, marker, text, source, **options):
+        """Confirmed comment changes revoke acceptance; ambiguity retains its intent."""
+        try:
+            return ensure_comment(self.github, self.config.state, number, marker, text, source, **options)
+        except CommentPublicationInvalid as error:
+            raise PipelineBlocked(str(error)) from error
+
+    @staticmethod
+    def aggregate_comment(source, intent):
+        """Keep the original exact marker/body stable across publication retries."""
+        marker = "<!-- agenc-pipeline-aggregate:" + intent + " -->"
+        text = ("Aggregate closure evidence snapshot. The immutable intent binds the graph, requirements "
+                "and accepted prerequisite receipts; current acceptance is rechecked before closure.\n\n"
+                f"Source: `{source}`. Intent: `{intent}`.\n\n" + marker)
+        return marker, text
 
     def reconcile_aggregates(self, *, recheck_only=False, preserve_valid_legacy=False):
         """Drain both independently owned aggregates before reporting a failure."""

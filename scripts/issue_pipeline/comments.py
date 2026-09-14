@@ -15,6 +15,10 @@ class CommentPublicationError(RuntimeError):
     """Preserve the original intent; an absent marker cannot disprove a POST."""
 
 
+class CommentPublicationInvalid(CommentPublicationError):
+    """A successful read confirms that the intended comment was altered/duplicated."""
+
+
 def _encoded(value):
     return (json.dumps(value, sort_keys=True, allow_nan=False) + "\n").encode()
 
@@ -63,32 +67,39 @@ def _matches(github, number, marker):
     rows = [row for row in github.comments(number)
             if isinstance(row.get("body"), str) and marker in row["body"]]
     if len(rows) > 1:
-        raise CommentPublicationError("duplicate comment publication marker; preserve the original intent")
+        raise CommentPublicationInvalid("duplicate comment publication marker; preserve the original intent")
     if rows and (type(rows[0].get("id")) is not int or rows[0]["id"] <= 0
                  or rows[0]["body"].count(marker) != 1):
-        raise CommentPublicationError("comment publication has invalid identity or repeated marker")
+        raise CommentPublicationInvalid("comment publication has invalid identity or repeated marker")
     return rows
 
 
-def ensure_comment(github, state: Path, number, marker, body, source, *, mutable=False):
+def ensure_comment(github, state: Path, number, marker, body, source, *, mutable=False,
+                   prepare_only=False, require_prepared=False):
     """Return the one read-back comment; callers serialize this with the graph lock.
 
     ``source`` may be a lazy callable: ordinary recorded polls never fetch merely
     to recreate the original source binding. Mutable comments keep their original
     creation body until acceptance; only then may the caller PATCH their fixed ID.
+    Aggregate callers prepare locally before checkpointing their aggregate
+    intent, then require that same journal across acceptance invalidation/retry.
     """
     if (type(number) is not int or number <= 0 or type(mutable) is not bool
+            or type(prepare_only) is not bool or type(require_prepared) is not bool
             or not isinstance(marker, str) or not 1 <= len(marker) <= 512
             or not re.fullmatch(r"<!-- agenc-pipeline-[^<>\r\n]+ -->", marker)
             or not isinstance(body, str) or len(body.encode()) > 60000 or body.count(marker) != 1):
         raise CommentPublicationError("invalid bounded comment publication")
     identity = hashlib.sha256(_encoded([github.repo, number, marker])).hexdigest()
     directory = state / "comment-publications" / identity
+    intent_path, dispatch_path, accepted_path = (directory / name for name in (
+        "intent.json", "dispatch.json", "accepted.json"))
+    if require_prepared and not intent_path.exists():
+        raise CommentPublicationError("comment publication lost or lacks its required original intent; preserve "
+                                      + str(directory) + " and reconcile without another POST")
     for parent in (state, state / "comment-publications", directory):
         private_directory(parent)
         _sync_directory(parent.parent)  # Persist new directory names before dispatch.
-    intent_path, dispatch_path, accepted_path = (directory / name for name in (
-        "intent.json", "dispatch.json", "accepted.json"))
     rows = _matches(github, number, marker)
     if intent_path.exists():
         intent = _read(intent_path)
@@ -96,7 +107,7 @@ def ensure_comment(github, state: Path, number, marker, body, source, *, mutable
         if dispatch_path.exists() or accepted_path.exists():
             raise CommentPublicationError("comment publication lost its original intent; preserve " + str(directory))
         if rows and not mutable and rows[0]["body"] != body:
-            raise CommentPublicationError("existing comment differs from its exact intended body")
+            raise CommentPublicationInvalid("existing comment differs from its exact intended body")
         bound_source = source() if callable(source) else source
         if not isinstance(bound_source, str) or not re.fullmatch(r"[0-9a-f]{40}", bound_source):
             raise CommentPublicationError("comment publication requires an exact source")
@@ -124,10 +135,13 @@ def ensure_comment(github, state: Path, number, marker, body, source, *, mutable
         if (set(accepted) != {"version", "intent_sha256", "comment_id"}
                 or type(accepted["version"]) is not int or accepted["version"] != 1
                 or accepted["intent_sha256"] != binding or type(accepted["comment_id"]) is not int
-                or accepted["comment_id"] <= 0 or not rows or rows[0]["id"] != accepted["comment_id"]
-                or (not mutable and rows[0]["body"] != intent["body"])):
+                or accepted["comment_id"] <= 0 or not rows):
             raise CommentPublicationError("accepted comment is absent or changed; preserve " + str(directory))
+        if rows[0]["id"] != accepted["comment_id"] or (not mutable and rows[0]["body"] != intent["body"]):
+            raise CommentPublicationInvalid("accepted comment is absent or changed; preserve " + str(directory))
         return rows[0]
+    if prepare_only:
+        return None  # Durable preparation never authorizes a remote creation.
     if not rows:
         if dispatch_path.exists():
             raise CommentPublicationError("comment POST remains uncertain; preserve " + str(directory)
@@ -135,7 +149,9 @@ def ensure_comment(github, state: Path, number, marker, body, source, *, mutable
         _write(dispatch_path, dispatch)  # Durable ambiguity boundary before any send.
         github.comment(number, intent["body"])
         rows = _matches(github, number, marker)
-    if not rows or rows[0]["body"] != intent["body"]:
+    if rows and rows[0]["body"] != intent["body"]:
+        raise CommentPublicationInvalid("comment publication differs from its exact original readback; preserve " + str(directory))
+    if not rows:
         raise CommentPublicationError("comment publication lacks its exact original readback; preserve " + str(directory))
     _write(accepted_path, {"version": 1, "intent_sha256": binding, "comment_id": rows[0]["id"]})
     return rows[0]
