@@ -32,7 +32,7 @@ expected_files = {
     "rfcs/rfc9420-mls-protocol.txt": "251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b",
     "rfcs/rfc9525-tls-service-identity.txt": "ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5",
     "rfcs/rfc9750-mls-architecture.txt": "6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd",
-    "docs/irc-mls-e2ee-extension.md": "398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1",
+    "docs/irc-mls-e2ee-extension.md": "79236c985a46205501c64ff45215846288cc0a4a3b8c17884d58055c1c394795",
     "docs/federation-v1-profile.registry": "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411",
 }
 
@@ -443,7 +443,7 @@ e2ee_profile_token = base64.urlsafe_b64encode(
     e2ee_profile_digest
 ).rstrip(b"=").decode("ascii")
 expected_e2ee_profile_hash = (
-    "699c74adfe70c8cc336888e5191d1e09166c5de4406b9c7c8e9a58edadc48159"
+    "d4deba80758c4585437420cd25330682b4fee97c77aea714df238505b08ab38c"
 )
 if e2ee_profile_hash != expected_e2ee_profile_hash:
     errors.append(
@@ -990,7 +990,8 @@ expected_companion_enums = {
         "sequencer_record", "device_attach_challenge", "device_attach",
         "root_binding_lock", "federation_state", "federation_origin",
         "federation_request", "federation_result", "federation_event",
-        "policy",
+        "policy", "recovery_submission", "witness_resolution",
+        "leaf_membership_proof",
     ]),
     "IrcFederationOpcode": numbered([
         "application_channel", "application_direct", "reserve_channel",
@@ -1006,13 +1007,14 @@ expected_companion_enums = {
         "attach_begin", "attach_finish", "claim_package", "claim_status",
         "publish_package", "revoke_package", "deliver_binding",
         "deliver_welcome", "fetch_mailbox", "acknowledge_mailbox",
-        "submit_policy",
+        "submit_policy", "submit_recovery", "submit_recovery_element",
+        "submit_membership",
     ]),
     "IrcFederationStoreKind": numbered([
         "store_authorization", "store_identity", "store_roster",
         "store_capabilities", "store_package", "store_application",
         "store_binding", "store_welcome", "store_staged_reinit",
-        "store_policy",
+        "store_policy", "store_membership",
     ]),
     "IrcFederationPendingKind": numbered([
         "pending_finalization", "pending_abort", "pending_reinit_attempt",
@@ -1036,7 +1038,8 @@ expected_companion_enums = {
         "attach_challenge", "revoked", "reserved", "finalized", "aborted",
         "claimed", "object_page", "mailbox_page", "reinit_staged",
         "reinit_acked", "reinit_activated", "reinit_aborted",
-        "mailbox_acked",
+        "mailbox_acked", "recovery_accepted", "recovery_extended",
+        "recovery_closed", "recovery_conflict",
     ]),
     "IrcFederationEventKind": numbered([
         "channel_application", "direct_application", "candidate_event",
@@ -1165,6 +1168,8 @@ expected_signature_labels = {
     "IRC-MLS/1 reinit attempt", "IRC-MLS/1 reinit attempt receipt",
     "IRC-MLS/1 reinit processed", "IRC-MLS/1 reinit disposition",
     "IRC-MLS/1 reinit activation", "IRC-MLS/1 reinit attempt abort",
+    "IRC-MLS/1 recovery submission", "IRC-MLS/1 leaf membership",
+    "IRC-MLS/1 leaf membership possession",
 }
 signature_rows = markdown_table("| Label | TBS content | Signing key |")
 signature_labels: list[str] = []
@@ -1208,7 +1213,8 @@ expected_semantic_ids = [
     "reinit_attempt_id", "reinit_activation_id", "reinit_abort_id",
     "federation_origin_state_id", "canonical_channel_name_hash",
     "federation_snapshot_digest", "acknowledgement_set_digest",
-    "reinit_acknowledgement_set_digest",
+    "reinit_acknowledgement_set_digest", "recovery_submission_id",
+    "leaf_membership_id",
 ]
 semantic_rows = markdown_table("| ID or digest | Exact formula |")
 semantic_ids: list[str] = []
