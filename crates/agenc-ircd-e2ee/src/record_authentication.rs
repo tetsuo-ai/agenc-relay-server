@@ -74,10 +74,23 @@ pub fn authenticate_record(
     let object =
         IrcWireObject::decode_kind(bytes, Some(IrcWireObjectKind::SequencerRecord), budget)?;
     let record = IrcSequencerRecord::decode_exact(object.body(), budget)?;
-    fields::authenticate(&record, expected, credential)?;
-    let semantic_id = identity::verify(&record, attempt_object, budget)?;
+    let semantic_id =
+        authenticate_decoded_record(&record, attempt_object, expected, credential, budget)?;
     Ok(AuthenticatedRecord {
         semantic_id,
         object_id: ObjectId::compute(bytes),
     })
+}
+
+/// The same authentication over an already decoded record, for a caller
+/// that needs the record's content afterwards (the historical chain).
+pub(crate) fn authenticate_decoded_record(
+    record: &IrcSequencerRecord,
+    attempt_object: Option<&[u8]>,
+    expected: &ExpectedRecord,
+    credential: &VerifiedSequencerCredential,
+    budget: &mut DecodeBudget,
+) -> Result<[u8; 32], E2eeError> {
+    fields::authenticate(record, expected, credential)?;
+    identity::verify(record, attempt_object, budget)
 }

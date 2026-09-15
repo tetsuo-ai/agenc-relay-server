@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 785
-reviewed_source_sha256 = "c51ca36577440b3f7b7f945d680cba99da3f6eb8341df00bd891b2fda627960e"
+reviewed_source_files = 788
+reviewed_source_sha256 = "e99d4e869ffce1ac4fff326c1b29b14014967611a69bf73b7ac27787f2c46591"
 deferred = []
 
 [[region]]
@@ -45,24 +45,54 @@ metric = "branches"
 reason = "Account invitation expiry must be canonical ASCII decimal and fit u64 before protected descriptor or signing-key access."
 
 [[region]]
-id = "domain-list-selection-before-ceiling"
+id = "history-chain-record-adoption"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-domain/src/projection.rs"
-source_sha256 = "0057c3be2b8a76ac46e1365511f43fa02ca6409ecc9304dd40f79a5ed4313ead"
-start_line = 407
-end_line = 451
+file = "crates/agenc-ircd-e2ee/src/history.rs"
+source_sha256 = "ead5bffdda33953cde2987deead8be21620a0fc586911d61e231cc577715d6ec"
+start_line = 478
+end_line = 552
 metric = "regions"
-reason = "A LIST resolves its explicit names before the 200-row ceiling and scans an unselected request only over the bounded table prefix; absent, secret, and unlisted names produce the same omission and the scan examines no more records than the charged bound."
+reason = "Every historical sequencer record is authenticated at exactly the next position under the credential the validated history committed, its referenced objects are admitted only for the record kind that names them, and the head advances only after the record's own checks succeed."
 
 [[region]]
-id = "domain-list-scan-charge"
+id = "history-finalization-transitions"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-domain/src/projection.rs"
-source_sha256 = "0057c3be2b8a76ac46e1365511f43fa02ca6409ecc9304dd40f79a5ed4313ead"
-start_line = 392
-end_line = 398
+file = "crates/agenc-ircd-e2ee/src/history/finalization.rs"
+source_sha256 = "7a766868729e551181df082d0ed201a43577ce2d98dd6b5bde0b0f3faf300f34"
+start_line = 235
+end_line = 399
 metric = "regions"
-reason = "A LIST owes one expensive-query token per twenty records its bounded scan will examine, never below one, assessed from the selection and the table size before any scan runs."
+reason = "A finalization installs only the transitions its certified action bits commit, each proved by the exact policy, roster, root, binding, or sequencer object supplied for it; an object without its bit or a bit without its object is refused."
+
+[[region]]
+id = "history-finalization-quorum"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/history/finalization.rs"
+source_sha256 = "7a766868729e551181df082d0ed201a43577ce2d98dd6b5bde0b0f3faf300f34"
+start_line = 160
+end_line = 201
+metric = "regions"
+reason = "The finality quorum of a historical finalization is recounted from council device signatures under the retained old policy, and a bootstrap activation additionally needs the resulting council's quorum, independently of the sequencer signature."
+
+[[region]]
+id = "history-reinit-activation"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/history/reinit.rs"
+source_sha256 = "df584dd20410a626e814e888bbe7134fd8e3401ec502da747c8ace95f63bcfd0"
+start_line = 87
+end_line = 127
+metric = "regions"
+reason = "A ReInit activation is adopted only for the exact retained attempt and receipt, with a canonical complete ACK set that repeats the attempt, and an old-policy quorum over the attempt's sign-once slot."
+
+[[region]]
+id = "history-reinit-ack-agreement"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-e2ee/src/history/reinit.rs"
+source_sha256 = "df584dd20410a626e814e888bbe7134fd8e3401ec502da747c8ace95f63bcfd0"
+start_line = 229
+end_line = 330
+metric = "regions"
+reason = "Every ReInit ACK in an activation repeats the attempt's identity and staged result, the set is canonical and hashes to the certified digest, and each ACK names the creator's old leaf or a reserved non-creator plan entry."
 
 [[region]]
 id = "storage-initialization-preserves-guard"
@@ -10306,9 +10336,9 @@ reason = "The attempt handler verifies public controller authority before any re
 id = "cap73-record-authentication-001-authenticate-record"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-e2ee/src/record_authentication.rs"
-source_sha256 = "666cc52a769494f9811a16209e75c45de267b09f5c8c6ff811fdd5378abb4394"
+source_sha256 = "faeff5ca1ed43c2ba62685bc6e0263b2e8d61234029de5e42ed1e3adc6a64724"
 start_line = 67
-end_line = 83
+end_line = 96
 metric = "regions"
 reason = "Historical records require the complete bounded wire object, the caller-established chain position and credential, and the recomputed semantic identity; authentication grants no finality or recovery permission."
 
