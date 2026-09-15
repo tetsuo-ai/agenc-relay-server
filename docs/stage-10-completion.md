@@ -24,7 +24,9 @@ Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
 in [the client input repair](stage-10-client-input-repair.md) and
-[the storage copy repair](stage-10-storage-copy-repair.md).
+[the storage copy repair](stage-10-storage-copy-repair.md). On-demand input
+and output queue backing and the default idle admission model (RUN-04, issue
+#46) are recorded in [the idle connection backing record](stage-10-idle-backing.md).
 The preceding operational changes are recorded in
 [the operational repair report](stage-10-operational-repair.md). Earlier credential
 and runtime repairs are recorded in
@@ -56,7 +58,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired. Capability refusals, channel privacy, per-connection accounting, maintenance isolation and independent round-robin input scheduling repaired; other items open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding, temporary cleanup, borrowed ciphertext decoding/opening and reverse-manifest arithmetic repaired; checkpoint/backup capacity and publication remain open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Disabled material, same-class key sharing, generated administrator UID and OCSP schema/WSS admission repaired, preserving edge outbound TLS; service-user checks remain open |
-| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; full workload open |
+| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; idle connections hold only the base charge and the default model admits 50,000 within the pool (Section 19.3 thresholds conflict recorded in #113); full workload open |
 
 Earlier findings remain in `TODO.md` and `stage-10-qualification.md`. A finding
 is closed here only with a current regression or a recorded current-source

@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 783
-reviewed_source_sha256 = "a5d884f900d0ca68285e27c156d2220e4dcd0aa5ac0477816e62b23dc79886f3"
+reviewed_source_files = 785
+reviewed_source_sha256 = "8c273633d56517569d2f92cbdfbf4f0c529dc0b3da24879eac42cea23a477948"
 deferred = []
 
 [[region]]
@@ -45,26 +45,6 @@ metric = "branches"
 reason = "Account invitation expiry must be canonical ASCII decimal and fit u64 before protected descriptor or signing-key access."
 
 [[region]]
-id = "connection-open-wait-classification"
-category = "protocol-enum-arms"
-file = "crates/agenc-ircd-runtime/src/connection/supervisor.rs"
-source_sha256 = "3aa4f33414ff8ebf5b7bbfe2567188b30b3f364171a2d3fdd3d10b979772bdd3"
-start_line = 280
-end_line = 301
-metric = "regions"
-reason = "Each way the StateCore open acknowledgement wait can end (answered accepted or refused, dropped, cancelled, timed out) maps to one closed close reason so a silent close after TLS is attributable from the daemon log."
-
-[[region]]
-id = "observe-close-reason-labels"
-category = "protocol-enum-arms"
-file = "crates/agenc-ircd-runtime/src/observe/events.rs"
-source_sha256 = "dc815d1e4418cf4c4eb850563ab70051b31aa88c754d253396735a7d71a1f70e"
-start_line = 268
-end_line = 284
-metric = "regions"
-reason = "Every connection close reason maps to exactly one closed public error label on the connection_closed log event, and only an orderly client quit carries none."
-
-[[region]]
 id = "storage-initialization-preserves-guard"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/initialize.rs"
@@ -89,20 +69,10 @@ id = "storage-guard-durable-publication"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/platform.rs"
 source_sha256 = "a85f0f87f6e32ec1cf2e22b7de34c26edd739a5d7b1a40865b77d40151430eec"
-start_line = 665
-end_line = 723
+start_line = 667
+end_line = 725
 metric = "branches"
 reason = "Initial no-replace publication and normal replacement retain the file-sync, rename, directory-sync and authenticated readback boundaries."
-
-[[region]]
-id = "storage-filesystem-cause-classification"
-category = "protocol-enum-arms"
-file = "crates/agenc-ircd-storage/src/error.rs"
-source_sha256 = "8714d1b5386b034c926eee6d929c069033abce013b44edbbd3e77e94e043667f"
-start_line = 112
-end_line = 144
-metric = "regions"
-reason = "Every raw operating-system errno and io::Error kind classifies into the closed FilesystemCause set with a generic fallback, so operator diagnostics carry a fixed label and never raw error text."
 
 [[region]]
 id = "client-message-error-enum-arms"
@@ -1826,7 +1796,7 @@ reason = "Complete authenticated checkpoint and mixed-event scans, unmatched-int
 id = "cap5-admin-adminowner-audit-export"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin.rs"
-source_sha256 = "b45d98ba755fd510323fad9ce9947b78a9f7238f474eb2ad0299e2036b8211c9"
+source_sha256 = "a53e175dbc6dbdcc1b2180a4955aa6fda20c78ed7c421ca45733080524b1b9e1"
 start_line = 1402
 end_line = 1467
 metric = "branches"
@@ -4676,7 +4646,7 @@ reason = "CAP84: infallible line-before-backing bundle precedes refusals. Existi
 id = "companion-mod-statecorecontext-backing-reservations"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "378eb4200b531f2d9e0777f1bdd587d83c7f76f5b6e69083b3e108a16a188085"
+source_sha256 = "38b203f0fadb3f4ba719c35240e0de60f531cb6e56657f25115a6b81f336cbb6"
 start_line = 838
 end_line = 840
 metric = "regions"
@@ -6276,7 +6246,7 @@ reason = "Route post-readback edge completions through the existing exact connec
 id = "cap13-mod-complete-index-refresh"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/state_core/mod.rs"
-source_sha256 = "378eb4200b531f2d9e0777f1bdd587d83c7f76f5b6e69083b3e108a16a188085"
+source_sha256 = "38b203f0fadb3f4ba719c35240e0de60f531cb6e56657f25115a6b81f336cbb6"
 start_line = 3835
 end_line = 3877
 metric = "regions"
@@ -6776,7 +6746,7 @@ reason = "Audit export profile, coverage, record-label, and observed-receipt dec
 id = "cap5-export-job-prepare-audit-export-job"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/admin.rs"
-source_sha256 = "b45d98ba755fd510323fad9ce9947b78a9f7238f474eb2ad0299e2036b8211c9"
+source_sha256 = "a53e175dbc6dbdcc1b2180a4955aa6fda20c78ed7c421ca45733080524b1b9e1"
 start_line = 1383
 end_line = 1400
 metric = "branches"
@@ -10696,7 +10666,7 @@ reason = "Completed key work requires unchanged session and channel authority, t
 id = "reload-admission-outcome"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/runtime_config.rs"
-source_sha256 = "1b09efd478e54af231f1ddaa740ea5e9c6541e83cdc939bbe3eaaaf165558212"
+source_sha256 = "02358784c76dfebf4bd12d6d0eb082c0c95dc869544ccba61ec439a497a2f9d2"
 start_line = 764
 end_line = 784
 metric = "branches"
@@ -10706,7 +10676,7 @@ reason = "Pre-submission full or closed queues are determinate refusals; lost po
 id = "reload-audit-submission-outcome"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/runtime_config.rs"
-source_sha256 = "1b09efd478e54af231f1ddaa740ea5e9c6541e83cdc939bbe3eaaaf165558212"
+source_sha256 = "02358784c76dfebf4bd12d6d0eb082c0c95dc869544ccba61ec439a497a2f9d2"
 start_line = 806
 end_line = 830
 metric = "branches"
@@ -10976,8 +10946,68 @@ reason = "Borrowing ciphertext retains the exact authentication-tag minimum and 
 id = "connection-input-publication"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/state_core/client_input.rs"
-source_sha256 = "4b18c16825dc5dca79e3120094930033e1898b93ad813cf8a3797b3fb46b327f"
-start_line = 60
-end_line = 90
+source_sha256 = "fc56984bae0f4cebbd1a82d71eb3ef5de52c84c4616ad7b7752e3ac120122f17"
+start_line = 208
+end_line = 249
 metric = "branches"
 reason = "Connection input publication checks generation, consumer lifetime and independent queue capacity before publishing one ready entry."
+
+[[region]]
+id = "output-frame-storage-charge"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/connection/sink.rs"
+source_sha256 = "12a5242378c3cbf7eec49425d786127a3bd97fd6979bc44b159c834a97060b75"
+start_line = 38
+end_line = 53
+metric = "branches"
+reason = "A demand's exact additional backing charge is zero for one inline frame and one quantized allocation otherwise, so no queue growth is uncharged."
+
+[[region]]
+id = "output-reservation-prepared-storage"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/connection/sink.rs"
+source_sha256 = "12a5242378c3cbf7eec49425d786127a3bd97fd6979bc44b159c834a97060b75"
+start_line = 434
+end_line = 502
+metric = "branches"
+reason = "Prepare pairs a reservation with exactly its permit and creates only the one storage that permit pays for; a mismatch or allocation failure rolls the whole demand back."
+
+[[region]]
+id = "output-queue-entry-ring"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/connection/queue.rs"
+source_sha256 = "c62593e01da65ba602285044234194a0136fcff38c589a655065bb99625db31c"
+start_line = 183
+end_line = 374
+metric = "branches"
+reason = "The fixed entry ring places committed demands without allocating and releases each demand's storage, permit, batch slot and query snapshot exactly once with its final frame."
+
+[[region]]
+id = "output-queue-reservation-commit"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/connection/queue.rs"
+source_sha256 = "c62593e01da65ba602285044234194a0136fcff38c589a655065bb99625db31c"
+start_line = 645
+end_line = 706
+metric = "branches"
+reason = "Reservation names the exact storage charge and commit is allocation-free: a closed, foreign or storage-less transfer is discarded or excludes the whole sink, never delivered partially."
+
+[[region]]
+id = "input-overflow-growth"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/state_core/client_input.rs"
+source_sha256 = "fc56984bae0f4cebbd1a82d71eb3ef5de52c84c4616ad7b7752e3ac120122f17"
+start_line = 40
+end_line = 139
+metric = "branches"
+reason = "Input overflow storage is charged before allocation, grows only when one more line needs it, and is released with its permit when it drains."
+
+[[region]]
+id = "input-reader-memory-retry"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/connection/reader/inbox.rs"
+source_sha256 = "d12cabba57c83e029e7e6ff862c540017c89d24c04809ad40f8b03827e9689b7"
+start_line = 35
+end_line = 68
+metric = "regions"
+reason = "A reader whose input overflow cannot be charged stays paused and retries inside its stall budget instead of dropping or partially publishing the line."

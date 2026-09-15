@@ -5,6 +5,9 @@
 //! non-cloneable permits and can neither inspect nor modify the counter.
 
 mod backing_reservation;
+#[cfg(test)]
+#[path = "tests/idle_model.rs"]
+mod idle_model;
 mod output_budget;
 mod permit;
 mod retained_queue;

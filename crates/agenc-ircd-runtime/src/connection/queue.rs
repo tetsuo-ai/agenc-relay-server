@@ -1,31 +1,39 @@
 //! The owner-side writer queue behind one client sink (spec 15.3, lines
-//! 2210-2260; spec 19.3, lines 2816-2822; spec 21.3, lines 4093-4106).
+//! 2210-2260; spec 19.2; spec 19.3, lines 2816-2822; spec 21.3, lines
+//! 4093-4106).
 //!
-//! The queue is a `VecDeque` whose slot capacity is fixed at admission and
-//! charged once against the memory budget, so committing a reservation
-//! never allocates and every reservation's additional backing charge is
-//! zero. New reservations use the current runtime byte, item, and response
-//! ceilings. A reload does not remove earlier reservations. Normal output may
-//! use `client_output_bytes` minus the control reserve; control frames may use
-//! the reserved subrange up to the total ceiling. Crossing 75% of the normal
-//! ceiling raises one warning; a whole demand that does not fit reports
-//! `Full` and the sink joins the slow-consumer close list. No frame is ever
-//! evicted for a newer one.
+//! Queue ceilings are logical admission limits, never eager capacity. An idle
+//! queue owns no backing allocation beyond the fixed entry ring inside its
+//! connection state, which the client connection base charge covers. Each
+//! committed demand occupies one ring entry until its final frame drains: a
+//! single-frame demand lives in the entry itself, and a larger demand brings
+//! one exact-capacity frame storage whose charge the fanout acquires with its
+//! frame buffers and `prepare` allocates, so committing never allocates. The
+//! storage and its permit leave together when the demand's final frame
+//! drains or the queue closes. The ring holds every response batch the
+//! hard maximum admits plus the control slots, so a reservation the counts
+//! admit always has an entry.
+//!
+//! New reservations use the current runtime byte, item, and response
+//! ceilings. A reload does not remove earlier reservations; an increase only
+//! admits more charged demands. Normal output may use `client_output_bytes`
+//! minus the control reserve; control frames may use the reserved subrange up
+//! to the total ceiling. Crossing 75% of the normal ceiling raises one
+//! warning; a whole demand that does not fit reports `Full` and the sink joins
+//! the slow-consumer close list. No frame is ever evicted for a newer one.
 
 use std::collections::VecDeque;
-use std::mem::size_of;
 
-use agenc_ircd_client_wire::RenderedMessage;
 use tokio::sync::Notify;
 
 use super::sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
     ClientSink, ConnectionGeneration, FlushAcknowledgement, MAX_DEMAND_FRAMES, QuerySnapshotPermit,
-    QueueAllocationError, QueueReservationLedger, SinkReserveError,
-    TentativeClientQueueReservation,
+    QueueAllocationError, QueueReservationLedger, QueueTransfer, SharedClientFrame,
+    SinkReserveError, TentativeClientQueueReservation, frame_storage_charge,
 };
 use crate::RuntimeError;
-use crate::budget::{MemoryCharge, MemoryPermit};
+use crate::budget::MemoryPermit;
 use crate::runtime_config::RuntimeConfigHandle;
 use crate::state_core::inbox::CloseReason;
 use crate::sync::{Arc, Mutex, lock};
@@ -38,15 +46,20 @@ pub const MAX_OUTPUT_BYTES: usize = 4_194_304;
 pub const DEFAULT_CONTROL_OUTPUT_BYTES: usize = 65_536;
 /// Hard maximum reserved control output, 256 KiB (spec line 2661).
 pub const MAX_CONTROL_OUTPUT_BYTES: usize = 262_144;
-/// Default queue item slots pre-allocated at admission: four maximal
-/// fanout demands of 1,024 frames each plus the control slots.
+/// Default logical queue items: four maximal fanout demands of 1,024 frames
+/// each plus the control slots.
 pub const DEFAULT_QUEUE_ITEMS: usize = 4_104;
-/// Hard maximum queue item slots: sixteen complete response demands plus
+/// Hard maximum logical queue items: sixteen complete response demands plus
 /// the eight control-only slots.
 pub const MAX_QUEUE_ITEMS: usize = 16_392;
 /// Item slots held back for control frames so a fatal or overload frame
 /// always has a slot (spec lines 2748-2756).
 pub const CONTROL_ITEM_SLOTS: usize = 8;
+/// Open response batches the hard item maximum admits (spec 19.2).
+pub const MAX_RESPONSE_BATCHES: usize = (MAX_QUEUE_ITEMS - CONTROL_ITEM_SLOTS) / MAX_DEMAND_FRAMES;
+/// Entries in the fixed ring: every admissible response batch plus every
+/// control slot.
+pub const QUEUE_ENTRY_SLOTS: usize = MAX_RESPONSE_BATCHES + CONTROL_ITEM_SLOTS;
 /// Queue occupancy that raises the one slow-consumer warning (spec line 2819).
 pub const QUEUE_WARNING_PERCENT: usize = 75;
 
@@ -109,7 +122,7 @@ impl QueueLimits {
         self.total_bytes - self.control_bytes
     }
 
-    /// Returns the pre-allocated item slots.
+    /// Returns the logical item ceiling.
     #[must_use]
     pub const fn items(self) -> usize {
         self.items
@@ -121,9 +134,9 @@ impl QueueLimits {
         self.items - CONTROL_ITEM_SLOTS
     }
 
-    /// Returns the logical open-response ceiling represented by the normal
-    /// item backing. Production profiles reserve one maximum-sized demand per
-    /// configured response batch; smaller embedding queues still admit one.
+    /// Returns the logical open-response ceiling the normal items represent.
+    /// Production profiles allow one maximum-sized demand per configured
+    /// response batch; smaller embedding queues still admit one.
     #[must_use]
     pub fn response_batches(self) -> usize {
         self.normal_items().div_ceil(MAX_DEMAND_FRAMES).max(1)
@@ -133,15 +146,6 @@ impl QueueLimits {
     #[must_use]
     pub const fn warning_bytes(self) -> usize {
         self.normal_bytes() / 100 * QUEUE_WARNING_PERCENT
-    }
-
-    /// Returns the memory charge for the deque backing the item slots.
-    pub fn backing_charge(self) -> Result<MemoryCharge, RuntimeError> {
-        let bytes = self
-            .items
-            .checked_mul(size_of::<QueuedFrame>())
-            .ok_or(RuntimeError::Overflow)?;
-        MemoryCharge::allocation(u64::try_from(bytes).map_err(|_| RuntimeError::Overflow)?)
     }
 }
 
@@ -157,28 +161,148 @@ pub enum ClosePolicy {
 /// What the writer found on the queue.
 pub enum QueuePop {
     /// The next frame in output order.
-    Frame(Arc<RenderedMessage<MemoryPermit>>),
+    Frame(SharedClientFrame),
     /// The queue is closed and holds nothing more to write.
     Closed(CloseReason),
     /// Nothing is queued yet.
     Empty,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum FrameClass {
-    Normal,
-    Control,
+/// The frames of one committed demand.
+enum DemandFrames {
+    /// A single frame held in the ring entry; no backing allocation.
+    Inline(Option<SharedClientFrame>),
+    /// A larger demand in the exact-capacity storage `prepare` created.
+    // Fields drop in declaration order: free the storage before its permit.
+    Stored {
+        frames: VecDeque<SharedClientFrame>,
+        _backing: MemoryPermit,
+    },
 }
 
-struct QueuedFrame {
-    class: FrameClass,
-    frame: Arc<RenderedMessage<MemoryPermit>>,
+impl DemandFrames {
+    fn pop_front(&mut self) -> Option<SharedClientFrame> {
+        match self {
+            Self::Inline(frame) => frame.take(),
+            Self::Stored { frames, .. } => frames.pop_front(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Inline(frame) => frame.is_none(),
+            Self::Stored { frames, .. } => frames.is_empty(),
+        }
+    }
+}
+
+/// One committed response batch and the query snapshot it drains.
+struct Response {
+    frames: DemandFrames,
     query_snapshot: Option<QuerySnapshotPermit>,
-    ends_response_batch: bool,
+}
+
+impl Response {
+    /// Places a committed demand's frames: one inline, more in the storage
+    /// its reservation prepared. `None` when a multi-frame transfer carries
+    /// no fitting storage, which only a foreign reservation can produce.
+    fn assemble(transfer: &mut QueueTransfer, frames: Vec<SharedClientFrame>) -> Option<Self> {
+        let frames = if frames.len() == 1 {
+            DemandFrames::Inline(frames.into_iter().next())
+        } else {
+            let stored = transfer.take_storage()?.fill(frames)?;
+            DemandFrames::Stored {
+                frames: stored,
+                _backing: transfer.take_backing()?,
+            }
+        };
+        Some(Self {
+            frames,
+            query_snapshot: transfer.take_query_snapshot(),
+        })
+    }
+}
+
+enum Entry {
+    Control(SharedClientFrame),
+    Response(Response),
+}
+
+/// A fixed ring of queue entries stored inside the connection state.
+struct EntryRing {
+    slots: [Option<Entry>; QUEUE_ENTRY_SLOTS],
+    head: usize,
+    len: usize,
+}
+
+impl EntryRing {
+    fn new() -> Self {
+        Self {
+            slots: [const { None }; QUEUE_ENTRY_SLOTS],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn slot(&mut self, offset: usize) -> Option<&mut Option<Entry>> {
+        self.slots.get_mut((self.head + offset) % QUEUE_ENTRY_SLOTS)
+    }
+
+    /// Appends in output order, or returns the entry when the ring is full.
+    fn push_back(&mut self, entry: Entry) -> Result<(), Entry> {
+        if self.len == QUEUE_ENTRY_SLOTS {
+            return Err(entry);
+        }
+        let len = self.len;
+        match self.slot(len) {
+            Some(slot) => {
+                *slot = Some(entry);
+                self.len += 1;
+                Ok(())
+            }
+            None => Err(entry),
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<Entry> {
+        if self.len == 0 {
+            return None;
+        }
+        let entry = self.slot(0)?.take();
+        self.head = (self.head + 1) % QUEUE_ENTRY_SLOTS;
+        self.len -= 1;
+        entry
+    }
+
+    /// Puts a partly drained entry back into the slot `pop_front` just freed.
+    fn restore_front(&mut self, entry: Entry) {
+        self.head = (self.head + QUEUE_ENTRY_SLOTS - 1) % QUEUE_ENTRY_SLOTS;
+        // The head slot always exists; the ring index is reduced modulo its length.
+        let restored = self.slot(0).map(|slot| *slot = Some(entry)).is_some();
+        self.len += usize::from(restored);
+    }
+
+    fn clear(&mut self) {
+        while self.pop_front().is_some() {}
+        self.head = 0;
+    }
+
+    fn largest_query_rows(&self) -> u64 {
+        self.slots
+            .iter()
+            .flatten()
+            .filter_map(|entry| match entry {
+                Entry::Response(response) => response.query_snapshot.as_ref(),
+                Entry::Control(_) => None,
+            })
+            .map(QuerySnapshotPermit::rows)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 struct QueueState {
-    frames: VecDeque<QueuedFrame>,
+    entries: EntryRing,
     normal_bytes: usize,
     normal_items: usize,
     control_bytes: usize,
@@ -196,19 +320,6 @@ struct QueueState {
 }
 
 impl QueueState {
-    fn release(&mut self, class: FrameClass, bytes: usize) {
-        match class {
-            FrameClass::Normal => {
-                self.normal_items = self.normal_items.saturating_sub(1);
-                self.normal_bytes = self.normal_bytes.saturating_sub(bytes);
-            }
-            FrameClass::Control => {
-                self.control_items = self.control_items.saturating_sub(1);
-                self.control_bytes = self.control_bytes.saturating_sub(bytes);
-            }
-        }
-    }
-
     fn retain_query_snapshot(&mut self, rows: u64, bytes: u64) {
         // StateCore admits these values below the configured hard maxima, so
         // saturation is unreachable in valid state. Keeping the update total
@@ -225,14 +336,41 @@ impl QueueState {
         self.query_rows = self.query_rows.saturating_sub(snapshot.rows());
         self.query_bytes = self.query_bytes.saturating_sub(snapshot.bytes());
         if snapshot.rows() == self.largest_query_rows {
-            self.largest_query_rows = self
-                .frames
-                .iter()
-                .filter_map(|queued| queued.query_snapshot.as_ref())
-                .map(QuerySnapshotPermit::rows)
-                .max()
-                .unwrap_or(0);
+            self.largest_query_rows = self.entries.largest_query_rows();
         }
+    }
+
+    /// Dequeues the next frame in output order and releases its logical
+    /// counts exactly once.
+    fn pop_frame(&mut self) -> Option<SharedClientFrame> {
+        match self.entries.pop_front()? {
+            Entry::Control(frame) => {
+                self.control_items = self.control_items.saturating_sub(1);
+                self.control_bytes = self.control_bytes.saturating_sub(frame.as_bytes().len());
+                Some(frame)
+            }
+            Entry::Response(response) => self.pop_response_frame(response),
+        }
+    }
+
+    /// Takes a response's next frame. The response returns to the front of
+    /// the ring while frames remain; its storage, permit, batch slot, and
+    /// query snapshot leave with its final frame.
+    fn pop_response_frame(&mut self, mut response: Response) -> Option<SharedClientFrame> {
+        // Every placed response holds at least one frame: `assemble` takes a
+        // nonempty bound group and a drained response is never restored.
+        let frame = response.frames.pop_front()?;
+        self.normal_items = self.normal_items.saturating_sub(1);
+        self.normal_bytes = self.normal_bytes.saturating_sub(frame.as_bytes().len());
+        if response.frames.is_empty() {
+            self.normal_batches = self.normal_batches.saturating_sub(1);
+            if let Some(snapshot) = response.query_snapshot.as_ref() {
+                self.release_query_snapshot(snapshot);
+            }
+        } else {
+            self.entries.restore_front(Entry::Response(response));
+        }
+        Some(frame)
     }
 }
 
@@ -258,7 +396,6 @@ pub struct WriterQueue {
     limits: QueueLimits,
     runtime_config: Option<RuntimeConfigHandle>,
     shared: Arc<QueueShared>,
-    _backing: MemoryPermit,
 }
 
 impl WriterQueue {
@@ -267,38 +404,28 @@ impl WriterQueue {
         let _ = self.registration_started.set(started);
     }
 
-    /// Creates a queue whose slots are backed by exactly `backing`, the
-    /// permit for [`QueueLimits::backing_charge`].
+    /// Creates an empty queue. It owns no backing allocation until a
+    /// charged multi-frame demand commits.
     pub fn new(
         generation: ConnectionGeneration,
         limits: QueueLimits,
-        backing: MemoryPermit,
     ) -> Result<Arc<Self>, RuntimeError> {
-        Self::new_with_runtime_config(generation, limits, backing, None)
+        Self::new_with_runtime_config(generation, limits, None)
     }
 
     pub(crate) fn new_live(
         generation: ConnectionGeneration,
         limits: QueueLimits,
-        backing: MemoryPermit,
         runtime_config: RuntimeConfigHandle,
     ) -> Result<Arc<Self>, RuntimeError> {
-        Self::new_with_runtime_config(generation, limits, backing, Some(runtime_config))
+        Self::new_with_runtime_config(generation, limits, Some(runtime_config))
     }
 
     fn new_with_runtime_config(
         generation: ConnectionGeneration,
         limits: QueueLimits,
-        backing: MemoryPermit,
         runtime_config: Option<RuntimeConfigHandle>,
     ) -> Result<Arc<Self>, RuntimeError> {
-        if backing.bytes() != limits.backing_charge()?.bytes() {
-            return Err(RuntimeError::InvalidValue);
-        }
-        let mut frames = VecDeque::new();
-        frames
-            .try_reserve_exact(limits.items())
-            .map_err(|_| RuntimeError::MemoryExhausted)?;
         Ok(Arc::new(Self {
             #[cfg(feature = "wss")]
             registration_started: std::sync::OnceLock::new(),
@@ -307,7 +434,7 @@ impl WriterQueue {
             runtime_config,
             shared: Arc::new(QueueShared {
                 state: Mutex::new(QueueState {
-                    frames,
+                    entries: EntryRing::new(),
                     normal_bytes: 0,
                     normal_items: 0,
                     control_bytes: 0,
@@ -325,12 +452,10 @@ impl WriterQueue {
                 }),
                 notify: Notify::new(),
             }),
-            _backing: backing,
         }))
     }
 
-    /// Returns the current byte limits and the item capacity available to
-    /// this queue's admission backing.
+    /// Returns the current byte, item, and response ceilings.
     #[must_use]
     pub fn limits(&self) -> QueueLimits {
         self.current_limits()
@@ -368,10 +493,7 @@ impl WriterQueue {
 
     /// Enqueues one control frame inside the control reserve, bypassing the
     /// normal ceiling (spec lines 2750-2756).
-    pub fn push_control(
-        &self,
-        frame: Arc<RenderedMessage<MemoryPermit>>,
-    ) -> Result<(), SinkReserveError> {
+    pub fn push_control(&self, frame: SharedClientFrame) -> Result<(), SinkReserveError> {
         let bytes = frame.as_bytes().len();
         let limits = self.current_limits();
         let mut state = lock(&self.shared.state);
@@ -385,14 +507,11 @@ impl WriterQueue {
         if next_bytes > limits.control_bytes() || state.control_items >= CONTROL_ITEM_SLOTS {
             return Err(SinkReserveError::Full);
         }
+        if state.entries.push_back(Entry::Control(frame)).is_err() {
+            return Err(SinkReserveError::Full);
+        }
         state.control_bytes = next_bytes;
         state.control_items += 1;
-        state.frames.push_back(QueuedFrame {
-            class: FrameClass::Control,
-            frame,
-            query_snapshot: None,
-            ends_response_batch: false,
-        });
         drop(state);
         self.shared.notify.notify_one();
         Ok(())
@@ -407,7 +526,7 @@ impl WriterQueue {
             state.close_started = Some(tokio::time::Instant::now());
         }
         if policy == ClosePolicy::Immediate {
-            state.frames.clear();
+            state.entries.clear();
             state.normal_bytes = 0;
             state.normal_items = 0;
             state.control_bytes = 0;
@@ -443,15 +562,8 @@ impl WriterQueue {
     #[must_use]
     pub fn pop(&self) -> QueuePop {
         let mut state = lock(&self.shared.state);
-        if let Some(queued) = state.frames.pop_front() {
-            state.release(queued.class, queued.frame.as_bytes().len());
-            if queued.ends_response_batch {
-                state.normal_batches = state.normal_batches.saturating_sub(1);
-            }
-            if let Some(snapshot) = queued.query_snapshot.as_ref() {
-                state.release_query_snapshot(snapshot);
-            }
-            return QueuePop::Frame(queued.frame);
+        if let Some(frame) = state.pop_frame() {
+            return QueuePop::Frame(frame);
         }
         match state.closed {
             Some(reason) => QueuePop::Closed(reason),
@@ -512,10 +624,8 @@ impl WriterQueue {
         let Some(runtime_config) = &self.runtime_config else {
             return (self.limits, self.limits.response_batches());
         };
-        let mut current = runtime_config.load().connection_limits().queue;
-        let response_batches = current.response_batches();
-        current.items = current.items.min(self.limits.items);
-        (current, response_batches)
+        let current = runtime_config.load().connection_limits().queue;
+        (current, current.response_batches())
     }
 }
 
@@ -544,11 +654,12 @@ impl ClientSink for WriterQueue {
             return Err(SinkReserveError::Full);
         }
         drop(state);
+        let backing_charge = frame_storage_charge(demand.frame_count());
         let ledger: Arc<dyn QueueReservationLedger> = self.shared.clone();
         Ok(TentativeClientQueueReservation::new(
             self.generation,
             demand,
-            0,
+            backing_charge,
             ledger,
         ))
     }
@@ -573,23 +684,23 @@ impl ClientSink for WriterQueue {
             transfer.discard();
             return;
         }
-        if let Some((rows, bytes)) = transfer.query_snapshot_usage() {
+        let usage = transfer.query_snapshot_usage();
+        let placed = Response::assemble(&mut transfer, frames.into_frames())
+            .map(|response| state.entries.push_back(Entry::Response(response)));
+        if !matches!(placed, Some(Ok(()))) {
+            // Only a foreign reservation can arrive without fitting storage
+            // or an entry. Exclude the whole sink rather than drop a frame.
+            drop(state);
+            drop(placed);
+            transfer.discard();
+            self.begin_slow_consumer_close();
+            return;
+        }
+        if let Some((rows, bytes)) = usage {
             state.retain_query_snapshot(rows, bytes);
         }
-        let frame_count = transfer.frame_count();
-        let mut query_snapshot = transfer.take_query_snapshot();
-        for (index, frame) in frames.into_frames().into_iter().enumerate() {
-            state.frames.push_back(QueuedFrame {
-                class: FrameClass::Normal,
-                frame,
-                query_snapshot: (index + 1 == frame_count)
-                    .then(|| query_snapshot.take())
-                    .flatten(),
-                ends_response_batch: index + 1 == frame_count,
-            });
-        }
         drop(state);
-        drop(transfer.take_backing());
+        drop(transfer);
         self.shared.notify.notify_one();
     }
 
@@ -628,27 +739,28 @@ impl ClientSink for WriterQueue {
 }
 
 #[cfg(test)]
+#[path = "queue/tests/backing.rs"]
+mod backing_tests;
+
+#[cfg(test)]
 mod tests {
-    use agenc_ircd_client_wire::WireMessage;
+    use agenc_ircd_client_wire::{RenderedMessage, WireMessage};
 
     use super::*;
-    use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, PermitCursor};
+    use crate::budget::{
+        BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge, PermitCursor,
+    };
 
     fn budget() -> MemoryBudget {
         MemoryBudget::new(64 * 1_048_576)
     }
 
     fn queue(
-        budget: &MemoryBudget,
+        _budget: &MemoryBudget,
         generation: u64,
         limits: QueueLimits,
     ) -> Result<Arc<WriterQueue>, RuntimeError> {
-        let charge = limits.backing_charge()?;
-        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
-        let backing = batch
-            .split_exact(charge.bytes())
-            .ok_or(RuntimeError::InvalidValue)?;
-        WriterQueue::new(ConnectionGeneration::new(generation), limits, backing)
+        WriterQueue::new(ConnectionGeneration::new(generation), limits)
     }
 
     fn frame(
@@ -669,17 +781,41 @@ mod tests {
         Ok(Arc::new(rendered))
     }
 
+    /// The exact permit a tentative reservation's backing charge names.
+    fn backing(budget: &MemoryBudget, charge: u64) -> Result<Option<MemoryPermit>, RuntimeError> {
+        if charge == 0 {
+            return Ok(None);
+        }
+        let mut batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(charge)])?)?;
+        Ok(Some(
+            batch
+                .split_exact(charge)
+                .ok_or(RuntimeError::InvalidValue)?,
+        ))
+    }
+
+    fn prepared(
+        budget: &MemoryBudget,
+        queue: &WriterQueue,
+        demand: ClientQueueDemand,
+    ) -> Result<ClientQueueReservation, RuntimeError> {
+        let tentative = queue
+            .try_reserve(demand)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        let permit = backing(budget, tentative.backing_charge())?;
+        queue
+            .prepare(tentative, permit)
+            .map_err(|_| RuntimeError::InvalidValue)
+    }
+
     fn reserve_and_commit(
+        budget: &MemoryBudget,
         queue: &WriterQueue,
         frames: Vec<Arc<RenderedMessage<MemoryPermit>>>,
     ) -> Result<(), RuntimeError> {
         let demand = ClientQueueDemand::new(frames.iter().map(|f| f.as_bytes().len()).collect())?;
-        let tentative = queue
-            .try_reserve(demand)
-            .map_err(|_| RuntimeError::LimitExceeded)?;
-        let prepared = queue
-            .prepare(tentative, None)
-            .map_err(|_| RuntimeError::InvalidValue)?;
+        let prepared = prepared(budget, queue, demand)?;
         let bound = BoundedSharedClientFrames::for_reservation(&prepared, frames)?;
         queue.commit(prepared, bound);
         Ok(())
@@ -712,7 +848,9 @@ mod tests {
         assert_eq!(limits.items(), 4_104);
         assert_eq!(limits.normal_items(), 4_096);
         assert_eq!(limits.warning_bytes(), 737_250);
-        assert!(limits.backing_charge()?.bytes() > 0);
+        assert_eq!(limits.response_batches(), 4);
+        assert_eq!(MAX_RESPONSE_BATCHES, 16);
+        assert_eq!(QUEUE_ENTRY_SLOTS, 24);
         for (total, control, items) in [
             (0, 1, 64),
             (MAX_OUTPUT_BYTES + 1, 1, 64),
@@ -735,14 +873,11 @@ mod tests {
     }
 
     #[test]
-    fn construction_requires_the_exact_backing_permit() -> Result<(), RuntimeError> {
+    fn an_idle_queue_holds_no_backing_charge() -> Result<(), RuntimeError> {
         let budget = budget();
         let limits = QueueLimits::DEFAULT;
-        let mut batch =
-            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(4_096)])?)?;
-        let wrong = batch.split_exact(4_096).ok_or(RuntimeError::InvalidValue)?;
-        assert!(WriterQueue::new(ConnectionGeneration::new(1), limits, wrong).is_err());
         let queue = queue(&budget, 1, limits)?;
+        assert_eq!(budget.available(), budget.capacity());
         assert_eq!(queue.generation(), ConnectionGeneration::new(1));
         assert_eq!(queue.limits(), limits);
         assert_eq!(queue.normal_bytes(), 0);
@@ -765,13 +900,13 @@ mod tests {
                 second.as_bytes().len(),
             ])?)
             .map_err(|_| RuntimeError::LimitExceeded)?;
-        assert_eq!(tentative.backing_charge(), 0);
+        assert_eq!(tentative.backing_charge(), 4_096);
         assert_eq!(queue.normal_bytes(), len);
         drop(tentative);
         assert_eq!(queue.normal_bytes(), 0, "drop rolled the counts back");
 
         assert!(matches!(queue.pop(), QueuePop::Empty));
-        reserve_and_commit(&queue, vec![first.clone(), second.clone()])?;
+        reserve_and_commit(&budget, &queue, vec![first.clone(), second.clone()])?;
         assert_eq!(queue.normal_bytes(), len);
         let QueuePop::Frame(popped) = queue.pop() else {
             return Err(RuntimeError::InvalidValue);
@@ -793,7 +928,7 @@ mod tests {
         let queue = queue(&budget, 1, limits)?;
         let first = frame(&budget, "first")?;
         let last = frame(&budget, "last")?;
-        reserve_and_commit(&queue, vec![first, last])?;
+        reserve_and_commit(&budget, &queue, vec![first, last])?;
 
         assert_eq!(
             queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
@@ -820,7 +955,7 @@ mod tests {
         let output = frame(&budget, "snapshot")?;
         let output_bytes =
             u64::try_from(output.as_bytes().len()).map_err(|_| RuntimeError::Overflow)?;
-        reserve_and_commit(&queue, vec![output])?;
+        reserve_and_commit(&budget, &queue, vec![output])?;
 
         assert_eq!(
             queue.queue_snapshot(),
@@ -848,8 +983,9 @@ mod tests {
         let snapshot_backing = snapshot_batch
             .split_exact(snapshot_charge.bytes())
             .ok_or(RuntimeError::InvalidValue)?;
+        let permit = backing(&budget, tentative.backing_charge())?;
         let prepared = queue
-            .prepare(tentative, None)
+            .prepare(tentative, permit)
             .map_err(|_| RuntimeError::InvalidValue)?
             .with_query_snapshot(QuerySnapshotPermit::new(17, snapshot_backing));
         let bound = BoundedSharedClientFrames::for_reservation(&prepared, vec![first, last])?;
@@ -971,7 +1107,7 @@ mod tests {
         let budget = budget();
         let queue = queue(&budget, 1, QueueLimits::new(400, 100, 12)?)?;
         let accepted = frame(&budget, "credential changed")?;
-        reserve_and_commit(&queue, vec![accepted.clone()])?;
+        reserve_and_commit(&budget, &queue, vec![accepted.clone()])?;
 
         let acknowledgement = queue.close_after_flush(CloseReason::ClientQuit);
         assert!(!acknowledgement.is_acknowledged());
@@ -1001,6 +1137,7 @@ mod tests {
 
         assert!(!queue.take_warning());
         reserve_and_commit(
+            &budget,
             &queue,
             vec![big.clone(), big.clone(), big.clone(), big.clone()],
         )?;
@@ -1064,7 +1201,7 @@ mod tests {
             }
         });
         tokio::task::yield_now().await;
-        reserve_and_commit(&queue, vec![text.clone()])?;
+        reserve_and_commit(&budget, &queue, vec![text.clone()])?;
         assert_eq!(
             waiter.await.map_err(|_| RuntimeError::Cancelled)?,
             text.as_bytes().len()

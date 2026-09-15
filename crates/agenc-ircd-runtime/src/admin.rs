@@ -2598,7 +2598,6 @@ where
         permits,
         global_slot,
         listener_slot,
-        queue_backing,
     } = resources;
     let (output_sender, output_receiver) = mpsc::channel(ADMIN_OUTPUT_CAPACITY);
     let output = AdminOutput::new(output_sender);
@@ -2607,7 +2606,7 @@ where
         .opened(generation, challenge, peer, output, &token)
         .await
     {
-        drop((permits, global_slot, listener_slot, queue_backing));
+        drop((permits, global_slot, listener_slot));
         return ConnectionExit {
             generation,
             purpose,
@@ -2650,7 +2649,7 @@ where
         _ => CloseReason::Overload,
     };
     port.closed(generation, reason).await;
-    drop((permits, global_slot, listener_slot, queue_backing));
+    drop((permits, global_slot, listener_slot));
     ConnectionExit {
         generation,
         purpose,

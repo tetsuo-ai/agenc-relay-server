@@ -5,6 +5,9 @@
 #[path = "stage_six_daemon/address_pool.rs"]
 mod address_pool;
 
+#[path = "stage_six_daemon/idle_capacity.rs"]
+mod idle_capacity;
+
 #[path = "stage_six_daemon/runtime_regressions.rs"]
 mod runtime_regressions;
 #[path = "stage_six_daemon/service_user.rs"]

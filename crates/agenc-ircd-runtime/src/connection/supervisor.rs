@@ -118,8 +118,6 @@ pub struct ConnectionResources {
     pub global_slot: Option<OwnedSemaphorePermit>,
     /// The listener's own count slot.
     pub listener_slot: OwnedSemaphorePermit,
-    /// The permit backing the writer queue's item slots.
-    pub queue_backing: MemoryPermit,
 }
 
 /// How one connection ended.
@@ -233,24 +231,18 @@ where
         mut permits,
         global_slot,
         listener_slot,
-        queue_backing,
     } = resources;
     let Some(state_permit) = permits.split_exact(CLIENT_CONNECTION_BASE_BYTES) else {
         drop(transport);
-        drop((permits, global_slot, listener_slot, queue_backing));
+        drop((permits, global_slot, listener_slot));
         let _closed_at = lease.release(CloseReason::Overload);
         return connection_exit(&admitted, CloseReason::Overload);
     };
     let (return_permit, _returned_permit) = oneshot::channel();
     lease.assign_state_permit(state_permit, return_permit);
     let queue = match policy.runtime_config.clone() {
-        Some(handle) => WriterQueue::new_live(
-            admitted.generation,
-            policy.limits.queue,
-            queue_backing,
-            handle,
-        ),
-        None => WriterQueue::new(admitted.generation, policy.limits.queue, queue_backing),
+        Some(handle) => WriterQueue::new_live(admitted.generation, policy.limits.queue, handle),
+        None => WriterQueue::new(admitted.generation, policy.limits.queue),
     };
     let Ok(queue) = queue else {
         drop(transport);
@@ -435,15 +427,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_unanswered_open_notice_closes_as_a_deadline_and_returns_every_permit()
     -> Result<(), RuntimeError> {
-        let backing = QueueLimits::DEFAULT.backing_charge()?;
-        let budget = MemoryBudget::new(CLIENT_CONNECTION_BASE_BYTES + backing.bytes());
-        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[
-            MemoryCharge::fixed(CLIENT_CONNECTION_BASE_BYTES),
-            backing,
-        ])?)?;
-        let queue_backing = permits
-            .split_exact(backing.bytes())
-            .ok_or(RuntimeError::InvalidValue)?;
+        let budget = MemoryBudget::new(CLIENT_CONNECTION_BASE_BYTES);
+        let permits =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(
+                CLIENT_CONNECTION_BASE_BYTES,
+            )])?)?;
         let global = Arc::new(tokio::sync::Semaphore::new(1));
         let listener = Arc::new(tokio::sync::Semaphore::new(1));
         let resources = ConnectionResources {
@@ -456,7 +444,6 @@ mod tests {
             listener_slot: Arc::clone(&listener)
                 .try_acquire_owned()
                 .map_err(|_| RuntimeError::LimitExceeded)?,
-            queue_backing,
         };
         let (port, _close_inbox) = connection_close_channel();
         let releases = Arc::new(AtomicU64::new(0));
