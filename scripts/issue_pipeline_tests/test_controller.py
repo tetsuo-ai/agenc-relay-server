@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -852,6 +853,51 @@ class ControllerTests(unittest.TestCase):
         self.execute()
         self.assertEqual(self.controller.state.get_task(36)["status"], "blocked")
         self.assertFalse(any(role == "worker" for role, *_ in self.runner.calls))
+
+    def test_rejected_plan_replans_with_findings_then_blocks_after_bounded_attempts(self):
+        rejection = {"verdict": "request_changes", "summary": "One criterion has no phase.",
+                     "findings": [{"severity": "high", "path": "src/service.rs", "line": 1,
+                                   "description": "Refused receipts have no phase."}],
+                     "acceptance_complete": False, "contract_separated": True}
+        agents = self.runner
+        original = agents.run
+
+        def run(role, worktree, prompt, output, **kwargs):
+            if role == "reviewer" and kwargs.get("review_purpose") == "plan":
+                request = json.loads(prompt)
+                agents.calls.append((role, worktree, request))
+                output.mkdir(parents=True)
+                (output / "result.json").write_text(json.dumps(rejection))
+                return copy.deepcopy(rejection)
+            return original(role, worktree, prompt, output, **kwargs)
+
+        agents.run = run
+        for attempt in range(1, self.config.max_attempts):
+            self.execute()
+            record = self.controller.state.get_task(36)
+            self.assertEqual(record["status"], "pending", record)
+            self.assertEqual(record["data"]["plan_reviews"], attempt)
+            self.assertIsNone(record["data"].get("plan"))
+            self.assertEqual(record["data"]["replan_feedback"]["plan_review"], rejection)
+            self.assertEqual(record["data"]["replan_feedback"]["rejected_plan"]["status"], "planned")
+            self.assertGreater(record["data"]["retry_after"], time.time())
+            self.assertLess(record["data"]["retry_after"], time.time() + 120)
+            self.assertFalse(self.controller.state.claims())
+            self.assertGreaterEqual(self.controller.next_wait_seconds(), 15)
+            self.assertLessEqual(self.controller.next_wait_seconds(), 60)
+            record["data"]["retry_after"] = 0
+            self.controller.state.set_task(36, "pending", record["data"])
+        self.execute()
+        record = self.controller.state.get_task(36)
+        self.assertEqual(record["status"], "blocked", record)
+        self.assertIn("after bounded replans", record["data"]["reason"])
+        planners = [request for role, _, request in agents.calls if role == "planner"]
+        self.assertEqual(len(planners), self.config.max_attempts)
+        self.assertIsNone(planners[0]["replan_feedback"])
+        for request in planners[1:]:
+            self.assertEqual(request["replan_feedback"]["plan_review"], rejection)
+            self.assertEqual(request["replan_feedback"]["rejected_plan"]["status"], "planned")
+        self.assertFalse(any(role == "worker" for role, *_ in agents.calls))
 
     def test_plan_approval_cannot_substitute_for_candidate_code_review(self):
         self.controller.state.set_task(36, "pending")

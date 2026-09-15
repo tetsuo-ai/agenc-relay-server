@@ -38,7 +38,11 @@ ROLE_POLICIES = {
 Read the complete issue and its dependencies, specifications, current source and
 tests. Produce finite ordered phases covering every original acceptance criterion.
 Each phase has exact repository-relative source file paths (no directories or globs),
-concrete observable acceptance criteria, and validation argv arrays. Include all
+concrete observable acceptance criteria, and validation argv arrays. Every validation
+entry is one argv array of single-line arguments that runs an existing script or test
+command; never embed multi-line programs, shell syntax or new inline scripts. When
+TASK_DATA_JSON carries replan_feedback, it holds the previous rejected plan and the
+independent reviewer's findings: address every finding in the new plan. Include all
 necessary tracked generated outputs as declared files. Disposable Cargo build
 outputs under target/ and fuzz/target/ are not source file claims. Contract phases precede dependent
 implementation; evidence phases follow the behavior they qualify. Identify safe

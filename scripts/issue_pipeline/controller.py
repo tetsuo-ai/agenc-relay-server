@@ -37,9 +37,27 @@ MAX_MANAGED_BACKLOG_BYTES = 16 * 1024 * 1024
 
 
 RATE_LIMIT_BACKOFF_SECONDS = 900
+SESSION_RETRY_SECONDS = 300
+REPLAN_RETRY_SECONDS = 60
+MINIMUM_WAIT_SECONDS = 15
+
 
 class PipelineBlocked(RuntimeError):
     """Keep evidence and source; do not infer completion or weaken a check."""
+
+
+class PipelineDeferred(RuntimeError):
+    """Retry the task from its checkpoint after ``delay`` seconds with ``updates`` applied.
+
+    Deferral is for bounded, evidence-carrying retries such as replanning with an
+    independent reviewer's findings. It never replaces a blocked verdict once the
+    configured attempt budget is exhausted.
+    """
+
+    def __init__(self, message: str, *, delay: float, **updates):
+        super().__init__(message)
+        self.delay = delay
+        self.updates = updates
 
 
 def encode(value: object) -> str:
@@ -953,12 +971,21 @@ class Controller:
                          "review_instruction": "Review plan coverage and scope against the full original issue and current source. Approve only if every original requirement has a specific phase, test and exact file scope; assess planning completeness, not implementation completion."}, review_purpose="plan")
                 self.record(task.issue, "plan-review", planning_source, base, {"review": check, "artifacts": {"review": review_artifact}}, accepted=check["verdict"] == "approve")
                 if check["verdict"] != "approve":
-                    raise PipelineBlocked("plan did not pass independent acceptance coverage review: " + encode(check))
+                    # An independent rejection is feedback for a fresh bounded
+                    # plan, not yet an operator handoff. The rejected plan and
+                    # its findings travel to the next planner as untrusted data.
+                    reviews = data.get("plan_reviews", 0) + 1
+                    if reviews < self.config.max_attempts and not self.stop.is_set():
+                        raise PipelineDeferred("plan did not pass independent acceptance coverage review; replanning with its findings",
+                                               delay=REPLAN_RETRY_SECONDS, plan_reviews=reviews,
+                                               replan_feedback={"rejected_plan": plan, "plan_review": check})
+                    raise PipelineBlocked("plan did not pass independent acceptance coverage review after bounded replans: " + encode(check))
                 previous = data.pop("completed_plan_phases", [])
                 plan["phases"] = previous + plan["phases"]
                 self.checkpoint(task.issue, "working", data, plan=plan, issue=issue, issue_hash=body_hash(issue),
                                 original_base=data.get("original_base", base), phase_index=len(previous),
-                                merged_phases=data.get("merged_phases", []), attempt=0)
+                                merged_phases=data.get("merged_phases", []), attempt=0,
+                                plan_reviews=0, replan_feedback=None)
             files = sorted({path for phase in data["plan"]["phases"] for path in phase["files"]})
             self.state.claim(task.issue, files=tuple(files))
             while data["phase_index"] < len(data["plan"]["phases"]):
@@ -1099,12 +1126,19 @@ class Controller:
             limited = error.kind == "rate_limited"
             failures = data.get("agent_failures", 0) + (0 if limited else 1)
             status = "pending" if failures < self.config.max_attempts and not self.stop.is_set() else "blocked"
-            backoff = max(self.config.poll_seconds, RATE_LIMIT_BACKOFF_SECONDS) if limited else self.config.poll_seconds
+            backoff = (max(self.config.poll_seconds, RATE_LIMIT_BACKOFF_SECONDS) if limited
+                       else min(self.config.poll_seconds, SESSION_RETRY_SECONDS))
             self.checkpoint(task.issue, status, data, agent_failures=failures,
                             reason=f"Claude session {error.kind}: {error}", retry_after=time.time() + backoff)
             if claimed and not self.stop.is_set():
                 self.state.release(task.issue, owner=str(task.issue))
             self.log("agent session interrupted", issue=task.issue, status=status, kind=error.kind)
+        except PipelineDeferred as error:
+            self.checkpoint(task.issue, "pending", data, reason=str(error),
+                            retry_after=time.time() + error.delay, **error.updates)
+            if claimed and not self.stop.is_set():
+                self.state.release(task.issue, owner=str(task.issue))
+            self.log("task deferred for a bounded retry", issue=task.issue, reason=str(error))
         except Exception as error:
             self.checkpoint(task.issue, "blocked", data, reason=str(error))
             # No cleanup on failure: uncertain source and remote actions remain reviewable.
@@ -1236,7 +1270,19 @@ class Controller:
                         for future in active.values():
                             future.result()
                         return
-                    self.stop.wait(self.config.poll_seconds)
+                    self.stop.wait(self.next_wait_seconds())
+
+    def next_wait_seconds(self) -> float:
+        """Sleep until the configured poll or the earliest pending retry, whichever is sooner."""
+        wait = float(self.config.poll_seconds)
+        now = time.time()
+        for row in self.state.list_tasks():
+            if row["status"] != "pending":
+                continue
+            due = row["data"].get("retry_after", 0)
+            if type(due) in (int, float) and now < due < now + wait:
+                wait = due - now
+        return max(float(MINIMUM_WAIT_SECONDS), wait)
 
     def check_native_children(self, graph, issues, number):
         """Recheck the target hierarchy after slow proof work, before its body read."""
