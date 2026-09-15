@@ -610,6 +610,39 @@ impl StateCoreFixture {
         Ok(!result.records.is_empty())
     }
 
+    /// Reconstructs the durable account-service state from the live owner and
+    /// counts the stale transaction cleanups a restart would schedule.
+    pub(crate) fn recovered_startup_cleanup_count(&self) -> TestResult<usize> {
+        let owner = self.owner.as_ref().ok_or("storage owner")?;
+        let seed = StateCoreSeed::from_storage(owner)?;
+        let storage = seed.storage();
+        let keys = KeyDeriver::new(
+            StorageMasterKey::from_bytes(STORAGE_MASTER),
+            storage.database_binding(),
+            storage.storage_key_generation(),
+        )?;
+        let reconstruction = reconstruct(
+            &seed,
+            &owner.port(),
+            &keys,
+            MonotonicTick::from_ticks(10),
+            UtcSecond::from_unix_seconds(1_000),
+        )?;
+        Ok(reconstruction
+            .account_service
+            .startup_transaction_cleanups()
+            .len())
+    }
+
+    /// Reads one plan through the fixture's live storage port.
+    pub(crate) fn read_rows(
+        &self,
+        plan: agenc_ircd_storage::ReadPlan,
+    ) -> TestResult<agenc_ircd_storage::ReadResult> {
+        let owner = self.owner.as_ref().ok_or("storage owner")?;
+        Ok(crate::bridge::storage::read_blocking(&owner.port(), plan)?)
+    }
+
     /// Builds the fixture with the pre-composition router that rejects every
     /// line; `entropy` scripts every entropy draw the test makes.
     pub(crate) fn new(entropy: Vec<u8>) -> TestResult<Self> {

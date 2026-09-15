@@ -9,32 +9,32 @@
 
 use agenc_ircd_auth::{
     ACCOUNT_CREATION_TIMEOUT_TICKS, AUTHENTICATION_TIMEOUT_TICKS,
-    AUTHENTICATION_TRANSACTION_RECORD_BYTES, AccountAuthenticationState,
+    AUTHENTICATION_TRANSACTION_RECORD_BYTES, AccountAuthenticationState, AccountCreationInvite,
     AccountCreationStartParameters, AccountCreationState, AccountCredentialRecord,
     AccountOperationContext, AccountRequestPayload, AccountRouteBinding, AccountServiceEnvelope,
     AccountServiceResponsePayload, AccountTransaction, AccountTransactionBinding, AuthError,
     AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationLookup, AuthenticationStart,
     AuthenticationStartParameters, AuthenticationTransactionRecord,
     CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TIMEOUT_TICKS,
-    CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES, CreationAdmission, CreationStart,
+    CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES, CreationAdmission, CreationFinish, CreationStart,
     CreationTransactionRecord, CredentialChangeFinish, CredentialChangeStart,
     CredentialChangeStartParameters, CredentialChangeState, CredentialChangeTransactionRecord,
     DestructiveAccountSnapshot, OPAQUE_SERVER_LOGIN_STATE_BYTES, OpaqueKe1, OpaqueKe3,
     OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
     OpenedAccountServiceRequest, SealedAccountStart, TransactionClass, begin_account_creation,
     begin_authentication, begin_credential_change, encode_request_plaintext,
-    finish_account_authentication, finish_credential_change, open_and_parse_request,
-    open_and_parse_response,
+    finish_account_authentication, finish_account_creation, finish_credential_change,
+    open_and_parse_request, open_and_parse_response,
 };
 use agenc_ircd_crypto::{
-    AccountHpkePrivateKey, AccountRequestBinding, AccountResponseOpenToken, LoginIndexKey,
-    OpaqueFakeCredentialKey, derive_login_index, seal_account_request,
+    AccountHpkePrivateKey, AccountRequestBinding, AccountResponseOpenToken, Ed25519SecretKey,
+    LoginIndexKey, OpaqueFakeCredentialKey, derive_login_index, seal_account_request,
 };
 use agenc_ircd_types::{
     AccountId, AccountRandomId, AccountServiceCompletionStatus, AccountServiceMessageKind,
-    ConnectionId, Generation, MonotonicTick, NetworkId, NormalizedLogin, OpaqueCredentialId,
-    OriginId, RecoveryEpoch, RequestId, Revision, ServerId, ServerIncarnation, TransactionId,
-    UtcSecond,
+    ConnectionId, Generation, InviteId, MonotonicTick, NetworkId, NormalizedLogin,
+    OpaqueCredentialId, OriginId, RecoveryEpoch, RequestId, Revision, ServerId, ServerIncarnation,
+    TransactionId, UtcSecond,
 };
 
 type TestResult = Result<(), Box<dyn core::error::Error>>;
@@ -62,10 +62,12 @@ const CANDIDATE_ACCOUNT_OFFSET: usize = BODY_OFFSET + 1;
 const CANDIDATE_REVISION_OFFSET: usize = CANDIDATE_ACCOUNT_OFFSET + 24;
 const CANDIDATE_GENERATION_OFFSET: usize = CANDIDATE_REVISION_OFFSET + 8;
 // Creation body: disposition u16, login digest 32, credential 32,
-// invitation tag 1, invite ID 16, invitation expiry u64.
+// invitation tag 1, invite ID 16, invitation not_before u64, invitation
+// expiry u64.
 const INVITATION_TAG_OFFSET: usize = BODY_OFFSET + 2 + 32 + 32;
 const INVITATION_ID_OFFSET: usize = INVITATION_TAG_OFFSET + 1;
-const INVITATION_EXPIRY_OFFSET: usize = INVITATION_ID_OFFSET + 16;
+const INVITATION_NOT_BEFORE_OFFSET: usize = INVITATION_ID_OFFSET + 16;
+const INVITATION_EXPIRY_OFFSET: usize = INVITATION_NOT_BEFORE_OFFSET + 8;
 // Credential-change body: disposition u16, account 24, revision u64,
 // generation u64, credential 32.
 const CREDENTIAL_GENERATION_OFFSET: usize = BODY_OFFSET + 2 + 24 + 8;
@@ -187,6 +189,56 @@ fn creation_start(
     .0
     {
         OpenedAccountServiceRequest::CreationStart(request) => Ok(request),
+        _ => Err("opened request kind changed".into()),
+    }
+}
+
+fn invited_creation_start(
+    request_id: u8,
+    invitation: AccountCreationInvite,
+) -> Result<AuthenticatedAccountRequest<CreationStart>, Box<dyn core::error::Error>> {
+    let payload = CreationStart {
+        network_id: TEST_NETWORK,
+        login: NormalizedLogin::prepare(TEST_LOGIN)?,
+        registration_request: OpaqueRegistrationRequest::from_bytes(vector(
+            "registration_request",
+        )?)?,
+        invitation: Some(invitation),
+    };
+    match open_request(
+        TEST_NETWORK,
+        request_id,
+        AccountRequestPayload::CreationStart(payload),
+    )?
+    .0
+    {
+        OpenedAccountServiceRequest::CreationStart(request) => Ok(request),
+        _ => Err("opened request kind changed".into()),
+    }
+}
+
+fn creation_finish(
+    request_id: u8,
+    transaction_id: TransactionId,
+) -> Result<
+    (
+        AuthenticatedAccountRequest<CreationFinish>,
+        AccountResponseOpenToken,
+    ),
+    Box<dyn core::error::Error>,
+> {
+    let payload = CreationFinish {
+        network_id: TEST_NETWORK,
+        transaction_id,
+        registration_record: OpaqueRegistrationRecord::from_bytes(vector("registration_record")?)?,
+    };
+    let (request, token) = open_request(
+        TEST_NETWORK,
+        request_id,
+        AccountRequestPayload::CreationFinish(payload),
+    )?;
+    match request {
+        OpenedAccountServiceRequest::CreationFinish(request) => Ok((request, token)),
         _ => Err("opened request kind changed".into()),
     }
 }
@@ -683,11 +735,139 @@ fn creation_record_rejects_deadlines_headers_bindings_and_invitation_corruption(
         restore(&absent_with_expiry).err(),
         Some(AuthError::InvalidEncoding)
     );
+    let absent_with_not_before = with_bytes(bytes, INVITATION_NOT_BEFORE_OFFSET, &ONE_U64)?;
+    assert_eq!(
+        restore(&absent_with_not_before).err(),
+        Some(AuthError::InvalidEncoding)
+    );
     let present_without_expiry = with_bytes(bytes, INVITATION_TAG_OFFSET, &[1_u8])?;
     assert_eq!(
         restore(&present_without_expiry).err(),
         Some(AuthError::InvalidEncoding)
     );
+    Ok(())
+}
+
+/// ZDH-A1 (issue #38): a sealed invitation-admitted START survives restart
+/// with its exact interval, and the restored transaction rechecks that
+/// interval at FINISH.
+#[test]
+fn restored_invited_creation_rechecks_the_invitation_interval_at_finish() -> TestResult {
+    let profile = OpaqueProfile::generate(TEST_NETWORK)?;
+    let login_key = LoginIndexKey::from_bytes([45_u8; 32]);
+    let invite_id = InviteId::from_bytes([46_u8; 16]);
+    let authority = Ed25519SecretKey::from_bytes([47_u8; 32]);
+    let not_before = UtcSecond::from_unix_seconds(100);
+    let expires_at = UtcSecond::from_unix_seconds(200);
+    let invitation =
+        AccountCreationInvite::issue(TEST_NETWORK, invite_id, not_before, expires_at, &authority)?;
+    let start = begin_account_creation(
+        &profile,
+        &login_key,
+        AccountCreationStartParameters {
+            context: operation_context(150)?,
+            request: invited_creation_start(48, invitation)?,
+            admission: CreationAdmission::Invitation {
+                authority: authority.public_key(),
+                now: UtcSecond::from_unix_seconds(150),
+            },
+            login_is_available: true,
+            invitation_is_available: true,
+        },
+    )?;
+    let transaction_id = start.transaction_id();
+    let sealed = start.seal(0)?;
+    assert_eq!(
+        sealed.creation_reservation_invitation(),
+        Some((invite_id, expires_at))
+    );
+    let record = sealed.creation_transaction_record(
+        MonotonicTick::from_ticks(1_150),
+        UtcSecond::from_unix_seconds(150),
+    )?;
+    let bytes = record.expose_for_persistence();
+    assert_eq!(
+        bytes.get(INVITATION_NOT_BEFORE_OFFSET..INVITATION_EXPIRY_OFFSET),
+        Some(100_u64.to_be_bytes().as_slice())
+    );
+    assert_eq!(
+        bytes.get(INVITATION_EXPIRY_OFFSET..),
+        Some(200_u64.to_be_bytes().as_slice())
+    );
+
+    // (a) restart cleanup reports the admitted invitation reservation.
+    let metadata = CreationTransactionRecord::parse(bytes)?.into_restart_cleanup_metadata()?;
+    assert_eq!(metadata.transaction_id(), transaction_id);
+    assert_eq!(
+        metadata.durable_expires_at_utc(),
+        UtcSecond::from_unix_seconds(209)
+    );
+    assert!(metadata.reservation_login_digest().is_some());
+    assert_eq!(
+        metadata.reservation_invitation(),
+        Some((invite_id, expires_at))
+    );
+
+    // (b) restore then FINISH inside the interval commits; at or after
+    // expires_at and before not_before it rejects with InvitationRejected.
+    let finish_after_restore = |now_utc: u64, request_id: u8| -> TestResult {
+        let mut restored = CreationTransactionRecord::parse(bytes)?.restore(
+            MonotonicTick::from_ticks(0),
+            UtcSecond::from_unix_seconds(now_utc),
+        )?;
+        let (finish, _token) = creation_finish(request_id, transaction_id)?;
+        let outcome = finish_account_creation(&mut restored, operation_context(now_utc)?, finish)?;
+        let inside = (100..200).contains(&now_utc);
+        if inside {
+            let intent = outcome.result()?;
+            assert_eq!(intent.invitation_id(), Some(invite_id));
+            assert_eq!(intent.invitation_interval(), Some((not_before, expires_at)));
+            assert!(outcome.seal(1)?.result().is_ok());
+        } else {
+            assert_eq!(
+                outcome.result().err(),
+                Some(AuthError::InvitationRejected),
+                "restored FINISH at UTC {now_utc} must reject"
+            );
+            assert!(outcome.seal(1)?.result().is_err());
+        }
+        Ok(())
+    };
+    finish_after_restore(199, 49)?;
+    finish_after_restore(100, 50)?;
+    finish_after_restore(200, 51)?;
+    finish_after_restore(205, 52)?;
+    finish_after_restore(99, 53)?;
+
+    // (c) interval corruption fails restore with InvalidEncoding.
+    let restore = |bytes: &[u8]| -> Result<_, AuthError> {
+        CreationTransactionRecord::parse(bytes)?.restore(
+            MonotonicTick::from_ticks(0),
+            UtcSecond::from_unix_seconds(150),
+        )
+    };
+    for not_before in [200_u64, 201, u64::MAX] {
+        let corrupted = with_bytes(
+            bytes,
+            INVITATION_NOT_BEFORE_OFFSET,
+            &not_before.to_be_bytes(),
+        )?;
+        assert_eq!(restore(&corrupted).err(), Some(AuthError::InvalidEncoding));
+        assert_eq!(
+            CreationTransactionRecord::parse(&corrupted)?
+                .into_restart_cleanup_metadata()
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+    }
+    let oversized = with_bytes(
+        bytes,
+        INVITATION_EXPIRY_OFFSET,
+        &(100 + 2_592_001_u64).to_be_bytes(),
+    )?;
+    assert_eq!(restore(&oversized).err(), Some(AuthError::InvalidEncoding));
+    let present_without_not_before = with_bytes(bytes, INVITATION_NOT_BEFORE_OFFSET, &ZERO_U64)?;
+    assert!(restore(&present_without_not_before).is_ok());
     Ok(())
 }
 

@@ -18,6 +18,27 @@ const INVITATION_USE_LIMIT: u16 = 1;
 /// Exact decoded account-creation invitation length.
 pub const ACCOUNT_CREATION_INVITE_BYTES: usize = 132;
 
+/// Reports whether `now` lies inside the exclusive invitation interval.
+///
+/// This is the single implementation of the architecture §11.3 lifetime rule
+/// `not_before <= now < expires_at`. START verification and the FINISH-time
+/// recheck both evaluate exactly this predicate, so an invitation admitted at
+/// START cannot FINISH at or after `expires_at`, or before `not_before` after
+/// a UTC rollback, no matter how much monotonic transaction lifetime remains.
+///
+/// The runtime re-evaluates this same function with a fresh trusted UTC read
+/// at durable admission, immediately before the creation FINISH durable set
+/// is staged, so crypto or queue latency that crosses `expires_at` after the
+/// worker's check cannot publish an account.
+#[must_use]
+pub fn invitation_interval_admits(
+    not_before: UtcSecond,
+    expires_at: UtcSecond,
+    now: UtcSecond,
+) -> bool {
+    not_before <= now && now < expires_at
+}
+
 /// One signed, network-scoped, single-use account-creation invitation.
 ///
 /// The complete bearer credential remains in zeroizing storage until this
@@ -121,8 +142,7 @@ impl AccountCreationInvite {
             .checked_sub(self.not_before)
             .ok_or(AuthError::InvitationRejected)?;
         if !(1..=MAX_INVITATION_LIFETIME_SECONDS).contains(&lifetime)
-            || now.get() < self.not_before
-            || now.get() >= self.expires_at
+            || !invitation_interval_admits(self.not_before(), self.expires_at(), now)
         {
             return Err(AuthError::InvitationRejected);
         }
@@ -150,6 +170,12 @@ impl AccountCreationInvite {
     #[must_use]
     pub const fn invite_id(&self) -> InviteId {
         self.invite_id
+    }
+
+    /// Returns the inclusive start of the invitation interval.
+    #[must_use]
+    pub const fn not_before(&self) -> UtcSecond {
+        UtcSecond::from_unix_seconds(self.not_before)
     }
 
     /// Returns the exclusive expiry used by the durable reservation.
@@ -249,7 +275,48 @@ mod tests {
     use agenc_ircd_crypto::{Ed25519SecretKey, SignatureDomain, sign_canonical};
     use agenc_ircd_types::{InviteId, NetworkId, UtcSecond};
 
-    use super::{ACCOUNT_CREATION_INVITE_BYTES, AccountCreationInvite, AuthError, Cursor, Writer};
+    use super::{
+        ACCOUNT_CREATION_INVITE_BYTES, AccountCreationInvite, AuthError, Cursor, Writer,
+        invitation_interval_admits,
+    };
+
+    #[test]
+    fn interval_predicate_is_inclusive_at_not_before_and_exclusive_at_expiry() {
+        let not_before = UtcSecond::from_unix_seconds(10);
+        let expires_at = UtcSecond::from_unix_seconds(20);
+        let admits = |now: u64| {
+            invitation_interval_admits(not_before, expires_at, UtcSecond::from_unix_seconds(now))
+        };
+        assert!(admits(10), "now == not_before is admitted");
+        assert!(admits(19), "now == expires_at - 1 is admitted");
+        assert!(!admits(20), "now == expires_at is refused");
+        assert!(!admits(9), "now == not_before - 1 is refused");
+        assert!(!invitation_interval_admits(
+            expires_at, expires_at, expires_at
+        ));
+    }
+
+    #[test]
+    fn verify_and_not_before_share_the_interval_predicate()
+    -> Result<(), Box<dyn core::error::Error>> {
+        let network = NetworkId::from_bytes([37_u8; 32]);
+        let invite = InviteId::from_bytes([93_u8; 16]);
+        let authority = Ed25519SecretKey::from_bytes([94_u8; 32]);
+        let not_before = UtcSecond::from_unix_seconds(10);
+        let expires_at = UtcSecond::from_unix_seconds(20);
+        let issued =
+            AccountCreationInvite::issue(network, invite, not_before, expires_at, &authority)?;
+        assert_eq!(issued.not_before(), not_before);
+        assert_eq!(issued.expires_at(), expires_at);
+        for now in [9_u64, 10, 19, 20, 21] {
+            let now = UtcSecond::from_unix_seconds(now);
+            assert_eq!(
+                issued.verify(authority.public_key(), network, now).is_ok(),
+                invitation_interval_admits(not_before, expires_at, now)
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn cursor_skip_rejects_truncation_and_position_overflow() {

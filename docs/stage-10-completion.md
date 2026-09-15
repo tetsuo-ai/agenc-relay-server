@@ -11,6 +11,9 @@ The earlier Stage 10 implementation and repairs merged through
 runtime follow-up starts at merge commit
 `fd7d39476302caae385e69bdea126d0a54164233`.
 
+The invitation FINISH revalidation repair (audit subfinding ZDH-A1, issue
+#38) is recorded in
+[the invitation FINISH repair](stage-10-invitation-finish-repair.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

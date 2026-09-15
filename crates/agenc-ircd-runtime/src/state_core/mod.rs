@@ -5695,6 +5695,14 @@ impl StateCoreContext {
         self.quiescing = true;
     }
 
+    /// Discards the staged batch exactly as a storage rejection would.
+    pub(crate) fn discard_pending_for_test(&mut self) {
+        if let Some(batch) = self.pending.take() {
+            let _rejections =
+                self.reject_batch(batch, agenc_ircd_storage::StorageError::Unavailable);
+        }
+    }
+
     /// Installs a trusted deterministic wall clock for retention boundary tests.
     pub(crate) fn set_wall_for_test(&mut self, seconds: u64) {
         self.wall = Box::new(agenc_ircd_testkit::DeterministicWallClock::at(seconds));
