@@ -194,10 +194,37 @@ regions without executable branch data. Both inventories bind all 765 current
 Rust source files; the thresholds remain unchanged.
 
 All three workflow files pass actionlint 1.7.12 syntax and expression checks,
-with its optional shellcheck and Pyflakes integrations disabled. The pinned
-checkout and upload action commits resolve. GitHub Actions still reports
-`startup_failure` before any job begins and supplies no actionable diagnostic.
-Hosted CI is not green.
+with its optional shellcheck and Pyflakes integrations disabled, and parse
+with PyYAML. The pinned checkout and upload action commits resolve.
+
+### Hosted CI startup incident
+
+Every push and pull-request event since 2026-09-10 17:42 UTC produces one
+run that GitHub records as `startup_failure` with zero jobs, an empty
+workflow name, the display title `(Unknown event)`, and the synthetic
+workflow path `BuildFailed` (workflow ID 355138507, state `deleted`), for
+example run 34782832427 on `daec140e`, run 34990440748 on `567cd6de`, and
+run 34992419054 on `3786108f`. Their check suites carry no check runs and no
+retained log, so the provider supplies no diagnostic text. The three real
+workflows (`ci.yml` ID 341694647, `stage-10-aarch64.yml` ID 355219474,
+`storage-qualification.yml` ID 345200086) are `active`, repository Actions
+permissions are enabled with every action allowed, the default token
+permission is read, no self-hosted runner is registered, and the last
+workflow-file change (`d01f638`, 2026-09-05) precedes runs that started jobs
+on 2026-09-05 and 2026-09-07. Probe PR #98, which removed
+`stage-10-aarch64.yml`, still ended in `startup_failure`, so workflow content
+is not the cause. The same signature appears across the organization's other
+private repositories from 2026-09-11 (`agenc-backend` Dependabot runs,
+`agenc-os` on 2026-09-14), and the organization's billing usage shows Actions
+charges beyond the included quota in August and September 2026. The cause is
+therefore an organization-level Actions block that starts every run before a
+workflow is selected; confirming and clearing it requires an organization
+owner to review the tetsuo-ai billing settings (payment method, Actions
+spending limit, and any hold) and the organization Actions policy, which the
+repository token cannot read (`admin:org` scope required). No repository
+change can resolve it. The `Record the source identity` step now prints the
+exact revision in every job log once runs start again. Hosted CI is not
+green.
 
 The isolated [upstream allocation probe](upstream/redb-allocation-probe/README.md)
 passes 424 host tests but cannot publish a transaction. Its required upstream
