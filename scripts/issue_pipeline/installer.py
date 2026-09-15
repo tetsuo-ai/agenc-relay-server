@@ -262,12 +262,22 @@ def _quote(value: str, *, command: bool = False) -> str:
     return '"' + value + '"'
 
 
+def _working_directory(state: Path) -> str:
+    # systemd unquotes only Exec and Environment values; a quoted
+    # WorkingDirectory= is rejected as a non-absolute path.
+    value = str(state)
+    if (not state.is_absolute() or any(ord(character) <= 32 or ord(character) == 127 for character in value)
+            or any(character in value for character in '"\\%;#')):
+        raise InstallError("state directory path must be absolute and contain no whitespace, quotes or unit metacharacters: " + repr(value))
+    return value
+
+
 def _unit(cli: Path, config: Path, state: Path, captured_path: str) -> bytes:
     argv = ["/usr/bin/python3", str(cli), "--config", str(config)]
     start = " ".join(_quote(value, command=True) for value in [*argv, "run"])
     stop = " ".join(_quote(value, command=True) for value in [*argv, "halt-children"])
     return ("[Unit]\nDescription=AgenC reviewed issue pipeline\n\n[Service]\nType=exec\n"
-            + f"WorkingDirectory={_quote(str(state))}\nEnvironment={_quote('PATH=' + captured_path)}\n"
+            + f"WorkingDirectory={_working_directory(state)}\nEnvironment={_quote('PATH=' + captured_path)}\n"
             + "Environment=PYTHONDONTWRITEBYTECODE=1\nEnvironment=PYTHONNOUSERSITE=1\n"
             + "UnsetEnvironment=PYTHONPATH PYTHONHOME PYTHONSTARTUP\n"
             + f"ExecStart={start}\nExecStopPost={stop}\n"

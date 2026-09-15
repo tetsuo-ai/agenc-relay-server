@@ -26,7 +26,9 @@ class InstallerTests(unittest.TestCase):
         self.parent = Path(self.temporary.name)
         self.home = self.parent / "home %n $name"
         self.home.mkdir()
-        self.state = self.home / "private state"
+        # WorkingDirectory= cannot carry quotes, so the state path itself stays plain;
+        # the home path above still exercises quoting of the release and PATH values.
+        self.state = self.parent / "private-state"
         self.source = self.parent / "source"
         self.source.mkdir()
         git(self.source, "init", "--initial-branch=main")
@@ -202,6 +204,17 @@ class InstallerTests(unittest.TestCase):
         git(self.source, "commit", "-m", "missing CLI")
         with self.assertRaises(InstallError):
             install(self.config, self.source, git(self.source, "rev-parse", "HEAD"))
+
+
+    def test_unit_working_directory_is_an_unquoted_absolute_path(self) -> None:
+        from issue_pipeline.installer import InstallError, _unit
+        unit = _unit(self.home / "cli.py", self.config, self.state, "/usr/bin").decode("utf-8")
+        line = next(line for line in unit.splitlines() if line.startswith("WorkingDirectory="))
+        self.assertEqual(line, "WorkingDirectory=" + str(self.state))
+        self.assertNotIn('"', line)
+        for bad in (Path("relative/state"), self.home / "with space", self.home / 'quo"te', self.home / "semi;colon"):
+            with self.subTest(bad=bad), self.assertRaises(InstallError):
+                _unit(self.home / "cli.py", self.config, bad, "/usr/bin")
 
 
 if __name__ == "__main__":
