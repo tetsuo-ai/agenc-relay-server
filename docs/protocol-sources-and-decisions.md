@@ -139,7 +139,7 @@ the complete graph actually shipped.
 | Package | Version | crates.io SHA-256 | Production feature decision |
 | --- | ---: | --- | --- |
 | `tokio` | 1.53.1 | `202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed` | no defaults; `rt-multi-thread,net,io-util,time,signal,sync,macros` |
-| `rustls` | 0.23.43 | `0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06` | no defaults; `std,aws_lc_rs,prefer-post-quantum`; TLS 1.3 list only |
+| `rustls` | 0.23.45 | `0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634` | no defaults; `std,aws_lc_rs,prefer-post-quantum`; TLS 1.3 list only |
 | `getrandom` | 0.4.3 | `300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099` | no defaults; `std` |
 | `redb` | 4.2.0 | `de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36` | no defaults; `std`; no production compaction call |
 | `opaque-ke` | 4.0.1 | `ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a` | no defaults; `ristretto255,argon2,std`; no Serde |

@@ -1349,7 +1349,7 @@ required_source_phrases = (
     "draft-ietf-mls-pq-ciphersuites-06",
     "bc5ebcad4d5545efc9a527ee33ec039c66d7cdf3",
     "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed",
-    "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06",
+    "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634",
     "no production compaction call",
     "random-salt collision claim an explicit bound",
     "specification-manifest.txt",

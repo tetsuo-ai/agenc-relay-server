@@ -6719,7 +6719,7 @@ not protocol revisions, when all canonical vectors remain byte-identical.
 | Purpose | Initial package/profile |
 | --- | --- |
 | async runtime | Tokio 1.53.1 with `default-features = false` and exactly `rt-multi-thread,net,io-util,time,signal,sync,macros`; `test-util` is dev-only |
-| TLS | rustls 0.23.43 with `default-features = false` and exactly `std,aws_lc_rs,prefer-post-quantum`; explicit `aws-lc-rs` provider, TLS-1.3-only version list, and `[X25519MLKEM768, X25519]` key-exchange list |
+| TLS | rustls 0.23.45 with `default-features = false` and exactly `std,aws_lc_rs,prefer-post-quantum`; explicit `aws-lc-rs` provider, TLS-1.3-only version list, and `[X25519MLKEM768, X25519]` key-exchange list |
 | operating-system CSPRNG | `getrandom` 0.4.3 with `default-features = false` and `std`; no deterministic or userspace fallback in production |
 | persistence | redb 4.2.0 with `default-features = false` and exactly `std`; no experimental, logging, cache-metrics, or compaction surface |
 | OPAQUE | `opaque-ke` 4.0.1 with `default-features = false` and exactly `ristretto255,argon2,std`; no Serde; plus the fixed custom Argon2id KSF |
@@ -7555,7 +7555,7 @@ its exact [`ServerLogin` state/finish contract](https://docs.rs/opaque-ke/4.0.1/
 [`redb` 4.2.0 documentation](https://docs.rs/redb/4.2.0/redb/), its
 [`WriteTransaction` durability/error contract](https://docs.rs/redb/4.2.0/redb/struct.WriteTransaction.html),
 and its pinned [two-phase/MVCC design](https://github.com/cberner/redb/blob/v4.2.0/docs/design.md),
-[`rustls` documentation](https://docs.rs/rustls/0.23.43/rustls/), and
+[`rustls` documentation](https://docs.rs/rustls/0.23.45/rustls/), and
 [`hpke` 0.14.0](https://docs.rs/hpke/0.14.0/hpke/),
 [`chacha20poly1305` 0.11.0](https://docs.rs/chacha20poly1305/0.11.0/chacha20poly1305/),
 [`ed25519-dalek` 3.0.0](https://docs.rs/ed25519-dalek/3.0.0/ed25519_dalek/),
