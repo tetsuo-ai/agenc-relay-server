@@ -524,11 +524,26 @@ impl ConnectionObserver for RuntimeObserver {
             ],
             1,
         );
+        // The closed label makes a close after admission attributable from
+        // the log alone (spec 25.2 typed error field); an orderly quit
+        // carries none, and a close the daemon itself chose is a warning.
+        let error = PublicErrorCode::from_close(exit.reason);
+        let severity = match exit.reason {
+            CloseReason::ClientQuit | CloseReason::TransportLoss | CloseReason::Shutdown => {
+                Severity::Info
+            }
+            CloseReason::ProtocolError
+            | CloseReason::SlowConsumer
+            | CloseReason::ReadStall
+            | CloseReason::WriteStall
+            | CloseReason::Deadline
+            | CloseReason::Overload => Severity::Warning,
+        };
         self.emit(
             LogEventCode::ConnectionClosed,
-            Severity::Info,
+            severity,
             Some(exit.purpose),
-            None,
+            error,
             None,
         );
     }
@@ -705,6 +720,59 @@ mod tests {
             assert!(!rendered.contains(forbidden), "{rendered}");
         }
         assert!(rendered.contains("event=connection_admitted"));
+    }
+
+    #[tokio::test]
+    async fn every_close_after_admission_logs_its_closed_label_and_a_quit_logs_none() {
+        let (observer, writer) = observer();
+        let reasons = [
+            CloseReason::ClientQuit,
+            CloseReason::TransportLoss,
+            CloseReason::ProtocolError,
+            CloseReason::SlowConsumer,
+            CloseReason::ReadStall,
+            CloseReason::WriteStall,
+            CloseReason::Deadline,
+            CloseReason::Overload,
+            CloseReason::Shutdown,
+        ];
+        for (index, reason) in reasons.into_iter().enumerate() {
+            observer.closed(&ConnectionExit {
+                generation: crate::connection::ConnectionGeneration::new(
+                    u64::try_from(index).unwrap_or(0),
+                ),
+                purpose: ListenerPurpose::ClientTls,
+                reason,
+            });
+        }
+        drop(observer);
+        let (target, failures) = writer.run().await;
+        assert_eq!(failures, 0);
+        let closed = target
+            .0
+            .iter()
+            .filter(|line| line.contains("event=connection_closed"))
+            .collect::<Vec<_>>();
+        assert_eq!(closed.len(), reasons.len());
+        let expected = [
+            ("severity=info", None),
+            ("severity=info", Some("error=transport_loss")),
+            ("severity=warning", Some("error=protocol_error")),
+            ("severity=warning", Some("error=slow_consumer")),
+            ("severity=warning", Some("error=read_stall")),
+            ("severity=warning", Some("error=write_stall")),
+            ("severity=warning", Some("error=deadline")),
+            ("severity=warning", Some("error=memory_exhausted")),
+            ("severity=info", Some("error=cancelled")),
+        ];
+        for (line, (severity, error)) in closed.iter().zip(expected) {
+            assert!(line.contains(severity), "{line}");
+            assert!(line.contains("purpose=client_tls"), "{line}");
+            match error {
+                Some(error) => assert!(line.contains(error), "{line}"),
+                None => assert!(!line.contains("error="), "{line}"),
+            }
+        }
     }
 
     #[tokio::test]

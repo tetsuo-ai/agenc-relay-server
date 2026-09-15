@@ -277,15 +277,27 @@ where
         let _closed_at = lease.release(CloseReason::Shutdown);
         return connection_exit(&admitted, CloseReason::Shutdown);
     }
+    // Each way the open handshake can end keeps its own closed label so a
+    // silent close after TLS is attributable: StateCore refused the open
+    // (overload), StateCore dropped the acknowledgement or the tree was
+    // cancelled (shutdown), or StateCore never answered inside the notice
+    // budget (deadline).
     let outcome = tokio::select! {
-        () = token.cancelled() => None,
-        outcome = tokio::time::timeout(INBOX_NOTICE_BUDGET, open_outcome) => outcome.ok(),
+        () = token.cancelled() => OpenWait::Cancelled,
+        outcome = tokio::time::timeout(INBOX_NOTICE_BUDGET, open_outcome) => match outcome {
+            Ok(Ok(outcome)) => OpenWait::Answered(outcome),
+            Ok(Err(_)) => OpenWait::Dropped,
+            Err(_) => OpenWait::TimedOut,
+        },
     };
     let reader_inbox = match outcome {
-        Some(Ok(ConnectionOpenOutcome::Accepted)) => Ok(ReaderInbox::from(inbox)),
-        Some(Ok(ConnectionOpenOutcome::AcceptedInput(port))) => Ok(ReaderInbox::from(port)),
-        Some(Ok(ConnectionOpenOutcome::Refused)) => Err(CloseReason::Overload),
-        Some(Err(_)) | None => Err(CloseReason::Shutdown),
+        OpenWait::Answered(ConnectionOpenOutcome::Accepted) => Ok(ReaderInbox::from(inbox)),
+        OpenWait::Answered(ConnectionOpenOutcome::AcceptedInput(port)) => {
+            Ok(ReaderInbox::from(port))
+        }
+        OpenWait::Answered(ConnectionOpenOutcome::Refused) => Err(CloseReason::Overload),
+        OpenWait::Dropped | OpenWait::Cancelled => Err(CloseReason::Shutdown),
+        OpenWait::TimedOut => Err(CloseReason::Deadline),
     };
     let reader_inbox = match reader_inbox {
         Ok(inbox) => inbox,
@@ -312,6 +324,18 @@ where
     drop((queue, permits, global_slot, listener_slot));
     let _closed_at = lease.release(reason);
     connection_exit(&admitted, reason)
+}
+
+/// How the wait for StateCore's open acknowledgement ended.
+enum OpenWait {
+    /// StateCore answered the open notice.
+    Answered(ConnectionOpenOutcome),
+    /// StateCore dropped the acknowledgement without answering.
+    Dropped,
+    /// The connection token was cancelled while the answer was pending.
+    Cancelled,
+    /// No answer arrived inside the inbox notice budget.
+    TimedOut,
 }
 
 fn connection_exit(admitted: &AdmittedConnection, reason: CloseReason) -> ConnectionExit {
@@ -402,6 +426,100 @@ mod tests {
         batch
             .split_exact(CLIENT_CONNECTION_BASE_BYTES)
             .ok_or(RuntimeError::InvalidValue)
+    }
+
+    /// StateCore that takes the open notice but never answers it ends the
+    /// connection as a deadline, not a shutdown, so the daemon log can tell
+    /// a stalled StateCore from a cancelled tree; every permit and slot
+    /// returns exactly once and the admission is released once.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_open_notice_closes_as_a_deadline_and_returns_every_permit()
+    -> Result<(), RuntimeError> {
+        let backing = QueueLimits::DEFAULT.backing_charge()?;
+        let budget = MemoryBudget::new(CLIENT_CONNECTION_BASE_BYTES + backing.bytes());
+        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[
+            MemoryCharge::fixed(CLIENT_CONNECTION_BASE_BYTES),
+            backing,
+        ])?)?;
+        let queue_backing = permits
+            .split_exact(backing.bytes())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let global = Arc::new(tokio::sync::Semaphore::new(1));
+        let listener = Arc::new(tokio::sync::Semaphore::new(1));
+        let resources = ConnectionResources {
+            permits,
+            global_slot: Some(
+                Arc::clone(&global)
+                    .try_acquire_owned()
+                    .map_err(|_| RuntimeError::LimitExceeded)?,
+            ),
+            listener_slot: Arc::clone(&listener)
+                .try_acquire_owned()
+                .map_err(|_| RuntimeError::LimitExceeded)?,
+            queue_backing,
+        };
+        let (port, _close_inbox) = connection_close_channel();
+        let releases = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&releases);
+        let lease = AdmissionLease::new(
+            Box::new(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                None
+            }),
+            port.try_reserve()
+                .map_err(|()| RuntimeError::LimitExceeded)?,
+        );
+        let (server_side, mut client_side) = tokio::io::duplex(4_096);
+        let (inbox, mut receiver) = mpsc::channel(4);
+        let admitted = AdmittedConnection {
+            generation: ConnectionGeneration::new(9),
+            purpose: ListenerPurpose::ClientTls,
+            source: SourceAddressKey::ipv4([127, 0, 0, 1]),
+            peer: PeerIdentity::Anonymous,
+        };
+        let token = CancellationToken::root();
+        let connection = tokio::spawn(run_connection(
+            server_side,
+            admitted,
+            resources,
+            ConnectionPolicy::new(ConnectionLimits::DEFAULT, None),
+            inbox,
+            token,
+            lease,
+        ));
+        let Some(StateCoreMessage::Opened {
+            generation,
+            acknowledgement,
+            sink,
+            ..
+        }) = receiver.recv().await
+        else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(generation, ConnectionGeneration::new(9));
+        assert_eq!(releases.load(Ordering::Relaxed), 0);
+
+        // The acknowledgement stays alive and silent past the notice budget;
+        // paused time advances only when every task is idle on the timer.
+        let exit = connection.await.map_err(|_| RuntimeError::Cancelled)?;
+        assert_eq!(exit.reason, CloseReason::Deadline);
+        assert_eq!(exit.generation, ConnectionGeneration::new(9));
+        assert_eq!(releases.load(Ordering::Relaxed), 1);
+        assert_eq!(global.available_permits(), 1);
+        assert_eq!(listener.available_permits(), 1);
+        drop(sink);
+        assert_eq!(budget.available(), budget.capacity());
+        let mut byte = [0_u8; 1];
+        let read = tokio::io::AsyncReadExt::read(&mut client_side, &mut byte)
+            .await
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(read, 0, "the transport is closed without a reply");
+        assert!(
+            acknowledgement
+                .send(ConnectionOpenOutcome::Accepted)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[tokio::test]

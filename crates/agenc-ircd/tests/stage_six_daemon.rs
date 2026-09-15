@@ -26,8 +26,8 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -104,6 +104,18 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const FRESH_CONNECTION_ATTEMPTS: usize = 4;
 /// Pause between those attempts.
 const FRESH_CONNECTION_PAUSE: Duration = Duration::from_millis(250);
+/// Test-only retention: when this variable names a directory, a fixture that
+/// ends in a panic or a returned error keeps its bounded daemon logs and a
+/// diagnostics record there (private modes, no keys, databases, or
+/// configuration). A fixture that succeeds always cleans up.
+const RETAIN_ENV: &str = "AGENC_IRCD_STAGE_SIX_RETAIN_DIR";
+/// Test-only strictness: when set, every fresh-connection helper makes one
+/// attempt, so a silent close after TLS fails the test instead of retrying.
+const STRICT_ADMISSION_ENV: &str = "AGENC_IRCD_STAGE_SIX_STRICT_ADMISSION";
+/// Upper bound on the daemon log bytes one failed fixture retains.
+const RETAINED_LOG_BYTES: usize = 4 * 1_048_576;
+/// Upper bound on the diagnostics entries one fixture records.
+const DIAGNOSTIC_ENTRIES: usize = 256;
 const ACCOUNT_HPKE_PRIVATE: [u8; 32] = [14; 32];
 const ACCOUNT_PASSWORD: &[u8] = b"stage six live account password";
 const REPLACEMENT_PASSWORD: &[u8] = b"stage six replacement password";
@@ -250,6 +262,49 @@ fn open_account_payload(
     Ok(open_and_parse_response(token, &response)?)
 }
 
+/// What a fixture knows about its own run: phase markers, every connection
+/// attempt with its reason, the daemon child's exit, and the first failure.
+#[derive(Default)]
+struct Diagnostics {
+    phases: Vec<String>,
+    attempts: Vec<String>,
+    child_exit: Option<String>,
+    first_failure: Option<String>,
+}
+
+impl Diagnostics {
+    fn push_bounded(entries: &mut Vec<String>, text: String) {
+        if entries.len() < DIAGNOSTIC_ENTRIES {
+            entries.push(text);
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("child_exit: ");
+        out.push_str(self.child_exit.as_deref().unwrap_or("<not joined>"));
+        out.push_str("\nfirst_failure: ");
+        out.push_str(self.first_failure.as_deref().unwrap_or("<none>"));
+        out.push_str("\nphases:\n");
+        for phase in &self.phases {
+            out.push_str("  ");
+            out.push_str(phase);
+            out.push('\n');
+        }
+        out.push_str("attempts:\n");
+        for attempt in &self.attempts {
+            out.push_str("  ");
+            out.push_str(attempt);
+            out.push('\n');
+        }
+        out
+    }
+}
+
+fn strict_admission() -> bool {
+    std::env::var_os(STRICT_ADMISSION_ENV).is_some_and(|value| !value.is_empty())
+}
+
 struct TestRoot(PathBuf);
 
 impl TestRoot {
@@ -278,6 +333,7 @@ impl Drop for TestRoot {
 
 struct LiveFixture {
     _root: TestRoot,
+    diagnostics: Arc<Mutex<Diagnostics>>,
     config_path: PathBuf,
     log_dir: PathBuf,
     admin_socket: PathBuf,
@@ -483,6 +539,7 @@ impl LiveFixture {
 
         Ok(Self {
             _root: root,
+            diagnostics: Arc::default(),
             config_path,
             log_dir: data_dir.join("logs"),
             admin_socket,
@@ -493,6 +550,98 @@ impl LiveFixture {
             operator_key: Ed25519SecretKey::from_bytes(operator_signing),
             tls,
         })
+    }
+
+    /// Records a phase marker for the diagnostics record.
+    fn phase(&self, text: &str) {
+        if let Ok(mut diagnostics) = self.diagnostics.lock() {
+            Diagnostics::push_bounded(&mut diagnostics.phases, text.to_owned());
+        }
+    }
+
+    /// Records one connection attempt and its outcome.
+    fn attempt(&self, text: String) {
+        if let Ok(mut diagnostics) = self.diagnostics.lock() {
+            Diagnostics::push_bounded(&mut diagnostics.attempts, text);
+        }
+    }
+
+    /// Records the first failure; later failures do not replace it.
+    fn record_failure(&self, text: String) {
+        if let Ok(mut diagnostics) = self.diagnostics.lock()
+            && diagnostics.first_failure.is_none()
+        {
+            diagnostics.first_failure = Some(text);
+        }
+    }
+
+    /// Runs one test body so a returned error is recorded before the
+    /// fixture drops; the drop then retains the diagnostics when enabled.
+    fn run(self, body: impl FnOnce(&Self) -> TestResult) -> TestResult {
+        let outcome = body(&self);
+        if let Err(error) = &outcome {
+            self.record_failure(error.to_string());
+        }
+        outcome
+    }
+
+    fn retain_directory() -> Option<PathBuf> {
+        let value = std::env::var_os(RETAIN_ENV)?;
+        if value.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(value))
+    }
+
+    /// Copies the bounded daemon logs and the diagnostics record into a
+    /// private directory under the retention root. Only the daemon's own
+    /// structured logs are copied; they carry no addresses, logins, or
+    /// keys by construction (spec 25.2).
+    fn preserve(&self, retain: &Path) -> io::Result<()> {
+        let name = self
+            ._root
+            .path()
+            .file_name()
+            .map(|name| name.to_os_string())
+            .unwrap_or_else(|| "fixture".into());
+        let target = retain.join(name);
+        fs::create_dir_all(&target)?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
+        let rendered = self
+            .diagnostics
+            .lock()
+            .map(|diagnostics| diagnostics.render())
+            .unwrap_or_else(|_| String::from("<diagnostics poisoned>\n"));
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        options
+            .open(target.join("diagnostics.txt"))?
+            .write_all(rendered.as_bytes())?;
+        let mut remaining = RETAINED_LOG_BYTES;
+        let mut paths = fs::read_dir(&self.log_dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            if remaining == 0 {
+                break;
+            }
+            let bytes = fs::read(&path)?;
+            let take = bytes.len().min(remaining);
+            let Some(slice) = bytes.get(..take) else {
+                continue;
+            };
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true).mode(0o600);
+            options.open(target.join(file_name))?.write_all(slice)?;
+            remaining = remaining.saturating_sub(take);
+        }
+        Ok(())
     }
 
     fn client_config(&self) -> TestResult<Arc<ClientConfig>> {
@@ -859,12 +1008,42 @@ fn replace_once(document: &mut String, old: &str, new: &str) -> TestResult {
     Ok(())
 }
 
+impl Drop for LiveFixture {
+    fn drop(&mut self) {
+        let panicking = thread::panicking();
+        if panicking {
+            self.record_failure(String::from("test panicked"));
+        }
+        let failed = self
+            .diagnostics
+            .lock()
+            .map(|diagnostics| diagnostics.first_failure.is_some())
+            .unwrap_or(true);
+        if !failed {
+            return;
+        }
+        if let Some(retain) = Self::retain_directory() {
+            let _preserved = self.preserve(&retain);
+        }
+    }
+}
+
 struct DaemonProcess {
     child: Option<Child>,
+    diagnostics: Option<Arc<Mutex<Diagnostics>>>,
 }
 
 impl DaemonProcess {
     fn start(config_path: &Path) -> TestResult<Self> {
+        Self::spawn(config_path, None)
+    }
+
+    /// Starts the daemon and reports its exit into the fixture diagnostics.
+    fn start_for(fixture: &LiveFixture) -> TestResult<Self> {
+        Self::spawn(&fixture.config_path, Some(Arc::clone(&fixture.diagnostics)))
+    }
+
+    fn spawn(config_path: &Path, diagnostics: Option<Arc<Mutex<Diagnostics>>>) -> TestResult<Self> {
         let child = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
             .arg("serve")
             .arg("--config")
@@ -873,7 +1052,18 @@ impl DaemonProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()?;
-        Ok(Self { child: Some(child) })
+        Ok(Self {
+            child: Some(child),
+            diagnostics,
+        })
+    }
+
+    fn record_exit(&self, text: String) {
+        if let Some(diagnostics) = &self.diagnostics
+            && let Ok(mut diagnostics) = diagnostics.lock()
+        {
+            diagnostics.child_exit = Some(text);
+        }
     }
 
     fn wait(&mut self) -> TestResult<ExitStatus> {
@@ -885,12 +1075,14 @@ impl DaemonProcess {
                 .ok_or_else(|| failure("daemon was already joined"))?;
             if let Some(status) = child.try_wait()? {
                 self.child = None;
+                self.record_exit(format!("joined: {status}"));
                 return Ok(status);
             }
             if Instant::now() >= deadline {
                 let _terminated = child.kill();
-                let _status = child.wait();
+                let status = child.wait();
                 self.child = None;
+                self.record_exit(format!("killed after the stop budget: {status:?}"));
                 return Err(failure("daemon did not stop within its total budget"));
             }
             thread::sleep(Duration::from_millis(25));
@@ -902,7 +1094,8 @@ impl Drop for DaemonProcess {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _terminated = child.kill();
-            let _status = child.wait();
+            let status = child.wait();
+            self.record_exit(format!("killed at drop without a join: {status:?}"));
         }
     }
 }
@@ -2314,20 +2507,48 @@ fn send_and_sync(client: &mut IrcClient, lines: &[String]) -> TestResult<Vec<Str
 
 /// Connects and registers a guest, reconnecting a bounded number of times
 /// when the daemon closes the fresh connection before its first reply.
+/// Registers a guest on a fresh connection. A silent close after the TLS
+/// handshake is retried a bounded number of times only in the recovery
+/// scenarios that call this helper, every attempt is recorded with its
+/// reason, and the strict-admission variable makes it a single attempt so the
+/// close fails the test instead of being retried away.
 fn connect_registered_guest(fixture: &LiveFixture) -> TestResult<(IrcClient, Vec<String>)> {
-    let mut last = None;
-    for _ in 0..FRESH_CONNECTION_ATTEMPTS {
+    let attempts = if strict_admission() {
+        1
+    } else {
+        FRESH_CONNECTION_ATTEMPTS
+    };
+    let mut reasons = Vec::new();
+    for attempt in 1..=attempts {
         let mut client = IrcClient::connect(fixture)?;
         match client.register() {
-            Ok(registered) => return Ok((client, registered)),
-            Err(error) if error.to_string().contains("received []") => {
-                last = Some(error);
-                std::thread::sleep(FRESH_CONNECTION_PAUSE);
+            Ok(registered) => {
+                fixture.attempt(format!(
+                    "guest registration attempt {attempt}/{attempts}: registered"
+                ));
+                return Ok((client, registered));
             }
-            Err(error) => return Err(error),
+            Err(error) if error.to_string().contains("received []") => {
+                fixture.attempt(format!(
+                    "guest registration attempt {attempt}/{attempts}: silent close after TLS before the first reply ({error})"
+                ));
+                reasons.push(format!("attempt {attempt}: {error}"));
+                if attempt < attempts {
+                    std::thread::sleep(FRESH_CONNECTION_PAUSE);
+                }
+            }
+            Err(error) => {
+                fixture.attempt(format!(
+                    "guest registration attempt {attempt}/{attempts}: {error}"
+                ));
+                return Err(error);
+            }
         }
     }
-    Err(last.unwrap_or_else(|| failure("guest registration never received a reply")))
+    Err(failure(format!(
+        "guest registration never received a reply after {attempts} attempt(s): {}",
+        reasons.join("; ")
+    )))
 }
 
 fn is_sasl_numeric(line: &str) -> bool {
@@ -2667,24 +2888,30 @@ fn local_deletion_evidence_rejects_refusal_replies_and_successful_logins() -> Te
 
 #[test]
 fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
-    let fixture = LiveFixture::create()?;
-    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    LiveFixture::create()?.run(credential_and_lookup_edges)
+}
+
+fn credential_and_lookup_edges(fixture: &LiveFixture) -> TestResult {
+    let mut daemon = DaemonProcess::start_for(fixture)?;
+    fixture.phase("account creation");
     let account_id = {
-        let mut creation = IrcClient::connect(&fixture)?;
+        let mut creation = IrcClient::connect(fixture)?;
         creation.negotiate_sasl()?;
-        create_live_account(&mut creation, &fixture)?
+        create_live_account(&mut creation, fixture)?
     };
 
     // Creating the same login twice is refused after the index lookup.
-    let mut duplicate = IrcClient::connect(&fixture)?;
+    fixture.phase("duplicate login");
+    let mut duplicate = IrcClient::connect(fixture)?;
     duplicate.negotiate_sasl()?;
-    let outcome = create_live_account(&mut duplicate, &fixture);
+    let outcome = create_live_account(&mut duplicate, fixture);
     assert!(outcome.is_err(), "a duplicate login was created");
     drop(duplicate);
 
     // An unknown login still receives a challenge from the fake record and
     // the finish then fails closed.
-    let mut unknown = IrcClient::connect(&fixture)?;
+    fixture.phase("unknown login");
+    let mut unknown = IrcClient::connect(fixture)?;
     unknown
         .negotiate_sasl()
         .map_err(|error| failure(format!("unknown negotiate: {error}")))?;
@@ -2745,7 +2972,8 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
 
     // Credential change before authentication, for another account, and
     // with the wrong transaction.
-    let mut early = IrcClient::connect(&fixture)?;
+    fixture.phase("credential change edges");
+    let mut early = IrcClient::connect(fixture)?;
     early
         .negotiate_sasl()
         .map_err(|error| failure(format!("early negotiate: {error}")))?;
@@ -2774,11 +3002,11 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
     });
     drop(early);
 
-    let mut client = IrcClient::connect(&fixture)?;
+    let mut client = IrcClient::connect(fixture)?;
     client
         .negotiate_sasl()
         .map_err(|error| failure(format!("client negotiate: {error}")))?;
-    authenticate_live_account(&mut client, &fixture, ACCOUNT_PASSWORD, 104, account_id)
+    authenticate_live_account(&mut client, fixture, ACCOUNT_PASSWORD, 104, account_id)
         .map_err(|error| failure(format!("client auth: {error}")))?;
     let registered = client
         .complete_registration("CredUser")
@@ -2805,12 +3033,13 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
 
     // A registered guest cannot log out of an account or delete one; each
     // refusal may close the connection, so each gets its own.
-    let (mut guest, registered) = connect_registered_guest(&fixture)
+    fixture.phase("guest refusals");
+    let (mut guest, registered) = connect_registered_guest(fixture)
         .map_err(|error| failure(format!("guest register: {error}")))?;
     assert_contains(&registered, " 001 LiveUser ")?;
     let _logout = send_and_sync(&mut guest, &["AUTHENTICATE *".to_owned()]);
     drop(guest);
-    let (mut deleter, registered) = connect_registered_guest(&fixture)
+    let (mut deleter, registered) = connect_registered_guest(fixture)
         .map_err(|error| failure(format!("deleter register: {error}")))?;
     assert_contains(&registered, " 001 LiveUser ")?;
     deleter.send("ACCT DELETE START")?;
@@ -2820,7 +3049,8 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
     drop(deleter);
 
     // Account settings from an authenticated session are acknowledged.
-    let mut settings = IrcClient::connect(&fixture)?;
+    fixture.phase("account settings");
+    let mut settings = IrcClient::connect(fixture)?;
     settings
         .negotiate_sasl()
         .map_err(|error| failure(format!("settings negotiate: {error}")))?;
@@ -2832,7 +3062,7 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
         .map_err(|error| failure(format!("settings cap: {error}")))?;
     assert_contains(&acknowledged, "standard-replies")?;
     assert_contains(&acknowledged, "agenc.ag/account-controls")?;
-    authenticate_live_account(&mut settings, &fixture, ACCOUNT_PASSWORD, 106, account_id)
+    authenticate_live_account(&mut settings, fixture, ACCOUNT_PASSWORD, 106, account_id)
         .map_err(|error| failure(format!("settings auth: {error}")))?;
     let registered = settings
         .complete_registration("SettingsUser")
@@ -2858,9 +3088,10 @@ fn production_daemon_credential_and_lookup_edges_fail_closed() -> TestResult {
     }
     drop(settings);
 
-    let mut admin = AdminClient::connect(&fixture)?;
+    fixture.phase("shutdown");
+    let mut admin = AdminClient::connect(fixture)?;
     admin.confirm_process("DIE :credential edge shutdown")?;
-    assert!(daemon.wait()?.success());
+    assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
     Ok(())
 }
 

@@ -161,3 +161,138 @@ fn disabled_client_listener_needs_no_tls_files_but_enablement_requires_them() ->
     assert!(agenc_ircd_runtime::daemon::check_configuration(&config, &secrets).is_err());
     Ok(())
 }
+
+/// Idle, healthy admission: every fresh TLS connection to an otherwise idle
+/// daemon receives its registration burst on the first attempt. A silent
+/// close after the handshake is a failure here, never a retry, and the
+/// daemon's own log must not record a deadline or overload close for any
+/// of these connections (the two listener paths that close a fresh
+/// connection before its first reply).
+#[test]
+fn idle_healthy_admission_never_silently_closes_a_fresh_connection() -> TestResult {
+    LiveFixture::create()?.run(|fixture| {
+        let mut daemon = DaemonProcess::start_for(fixture)?;
+        for attempt in 1..=8_u32 {
+            fixture.phase(&format!("fresh connection {attempt}"));
+            let mut client = IrcClient::connect(fixture)?;
+            let registered = client.register().map_err(|error| {
+                fixture.attempt(format!(
+                    "fresh connection {attempt}/8: silent close or refusal before the first reply ({error})"
+                ));
+                failure(format!(
+                    "fresh connection {attempt} of 8 did not register on its only attempt: {error}\n{}",
+                    fixture.log_excerpt()
+                ))
+            })?;
+            fixture.attempt(format!("fresh connection {attempt}/8: registered"));
+            assert_contains(&registered, " 001 LiveUser ")?;
+            client.send("QUIT :idle admission")?;
+            let _closed = client.shutdown_lines()?;
+        }
+        fixture.phase("shutdown");
+        let mut admin = AdminClient::connect(fixture)?;
+        admin.confirm_process("DIE :idle admission complete")?;
+        assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
+        let log = fixture.log_excerpt();
+        let closes = log
+            .lines()
+            .filter(|line| line.contains("event=connection_closed"))
+            .collect::<Vec<_>>();
+        assert!(
+            closes.iter().all(|line| {
+                !line.contains("error=deadline") && !line.contains("error=memory_exhausted")
+            }),
+            "a fresh connection was closed by the daemon before its first reply:\n{}",
+            closes.join("\n")
+        );
+        assert!(
+            log.lines().any(|line| line.contains("event=connection_admitted")),
+            "the retained log records admissions:\n{log}"
+        );
+        Ok(())
+    })
+}
+
+/// A fixture that failed keeps exactly its bounded daemon logs and one
+/// diagnostics record under a private directory: phases, every attempt with
+/// its reason, the daemon child's exit, and the first failure. Keys, the
+/// database, and the configuration are never copied.
+#[test]
+fn a_failed_fixture_retains_only_bounded_logs_and_diagnostics() -> TestResult {
+    let retain_root = TestRoot::create()?;
+    let fixture = LiveFixture::create()?;
+    let mut daemon = DaemonProcess::start_for(&fixture)?;
+    fixture.phase("registration");
+    let (mut guest, _) = connect_registered_guest(&fixture)?;
+    guest.send("QUIT :retention")?;
+    let _closed = guest.shutdown_lines()?;
+    fixture.phase("shutdown");
+    let mut admin = AdminClient::connect(&fixture)?;
+    admin.confirm_process("DIE :retention complete")?;
+    assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
+    fixture.record_failure(String::from("injected failure"));
+    fixture.record_failure(String::from("a later failure never replaces the first"));
+    fixture.preserve(retain_root.path())?;
+
+    let mut retained = fs::read_dir(retain_root.path())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 1, "one directory per fixture: {retained:?}");
+    let directory = retained
+        .pop()
+        .ok_or_else(|| failure("retained directory"))?;
+    assert_eq!(fs::metadata(&directory)?.mode() & 0o777, 0o700);
+    let mut files = fs::read_dir(&directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    files.sort();
+    assert!(
+        files.len() >= 2,
+        "diagnostics and at least one log: {files:?}"
+    );
+    let mut copied_bytes = 0_usize;
+    for file in &files {
+        let metadata = fs::metadata(file)?;
+        assert!(metadata.is_file());
+        assert_eq!(metadata.mode() & 0o777, 0o600, "{file:?}");
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| failure("retained file name"))?;
+        assert!(
+            name == "diagnostics.txt" || !name.contains("key") && !name.ends_with(".toml"),
+            "only logs and the record are retained: {name}"
+        );
+        if name != "diagnostics.txt" {
+            copied_bytes = copied_bytes.saturating_add(usize::try_from(metadata.len())?);
+        }
+    }
+    assert!(copied_bytes <= RETAINED_LOG_BYTES);
+    let record = fs::read_to_string(directory.join("diagnostics.txt"))?;
+    assert!(
+        record.contains("child_exit: joined: exit status: 0"),
+        "{record}"
+    );
+    assert!(
+        record.contains("first_failure: injected failure"),
+        "{record}"
+    );
+    assert!(!record.contains("a later failure"), "{record}");
+    assert!(record.contains("  registration\n  shutdown\n"), "{record}");
+    assert!(record.contains("guest registration attempt 1/"), "{record}");
+    assert!(record.contains(": registered"), "{record}");
+    let logs = files
+        .iter()
+        .filter(|file| {
+            file.file_name()
+                .is_some_and(|name| name != "diagnostics.txt")
+        })
+        .map(fs::read_to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    assert!(logs.contains("event=connection_admitted"), "{logs}");
+    assert!(logs.contains("event=connection_closed"), "{logs}");
+    Ok(())
+}

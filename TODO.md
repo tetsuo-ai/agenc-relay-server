@@ -1620,14 +1620,19 @@ the closure branch at review time.
   framing another, including a maximum-sized line split across reads. The two
   accumulator regressions fail with the earlier behavior; all 27 connection
   tests pass, including exact bounds and the paused-time inbox stall case.
-- [ ] One recorded gate run closed a fresh guest connection after the TLS
+- [x] One recorded gate run closed a fresh guest connection after the TLS
   handshake and before its first reply
-  (`production_daemon_credential_and_lookup_edges_fail_closed`), which the
-  listener code only does on a StateCore open refusal or a shutdown. It did
-  not reproduce in thirteen local suite runs, including nine concurrent
-  suites. The daemon tests now reconnect a bounded number of times on a
-  silent close; find the refusal path and give the fixture a way to keep the
-  daemon log when a test fails.
+  (`production_daemon_credential_and_lookup_edges_fail_closed`). The
+  listener does that only when StateCore refuses the open, drops or never
+  answers the open notice, or the tree is cancelled; the unanswered-notice
+  case is now classified `Deadline` instead of `Shutdown`, and every
+  `connection_closed` event carries its closed reason label. Deterministic
+  listener tests force each outcome and check every permit returns once; the
+  daemon fixture records phases, attempts, child exit, and the first failure
+  and retains bounded logs under a test-only directory variable; a strict
+  single-attempt idle-admission test fails on any silent close. The strict
+  repetition campaign did not reproduce the incident, so its root cause stays
+  unknown. See `docs/stage-10-admission-diagnostics.md`.
 
 - [x] `S06-001` **Implement strict configuration parsing and validation.**
   Parse TOML into an untrusted intermediate, reject unknowns, validate the full

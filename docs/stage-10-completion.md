@@ -14,6 +14,8 @@ runtime follow-up starts at merge commit
 The invitation FINISH revalidation repair (audit subfinding ZDH-A1, issue
 #38) is recorded in
 [the invitation FINISH repair](stage-10-invitation-finish-repair.md).
+The silent post-TLS close follow-up (RUN-03, issue #45) is recorded in
+[the admission diagnostics record](stage-10-admission-diagnostics.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
