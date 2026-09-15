@@ -13,7 +13,7 @@ from typing import NoReturn
 
 RAW_HASHES = {
     "docs/ircd-architecture-and-implementation-spec.md": (
-        "6f78fbbb42f1acab761ef8051e0ec46db803176e3066e266bfbf32dcb3694df0"
+        "f542c23cab2724a88476d4650a501043bc367c71c66d45dfac676362f1fb0958"
     ),
     "docs/irc-mls-e2ee-extension.md": (
         "0620b993c63529dca24cc7b2e54eba158ebdf5401ecf54dc081ded73501a76f6"

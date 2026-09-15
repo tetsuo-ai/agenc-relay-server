@@ -2026,6 +2026,52 @@ checks, in order: syntax, visibility-safe lookup/create eligibility, account
 requirement, ban/exception, invite, channel key, limit, then E2EE eligibility.
 An invite is consumed only in the successful commit.
 
+The executable JOIN outcome matrix below is the single reconciliation of the
+Section 13.1 creation rule with the Section 13.5 discovery rule. Each target
+of one JOIN is decided independently in the order given; the first matching
+row decides that target, a refused target changes nothing, and no refusal
+consumes an invite, projects a nickname, or reveals a topic, roster, mode, or
+member count. A `standard-replies` client receives the listed code. A legacy
+client receives the Appendix A.2 numeric for the same outcome: `461` for
+`INVALID_ARGUMENT`, `481` for `SERVER_BUSY`, `403` for `SECRET_UNAVAILABLE`,
+and `482` for the ban, `+i`, and existing-membership refusals, which have no
+standard code and are rendered as `482` for every client.
+
+| Target and requester | Outcome |
+| --- | --- |
+| malformed name, more than 20 targets, misaligned keys, or a mixed-scope `JOIN 0` | `INVALID_ARGUMENT`, nothing joined |
+| any name; requester at the session channel ceiling | `SERVER_BUSY`, no lookup or creation |
+| absent name; scope channel ceiling reached | `SERVER_BUSY`, nothing created |
+| absent name; otherwise, guest or account | created as Section 13.1 states, requester is owner |
+| existing channel; requester already a member | `482`, no change |
+| existing unlisted, secret, or E2EE-bound channel; guest, with or without an invite, `+I` match, or key | `SECRET_UNAVAILABLE` |
+| existing unlisted or secret channel; account with no matching invite, `+I` match, or verified key | `SECRET_UNAVAILABLE`, whether the channel is banned, `+i`, or full |
+| existing unlisted or secret channel; account holding an invite, `+I` match, or verified key | continues below as an authorized requester |
+| listed channel or authorized requester; ban match without exception | `482` |
+| listed channel or authorized requester; `+i` without invite or `+I` match | `482` |
+| listed channel or authorized requester; `+k` with an absent or wrong key | `SECRET_UNAVAILABLE` |
+| listed channel or authorized requester; `+l` reached or the operational member ceiling reached | `SERVER_BUSY` |
+| listed channel or authorized requester; E2EE-bound channel and a client without `agenc.ag/e2ee-mls` | `E2EE_REQUIRED` as Section 26.1 states |
+| otherwise | joined as Sections 13.1 and 14.2 state |
+
+Creation of an absent name is therefore a documented outcome that any
+registered connection under its own session and scope ceilings obtains, and
+it is distinguishable from the `SECRET_UNAVAILABLE` refusal of an existing
+hidden channel. Section 13.5's identical-result rule applies to JOIN for
+every existing hidden channel the requester is not authorized to enter,
+including a banned, invite-only, or full one. The `+l` limit and the
+operational member ceiling are capacity outcomes reported only to requesters
+the earlier rows already admit to learn that the channel exists; the session
+channel ceiling is the requester's own quota and is reported identically for
+absent and existing names. This disposes audit finding ZDH-C4: JOIN cannot
+hide whether a name is creatable, because creation is bounded only by the
+requester's own admission quota, the scope ceiling, and the Section 13.5
+timing floor, while every existence-revealing distinction for an existing
+hidden channel through JOIN, NAMES, TOPIC, MODE, and LIST stays closed. The
+matrix changes no wire encoding, code, numeric, or profile; an implementation
+that reported a capacity refusal for an unauthorized hidden target was
+nonconforming before this text and remains so.
+
 Successful JOIN sends the JOIN event, then topic numerics, then one NAMES
 burst. With `extended-join`, the JOIN includes the public account label and
 display name. Secret-channel membership is sent only to current members.
