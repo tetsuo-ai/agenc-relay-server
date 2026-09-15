@@ -886,6 +886,7 @@ class ControllerTests(unittest.TestCase):
             self.assertFalse(self.controller.state.claims())
             self.assertGreaterEqual(self.controller.next_wait_seconds(), 15)
             self.assertLessEqual(self.controller.next_wait_seconds(), 60)
+            self.assertLessEqual(self.controller.next_wait_seconds(active=True), 30)
             record["data"]["retry_after"] = 0
             self.controller.state.set_task(36, "pending", record["data"])
         self.execute()
@@ -948,6 +949,14 @@ class ControllerTests(unittest.TestCase):
             module.validate(path)
         # Re-running on the refrozen candidate changes nothing.
         self.assertEqual(self.controller.refreeze_baseline(self.task, data, {"kind": "contract"}, path, final), final)
+
+    def test_scheduler_never_sleeps_a_full_poll_while_tasks_are_active(self):
+        self.controller.state.set_task(36, "planning", {})
+        self.assertEqual(self.controller.next_wait_seconds(), float(self.config.poll_seconds))
+        self.assertEqual(self.controller.next_wait_seconds(active=True), 30.0)
+        self.controller.state.set_task(41, "pending", {"retry_after": time.time() + 20})
+        self.assertGreaterEqual(self.controller.next_wait_seconds(active=True), 15)
+        self.assertLessEqual(self.controller.next_wait_seconds(active=True), 20)
 
     def test_plan_approval_cannot_substitute_for_candidate_code_review(self):
         self.controller.state.set_task(36, "pending")

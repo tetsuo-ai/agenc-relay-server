@@ -60,6 +60,7 @@ BASELINE_PROFILES = (
 SESSION_RETRY_SECONDS = 300
 REPLAN_RETRY_SECONDS = 60
 MINIMUM_WAIT_SECONDS = 15
+ACTIVE_POLL_SECONDS = 30
 
 
 class PipelineBlocked(RuntimeError):
@@ -1293,7 +1294,10 @@ class Controller:
                         for future in active.values():
                             future.result()
                         return
-                    self.stop.wait(self.next_wait_seconds())
+                    # While work is in flight its outcome (a deferral, a retry
+                    # time, a claim release) decides the next dispatch, so never
+                    # sleep a full poll interval with active tasks.
+                    self.stop.wait(self.next_wait_seconds(active=bool(active)))
 
     @staticmethod
     def _baseline_profiles(root: Path) -> dict[str, tuple[str, str]]:
@@ -1379,9 +1383,13 @@ class Controller:
             candidate = self.repo.commit(worktree, f"{task.key}: refreeze the specification baseline at {candidate}")
         return candidate
 
-    def next_wait_seconds(self) -> float:
-        """Sleep until the configured poll or the earliest pending retry, whichever is sooner."""
-        wait = float(self.config.poll_seconds)
+    def next_wait_seconds(self, *, active: bool = False) -> float:
+        """Sleep until the configured poll or the earliest pending retry, whichever is sooner.
+
+        With ``active`` tasks the wait is capped so completed or deferred work is
+        collected and redispatched promptly.
+        """
+        wait = float(min(self.config.poll_seconds, ACTIVE_POLL_SECONDS) if active else self.config.poll_seconds)
         now = time.time()
         for row in self.state.list_tasks():
             if row["status"] != "pending":
