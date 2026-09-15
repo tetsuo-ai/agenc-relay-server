@@ -74,7 +74,9 @@ async fn an_old_rejection_callback_cannot_abort_a_new_exclusive_prefix() -> Test
     for _ in 0..3 {
         fixture.edge.batch_rejected_with_error(
             fixture.core.context_mut()?,
-            agenc_ircd_storage::StorageError::FilesystemRejected,
+            agenc_ircd_storage::StorageError::FilesystemRejected(
+                agenc_ircd_storage::FilesystemCause::IoFailure,
+            ),
         );
     }
     assert!(matches!(

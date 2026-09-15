@@ -200,13 +200,13 @@ fn run_case(
             guard_temporary,
             &[7; agenc_ircd_storage::ROLLBACK_GUARD_BYTES],
         )
-        .map_err(|_| StorageError::FilesystemRejected),
+        .map_err(agenc_ircd_storage::filesystem_rejected),
         "guard-rename" => {
-            fs::rename(guard_temporary, guard).map_err(|_| StorageError::FilesystemRejected)
+            fs::rename(guard_temporary, guard).map_err(agenc_ircd_storage::filesystem_rejected)
         }
         "guard-directory-fsync" => File::open(directory)
             .and_then(|file| file.sync_all())
-            .map_err(|_| StorageError::FilesystemRejected),
+            .map_err(agenc_ircd_storage::filesystem_rejected),
         "reserve-minus-one" => insert_value(database, &[0x40], &[8; MIN_SEALED_RECORD_BYTES]),
         "reserve-equal" => insert_value(database, &[0x41], &[9; MIN_SEALED_RECORD_BYTES]),
         "reserve-plus-one" => insert_value(database, &[0x42], &[10; MIN_SEALED_RECORD_BYTES]),

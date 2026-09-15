@@ -803,9 +803,11 @@ fn platform_adapter_rejects_each_path_lock_guard_and_capacity_boundary()
     let qualification = signed_qualification(tuple)?;
 
     for name in ["", ".", "..", "/absolute", "nested/name"] {
-        assert_eq!(
-            agenc_ircd_storage::BackupDestination::new(directory.path(), name).err(),
-            Some(StorageError::FilesystemRejected),
+        assert!(
+            matches!(
+                agenc_ircd_storage::BackupDestination::new(directory.path(), name).err(),
+                Some(StorageError::FilesystemRejected(_))
+            ),
             "unsafe backup name {name:?} was not rejected as a filesystem policy violation"
         );
     }
@@ -847,10 +849,10 @@ fn platform_adapter_rejects_each_path_lock_guard_and_capacity_boundary()
         .join(".agenc-recovery-scratch-v1-not-a-random-name");
     fs::write(&invalid_temporary, [])?;
     fs::set_permissions(&invalid_temporary, fs::Permissions::from_mode(0o600))?;
-    assert_eq!(
+    assert!(matches!(
         StateDirectory::open(directory.path(), &[qualification]).err(),
-        Some(StorageError::FilesystemRejected)
-    );
+        Some(StorageError::FilesystemRejected(_))
+    ));
     fs::remove_file(invalid_temporary)?;
 
     let valid_temporary = directory
@@ -864,10 +866,10 @@ fn platform_adapter_rejects_each_path_lock_guard_and_capacity_boundary()
 
     let wrong_mode = TestDirectory::create()?;
     fs::set_permissions(wrong_mode.path(), fs::Permissions::from_mode(0o755))?;
-    assert_eq!(
+    assert!(matches!(
         StateDirectory::probe(wrong_mode.path()),
-        Err(StorageError::FilesystemRejected)
-    );
+        Err(StorageError::FilesystemRejected(_))
+    ));
 
     let symlink_parent = TestDirectory::create()?;
     let symlink_path = symlink_parent.path().join("state-link");
@@ -1076,16 +1078,16 @@ fn qualification_rejects_every_report_and_measurement_boundary() -> Result<(), B
     set_recorder.measure_file_set("file-set", &[&first, &second], || {
         first
             .set_len(8_192)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(agenc_ircd_storage::filesystem_rejected)?;
         second
             .set_len(4_096)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(agenc_ircd_storage::filesystem_rejected)?;
         first
             .sync_all()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(agenc_ircd_storage::filesystem_rejected)?;
         second
             .sync_all()
-            .map_err(|_| StorageError::FilesystemRejected)
+            .map_err(agenc_ircd_storage::filesystem_rejected)
     })?;
     let (measured_set, _) = set_recorder.finish()?;
     assert_eq!(
@@ -1240,16 +1242,16 @@ fn qualification_required_file_set_measures_every_named_durable_case() -> Result
     recorder.measure_required_file_set(&[&database, &guard, &directory_file], |name| {
         operation_database
             .write_all(name.as_bytes())
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(agenc_ircd_storage::filesystem_rejected)?;
         operation_database
             .sync_all()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(agenc_ircd_storage::filesystem_rejected)?;
         operation_guard
             .sync_all()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(agenc_ircd_storage::filesystem_rejected)?;
         operation_directory
             .sync_all()
-            .map_err(|_| StorageError::FilesystemRejected)
+            .map_err(agenc_ircd_storage::filesystem_rejected)
     })?;
     let (cases, maximum) = recorder.finish()?;
     let mut expected = QUALIFICATION_CASES;
@@ -1379,8 +1381,8 @@ fn storage_errors_and_fault_controllers_cover_the_closed_failure_surface()
         (StorageError::QueueFull, "storage queue is full"),
         (StorageError::Unavailable, "storage owner is unavailable"),
         (
-            StorageError::FilesystemRejected,
-            "filesystem policy rejected storage",
+            StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
+            "filesystem policy rejected storage: io_failure",
         ),
         (
             StorageError::WriterLocked,
@@ -1398,6 +1400,61 @@ fn storage_errors_and_fault_controllers_cover_the_closed_failure_surface()
     for (error, expected) in errors {
         assert_eq!(error.to_string(), expected);
     }
+    // The cause set is closed and fixed-label: one distinct lowercase label per
+    // cause, rendered inside the same outer rejection, and every classified
+    // errno lands in the set with a generic fallback for the rest.
+    use agenc_ircd_storage::FilesystemCause;
+    let mut labels = FilesystemCause::ALL
+        .iter()
+        .map(|cause| cause.label())
+        .collect::<Vec<_>>();
+    assert_eq!(labels.len(), 7);
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(labels.len(), 7);
+    for cause in FilesystemCause::ALL {
+        assert!(
+            cause
+                .label()
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        );
+        assert_eq!(
+            StorageError::FilesystemRejected(cause).to_string(),
+            format!("filesystem policy rejected storage: {}", cause.label())
+        );
+    }
+    for (raw, expected) in [
+        (2, FilesystemCause::MissingState),
+        (13, FilesystemCause::PermissionRejected),
+        (28, FilesystemCause::InsufficientCapacity),
+        (5, FilesystemCause::IoFailure),
+        (17, FilesystemCause::UnsafePath),
+        (40, FilesystemCause::UnsafePath),
+        (4, FilesystemCause::Unknown),
+    ] {
+        assert_eq!(
+            FilesystemCause::from_io(&std::io::Error::from_raw_os_error(raw)),
+            expected,
+            "errno {raw}"
+        );
+    }
+    assert_eq!(
+        FilesystemCause::from_io(&std::io::Error::other("no errno")),
+        FilesystemCause::Unknown
+    );
+    // A cause never changes the outer outcome class or leaks text: the
+    // rendered rejection for a path-bearing OS error is the fixed label only.
+    let leaky = std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "/var/lib/agenc-ircd/state/rollback.guard secret-canary",
+    );
+    let rendered = agenc_ircd_storage::filesystem_rejected(leaky).to_string();
+    assert_eq!(
+        rendered,
+        "filesystem policy rejected storage: permission_rejected"
+    );
+    assert!(!rendered.contains("canary") && !rendered.contains('/'));
 
     let crypto_conversions = [
         (
@@ -1478,9 +1535,9 @@ fn fault_campaign_classifies_real_durable_file_effects() -> Result<(), Box<dyn E
         let mut schedule = StorageFaultSchedule::new(case, 1)?;
         let result = schedule.run(case.site, || {
             file.write_all(&(case.site as u16).to_be_bytes())
-                .map_err(|_| StorageError::FilesystemRejected)?;
+                .map_err(agenc_ircd_storage::filesystem_rejected)?;
             file.sync_all()
-                .map_err(|_| StorageError::FilesystemRejected)?;
+                .map_err(agenc_ircd_storage::filesystem_rejected)?;
             Ok(())
         });
         assert!(result.is_err());

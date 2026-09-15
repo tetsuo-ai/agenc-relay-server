@@ -1116,8 +1116,8 @@ fn read_vector_hashed<R: Read>(
     Ok(bytes)
 }
 
-fn io_rejected(_error: std::io::Error) -> StorageError {
-    StorageError::FilesystemRejected
+fn io_rejected(error: std::io::Error) -> StorageError {
+    crate::filesystem_rejected(error)
 }
 
 fn database_binding(header: &DatabaseHeader) -> DatabaseBinding {

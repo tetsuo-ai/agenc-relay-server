@@ -797,17 +797,21 @@ mod tests {
         let output_name = state_path
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or(StorageError::FilesystemRejected)?;
+            .ok_or(StorageError::FilesystemRejected(
+                crate::FilesystemCause::UnsafePath,
+            ))?;
         let staging = state_path
             .parent()
-            .ok_or(StorageError::FilesystemRejected)?
+            .ok_or(StorageError::FilesystemRejected(
+                crate::FilesystemCause::UnsafePath,
+            ))?
             .join(format!(
                 ".{output_name}{}",
                 crate::construction_directory::STAGING_SUFFIX
             ));
-        std::fs::create_dir(&staging).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::create_dir(&staging).map_err(crate::filesystem_rejected)?;
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
 
         let engine = fixture.engine_mut()?;
         commit_first_account(engine, 9)?;
@@ -822,7 +826,7 @@ mod tests {
             OwnerStep::Continue
         );
         let values = take(&receiver)?.values();
-        std::fs::remove_dir(&staging).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_dir(&staging).map_err(crate::filesystem_rejected)?;
 
         assert!(values[0] > 0);
         assert!(values[1] > 0);
@@ -1003,9 +1007,9 @@ mod tests {
     -> Result<(), StorageError> {
         let mut fixture = EngineFixture::create()?;
         let backup_directory = fixture.path().join("backups");
-        std::fs::create_dir(&backup_directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::create_dir(&backup_directory).map_err(crate::filesystem_rejected)?;
         std::fs::set_permissions(&backup_directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let engine = fixture.engine_mut()?;
         commit_first_account(engine, 5)?;
         engine.mark_checkpoint_due();

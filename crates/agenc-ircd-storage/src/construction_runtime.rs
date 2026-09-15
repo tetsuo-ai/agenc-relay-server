@@ -2134,17 +2134,17 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
             .ok_or(StorageError::InvalidEncoding)?;
         input
             .seek(SeekFrom::Start(crate::backup::BACKUP_RECORDS_OFFSET))
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let mut active_checkpoint = None;
         let mut login_scan = RestoreLoginScan::new();
         while input
             .stream_position()
-            .map_err(|_| StorageError::FilesystemRejected)?
+            .map_err(crate::filesystem_rejected)?
             < trailer_start
         {
             let offset = input
                 .stream_position()
-                .map_err(|_| StorageError::FilesystemRejected)?;
+                .map_err(crate::filesystem_rejected)?;
             let record = read_backup_record(input, offset, trailer_start)?;
             let sealed = SealedRecord::decode(record.sealed_record())?;
             let source = StorageConstructionSource::new(
@@ -2174,7 +2174,7 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
         }
         if input
             .stream_position()
-            .map_err(|_| StorageError::FilesystemRejected)?
+            .map_err(crate::filesystem_rejected)?
             != trailer_start
         {
             return Err(StorageError::InvalidEncoding);
@@ -2275,11 +2275,11 @@ fn read_backup_frame<R: Read + Seek>(
     }
     input
         .seek(SeekFrom::Start(offset))
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
     let mut length_bytes = [0_u8; 4];
     input
         .read_exact(&mut length_bytes)
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
     let length =
         usize::try_from(u32::from_be_bytes(length_bytes)).map_err(|_| StorageError::Overflow)?;
     let frame_end = offset
@@ -2296,7 +2296,7 @@ fn read_backup_frame<R: Read + Seek>(
     encoded.resize(length, 0);
     input
         .read_exact(&mut encoded)
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
     BackupRecord::decode(&encoded)
 }
 
@@ -3440,9 +3440,9 @@ mod tests {
     fn scratch_file(label: &str) -> Result<(File, PathBuf), StorageError> {
         let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::current_dir()
-            .map_err(|_| StorageError::FilesystemRejected)?
+            .map_err(crate::filesystem_rejected)?
             .join("target");
-        std::fs::create_dir_all(&directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::create_dir_all(&directory).map_err(crate::filesystem_rejected)?;
         let path = directory.join(format!(
             "construction-{label}-{}-{sequence}.redb",
             std::process::id()
@@ -3452,7 +3452,7 @@ mod tests {
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         Ok((file, path))
     }
 
@@ -4281,7 +4281,7 @@ mod tests {
         assert!(plan.entry(2)?.is_none());
         plan.reverify_disk()?;
         drop(plan);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("streaming")?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
@@ -4295,7 +4295,7 @@ mod tests {
         let plan = builder.finish()?;
         assert_eq!(plan.entry_count(), 2);
         drop(plan);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("duplicate")?;
         let mut builder = ConstructionPlanBuilder::start(
@@ -4310,7 +4310,7 @@ mod tests {
             Err(StorageError::InvalidEncoding)
         );
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("count")?;
         let mut builder = ConstructionPlanBuilder::start(
@@ -4328,7 +4328,7 @@ mod tests {
             Err(StorageError::LimitExceeded)
         );
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("bytes")?;
         let mut builder = ConstructionPlanBuilder::start(
@@ -4345,7 +4345,7 @@ mod tests {
             Err(StorageError::LimitExceeded)
         );
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 
@@ -4372,7 +4372,7 @@ mod tests {
             Err(StorageError::InvalidEncoding)
         );
         drop(rekey);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         let (file, path) = scratch_file("restore-index")?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
@@ -4500,7 +4500,7 @@ mod tests {
             Err(StorageError::StaleState)
         );
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 
@@ -4718,7 +4718,7 @@ mod tests {
         }
 
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 
@@ -4830,7 +4830,7 @@ mod tests {
         }
         assert_eq!(builder.entry_count, 0);
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 
@@ -5411,7 +5411,7 @@ mod tests {
             }
             assert_eq!(plan.reverify_disk(), Err(StorageError::ResumeMismatch));
             drop(plan);
-            std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+            std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         }
 
         let (identity, plan) = rekey_plan()?;
@@ -5987,7 +5987,7 @@ mod tests {
             Err(StorageError::InvalidEncoding),
         );
         drop(rekey_builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let mutation = IntegrityRecordMutation::new(
             TableId::Account,
@@ -6036,7 +6036,7 @@ mod tests {
             }
         }
         drop(restore_builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (_, memory_plan) = rekey_plan()?;
         memory_plan.reverify_disk()?;
@@ -6179,7 +6179,7 @@ mod tests {
             Err(StorageError::StaleState),
         );
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let entries = rekey_entries()?;
         let identity = rekey_identity(&entries)?;
@@ -6215,7 +6215,7 @@ mod tests {
             .map_err(|_| StorageError::DatabaseRejected)?;
         assert_eq!(plan.reverify_disk(), Err(StorageError::StaleState));
         drop(plan);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let entries = rekey_entries()?;
         let identity = rekey_identity(&entries)?;
@@ -6260,7 +6260,7 @@ mod tests {
             .map_err(|_| StorageError::DatabaseRejected)?;
         assert_eq!(plan.reverify_disk(), Err(StorageError::InvalidEncoding));
         drop(plan);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("builder-order-corruption")?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
@@ -6298,7 +6298,7 @@ mod tests {
             builder.finish(),
             Err(StorageError::InvalidEncoding)
         ));
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 
@@ -6468,7 +6468,7 @@ mod tests {
             Err(StorageError::StaleState),
         );
         drop(builder);
-        std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 }

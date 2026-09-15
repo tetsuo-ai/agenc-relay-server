@@ -533,7 +533,7 @@ fn current_state_directory_exists(path: &Path) -> Result<bool, StorageError> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(StorageError::FilesystemRejected),
+        Err(error) => Err(crate::filesystem_rejected(error)),
     }
 }
 
@@ -848,9 +848,7 @@ fn secret_bytes_match(left: &[u8; 32], right: &[u8; 32]) -> bool {
 
 pub(crate) fn read_secret_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, StorageError> {
     let file = open_private_regular(path, Mode::RUSR | Mode::WUSR)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| StorageError::FilesystemRejected)?;
+    let metadata = file.metadata().map_err(crate::filesystem_rejected)?;
     if metadata.len() != 32 {
         return Err(StorageError::InvalidEncoding);
     }
@@ -858,13 +856,15 @@ pub(crate) fn read_secret_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, Storag
     use std::io::Read as _;
     (&file)
         .read_exact(bytes.as_mut())
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
     Ok(bytes)
 }
 
 fn open_private_regular(path: &Path, mode: Mode) -> Result<File, StorageError> {
     if !path.is_absolute() {
-        return Err(StorageError::FilesystemRejected);
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::UnsafePath,
+        ));
     }
     let fd = openat(
         CWD,
@@ -872,14 +872,17 @@ fn open_private_regular(path: &Path, mode: Mode) -> Result<File, StorageError> {
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|_| StorageError::FilesystemRejected)?;
-    let metadata = fstat(&fd).map_err(|_| StorageError::FilesystemRejected)?;
-    if (
-        FileType::from_raw_mode(metadata.st_mode),
-        Mode::from_raw_mode(metadata.st_mode),
-    ) != (FileType::RegularFile, mode)
-    {
-        return Err(StorageError::FilesystemRejected);
+    .map_err(crate::filesystem_rejected)?;
+    let metadata = fstat(&fd).map_err(crate::filesystem_rejected)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::UnsafePath,
+        ));
+    }
+    if Mode::from_raw_mode(metadata.st_mode) != mode {
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::PermissionRejected,
+        ));
     }
     Ok(File::from(fd))
 }
@@ -1007,7 +1010,7 @@ mod tests {
     fn current_boundary_is_skipped_only_when_the_configured_directory_is_absent()
     -> Result<(), StorageError> {
         let directory = unique_temp_directory();
-        std::fs::create_dir(&directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::create_dir(&directory).map_err(crate::filesystem_rejected)?;
         let limits = engine_limits();
         let absent = request(true, 1);
         assert_eq!(
@@ -1025,7 +1028,7 @@ mod tests {
 
         let mut unreadable_keys = request(true, 1);
         unreadable_keys.current_state_directory = directory.clone();
-        assert_eq!(
+        assert!(matches!(
             read_current_boundary(
                 &unreadable_keys,
                 &[],
@@ -1035,8 +1038,8 @@ mod tests {
                 ConstructionSchema::Four
             )
             .map(|facts| facts.is_some()),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
 
         let file_path = directory.join("file");
         OpenOptions::new()
@@ -1044,10 +1047,10 @@ mod tests {
             .create_new(true)
             .mode(0o600)
             .open(&file_path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let mut below_file = request(true, 1);
         below_file.current_state_directory = file_path.join("child");
-        assert_eq!(
+        assert!(matches!(
             read_current_boundary(
                 &below_file,
                 &[],
@@ -1057,10 +1060,10 @@ mod tests {
                 ConstructionSchema::Four
             )
             .map(|facts| facts.is_some()),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
 
-        std::fs::remove_dir_all(directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_dir_all(directory).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 
@@ -1208,16 +1211,16 @@ mod tests {
     fn secret_files_require_absolute_regular_mode_0600_and_exact_length() -> Result<(), StorageError>
     {
         let directory = unique_temp_directory();
-        std::fs::create_dir(&directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::create_dir(&directory).map_err(crate::filesystem_rejected)?;
         let key_path = directory.join("key");
         let mut key = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&key_path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         key.write_all(&[1; 32])
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         drop(key);
         assert_eq!(*read_secret_key(&key_path)?, [1; 32]);
 
@@ -1227,10 +1230,10 @@ mod tests {
             .create_new(true)
             .mode(0o600)
             .open(&short_path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         short
             .write_all(&[2; 31])
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         drop(short);
         assert_eq!(
             read_secret_key(&short_path).map(|_| ()),
@@ -1243,29 +1246,29 @@ mod tests {
             .create_new(true)
             .mode(0o600)
             .open(&public_path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         public
             .write_all(&[3; 32])
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         drop(public);
         std::fs::set_permissions(&public_path, std::fs::Permissions::from_mode(0o644))
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        assert_eq!(
+            .map_err(crate::filesystem_rejected)?;
+        assert!(matches!(
             read_secret_key(&public_path).map(|_| ()),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
 
         let link_path = directory.join("link");
-        symlink(&key_path, &link_path).map_err(|_| StorageError::FilesystemRejected)?;
-        assert_eq!(
+        symlink(&key_path, &link_path).map_err(crate::filesystem_rejected)?;
+        assert!(matches!(
             read_secret_key(&link_path).map(|_| ()),
-            Err(StorageError::FilesystemRejected)
-        );
-        assert_eq!(
+            Err(StorageError::FilesystemRejected(_))
+        ));
+        assert!(matches!(
             read_secret_key(Path::new("relative-key")).map(|_| ()),
-            Err(StorageError::FilesystemRejected)
-        );
-        std::fs::remove_dir_all(directory).map_err(|_| StorageError::FilesystemRejected)?;
+            Err(StorageError::FilesystemRejected(_))
+        ));
+        std::fs::remove_dir_all(directory).map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 }

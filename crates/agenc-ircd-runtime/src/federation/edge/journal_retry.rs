@@ -37,7 +37,9 @@ pub(super) const fn stage_retryable(error: &StageRefused) -> bool {
 pub(super) const fn storage_retryable(error: StorageError) -> bool {
     matches!(
         error,
-        StorageError::QueueFull | StorageError::AllocationFailed | StorageError::FilesystemRejected
+        StorageError::QueueFull
+            | StorageError::AllocationFailed
+            | StorageError::FilesystemRejected(_)
     )
 }
 

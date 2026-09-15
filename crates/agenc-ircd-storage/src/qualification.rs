@@ -378,7 +378,9 @@ impl StorageQualificationReport {
             || tuple.block_size != self.tbs.block_size
             || tuple.mount_flags != self.tbs.mount_flags
         {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                crate::FilesystemCause::Unqualified,
+            ));
         }
         StorageQualification::from_verified_report(tuple, self.tbs.maximum_observed_growth)
             .validate()
@@ -432,8 +434,7 @@ impl StorageGrowthRecorder {
     ) -> Result<T, StorageError> {
         self.measure_file_set(name, &[file], || {
             let result = operation()?;
-            file.sync_all()
-                .map_err(|_| StorageError::FilesystemRejected)?;
+            file.sync_all().map_err(crate::filesystem_rejected)?;
             Ok(result)
         })
     }
@@ -531,7 +532,7 @@ impl StorageGrowthRecorder {
 
 fn allocated_bytes(file: &File) -> Result<u64, StorageError> {
     file.metadata()
-        .map_err(|_| StorageError::FilesystemRejected)?
+        .map_err(crate::filesystem_rejected)?
         .blocks()
         .checked_mul(512)
         .ok_or(StorageError::Overflow)
@@ -553,7 +554,7 @@ fn allocated_path_set(paths: &[&Path]) -> Result<u64, StorageError> {
                 .checked_mul(512)
                 .ok_or(StorageError::Overflow)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(_) => return Err(StorageError::FilesystemRejected),
+            Err(error) => return Err(crate::filesystem_rejected(error)),
         };
         total.checked_add(blocks).ok_or(StorageError::Overflow)
     })
@@ -597,7 +598,9 @@ impl StorageGrowthProbe {
     /// Observes one existing state directory.
     pub fn new(directory: &Path) -> Result<Self, StorageError> {
         if directory.is_symlink() || !directory.is_dir() {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                crate::FilesystemCause::UnsafePath,
+            ));
         }
         Ok(Self {
             directory: directory.to_path_buf(),
@@ -641,22 +644,23 @@ impl StorageGrowthProbe {
 
 /// Sums allocated bytes of a state directory inode and its regular files.
 pub fn allocated_directory_bytes(directory: &Path) -> Result<u64, StorageError> {
-    let metadata = fs::symlink_metadata(directory).map_err(|_| StorageError::FilesystemRejected)?;
+    let metadata = fs::symlink_metadata(directory).map_err(crate::filesystem_rejected)?;
     if !metadata.is_dir() {
-        return Err(StorageError::FilesystemRejected);
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::UnsafePath,
+        ));
     }
     let mut total = metadata
         .blocks()
         .checked_mul(512)
         .ok_or(StorageError::Overflow)?;
-    let entries = fs::read_dir(directory).map_err(|_| StorageError::FilesystemRejected)?;
+    let entries = fs::read_dir(directory).map_err(crate::filesystem_rejected)?;
     for (index, entry) in entries.enumerate() {
         if index >= MAX_PROBED_ENTRIES {
             return Err(StorageError::LimitExceeded);
         }
-        let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
-        let metadata =
-            fs::symlink_metadata(entry.path()).map_err(|_| StorageError::FilesystemRejected)?;
+        let entry = entry.map_err(crate::filesystem_rejected)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(crate::filesystem_rejected)?;
         if !metadata.is_file() {
             continue;
         }
@@ -779,7 +783,7 @@ mod tests {
                 .write(true)
                 .create_new(true)
                 .open(&path)
-                .map_err(|_| StorageError::FilesystemRejected)?;
+                .map_err(crate::filesystem_rejected)?;
             Ok(Self { path, file })
         }
     }
@@ -951,10 +955,10 @@ mod tests {
                 2 => wrong.block_size += 1,
                 _ => wrong.mount_flags += 1,
             }
-            assert_eq!(
+            assert!(matches!(
                 verified.qualification_for(wrong),
-                Err(StorageError::FilesystemRejected)
-            );
+                Err(StorageError::FilesystemRejected(_))
+            ));
         }
         assert_eq!(
             StorageQualificationReportTbs::decode_unsigned(&vec![

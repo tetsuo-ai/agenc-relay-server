@@ -50,7 +50,9 @@ async fn a_rejected_fetch_batch_preserves_the_sealed_owner_and_original_deadline
         .storage
         .state_mut()?
         .reject_fixture_batch_before_submission(
-            agenc_ircd_storage::StorageError::FilesystemRejected,
+            agenc_ircd_storage::StorageError::FilesystemRejected(
+                agenc_ircd_storage::FilesystemCause::IoFailure,
+            ),
         )?;
     fixture.coordinator.batch_rejected();
     assert!(fixture.coordinator.batch_applied(Some(0))?.is_none());

@@ -12,8 +12,8 @@ use rustix::fs::{
 };
 
 use crate::{
-    MAX_QUALIFIED_OBSERVED_GROWTH, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH, StorageError,
-    StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
+    FilesystemCause, MAX_QUALIFIED_OBSERVED_GROWTH, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH,
+    StorageError, StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
 };
 
 const DATABASE_FILE: &str = "database.redb";
@@ -33,12 +33,14 @@ const TARGET_TRIPLE: &str = "aarch64-unknown-linux-gnu";
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("Stage 05 storage qualification supports only x86_64 and aarch64 Linux");
 
-fn io_rejected(_error: std::io::Error) -> StorageError {
-    StorageError::FilesystemRejected
+/// Retains only the classified cause of a raw `std::io::Error`.
+fn io_rejected(error: std::io::Error) -> StorageError {
+    crate::filesystem_rejected(error)
 }
 
-fn rustix_rejected(_error: rustix::io::Errno) -> StorageError {
-    StorageError::FilesystemRejected
+/// Retains only the classified cause of a raw errno.
+fn rustix_rejected(error: rustix::io::Errno) -> StorageError {
+    crate::filesystem_rejected(error)
 }
 
 /// Exact host tuple that must have passing characterization evidence.
@@ -75,7 +77,9 @@ impl StorageQualification {
     /// Validates the mandatory twofold margin inside the live reserve.
     pub const fn validate(self) -> Result<Self, StorageError> {
         if self.maximum_observed_growth > MAX_QUALIFIED_OBSERVED_GROWTH {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::Unqualified,
+            ));
         }
         Ok(self)
     }
@@ -380,7 +384,9 @@ impl BackupOutput {
         // The name must still refer to the exact inode that was written and
         // verified; anything else under it is a foreign artifact.
         if !same_inode(&self.file, &published)? {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath,
+            ));
         }
         Ok(PublishedBackup {
             file: File::from(published),
@@ -474,7 +480,9 @@ impl StateDirectory {
             .iter()
             .any(|entry| entry.validate().is_ok() && entry.tuple == tuple)
         {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::Unqualified,
+            ));
         }
         let writer_fd = openat(
             &directory_fd,
@@ -564,7 +572,9 @@ impl StateDirectory {
             .checked_add(MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH)
             .ok_or(StorageError::Overflow)?;
         if capacity.available_bytes < required {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::InsufficientCapacity,
+            ));
         }
         Ok(capacity)
     }
@@ -637,7 +647,9 @@ impl StateDirectory {
     pub(crate) fn require_absent_guard(&self) -> Result<(), StorageError> {
         match statat(&self.directory, GUARD_FILE, AtFlags::SYMLINK_NOFOLLOW) {
             Err(rustix::io::Errno::NOENT) => Ok(()),
-            Ok(_) => Err(StorageError::FilesystemRejected),
+            Ok(_) => Err(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath,
+            )),
             Err(error) => Err(rustix_rejected(error)),
         }
     }
@@ -752,7 +764,9 @@ impl InspectionStateDirectory {
             .iter()
             .any(|entry| entry.validate().is_ok() && entry.tuple == tuple)
         {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::Unqualified,
+            ));
         }
         let database_fd = openat(
             &directory_fd,
@@ -863,7 +877,9 @@ impl InspectionStateDirectory {
         validate_file(&scratch, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
         let metadata = fstat(&scratch).map_err(rustix_rejected)?;
         if metadata.st_nlink != 0 {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath,
+            ));
         }
         require_same_filesystem(&self.directory, &scratch)?;
         Ok(File::from(scratch))
@@ -875,12 +891,16 @@ fn random_guard_temporary_name() -> Result<String, StorageError> {
 }
 
 fn construction_sibling(path: &Path) -> Result<PathBuf, StorageError> {
-    let output_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(StorageError::FilesystemRejected)?;
+    let output_name =
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath,
+            ))?;
     validate_single_component(output_name)?;
-    let parent = path.parent().ok_or(StorageError::FilesystemRejected)?;
+    let parent = path.parent().ok_or(StorageError::FilesystemRejected(
+        FilesystemCause::UnsafePath,
+    ))?;
     let sibling = format!(
         ".{output_name}{}",
         crate::construction_directory::STAGING_SUFFIX
@@ -941,7 +961,9 @@ fn validate_single_component(name: &str) -> Result<(), StorageError> {
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {
-        return Err(StorageError::FilesystemRejected);
+        return Err(StorageError::FilesystemRejected(
+            FilesystemCause::UnsafePath,
+        ));
     }
     Ok(())
 }
@@ -956,7 +978,9 @@ fn cleanup_random_temporaries(directory: &impl AsFd, prefix: &str) -> Result<(),
             continue;
         };
         if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath,
+            ));
         }
         unlinkat(directory, entry.file_name(), AtFlags::empty()).map_err(rustix_rejected)?;
     }
@@ -975,10 +999,15 @@ fn validate_file(
     expected_mode: Mode,
 ) -> Result<(), StorageError> {
     let metadata = fstat(fd).map_err(rustix_rejected)?;
-    if FileType::from_raw_mode(metadata.st_mode) != expected_type
-        || Mode::from_raw_mode(metadata.st_mode) != expected_mode
-    {
-        return Err(StorageError::FilesystemRejected);
+    if FileType::from_raw_mode(metadata.st_mode) != expected_type {
+        return Err(StorageError::FilesystemRejected(
+            FilesystemCause::UnsafePath,
+        ));
+    }
+    if Mode::from_raw_mode(metadata.st_mode) != expected_mode {
+        return Err(StorageError::FilesystemRejected(
+            FilesystemCause::PermissionRejected,
+        ));
     }
     Ok(())
 }
@@ -989,8 +1018,15 @@ pub(crate) fn admit_backup_output(
     fixed_reserve_bytes: u64,
     reserve_percent: u8,
 ) -> Result<(), StorageError> {
-    if reserve_percent > 100 || file.metadata().map_err(io_rejected)?.len() != 0 {
-        return Err(StorageError::FilesystemRejected);
+    if reserve_percent > 100 {
+        return Err(StorageError::FilesystemRejected(
+            FilesystemCause::Unqualified,
+        ));
+    }
+    if file.metadata().map_err(io_rejected)?.len() != 0 {
+        return Err(StorageError::FilesystemRejected(
+            FilesystemCause::UnsafePath,
+        ));
     }
     validate_file(file, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
     let statistics = fstatvfs(file).map_err(rustix_rejected)?;
@@ -1000,7 +1036,9 @@ pub(crate) fn admit_backup_output(
         .checked_add(required_stream_bytes)
         .ok_or(StorageError::Overflow)?;
     if capacity.available_bytes < required {
-        return Err(StorageError::FilesystemRejected);
+        return Err(StorageError::FilesystemRejected(
+            FilesystemCause::InsufficientCapacity,
+        ));
     }
     Ok(())
 }
@@ -1012,7 +1050,9 @@ fn require_same_filesystem<Left: std::os::fd::AsFd, Right: std::os::fd::AsFd>(
     let left_stat = fstat(left).map_err(rustix_rejected)?;
     let right_stat = fstat(right).map_err(rustix_rejected)?;
     if left_stat.st_dev != right_stat.st_dev {
-        return Err(StorageError::FilesystemRejected);
+        return Err(StorageError::FilesystemRejected(
+            FilesystemCause::UnsafePath,
+        ));
     }
     Ok(())
 }
@@ -1022,7 +1062,8 @@ fn filesystem_tuple(fd: &OwnedFd) -> Result<FilesystemTuple, StorageError> {
     let vfs = fstatvfs(fd).map_err(rustix_rejected)?;
     Ok(FilesystemTuple {
         target: TARGET_TRIPLE,
-        filesystem_type: u64::try_from(fs.f_type).map_err(|_| StorageError::FilesystemRejected)?,
+        filesystem_type: u64::try_from(fs.f_type)
+            .map_err(|_| StorageError::FilesystemRejected(FilesystemCause::Unqualified))?,
         block_size: vfs.f_frsize,
         mount_flags: vfs.f_flag.bits(),
     })
@@ -1086,17 +1127,17 @@ mod tests {
         assert_eq!(valid.validate(), Ok(valid));
         assert_eq!(valid.tuple(), tuple);
         assert_eq!(valid.maximum_observed_growth(), 134_217_728);
-        assert_eq!(
+        assert!(matches!(
             StorageQualification::from_verified_report(tuple, MAX_QUALIFIED_OBSERVED_GROWTH + 1)
                 .validate(),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
 
         assert!(BackupDestination::new(Path::new("/tmp"), "backup.bin").is_ok());
         for name in ["", ".", "..", "nested/backup", "/absolute"] {
             assert!(matches!(
                 BackupDestination::new(Path::new("/tmp"), name),
-                Err(StorageError::FilesystemRejected)
+                Err(StorageError::FilesystemRejected(_))
             ));
         }
     }
@@ -1134,10 +1175,10 @@ mod tests {
         let mut bytes = Vec::new();
         candidate.read_to_end(&mut bytes).map_err(io_rejected)?;
         assert_eq!(bytes, b"verified-input");
-        assert_eq!(
+        assert!(matches!(
             reader.open_candidate("linked.agenc-backup").err(),
-            Some(StorageError::FilesystemRejected)
-        );
+            Some(StorageError::FilesystemRejected(_))
+        ));
 
         let mut bounded = BackupDirectoryReader::open(directory.path(), 3)?;
         assert!(bounded.next_name()?.is_some());
@@ -1164,10 +1205,10 @@ mod tests {
         assert!(directory.path().join("unrelated").exists());
 
         directory.create_file(&format!("{prefix}short"), 0o600)?;
-        assert_eq!(
+        assert!(matches!(
             cleanup_random_temporaries(&directory_fd, prefix),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
         Ok(())
     }
 
@@ -1225,7 +1266,7 @@ mod tests {
                         .map_err(io_rejected)?
                         .file_name()
                         .into_string()
-                        .map_err(|_| StorageError::FilesystemRejected)
+                        .map_err(|_| StorageError::FilesystemRejected(FilesystemCause::UnsafePath))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             names.sort();
@@ -1338,7 +1379,9 @@ mod tests {
         }));
         assert_eq!(
             output.publish().err(),
-            Some(StorageError::FilesystemRejected)
+            Some(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath
+            ))
         );
         assert_eq!(
             fs::read(directory.path().join("state.backup")).map_err(io_rejected)?,
@@ -1352,7 +1395,9 @@ mod tests {
         let retry = written_backup_output(&directory, "state.backup", b"ours again")?;
         assert_eq!(
             retry.publish().err(),
-            Some(StorageError::FilesystemRejected)
+            Some(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath
+            ))
         );
         assert_eq!(
             fs::read(directory.path().join("state.backup")).map_err(io_rejected)?,
@@ -1374,7 +1419,9 @@ mod tests {
         }));
         assert_eq!(
             output.publish().err(),
-            Some(StorageError::FilesystemRejected)
+            Some(StorageError::FilesystemRejected(
+                FilesystemCause::PermissionRejected
+            ))
         );
         assert_eq!(
             backup_directory_names(directory.path())?,
@@ -1409,7 +1456,9 @@ mod tests {
         let retry = written_backup_output(&directory, "state.backup", b"retry")?;
         assert_eq!(
             retry.publish().err(),
-            Some(StorageError::FilesystemRejected)
+            Some(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath
+            ))
         );
         assert_eq!(
             fs::read(directory.path().join("state.backup")).map_err(io_rejected)?,
@@ -1457,17 +1506,31 @@ mod tests {
         let directory = TestDirectory::create("admission")?;
         let file = directory.create_file("empty", 0o600)?;
         validate_file(&file, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
+        // Each refusal keeps its closed cause: type, mode, configuration,
+        // and state are distinguishable to an operator and to a test.
         assert_eq!(
             validate_file(&file, FileType::Directory, Mode::RUSR | Mode::WUSR),
-            Err(StorageError::FilesystemRejected)
+            Err(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath
+            ))
         );
         assert_eq!(
             validate_file(&file, FileType::RegularFile, Mode::RUSR),
-            Err(StorageError::FilesystemRejected)
+            Err(StorageError::FilesystemRejected(
+                FilesystemCause::PermissionRejected
+            ))
         );
         assert_eq!(
             admit_backup_output(&file, 0, 0, 101),
-            Err(StorageError::FilesystemRejected)
+            Err(StorageError::FilesystemRejected(
+                FilesystemCause::Unqualified
+            ))
+        );
+        assert_eq!(
+            admit_backup_output(&file, u64::MAX / 2, 0, 0),
+            Err(StorageError::FilesystemRejected(
+                FilesystemCause::InsufficientCapacity
+            ))
         );
         admit_backup_output(&file, 0, 0, 0)?;
         assert_eq!(
@@ -1478,7 +1541,27 @@ mod tests {
         file.set_len(1).map_err(io_rejected)?;
         assert_eq!(
             admit_backup_output(&file, 0, 0, 0),
-            Err(StorageError::FilesystemRejected)
+            Err(StorageError::FilesystemRejected(
+                FilesystemCause::UnsafePath
+            ))
+        );
+        // Raw operating-system failures classify at the adapter boundary and
+        // keep nothing but the cause.
+        assert_eq!(
+            io_rejected(std::io::Error::from_raw_os_error(2)),
+            StorageError::FilesystemRejected(FilesystemCause::MissingState)
+        );
+        assert_eq!(
+            io_rejected(std::io::Error::from_raw_os_error(13)),
+            StorageError::FilesystemRejected(FilesystemCause::PermissionRejected)
+        );
+        assert_eq!(
+            rustix_rejected(rustix::io::Errno::NOSPC),
+            StorageError::FilesystemRejected(FilesystemCause::InsufficientCapacity)
+        );
+        assert_eq!(
+            rustix_rejected(rustix::io::Errno::IO),
+            StorageError::FilesystemRejected(FilesystemCause::IoFailure)
         );
         require_same_filesystem(directory.create_file("second", 0o600)?, file)?;
         Ok(())
@@ -1494,15 +1577,15 @@ mod tests {
         state.require_absent_guard()?;
         let mut previous = directory.create_file(GUARD_FILE, 0o600)?;
         previous.write_all(b"previous").map_err(io_rejected)?;
-        assert_eq!(
+        assert!(matches!(
             state.install_initial_guard(b"replacement"),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
         assert_eq!(state.read_guard(8)?, b"previous");
-        assert_eq!(
+        assert!(matches!(
             state.require_absent_guard(),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
         Ok(())
     }
 
@@ -1515,10 +1598,10 @@ mod tests {
         state.require_absent_guard()?;
         state.install_initial_guard(b"initial")?;
         assert_eq!(state.read_guard(7)?, b"initial");
-        assert_eq!(
+        assert!(matches!(
             state.install_initial_guard(b"replacement"),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
         state.replace_guard(b"committed")?;
         assert_eq!(state.read_guard(9)?, b"committed");
         Ok(())
@@ -1539,7 +1622,12 @@ mod tests {
         let capacity = state.capacity(0, 0)?;
         assert!(capacity.available_bytes > 0);
 
-        assert_eq!(state.read_guard(1), Err(StorageError::FilesystemRejected));
+        assert_eq!(
+            state.read_guard(1),
+            Err(StorageError::FilesystemRejected(
+                FilesystemCause::MissingState
+            ))
+        );
         state.replace_guard(b"guard")?;
         assert_eq!(state.read_guard(5)?, b"guard");
         assert_eq!(state.read_guard(4), Err(StorageError::InvalidEncoding));
@@ -1548,7 +1636,7 @@ mod tests {
         assert_eq!(database.metadata().map_err(io_rejected)?.len(), 0);
         assert!(matches!(
             state.create_database_file(),
-            Err(StorageError::FilesystemRejected)
+            Err(StorageError::FilesystemRejected(_))
         ));
         assert_eq!(
             state

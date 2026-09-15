@@ -12,6 +12,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agenc_ircd_crypto::{CryptoError, OsEntropy};
+use agenc_ircd_storage::{FilesystemCause, StorageError};
 use agenc_ircd_types::{ServerId, UtcSecond};
 
 use crate::RuntimeError;
@@ -227,6 +228,8 @@ pub enum PublicErrorCode {
     AuthenticationFailed,
     /// The operation was cancelled by its owner.
     Cancelled,
+    /// The storage filesystem adapter refused an operation for this closed cause.
+    FilesystemRejected(FilesystemCause),
     /// The transport ended without a protocol close.
     TransportLoss,
     /// The reader rejected an over-budget or malformed line.
@@ -255,6 +258,9 @@ impl PublicErrorCode {
             RuntimeError::CommandRefused(_) => Self::AdmissionRefused,
             RuntimeError::MemoryExhausted => Self::MemoryExhausted,
             RuntimeError::Cancelled => Self::Cancelled,
+            RuntimeError::Storage(StorageError::FilesystemRejected(cause)) => {
+                Self::FilesystemRejected(*cause)
+            }
             RuntimeError::Storage(_) => Self::StorageUnavailable,
         }
     }
@@ -292,6 +298,17 @@ impl PublicErrorCode {
             Self::AdmissionRefused => "admission_refused",
             Self::AuthenticationFailed => "authentication_failed",
             Self::Cancelled => "cancelled",
+            Self::FilesystemRejected(FilesystemCause::MissingState) => "filesystem_missing_state",
+            Self::FilesystemRejected(FilesystemCause::PermissionRejected) => {
+                "filesystem_permission_rejected"
+            }
+            Self::FilesystemRejected(FilesystemCause::InsufficientCapacity) => {
+                "filesystem_insufficient_capacity"
+            }
+            Self::FilesystemRejected(FilesystemCause::Unqualified) => "filesystem_unqualified",
+            Self::FilesystemRejected(FilesystemCause::IoFailure) => "filesystem_io_failure",
+            Self::FilesystemRejected(FilesystemCause::UnsafePath) => "filesystem_unsafe_path",
+            Self::FilesystemRejected(FilesystemCause::Unknown) => "filesystem_unknown",
             Self::TransportLoss => "transport_loss",
             Self::ProtocolError => "protocol_error",
             Self::SlowConsumer => "slow_consumer",
@@ -558,7 +575,6 @@ impl fmt::Display for LogEvent {
 
 #[cfg(test)]
 mod tests {
-    use agenc_ircd_storage::StorageError;
 
     use super::*;
 
@@ -701,7 +717,17 @@ mod tests {
                 RuntimeError::Storage(StorageError::Unavailable),
                 PublicErrorCode::StorageUnavailable,
             ),
+            (
+                RuntimeError::Storage(StorageError::FilesystemRejected(
+                    FilesystemCause::InsufficientCapacity,
+                )),
+                PublicErrorCode::FilesystemRejected(FilesystemCause::InsufficientCapacity),
+            ),
         ];
+        for cause in FilesystemCause::ALL {
+            let label = PublicErrorCode::FilesystemRejected(cause).label();
+            assert_eq!(label, format!("filesystem_{}", cause.label()));
+        }
         for (error, expected) in mapping {
             assert_eq!(PublicErrorCode::from_runtime(&error), expected);
         }

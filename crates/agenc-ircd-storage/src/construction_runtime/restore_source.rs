@@ -31,7 +31,7 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
     ) -> Result<Self, StorageError> {
         input
             .seek(SeekFrom::Start(0))
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let verified = crate::verify_backup(
             &mut input,
             &config.source_master_key,

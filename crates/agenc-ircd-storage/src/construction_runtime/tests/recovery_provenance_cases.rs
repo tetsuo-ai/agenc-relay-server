@@ -33,7 +33,7 @@ fn restore_provenance_resets_pending_sources_when_reusing_a_scratch_database()
             .read(true)
             .write(true)
             .open(&path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
@@ -52,7 +52,7 @@ fn restore_provenance_resets_pending_sources_when_reusing_a_scratch_database()
         assert_eq!(plan.entry_count(), 1);
         Ok(())
     })();
-    std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+    std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
     result
 }
 
@@ -169,7 +169,7 @@ fn restore_provenance_charges_pending_sources_and_output_entries_together()
         assert_eq!(builder.push(entry), Err(StorageError::LimitExceeded));
         Ok(())
     })();
-    std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+    std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
     result
 }
 

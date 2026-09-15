@@ -1803,7 +1803,7 @@ const fn storage_rejection_result(error: StorageError) -> ResultClass {
         | StorageError::Overflow
         | StorageError::AuthenticationFailed
         | StorageError::Unavailable
-        | StorageError::FilesystemRejected
+        | StorageError::FilesystemRejected(_)
         | StorageError::WriterLocked
         | StorageError::DatabaseRejected
         | StorageError::ResumeMismatch => ResultClass::Error,

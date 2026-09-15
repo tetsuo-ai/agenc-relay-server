@@ -611,6 +611,8 @@ pub(super) fn rejected(
 fn retryable_storage(error: StorageError) -> bool {
     matches!(
         error,
-        StorageError::QueueFull | StorageError::AllocationFailed | StorageError::FilesystemRejected
+        StorageError::QueueFull
+            | StorageError::AllocationFailed
+            | StorageError::FilesystemRejected(_)
     )
 }

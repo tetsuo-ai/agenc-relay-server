@@ -46,7 +46,10 @@ async fn journal_retry_timer_exhaustion_never_reenters_staging() -> TestResult {
     assert_eq!(edge.phase, Phase::Down);
     assert!(edge.journal.retry.recovering);
     for _ in 0..10 {
-        edge.batch_rejected_with_error(fixture.context_mut()?, StorageError::FilesystemRejected);
+        edge.batch_rejected_with_error(
+            fixture.context_mut()?,
+            StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
+        );
         edge.continue_request_journal(fixture.context_mut()?);
     }
     assert!(
@@ -165,7 +168,7 @@ async fn refused_journal_storage_keeps_the_link_and_retries_exact_bytes_after_st
 #[tokio::test]
 async fn rejected_journal_receipts_do_not_reenter_or_extend_the_retry() -> TestResult {
     for error in [
-        StorageError::FilesystemRejected,
+        StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
         StorageError::QueueFull,
         StorageError::AllocationFailed,
     ] {
@@ -297,7 +300,11 @@ async fn closing_a_client_keeps_the_original_retry_and_tombstones_before_transmi
     let (mut edge, _queue) = active_edge(fixture.context_mut()?)?;
     let id = start_request(&mut edge, fixture.context_mut()?)?;
     let bytes = edge.pending.get(&id).ok_or("request")?.bytes.clone();
-    reject_request(&mut edge, &mut fixture, StorageError::FilesystemRejected)?;
+    reject_request(
+        &mut edge,
+        &mut fixture,
+        StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
+    )?;
     let token = edge.journal.retry.waiting;
     let deadline = fixture.context_mut()?.timers_mut().next_deadline();
     edge.connection_closed(
@@ -336,7 +343,11 @@ async fn a_new_authenticated_link_rearms_journal_retry_after_timer_capacity_retu
     let id = start_request(&mut edge, fixture.context_mut()?)?;
     let bytes = edge.pending.get(&id).ok_or("request")?.bytes.clone();
     *fixture.context_mut()?.timers_mut() = TimerHeap::with_ceiling(0);
-    reject_request(&mut edge, &mut fixture, StorageError::FilesystemRejected)?;
+    reject_request(
+        &mut edge,
+        &mut fixture,
+        StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
+    )?;
     let _failed_queue = establish_retry_link(&mut edge, fixture.context_mut()?, 2);
     assert_eq!(edge.phase, Phase::Down);
     assert_eq!(fixture.context_mut()?.pending_len(), 0);

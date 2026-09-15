@@ -25,8 +25,10 @@ pub enum StorageError {
     /// The storage owner is closing, entered indeterminate state, or lost a required
     /// operating-system facility such as entropy.
     Unavailable,
-    /// The filesystem identity, permissions, capacity, or qualification was invalid.
-    FilesystemRejected,
+    /// The filesystem identity, permissions, capacity, or qualification was invalid;
+    /// the closed cause says which, for operator diagnosis only. The outer
+    /// determinate/committed/indeterminate outcome never depends on the cause.
+    FilesystemRejected(FilesystemCause),
     /// Another process owns the fixed writer lock.
     WriterLocked,
     /// A database operation failed before irreversible commit began.
@@ -47,7 +49,9 @@ impl fmt::Display for StorageError {
             Self::StaleState => "storage state is stale or inconsistent",
             Self::QueueFull => "storage queue is full",
             Self::Unavailable => "storage owner is unavailable",
-            Self::FilesystemRejected => "filesystem policy rejected storage",
+            Self::FilesystemRejected(cause) => {
+                return write!(formatter, "filesystem policy rejected storage: {cause}");
+            }
             Self::WriterLocked => "storage writer is already locked",
             Self::DatabaseRejected => "database rejected the operation",
             Self::ResumeMismatch => "storage construction cannot be resumed",
@@ -56,6 +60,121 @@ impl fmt::Display for StorageError {
 }
 
 impl Error for StorageError {}
+
+/// Closed, bounded cause of a filesystem rejection (spec 25.2: fixed labels,
+/// never a path, an errno string, or content). It is diagnostic only: the
+/// public storage outcome is the same `FilesystemRejected` whatever the cause,
+/// and no cause makes an uncertain write retryable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesystemCause {
+    /// A required entry (guard, database, lock, directory, plan) was absent.
+    MissingState,
+    /// Ownership, mode, or an access check refused the entry.
+    PermissionRejected,
+    /// The free-space reserve, quota, or configured size ceiling was exhausted.
+    InsufficientCapacity,
+    /// The filesystem, mount, target, or measured tuple is not the qualified one.
+    Unqualified,
+    /// The kernel reported an input/output failure.
+    IoFailure,
+    /// The path, name, link count, type, or filesystem boundary is unsafe.
+    UnsafePath,
+    /// An operating-system error outside the classified set.
+    Unknown,
+}
+
+impl FilesystemCause {
+    /// Every cause, in label order.
+    pub const ALL: [Self; 7] = [
+        Self::MissingState,
+        Self::PermissionRejected,
+        Self::InsufficientCapacity,
+        Self::Unqualified,
+        Self::IoFailure,
+        Self::UnsafePath,
+        Self::Unknown,
+    ];
+
+    /// Fixed lowercase label for logs and metrics.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MissingState => "missing_state",
+            Self::PermissionRejected => "permission_rejected",
+            Self::InsufficientCapacity => "insufficient_capacity",
+            Self::Unqualified => "unqualified",
+            Self::IoFailure => "io_failure",
+            Self::UnsafePath => "unsafe_path",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Classifies a raw operating-system errno into the closed set.
+    #[must_use]
+    pub fn from_errno(errno: rustix::io::Errno) -> Self {
+        use rustix::io::Errno;
+        match errno {
+            Errno::NOENT => Self::MissingState,
+            Errno::ACCESS | Errno::PERM | Errno::ROFS => Self::PermissionRejected,
+            Errno::NOSPC | Errno::DQUOT | Errno::FBIG => Self::InsufficientCapacity,
+            Errno::IO | Errno::STALE => Self::IoFailure,
+            Errno::LOOP
+            | Errno::NOTDIR
+            | Errno::ISDIR
+            | Errno::XDEV
+            | Errno::EXIST
+            | Errno::NAMETOOLONG
+            | Errno::INVAL
+            | Errno::TXTBSY => Self::UnsafePath,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Classifies a `std::io::Error` through its raw errno when it has one.
+    #[must_use]
+    pub fn from_io(error: &std::io::Error) -> Self {
+        match error.raw_os_error() {
+            Some(raw) => Self::from_errno(rustix::io::Errno::from_raw_os_error(raw)),
+            None => match error.kind() {
+                std::io::ErrorKind::NotFound => Self::MissingState,
+                std::io::ErrorKind::PermissionDenied => Self::PermissionRejected,
+                std::io::ErrorKind::UnexpectedEof => Self::IoFailure,
+                _ => Self::Unknown,
+            },
+        }
+    }
+}
+
+impl fmt::Display for FilesystemCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+/// A raw operating-system failure that classifies into a [`FilesystemCause`].
+pub trait FilesystemFailure {
+    /// The closed cause this failure maps to.
+    fn cause(&self) -> FilesystemCause;
+}
+
+impl FilesystemFailure for std::io::Error {
+    fn cause(&self) -> FilesystemCause {
+        FilesystemCause::from_io(self)
+    }
+}
+
+impl FilesystemFailure for rustix::io::Errno {
+    fn cause(&self) -> FilesystemCause {
+        FilesystemCause::from_errno(*self)
+    }
+}
+
+/// Maps a raw operating-system failure to the closed rejection, retaining
+/// only its classified cause; the raw error, its text, and any path are
+/// dropped here at the adapter boundary.
+pub fn filesystem_rejected<E: FilesystemFailure>(error: E) -> StorageError {
+    StorageError::FilesystemRejected(error.cause())
+}
 
 impl From<agenc_ircd_crypto::CryptoError> for StorageError {
     fn from(error: agenc_ircd_crypto::CryptoError) -> Self {

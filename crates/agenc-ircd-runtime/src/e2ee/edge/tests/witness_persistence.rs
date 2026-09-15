@@ -217,7 +217,9 @@ fn reject_witness(
         .core
         .state_mut()?
         .reject_fixture_batch_before_submission(
-            agenc_ircd_storage::StorageError::FilesystemRejected,
+            agenc_ircd_storage::StorageError::FilesystemRejected(
+                agenc_ircd_storage::FilesystemCause::IoFailure,
+            ),
         )?;
     let rejected = fixture
         .companion
@@ -441,7 +443,9 @@ async fn a_witness_rejection_is_not_hidden_by_a_newly_staged_unrelated_batch() -
         .core
         .state_mut()?
         .reject_fixture_batch_before_submission(
-            agenc_ircd_storage::StorageError::FilesystemRejected,
+            agenc_ircd_storage::StorageError::FilesystemRejected(
+                agenc_ircd_storage::FilesystemCause::IoFailure,
+            ),
         )?;
     let rejected = fixture
         .companion

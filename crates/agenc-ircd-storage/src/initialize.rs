@@ -149,12 +149,7 @@ fn initialize_storage_inner(
         .state_directory
         .admit_transaction(limits.fixed_reserve_bytes, limits.reserve_percent)?;
     let file = config.state_directory.create_database_file()?;
-    if file
-        .metadata()
-        .map_err(|_| StorageError::FilesystemRejected)?
-        .len()
-        != 0
-    {
+    if file.metadata().map_err(crate::filesystem_rejected)?.len() != 0 {
         return Err(StorageError::StaleState);
     }
     let store = RedbStore::open_with_faults(
