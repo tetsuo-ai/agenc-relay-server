@@ -230,10 +230,21 @@ pub struct BackupOutput {
     file: File,
     temporary_name: String,
     final_name: String,
-    published: bool,
+    /// The no-replace rename has happened; the temporary name is gone and
+    /// the final name refers to `file`'s inode unless someone replaced it.
+    renamed: bool,
     faults: StorageFaultInjector,
+    #[cfg(test)]
+    after_rename: Option<AfterRenameHook>,
 }
 
+/// Test-only interposition between the rename and the rest of publication:
+/// receives the directory, the written file, and the final name.
+#[cfg(test)]
+type AfterRenameHook = Box<dyn FnOnce(&File, &File, &str) -> Result<(), StorageError>>;
+
+/// One backup published under its final name: the exact inode that was
+/// written and verified, reopened by that name.
 pub(crate) struct PublishedBackup {
     file: File,
 }
@@ -283,8 +294,10 @@ impl BackupOutput {
             file: File::from(file_fd),
             temporary_name,
             final_name: final_name.to_owned(),
-            published: false,
+            renamed: false,
             faults,
+            #[cfg(test)]
+            after_rename: None,
         })
     }
 
@@ -296,6 +309,18 @@ impl BackupOutput {
         &mut self.file
     }
 
+    /// Publishes the fully written and verified temporary under its final
+    /// name (spec C.5 backup publication).
+    ///
+    /// The file descriptor written and verified is kept through the
+    /// no-replace rename, so the final name refers to that exact inode. The
+    /// rename is the irreversible boundary: a failure before it leaves only
+    /// the temporary, which `Drop` removes; a failure after it (directory
+    /// sync, reopen, validation) retracts the artifact only after proving
+    /// that the final name still refers to the written inode, then syncs the
+    /// directory, so a failed publication never leaves an unverified file
+    /// under the final name and a same-name retry is possible. A final name
+    /// that no longer refers to the written inode is never touched.
     pub(crate) fn publish(mut self) -> Result<PublishedBackup, StorageError> {
         self.faults.check(
             StorageFaultSite::BackupFileSync,
@@ -316,8 +341,24 @@ impl BackupOutput {
             RenameFlags::NOREPLACE,
         )
         .map_err(rustix_rejected)?;
+        self.renamed = true;
+        match self.complete_publication() {
+            Ok(published) => Ok(published),
+            Err(error) => {
+                self.retract_after_rename();
+                Err(error)
+            }
+        }
+    }
+
+    /// Everything after the irreversible rename.
+    fn complete_publication(&mut self) -> Result<PublishedBackup, StorageError> {
         self.faults
             .check(StorageFaultSite::BackupRename, StorageFaultBoundary::After)?;
+        #[cfg(test)]
+        if let Some(hook) = self.after_rename.take() {
+            hook(&self.directory, &self.file, self.final_name.as_str())?;
+        }
         self.faults.check(
             StorageFaultSite::BackupDirectorySync,
             StorageFaultBoundary::Before,
@@ -327,7 +368,6 @@ impl BackupOutput {
             StorageFaultSite::BackupDirectorySync,
             StorageFaultBoundary::After,
         )?;
-        self.published = true;
         let published = openat(
             &self.directory,
             self.final_name.as_str(),
@@ -337,15 +377,52 @@ impl BackupOutput {
         .map_err(rustix_rejected)?;
         validate_file(&published, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
         require_same_filesystem(&self.directory, &published)?;
+        // The name must still refer to the exact inode that was written and
+        // verified; anything else under it is a foreign artifact.
+        if !same_inode(&self.file, &published)? {
+            return Err(StorageError::FilesystemRejected);
+        }
         Ok(PublishedBackup {
             file: File::from(published),
         })
     }
+
+    /// Removes the artifact under the final name only if that name still
+    /// refers to the written inode, then syncs the directory. A foreign inode
+    /// under the name is left alone. Errors here are deliberately dropped:
+    /// the caller already carries the publication failure, and a leftover
+    /// verified file is a refused (never overwritten) same-name retry, not a
+    /// corruption.
+    fn retract_after_rename(&self) {
+        let Ok(named) = statat(
+            &self.directory,
+            self.final_name.as_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) else {
+            return;
+        };
+        let Ok(written) = fstat(&self.file) else {
+            return;
+        };
+        if named.st_dev != written.st_dev || named.st_ino != written.st_ino {
+            return;
+        }
+        if unlinkat(&self.directory, self.final_name.as_str(), AtFlags::empty()).is_ok() {
+            let _synced = fsync(&self.directory);
+        }
+    }
+}
+
+/// Whether two descriptors refer to one inode on one device.
+fn same_inode<Left: AsFd, Right: AsFd>(left: Left, right: Right) -> Result<bool, StorageError> {
+    let left = fstat(left).map_err(rustix_rejected)?;
+    let right = fstat(right).map_err(rustix_rejected)?;
+    Ok(left.st_dev == right.st_dev && left.st_ino == right.st_ino)
 }
 
 impl Drop for BackupOutput {
     fn drop(&mut self) {
-        if !self.published {
+        if !self.renamed {
             let _ = unlinkat(
                 &self.directory,
                 self.temporary_name.as_str(),
@@ -1175,6 +1252,180 @@ mod tests {
         assert!(directory.path().join(recovery_temporary).exists());
         assert!(directory.path().join(guard_temporary).exists());
         Ok(())
+    }
+
+    fn backup_directory_names(directory: &Path) -> Result<Vec<String>, StorageError> {
+        let mut names = fs::read_dir(directory)
+            .map_err(io_rejected)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    fn written_backup_output(
+        directory: &TestDirectory,
+        final_name: &str,
+        body: &[u8],
+    ) -> Result<BackupOutput, StorageError> {
+        let mut output = BackupOutput::create(
+            directory.path(),
+            final_name,
+            StorageFaultInjector::disabled(),
+        )?;
+        output.file_mut().write_all(body).map_err(io_rejected)?;
+        Ok(output)
+    }
+
+    /// A failure after the irreversible rename retracts the artifact the
+    /// same operation wrote, proves it by inode, syncs the directory, and
+    /// leaves nothing under either name, so the same-name retry publishes.
+    #[test]
+    fn a_failure_after_the_rename_retracts_only_the_written_inode_and_frees_the_name()
+    -> Result<(), StorageError> {
+        let directory = TestDirectory::create("backup-retract")?;
+        let mut output = written_backup_output(&directory, "state.backup", b"verified bytes")?;
+        output.after_rename = Some(Box::new(|_, _, _| Err(StorageError::DatabaseRejected)));
+        assert_eq!(output.publish().err(), Some(StorageError::DatabaseRejected));
+        assert_eq!(
+            backup_directory_names(directory.path())?,
+            Vec::<String>::new()
+        );
+
+        let retry = written_backup_output(&directory, "state.backup", b"verified bytes")?;
+        let published = retry.publish()?;
+        assert_eq!(
+            fs::read(directory.path().join("state.backup")).map_err(io_rejected)?,
+            b"verified bytes"
+        );
+        assert!(same_inode(&published.file, &published.file)?);
+        assert_eq!(
+            backup_directory_names(directory.path())?,
+            vec![String::from("state.backup")]
+        );
+        Ok(())
+    }
+
+    /// A final name that no longer refers to the written inode is a foreign
+    /// artifact: publication fails and the foreign file is never unlinked or
+    /// overwritten, whatever it contains.
+    #[test]
+    fn a_replaced_final_inode_fails_publication_without_touching_the_foreign_file()
+    -> Result<(), StorageError> {
+        let directory = TestDirectory::create("backup-foreign")?;
+        let mut output = written_backup_output(&directory, "state.backup", b"ours")?;
+        output.after_rename = Some(Box::new(|directory, _, final_name| {
+            // Another actor replaces the just-published name with its own
+            // inode between the rename and the reopen.
+            let foreign = format!("{final_name}.foreign");
+            let fd = openat(
+                directory,
+                foreign.as_str(),
+                OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )
+            .map_err(rustix_rejected)?;
+            File::from(fd).write_all(b"theirs").map_err(io_rejected)?;
+            renameat_with(
+                directory,
+                foreign.as_str(),
+                directory,
+                final_name,
+                RenameFlags::empty(),
+            )
+            .map_err(rustix_rejected)
+        }));
+        assert_eq!(
+            output.publish().err(),
+            Some(StorageError::FilesystemRejected)
+        );
+        assert_eq!(
+            fs::read(directory.path().join("state.backup")).map_err(io_rejected)?,
+            b"theirs"
+        );
+        assert_eq!(
+            backup_directory_names(directory.path())?,
+            vec![String::from("state.backup")]
+        );
+        // The occupied name refuses a same-name retry instead of replacing it.
+        let retry = written_backup_output(&directory, "state.backup", b"ours again")?;
+        assert_eq!(
+            retry.publish().err(),
+            Some(StorageError::FilesystemRejected)
+        );
+        assert_eq!(
+            fs::read(directory.path().join("state.backup")).map_err(io_rejected)?,
+            b"theirs"
+        );
+        Ok(())
+    }
+
+    /// A final artifact whose mode was changed after the rename fails the
+    /// reopen validation; it is still the written inode, so it is retracted.
+    #[test]
+    fn a_final_artifact_that_fails_validation_after_the_rename_is_retracted()
+    -> Result<(), StorageError> {
+        let directory = TestDirectory::create("backup-mode")?;
+        let mut output = written_backup_output(&directory, "state.backup", b"ours")?;
+        output.after_rename = Some(Box::new(|directory, _, final_name| {
+            let path = directory_path_of(directory)?.join(final_name);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).map_err(io_rejected)
+        }));
+        assert_eq!(
+            output.publish().err(),
+            Some(StorageError::FilesystemRejected)
+        );
+        assert_eq!(
+            backup_directory_names(directory.path())?,
+            Vec::<String>::new()
+        );
+        Ok(())
+    }
+
+    /// A crash after the rename cannot retract: the complete file (synced
+    /// before the rename) stays under the final name, a same-name retry is
+    /// refused rather than replacing it, and a fresh name still publishes.
+    #[test]
+    fn a_crash_after_the_rename_leaves_a_complete_artifact_that_a_retry_never_replaces()
+    -> Result<(), StorageError> {
+        let directory = TestDirectory::create("backup-crash")?;
+        let output = written_backup_output(&directory, "state.backup", b"complete")?;
+        output.file.sync_all().map_err(io_rejected)?;
+        renameat_with(
+            &output.directory,
+            output.temporary_name.as_str(),
+            &output.directory,
+            output.final_name.as_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(rustix_rejected)?;
+        // The process ends here without completing publication.
+        drop(output);
+        assert_eq!(
+            backup_directory_names(directory.path())?,
+            vec![String::from("state.backup")]
+        );
+        let retry = written_backup_output(&directory, "state.backup", b"retry")?;
+        assert_eq!(
+            retry.publish().err(),
+            Some(StorageError::FilesystemRejected)
+        );
+        assert_eq!(
+            fs::read(directory.path().join("state.backup")).map_err(io_rejected)?,
+            b"complete"
+        );
+        let fresh = written_backup_output(&directory, "state-2.backup", b"fresh")?;
+        drop(fresh.publish()?);
+        assert_eq!(
+            backup_directory_names(directory.path())?,
+            vec![String::from("state-2.backup"), String::from("state.backup")]
+        );
+        Ok(())
+    }
+
+    fn directory_path_of(directory: &File) -> Result<PathBuf, StorageError> {
+        fs::read_link(format!("/proc/self/fd/{}", directory.as_raw_fd())).map_err(io_rejected)
     }
 
     #[test]

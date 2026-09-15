@@ -3556,20 +3556,18 @@ impl BackupJob {
         {
             return Err(StorageError::AuthenticationFailed);
         }
+        // The one full verification above ran on the descriptor that the
+        // rename carries under the final name; publication proves by inode
+        // identity that the final name refers to that verified file, so no
+        // second O(database) pass runs on the owner thread and no failure
+        // after the rename leaves the final name occupied.
         let mut published = output.publish()?;
-        let published_verified = verify_backup(
-            published.file_mut(),
-            master_key,
-            guard_root_key,
-            &[trusted_key],
-            self.maximum_bytes,
-        )?;
-        if (
-            published_verified.stream_bytes,
-            published_verified.trailer,
-            published_verified.state_meta.tbs(),
-        ) != (actual_bytes, trailer, &self.expected_state_meta)
-        {
+        let published_bytes = published
+            .file_mut()
+            .metadata()
+            .map_err(|_| StorageError::FilesystemRejected)?
+            .len();
+        if published_bytes != actual_bytes {
             return Err(StorageError::AuthenticationFailed);
         }
         Ok(BackupReceipt {
