@@ -1,6 +1,6 @@
 # Reviewed implementation ownership; normative text remains generated separately.
 schema_version = 1
-binding_count = 244
+binding_count = 251
 
 [[binding]]
 id = "ARCH-AUTH-01"
@@ -717,6 +717,13 @@ evidence_ids = ["EVID-ARCH-REQ-705219A4555AC2842B77"]
 status = "implemented"
 
 [[binding]]
+id = "ARCH-REQ-71BBCEF88CC9E11D5672"
+target_crates = ["agenc-ircd"]
+task_ids = ["S10-008"]
+evidence_ids = ["EVID-ARCH-REQ-71BBCEF88CC9E11D5672"]
+status = "unimplemented"
+
+[[binding]]
 id = "ARCH-REQ-71EF3D90A56EB55DF930"
 target_crates = ["agenc-ircd-runtime"]
 task_ids = ["S10-007"]
@@ -1116,6 +1123,13 @@ evidence_ids = ["EVID-E2EE-REQ-0EE614CD32C84FA9F408"]
 status = "implemented"
 
 [[binding]]
+id = "E2EE-REQ-1632A363615EC244C060"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S10-008"]
+evidence_ids = ["EVID-E2EE-REQ-1632A363615EC244C060"]
+status = "unimplemented"
+
+[[binding]]
 id = "E2EE-REQ-1AB78DA63741FF0B38CF"
 target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-021"]
@@ -1198,6 +1212,13 @@ target_crates = ["agenc-ircd-crypto"]
 task_ids = ["S08-005"]
 evidence_ids = ["EVID-E2EE-REQ-3AE1FE848688A346F9F1"]
 status = "implemented"
+
+[[binding]]
+id = "E2EE-REQ-3BF36AD518354432CC26"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S10-008"]
+evidence_ids = ["EVID-E2EE-REQ-3BF36AD518354432CC26"]
+status = "unimplemented"
 
 [[binding]]
 id = "E2EE-REQ-3DDAFB884DFFB22C1F74"
@@ -1375,6 +1396,20 @@ evidence_ids = ["EVID-E2EE-REQ-75819BD50FB3E71F2B91"]
 status = "implemented"
 
 [[binding]]
+id = "E2EE-REQ-771379F5831CC43DFC79"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S10-008"]
+evidence_ids = ["EVID-E2EE-REQ-771379F5831CC43DFC79"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-7786F88DFC1133E9A596"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S10-008"]
+evidence_ids = ["EVID-E2EE-REQ-7786F88DFC1133E9A596"]
+status = "unimplemented"
+
+[[binding]]
 id = "E2EE-REQ-7FE02BCBD9EEB3934B70"
 target_crates = ["agenc-ircd-client-wire"]
 task_ids = ["S08-027"]
@@ -1429,6 +1464,13 @@ target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-025"]
 evidence_ids = ["EVID-E2EE-REQ-8C607B4410F376797BD2"]
 status = "implemented"
+
+[[binding]]
+id = "E2EE-REQ-91A46BDD00D6FEE6A439"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S10-008"]
+evidence_ids = ["EVID-E2EE-REQ-91A46BDD00D6FEE6A439"]
+status = "unimplemented"
 
 [[binding]]
 id = "E2EE-REQ-9641FAA02EEEC75A2E7D"
@@ -1618,6 +1660,13 @@ target_crates = ["agenc-ircd-e2ee"]
 task_ids = ["S08-024"]
 evidence_ids = ["EVID-E2EE-REQ-D2C711B6BB260BFB72FD"]
 status = "implemented"
+
+[[binding]]
+id = "E2EE-REQ-D45FEF86A189C16F9C2D"
+target_crates = ["agenc-ircd-e2ee"]
+task_ids = ["S10-008"]
+evidence_ids = ["EVID-E2EE-REQ-D45FEF86A189C16F9C2D"]
+status = "unimplemented"
 
 [[binding]]
 id = "E2EE-REQ-D70B8B9850E29E082F85"

@@ -192,6 +192,81 @@ Assign one purpose to each key. Record its generation, creation time, activation
 
 Store encrypted key backups separately from state backups. Audit access to those backups and rehearse restoration at least every six months.
 
+## Rotate the sequencer credential
+
+The coordinator holds the active sequencer key at
+`e2ee.sequencer_private_key_file`, an optional successor key at
+`e2ee.sequencer_successor_private_key_file`, and an optional retired key at
+`e2ee.sequencer_retired_private_key_file`. Every node reads the same public
+credentials file. Rotate in this order:
+
+1. Provision the successor credential out of band: a fresh key, key
+   generation plus one, an interval whose `not_before` lies inside the active
+   interval, and the active key's continuity signature.
+2. Publish a credentials file with set generation plus one holding the
+   active credential first and the successor second. Install it on every
+   edge and, together with the successor private key, on the coordinator.
+3. Restart the coordinator and the edges; a changed credentials file is
+   restart-only and never reloads in place.
+4. Monitor the migration telemetry: set generation, pinned-route and
+   unfinished-record counts per credential, the overlap deadline, and the
+   blocked-route count. Groups migrate when their controllers finalize a
+   context transition to the successor.
+5. Retire the old credential with a successor-only credentials file. Before
+   the overlap deadline the coordinator refuses that file while any normal
+   route still pins the old credential; at or after the deadline it accepts
+   the file and blocks those routes. Move the old key to the retired path
+   whenever a normal route or an unfinished receipt still needs it.
+6. Destroy the old key only after the coordinator has recorded its release
+   fact: the credential is out of the accepted set, no normal route pins it,
+   and no unfinished receipt names it.
+7. If routes are blocked because the retired key is unavailable, restore it
+   from custody to the retired path and restart; the unfinished receipts then
+   complete under their original credential.
+
+Steady state:
+
+```toml
+[e2ee]
+sequencer_private_key_file = "/etc/agenc-ircd/keys/sequencer-active.key"
+sequencer_credentials_file = "/etc/agenc-ircd/sequencer-credentials.bin"
+```
+
+Overlap:
+
+```toml
+[e2ee]
+sequencer_private_key_file = "/etc/agenc-ircd/keys/sequencer-active.key"
+sequencer_successor_private_key_file = "/etc/agenc-ircd/keys/sequencer-successor.key"
+sequencer_credentials_file = "/etc/agenc-ircd/sequencer-credentials.bin"
+```
+
+Retirement with a retained signer:
+
+```toml
+[e2ee]
+sequencer_private_key_file = "/etc/agenc-ircd/keys/sequencer-successor.key"
+sequencer_retired_private_key_file = "/etc/agenc-ircd/keys/sequencer-active.key"
+sequencer_credentials_file = "/etc/agenc-ircd/sequencer-credentials.bin"
+```
+
+Startup refuses, without installing any signer: a key whose public key
+matches no credential the node knows; a public key reused under a different
+credential ID; a credentials file whose set or key generation rolls back; a
+retired key for a credential outside the verified history; a file with more
+than two credentials, a generation gap, or two successors; a successor-only
+file before the overlap deadline while a normal route still pins the old
+credential; a missing active or successor key; the same key bytes at two
+paths or shared with another purpose; a failed protected-file check; and a
+REHASH that changes any sequencer path or the credentials file. A missing
+retired key that a route still needs does not stop the node: the affected
+routes are blocked and an audit event names the count.
+
+No workflow signs an old receipt with a replacement key, silently updates
+every conversation's pin on reload, or keeps accepting new records for a
+group pinned to a retired credential. Public credentials are retained
+permanently for historical verification; only the private key is destroyed.
+
 ## Respond to an incident
 
 For suspected key compromise, rollback, equivocation, database corruption, or secret exposure, quiesce the affected listeners. Preserve encrypted audit evidence and fence the affected incarnation or key. Send a client-visible security notice after verifying the facts.

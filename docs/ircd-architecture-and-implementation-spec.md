@@ -4532,7 +4532,8 @@ bytes. Required secret and trust material includes:
 - federation Ed25519 private key;
 - backup Ed25519 private key and historical trust manifest;
 - audit Ed25519 private key and historical trust manifest;
-- network sequencer private key where applicable;
+- the active, successor, and retired-retained network sequencer private keys
+  on the coordinator, each at its own path, per companion Section 9.2.1;
 - admin trust roots and operator public verification keys;
 - optional deployment access-token verification key; and
 - the account-invitation verification public key when invite registration is
@@ -4805,7 +4806,10 @@ Network ID, Server ID, role, coordinator identity, state-directory path,
 storage/rollback-guard keys, listener purpose, federation signing key, OPAQUE
 profile, wire limits, E2EE
 profile, account-service HPKE pin/key, and existing onion identity are
-restart-only. A REHASH parses and
+restart-only. Every `e2ee.sequencer_*` path and the bytes of the sequencer
+credentials file are restart-only as well; a changed credentials file on an
+active link triggers the companion Section-12.5 fail-closed reconnect and
+never updates a conversation's pin in place. A REHASH parses and
 validates a complete candidate, computes a typed diff, rejects any restart-only
 change, applies all reloadable changes at one state revision, and retains the
 old configuration on any error.
@@ -6866,8 +6870,20 @@ bytes or silently changes an identity:
 
 - TLS certificates may rotate in place when the configured identity and pin
   policy are satisfied;
-- federation and sequencer signing-key rotation uses signed continuity and a
-  bounded overlap from the applicable protocol;
+- federation signing-key rotation uses signed continuity and a bounded
+  overlap from the applicable protocol;
+- sequencer signing-key rotation follows companion Section 9.2.1: the
+  coordinator holds an active signer, an optional successor signer, and an
+  optional retired-retained signer, each at its own path; a credential is
+  retired only by accepting a key set that omits it, and its private key is
+  released and zeroized only after the durable release fact; sequencer key
+  bytes are never shared between two paths or with any TLS, federation,
+  backup, audit, or HPKE purpose; private sequencer keys live in separately
+  encrypted custody while state backups carry the public credential history
+  and route pins but never a private key; and the permitted telemetry is the
+  set generation, per-credential counts of pinned routes and unfinished
+  records, the overlap deadline, the blocked-route count, and each signer's
+  state, never key bytes or secret file contents;
 - backup and audit signing keys rotate independently, append their public keys
   to the corresponding offline trust manifest before activation, and retain
   old verification keys through the last signed artifact's retention
@@ -7610,14 +7626,14 @@ These SHA-256 values identify the exact files read for this draft:
 | `rfcs/rfc9420-mls-protocol.txt` | `251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b` |
 | `rfcs/rfc9525-tls-service-identity.txt` | `ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5` |
 | `rfcs/rfc9750-mls-architecture.txt` | `6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd` |
-| `docs/irc-mls-e2ee-extension.md` | `79236c985a46205501c64ff45215846288cc0a4a3b8c17884d58055c1c394795` |
+| `docs/irc-mls-e2ee-extension.md` | `0620b993c63529dca24cc7b2e54eba158ebdf5401ecf54dc081ded73501a76f6` |
 
 Changing a file without updating its hash, source decision, and affected
 vectors is a conformance-ledger failure.
 The companion's domain-separated version-1 profile hash is
-`d4deba80758c4585437420cd25330682b4fee97c77aea714df238505b08ab38c`
+`618080b4c92aa6b92196ce823369e5c0dd36b4916049670fd82bdabb09f78f07`
 (unpadded base64url
-`1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w`).
+`YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc`).
 
 ## Appendix A. Client wire registries
 
@@ -9375,8 +9391,10 @@ admission.
 | `e2ee.enabled` | bool, true | false forbidden when any active/tombstoned encrypted route exists |
 | `e2ee.profile_version` | integer, 1 | fixed |
 | `e2ee.coordinator_server_id` | Server ID, required when enabled | equals network coordinator |
-| `e2ee.sequencer_private_key_file` | optional path | required only on logical E2EE coordinator |
-| `e2ee.sequencer_credentials_file` | path, required when enabled | canonical public active/overlap credentials |
+| `e2ee.sequencer_private_key_file` | optional path | active credential's private key; required only on the logical E2EE coordinator |
+| `e2ee.sequencer_successor_private_key_file` | optional path | coordinator only; required exactly when the credentials file holds a successor and must be that successor's key |
+| `e2ee.sequencer_retired_private_key_file` | optional path | coordinator only; exactly one credential from the durable credential history that a `normal` route or an unfinished receipt still requires; refused otherwise |
+| `e2ee.sequencer_credentials_file` | path, required when enabled | canonical public active/overlap credentials in the layout below |
 | `e2ee.max_group_leaves` | integer, 512 | 1..companion `MAX_GROUP_LEAVES` |
 | `e2ee.max_devices_per_account` | integer, 64 | 1..companion maximum |
 | `e2ee.mailbox_bytes_per_account` | integer, 67,108,864 | 1 MiB..companion maximum |
@@ -9385,6 +9403,32 @@ admission.
 | `e2ee.global_disk_bytes` | integer, 107,374,182,400 | explicit 1 GiB..16 TiB logical E2EE ceiling; never unlimited |
 | `e2ee.federation_peer_bytes_per_second` | integer, 16,777,216 | 65,536..1,073,741,824 decoded bytes per direction |
 | `e2ee.federation_peer_burst_bytes` | integer, 33,554,432 | 4 MiB..4 GiB and no more than ten seconds of the configured peer rate |
+
+`e2ee.sequencer_credentials_file` is the TLS encoding of
+`struct { uint64 set_generation; IrcSequencerCredential credentials<1..4096>; }`
+holding one or two companion Section-9.2 credentials in key-generation
+order, active first, in at most 4,096 bytes; the set digest is recomputed from
+the verified credentials and never read from the file. Every sequencer
+private key file is one raw 32-byte Ed25519 seed under the Section 22.2
+protected-file rules: a regular non-symlink file, mode 0600, opened with
+`O_NOFOLLOW`, with metadata checked before and after open. The three key
+paths are optional and every existing single-key configuration remains
+valid; the signer configuration is accepted or refused atomically, with no
+partial signer installation:
+
+| Condition | Detected by | Result |
+| --- | --- | --- |
+| an extra or unrelated private key whose public key matches no credential in the file or the required history | key parsing against the verified credentials | startup refused |
+| a public key reused under a different credential ID | credential verification against the durable credential history | startup refused |
+| a set generation or key generation below the durably accepted set | credential verification against the database | startup refused |
+| a retired key whose credential is absent from the verified credential history | key parsing | startup refused |
+| more than two credentials, a key-generation gap, or two successors | credentials file parsing | startup refused; ECAP is never widened beyond the profile maximum |
+| a set that omits a credential a `normal` route still pins before its overlap deadline | E2EE state compatibility check | startup refused |
+| a missing active or successor private key | secret parsing | startup refused |
+| a missing required retired-retained key | E2EE state compatibility check | startup continues; the affected routes are blocked; one audit event; blocked-route telemetry |
+| the same key bytes at two `e2ee.sequencer_*` paths, or shared with a TLS, federation, backup, audit, or HPKE key | secret parsing | startup refused |
+| a protected-file check failure on any key file | secret parsing | startup refused |
+| a REHASH candidate that changes any `e2ee.sequencer_*` path or the credentials file bytes | reload diff | refused as restart-only; the running configuration is retained |
 
 The companion profile hash is a release build constant, not a configuration
 key. Startup hashes the packaged canonical companion document, verifies the
@@ -9484,13 +9528,23 @@ base-profile-sha256=ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=IRC-MLS/1
-e2ee-profile-sha256=1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w
+e2ee-profile-sha256=YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc
 sequencer-key-set-generation=<uint64-decimal>
 sequencer-key-set-hash=<43-char-hash>
 ```
 
 Lines occur exactly in that order; optional DNS and the paired onion lines are
-omitted as units. At least one endpoint remains. Values contain printable ASCII
+omitted as units. At least one endpoint remains. On a coordinator and on an
+edge alike, `print-onboarding` loads, parses, and verifies the configured
+sequencer credentials file exactly as startup does, read-only: network ID,
+continuity signatures, key-generation order, at most two credentials, and,
+when a database exists, monotonicity against the durably accepted set; the
+emitted `sequencer-key-set-generation` and `sequencer-key-set-hash` are that
+verified set's values, never a placeholder. With `e2ee.enabled = false` the
+four lines `e2ee-profile`, `e2ee-profile-sha256`,
+`sequencer-key-set-generation`, and `sequencer-key-set-hash` are omitted as
+one unit; an importer treats their absence as no E2EE offered and MUST NOT
+enable E2EE, and a present block must still equal the build constant. Values contain printable ASCII
 and no whitespace. `e2ee-profile-sha256` is the exact companion Section-2.3
 profile hash and must equal the importing client's supported build constant;
 an absent or unequal value rejects the descriptor. A QR code contains the

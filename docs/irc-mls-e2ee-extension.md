@@ -1196,6 +1196,94 @@ accepts only the one credential pinned in its current context. Sequencer signatu
 of what one server key said, not proof that its ordering is truthful or
 available.
 
+#### 9.2.1 Signer roles, transition, retirement, and release
+
+Credential identity is `sequencer_credential_id`. Two credentials that share
+one `sequencer_public_key` are distinct credentials, a successor **MUST NOT**
+reuse the active credential's public key, and membership in the advertised
+ECAP key set is a separate fact from credential identity: a set that names a
+credential neither proves possession of its private key nor changes any
+conversation's pin. The per-conversation pin is the `sequencer` credential of
+the conversation's current accepted `IrcMlsContext`. The finalized transition
+instant of a conversation is the finalization certificate of the
+GroupContextExtensions Commit whose resulting context names the successor.
+That Commit's candidate receipt, its disposition votes, and its finalization
+are signed under the old credential; every later record of the conversation
+is signed under the successor.
+
+A coordinator holds at most three private signers, one per role:
+
+- the active signer, whose credential every new binding pins;
+- the successor signer, present exactly while the advertised set holds a
+  successor credential; and
+- the retired-retained signer, the private key of a credential absent from
+  the advertised set that a live route still pins or an unfinished receipt
+  still names.
+
+A new candidate or ReInit-attempt receipt **MUST** be signed only by the
+credential the conversation pins, and only when that credential's interval
+covers the Commit's canonical validation time; otherwise the submission is
+refused with `E2EE_SYNCING` and no state changes. Finalization, abort, ReInit
+activation, and ReInit abort **MUST** use exactly the credential ID carried by
+the retained receipt they complete, never a replacement. A retired-retained
+signer signs only terminals of receipts issued before its retirement and
+never a new receipt.
+
+Retirement is acceptance of a key set that omits a credential; the overlap
+deadline of a credential is its successor's `not_before` plus
+`MAX_SEQUENCER_KEY_OVERLAP`. Before that deadline a coordinator **MUST**
+refuse a set that omits the credential while any `normal` route still pins
+it. At or after the deadline it **MUST** accept the set and mark every route
+still pinned to the omitted credential blocked. A blocked route accepts no
+candidate, ReInit attempt, or policy change; it continues opaque application
+delivery on its last accepted epoch; and it leaves the blocked state only by
+route close followed by a fresh binding under the current credential, or by
+completing an already issued old-credential transition terminal that
+finalizes a successor context. An unfinished old-credential receipt remains
+completable by the retired-retained signer, and a terminal that finalizes a
+successor transition unblocks its route. If the retired private key is
+unavailable, the receipt stays unfinished and the route stays blocked; the
+coordinator never signs it with another key.
+
+The durable metadata that proves signer ownership after a restart is:
+
+- the highest accepted key set: its set generation, digest, and credential
+  IDs;
+- a permanent credential history holding every accepted public credential,
+  the set generations that introduced and retired it, and its signer-release
+  fact;
+- every route's current accepted context pin; and
+- the `sequencer_key_id` of every unfinished candidate and ReInit-attempt
+  receipt.
+
+Startup derives the required signer set from the advertised set plus those
+pins and unfinished receipts, counting only `normal` routes; a route whose
+Section 13.7.1 gate is `pending`, `conflict`, or `closed` is never live for
+signer purposes. Backup restore, a new recovery epoch, and evidence-only
+recovery under Section 13.7 never require an old private key and never sign
+a missing link. Permanent retention of public credentials for historical
+verification is distinct from possession of a private signer. A retired
+private key **MAY** be destroyed only when its credential is absent from the
+durably accepted set, no `normal` route pins it, no unfinished receipt names
+it, and the coordinator has durably recorded the release fact. After release
+a configured key for that credential is refused as unrelated, and in-memory
+copies are zeroized at release.
+
+The transition below follows two conversations: A stays pinned to the old
+credential and B migrates first. Each row states what a restart in that
+phase does:
+
+| Phase | Advertised set | Conversation A (pinned old) | Conversation B (migrated) | Unfinished candidate receipt | Unfinished ReInit receipt | Required private signers | Restart behaviour |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| steady state | old only | pins old | pins old | none | none | active old | loads old; both routes normal |
+| successor published | old and new | pins old | pins old | old-key receipt open | none | active old, successor new | loads both; the open receipt completes under old |
+| B transition finalized | old and new | pins old | pins new from its transition certificate | none | old-key attempt open | active old, successor new | B signs under new; A and the open attempt under old |
+| all live groups migrated before the deadline | new only, accepted early | pins new | pins new | none | none | active new; old released after the release fact | loads new only; a configured old key is refused as unrelated |
+| deadline reached with A still pinned | new only, accepted at the deadline | blocked on old | pins new | none | none | active new; old retired-retained if configured | loads new; A blocked; no old-key receipt is required |
+| retirement with unfinished old receipts | new only | blocked on old | pins new | old-key receipt open | old-key attempt open | active new, retired-retained old required | loads both; only terminals of the open records sign under old; new receipts for A are refused |
+| retired key unavailable | new only | blocked on old | pins new | old-key receipt open | none | active new; old missing | starts; one audit event and blocked-route telemetry; the receipt stays unfinished and A stays blocked |
+| signer released | new only | closed and rebound under new | pins new | none | none | active new | loads new; the release fact is retained and the old key is refused |
+
 ### 9.3 Canonical policy and roster transitions
 
 ```text
@@ -2968,7 +3056,7 @@ disclosed identity material.
 | `E2EE_KEY_UNAVAILABLE` | No acceptable KeyPackage is available |
 | `E2EE_OPERATION_CONFLICT` | A stable operation ID was reused with different parameters |
 | `E2EE_DELIVERY_UNCERTAIN` | Coordinator accepted the request but ingress lost its correlated result |
-| `E2EE_SYNCING` | Federation route state has not crossed the READY/ACTIVE barrier |
+| `E2EE_SYNCING` | Federation route state has not crossed the READY/ACTIVE barrier, or the pinned sequencer credential cannot sign at this time |
 | `E2EE_REQUIRED` | Plaintext is forbidden for the target |
 
 Descriptions contain no ciphertext, key material, credentials, or sensitive
