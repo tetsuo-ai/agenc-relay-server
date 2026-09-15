@@ -262,6 +262,42 @@ if not request["probe_only"]:
 '''
 
 
+MAX_ADMINISTRATION_BYTES = 256 * 1024 * 1024
+
+
+def _private_git_administration(administration: Path, output: Path) -> Path:
+    """Copy the worktree's Git administration into the gate's private output directory.
+
+    The copy contains only regular files and directories: a symlink anywhere in
+    the real administration is refused rather than copied, and the total size is
+    bounded. The copy is retained with the gate evidence; nothing in it is ever
+    read back by the host as Git state.
+    """
+    target = output / "git-administration"
+    if target.exists() or target.is_symlink():
+        raise SandboxFailure("gate private Git administration copy already exists; inspect the retained attempt")
+    if administration.is_symlink() or not administration.is_dir():
+        raise SandboxFailure("validation worktree Git administration is not a directory")
+    total = 0
+    for root, directories, files in os.walk(administration):
+        for name in (*directories, *files):
+            entry = Path(root) / name
+            info = entry.lstat()
+            if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+                raise SandboxFailure("validation worktree Git administration contains a symlink or special file")
+            total += info.st_size
+            if total > MAX_ADMINISTRATION_BYTES:
+                raise SandboxFailure("validation worktree Git administration exceeds its copy bound")
+    shutil.copytree(administration, target, symlinks=True)
+    for root, directories, files in os.walk(target):
+        os.chmod(root, 0o700)
+        for name in files:
+            entry = Path(root) / name
+            if entry.is_symlink():
+                raise SandboxFailure("gate private Git administration copy is not a plain tree")
+    return target
+
+
 def filesystem_command(config: Config, repo, worktree: Path, output: Path,
                        *, probe_only: bool = False) -> list[str]:
     """Build a pinned local Docker command, recording ownership before launch.
@@ -430,7 +466,13 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
     # Host compiler entrypoints such as /usr/bin/cc resolve through alternatives.
     for path in (Path("/usr"), Path("/etc/alternatives"), Path("/etc/ssl/certs"), *readable):
         bind(path)
-    for path in (administration, cargo_home, scratch, *generated):
+    # Gate commands need a writable index and reflog, but the controller's real
+    # per-worktree Git administration must never be writable by candidate code:
+    # a planted symlink there would be followed by a later host checkout. The
+    # container therefore sees a disposable private copy at the same path.
+    private_administration = _private_git_administration(administration, output)
+    bind(private_administration, administration, readonly=False)
+    for path in (cargo_home, scratch, *generated):
         bind(path, readonly=False)
     bind(cargo_home / "registry")
     bind(cargo_home / "registry/index", readonly=False)
@@ -438,8 +480,8 @@ def filesystem_command(config: Config, repo, worktree: Path, output: Path,
     for path in dependency_sources:
         bind(path)
     for name in ("HEAD", "gitdir", "commondir"):
-        if (administration / name).is_file():
-            bind(administration / name)
+        if (private_administration / name).is_file():
+            bind(private_administration / name, administration / name)
     for path in existing_artifacts:
         bind(path)
     name = unit.removesuffix(".service")

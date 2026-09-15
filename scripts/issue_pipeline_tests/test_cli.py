@@ -200,10 +200,11 @@ class DoctorTests(CommandFixture, unittest.TestCase):
         self.secret = "DOCTOR_AUTH_OUTPUT_MUST_NOT_BE_LOGGED"
         self.patches = [
             mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/bin/" + command),
-            mock.patch.object(Config, "executable", return_value="/bin/codex"),
+            mock.patch.object(Config, "executable", return_value="/bin/claude"),
             mock.patch.object(cli.shutil, "disk_usage", return_value=SimpleNamespace(free=512 * 2**30)),
             mock.patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, self.secret, self.secret)),
             mock.patch.object(cli, "Github", return_value=self.github),
+            mock.patch.object(Config, "sandbox_runtime", return_value="/bin/srt"),
         ]
         self.mocks = [patch.start() for patch in self.patches]
         self.mocks[3].side_effect = lambda argv, **kwargs: subprocess.CompletedProcess(

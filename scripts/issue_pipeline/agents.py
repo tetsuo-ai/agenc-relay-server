@@ -1,7 +1,10 @@
-"""Fresh, sandboxed Codex sessions with bounded logs and independent validation.
+"""Fresh, sandboxed Claude Code sessions with bounded logs and independent validation.
 
-Production must enable ``use_systemd``: process groups alone cannot contain a
-descendant that calls setsid(). Structured results are claims, never gate authority.
+Each role runs one noninteractive ``claude -p`` process whose commands execute
+inside the closed sandbox policy from :mod:`permissions`; its final answer is the
+schema-validated structured output of that single turn. Production must enable
+``use_systemd``: process groups alone cannot contain a descendant that calls
+setsid(). Structured results are claims, never gate authority.
 """
 
 from __future__ import annotations
@@ -211,52 +214,39 @@ def _json(raw):
         raise ValueError("invalid JSON encoding or nesting") from error
 
 
-class _EventObject(list):
-    """Preserve event object pairs so telemetry cannot hide envelope ambiguity."""
+def _event(raw):
+    """Read one stream-json event strictly: a closed object with a string type.
+
+    Duplicate keys at any depth are rejected so telemetry cannot hide envelope
+    ambiguity. Final role results always use the same recursively strict parser.
+    """
+    try:
+        event = _json(raw)
+    except (UnicodeError, RecursionError) as error:
+        raise ValueError("invalid JSON event encoding or nesting") from error
+    if type(event) is not dict or type(event.get("type")) is not str:
+        raise ValueError("event requires an object with a string type")
+    return event
 
 
 def _event_type(raw):
-    """Read control events strictly, tolerating one observed Codex telemetry quirk.
+    return _event(raw)["type"]
 
-    Codex 0.154 emits two string ``item.id`` keys for web-search item events:
-    its item identifier and the flattened search identifier. Neither identifier
-    grants authority here. Preserve the raw log, ignore both identifiers, and
-    reject every other duplicate, including envelope/turn-status fields. Final
-    role results always use the separate, recursively strict ``_json`` parser.
-    """
-    try:
-        event = json.loads(raw, object_pairs_hook=_EventObject, parse_constant=_invalid_constant)
-        if type(event) is not _EventObject:
-            raise ValueError("event requires an object")
-        envelope = _closed_pairs(event)
-        if type(envelope.get("type")) is not str:
-            raise ValueError("event requires a string type")
-        kind = envelope["type"]
 
-        def check(node, path):
-            if type(node) is _EventObject:
-                fields = {}
-                for key, value in node:
-                    fields.setdefault(key, []).append(value)
-                for key, values in fields.items():
-                    if len(values) > 1 and not (
-                        path == ("item",) and key == "id" and len(values) == 2
-                        and all(type(value) is str for value in values)
-                        and fields.get("type") == ["web_search"]
-                        and kind in {"item.started", "item.updated", "item.completed"}
-                    ):
-                        raise ValueError("duplicate JSON event object key")
-                for key, value in node:
-                    check(value, (*path, key))
-            elif type(node) is list:
-                for value in node:
-                    check(value, (*path, None))
+_RATE_LIMIT_WORDS = ("rate limit", "rate_limit", "usage limit", "overloaded", "429", "quota")
 
-        for key, value in envelope.items():
-            check(value, (key,))
-        return kind
-    except (UnicodeError, RecursionError) as error:
-        raise ValueError("invalid JSON event encoding or nesting") from error
+
+def _result_failure(event):
+    """Classify a terminal result event; return (kind, message) or None when usable."""
+    subtype = event.get("subtype")
+    text = str(event.get("result") or "")
+    if event.get("is_error") is True or subtype != "success":
+        lowered = (text + " " + str(subtype)).lower()
+        kind = "rate_limited" if any(word in lowered for word in _RATE_LIMIT_WORDS) else "agent_failure"
+        return kind, f"Claude reported {subtype or 'an error'}: {text[:200]}"
+    if type(event.get("structured_output")) is not dict:
+        return "result", "Claude completed without a structured result"
+    return None
 
 
 def load_result(role: str, path: Path, worktree: Path | None = None) -> dict:
@@ -275,15 +265,24 @@ def load_result(role: str, path: Path, worktree: Path | None = None) -> dict:
 
 def _child_environment():
     # A safe allowlist also prevents future or vendor-specific credential variable
-    # names from silently entering the child. Authentication stays in existing HOME.
-    names = {"HOME", "CODEX_HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "TZ",
-             "TMPDIR", "TMP", "TEMP", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
-             "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "DBUS_SESSION_BUS_ADDRESS",
+    # names from silently entering the child. Authentication stays in existing HOME
+    # (or CLAUDE_CONFIG_DIR). Commands always use bash: the sandbox wrapper reports
+    # spurious exit statuses under other login shells.
+    # XDG_RUNTIME_DIR and the session bus address let the systemd-run client
+    # reach the user manager; the sandbox masks that runtime directory from
+    # model commands.
+    names = {"HOME", "CLAUDE_CONFIG_DIR", "PATH", "USER", "LOGNAME", "LANG", "TZ",
+             "TMPDIR", "TMP", "TEMP", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+             "XDG_STATE_HOME", "XDG_CACHE_HOME", "DBUS_SESSION_BUS_ADDRESS",
              "SSL_CERT_FILE", "SSL_CERT_DIR"}
     env = {key: value for key, value in os.environ.items()
            if key in names or key.startswith("LC_")}
     if not env.get("HOME") or not env.get("PATH"):
         raise ValueError("existing HOME and PATH are required")
+    bash = shutil.which("bash")
+    if not bash:
+        raise ValueError("bash is required for sandboxed model commands")
+    env["SHELL"] = bash
     return env
 
 
@@ -433,9 +432,9 @@ def record_session_quiescent(output_dir: Path, *, observed_registered: bool = Fa
     _write_session_receipt(output_dir, "launch-quiescent.json", "quiescent")
 
 
-def _permissions(worktree, output_dir, role, codex_path, *, evidence_paths=()):
+def _permissions(worktree, output_dir, role, sandbox_runtime_path, *, evidence_paths=()):
     from .permissions import prepare_permissions
-    return prepare_permissions(worktree, output_dir, role, codex_path, evidence_paths=evidence_paths)
+    return prepare_permissions(worktree, output_dir, role, sandbox_runtime_path, evidence_paths=evidence_paths)
 
 
 _PERMISSION_BOOTSTRAP = r'''
@@ -458,11 +457,12 @@ os.execv(sys.argv[3], sys.argv[3:])
 '''
 
 
-class CodexRunner:
+class ClaudeRunner:
     """Run isolated roles; at most four sessions exist across all runner instances."""
 
-    def __init__(self, codex_path, model, reasoning_effort, max_sessions=4,
-                 timeout_seconds=7200, use_systemd=False, minimum_free_gib=1):
+    def __init__(self, claude_path, model, effort, max_sessions=4,
+                 timeout_seconds=7200, use_systemd=False, minimum_free_gib=1,
+                 sandbox_runtime_path="srt"):
         if type(max_sessions) is not int or not 1 <= max_sessions <= 4:
             raise ValueError("max_sessions must be an integer in 1..4")
         if (type(timeout_seconds) not in {int, float} or not math.isfinite(timeout_seconds)
@@ -471,18 +471,18 @@ class CodexRunner:
         _string(model, "model", 128)
         if any(ord(char) < 33 for char in model) or model.startswith("-"):
             raise ValueError("invalid model")
-        _enum(reasoning_effort, {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"},
-              "reasoning_effort")
+        _enum(effort, {"low", "medium", "high", "xhigh", "max"}, "effort")
         if type(use_systemd) is not bool:
             raise ValueError("use_systemd must be boolean")
         if type(minimum_free_gib) is not int or minimum_free_gib < 1:
             raise ValueError("minimum_free_gib must be a positive integer")
-        executable = shutil.which(str(codex_path))
+        executable = shutil.which(str(claude_path))
         if not executable:
-            raise ValueError("Codex executable is unavailable")
-        self.codex_path = str(Path(executable).absolute())
+            raise ValueError("Claude Code executable is unavailable")
+        self.claude_path = str(Path(executable).resolve(strict=True))
+        self.sandbox_runtime_path = str(sandbox_runtime_path)
         self.model = model
-        self.reasoning_effort = reasoning_effort
+        self.effort = effort
         self.timeout_seconds = timeout_seconds
         self.use_systemd = use_systemd
         self.minimum_free_gib = minimum_free_gib
@@ -525,19 +525,23 @@ class CodexRunner:
             if semaphore.acquire(timeout=min(0.05, remaining)):
                 return
 
-    def _argv(self, role, worktree, result_path, permission_args=()):
-        return [self.codex_path, "exec", "--ignore-user-config",
-                "--strict-config", "--ephemeral", "--model", self.model,
-                "--json", "--cd", str(worktree),
-                "--output-schema", str(_SCHEMAS / f"{role}.json"),
-                "--output-last-message", str(result_path),
-                "-c", f"model_reasoning_effort={json.dumps(self.reasoning_effort)}",
-                "-c", 'model_provider="openai"',
-                "-c", 'approval_policy="never"', "-c", "agents.enabled=false",
-                "-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false",
-                "-c", "features.plugins=false", "-c", "features.hooks=false",
-                "-c", "features.apps=false", "-c", "features.remote_plugin=false",
-                "-c", "features.skill_mcp_dependency_install=false", *permission_args, "-"]
+    def _argv(self, role, profile):
+        # --restricted confines the file tools to the working directories: the
+        # private runtime directory the process starts in, the worktree and any
+        # copied evidence directory, all passed as --add-dir. It ignores
+        # user/project settings and refuses permission bypass; dontAsk with no
+        # prompt target denies anything the explicit allow list does not cover.
+        # The prompt arrives on stdin.
+        schema = json.dumps(json.loads((_SCHEMAS / f"{role}.json").read_text()), separators=(",", ":"))
+        argv = [self.claude_path, "-p", "--restricted", "--output-format", "stream-json", "--verbose",
+                "--json-schema", schema, "--model", self.model, "--effort", self.effort,
+                "--permission-mode", "dontAsk", "--permission-prompts", "none",
+                "--no-session-persistence", "--strict-mcp-config",
+                "--disable-slash-commands", "--tools", ",".join(profile.tools),
+                "--allowedTools", ",".join(profile.tools), "--settings", profile.settings]
+        for directory in profile.add_dirs:
+            argv += ["--add-dir", str(directory)]
+        return argv
 
     def _contained_argv(self, argv, env, unit):
         if not self.use_systemd:
@@ -604,10 +608,11 @@ class CodexRunner:
         except (OSError, subprocess.TimeoutExpired, ValueError) as error:
             raise AgentRunError("cleanup", "cannot stop/verify owned systemd unit", output_dir) from error
 
-    def _stream(self, process, events, errors, deadline, output_dir, worktree):
+    def _stream(self, process, events, errors, deadline, output_dir, worktree, result_path):
         pending = bytearray()
         total = 0
         completed = False
+        rate_limited = False
         next_disk_check = 0.0
         with selectors.DefaultSelector() as selector:
             for stream, kind in ((process.stdout, "events"), (process.stderr, "stderr")):
@@ -648,10 +653,11 @@ class CodexRunner:
                         if len(raw) > MAX_EVENT_BYTES:
                             raise AgentRunError("event_limit", "agent event exceeds configured bound", output_dir)
                         try:
-                            kind = _event_type(raw)
+                            event = _event(raw)
                         except ValueError as error:
                             raise AgentRunError("event_json", "invalid agent JSONL event", output_dir) from error
-                        # A Codex or trusted bootstrap event proves the transient
+                        kind = event["type"]
+                        # A Claude or trusted bootstrap event proves the transient
                         # service executed; starting its systemd-run client does not.
                         with self._lock:
                             if self.use_systemd and process not in self._registered:
@@ -660,9 +666,25 @@ class CodexRunner:
                                 except SessionLifecycleError as error:
                                     raise AgentRunError("cleanup", "cannot persist observed session registration", output_dir) from error
                             self._registered.add(process)
-                        if kind in {"error", "turn.failed"}:
-                            raise AgentRunError("agent_failure", "Codex emitted a failure event", output_dir)
-                        if kind == "turn.completed":
+                        if kind == "rate_limit_event":
+                            info = event.get("rate_limit_info")
+                            if type(info) is dict and info.get("status") not in (None, "allowed"):
+                                rate_limited = True
+                        elif kind == "error":
+                            raise AgentRunError("agent_failure", "Claude emitted a failure event", output_dir)
+                        elif kind == "result":
+                            if completed:
+                                raise AgentRunError("event_json", "Claude emitted more than one result", output_dir)
+                            failure = _result_failure(event)
+                            if failure is not None:
+                                failure_kind, message = failure
+                                if rate_limited and failure_kind == "agent_failure":
+                                    failure_kind = "rate_limited"
+                                raise AgentRunError(failure_kind, message, output_dir)
+                            with _private_file(result_path, "w") as stream:
+                                json.dump(event["structured_output"], stream)
+                                stream.flush()
+                                os.fsync(stream.fileno())
                             completed = True
                     if len(pending) > MAX_EVENT_BYTES:
                         raise AgentRunError("event_limit", "agent event exceeds configured bound", output_dir)
@@ -673,9 +695,10 @@ class CodexRunner:
             if pending:
                 raise AgentRunError("event_json", "truncated agent JSONL event", output_dir)
             if process.returncode != 0:
-                raise AgentRunError("exit", f"Codex exited with status {process.returncode}", output_dir)
+                raise AgentRunError("rate_limited" if rate_limited else "exit",
+                                    f"Claude exited with status {process.returncode}", output_dir)
             if not completed:
-                raise AgentRunError("event_json", "Codex emitted no completed turn", output_dir)
+                raise AgentRunError("event_json", "Claude emitted no result", output_dir)
 
     def run(self, role: str, worktree: Path, prompt: str, output_dir: Path, *,
             review_purpose: str = "candidate", evidence_paths: tuple[Path, ...] = ()) -> dict:
@@ -684,7 +707,7 @@ class CodexRunner:
         output_dir must be outside the source worktree and unused for any previous
         invocation. Logs and final output are private files retained on failures.
         """
-        wrapped = build_prompt(role, prompt, review_purpose=review_purpose)
+        build_prompt(role, prompt, review_purpose=review_purpose)  # validate before any side effect
         worktree = Path(worktree).resolve(strict=True)
         if not worktree.is_dir():
             raise ValueError("worktree must be a directory")
@@ -705,15 +728,22 @@ class CodexRunner:
                     or any(item.is_symlink() for item in (path, *path.parents))
                     or str(path) != str(path.resolve())):
                 raise ValueError("trusted evidence paths must name exact canonical ordinary files")
-        profile = _permissions(worktree, output_dir, role, self.codex_path, evidence_paths=evidence_paths)
+        profile = _permissions(worktree, output_dir, role, self.sandbox_runtime_path, evidence_paths=evidence_paths)
         if (set(profile.environment) != {"TMPDIR", "CARGO_HOME", "RUSTUP_HOME"}
                 or any(type(value) is not str or not value for value in profile.environment.values())):
             raise ValueError("permission preparation may override only private temporary/Cargo paths and the existing Rust toolchain")
+        wrapped = build_prompt(role, prompt, review_purpose=review_purpose, evidence_copies=profile.evidence,
+                               worktree=str(worktree))
         env = _child_environment()
         env.update(profile.environment)
+        # The process starts in the private runtime directory, never in the
+        # source worktree: see permissions.prepare_permissions.
+        runtime = Path(profile.environment["TMPDIR"])
+        if not runtime.is_dir() or runtime.is_symlink() or runtime.is_relative_to(worktree):
+            raise ValueError("permission preparation must supply a private runtime directory outside the worktree")
         deadline = time.monotonic() + self.timeout_seconds
         result_path = output_dir / "result.json"
-        argv = self._argv(role, worktree, result_path, profile.argv)
+        argv = self._argv(role, profile)
         unit = f"agenc-ircd-agent-{uuid.uuid4().hex}.service" if self.use_systemd else None
         bootstrap = ["/usr/bin/python3", "-I", "-B", "-c", _PERMISSION_BOOTSTRAP,
                      str(output_dir / "permissions-probe.log"), json.dumps(profile.probe_argv), *argv]
@@ -753,12 +783,12 @@ class CodexRunner:
                             raise AgentRunError("cleanup", "cannot persist session launch intent", output_dir) from error
                     try:
                         process = subprocess.Popen(actual_argv, stdin=source, stdout=subprocess.PIPE,
-                                                   stderr=subprocess.PIPE, cwd=worktree, env=env,
+                                                   stderr=subprocess.PIPE, cwd=runtime, env=env,
                                                    start_new_session=True)
                     except OSError as error:
-                        raise AgentRunError("spawn", "cannot start Codex session", output_dir) from error
+                        raise AgentRunError("spawn", "cannot start Claude session", output_dir) from error
                     self._active.add(process)
-                self._stream(process, events, errors, deadline, output_dir, worktree)
+                self._stream(process, events, errors, deadline, output_dir, worktree, result_path)
             try:
                 return load_result(role, result_path, worktree)
             except (OSError, ValueError) as error:
@@ -797,6 +827,10 @@ class CodexRunner:
                         with self._lock:
                             self._active.discard(process)
                             self._registered.discard(process)
+                        # The private runtime directory held only sandbox proxy
+                        # sockets and command temporary files; the session's
+                        # evidence lives in output_dir and is always retained.
+                        shutil.rmtree(profile.environment["TMPDIR"], ignore_errors=True)
             finally:
                 for semaphore in reversed(acquired):
                     semaphore.release()

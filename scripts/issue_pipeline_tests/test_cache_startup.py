@@ -285,10 +285,15 @@ class InstalledColdStartTests(unittest.TestCase):
             with self.states.SupervisorLock(self.config.state / "supervisor.lock"):
                 self.fail("startup preparation and admission escaped the supervisor lock")
         output.mkdir(parents=True)
-        profile = self.permissions.prepare_permissions(worktree, output, role, "offline-codex")
+        launcher = self.home / "trusted-tools" / "srt"
+        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.chmod(0o700)
+        profile = self.permissions.prepare_permissions(worktree, output, role, str(launcher))
         policy = json.loads((output / "permissions.json").read_text())
-        self.assertEqual(policy["filesystem"][str(self.cache)], "read")
-        self.assertEqual(policy["filesystem"][":root"], "deny")
+        filesystem = policy["settings"]["sandbox"]["filesystem"]
+        self.assertIn(str(self.cache), filesystem["allowRead"])
+        self.assertIn(str(self.cache), filesystem["denyWrite"])
+        self.assertIn(str(self.home) + "/", filesystem["denyRead"])
         self.assertEqual(set(policy["environment"]), {"TMPDIR", "CARGO_HOME", "RUSTUP_HOME"})
         for relative in DEPENDENCY_CACHE_PATHS:
             self.assertEqual((self.cache / relative / ".gate-readonly-canary").read_text(), CACHE_CONTROL_TEXT)

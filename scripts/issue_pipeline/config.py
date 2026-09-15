@@ -16,9 +16,10 @@ class Config:
     master_issue: int = 35
     base_branch: str = "main"
     state_dir: str = "~/.local/state/agenc-ircd-pipeline"
-    model: str = "gpt-6-astra"
-    reasoning_effort: str = "xhigh"
-    codex_path: str = "codex"
+    model: str = "claude-fable-5-1"
+    effort: str = "high"
+    claude_path: str = "claude"
+    sandbox_runtime_path: str = "~/.local/share/agenc-ircd-pipeline/tools/node_modules/.bin/srt"
     max_issues: int = 2
     max_sessions: int = 4
     max_attempts: int = 3
@@ -63,10 +64,11 @@ class Config:
             raise ValueError("controller concurrency/retry safety ceiling exceeded")
         if result.max_sessions < result.max_issues:
             raise ValueError("max_sessions must cover max_issues")
-        if not result.model.strip() or result.reasoning_effort not in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        if not result.model.strip() or result.effort not in ("low", "medium", "high", "xhigh", "max"):
             raise ValueError("invalid model/effort configuration")
-        if not result.codex_path.strip() or not result.state_dir.strip():
-            raise ValueError("Codex executable and state directory must be nonempty")
+        if (not result.claude_path.strip() or not result.sandbox_runtime_path.strip()
+                or not result.state_dir.strip()):
+            raise ValueError("Claude Code executable, sandbox runtime and state directory must be nonempty")
         if not Path(result.state_dir).expanduser().is_absolute():
             raise ValueError("state directory must expand to an absolute path")
         if Path(result.state_dir).expanduser() in (Path("/"), Path.home()):
@@ -86,9 +88,15 @@ class Config:
         return self.state / "worktrees"
 
     def executable(self) -> str:
-        candidate = shutil.which(self.codex_path)
+        candidate = shutil.which(self.claude_path)
         if candidate is None:
-            raise ValueError("Codex executable is unavailable: " + self.codex_path)
+            raise ValueError("Claude Code executable is unavailable: " + self.claude_path)
+        return candidate
+
+    def sandbox_runtime(self) -> str:
+        candidate = shutil.which(str(Path(self.sandbox_runtime_path).expanduser()))
+        if candidate is None:
+            raise ValueError("srt sandbox-runtime launcher is unavailable: " + self.sandbox_runtime_path)
         return candidate
 
 

@@ -446,6 +446,13 @@ class GitRepo:
             self._verify_owned(path, None, item.get("head"), records)
             if self.changed_paths(path) or self._merge_head(path) is not None:
                 raise GitError("persistent validation worktree has uncommitted source changes")
+            # Host Git follows symlinks when it appends reflogs or replaces the
+            # index. The gate never exposes this administration writable, but a
+            # planted link here would still be a controller-side write hazard.
+            administration = Path(self.run(["rev-parse", "--absolute-git-dir"], cwd=path).strip())
+            for entry in administration.rglob("*"):
+                if entry.is_symlink():
+                    raise GitError("validation worktree Git administration contains a symlink; refuse host reuse")
             self.run(["checkout", "--no-overwrite-ignore", "--detach", candidate_sha], cwd=path)
             item["head"] = self.head(path)
             if item["head"] != candidate_sha:

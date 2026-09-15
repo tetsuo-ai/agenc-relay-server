@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from issue_pipeline.agents import (AgentRunError, CodexRunner, SessionLifecycleError, _event_type,
+from issue_pipeline.agents import (AgentRunError, ClaudeRunner, SessionLifecycleError, _event_type, _result_failure,
                                    load_result, record_session_quiescent, session_lifecycle, validate_result)
 from issue_pipeline.prompts import build_prompt
 
@@ -184,27 +184,31 @@ class ResultTests(unittest.TestCase):
                         check_children(item)
             check_children(schema)
 
-    def test_event_parser_tolerates_only_observed_web_search_identifier_collision(self):
-        for kind in ("item.started", "item.updated", "item.completed"):
-            raw = ('{"type":' + json.dumps(kind)
-                   + ',"item":{"id":"item_7","type":"web_search","id":"search_2",'
-                     '"query":"benign test query","action":{"type":"search"}}}')
-            self.assertEqual(_event_type(raw), kind)
+    def test_event_parser_rejects_duplicate_keys_and_untyped_events(self):
+        self.assertEqual(_event_type('{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}'), "assistant")
         for raw in (
-            '{"type":"turn.failed","type":"turn.completed"}',
-            '{"type":"turn.completed","status":"failed","status":"complete"}',
-            '{"type":"turn.completed","usage":{"status":"failed","status":"complete"}}',
-            '{"type":"item.started","item":{"id":"one","type":"web_search","id":2}}',
-            '{"type":"item.started","item":{"id":"one","type":"web_search","id":"two","id":"three"}}',
-            '{"type":"item.started","item":{"id":"one","type":"command_execution","id":"two"}}',
-            '{"type":"item.started","item":{"id":"one","type":"web_search","type":"web_search","id":"two"}}',
-            '{"type":"item.started","item":{"id":"one","type":"web_search","id":"two","status":"failed","status":"complete"}}',
-            '{"type":"item.started","item":{"type":"web_search","action":{"id":"one","id":"two"}}}',
-            '{"type":"turn.completed","item":{"id":"one","type":"web_search","id":"two"}}',
-            '{"type":"item.started","item":{},"item":{}}',
+            '{"type":"result","type":"assistant"}',
+            '{"type":"result","subtype":"success","subtype":"error"}',
+            '{"type":"result","structured_output":{"verdict":"approve","verdict":"blocked"}}',
+            '{"type":"user","message":{"content":[{"type":"tool_result","type":"text"}]}}',
+            '{"message":"no type"}', '{"type":7}', '[]', '"result"', '{"type":"result","x":NaN}',
         ):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 _event_type(raw)
+
+    def test_result_events_are_classified_before_any_structured_output_is_trusted(self):
+        self.assertIsNone(_result_failure({"type": "result", "subtype": "success", "is_error": False,
+                                           "structured_output": REVIEWER}))
+        for event, kind in (
+            ({"type": "result", "subtype": "success", "is_error": False}, "result"),
+            ({"type": "result", "subtype": "success", "is_error": False, "structured_output": "text"}, "result"),
+            ({"type": "result", "subtype": "error_max_turns", "is_error": True, "structured_output": REVIEWER}, "agent_failure"),
+            ({"type": "result", "subtype": "success", "is_error": True, "result": "x", "structured_output": REVIEWER}, "agent_failure"),
+            ({"type": "result", "subtype": "error", "is_error": True, "result": "You have hit your usage limit"}, "rate_limited"),
+            ({"type": "result", "subtype": "error_rate_limit", "is_error": True}, "rate_limited"),
+        ):
+            with self.subTest(event=event):
+                self.assertEqual(_result_failure(event)[0], kind)
 
     def test_final_results_still_reject_duplicate_keys_at_every_depth(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -258,31 +262,34 @@ class RunnerTests(unittest.TestCase):
         self.base = Path(self.temporary.name)
         self.worktree = self.base / "source"
         self.worktree.mkdir()
-        self.fake = self.base / "fake-codex"
+        self.fake = self.base / "fake-claude"
         self.make_fake()
         self.permission_mock = mock.patch("issue_pipeline.agents._permissions", side_effect=self.permissions)
         self.permission_mock.start()
         self.addCleanup(self.permission_mock.stop)
 
-    def permissions(self, worktree, output_dir, role, codex_path, *, evidence_paths=()):
+    def permissions(self, worktree, output_dir, role, sandbox_runtime_path, *, evidence_paths=()):
         temporary = output_dir / "tmp"
         temporary.mkdir(mode=0o700)
-        return SimpleNamespace(argv=("-c", f'default_permissions="offline_{role}"'),
+        settings = json.dumps({"sandbox": {"filesystem": {"allowWrite": [str(temporary)]}},
+                               "profile": "offline_" + role})
+        tools = ("Bash", "Read", "Edit", "Write", "Glob", "Grep") if role == "worker" else ("Bash", "Read", "Glob", "Grep")
+        return SimpleNamespace(settings=settings, tools=tools, add_dirs=(str(worktree),),
                                environment={"TMPDIR": str(temporary), "CARGO_HOME": str(temporary / "cargo"),
                                             "RUSTUP_HOME": str(self.base / "rustup")}, profile="offline_" + role,
-                               probe_argv=(sys.executable, "-I", "-c", "pass"))
+                               probe_argv=(sys.executable, "-I", "-c", "pass"), evidence=())
 
     def make_fake(self, body="", result=WORKER):
         source = f"""#!{sys.executable}
 import json, os, pathlib, subprocess, sys, time
 args = sys.argv[1:]
-result_path = pathlib.Path(args[args.index('--output-last-message') + 1])
-capture = {{'argv': args, 'env': dict(os.environ), 'pid': os.getpid(), 'stdin': sys.stdin.read()}}
-(result_path.parent / 'captured.json').write_text(json.dumps(capture))
-print(json.dumps({{'type': 'turn.started'}}), flush=True)
+settings = json.loads(args[args.index('--settings') + 1])
+out_dir = pathlib.Path(settings['sandbox']['filesystem']['allowWrite'][0]).parent
+capture = {{'argv': args, 'env': dict(os.environ), 'pid': os.getpid(), 'stdin': sys.stdin.read(), 'cwd': os.getcwd()}}
+(out_dir / 'captured.json').write_text(json.dumps(capture))
+print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': 'fixture'}}), flush=True)
 {textwrap.dedent(body)}
-result_path.write_text({json.dumps(result)!r})
-print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
+print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'structured_output': {result!r}}}), flush=True)
 """
         self.fake.write_text(source)
         self.fake.chmod(0o700)
@@ -293,35 +300,49 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
             with mock.patch("issue_pipeline.agents.shutil.which", side_effect=lambda path:
                             f"/fake/{path}" if path in {"systemd-run", "systemctl", "env"}
                             else original_which(path)):
-                return CodexRunner(self.fake, "gpt-6-astra", "xhigh", **kwargs)
-        return CodexRunner(self.fake, "gpt-6-astra", "xhigh", **kwargs)
+                return ClaudeRunner(self.fake, "claude-fable-5-1", "high", **kwargs)
+        return ClaudeRunner(self.fake, "claude-fable-5-1", "high", **kwargs)
 
     def test_arguments_existing_auth_environment_and_logs(self):
         out = self.base / "output"
         with mock.patch.dict(os.environ, {"GH_TOKEN": "test-gh-secret", "GITHUB_TOKEN": "test-secret",
-                                          "OPENAI_API_KEY": "test-api-key", "SSH_AUTH_SOCK": "secret",
-                                          "CODEX_HOME": str(self.base / "existing-auth"),
-                                          "CODEX_THREAD_ID": "inherited-worker-thread"}):
+                                          "ANTHROPIC_API_KEY": "test-api-key", "SSH_AUTH_SOCK": "secret",
+                                          "CLAUDE_CONFIG_DIR": str(self.base / "existing-auth"),
+                                          "CLAUDECODE": "1", "SHELL": "/bin/zsh"}):
             home = os.environ["HOME"]
             result = self.runner().run("worker", self.worktree, "Fix bounded operation.", out)
         self.assertEqual(result, WORKER)
         capture = json.loads((out / "captured.json").read_text())
         argv = capture["argv"]
-        for flag in ("--ignore-user-config", "--strict-config", "--ephemeral", "--json"):
+        for flag in ("-p", "--restricted", "--no-session-persistence", "--strict-mcp-config",
+                     "--disable-slash-commands", "--verbose"):
             self.assertIn(flag, argv)
-        self.assertNotIn("--sandbox", argv)
-        self.assertIn('default_permissions="offline_worker"', argv)
-        self.assertIn("agents.enabled=false", argv)
-        self.assertIn("features.hooks=false", argv)
-        self.assertNotIn("--ignore-rules", argv)
-        self.assertNotIn("danger-full-access", argv)
+        self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+        self.assertNotIn("--setting-sources", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-fable-5-1")
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Bash,Read,Edit,Write,Glob,Grep")
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], "Bash,Read,Edit,Write,Glob,Grep")
+        self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1])["required"], ["status", "summary", "acceptance", "tests", "discoveries", "needs_new_phase"])
+        self.assertEqual(json.loads(argv[argv.index("--settings") + 1])["profile"], "offline_worker")
+        self.assertEqual(argv.count("--add-dir"), 1)
+        self.assertEqual(argv[argv.index("--add-dir") + 1], str(self.worktree))
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertNotIn("bypassPermissions", argv)
+        self.assertEqual(capture["cwd"], str(out / "tmp"))
+        self.assertIn("SOURCE_WORKTREE:", capture["stdin"])
+        self.assertIn(json.dumps(str(self.worktree)), capture["stdin"])
         self.assertEqual(capture["env"]["HOME"], home)
-        self.assertEqual(capture["env"]["CODEX_HOME"], str(self.base / "existing-auth"))
-        for key in ("GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "SSH_AUTH_SOCK", "CODEX_THREAD_ID"):
+        self.assertEqual(capture["env"]["CLAUDE_CONFIG_DIR"], str(self.base / "existing-auth"))
+        self.assertEqual(capture["env"]["SHELL"], shutil.which("bash"))
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "SSH_AUTH_SOCK", "CLAUDECODE"):
             self.assertNotIn(key, capture["env"])
         self.assertIn("untrusted task data", capture["stdin"])
         self.assertTrue((out / "events.jsonl").is_file())
         self.assertEqual((out / "events.jsonl").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((out / "result.json").stat().st_mode & 0o777, 0o600)
 
     def test_planner_and_reviewer_are_read_only_fresh_processes(self):
         runner = self.runner()
@@ -337,8 +358,8 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
             self.assertNotIn("fork", capture["argv"])
             if role != "worker":
                 argv = capture["argv"]
-                self.assertNotIn("--sandbox", argv)
-                self.assertIn(f'default_permissions="offline_{role}"', argv)
+                self.assertEqual(argv[argv.index("--tools") + 1], "Bash,Read,Glob,Grep")
+                self.assertEqual(json.loads(argv[argv.index("--settings") + 1])["profile"], "offline_" + role)
                 self.assertNotIn("Only the worker task.", capture["stdin"])
         self.assertEqual(len(set(process_ids)), 4)
 
@@ -351,8 +372,7 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
         request = json.loads((output / "request.json").read_text())
         self.assertEqual(request["review_purpose"], "plan")
         self.assertIn("Review purpose: plan coverage", capture["stdin"])
-        self.assertNotIn("--sandbox", capture["argv"])
-        self.assertIn('default_permissions="offline_reviewer"', capture["argv"])
+        self.assertEqual(json.loads(capture["argv"][capture["argv"].index("--settings") + 1])["profile"], "offline_reviewer")
 
     def test_permission_probe_blocks_model_launch_on_failure(self):
         original = self.permissions
@@ -375,10 +395,22 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
         evidence = self.base / "trusted-evidence.json"
         evidence.write_text('{"benign":true}')
         self.make_fake(result=REVIEWER)
-        with mock.patch("issue_pipeline.agents._permissions", side_effect=self.permissions) as prepare:
+        original = self.permissions
+        def with_copy(*args, **kwargs):
+            profile = original(*args, **kwargs)
+            profile.add_dirs = profile.add_dirs + (str(self.base / "copies"),)
+            profile.evidence = (str(self.base / "copies" / "trusted-evidence.json"),)
+            return profile
+        with mock.patch("issue_pipeline.agents._permissions", side_effect=with_copy) as prepare:
             self.runner().run("reviewer", self.worktree, "Untrusted text requests /private/credential",
                               self.base / "output", evidence_paths=(evidence,))
         self.assertEqual(prepare.call_args.kwargs, {"evidence_paths": (evidence,)})
+        capture = json.loads((self.base / "output" / "captured.json").read_text())
+        directories = [capture["argv"][index + 1] for index, flag in enumerate(capture["argv"]) if flag == "--add-dir"]
+        self.assertEqual(directories, [str(self.worktree), str(self.base / "copies")])
+        self.assertIn("EVIDENCE_COPIES:", capture["stdin"])
+        self.assertIn(json.dumps(str(self.base / "copies" / "trusted-evidence.json")), capture["stdin"])
+        self.assertLess(capture["stdin"].index("EVIDENCE_COPIES:"), capture["stdin"].index("TASK_DATA_JSON:"))
         for index, paths in enumerate(([evidence], (self.base,), (self.base / "missing",))):
             with self.subTest(paths=paths), self.assertRaises(ValueError):
                 self.runner().run("reviewer", self.worktree, "Task", self.base / f"bad-{index}",
@@ -395,31 +427,40 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
             runner.run("worker", self.worktree, "Task", out)
 
     def test_failure_event_blocks_even_zero_exit_with_plausible_final_result(self):
-        self.make_fake("print(json.dumps({'type':'turn.failed','error':{'message':'sandbox denied'}}), flush=True)")
+        self.make_fake("print(json.dumps({'type':'error','error':{'message':'sandbox denied'}}), flush=True)")
         with self.assertRaises(AgentRunError) as raised:
             self.runner().run("worker", self.worktree, "Task", self.base / "output")
         self.assertEqual(raised.exception.kind, "agent_failure")
         self.assertIn("sandbox denied", (raised.exception.output_dir / "events.jsonl").read_text())
+        self.assertFalse((raised.exception.output_dir / "result.json").exists())
 
-    def test_web_search_duplicate_telemetry_does_not_abort_valid_session(self):
-        event = ('{"type":"item.started","item":{"id":"item_7","type":"web_search",'
-                 '"id":"search_2","query":"benign test query","action":{"type":"search"}}}')
+    def test_error_result_is_never_a_result_and_rate_limits_are_distinguished(self):
+        for index, (event, kind) in enumerate((
+            ('{"type":"result","subtype":"error_max_turns","is_error":true,"structured_output":' + json.dumps(WORKER) + '}', "agent_failure"),
+            ('{"type":"result","subtype":"error","is_error":true,"result":"Rate limit reached"}', "rate_limited"),
+            ('{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}\n{"type":"result","subtype":"error","is_error":true,"result":"x"}', "rate_limited"),
+            ('{"type":"result","subtype":"success","is_error":false}', "result"),
+        )):
+            self.make_fake("sys.stdout.write(" + repr(event + "\n") + "); sys.stdout.flush(); sys.exit(0)")
+            with self.subTest(kind=kind), self.assertRaises(AgentRunError) as raised:
+                self.runner().run("worker", self.worktree, "Task", self.base / f"output-{index}")
+            self.assertEqual(raised.exception.kind, kind)
+            self.assertFalse((self.base / f"output-{index}" / "result.json").exists())
+
+    def test_second_result_and_result_without_structured_object_fail_closed(self):
+        second = json.dumps({"type": "result", "subtype": "success", "is_error": False, "structured_output": WORKER})
+        self.make_fake("print(" + repr(second) + ", flush=True)")
+        with self.assertRaises(AgentRunError) as raised:
+            self.runner().run("worker", self.worktree, "Task", self.base / "output")
+        self.assertEqual(raised.exception.kind, "event_json")
+
+    def test_intermediate_events_are_logged_and_do_not_change_the_result(self):
+        event = ('{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash",'
+                 '"input":{"command":"cargo test"}}]}}')
         self.make_fake("print(" + repr(event) + ", flush=True)", result=REVIEWER)
         output = self.base / "output"
         self.assertEqual(self.runner().run("reviewer", self.worktree, "Review.", output), REVIEWER)
         self.assertIn(event + "\n", (output / "events.jsonl").read_text())
-
-    def test_web_search_telemetry_cannot_mask_later_failure_or_ambiguous_completion(self):
-        event = ('{"type":"item.started","item":{"id":"item_7","type":"web_search",'
-                 '"id":"search_2"}}')
-        for index, (ending, kind) in enumerate((
-            ('{"type":"turn.failed","error":{"message":"test failure"}}', "agent_failure"),
-            ('{"type":"turn.failed","type":"turn.completed"}', "event_json"),
-        )):
-            self.make_fake("print(" + repr(event) + ", flush=True)\nprint(" + repr(ending) + ", flush=True)")
-            with self.subTest(kind=kind), self.assertRaises(AgentRunError) as raised:
-                self.runner().run("worker", self.worktree, "Task", self.base / f"output-{index}")
-            self.assertEqual(raised.exception.kind, kind)
 
     def test_truncated_jsonl_and_missing_completed_turn_fail(self):
         for index, body in enumerate(("sys.stdout.write('{\"type\":'); sys.stdout.flush(); sys.exit(0)",
@@ -429,8 +470,8 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
                 self.runner().run("worker", self.worktree, "Task", self.base / f"output-{index}")
             self.assertEqual(raised.exception.kind, "event_json")
 
-    def test_invalid_final_json_and_nonzero_process_exit_fail(self):
-        for index, (body, kind) in enumerate((("result_path.write_text('{'); print(json.dumps({'type':'turn.completed'}), flush=True); sys.exit(0)", "result"),
+    def test_invalid_final_object_and_nonzero_process_exit_fail(self):
+        for index, (body, kind) in enumerate((("print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':{'status':'complete'}}), flush=True); sys.exit(0)", "result"),
                                              ("sys.exit(12)", "exit"))):
             self.make_fake(body)
             with self.assertRaises(AgentRunError) as raised:
@@ -440,7 +481,7 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{}}}}), flush=True)
     def test_timeout_terminates_process_group_and_preserves_logs(self):
         self.make_fake("""
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-(result_path.parent / 'child-pid').write_text(str(child.pid))
+(out_dir / 'child-pid').write_text(str(child.pid))
 time.sleep(30)
 """)
         out = self.base / "output"
@@ -459,7 +500,7 @@ time.sleep(30)
     def test_disk_reserve_crossing_stops_descendants_and_limits_monitor_frequency(self):
         self.make_fake("""
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-(result_path.parent / 'child-pid').write_text(str(child.pid))
+(out_dir / 'child-pid').write_text(str(child.pid))
 time.sleep(30)
 """)
         out = self.base / "output"
@@ -589,8 +630,8 @@ time.sleep(30)
         def fake_popen(argv, **kwargs):
             calls.append(argv)
             self.assertEqual(session_lifecycle(self.base / "output")["state"], "unresolved")
-            codex_start = argv.index(str(self.fake))
-            return original_popen(argv[codex_start:], **kwargs)
+            claude_start = argv.index(str(self.fake))
+            return original_popen(argv[claude_start:], **kwargs)
         def fake_control(argv, **kwargs):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, stdout=SYSTEMD_QUIET, stderr=b"")
@@ -680,10 +721,10 @@ from pathlib import Path
 from unittest import mock
 from types import SimpleNamespace
 sys.path.insert(0, {str(Path(agents.__file__).parent.parent)!r})
-from issue_pipeline.agents import CodexRunner
-runner = CodexRunner({str(self.fake)!r}, 'gpt-6-astra', 'xhigh')
+from issue_pipeline.agents import ClaudeRunner
+runner = ClaudeRunner({str(self.fake)!r}, 'claude-fable-5-1', 'high')
 runner.use_systemd = True
-profile = SimpleNamespace(argv=(), environment={{'TMPDIR': {str(self.base)!r}, 'CARGO_HOME': {str(self.base)!r}, 'RUSTUP_HOME': {str(self.base)!r}}}, probe_argv=())
+profile = SimpleNamespace(settings='{{}}', tools=('Bash',), add_dirs=(), evidence=(), environment={{'TMPDIR': {str(self.base)!r}, 'CARGO_HOME': {str(self.base)!r}, 'RUSTUP_HOME': {str(self.base)!r}}}, probe_argv=())
 def abrupt_crash(*args, **kwargs):
     os.kill(os.getpid(), signal.SIGKILL)
 with mock.patch('issue_pipeline.agents.subprocess.Popen', side_effect=abrupt_crash), mock.patch('issue_pipeline.agents._permissions', return_value=profile):

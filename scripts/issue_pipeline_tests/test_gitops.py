@@ -470,6 +470,30 @@ class GitRepoTests(unittest.TestCase):
         with self.assertRaises(GitError):
             self.repo.prepare_validation_worktree(worker, self.base)
 
+    def test_validation_reuse_refuses_symlinked_git_administration(self) -> None:
+        worker = self.worker()
+        candidate = self.commit(worker)
+        validation = self.owned / "validation"
+        self.repo.prepare_validation_worktree(validation, self.base)
+        administration = Path(git(validation, "rev-parse", "--absolute-git-dir"))
+        host_target = self.parent / "controller-owned.txt"
+        host_target.write_text("controller-owned\n")
+        reflog = administration / "logs" / "HEAD"
+        original = reflog.read_bytes() if reflog.exists() else None
+        reflog.parent.mkdir(exist_ok=True)
+        if reflog.exists():
+            reflog.unlink()
+        reflog.symlink_to(host_target)
+        with self.assertRaisesRegex(GitError, "contains a symlink"):
+            self.repo.prepare_validation_worktree(validation, candidate)
+        self.assertEqual(host_target.read_text(), "controller-owned\n")
+        self.assertEqual(self.repo.head(validation), self.base)
+        reflog.unlink()
+        if original is not None:
+            reflog.write_bytes(original)
+        self.repo.prepare_validation_worktree(validation, candidate)
+        self.assertEqual(self.repo.head(validation), candidate)
+
     def test_generated_tree_cleanup_removes_nested_symlink_without_following_it(self) -> None:
         path = self.worker()
         candidate = self.commit(path)

@@ -46,7 +46,7 @@ class InstallerTests(unittest.TestCase):
         self.sha = git(self.source, "rev-parse", "HEAD")
         self.config = self.parent / "controller.toml"
         self.config.write_text('version = 1\nstate_dir = ' + json.dumps(str(self.state))
-                               + '\nmodel = "gpt-6-astra"\nreasoning_effort = "xhigh"\n')
+                               + '\nmodel = "claude-fable-5-1"\neffort = "xhigh"\n')
         self.config.chmod(0o600)
         self.home_patch = patch("pathlib.Path.home", return_value=self.home)
         self.home_patch.start()

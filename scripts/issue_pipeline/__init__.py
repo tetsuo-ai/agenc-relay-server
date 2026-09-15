@@ -1,1 +1,1 @@
-"""Dependency-aware, evidence-gated Codex issue execution."""
+"""Dependency-aware, evidence-gated Claude Code issue execution."""

@@ -248,8 +248,43 @@ class SandboxPlanTests(unittest.TestCase):
         for target in (self.worktree / "target", self.worktree / "fuzz/target", self.admin,
                        self.worktree / "conformance/evidence/artifacts", self.cargo / "registry/index"):
             self.assertFalse(mounts[str(target)]["readonly"], str(target))
+        # The controller's real Git administration is never a writable source.
+        private = self.output / "git-administration"
+        self.assertEqual(mounts[str(self.admin)]["source"], str(private))
+        for name in ("HEAD", "gitdir", "commondir"):
+            self.assertEqual(mounts[str(self.admin / name)]["source"], str(private / name))
+        self.assertFalse(any(Path(entry["source"]).is_relative_to(self.admin) and not entry["readonly"]
+                             for entry in mounts.values()))
+        self.assertFalse(any(Path(entry["source"]) == self.admin for entry in mounts.values()))
         self.assertFalse(any("docker.sock" in entry["source"] or entry["source"].startswith("/run/")
                              for entry in mounts.values()))
+
+    def test_candidate_metadata_symlink_in_private_copy_never_reaches_host_administration(self):
+        (self.admin / "logs").mkdir()
+        (self.admin / "logs" / "HEAD").write_text("benign reflog\n")
+        self.command()
+        private = self.output / "git-administration"
+        self.assertEqual((private / "logs" / "HEAD").read_text(), "benign reflog\n")
+        host_target = self.home / "host-controller-file"
+        host_target.write_text("controller-owned\n")
+        # A candidate test replacing reflog metadata inside its writable view.
+        (private / "logs" / "HEAD").unlink()
+        (private / "logs" / "HEAD").symlink_to(host_target)
+        with open(private / "logs" / "HEAD", "a") as stream:
+            stream.write("candidate append\n")
+        self.assertEqual(host_target.read_text(), "controller-owned\ncandidate append\n")
+        # Host state is untouched: the real administration keeps its regular file.
+        self.assertFalse((self.admin / "logs" / "HEAD").is_symlink())
+        self.assertEqual((self.admin / "logs" / "HEAD").read_text(), "benign reflog\n")
+        self.assertEqual(sum(1 for _ in self.admin.rglob("*") if _.is_symlink()), 0)
+
+    def test_symlinked_host_administration_is_refused_before_any_copy(self):
+        (self.admin / "logs").mkdir()
+        (self.admin / "logs" / "HEAD").symlink_to(self.home / "host-controller-file")
+        with self.assertRaisesRegex(SandboxFailure, "symlink or special file"):
+            self.command()
+        self.assertFalse((self.output / "git-administration").exists())
+        self.assertIsNone(self.created)
 
     def test_wrong_source_or_state_record_cannot_create_container_authority(self):
         for field, value in (("source", "c" * 40), ("state_dir", "/different-state")):

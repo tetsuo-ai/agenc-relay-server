@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-from .agents import (AgentRunError, CodexRunner, SessionLifecycleError, record_session_quiescent,
+from .agents import (AgentRunError, ClaudeRunner, SessionLifecycleError, record_session_quiescent,
                      session_lifecycle, validate_result)
 from .config import Config, digest_file, private_directory
 from .comments import CommentPublicationError, CommentPublicationInvalid, ensure_comment
@@ -35,6 +35,8 @@ from .containers import (ContainerError, container_cleanup_complete, load_contai
 UNIT = re.compile(r"agenc-ircd-(?:agent|pipeline-gate)-[0-9a-f]{32}\.service\Z")
 MAX_MANAGED_BACKLOG_BYTES = 16 * 1024 * 1024
 
+
+RATE_LIMIT_BACKOFF_SECONDS = 900
 
 class PipelineBlocked(RuntimeError):
     """Keep evidence and source; do not infer completion or weaken a check."""
@@ -294,10 +296,11 @@ class Controller:
         self.repo = repo if repo is not None else ensure_clone(config)
         self.github = github if github is not None else Github(config.repository, cwd=config.clone)
         self.state = State(config.state / "state.sqlite3")
-        self.runner = runner if runner is not None else CodexRunner(
-            config.executable(), config.model, config.reasoning_effort,
+        self.runner = runner if runner is not None else ClaudeRunner(
+            config.executable(), config.model, config.effort,
             max_sessions=config.max_sessions, timeout_seconds=config.agent_timeout_seconds,
-            use_systemd=config.use_systemd, minimum_free_gib=config.minimum_free_gib)
+            use_systemd=config.use_systemd, minimum_free_gib=config.minimum_free_gib,
+            sandbox_runtime_path=config.sandbox_runtime())
         if gate is None:
             from .gate import GateRunner
             gate = GateRunner(config)
@@ -468,7 +471,7 @@ class Controller:
                     self.repo.cleanup_owned(worktree, None, source)
             raise
         validate_result(role, result, worktree)
-        # CodexRunner confirms the entire cgroup is gone before returning.
+        # ClaudeRunner confirms the entire cgroup is gone before returning.
         if writable is None:
             with self.git_lock:
                 if self.repo.head(worktree) != source:
@@ -610,7 +613,7 @@ class Controller:
         return (f"Implements phase {data['phase_index'] + 1}/{len(data['plan']['phases'])} of {task.key}. Refs #{task.issue}.\n\n"
                 f"{phase['name']}\n\nContract and acceptance:\n" + "\n".join("- " + item for item in phase["acceptance"]) +
                 f"\n\nSource `{data['candidate']}`; base `{data['base']}`.\n\n"
-                "Validation: two fresh independent Codex reviews accepted; `AGENC_IRCD_RECORD_GATE=1 bash scripts/check-stage-nine.sh` passed on this committed source. "
+                "Validation: two fresh independent Claude reviews accepted; `AGENC_IRCD_RECORD_GATE=1 bash scripts/check-stage-nine.sh` passed on this committed source. "
                 "Receipt hashes below bind the archived review results, full gate artifact and log. Hosted checks are assessed separately; empty checks and zero-job startup failures are not reported as passing.\n\n"
                 "```json\n" + encode([{"kind": r["kind"], "receipt": r["digest"], "artifacts": r["artifact_hashes"]} for r in proofs]) +
                 "```\n\nRemaining work: " + ("later phases in the parent issue" if data["phase_index"] + 1 < len(data["plan"]["phases"]) else "none within this issue after final acceptance") + ".\n")
@@ -966,7 +969,7 @@ class Controller:
                 if not data.get("worktree"):
                     base = self.fetch()
                     identity = f"i-{task.issue}-p-{data['phase_index'] + 1}-" + uuid.uuid4().hex
-                    branch = "codex/pipeline/" + identity
+                    branch = "claude/pipeline/" + identity
                     path = self.config.worktrees / identity
                     with self.git_lock:
                         self.repo.add_worktree(path, branch, base)
@@ -1091,10 +1094,14 @@ class Controller:
                 self.state.release(task.issue, owner=str(task.issue))
             self.log("claim waits for its owner", issue=task.issue, reason=str(error))
         except AgentRunError as error:
-            failures = data.get("agent_failures", 0) + 1
+            # A usage/rate limit is not a defect of the task: keep its attempt
+            # budget and wait at least the configured backoff before redispatch.
+            limited = error.kind == "rate_limited"
+            failures = data.get("agent_failures", 0) + (0 if limited else 1)
             status = "pending" if failures < self.config.max_attempts and not self.stop.is_set() else "blocked"
+            backoff = max(self.config.poll_seconds, RATE_LIMIT_BACKOFF_SECONDS) if limited else self.config.poll_seconds
             self.checkpoint(task.issue, status, data, agent_failures=failures,
-                            reason=f"Codex session {error.kind}: {error}", retry_after=time.time() + self.config.poll_seconds)
+                            reason=f"Claude session {error.kind}: {error}", retry_after=time.time() + backoff)
             if claimed and not self.stop.is_set():
                 self.state.release(task.issue, owner=str(task.issue))
             self.log("agent session interrupted", issue=task.issue, status=status, kind=error.kind)

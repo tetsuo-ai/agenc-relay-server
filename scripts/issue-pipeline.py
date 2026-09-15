@@ -51,13 +51,15 @@ def parser():
 
 def doctor(config: Config) -> dict:
     commands = {}
-    for name in ("git", "gh", "systemctl", "systemd-run", "docker", "prlimit", "cargo", "rustup", "bash", "python3"):
+    for name in ("git", "gh", "systemctl", "systemd-run", "docker", "prlimit", "cargo", "rustup", "bash", "python3",
+                 "bwrap", "socat"):
         path = shutil.which(name)
         if not path:
             raise PipelineBlocked("missing executable: " + name)
         commands[name] = path
-    commands["codex"] = config.executable()
-    for argv in ([commands["codex"], "login", "status"], ["gh", "auth", "status"],
+    commands["claude"] = config.executable()
+    commands["srt"] = config.sandbox_runtime()
+    for argv in ([commands["claude"], "auth", "status"], ["gh", "auth", "status"],
                  ["systemctl", "--user", "show-environment"]):
         # Authentication/environment output is deliberately not returned or logged.
         subprocess.run(argv, check=True, capture_output=True, timeout=30)
@@ -116,7 +118,7 @@ def doctor(config: Config) -> dict:
             "dependency_edges": sum(len(task.depends_on) for task in graph.tasks),
             "free_disk_gib": round(free, 1), "executables": commands,
             "gate_container": {"daemon": DOCKER_HOST, "image": IMAGE},
-            "limits": {"issues": config.max_issues, "codex_sessions": config.max_sessions, "full_gates": 1},
+            "limits": {"issues": config.max_issues, "model_sessions": config.max_sessions, "full_gates": 1},
             "note": "This does not qualify a source revision or prove external/native requirements."}
 
 
