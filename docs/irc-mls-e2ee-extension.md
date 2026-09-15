@@ -163,6 +163,9 @@ above.
 | `IRC-MLS/1 reinit disposition` | `IrcReInitDispositionVoteTBS` | finality device |
 | `IRC-MLS/1 reinit activation` | `IrcReInitActivationTBS` | sequencer |
 | `IRC-MLS/1 reinit attempt abort` | `IrcReInitAbortTBS` | sequencer |
+| `IRC-MLS/1 recovery submission` | `IrcRecoverySubmissionTBS` | device |
+| `IRC-MLS/1 leaf membership` | `IrcLeafMembershipProofTBS` | device |
+| `IRC-MLS/1 leaf membership possession` | `IrcLeafMembershipProofTBS` | old leaf |
 
 An implementation **MUST NOT** infer raw-TBS signing for an omitted case. A
 future signature adds a new profile version or an explicitly registered label.
@@ -232,6 +235,8 @@ backslash is not part of any hashed input:
 | `federation_snapshot_digest` | `SHA256("IRC-MLS/1 federation snapshot" \|\| TLS-encode(state_generation, delivery_generation, ordered_state_object_ids))` |
 | `acknowledgement_set_digest` | `SHA256("IRC-MLS/1 commit acknowledgement set" \|\| TLS-encode(canonical_IrcCommitAckTBS_vector))` |
 | `reinit_acknowledgement_set_digest` | `SHA256("IRC-MLS/1 reinit acknowledgement set" \|\| TLS-encode(canonical_IrcReInitAckTBS_vector))` |
+| `recovery_submission_id` | `SHA256("IRC-MLS/1 recovery submission id" \|\| encoded_IrcRecoverySubmissionTBS)` |
+| `leaf_membership_id` | `SHA256("IRC-MLS/1 leaf membership id" \|\| encoded_IrcLeafMembershipProofTBS)` |
 
 Every carried ID is recomputed. Parsed structures consume all input and
 re-encode to identical bytes. Two records are the same record exactly when
@@ -276,6 +281,13 @@ The hash prevents accidental mixed-revision negotiation; it is not evidence
 that a peer implements the document faithfully and does not replace TLS peer
 authentication, object validation, conformance evidence, or independent
 review.
+
+The public-evidence revision that added Section 12.5.1 and Sections 13.7.2
+through 13.7.5 keeps profile version 1 and changes only this hash. A peer
+that presents the previous hash is refused by the exact-match CAP and ECAP
+rule of Section 22. Evidence recorded under the previous hash remains valid
+historical evidence for that revision; it is never re-admitted or
+reinterpreted under this one.
 
 ## 3. Goals
 
@@ -2327,7 +2339,8 @@ enum {
     sequencer_record(25), device_attach_challenge(26), device_attach(27),
     root_binding_lock(28), federation_state(29), federation_origin(30),
     federation_request(31), federation_result(32), federation_event(33),
-    policy(34)
+    policy(34), recovery_submission(35), witness_resolution(36),
+    leaf_membership_proof(37)
 } IrcWireObjectKind;
 
 struct {
@@ -2357,6 +2370,9 @@ never reaches fanout or sequencing.
 | `EGROUP SUBMIT REINIT ACTIVATE` | `reinit_activation_request`: `IrcReInitActivationRequest` | `MAX_REINIT_OBJECT` | attached continuing old-group device | `REINIT-ACTIVATED` or `PENDING` |
 | `EGROUP SUBMIT REINIT ABORT` | `reinit_abort_request`: `IrcReInitAbortRequest` | `MAX_REINIT_OBJECT` | attached old-group device | `REINIT-ABORTED` or `PENDING` |
 | `EGROUP SUBMIT POLICY` | `policy`: `IrcPolicy` | `MAX_POLICY_OBJECT` | attached, roster-active bound device; approvals verified against retained rosters and the binding's policy chain | `STORED POLICY` |
+| `EGROUP SUBMIT MEMBERSHIP` | `leaf_membership_proof`: `IrcLeafMembershipProof` | `MAX_LEAF_MEMBERSHIP_OBJECT` | attached device whose Device ID equals the proof's and whose account is a principal of the current binding | `STORED MEMBERSHIP` |
+| `EGROUP SUBMIT RECOVERY` | `recovery_submission`: `IrcRecoverySubmission` | `MAX_RECOVERY_SUBMISSION_OBJECT` | attached device of a binding-principal account while the Section 13.7.1 gate is `pending` | `RECOVERY-ACCEPTED` |
+| `EGROUP SUBMIT RECOVERY-ELEMENT` | the kind named by the accepted submission: `sequencer_record`, `close_authorization`, or the referenced object's existing kind | that kind's existing limit | the submitting device of the named open submission | `RECOVERY-EXTENDED`, `RECOVERY-CLOSED`, or `RECOVERY-CONFLICT` |
 | `EGROUP BIND` | `conversation_binding`: `IrcConversationBindingPackage` | `MAX_BINDING_OBJECT` | reservation owner and complete binding approvals | `BOUND` |
 | `EGROUP CLOSE` | `close_authorization`: `IrcCloseAuthorization` | `MAX_CLOSE_OBJECT` | old-policy authorization and finality reference | `CLOSED` |
 | `EKEY PUBLISH IDENTITY` | `root_identity`: `IrcRootIdentity` | `MAX_IDENTITY_OBJECT` | same authenticated Account ID | `STORED` |
@@ -2378,8 +2394,9 @@ exact named certificate types; `sequencer_record` is `IrcSequencerRecord`;
 `device_attach_challenge` is `IrcDeviceAttachChallenge`; and
 `root_binding_lock` is `IrcRootBindingLock`. S2S-only kinds map exactly to
 `IrcFederationRouteState`, `IrcFederationOrigin`, `IrcFederationRequest`,
-`IrcFederationResult`, and `IrcFederationEvent`. No other type-to-kind mapping
-is legal; each S2S control envelope is bounded by
+`IrcFederationResult`, `IrcFederationEvent`, and, for `witness_resolution`,
+the Section 12.5.1 `IrcFederationWitnessResolution`. No other type-to-kind
+mapping is legal; each S2S control envelope is bounded by
 `MAX_FEDERATION_CONTROL_OBJECT` and transports any larger payload as its
 separately bounded referenced object. `reservation` uses
 `MAX_RESERVATION_OBJECT`; root chains use `MAX_ROOT_CHAIN_OBJECT`; device
@@ -2419,6 +2436,9 @@ EGROUP SUBMIT REINIT ACK <conversation-id>
 EGROUP SUBMIT REINIT ACTIVATE <conversation-id>
 EGROUP SUBMIT REINIT ABORT <conversation-id>
 EGROUP SUBMIT POLICY <conversation-id>
+EGROUP SUBMIT MEMBERSHIP <conversation-id>
+EGROUP SUBMIT RECOVERY <conversation-id>
+EGROUP SUBMIT RECOVERY-ELEMENT <conversation-id> <submission-id>
 EGROUP FETCH OBJECT <conversation-id> <object-id>
 EGROUP FETCH AUTHORIZATIONS <conversation-id> <candidate-id> <cursor-or-star>
 EGROUP FETCH ACKS <conversation-id> <candidate-or-reinit-attempt-id> <cursor-or-star>
@@ -2431,6 +2451,11 @@ contains only `commit_ack` objects; an attempt page contains only `reinit_ack`
 objects. It never mixes the two kinds. An unknown selector returns
 `EMPTY ACKS`; a selector matching both namespaces or a returned object whose
 signed parent differs is a fatal semantic-ID collision, not an ambiguous page.
+
+`SUBMIT MEMBERSHIP` stores one Section 13.7.3 leaf-membership proof.
+`SUBMIT RECOVERY` and `SUBMIT RECOVERY-ELEMENT` carry the Section 13.7.4
+recovery evidence for a route whose Section 13.7.1 gate is `pending`; every
+other `EGROUP` mutation of such a route is refused with `E2EE_ROUTE_INVALID`.
 
 The reservation and close objects are:
 
@@ -2691,6 +2716,11 @@ Extension success responses are server-prefixed and use these fixed forms:
 @label=<label> :server EGROUP CLOSED <conversation-id> <close-id>
 @label=<label> :server EGROUP STORED AUTHORIZATION <conversation-id> <candidate-id> <approval-object-id>
 @label=<label> :server EGROUP STORED POLICY <conversation-id> <policy-id> <policy-object-id>
+@label=<label> :server EGROUP STORED MEMBERSHIP <conversation-id> <leaf-membership-id> <membership-object-id>
+@label=<label> :server EGROUP RECOVERY-ACCEPTED <conversation-id> <submission-id>
+@label=<label> :server EGROUP RECOVERY-EXTENDED <conversation-id> <route-sequence> <record-id>
+@label=<label> :server EGROUP RECOVERY-CLOSED <conversation-id> <close-id>
+@label=<label> :server EGROUP RECOVERY-CONFLICT <conversation-id> <route-sequence> <first-record-id> <second-record-id>
 @label=<label> :server EGROUP ACKED <conversation-id> <candidate-id> <ack-object-id>
 @label=<label> :server EGROUP PENDING <conversation-id> <FINALIZATION|ABORT|REINIT-ATTEMPT|REINIT-ACTIVATE|REINIT-ABORT> <object-id>
 @label=<label> :server EGROUP FINALIZED <conversation-id> <resulting-epoch> <finalization-id> <certificate-object-id>
@@ -2733,7 +2763,13 @@ sequence, and 43-character cursor. It is 168 non-tag bytes including CRLF. An
 extension server prefix is at most
 `MAX_E2EE_SERVER_PREFIX_BYTES`; every production above and below must remain
 at most 512 non-tag bytes including that prefix and CRLF. An implementation
-generates and tests each exact bound rather than truncating a parameter.
+generates and tests each exact bound rather than truncating a parameter. The
+longest recovery command, `EGROUP SUBMIT RECOVERY-ELEMENT` with its
+conversation ID and submission ID, is 99 non-tag bytes including CRLF, and the
+longest recovery success body, `RECOVERY-CONFLICT` with its conversation ID,
+20-digit sequence, and two record IDs, is 177 bytes before the prefix and
+CRLF; neither exceeds the existing maxima, so the published wire-budget table
+is unchanged by them.
 
 `key-package-ref` is unpadded base64url of the exact RFC 9420 `KeyPackageRef`;
 its decoded length is the selected suite's hash length and is not assumed to
@@ -2780,7 +2816,8 @@ IDs that the client cannot resolve to authenticated bytes.
 `REINIT-ABORT-REQUEST`, `REINIT-ABORT-CERTIFICATE`, `SEQUENCER-RECORD`,
 `DEVICE-ATTACH-CHALLENGE`, `DEVICE-ATTACH`, `BINDING-LOCK`,
 `FEDERATION-STATE`, `FEDERATION-ORIGIN`, `FEDERATION-REQUEST`,
-`FEDERATION-RESULT`, or `FEDERATION-EVENT`; these map by ordinal to the
+`FEDERATION-RESULT`, `FEDERATION-EVENT`, `POLICY`, `RECOVERY-SUBMISSION`,
+`WITNESS-RESOLUTION`, or `LEAF-MEMBERSHIP-PROOF`; these map by ordinal to the
 registry in Section 11.4. `scope-token` is a fresh 16-byte response-scope ID in
 unpadded base64url, not a repeated Account ID. The explicit object ID must equal the
 tag's object ID on every fragment. All fragments for an object stay in one
@@ -2999,6 +3036,21 @@ star-event-id = "*" / event-id
 entry-count = uint32-dec
 snapshot-cursor = hash-token
 next-snapshot-cursor = "*" / snapshot-cursor
+submission-id = hash-token
+record-id     = hash-token
+first-record-id = hash-token
+second-record-id = hash-token
+leaf-membership-id = hash-token
+membership-object-id = hash-token
+resolution-token = id16-token
+resolution-object-id = hash-token
+record-object-id = hash-token
+expected-head-id = hash-token
+new-head-id   = hash-token
+expected-sequence = uint64-dec
+new-head-sequence = uint64-dec
+entry-sequence = uint32-dec
+record-count  = uint32-dec
 mailbox-kind  = "APPLICATION" / "BINDING" / "WELCOME" / "STAGED-REINIT"
 ```
 
@@ -3713,7 +3765,8 @@ enum {
     attach_finish(32), claim_package(33), claim_status(34),
     publish_package(35), revoke_package(36), deliver_binding(37),
     deliver_welcome(38), fetch_mailbox(39), acknowledge_mailbox(40),
-    submit_policy(41)
+    submit_policy(41), submit_recovery(42), submit_recovery_element(43),
+    submit_membership(44)
 } IrcFederationOpcode;
 
 struct {
@@ -3758,6 +3811,9 @@ forbidden:
 | `submit_reinit_activate` | old conversation ID | `reinit_activation_request` |
 | `submit_reinit_abort` | old conversation ID | `reinit_abort_request` |
 | `submit_policy` | conversation ID | `policy` |
+| `submit_recovery` | conversation ID | `recovery_submission` |
+| `submit_recovery_element` | conversation ID, submission ID | `sequencer_record`, `close_authorization`, or the referenced object's existing kind, exactly as the accepted submission names |
+| `submit_membership` | conversation ID | `leaf_membership_proof` |
 | `fetch_object` | conversation ID, object ID | none |
 | `fetch_authorizations` | conversation ID, candidate ID, cursor | none |
 | `fetch_acks` | conversation ID, candidate-or-ReInit-attempt ID, cursor | none |
@@ -3790,7 +3846,7 @@ enum {
     store_authorization(1), store_identity(2), store_roster(3),
     store_capabilities(4), store_package(5), store_application(6),
     store_binding(7), store_welcome(8), store_staged_reinit(9),
-    store_policy(10)
+    store_policy(10), store_membership(11)
 } IrcFederationStoreKind;
 
 enum {
@@ -3820,7 +3876,8 @@ enum {
     attach_challenge(11), revoked(12), reserved(13), finalized(14),
     aborted(15), claimed(16), object_page(17), mailbox_page(18),
     reinit_staged(19), reinit_acked(20), reinit_activated(21),
-    reinit_aborted(22), mailbox_acked(23)
+    reinit_aborted(22), mailbox_acked(23), recovery_accepted(24),
+    recovery_extended(25), recovery_closed(26), recovery_conflict(27)
 } IrcFederationResultKind;
 
 struct {
@@ -3885,6 +3942,10 @@ field conflict is a fatal peer violation.
 | `reinit_activated` | old conversation ID, new conversation ID, activation ID, certificate object ID |
 | `reinit_aborted` | old conversation ID, ReInit attempt ID, abort ID, certificate object ID |
 | `mailbox_acked` | delivery token, object ID |
+| `recovery_accepted` | conversation ID, submission ID |
+| `recovery_extended` | conversation ID, route sequence, record ID |
+| `recovery_closed` | conversation ID, close ID |
+| `recovery_conflict` | conversation ID, route sequence, first record ID, second record ID |
 
 Every opcode permits `failed`. A failed result has
 `coordinator_state_generation=0`, an empty completion Event ID, empty snapshot
@@ -3937,6 +3998,9 @@ home copy is the completion event; `generic` means a separate home-only
 | `deliver_welcome` | `stored(store_welcome)` or `stored(store_staged_reinit)` matching its payload | generic |
 | `fetch_mailbox` | `mailbox_page` or exactly one selected `empty(empty_application)`, `empty(empty_binding)`, `empty(empty_welcome)`, or `empty(empty_staged_reinit)` | generic for `mailbox_page`, none for `empty` |
 | `acknowledge_mailbox` | `mailbox_acked` | generic |
+| `submit_recovery` | `recovery_accepted` | generic |
+| `submit_recovery_element` | `recovery_extended`, `recovery_closed`, or `recovery_conflict` | generic for `recovery_extended` and `recovery_conflict`; `semantic:route_state_changed` for `recovery_closed` |
+| `submit_membership` | `stored(store_membership)` | generic |
 
 For `accepted_event`, the encoded event ID equals the top-level
 `completion_event_id`. A generic completion's event arm repeats
@@ -4219,9 +4283,10 @@ semantic event that does not extend the head is a witness violation: the edge
 produces no client output and no EACK, records a durable `witness/v1` row
 naming the conversation ID, the expected next position and head ID, and the
 observed sequence, identifier, and asserted predecessor, and nothing else,
-then closes the link so the route reads `E2EE_SYNCING` until a snapshot that
-extends the witnessed head arrives. Logs carry only the closure, never an
-identifier. The witness cannot detect a record the coordinator never
+then closes the link so the route reads `E2EE_SYNCING` until the Section
+12.5.1 witness resolution installs a delivered chain that extends the
+witnessed head; a route-state snapshot alone never resolves the row. Logs
+carry only the closure, never an identifier. The witness cannot detect a record the coordinator never
 delivers; it detects every fork and every skipped position.
 Cross-profile parts instead stage and commit under the base Section-20.8
 combined transaction; no individual part advances this cursor or emits EACK.
@@ -4560,6 +4625,93 @@ traffic may continue only when no removal, compromise, or membership
 uncertainty is pending. Ordinary IRC collision rules never merge encrypted
 membership or inject old ciphertext into a new instance.
 
+#### 12.5.1 Edge witness resolution
+
+A durable `witness/v1` row blocks a conversation until the coordinator proves
+how the retained chain continues from the witnessed head. That proof travels
+in the only frame family a blocked edge accepts for that conversation:
+
+```text
+struct {
+    uint16 profile_version;
+    opaque network_id[32];
+    opaque coordinator_server_id[16];
+    opaque target_server_id[16];
+    opaque conversation_id[32];
+    opaque resolution_token[16];
+    uint64 expected_sequence;
+    opaque expected_head_id[32];
+    uint32 record_count;
+    uint64 new_head_sequence;
+    opaque new_head_id[32];
+    opaque record_object_ids<0..32768>;
+} IrcFederationWitnessResolution;
+```
+
+`record_object_ids` is exactly `record_count` concatenated 32-byte object IDs
+of `sequencer_record` objects in chain order, and `record_count` is at most
+`MAX_WITNESS_RESOLUTION_RECORDS`, so the vector fits the control envelope. The
+wire kind is `witness_resolution`; like every S2S control envelope the object
+is bounded by `MAX_FEDERATION_CONTROL_OBJECT`. The S2S lines are:
+
+```text
+:<edge-sid> EWITNESS REQUEST <coordinator-server-id> <conversation-id> <expected-sequence> <expected-head-id>
+@agenc.ag/e2ee=<fragment> :<coordinator-sid> EWITNESS BEGIN <target-server-id> <conversation-id> <resolution-token> <resolution-object-id>
+@agenc.ag/e2ee=<fragment> :<coordinator-sid> EWITNESS ENTRY <target-server-id> <resolution-token> <entry-sequence> <record-object-id>
+:<coordinator-sid> EWITNESS END <target-server-id> <resolution-token> <record-count>
+:<edge-sid> EWITNESS RESOLVED <coordinator-server-id> <conversation-id> <resolution-token> <new-head-sequence> <new-head-id>
+```
+
+After profile activation and `ERESUME OK` on a same-incarnation link, the edge
+sends one `EWITNESS REQUEST` for every durable `witness/v1` row, naming the
+row's expected next position and head ID. `EWITNESS BEGIN` carries exactly one
+`witness_resolution` object whose coordinator, target, conversation, token,
+expected sequence, expected head, and record count equal the line and the
+request. `resolution_token` is fresh per link incarnation and identifies one
+open resolution; at most one resolution is open per conversation per link,
+and a token from an earlier incarnation is refused. Each `EWITNESS ENTRY`
+carries one `sequencer_record` object whose object ID equals the
+`record_object_ids` entry at `entry-sequence`, counted from zero and
+contiguous. `EWITNESS END` completes the set and its count equals
+`record_count`. The edge answers `EWITNESS RESOLVED` only after the durable
+installation below; a repeated `RESOLVED` for an installed token is
+idempotent. Every line fits the 512-byte non-tag ceiling under
+`MAX_E2EE_SERVER_PREFIX_BYTES`, and one resolution set is at most
+`MAX_WITNESS_RESOLUTION_BYTES` of complete `sequencer_record` objects.
+
+The edge validates the delivered records exactly as Section 12.2 and the
+witness rules above require:
+
+1. While any `witness/v1` row is unresolved, the edge accepts only `EWITNESS`
+   frames for conversations that have a durable row and refuses every other
+   companion frame exactly as before; the route continues to read
+   `E2EE_SYNCING`.
+2. The first record occupies `expected_sequence` and, for a candidate record,
+   names `expected_head_id` as its predecessor; every later record has
+   sequence one greater than the previous record and names that record's
+   semantic ID as its predecessor.
+3. Every record verifies under a sequencer credential of the key set
+   negotiated on the current link, including the overlapping successor during
+   `MAX_SEQUENCER_KEY_OVERLAP`; a record under any other key is a violation.
+4. The last record's recomputed semantic ID equals `new_head_id` and its
+   sequence equals `new_head_sequence`.
+
+When every check passes, one durable edge transaction deletes the row and
+installs `(new_head_sequence, new_head_id)` as the witnessed head; only then
+is `RESOLVED` sent, and a later route-state cut naming that head or a later
+one is accepted under the ordinary rules. A `record_count` of zero means the
+coordinator holds no record beyond the expected position: the row is retained
+unchanged and the edge repeats its request after
+`MAX_WITNESS_RESOLUTION_SECONDS`. A record that verifies at the expected
+position but names a predecessor other than `expected_head_id` is an
+unresolvable fork: the edge durably marks the row `conflict`, keeps that
+conversation reading `E2EE_SYNCING` permanently with no head change, resumes
+every other conversation, and offers no administrator or maintenance command
+that clears that mark. Any other failure closes the link as a profile
+violation and retains the row. The witness still cannot detect a record the
+coordinator never delivers; a resolution proves continuity of what was
+delivered, never completeness.
+
 ## 13. Group lifecycle
 
 ### 13.1 Device provisioning
@@ -4821,9 +4973,13 @@ An ordinary live route is `normal`. Restoring any nonterminal route writes
 `pending` under the new daemon recovery epoch with the exact authenticated
 source heads and source guard hash. Pending rejects application ciphertext,
 new receipts/sequencer records, membership, policy, route, and security-state
-mutation. It accepts only reads of already-known public objects and
+mutation. It accepts only reads of already-known public objects,
 byte-identical re-upload of previously signed evidence whose complete chain
-extends a stored head; the restored server never signs a missing link.
+extends a stored head, the Section 13.7.4 recovery submission that carries
+such evidence, and the Section 12.5.1 witness resolution that delivers it to
+a blocked edge. `EGROUP SUBMIT MEMBERSHIP` and every other companion mutation
+of a `pending` route are refused with `E2EE_ROUTE_INVALID`, and the restored
+server never signs a missing link.
 
 A complete companion-valid chain to an already finalized terminal close may
 atomically install the evidence and set `closed`; it never returns the old
@@ -4834,6 +4990,293 @@ confirmation and renewed out-of-band verification. No administrator override
 clears, rewrites, or downgrades this gate. These rules narrow every ordinary
 recovery path in this document and never relax its signature, finality, or
 client state-loss requirements.
+
+#### 13.7.2 Public proof inputs and validation owners
+
+Every transition a restored server may adopt is proved by public objects it
+can fetch or receive, authorized by prior state it already holds. Publication
+of an object, or of a matching digest, never implies adoption:
+
+| Transition | Public proof inputs | Authorizing prior state |
+| --- | --- | --- |
+| initial authority at the pinned genesis binding | the `conversation_binding` package, its exact context-core bytes named by `context_core_id`, the generation-zero `policy` object, the exact `IrcSequencerCredential` bytes, and one `root_identity` plus `device_roster` object per binding principal | the independently pinned source binding of the restore: `restored_binding_id` and `source_rollback_guard_hash` of the durable gate, never the objects themselves |
+| bootstrap activation | the genesis-epoch `candidate_record` and `finalization_record` at route sequences zero and one with the finalization's complete ACK-set digest | the initial-authority row: the receipt and certificate verify under the pinned sequencer credential at exactly the next position |
+| policy transition | the `policy` object with its approvals and the `candidate_record` and `finalization_record` that commit it | the retained finalized policy chain head and the roster heads at the record's validation time |
+| roster transition | the `device_roster` object and the finalized record committing the roster head | the previous root-signed roster and the retained root identity chain |
+| root continuity transition | the successor `root_identity` in the account root chain and the finalized record | the previous root's continuity signature over the successor |
+| binding transition | the successor `conversation_binding` package and the finalized record | the retained current binding and its approvals under the current policy |
+| sequencer credential transition | the successor `IrcSequencerCredential` and the finalized GroupContextExtensions record | the previous credential's continuity signature and the old-policy-authorized finalization |
+| ReInit target authorization | the `reinit_attempt_record` and the authorizing old-group finalization | the retained old finalized state and the `reinit_attempt_authorization_id` it names |
+| ReInit activation | the `reinit_activation_record` with its complete ReInit ACK set and disposition votes | the retained ReInit attempt receipt and the old-policy finality council |
+| terminal close | the `close_authorization` object | the finalized record named by `authorizing_terminal_id` and the last finalized policy's controller rule |
+
+The restored server derives every authorizing prior state from the durable
+`E2eeServerRecoveryGate`, its retained finalized records, and the credentials
+pinned by them. Each row's inputs are adopted only when they verify under
+that state at exactly the next chain position.
+
+Every field of the carriers defined below has one validation owner and one
+evidence class. Cryptographic finality means a signature or chain that the
+owner verifies under a credential it already trusts. A server-visible
+attestation is a check the owner performs against retained public state and
+that can be wrong only if that retained state is wrong. An endpoint-only MLS
+check is one no server can perform and none claims:
+
+| Requirement | Carrier field or object | Validation owner | Evidence class |
+| --- | --- | --- | --- |
+| submission names this network and conversation | `IrcRecoverySubmissionTBS` `profile_version`, `network_id`, `conversation_id` | coordinator | server-visible attestation |
+| submission targets the exact restored route | `IrcRecoverySubmissionTBS` `recovery_epoch`, `restored_binding_id`, `restored_accepted_state_id`, `restored_sequencer_head_id`, `source_rollback_guard_hash` equal the durable gate | coordinator | server-visible attestation |
+| submission extends the stored head | `IrcRecoverySubmissionTBS` `route_sequence`, `predecessor_record_id` | coordinator | server-visible attestation |
+| submission names one element | `IrcRecoverySubmissionTBS` `element_kind`, `element_object_kind`, `element_object_id`; the element hashes to that ID | coordinator | server-visible attestation |
+| submitter is an authorized principal device | `IrcRecoverySubmissionTBS` `account_id`, `device_id`, and `IrcRecoverySubmission` `device_signature` under the retained roster | coordinator | server-visible attestation |
+| record element continues the chain | `record_element`: the `sequencer_record` verifies under the credential committed for its position | coordinator | cryptographic finality |
+| close element closes the chain | `close_element`: the `close_authorization` approvals satisfy the retained old policy and name the head finalization | coordinator | cryptographic finality |
+| referenced object supports a record | `reference_element`: the object hashes to the ID the referencing record names | coordinator | server-visible attestation |
+| resolution is addressed to this link | `IrcFederationWitnessResolution` `coordinator_server_id`, `target_server_id`, `conversation_id`, `resolution_token` | edge | server-visible attestation |
+| resolution starts at the witnessed head | `IrcFederationWitnessResolution` `expected_sequence`, `expected_head_id` equal the durable row | edge | server-visible attestation |
+| delivered records continue the chain | `IrcFederationWitnessResolution` `record_count`, `record_object_ids` and each delivered `sequencer_record` under the negotiated key set | edge | cryptographic finality |
+| resolution ends at the claimed head | `IrcFederationWitnessResolution` `new_head_sequence`, `new_head_id` equal the last verified record | edge | cryptographic finality |
+| proof names this network and conversation | `IrcLeafMembershipProofTBS` `profile_version`, `network_id`, `conversation_id` | coordinator | server-visible attestation |
+| proof identifies one old leaf | `IrcLeafMembershipProofTBS` `epoch`, `leaf_index`, `old_credential_hash`, `leaf_signature_scheme`, `leaf_signature_key` | coordinator against the ACK TBS and the possession signature | server-visible attestation |
+| proof binds an active device | `IrcLeafMembershipProofTBS` `account_id`, `device_id`, `root_generation`, `root_fingerprint`, `roster_generation`, `roster_id`, `credential_generation` and `IrcLeafMembershipProof` `device_signature` | coordinator against the retained roster and root chain | server-visible attestation |
+| proof states a disposition | `IrcLeafMembershipProofTBS` `disposition`, `removal_finalization_id` and `IrcLeafMembershipProof` `possession_signature` | coordinator against retained finalized records | server-visible attestation |
+| leaf is actually in the tree at that epoch | the MLS ratchet tree | endpoint | endpoint-only MLS check |
+| ACK set covers every UpdatePath copath | the old tree and staged Commit | endpoint | endpoint-only MLS check |
+| exact continuing set of a ReInit | the old tree, the successor tree, and the Welcome set | endpoint | endpoint-only MLS check |
+
+The expected recovery epoch, source rollback guard hash, restored binding,
+state, and head IDs, and the sequencer key set are taken only from the
+durable `E2eeServerRecoveryGate`, the retained route state, and the
+ECAP-negotiated key set, never from uploaded evidence.
+
+#### 13.7.3 Leaf-membership proofs
+
+An ordinary Commit ACK or ReInit ACK is signed by an old MLS leaf key the
+server does not otherwise know. A leaf-membership proof gives the server a
+public, device-attested mapping from an attached device to that leaf so the
+ACK signer can be identified without any private MLS state:
+
+```text
+enum { continuing(1), removed(2) } IrcLeafDispositionKind;
+
+struct {
+    uint16 profile_version;
+    opaque network_id[32];
+    opaque conversation_id[32];
+    uint64 epoch;
+    uint32 leaf_index;
+    opaque old_credential_hash[32];
+    SignatureScheme leaf_signature_scheme;
+    opaque leaf_signature_key<1..255>;
+    opaque account_id<1..255>;
+    opaque device_id[16];
+    uint64 root_generation;
+    opaque root_fingerprint[32];
+    uint64 roster_generation;
+    opaque roster_id[32];
+    uint64 credential_generation;
+    IrcLeafDispositionKind disposition;
+    opaque removal_finalization_id[32];
+} IrcLeafMembershipProofTBS;
+
+struct {
+    IrcLeafMembershipProofTBS tbs;
+    opaque device_signature[64];
+    opaque possession_signature<0..255>;
+} IrcLeafMembershipProof;
+```
+
+`epoch` is the MLS epoch in which the leaf at `leaf_index` holds the
+credential whose `old_credential_hash` and raw public `leaf_signature_key`
+the proof carries; the account, device, root, roster, and credential
+generation fields equal the leaf authorization of that credential. The device
+signs with label `IRC-MLS/1 leaf membership`. A `continuing` proof also
+carries a nonempty `possession_signature` by the old leaf key with label
+`IRC-MLS/1 leaf membership possession`, verifiable under the carried public
+key, and has an all-zero `removal_finalization_id`. A `removed` proof carries
+an empty possession field and names the retained finalized record after
+which the leaf is gone. `leaf_membership_id` is the Section 2.2 hash of the
+TBS. The wire kind is `leaf_membership_proof`, the object is at most
+`MAX_LEAF_MEMBERSHIP_OBJECT`, and it carries only a public leaf key and
+digests: no ratchet tree, epoch secret, private key, or decrypted
+GroupContext appears in it.
+
+The server applies these rules:
+
+- A proof is durably stored before any ACK it authenticates. A `commit_ack`
+  or `reinit_ack` signer is identified by the stored `continuing` proof whose
+  `(leaf_index, old_credential_hash)` equals the ACK TBS values and whose
+  `epoch` is not later than the ACK's prior epoch; the server verifies the
+  ACK's `old_leaf_signature` under that proof's public key and classifies the
+  result as a server-visible attestation. An ACK with no such stored proof is
+  refused with `E2EE_BINDING_AUTH_INVALID` and consumes no state.
+- The proof's device must be active in the retained roster named by
+  `roster_id` at the record's validation time, so a proof or ACK from a
+  revoked device is refused.
+- Two `continuing` proofs for one `(leaf_index, old_credential_hash)` from
+  different devices, or one device holding `continuing` proofs for two leaf
+  indexes at one epoch, are a duplicate continuing leaf and are refused with
+  `E2EE_OPERATION_CONFLICT`; the earlier stored proof is unchanged.
+- A later proof for the same leaf and device with a higher `epoch` replaces
+  the earlier one; a byte-identical resubmission returns the same
+  `STORED MEMBERSHIP` reply without state change; a differing proof at the
+  same epoch is refused with `E2EE_OPERATION_CONFLICT`.
+- A `reinit_activation_request` that lacks a proof-backed ACK for any stored
+  `continuing` proof not superseded by a `removed` proof from the same device
+  is refused as a missing continuing leaf with `E2EE_BINDING_AUTH_INVALID`.
+- The server relies on `continuing` proofs only to identify ACK signers and
+  on `removed` proofs only to shrink its expected ReInit continuing set. The
+  exact continuing set, copath coverage, and removal outcomes remain
+  endpoint-only MLS checks; the server check is a filter, never authority.
+
+Proofs are stored under the conversation and fetched only through
+`EGROUP FETCH OBJECT` by attached devices of binding-principal accounts. A
+proof is durably stored before its ACK is admitted, so an ACK never waits on
+a proof that is still in flight. Because Section 22 exact-match negotiation
+refuses the previous profile hash, there is no mixed-mode admission: ACK
+objects retained under the previous revision are historical evidence that
+this revision never re-admits.
+
+| Membership failure | Reply code |
+| --- | --- |
+| unattached or revoked device | `E2EE_DEVICE_REQUIRED` |
+| account is not a binding principal | `E2EE_BINDING_AUTH_INVALID` |
+| malformed object | `E2EE_INVALID_FRAGMENT` |
+| invalid device or possession signature | `E2EE_BINDING_AUTH_INVALID` |
+| roster or root mismatch | `E2EE_BINDING_AUTH_INVALID` |
+| duplicate or conflicting continuing leaf | `E2EE_OPERATION_CONFLICT` |
+| object exceeds `MAX_LEAF_MEMBERSHIP_OBJECT` | `E2EE_OBJECT_TOO_LARGE` |
+| authenticated quota exceeded | `E2EE_RATE_LIMITED` |
+
+#### 13.7.4 Recovery submission carrier
+
+A route whose gate is `pending` accepts evidence only through a signed
+submission that names exactly one element and binds it to the restored
+route:
+
+```text
+enum {
+    record_element(1), close_element(2), reference_element(3)
+} IrcRecoveryElementKind;
+
+struct {
+    uint16 profile_version;
+    opaque network_id[32];
+    opaque conversation_id[32];
+    opaque recovery_epoch[16];
+    opaque restored_binding_id[32];
+    opaque restored_accepted_state_id[32];
+    opaque restored_sequencer_head_id[32];
+    opaque source_rollback_guard_hash[32];
+    uint64 route_sequence;
+    opaque predecessor_record_id[32];
+    IrcRecoveryElementKind element_kind;
+    IrcWireObjectKind element_object_kind;
+    opaque element_object_id[32];
+    opaque account_id<1..255>;
+    opaque device_id[16];
+} IrcRecoverySubmissionTBS;
+
+struct {
+    IrcRecoverySubmissionTBS tbs;
+    opaque device_signature[64];
+} IrcRecoverySubmission;
+```
+
+The device signs with label `IRC-MLS/1 recovery submission`;
+`recovery_submission_id` is the Section 2.2 hash of the TBS. The wire kind is
+`recovery_submission` and the object is at most
+`MAX_RECOVERY_SUBMISSION_OBJECT`. A `record_element` names a
+`sequencer_record`; a `close_element` names a `close_authorization`, because
+`IrcSequencerRecordKind` has no close arm and the Section 12.5 rule makes the
+close ID the head at the route sequence after its authorizing record; a
+`reference_element` names an object of its existing kind that a submitted
+record references. The element is uploaded under
+`EGROUP SUBMIT RECOVERY-ELEMENT` in its existing wire kind with its existing
+limit and must hash to `element_object_id`.
+
+The submitter is an attached device whose account is a principal of the
+binding named by `restored_binding_id` and whose certificate is active in
+that account's retained roster at the element's validation time. A
+submission is accepted, and answered `RECOVERY-ACCEPTED`, only when the gate
+is `pending`, `recovery_epoch`, `source_rollback_guard_hash`, and the three
+restored IDs equal the durable gate, and `route_sequence` equals the stored
+head sequence plus one with `predecessor_record_id` equal to the stored head
+ID, except that a byte-identical re-upload of the record already at the
+restored head is idempotent. An exact duplicate returns the prior reply
+without state change. When the element arrives, a record valid under the
+credential committed for its position extends the head and is answered
+`RECOVERY-EXTENDED`; a valid close element that names the head finalization
+installs `closed` and is answered `RECOVERY-CLOSED`; a second record valid
+under the position's committed credential at an already installed position
+installs `conflict` and is answered `RECOVERY-CONFLICT` naming both record
+IDs; an invalid second record is refused and installs nothing.
+
+Incomplete evidence is bounded. A conversation holds at most
+`MAX_OPEN_RECOVERY_SUBMISSIONS` accepted submissions whose element has not
+arrived, and the complete accepted chain, elements included, is at most
+`MAX_RECOVERY_CHAIN_BYTES`. An accepted submission whose element has not
+arrived after `MAX_RECOVERY_SUBMISSION_SECONDS` is discarded with the gate,
+head, and every other submission unchanged; a later element for it, or a
+new submission beyond either ceiling, is refused with the code below, and
+expiry never installs `closed` or `conflict`. Every byte counts against the
+global E2EE disk ceiling and the per-conversation stored-byte quota.
+
+| Recovery failure | Reply code |
+| --- | --- |
+| gate is not `pending`, wrong recovery epoch, guard, head, or binding | `E2EE_ROUTE_INVALID` |
+| unrelated network, conversation, or context | `E2EE_ROUTE_INVALID` |
+| unattached or revoked submitting device | `E2EE_DEVICE_REQUIRED` |
+| account is not a principal of the restored binding | `E2EE_BINDING_AUTH_INVALID` |
+| malformed submission or element | `E2EE_INVALID_FRAGMENT` |
+| invalid submission signature or invalid record, close, or reference | `E2EE_BINDING_AUTH_INVALID` |
+| element does not hash to `element_object_id` | `E2EE_HASH_MISMATCH` |
+| unknown or expired submission for an element | `E2EE_OBJECT_NOT_FOUND` |
+| object exceeds its limit | `E2EE_OBJECT_TOO_LARGE` |
+| open-submission, chain-byte, or rate ceiling exceeded | `E2EE_RATE_LIMITED` |
+
+Submissions and elements are retained under the recovery gate and are never
+fanned out while the gate is `pending`. After installation they are fetched
+through `EGROUP FETCH OBJECT` only by binding participants; on `closed` they
+are installed together with the encrypted tombstone, and on `conflict` both
+proofs are preserved permanently. Recovery submissions produce no new
+semantic event kind: `recovery_closed` completes through the existing
+`route_state_changed` event and every other result completes generically.
+
+#### 13.7.5 Durability, irreversibility, and worked examples
+
+Pending gates, accepted recovery submissions, stored membership proofs, and
+`witness/v1` rows are durable and survive restart unchanged. A refused or
+indeterminate storage write installs nothing and leaves the gate, head,
+submission set, and witness row exactly as they were; the client receives
+`E2EE_DELIVERY_UNCERTAIN` or a retryable failure, never a success. `closed`
+and `conflict` are installed in one joint transaction and never transition
+again; the old lineage never returns to `normal`. A fresh semantic lineage is
+a new conversation, a ReInit successor or a new binding, under new sequencer
+confirmation and renewed out-of-band verification. There is deliberately no
+administrator or maintenance command that clears, rewrites, or downgrades the
+gate or a `conflict` witness row; both this document and the daemon
+architecture specification record that decision.
+
+A complete recovery from an empty head at the external anchor to a valid
+terminal close proceeds as follows. The restored head is the ReInit
+activation anchor at route sequence zero:
+
+| Step | Route sequence | Predecessor | Element | Reply | Gate after |
+| --- | ---: | --- | --- | --- | --- |
+| 1 | 1 | activation anchor | `record_element`: candidate receipt | `RECOVERY-EXTENDED` | `pending` |
+| 2 | 2 | candidate ID | `record_element`: finalization certificate | `RECOVERY-EXTENDED` | `pending` |
+| 3 | 2 | candidate ID | `record_element`: byte-identical finalization re-upload | prior reply, no change | `pending` |
+| 4 | 3 | finalization ID | `close_element`: close authorization naming that finalization | `RECOVERY-CLOSED` | `closed` |
+| 5 | 4 | close ID | any submission | `E2EE_ROUTE_INVALID` | `closed` |
+
+Two valid successors at one position end in `conflict`:
+
+| Step | Route sequence | Predecessor | Element | Reply | Gate after |
+| --- | ---: | --- | --- | --- | --- |
+| 1 | 1 | activation anchor | `record_element`: candidate receipt A | `RECOVERY-EXTENDED` | `pending` |
+| 2 | 1 | activation anchor | `record_element`: candidate receipt B, valid under the same committed credential | `RECOVERY-CONFLICT` naming A and B | `conflict` |
+| 3 | 2 | candidate A | `record_element`: finalization of A | `E2EE_ROUTE_INVALID` | `conflict` |
 
 ### 13.8 Full ReInit and route migration
 
@@ -5435,6 +5878,14 @@ The profile limits and operational defaults are:
 | `SEQUENCER_RECORD_RETENTION` | 30 days |
 | `SECURITY_PROOF_RETENTION` | live semantic lineage plus `WELCOME_RETENTION` after final close |
 | `MAX_SEQUENCER_KEY_OVERLAP` | 7 days |
+| `MAX_LEAF_MEMBERSHIP_OBJECT` | 8,192 bytes |
+| `MAX_RECOVERY_SUBMISSION_OBJECT` | 4,096 bytes |
+| `MAX_OPEN_RECOVERY_SUBMISSIONS` | 8 per conversation |
+| `MAX_RECOVERY_CHAIN_BYTES` | 268,435,456 bytes |
+| `MAX_RECOVERY_SUBMISSION_SECONDS` | 600 seconds |
+| `MAX_WITNESS_RESOLUTION_RECORDS` | 1,024 |
+| `MAX_WITNESS_RESOLUTION_BYTES` | 268,435,456 bytes |
+| `MAX_WITNESS_RESOLUTION_SECONDS` | 300 seconds |
 | `REINIT_RESUMPTION_PSK_RETENTION` | 24 hours |
 | `MAX_SIGNATURE_VERIFICATIONS_PER_ACCOUNT_PER_MINUTE` | 1,024 |
 | `DEFAULT_ACTIVE_UPDATE_PERIOD` | 24 hours |
@@ -5659,7 +6110,8 @@ The IRCD implementation should keep these surfaces separate:
 - route authorization and fanout;
 - Commit sequencing and receipt signing;
 - published-policy retention and finality-vote verification;
-- sequencer record-chain witnessing at the edge; and
+- sequencer record-chain witnessing at the edge;
+- recovery-submission admission and edge witness resolution; and
 - bounded MLS outer-header inspection, without MLS secret state.
 
 The client or client SDK owns:
@@ -5673,6 +6125,12 @@ The client or client SDK owns:
 
 No IRC-MLS server code path should accept decrypted application content or an
 MLS epoch secret; ordinary unbound IRC remains a separate plaintext feature.
+No production API or carrier in this document, including the recovery
+submission, witness resolution, and leaf-membership proof of Sections 12.5.1
+and 13.7, carries application plaintext, an MLS epoch secret, a private key,
+or a decrypted GroupContext. A leaf-membership proof carries only a public
+leaf signature key and digests, and `finalization_authenticator` remains the
+only exported MLS value a server ever sees.
 Logs, metrics, traces, panic reports, and error descriptions must not record
 fragment tags, identity documents, KeyPackages, Welcome objects, ciphertexts,
 or decrypted content by default.
@@ -5811,7 +6269,11 @@ CAP and ECAP accept only an explicitly supported `(version, profile-hash)`
 pair. A bridge supporting two revisions implements and tests two complete
 profiles and never parses one revision under the other's rules. A
 cryptographic suite or MLS protocol upgrade uses `ReInit`. Unknown required
-capabilities cause fail-closed rejection.
+capabilities cause fail-closed rejection. The revision that added the
+public-evidence carriers of Section 12.5.1 and Sections 13.7.2 through 13.7.5
+is such a hash change under an unchanged numeric version: peers presenting
+the previous profile hash are refused by exact-match negotiation, and no
+implementation parses that revision's objects under this one.
 
 Before interoperability outside this implementation family:
 

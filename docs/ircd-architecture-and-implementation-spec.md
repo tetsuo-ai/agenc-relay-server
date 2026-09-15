@@ -2706,9 +2706,15 @@ Ordinary live routes use `normal` and the current epoch; backup restore writes
 source-guard hash. While pending, the daemon rejects application ciphertext,
 membership/policy/route mutation, new sequencer records, receipts, and any
 operation that could reuse a generation or sequence. It permits only fetching
-already-known public objects and idempotent re-upload of byte-identical,
+already-known public objects, idempotent re-upload of byte-identical,
 previously signed objects whose complete predecessor chain extends the stored
-heads. It never signs a missing link after restore.
+heads, the companion Section 13.7.4 recovery submission that carries such an
+object bound to this gate's exact epoch, guard, and restored heads, and the
+companion Section 12.5.1 witness resolution that delivers retained records to
+an edge blocked on a witness row. Those two carriers are the only additions
+to the pending admission set; every other companion mutation of a pending
+route, including leaf-membership proofs, is refused. It never signs a missing
+link after restore.
 
 If re-upload proves one continuous companion-valid chain ending in an already
 finalized terminal close, one joint transaction installs that evidence, sets
@@ -2719,6 +2725,15 @@ If no complete terminal evidence survives, users create a fresh semantic
 lineage under a newly confirmed sequencer key set and renewed out-of-band
 verification; the old pending/conflict tombstone remains. No administrator
 flag clears or rewrites the gate.
+
+Pending gates, accepted recovery submissions, stored membership proofs, and
+edge witness rows are durable and survive restart unchanged. A refused or
+indeterminate write installs nothing and leaves the gate, the restored heads,
+the submission set, and the witness row as they were; no success is reported
+for it. `closed` and `conflict` are installed in one joint transaction and
+never transition again, and there is deliberately no maintenance command that
+clears, rewrites, or downgrades either state or a witness row marked
+conflict.
 
 ## 19. Abuse resistance and resource limits
 
@@ -7595,14 +7610,14 @@ These SHA-256 values identify the exact files read for this draft:
 | `rfcs/rfc9420-mls-protocol.txt` | `251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b` |
 | `rfcs/rfc9525-tls-service-identity.txt` | `ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5` |
 | `rfcs/rfc9750-mls-architecture.txt` | `6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd` |
-| `docs/irc-mls-e2ee-extension.md` | `398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1` |
+| `docs/irc-mls-e2ee-extension.md` | `79236c985a46205501c64ff45215846288cc0a4a3b8c17884d58055c1c394795` |
 
 Changing a file without updating its hash, source decision, and affected
 vectors is a conformance-ledger failure.
 The companion's domain-separated version-1 profile hash is
-`699c74adfe70c8cc336888e5191d1e09166c5de4406b9c7c8e9a58edadc48159`
+`d4deba80758c4585437420cd25330682b4fee97c77aea714df238505b08ab38c`
 (unpadded base64url
-`aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk`).
+`1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w`).
 
 ## Appendix A. Client wire registries
 
@@ -9469,7 +9484,7 @@ base-profile-sha256=ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=IRC-MLS/1
-e2ee-profile-sha256=aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk
+e2ee-profile-sha256=1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w
 sequencer-key-set-generation=<uint64-decimal>
 sequencer-key-set-hash=<43-char-hash>
 ```

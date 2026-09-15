@@ -258,6 +258,6 @@ pub const WIRE_OBJECT_ENVELOPE_BYTES: usize = 6;
 /// The largest `IrcWireObject.body` the envelope can carry.
 pub const MAX_WIRE_OBJECT_BODY_BYTES: usize = 4_194_298;
 /// The Section 11.1 vendor capability value, exact.
-pub const CAPABILITY_VALUE: &str = "v1,profile=aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk,seg=2940,obj=262144,parts=90,welcome=4194304";
+pub const CAPABILITY_VALUE: &str = "v1,profile=1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w,seg=2940,obj=262144,parts=90,welcome=4194304";
 /// The vendor capability name.
 pub const CAPABILITY_NAME: &str = "agenc.ag/e2ee-mls";
