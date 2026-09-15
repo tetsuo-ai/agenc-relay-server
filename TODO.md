@@ -1591,9 +1591,12 @@ the closure branch at review time.
   resolving the contradiction with `tls.require_ocsp_staple`. Configuration
   regressions cover optional/required WSS staples and forbidden purposes.
   See `docs/stage-10-ocsp-repair.md`.
-- [ ] With euid 0, secret file checks accept only root-owned files, so root
+- [x] With euid 0, secret file checks accept only root-owned files, so root
   cannot run `print-onboarding`, `check-config`, or `account-invite create`
-  against keys installed for the service account.
+  against keys installed for the service account. OPS-01 (#40) adds the
+  explicit `--service-user <name>` option: a root caller trusts the one
+  named local account resolved from `/etc/passwd`, every other file rule is
+  unchanged, and `serve` still never starts as root.
 - [x] Unused disabled listeners no longer load TLS material; the disabled
   federation entry on an enabled edge still supplies its outbound identity.
   Same-class TLS aliases are allowed consistently; cross-class and other secret

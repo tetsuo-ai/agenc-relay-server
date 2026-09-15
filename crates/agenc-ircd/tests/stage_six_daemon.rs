@@ -7,6 +7,8 @@ mod address_pool;
 
 #[path = "stage_six_daemon/runtime_regressions.rs"]
 mod runtime_regressions;
+#[path = "stage_six_daemon/service_user.rs"]
+mod service_user;
 
 #[path = "stage_six_daemon/stage_ten.rs"]
 mod stage_ten;

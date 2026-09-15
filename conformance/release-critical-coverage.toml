@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 783
-reviewed_source_sha256 = "34aeb989d4a70cf99021ae520e28dd8044d83b005b8ca7aae1c64cfac8a57074"
+reviewed_source_sha256 = "11c67c45fbebec8cd2ba825f2ee8b9824ced19f3e176cb3a04c2dbc0f71eeff2"
 deferred = []
 
 [[region]]
@@ -38,11 +38,21 @@ reason = "A line completed from retained transport bytes must drain before anoth
 id = "cli-account-invite-expiry"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd/src/main.rs"
-source_sha256 = "5199c8dd1564762f8fd9882656d82ef720861d95c9b8d99a794db0a95654c668"
-start_line = 288
-end_line = 323
+source_sha256 = "8eaebc2e09d88f1488966be026f62cd3568c13fe5a354c511496311dbc3c5394"
+start_line = 327
+end_line = 368
 metric = "branches"
 reason = "Account invitation expiry must be canonical ASCII decimal and fit u64 before protected descriptor or signing-key access."
+
+[[region]]
+id = "config-offline-service-identity-trust"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-config/src/paths.rs"
+source_sha256 = "dc226b726b1390fc7903bafd756b97e3128eee19c0fd8e255ccdba6293bc3576"
+start_line = 470
+end_line = 554
+metric = "regions"
+reason = "Offline commands trust file ownership only for root, the executing process and the one explicitly named local service account resolved from the bounded protected account database; every other owner is refused."
 
 [[region]]
 id = "storage-initialization-preserves-guard"
