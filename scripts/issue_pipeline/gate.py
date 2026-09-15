@@ -26,9 +26,29 @@ ARTIFACT_PREFIX = "conformance/evidence/artifacts/"
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 MAX_GATE_LOG_BYTES = 64 * 1024 * 1024
 PROTECTED_PATHS = frozenset({
-    "scripts/run-gate.py", "scripts/check-stage-nine.sh", "scripts/check-evidence.py",
+    "scripts/run-gate.py", "scripts/check-stage-nine.sh", "scripts/check-baseline.py",
+    "scripts/check-evidence.py", "scripts/check-source.py", "scripts/check-coverage.py",
+    "scripts/check-ci.py", "scripts/requirements.py", "conformance/toolchain-policy.toml",
+    "rust-toolchain.toml",
+})
+# Validators and generators that pin reviewed normative content (document
+# digests, profile hashes, wire registries, requirement maps). A normative
+# revision must move these pins, so a contract phase may change them; two
+# independent reviews and the complete recorded gate still apply, and the
+# gate machinery, coverage floors, toolchain policy and required command set
+# stay protected for every phase.
+CONTRACT_REVIEWED_PATHS = frozenset({
+    "scripts/check-spec.sh", "scripts/requirements.py", "scripts/check-evidence.py",
+    "scripts/check-stage-one.py", "scripts/check-stage-two.py", "scripts/check-stage-three.py",
+    "scripts/check-stage-four.py", "scripts/check-stage-five.py", "scripts/check-stage-six.py",
+    "scripts/check-stage-seven.py", "scripts/check-stage-eight.py", "scripts/check-stage-nine.py",
+    "scripts/check-deploy.py",
+})
+CONTRACT_REVIEWED_PREFIXES = ("scripts/generate-",)
+ALWAYS_PROTECTED_PATHS = frozenset({
+    "scripts/run-gate.py", "scripts/check-stage-nine.sh", "scripts/check-baseline.py",
     "scripts/check-source.py", "scripts/check-coverage.py", "scripts/check-ci.py",
-    "scripts/requirements.py", "conformance/toolchain-policy.toml", "rust-toolchain.toml",
+    "conformance/toolchain-policy.toml", "rust-toolchain.toml",
 })
 
 
@@ -204,8 +224,14 @@ def _preserve_critical_policy(repo, base: str, candidate: str, before: dict, aft
             raise GateFailure("candidate narrows inherited critical coverage: " + identifier)
 
 
-def check_policy(repo, base: str, candidate: str) -> list[dict]:
-    """Ordinary workers cannot weaken policy or rewrite trusted gate machinery."""
+def check_policy(repo, base: str, candidate: str, *, contract: bool = False) -> list[dict]:
+    """Ordinary workers cannot weaken policy or rewrite trusted gate machinery.
+
+    ``contract`` marks a normative phase, which may additionally change the
+    reviewed validators and generators in CONTRACT_REVIEWED_PATHS.
+    """
+    if type(contract) is not bool:
+        raise GateFailure("contract phase marker must be boolean")
     old = tomllib.loads(repo.run(["show", base + ":conformance/gates.toml"]))
     new = tomllib.loads(repo.run(["show", candidate + ":conformance/gates.toml"]))
     required, proposed = commands(old), commands(new)
@@ -221,6 +247,10 @@ def check_policy(repo, base: str, candidate: str) -> list[dict]:
     protected = set(PROTECTED_PATHS)
     for command in required:
         protected.update(arg for arg in command["argv"] if arg.startswith("scripts/"))
+    if contract:
+        protected = {path for path in protected
+                     if path in ALWAYS_PROTECTED_PATHS
+                     or not (path in CONTRACT_REVIEWED_PATHS or path.startswith(CONTRACT_REVIEWED_PREFIXES))}
     changed = repo.run(["diff", "--name-only", "-z", base, candidate, "--"]).split("\0")
     for path in changed:
         if (path in protected or path.startswith("scripts/issue_pipeline")
@@ -477,14 +507,14 @@ class GateRunner:
             except subprocess.TimeoutExpired:
                 continue
 
-    def run(self, repo, worktree: Path, source: str, base: str, output: Path) -> dict:
+    def run(self, repo, worktree: Path, source: str, base: str, output: Path, *, contract: bool = False) -> dict:
         with self._lock:
             self.assert_available()
             if shutil.disk_usage(worktree).free < self.config.minimum_free_gib * 2**30:
                 raise GateFailure("insufficient free disk for the isolated full gate")
             if repo.head(worktree) != source or repo.run(["status", "--porcelain"], cwd=worktree):
                 raise GateFailure("gate requires the exact clean committed candidate")
-            expected = check_policy(repo, base, source)
+            expected = check_policy(repo, base, source, contract=contract)
             tree = repo.tree(source)
             private_directory(output)
             artifact = worktree / ARTIFACT_PREFIX / f"{GATE}-{source}.json"

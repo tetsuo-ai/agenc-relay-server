@@ -214,7 +214,8 @@ class ScriptedGate:
     def cancel(self):
         pass
 
-    def run(self, repo, worktree, source, base, output):
+    def run(self, repo, worktree, source, base, output, **kwargs):
+        self.kwargs = kwargs
         self.calls.append((source, base))
         if self.failures:
             self.failures -= 1
@@ -629,7 +630,7 @@ class ControllerTests(unittest.TestCase):
                 (output / "result.json").write_text(json.dumps(result))
             return result
 
-        def uncertain_gate(repo, worktree, source, base, output):
+        def uncertain_gate(repo, worktree, source, base, output, **kwargs):
             self.gate.calls.append((source, base))
             output.mkdir(parents=True)
             (output / "full-gate.log").write_text("Gate writer may still be alive.\n")
@@ -898,6 +899,55 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(request["replan_feedback"]["plan_review"], rejection)
             self.assertEqual(request["replan_feedback"]["rejected_plan"]["status"], "planned")
         self.assertFalse(any(role == "worker" for role, *_ in agents.calls))
+
+    def test_contract_phase_refreezes_the_specification_baseline_in_controller_commits(self):
+        import base64, hashlib, importlib.util, subprocess as sp, tomllib
+        from issue_pipeline.controller import BASELINE_ARTIFACTS, BASELINE_PROFILES
+        path = self.config.worktrees / "contract-phase"
+        self.repo.add_worktree(path, "pipeline/contract-phase", self.base)
+        for _, relative in BASELINE_ARTIFACTS:
+            target = path / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("revised " + relative + "\n")
+        (path / "scripts/check-spec.sh").write_text("#!/bin/sh\nexit 0\n")
+        (path / "scripts/check-spec.sh").chmod(0o755)
+        (path / "conformance").mkdir(exist_ok=True)
+        (path / "conformance/spec-baseline.toml").write_text("schema_version = 1\nfrozen_at_commit = \"" + "0" * 40 + "\"\n")
+        candidate = self.repo.commit(path, f"{self.task.key}: revise the companion")
+        data = {"base": self.base}
+        self.assertEqual(self.controller.refreeze_baseline(self.task, data, {"kind": "implementation"}, path, candidate), candidate)
+        final = self.controller.refreeze_baseline(self.task, data, {"kind": "contract"}, path, candidate)
+        self.assertNotEqual(final, candidate)
+        self.assertEqual(self.repo.head(path), final)
+        self.assertFalse(self.repo.changed_paths(path))
+        log = git(path, "log", "--format=%s", f"{candidate}..{final}").splitlines()
+        self.assertEqual(log[-1], f"{self.task.key}: regenerate the specification manifest")
+        self.assertTrue(log[0].startswith(f"{self.task.key}: refreeze the specification baseline at "))
+        frozen = log[0].rsplit(" ", 1)[1]
+        record = tomllib.loads((path / "conformance/spec-baseline.toml").read_text())
+        self.assertEqual(record["frozen_at_commit"], frozen)
+        self.assertEqual(git(path, "rev-parse", f"{final}~1"), frozen)
+        self.assertEqual({row["role"]: row["path"] for row in record["artifacts"]}, dict(BASELINE_ARTIFACTS))
+        for row in record["artifacts"]:
+            self.assertEqual(row["sha256"], hashlib.sha256((path / row["path"]).read_bytes()).hexdigest())
+            self.assertEqual(git(path, "rev-parse", f"{frozen}:{row['path']}"), git(path, "rev-parse", f"{final}:{row['path']}"))
+        manifest = (path / "docs/specification-manifest.txt").read_text()
+        for key, name, label, source in BASELINE_PROFILES:
+            digest = hashlib.sha256(label + (path / source).read_bytes()).digest()
+            self.assertEqual(record["profiles"][key]["sha256"], digest.hex())
+            self.assertEqual(record["profiles"][key]["base64url"], base64.urlsafe_b64encode(digest).decode().rstrip("="))
+            self.assertIn(f"profile-sha256|{name}|{digest.hex()}", manifest)
+        # The repository's own frozen-baseline validator accepts the rendered record.
+        spec = importlib.util.spec_from_file_location("check_baseline", Path(__file__).resolve().parents[1] / "check-baseline.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        real_run = sp.run
+        with mock.patch.object(module.subprocess, "run", side_effect=lambda argv, **kw: (
+                sp.CompletedProcess(argv, 0, "", "") if argv[:2] == ["bash", "scripts/check-spec.sh"]
+                else real_run(argv, **kw))):
+            module.validate(path)
+        # Re-running on the refrozen candidate changes nothing.
+        self.assertEqual(self.controller.refreeze_baseline(self.task, data, {"kind": "contract"}, path, final), final)
 
     def test_plan_approval_cannot_substitute_for_candidate_code_review(self):
         self.controller.state.set_task(36, "pending")

@@ -133,6 +133,38 @@ class PolicyTests(unittest.TestCase):
                 return before if revision == BASE else after
         return SourceRepo()
 
+    def test_contract_phases_may_change_reviewed_validators_but_never_gate_machinery(self):
+        source = "header\na\nb\nc\nfooter\n"
+
+        def repo_changing(*paths):
+            repo = self.coverage_repo(source, source)
+            original = repo.run
+            def run(argv):
+                if argv[0] == "diff" and "--name-only" in argv:
+                    return "\0".join(paths)
+                return original(argv)
+            repo.run = run
+            return repo
+
+        # Protected for ordinary phases: fixed machinery plus the fixture's required command script.
+        for path in ("scripts/requirements.py", "scripts/check-evidence.py", "scripts/check-first.py"):
+            with self.subTest(path=path, contract=False), self.assertRaisesRegex(GateFailure, "trusted validation"):
+                check_policy(repo_changing(path), BASE, SOURCE)
+        reviewed = ("scripts/check-spec.sh", "scripts/check-stage-one.py", "scripts/check-stage-eight.py",
+                    "scripts/generate-stage-one.py", "scripts/requirements.py", "scripts/check-evidence.py")
+        for path in reviewed:
+            with self.subTest(path=path, contract=True):
+                self.assertEqual(len(check_policy(repo_changing(path), BASE, SOURCE, contract=True)), 2)
+        for path in ("scripts/run-gate.py", "scripts/check-stage-nine.sh", "scripts/check-baseline.py",
+                     "scripts/check-coverage.py", "scripts/check-source.py", "scripts/check-ci.py",
+                     "scripts/check-first.py", "conformance/toolchain-policy.toml", "rust-toolchain.toml",
+                     "scripts/issue_pipeline/gate.py", "scripts/issue-pipeline.py", "scripts/test-issue-pipeline.py"):
+            for contract in (False, True):
+                with self.subTest(path=path, contract=contract), self.assertRaisesRegex(GateFailure, "trusted validation"):
+                    check_policy(repo_changing(path), BASE, SOURCE, contract=contract)
+        with self.assertRaises(GateFailure):
+            check_policy(repo_changing("docs/spec.md"), BASE, SOURCE, contract="yes")
+
     def test_critical_region_deletion_renaming_or_reclassification_cannot_keep_numeric_floors(self):
         source = "header\na\nb\nc\nfooter\n"
         baseline = self.coverage(source)
@@ -658,7 +690,7 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(self.calls)
 
     def test_cancellation_during_policy_validation_prevents_launch(self):
-        def policy(*args):
+        def policy(*args, **kwargs):
             self.runner.cancel()
             return []
         with mock.patch("issue_pipeline.gate.check_policy", side_effect=policy), \

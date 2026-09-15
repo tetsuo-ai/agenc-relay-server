@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+import base64
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import threading
 import time
+import tomllib
 import uuid
 
 from .agents import (AgentRunError, ClaudeRunner, SessionLifecycleError, record_session_quiescent,
@@ -37,6 +39,24 @@ MAX_MANAGED_BACKLOG_BYTES = 16 * 1024 * 1024
 
 
 RATE_LIMIT_BACKOFF_SECONDS = 900
+# The frozen specification baseline: a contract phase that changes any of these
+# needs a follow-up commit that refreezes conformance/spec-baseline.toml at the
+# commit holding the revised bytes. The controller renders that record itself
+# from file digests; no candidate code runs on the host.
+BASELINE_ARTIFACTS = (
+    ("architecture", "docs/ircd-architecture-and-implementation-spec.md"),
+    ("e2ee-companion", "docs/irc-mls-e2ee-extension.md"),
+    ("federation-registry", "docs/federation-v1-profile.registry"),
+    ("source-ledger", "docs/protocol-sources-and-decisions.md"),
+    ("specification-manifest", "docs/specification-manifest.txt"),
+    ("specification-validator", "scripts/check-spec.sh"),
+)
+BASELINE_MANIFEST = "docs/specification-manifest.txt"
+BASELINE_RECORD = "conformance/spec-baseline.toml"
+BASELINE_PROFILES = (
+    ("base_federation_v1", "base-federation-v1", b"agenc-chat base federation profile registry v1\0", "docs/federation-v1-profile.registry"),
+    ("e2ee_mls_v1", "e2ee-mls-v1", b"agenc-chat IRC-MLS specification profile v1\0", "docs/irc-mls-e2ee-extension.md"),
+)
 SESSION_RETRY_SECONDS = 300
 REPLAN_RETRY_SECONDS = 60
 MINIMUM_WAIT_SECONDS = 15
@@ -1065,6 +1085,8 @@ class Controller:
                                 continue
                             candidate = self.repo.head(path)
                             self.checkpoint(task.issue, "working", data, candidate=candidate, base=newest)
+                        candidate = self.refreeze_baseline(task, data, phase, path, candidate)
+                        self.checkpoint(task.issue, "working", data, candidate=candidate)
                         self.review_pair(task, data, phase, candidate, data["base"])
                         self.checkpoint(task.issue, "gating", data)
                         validation = self.config.worktrees / "validation"
@@ -1072,7 +1094,8 @@ class Controller:
                         self.repo.prepare_validation_worktree(validation, candidate)
                         output = self.config.state / "gates" / uuid.uuid4().hex
                         try:
-                            proof = self.gate.run(self.repo, validation, candidate, data["base"], output)
+                            proof = self.gate.run(self.repo, validation, candidate, data["base"], output,
+                                                  contract=phase.get("kind") == "contract")
                         except GateStopped:
                             # Set the global stop before releasing integration:
                             # a queued issue must not mutate a checkout that an
@@ -1271,6 +1294,90 @@ class Controller:
                             future.result()
                         return
                     self.stop.wait(self.next_wait_seconds())
+
+    @staticmethod
+    def _baseline_profiles(root: Path) -> dict[str, tuple[str, str]]:
+        digests = {}
+        for key, _, label, source in BASELINE_PROFILES:
+            digest = hashlib.sha256(label + (root / source).read_bytes()).digest()
+            digests[key] = (digest.hex(), base64.urlsafe_b64encode(digest).decode().rstrip("="))
+        return digests
+
+    @classmethod
+    def render_manifest(cls, root: Path) -> str:
+        """Render docs/specification-manifest.txt from the frozen artifact bytes."""
+        digests = cls._baseline_profiles(root)
+        lines = ["manifest|version|1"]
+        lines += [f"profile-base64url|{name}|{digests[key][1]}" for key, name, _, _ in BASELINE_PROFILES]
+        lines += [f"profile-sha256|{name}|{digests[key][0]}" for key, name, _, _ in BASELINE_PROFILES]
+        for _, path in sorted(BASELINE_ARTIFACTS, key=lambda item: item[1]):
+            if path != BASELINE_MANIFEST:
+                lines.append(f"sha256|{path}|{digest_file(root / path)}")
+        return "\n".join(lines) + "\n"
+
+    @classmethod
+    def render_baseline(cls, root: Path, frozen_commit: str) -> str:
+        """Render conformance/spec-baseline.toml binding the artifacts at ``frozen_commit``."""
+        digests = cls._baseline_profiles(root)
+        lines = ["schema_version = 1", f'frozen_at_commit = "{frozen_commit}"', ""]
+        for key, _, _, _ in BASELINE_PROFILES:
+            lines += [f"[profiles.{key}]", f'sha256 = "{digests[key][0]}"', f'base64url = "{digests[key][1]}"', ""]
+        for role, path in BASELINE_ARTIFACTS:
+            lines += ["[[artifacts]]", f'path = "{path}"', f'role = "{role}"', f'sha256 = "{digest_file(root / path)}"', ""]
+        return "\n".join(lines)
+
+    def _baseline_current(self, root: Path, candidate: str) -> bool:
+        """True when the checked-out record already binds these exact bytes at an ancestor."""
+        try:
+            existing = tomllib.loads((root / BASELINE_RECORD).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        frozen = existing.get("frozen_at_commit")
+        if type(frozen) is not str or not re.fullmatch(r"[0-9a-f]{40}", frozen):
+            return False
+        digests = self._baseline_profiles(root)
+        expected_profiles = {key: {"sha256": digests[key][0], "base64url": digests[key][1]} for key, *_ in BASELINE_PROFILES}
+        expected_artifacts = [{"path": path, "role": role, "sha256": digest_file(root / path)} for role, path in BASELINE_ARTIFACTS]
+        if existing.get("profiles") != expected_profiles or existing.get("artifacts") != expected_artifacts:
+            return False
+        try:
+            if not self.repo.is_ancestor(frozen, candidate):
+                return False
+            return all(self.repo.run(["rev-parse", f"{frozen}:{path}"]).strip()
+                       == self.repo.run(["rev-parse", f"{candidate}:{path}"]).strip()
+                       for _, path in BASELINE_ARTIFACTS)
+        except GitError:
+            return False
+
+    def refreeze_baseline(self, task: Task, data: dict, phase: dict, worktree: Path, candidate: str) -> str:
+        """Refreeze the specification baseline after a contract phase that changed it.
+
+        Returns the candidate to review: the original commit when no baseline
+        artifact changed, otherwise controller commits on top of it that carry the
+        regenerated manifest and a ``spec-baseline.toml`` whose frozen commit holds
+        the exact revised bytes. Only file digests and fixed labels are used; no
+        candidate code runs on the host.
+        """
+        if phase.get("kind") != "contract":
+            return candidate
+        changed = set(self.repo.run(["diff", "--name-only", "-z", data["base"], candidate, "--"]).split("\0"))
+        if not changed & {path for _, path in BASELINE_ARTIFACTS}:
+            return candidate
+        if self.repo.head(worktree) != candidate or self.repo.changed_paths(worktree):
+            raise PipelineBlocked("baseline refreeze requires the committed candidate to be checked out cleanly")
+        root = Path(worktree)
+        manifest = self.render_manifest(root)
+        if (root / BASELINE_MANIFEST).read_text(encoding="utf-8") != manifest:
+            (root / BASELINE_MANIFEST).write_text(manifest, encoding="utf-8")
+            candidate = self.repo.commit(worktree, f"{task.key}: regenerate the specification manifest")
+        record = self.render_baseline(root, candidate)
+        if self._baseline_current(root, candidate):
+            return candidate
+        if (root / BASELINE_RECORD).read_text(encoding="utf-8") != record:
+            (root / BASELINE_RECORD).write_text(record, encoding="utf-8")
+            self.log("refreezing specification baseline", issue=task.issue, frozen_at=candidate)
+            candidate = self.repo.commit(worktree, f"{task.key}: refreeze the specification baseline at {candidate}")
+        return candidate
 
     def next_wait_seconds(self) -> float:
         """Sleep until the configured poll or the earliest pending retry, whichever is sooner."""

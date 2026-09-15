@@ -47,6 +47,13 @@ necessary tracked generated outputs as declared files. Disposable Cargo build
 outputs under target/ and fuzz/target/ are not source file claims. Contract phases precede dependent
 implementation; evidence phases follow the behavior they qualify. Identify safe
 grouping but do not invent permission to combine normative and implementation PRs.
+A contract phase may declare, besides the specification documents, the reviewed
+validators and generators that pin normative content (scripts/check-spec.sh,
+scripts/check-stage-*.py, scripts/generate-*.py, scripts/requirements.py,
+scripts/check-evidence.py) and the generated artifacts they produce. The controller
+regenerates docs/specification-manifest.txt and conformance/spec-baseline.toml in
+its own commit after each contract phase; never plan a separate refreeze phase and
+never treat that pending refreeze as a blocker.
 Do not include unrelated cleanup. If scope or requirements cannot be established,
 return status blocked with precise blockers. Planned status requires nonempty
 phases and no blockers. A plan is a proposal; it is not completion evidence.
@@ -62,6 +69,13 @@ Native socket/storage fixtures that require qualified filesystem properties run
 in the controller's Docker gate. Report a focused check that cannot run within
 this session's permissions as unexecuted or failed with its exact observed cause;
 never change fixtures, weaken policy or invent a pass to hide that limitation.
+In a contract phase you may change the reviewed validators and generators that pin
+normative content only so that they reflect the normative change exactly: move
+document digests, profile hashes, registries, expectation lists and requirement maps;
+never remove, reorder, skip or weaken a check. Run the repository generators so every
+generated artifact matches the revised documents. The controller regenerates
+docs/specification-manifest.txt and conformance/spec-baseline.toml after your commit,
+so a baseline check that fails only on those two files is expected at this stage.
 Implement every
 phase acceptance criterion fully, preserving its normative contract and independent
 gate. Run appropriate available focused checks. Provide an acceptance-to-evidence
@@ -96,7 +110,10 @@ authorized phase, prior merged phases, and normative dependencies. Check every
 phase criterion and, when designated the final phase, all original issue criteria.
 Inspect test adequacy for required positive, negative, restart, crash, resource and
 compatibility behavior. Confirm required contract changes merged separately before
-dependent implementation. The controller runs the mandatory exact-source full gate
+dependent implementation. When the candidate changes a validator, generator or
+checker script, compare every such change against the normative change it reflects:
+a removed, reordered, skipped or weakened check, or a pin, list or map entry that does
+not correspond to the revised documents, is a finding. The controller runs the mandatory exact-source full gate
 independently AFTER this source review; its later receipt is required for promotion.
 Your approval does not assert that this not-yet-run gate passed. Inspect controller
 receipts when supplied, but never substitute worker claims for them. Missing proof
