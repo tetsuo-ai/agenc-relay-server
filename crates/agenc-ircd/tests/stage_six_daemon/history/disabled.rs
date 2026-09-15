@@ -22,7 +22,10 @@ fn start_binary(fixture: &LiveFixture, binary: &Path) -> TestResult<DaemonProces
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()?;
-    Ok(DaemonProcess { child: Some(child) })
+    Ok(DaemonProcess {
+        child: Some(child),
+        diagnostics: None,
+    })
 }
 
 fn stop(fixture: &LiveFixture, daemon: &mut DaemonProcess) -> TestResult {

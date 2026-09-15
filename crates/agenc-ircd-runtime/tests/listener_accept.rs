@@ -53,6 +53,8 @@ use tokio::sync::{Semaphore, mpsc};
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 type ClientOutcome = Result<Vec<u8>, String>;
 
+#[path = "listener_accept/admission_outcomes.rs"]
+mod admission_outcomes;
 #[path = "listener_accept/task_isolation.rs"]
 mod task_isolation;
 
@@ -144,6 +146,7 @@ struct Harness {
     budget: Arc<MemoryBudget>,
     handshakes: HandshakeLimiter,
     client_slots: Arc<Semaphore>,
+    client_slot_capacity: usize,
     recorder: Arc<Recorder>,
     inbox: mpsc::Receiver<StateCoreMessage>,
     _connection_closes: ConnectionCloseInbox,
@@ -229,11 +232,13 @@ fn start(specs: Vec<ListenerSpec>, options: HarnessOptions) -> Result<Harness, L
         runtime_config: None,
         federation_accepts: None,
     };
+    let client_slot_capacity = options.client_slots;
     let set = ListenerSet::start(specs, context, &root)?;
     Ok(Harness {
         budget,
         handshakes,
         client_slots,
+        client_slot_capacity,
         recorder,
         inbox,
         _connection_closes: connection_close_inbox,
@@ -407,6 +412,11 @@ async fn finish(harness: Harness) -> Result<(u64, u64), Box<dyn Error + Send + S
     assert_eq!(
         harness.handshakes.available(),
         harness.handshakes.capacity()
+    );
+    assert_eq!(
+        harness.client_slots.available_permits(),
+        harness.client_slot_capacity,
+        "every global client slot returned"
     );
     harness.root.cancel();
     Ok((admitted, refused))

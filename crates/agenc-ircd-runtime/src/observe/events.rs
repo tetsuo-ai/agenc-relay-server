@@ -16,6 +16,7 @@ use agenc_ircd_types::{ServerId, UtcSecond};
 
 use crate::RuntimeError;
 use crate::purpose::ListenerPurpose;
+use crate::state_core::inbox::CloseReason;
 
 /// The software version recorded on every event.
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -226,6 +227,19 @@ pub enum PublicErrorCode {
     AuthenticationFailed,
     /// The operation was cancelled by its owner.
     Cancelled,
+    /// The transport ended without a protocol close.
+    TransportLoss,
+    /// The reader rejected an over-budget or malformed line.
+    ProtocolError,
+    /// The output queue reached its hard limit.
+    SlowConsumer,
+    /// The reader stayed paused past the inbox stall budget.
+    ReadStall,
+    /// A write stalled past its grace period.
+    WriteStall,
+    /// A registration, handshake, open-acknowledgement, or keepalive
+    /// deadline expired.
+    Deadline,
 }
 
 impl PublicErrorCode {
@@ -245,6 +259,24 @@ impl PublicErrorCode {
         }
     }
 
+    /// Maps a connection close to the closed label a `connection_closed`
+    /// event carries, so a close after admission is attributable from the
+    /// log alone; an orderly client quit carries none.
+    #[must_use]
+    pub const fn from_close(reason: CloseReason) -> Option<Self> {
+        match reason {
+            CloseReason::ClientQuit => None,
+            CloseReason::TransportLoss => Some(Self::TransportLoss),
+            CloseReason::ProtocolError => Some(Self::ProtocolError),
+            CloseReason::SlowConsumer => Some(Self::SlowConsumer),
+            CloseReason::ReadStall => Some(Self::ReadStall),
+            CloseReason::WriteStall => Some(Self::WriteStall),
+            CloseReason::Deadline => Some(Self::Deadline),
+            CloseReason::Overload => Some(Self::MemoryExhausted),
+            CloseReason::Shutdown => Some(Self::Cancelled),
+        }
+    }
+
     /// Returns the fixed wire label.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -260,6 +292,12 @@ impl PublicErrorCode {
             Self::AdmissionRefused => "admission_refused",
             Self::AuthenticationFailed => "authentication_failed",
             Self::Cancelled => "cancelled",
+            Self::TransportLoss => "transport_loss",
+            Self::ProtocolError => "protocol_error",
+            Self::SlowConsumer => "slow_consumer",
+            Self::ReadStall => "read_stall",
+            Self::WriteStall => "write_stall",
+            Self::Deadline => "deadline",
         }
     }
 }
@@ -674,12 +712,61 @@ mod tests {
             PublicErrorCode::AlpnMismatch,
             PublicErrorCode::AdmissionRefused,
             PublicErrorCode::AuthenticationFailed,
+            PublicErrorCode::TransportLoss,
+            PublicErrorCode::ProtocolError,
+            PublicErrorCode::SlowConsumer,
+            PublicErrorCode::ReadStall,
+            PublicErrorCode::WriteStall,
+            PublicErrorCode::Deadline,
         ] {
             assert!(code.label().is_ascii());
+            assert!(
+                code.label()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            );
         }
         assert!(Severity::Debug < Severity::Info);
         assert!(Severity::Error < Severity::Critical);
         assert_eq!(Severity::Info.label(), "info");
+    }
+
+    #[test]
+    fn every_close_reason_maps_to_one_closed_label_except_an_orderly_quit() {
+        let mapping = [
+            (CloseReason::ClientQuit, None),
+            (
+                CloseReason::TransportLoss,
+                Some(PublicErrorCode::TransportLoss),
+            ),
+            (
+                CloseReason::ProtocolError,
+                Some(PublicErrorCode::ProtocolError),
+            ),
+            (
+                CloseReason::SlowConsumer,
+                Some(PublicErrorCode::SlowConsumer),
+            ),
+            (CloseReason::ReadStall, Some(PublicErrorCode::ReadStall)),
+            (CloseReason::WriteStall, Some(PublicErrorCode::WriteStall)),
+            (CloseReason::Deadline, Some(PublicErrorCode::Deadline)),
+            (
+                CloseReason::Overload,
+                Some(PublicErrorCode::MemoryExhausted),
+            ),
+            (CloseReason::Shutdown, Some(PublicErrorCode::Cancelled)),
+        ];
+        for (reason, expected) in mapping {
+            assert_eq!(PublicErrorCode::from_close(reason), expected, "{reason:?}");
+        }
+        let labels = mapping
+            .iter()
+            .filter_map(|(_, code)| code.map(PublicErrorCode::label))
+            .collect::<Vec<_>>();
+        let mut distinct = labels.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), labels.len(), "close labels are distinct");
     }
 
     #[test]

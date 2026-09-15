@@ -218,7 +218,8 @@ pub enum CloseReason {
     ReadStall,
     /// A write stalled past its 30-second grace (spec line 522).
     WriteStall,
-    /// A registration, handshake, or keepalive deadline expired.
+    /// A registration, handshake, open-acknowledgement, or keepalive
+    /// deadline expired.
     Deadline,
     /// Memory overload evicted the whole connection (spec line 2825).
     Overload,
