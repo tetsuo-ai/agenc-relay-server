@@ -60,6 +60,16 @@ agenc-ircd check-config --config /etc/agenc-ircd/config.toml
 
 The command parses the complete document, opens every configured secret under the protected-file rules, reconstructs the authenticated database through a read-only handle, checks the database identity, and prints the observed host controls. It does not create the writer lock, repair the database, replace the rollback guard, or remove stale temporary files. Exit status 2 means at least one required control was observed absent. An unreadable control is reported as unknown instead of present.
 
+Run the stopped-node commands either as the service account or as root. As the service account (for example through `runuser -u agenc-ircd -- agenc-ircd check-config --config /etc/agenc-ircd/config.toml`) the command trusts the account's own files. As root, name the service account explicitly so its material is trusted without weakening any other file check:
+
+```sh
+agenc-ircd check-config --config /etc/agenc-ircd/config.toml --service-user agenc-ircd
+agenc-ircd print-onboarding --config /etc/agenc-ircd/config.toml --service-user agenc-ircd
+agenc-ircd account-invite create --descriptor /etc/agenc-ircd/onboarding.txt --signing-key-file /var/lib/agenc-ircd-operator/invite-signing.key --expires-in 86400 --service-user agenc-ircd
+```
+
+`--service-user` names a local account from `/etc/passwd`; it is refused for an unknown name and for any caller other than root or that account. It never changes the daemon's refusal to start as root, and the host-control report still names the invoking identity. Root keeps its own operator-owned invitation signing key; the option only lets root read the service-owned keys, trust manifests, and directories that the daemon itself would read.
+
 The packaged tmpfiles and service records keep `/run/agenc-ircd` at mode 0750 while the daemon is stopped. This allows the same Host-depth path checks to run before the first start and between service runs.
 
 The process cannot observe every service-manager restriction from inside its own namespace. Check the installed unit separately with `systemd-analyze security` and the deployment checker. `check-config` does not prove swap encryption, backup handling, certificate issuance, firewall rules, or Tor routing.
