@@ -134,6 +134,71 @@ fn secret_channel_mask_removal_and_controls_hide_channel_and_entry_existence() -
     Ok(())
 }
 
+/// RUN-01 (#44): on the real daemon, a hidden channel that is full at the
+/// operational member ceiling is refused with the same unavailable failure
+/// as any unauthorized hidden JOIN, an absent name is created, and a full
+/// listed channel reports its capacity outcome instead.
+#[test]
+fn full_hidden_channel_join_is_unavailable_and_absent_name_is_created() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let mut config = fs::read_to_string(&fixture.config_path)?;
+    replace_once(
+        &mut config,
+        "[limits]\n",
+        "[limits]\nmembers_per_channel = 2\n",
+    )?;
+    fs::write(&fixture.config_path, config)?;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let (mut owner, account) = exercise_account_client(&fixture)?;
+    owner.send_until("JOIN #packed", " 366 ")?;
+    owner.send_until("MODE #packed +s", " MODE #packed ")?;
+    owner.send_until("JOIN #quiet", " 366 ")?;
+    owner.send_until("MODE #quiet +p", " MODE #quiet ")?;
+    owner.send_until("JOIN #open", " 366 ")?;
+    let mut second = connect_registered_account(&fixture, "Second", 95, account)?;
+    // An invitation admits the second member to each hidden channel, which
+    // fills every channel to the two-member ceiling.
+    owner.send_until("INVITE Second #packed", " 341 ")?;
+    owner.send_until("INVITE Second #quiet", " 341 ")?;
+    for channel in ["#packed", "#quiet", "#open"] {
+        second.send_until(&format!("JOIN {channel}"), " 366 ")?;
+    }
+    let mut outsider = connect_registered_account(&fixture, "Outside", 91, account)?;
+    outsider.send_until("CAP REQ :standard-replies", " ACK ")?;
+    let (mut guest, _) = connect_registered_guest(&fixture)?;
+    guest.send_until("CAP REQ :standard-replies", " ACK ")?;
+    for (client, creates_absent) in [(&mut outsider, false), (&mut guest, true)] {
+        for channel in ["#packed", "#quiet"] {
+            let lines = send_and_sync(client, &[format!("JOIN {channel}")])?;
+            assert_contains(
+                &lines,
+                &format!(" FAIL JOIN SECRET_UNAVAILABLE {channel} :Channel is unavailable"),
+            )?;
+        }
+        if creates_absent {
+            // A guest may create an absent name: the creation path is a
+            // documented, distinguishable outcome, not an existence leak.
+            let lines = send_and_sync(client, &["JOIN #absent".to_owned()])?;
+            assert_contains(&lines, " 366 ")?;
+        }
+    }
+    let open = send_and_sync(&mut outsider, &["JOIN #open".to_owned()])?;
+    assert!(
+        !open.iter().any(|line| line.contains("SECRET_UNAVAILABLE")),
+        "a full listed channel must not read as hidden: {open:?}"
+    );
+    assert!(
+        open.iter()
+            .any(|line| line.contains("SERVER_BUSY") || line.contains(" 471 ")),
+        "a full listed channel reports capacity: {open:?}"
+    );
+    outsider.send_until("JOIN #fresh", " 366 ")?;
+    let mut admin = AdminClient::connect(&fixture)?;
+    admin.confirm_process("DIE :join privacy regression complete")?;
+    assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
+    Ok(())
+}
+
 #[test]
 fn disabled_client_listener_needs_no_tls_files_but_enablement_requires_them() -> TestResult {
     let fixture = LiveFixture::create()?;
