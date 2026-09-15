@@ -50,6 +50,7 @@ pub use persist::{
     DurableSanction, DurableSession, DurableTopic, DurableWrite,
 };
 pub use projection::{
-    AccountProjection, ChannelListProjection, ChannelProjection, MemberProjection,
-    PresenceProjection, ProjectionDecision, SessionProjection, TopicProjection,
+    AccountProjection, ChannelListProjection, ChannelListScan, ChannelProjection,
+    LIST_RECORDS_PER_QUERY_TOKEN, MAX_LIST_SCAN_RECORDS, MemberProjection, PresenceProjection,
+    ProjectionDecision, SessionProjection, TopicProjection,
 };

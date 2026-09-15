@@ -2439,7 +2439,14 @@ impl DomainState {
     fn assess_charges(&self, user_id: UserId, command: &CanonicalCommand) -> Vec<RateCharge> {
         let mut charges = Vec::new();
         charges.push(rate_charge(RateBucket::RegisteredCommand(user_id)));
-        if is_expensive_query(command.kind()) {
+        if let CanonicalCommandData::List(selected) = command.data() {
+            // A LIST owes one query token per 20 records its bounded scan
+            // will examine (spec 14.3), assessed before the scan runs.
+            charges.push(RateCharge {
+                bucket: RateBucket::ExpensiveQuery(user_id),
+                tokens: self.list_query_tokens(selected),
+            });
+        } else if is_expensive_query(command.kind()) {
             charges.push(rate_charge(RateBucket::ExpensiveQuery(user_id)));
         }
         if let CanonicalCommandData::Message(message) = command.data() {
@@ -5782,6 +5789,213 @@ mod tests {
             created_at_utc: UtcSecond::from_unix_seconds(10),
             revision: Revision::new(1)?,
         })
+    }
+
+    /// Replaces the fixture's channels with `count` listed channels, each
+    /// created by its own guest, and returns their names in creation order.
+    fn listed_channels(f: &mut Fixture, count: u32) -> Result<Vec<ChannelNameValue>, DomainError> {
+        f.state.channels.clear();
+        f.state.channel_names.clear();
+        let mut names = Vec::new();
+        for n in 1..=count {
+            let mut raw = [0_u8; 16];
+            raw.get_mut(12..)
+                .ok_or(DomainError::InvariantViolation)?
+                .copy_from_slice(&n.to_be_bytes());
+            let id = ChannelInstanceId::from_bytes(raw);
+            let name = ChannelNameValue::parse(&format!("#list-{n}"))?;
+            // Seeds wrap past 240 creators; a repeated creator only replaces
+            // its earlier session, which these scans never depend on.
+            let seed = u8::try_from(
+                n.checked_rem(240)
+                    .ok_or(DomainError::Overflow)?
+                    .saturating_add(10),
+            )
+            .map_err(|_| DomainError::Overflow)?;
+            let mut creator = session(seed, None)?;
+            creator.joined_channels.insert(id);
+            let channel = crate::ChannelState::new_ephemeral(
+                id,
+                name.clone(),
+                creator.principal(),
+                Membership::new(creator.user_id, None, Role::Owner),
+                UtcSecond::from_unix_seconds(10),
+                Revision::new(1)?,
+            );
+            f.state.apply_session(creator, Revision::new(1)?);
+            f.state.channel_names.insert(name.clone(), id);
+            f.state.channels.insert(id, channel);
+            names.push(name);
+        }
+        Ok(names)
+    }
+
+    fn expensive_query_tokens(f: &Fixture, command: &CanonicalCommand) -> u64 {
+        f.state
+            .assess_charges(f.owner.user_id, command)
+            .iter()
+            .filter(|charge| charge.bucket() == RateBucket::ExpensiveQuery(f.owner.user_id))
+            .map(|charge| charge.tokens())
+            .sum()
+    }
+
+    #[test]
+    fn list_selection_resolves_a_late_listed_channel_before_the_result_ceiling()
+    -> Result<(), DomainError> {
+        let mut f = fixture()?;
+        let names = listed_channels(&mut f, 201)?;
+        let first = names
+            .first()
+            .cloned()
+            .ok_or(DomainError::InvariantViolation)?;
+        let last = names
+            .last()
+            .cloned()
+            .ok_or(DomainError::InvariantViolation)?;
+        // The unselected page holds the first 200 channels and not the last.
+        let page = f.state.select_channel_list(&[])?;
+        assert_eq!(page.rows().len(), 200);
+        assert_eq!(page.scanned_records(), 200);
+        assert_eq!(
+            page.rows().iter().filter(|row| row.name() == &last).count(),
+            0
+        );
+        assert_eq!(f.state.project_channel_list()?.len(), 200);
+        // An explicit name resolves wherever the channel sorts.
+        let selected = f.state.select_channel_list(std::slice::from_ref(&last))?;
+        assert_eq!(selected.rows().len(), 1);
+        assert!(selected.rows().first().map(|row| row.name()) == Some(&last));
+        assert_eq!(selected.scanned_records(), 1);
+        let both = f
+            .state
+            .select_channel_list(&[first.clone(), last.clone()])?;
+        assert_eq!(both.rows().len(), 2);
+        assert_eq!(both.scanned_records(), 2);
+        // Exactly 199 and 200 channels fill the page without truncation.
+        for count in [199_u32, 200] {
+            let names = listed_channels(&mut f, count)?;
+            let page = f.state.select_channel_list(&[])?;
+            assert_eq!(
+                page.rows().len(),
+                usize::try_from(count).map_err(|_| DomainError::Overflow)?
+            );
+            let last = names.last().ok_or(DomainError::InvariantViolation)?;
+            assert!(page.rows().iter().any(|row| row.name() == last));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn list_selection_hides_secret_unlisted_and_absent_names_identically() -> Result<(), DomainError>
+    {
+        let mut f = fixture()?;
+        let names = listed_channels(&mut f, 3)?;
+        let [listed, unlisted, secret] = names.as_slice() else {
+            return Err(DomainError::InvariantViolation);
+        };
+        for (name, visibility) in [
+            (unlisted, Visibility::Unlisted),
+            (secret, Visibility::Secret),
+        ] {
+            let id = *f
+                .state
+                .channel_names
+                .get(name)
+                .ok_or(DomainError::InvariantViolation)?;
+            f.state
+                .channels
+                .get_mut(&id)
+                .ok_or(DomainError::InvariantViolation)?
+                .visibility = visibility;
+        }
+        let absent = ChannelNameValue::parse("#list-absent")?;
+        let mixed = f.state.select_channel_list(&[
+            absent.clone(),
+            secret.clone(),
+            unlisted.clone(),
+            listed.clone(),
+        ])?;
+        assert_eq!(mixed.rows().len(), 1);
+        assert!(mixed.rows().first().map(|row| row.name()) == Some(listed));
+        assert_eq!(mixed.scanned_records(), 4);
+        // Hidden and absent selections are indistinguishable: empty results
+        // with the same scan count and no row shape.
+        let hidden = f.state.select_channel_list(std::slice::from_ref(secret))?;
+        let missing = f.state.select_channel_list(std::slice::from_ref(&absent))?;
+        assert!(hidden.rows().is_empty() && missing.rows().is_empty());
+        assert_eq!(hidden.scanned_records(), missing.scanned_records());
+        // The unselected scan examines hidden records but never returns them.
+        let page = f.state.select_channel_list(&[])?;
+        assert_eq!(page.rows().len(), 1);
+        assert_eq!(page.scanned_records(), 3);
+        // Duplicate names never reach selection and a canonical form is one name.
+        assert_eq!(
+            CanonicalCommand::list(vec![listed.clone(), listed.clone()]).err(),
+            Some(DomainError::DuplicateTarget)
+        );
+        let upper = ChannelNameValue::parse("#LIST-1")?;
+        assert_eq!(
+            CanonicalCommand::list(vec![listed.clone(), upper]).err(),
+            Some(DomainError::DuplicateTarget)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn list_scan_tokens_charge_one_per_twenty_examined_records_before_the_scan()
+    -> Result<(), DomainError> {
+        let mut f = fixture()?;
+        for (count, expected) in [
+            (0_u32, 1_u64),
+            (1, 1),
+            (19, 1),
+            (20, 1),
+            (21, 2),
+            (40, 2),
+            (41, 3),
+            (200, 10),
+            (201, 10),
+            (250, 10),
+        ] {
+            let names = listed_channels(&mut f, count)?;
+            let unselected = CanonicalCommand::list(Vec::new())?;
+            assert_eq!(
+                f.state.list_scan_bound(&[]),
+                usize::try_from(count.min(200)).map_err(|_| DomainError::Overflow)?
+            );
+            assert_eq!(
+                expensive_query_tokens(&f, &unselected),
+                expected,
+                "{count} channels"
+            );
+            // The scan never examines more records than it was charged for.
+            let scanned = f.state.select_channel_list(&[])?.scanned_records();
+            assert!(scanned <= f.state.list_scan_bound(&[]));
+            assert!(
+                u64::try_from(scanned.div_ceil(20).max(1)).map_err(|_| DomainError::Overflow)?
+                    <= expected
+            );
+            if let Some(last) = names.last() {
+                let named = CanonicalCommand::list(vec![last.clone()])?;
+                assert_eq!(
+                    expensive_query_tokens(&f, &named),
+                    1,
+                    "{count} channels, one name"
+                );
+            }
+        }
+        // Twenty explicit names are one token; every other expensive query
+        // keeps its single token.
+        let names = listed_channels(&mut f, 20)?;
+        assert_eq!(
+            expensive_query_tokens(&f, &CanonicalCommand::list(names)?),
+            1
+        );
+        assert_eq!(
+            expensive_query_tokens(&f, &CanonicalCommand::names(Vec::new())?),
+            1
+        );
+        Ok(())
     }
 
     fn fixture() -> Result<Fixture, DomainError> {

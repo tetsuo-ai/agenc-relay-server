@@ -8,6 +8,39 @@ use crate::{
 };
 
 const MAX_LIST_RESULTS: usize = 200;
+/// Channel records one `LIST` request examines at most (spec 14.3): the
+/// result ceiling doubles as the scan ceiling, so an unselected request never
+/// reads past the records that could fill its 200 rows.
+pub const MAX_LIST_SCAN_RECORDS: usize = MAX_LIST_RESULTS;
+/// Records one expensive-query token funds (spec 14.3).
+pub const LIST_RECORDS_PER_QUERY_TOKEN: usize = 20;
+
+/// The rows one bounded `LIST` scan produced and the records it examined.
+pub struct ChannelListScan<'a> {
+    rows: Vec<ChannelListProjection<'a>>,
+    scanned_records: usize,
+}
+
+impl<'a> ChannelListScan<'a> {
+    /// The listed rows, in the scan's stable order, at most 200.
+    #[must_use]
+    pub fn rows(&self) -> &[ChannelListProjection<'a>] {
+        &self.rows
+    }
+
+    /// Consumes the scan into its rows.
+    #[must_use]
+    pub fn into_rows(self) -> Vec<ChannelListProjection<'a>> {
+        self.rows
+    }
+
+    /// Channel records examined, hidden and nonmatching ones included; never
+    /// above the bound the request was charged for.
+    #[must_use]
+    pub const fn scanned_records(&self) -> usize {
+        self.scanned_records
+    }
+}
 
 /// A visibility decision that never distinguishes hidden from absent targets.
 pub enum ProjectionDecision<Visible> {
@@ -334,38 +367,102 @@ impl DomainState {
         }))
     }
 
-    /// Returns at most 200 listed channels with only privacy-bucketed counts.
+    /// Returns at most 200 listed channels with only privacy-bucketed counts:
+    /// the unselected `LIST`.
     pub fn project_channel_list(&self) -> Result<Vec<ChannelListProjection<'_>>, DomainError> {
-        let listed_count = self
-            .channels
-            .values()
-            .filter(|channel| channel.visibility == Visibility::Listed)
-            .count()
-            .min(MAX_LIST_RESULTS);
-        let mut projections = Vec::new();
-        projections
-            .try_reserve_exact(listed_count)
-            .map_err(|_| DomainError::AllocationFailed)?;
-        for channel in self
-            .channels
-            .values()
-            .filter(|channel| channel.visibility == Visibility::Listed)
-            .take(MAX_LIST_RESULTS)
-        {
-            projections.push(ChannelListProjection {
-                channel_id: channel.channel_id,
-                name: &channel.name,
-                member_count_lower_bound: member_bucket(
-                    channel
-                        .memberships
-                        .keys()
-                        .filter(|user| self.session(**user).is_some())
-                        .count(),
-                ),
-                topic: topic_projection(channel),
-            });
+        Ok(self.select_channel_list(&[])?.into_rows())
+    }
+
+    /// The channel records a `LIST` request with `selected` names examines,
+    /// computed before any scan so the query tokens that fund it can be
+    /// charged first (spec 14.3): one record per explicit name, otherwise the
+    /// bounded prefix of the channel table that an unselected request reads.
+    #[must_use]
+    pub fn list_scan_bound(&self, selected: &[ChannelNameValue]) -> usize {
+        if selected.is_empty() {
+            self.channels.len().min(MAX_LIST_SCAN_RECORDS)
+        } else {
+            selected.len()
         }
-        Ok(projections)
+    }
+
+    /// Expensive-query tokens one `LIST` request owes for its scan bound: one
+    /// per 20 records examined, rounded up, and never below one.
+    #[must_use]
+    pub fn list_query_tokens(&self, selected: &[ChannelNameValue]) -> u64 {
+        let tokens = self
+            .list_scan_bound(selected)
+            .div_ceil(LIST_RECORDS_PER_QUERY_TOKEN)
+            .max(1);
+        u64::try_from(tokens).unwrap_or(u64::MAX)
+    }
+
+    /// Selects `LIST` rows before the result ceiling (spec 14.3, Appendix A.1
+    /// and B): an explicit vector of at most 20 names resolves each name
+    /// directly, so a listed channel is returned wherever it sorts, and an
+    /// empty vector scans the bounded table prefix. Absent, secret, and
+    /// unlisted names produce the same omission as each other and never a
+    /// row, a count, or a distinct shape. The scan examines no more records
+    /// than [`Self::list_scan_bound`] promised for the same selection.
+    pub fn select_channel_list(
+        &self,
+        selected: &[ChannelNameValue],
+    ) -> Result<ChannelListScan<'_>, DomainError> {
+        let bound = self.list_scan_bound(selected);
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(bound.min(MAX_LIST_RESULTS))
+            .map_err(|_| DomainError::AllocationFailed)?;
+        let mut scanned_records = 0_usize;
+        if selected.is_empty() {
+            for channel in self.channels.values().take(bound) {
+                scanned_records = scanned_records
+                    .checked_add(1)
+                    .ok_or(DomainError::Overflow)?;
+                if channel.visibility == Visibility::Listed {
+                    rows.push(self.list_row(channel));
+                }
+                if rows.len() >= MAX_LIST_RESULTS {
+                    break;
+                }
+            }
+        } else {
+            for name in selected.iter().take(bound) {
+                scanned_records = scanned_records
+                    .checked_add(1)
+                    .ok_or(DomainError::Overflow)?;
+                let Some(channel) = self
+                    .channel_names
+                    .get(name)
+                    .and_then(|channel_id| self.channels.get(channel_id))
+                else {
+                    continue;
+                };
+                if channel.visibility == Visibility::Listed
+                    && !rows.iter().any(|row| row.channel_id == channel.channel_id)
+                {
+                    rows.push(self.list_row(channel));
+                }
+            }
+        }
+        Ok(ChannelListScan {
+            rows,
+            scanned_records,
+        })
+    }
+
+    fn list_row<'a>(&'a self, channel: &'a crate::ChannelState) -> ChannelListProjection<'a> {
+        ChannelListProjection {
+            channel_id: channel.channel_id,
+            name: &channel.name,
+            member_count_lower_bound: member_bucket(
+                channel
+                    .memberships
+                    .keys()
+                    .filter(|user| self.session(**user).is_some())
+                    .count(),
+            ),
+            topic: topic_projection(channel),
+        }
     }
 
     fn session_projection<'a>(
