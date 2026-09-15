@@ -4571,6 +4571,24 @@ pin but never creates or requests the recipient private key.
 listeners or mutating storage. `agenc-ircd print-onboarding` emits the public
 DNS/onion/pin descriptor and contains no private material.
 
+Offline commands trust file ownership by an explicit identity, never by
+inference. Without further options, `check-config`, `print-onboarding`, and
+`account-invite create` accept secret, trust, and directory material owned
+by root or by the caller's own effective UID, so the service account runs
+them against its own material directly. Each of the three commands also
+accepts `--service-user <name>`: a root caller then additionally trusts
+material owned by that one named local account, which the command resolves
+from the local account database (`/etc/passwd`, read as a bounded protected
+file) and never from a configuration key, an input file, or the ownership of
+any directory. The option is refused for a caller whose effective UID is
+neither zero nor the named account's UID, refused when the name is unknown,
+and refused by `serve`, which still never starts as root. Accepting the
+named owner changes nothing else: the regular-file, single-link, no-symlink,
+mode, size, nonblocking special-file, protected-ancestor, and
+stability-during-read rules of Section 22.2 apply unchanged, an unrelated
+owner is still refused, and the host-control report continues to describe
+the process that actually executes, so a root invocation reports root.
+
 ### 22.4 Administrative transports
 
 Public client connections cannot obtain network-operator authority. `OPER`
@@ -9559,8 +9577,9 @@ channel, not a substitute for WebPKI or E2EE identity verification.
 
 For invite registration, the offline command
 `agenc-ircd account-invite create --descriptor <file> --signing-key-file
-<file> --expires-in <seconds>` verifies the descriptor and key, accepts 1
-through 2,592,000 seconds, generates a fresh Invite ID, and emits exactly:
+<file> --expires-in <seconds> [--service-user <name>]` verifies the
+descriptor and key, accepts 1 through 2,592,000 seconds, generates a fresh
+Invite ID, and emits exactly:
 
 ```text
 AGENC-CHAT-ACCOUNT-INVITE/1
