@@ -62,6 +62,7 @@ pub use onboarding::{
 };
 pub use paths::{
     PathResolver, load_public_text, read_protected_bytes, read_protected_bytes_with_hook,
+    trust_service_account,
 };
 pub use privacy::{HistoryDefault, PrivacyConfig};
 pub use release_decision::{

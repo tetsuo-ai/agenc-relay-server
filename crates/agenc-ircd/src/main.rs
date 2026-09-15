@@ -36,10 +36,10 @@ const USAGE: &str = concat!(
     "  version [--json]\n",
     "  conformance --json [--release-decision <directory> --trusted-public-key <pem>]\n",
     "  serve --config <file>\n",
-    "  check-config --config <file>\n",
+    "  check-config --config <file> [--service-user <name>]\n",
     "  init --config <file> --profile <public|onion|dual> [options]\n",
-    "  print-onboarding --config <file>\n",
-    "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>\n",
+    "  print-onboarding --config <file> [--service-user <name>]\n",
+    "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds> [--service-user <name>]\n",
     "  storage restore --config <file> --backup <file> [restore options]\n",
     "  storage login-index-rotate-start --config <file> --new-key-file <file>\n",
     "  storage login-index-rotate-finish --config <file>\n",
@@ -112,6 +112,43 @@ fn one_config(arguments: &[OsString], usage: &str) -> Result<PathBuf, CliFailure
         .map_err(|()| CliFailure::usage(usage))
 }
 
+const SERVICE_USER: &str = "--service-user";
+
+/// Parses `--config` plus the optional explicit service identity of an
+/// offline command and trusts that identity before any file is opened.
+fn one_config_with_service_user(
+    arguments: &[OsString],
+    usage: &str,
+) -> Result<PathBuf, CliFailure> {
+    let mut parsed = ParsedOptions::parse(
+        arguments,
+        &[
+            OptionSpec::value("--config"),
+            OptionSpec::value(SERVICE_USER),
+        ],
+    )
+    .map_err(|()| CliFailure::usage(usage))?;
+    let config = parsed
+        .required_path("--config")
+        .map_err(|()| CliFailure::usage(usage))?;
+    let service_user = parsed
+        .optional_text(SERVICE_USER)
+        .map_err(|()| CliFailure::usage(usage))?;
+    trust_service_user(service_user)?;
+    Ok(config)
+}
+
+/// Trusts the named local service account for this offline process (spec
+/// Section 22.3). The daemon's `serve` command never calls this.
+fn trust_service_user(name: Option<String>) -> Result<(), CliFailure> {
+    let Some(name) = name else {
+        return Ok(());
+    };
+    agenc_ircd_config::trust_service_account(&name)
+        .map(|_uid| ())
+        .map_err(|error| CliFailure::command(EXIT_USAGE, format!("service user rejected: {error}")))
+}
+
 fn serve(arguments: &[OsString]) -> Result<(), CliFailure> {
     let config = one_config(arguments, "usage: agenc-ircd serve --config <file>")?;
     match agenc_ircd_runtime::daemon::serve(&config) {
@@ -125,7 +162,10 @@ fn serve(arguments: &[OsString]) -> Result<(), CliFailure> {
 }
 
 fn check_config(arguments: &[OsString]) -> Result<(), CliFailure> {
-    let path = one_config(arguments, "usage: agenc-ircd check-config --config <file>")?;
+    let path = one_config_with_service_user(
+        arguments,
+        "usage: agenc-ircd check-config --config <file> [--service-user <name>]",
+    )?;
     let config = load_config(&path, ValidationDepth::Host)
         .map_err(|report| CliFailure::command(EXIT_USAGE, report.to_string()))?;
     harden_offline_process();
@@ -267,9 +307,9 @@ fn print_init_receipt(receipt: &InitReceipt) {
 }
 
 fn print_onboarding(arguments: &[OsString]) -> Result<(), CliFailure> {
-    let path = one_config(
+    let path = one_config_with_service_user(
         arguments,
-        "usage: agenc-ircd print-onboarding --config <file>",
+        "usage: agenc-ircd print-onboarding --config <file> [--service-user <name>]",
     )?;
     harden_offline_process();
     let descriptor = render_onboarding(&path)
@@ -287,7 +327,7 @@ fn harden_offline_process() {
 
 fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
     harden_offline_process();
-    let usage = "usage: agenc-ircd account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds>";
+    let usage = "usage: agenc-ircd account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds> [--service-user <name>]";
     if arguments.first().and_then(|value| value.to_str()) != Some("create") {
         return Err(CliFailure::usage(usage));
     }
@@ -296,6 +336,7 @@ fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
         OptionSpec::value("--descriptor"),
         OptionSpec::value("--signing-key-file"),
         OptionSpec::value("--expires-in"),
+        OptionSpec::value(SERVICE_USER),
     ];
     let mut parsed = ParsedOptions::parse(rest, &specs).map_err(|()| CliFailure::usage(usage))?;
     let descriptor = parsed
@@ -316,6 +357,10 @@ fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
             value.parse::<u64>().map_err(|_| ())
         })
         .map_err(|()| CliFailure::usage(usage))?;
+    let service_user = parsed
+        .optional_text(SERVICE_USER)
+        .map_err(|()| CliFailure::usage(usage))?;
+    trust_service_user(service_user)?;
     let envelope = create_account_invite(&descriptor, &key, expires)
         .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
     print!("{envelope}");
