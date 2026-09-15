@@ -406,6 +406,20 @@ impl BackupTrustKey {
     }
 
     /// Validates one exact offline trust-manifest row.
+    ///
+    /// The `[not_before, not_after)` interval is a policy over the backup
+    /// header's *claimed* creation time, which the same key signs. Restore
+    /// accepts a backup when that claimed time lies in the interval of the
+    /// retained key that signed it; nothing in the format proves the backup
+    /// existed inside the interval, and a holder of the private key can sign
+    /// a header with any earlier time. The interval therefore limits which
+    /// claims a retained key may vouch for; it is not protection against a
+    /// key compromised after `not_after`. The independent controls are the
+    /// offline-authorized, protected trust manifest itself (a key whose row
+    /// is removed verifies nothing), the exact current rollback-guard
+    /// boundary the restore command compares against, backup custody, and
+    /// the disaster-recovery generation pins. See the operator guide section
+    /// on backup signing-key validity windows.
     pub fn with_validity(
         key_id: StorageDigest,
         public_key: Ed25519PublicKey,
@@ -423,6 +437,10 @@ impl BackupTrustKey {
         })
     }
 
+    /// Whether the signed, claimed creation time lies in this key's interval.
+    /// This is the only time check restore performs: no external clock,
+    /// receipt, or timestamp authority is consulted (current-format policy,
+    /// documented in the operator guide).
     const fn accepts_creation_time(&self, created_at: u64) -> bool {
         created_at >= self.not_before && created_at < self.not_after
     }
@@ -804,6 +822,11 @@ fn read_backup_header<R: Read>(
     )
 }
 
+/// Selects the one retained key whose ID matches the header and whose
+/// interval admits the header's claimed creation time. The header is
+/// authenticated by that key afterwards, so the claimed time is trusted
+/// exactly as far as the key is: a backdated header signed by a compromised
+/// key inside a still-retained interval is accepted by this policy.
 fn trusted_backup_key(
     header: &BackupHeader,
     trusted_keys: &[BackupTrustKey],
@@ -1730,6 +1753,76 @@ mod tests {
                 20,
             ),
             Err(StorageError::AuthenticationFailed)
+        );
+        Ok(())
+    }
+
+    /// Documents the current-format policy, not compromise resistance: the
+    /// validity interval constrains only the signed, claimed creation time.
+    /// A header claiming a time inside a retained key's interval selects that
+    /// key even when the interval ended long before any signature over the
+    /// header could have been made, while each boundary, an unknown key, a
+    /// mismatched key, and a tampered stream are refused. The complete
+    /// backdated restore case runs against a real database in the stage-five
+    /// integration suite.
+    #[test]
+    fn a_backdated_backup_inside_a_retained_interval_is_accepted_by_current_policy()
+    -> Result<(), StorageError> {
+        let (header, master_key, guard_root, signing_key) = backup_boundary()?;
+        // The fixture header claims creation at Unix second 123 (1970); any
+        // real signature over it was necessarily made after that interval.
+        assert_eq!(header.created_at(), 123);
+        let key_id = header.signing_key_id();
+        let public_key = signing_key.public_key();
+
+        // Retained interval that admits the claimed time: selected by policy.
+        let retained = BackupTrustKey::with_validity(key_id, public_key, 100, 200)?;
+        assert_eq!(trusted_backup_key(&header, &[retained]), Ok(public_key));
+        // Exact boundaries: not_before is inclusive, not_after exclusive.
+        let starts_at_claim = BackupTrustKey::with_validity(key_id, public_key, 123, 124)?;
+        assert_eq!(
+            trusted_backup_key(&header, &[starts_at_claim]),
+            Ok(public_key)
+        );
+        let ends_at_claim = BackupTrustKey::with_validity(key_id, public_key, 100, 123)?;
+        assert_eq!(
+            trusted_backup_key(&header, &[ends_at_claim]),
+            Err(StorageError::AuthenticationFailed)
+        );
+        let starts_after_claim = BackupTrustKey::with_validity(key_id, public_key, 124, 200)?;
+        assert_eq!(
+            trusted_backup_key(&header, &[starts_after_claim]),
+            Err(StorageError::AuthenticationFailed)
+        );
+        // A disabled key (row removed) verifies nothing: the manifest is the
+        // control, not the clock.
+        assert_eq!(
+            trusted_backup_key(&header, &[]),
+            Err(StorageError::AuthenticationFailed)
+        );
+        // A different key under its own ID never matches this header.
+        let other = Ed25519SecretKey::from_bytes([73; 32]);
+        assert_eq!(
+            trusted_backup_key(&header, &[BackupTrustKey::new(other.public_key())?]),
+            Err(StorageError::AuthenticationFailed)
+        );
+        // A tampered header fails before any record is read.
+        let (bytes, _) = BackupStreamWriter::start(Vec::new(), &header, BACKUP_FIXED_STREAM_BYTES)?
+            .finish(&signing_key)?;
+        let mut tampered = bytes;
+        let tampered_offset = BACKUP_MAGIC.len() + 2 + 4 + 8;
+        if let Some(byte) = tampered.get_mut(tampered_offset) {
+            *byte ^= 0x01;
+        }
+        assert!(
+            verify_backup(
+                std::io::Cursor::new(tampered),
+                &master_key,
+                &guard_root,
+                &[BackupTrustKey::with_validity(key_id, public_key, 100, 200)?],
+                BACKUP_FIXED_STREAM_BYTES,
+            )
+            .is_err()
         );
         Ok(())
     }

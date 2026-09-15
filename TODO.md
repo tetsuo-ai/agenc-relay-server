@@ -1817,10 +1817,19 @@ None blocks the core-v1 gate.
   integration regressions reproduce the original overwrite and now pass;
   platform tests cover a guard appearing after admission and later normal
   replacement. The complete storage suite passes 316 tests.
-- [ ] Backup trust-key validity windows are checked against the header
+- [x] Backup trust-key validity windows are checked against the header
   `created_at` that the same key signs (`backup.rs` `accepts_creation_time`),
   so a key compromised after `not_after` can still produce accepted backups
-  by back-dating. Document the limit or bind `created_at` to an external fact.
+  by back-dating. Recorded as an accepted current-format limitation: the
+  interval constrains the signed claim, not when the backup existed. The
+  operator guide section on backup signing-key validity windows names the
+  independent controls (manifest row removal, current guard boundary,
+  custody, retained keys and generation pins) and separates a retained key
+  from a disabled one; the API comments say the same, and
+  `a_backdated_backup_inside_a_retained_interval_is_accepted_by_current_policy`
+  documents the accepted backdated case beside both boundaries, an unknown
+  key, a mismatched key, and a tampered header. Binding `created_at` to an
+  external fact would be a separately reviewed versioned design.
 - [ ] If the second `verify_backup` in `BackupJob::finish` fails after
   `publish`, the file stays under its final name while the caller gets an
   error, and a retry then fails on `RENAME_NOREPLACE`. Unlink on post-publish

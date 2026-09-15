@@ -202,6 +202,21 @@ Assign one purpose to each key. Record its generation, creation time, activation
 
 Store encrypted key backups separately from state backups. Audit access to those backups and rehearse restoration at least every six months.
 
+## Understand backup signing-key validity windows
+
+Each `[[key]]` row of the backup trust manifest carries `not_before` and `not_after`. Restore accepts a backup only when the creation time written in the backup header lies in the interval of the retained key that signed it. That creation time is a claim made by the same private key: the interval constrains which claims a retained key may vouch for, and nothing in the current backup format proves that the backup existed during the interval. A holder of a compromised private key can sign a header that claims an earlier time, and such a backup verifies as long as the key's row is still in the manifest and the claimed time lies in its interval. The format consults no external clock, receipt, or timestamp authority; treat the interval as retention policy for verification, not as evidence of when a backup was made.
+
+The controls that hold independently of the claimed time are:
+
+- The trust manifest itself. It is an offline-authorized, mode-0600 protected file; a key whose row has been removed verifies nothing, whatever a header claims. This is the only way to stop a key from vouching for backups.
+- The current rollback guard. The stopped `storage restore` command compares the backup's embedded source boundary against the readable current guard where one exists, so a backup cannot silently move the state behind the boundary the guard records.
+- Backup custody. Restore only from artifacts whose origin and storage you control; a signature and an interval do not substitute for custody.
+- Retained old keys and disaster-recovery generation pins. Keep every verification key that a surviving legitimate backup still needs, and pin the schema and storage key generations you expect a restored state to carry.
+
+Distinguish two states of a key row. A historically retained key is one whose private half was retired and destroyed in a controlled rotation; keep its row, with its original interval, until no surviving backup signed by it is needed, so old legitimate backups still restore. A disabled key is one whose private half was lost, exposed, or otherwise compromised; remove its row immediately, because a retained interval would still accept backdated backups from whoever holds it. Backups it signed can no longer be restored from that manifest, so re-create current backups under a fresh key before removing the row when a controlled window allows. Do not extend an interval to accept a backup whose claimed time falls outside it; investigate why the claim and the rotation record disagree instead.
+
+Do not narrow an interval to a single second to compensate: `created_at` is the signed claim, and a key holder chooses it. If a deployment requires proof of when a backup was made, that is a separate, versioned design with an external timestamp or receipt authority, not a change to how the current format is parsed.
+
 ## Rotate the sequencer credential
 
 The coordinator holds the active sequencer key at
