@@ -31,6 +31,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Record the source identity
+        run: |
+          git rev-parse --verify HEAD
+          git log -1 --format='%H %ci'
+          git status --porcelain=v1
+
       - name: Install the pinned Rust build contract
         run: |
           rustup toolchain install 1.98.0 --profile minimal
