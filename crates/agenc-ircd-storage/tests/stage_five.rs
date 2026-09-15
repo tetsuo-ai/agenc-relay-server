@@ -693,6 +693,50 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             Some(StorageError::AuthenticationFailed)
         );
     }
+    // Current-format policy, documented in the operator guide: the interval
+    // constrains only the signed claim. A backup created now but claiming
+    // Unix second 1_500_000_000 (2017) verifies under a key whose interval
+    // ended in 2020, because the row is still retained and the claim lies
+    // inside it; removing the row is what stops the key from vouching.
+    let backdated_file = BackupDestination::new(directory.path(), "backdated.backup")?;
+    let backdated = port
+        .try_backup(
+            backdated_file,
+            Ed25519SecretKey::from_bytes([22; 32]),
+            1_500_000_000,
+            [24; 16],
+        )?
+        .wait()?;
+    assert_eq!(backdated.stream_bytes, backup.stream_bytes);
+    let backdated_bytes = fs::read(directory.path().join("backdated.backup"))?;
+    let retired_interval = BackupTrustKey::with_validity(
+        trusted.key_id,
+        signing_key.public_key(),
+        1_400_000_000,
+        1_600_000_000,
+    )?;
+    let accepted = verify_backup(
+        backdated_bytes.as_slice(),
+        &StorageMasterKey::from_bytes([19; 32]),
+        &RollbackGuardRootKey::from_bytes([20; 32]),
+        &[retired_interval],
+        limits.backup_max_bytes,
+    )?;
+    assert_eq!(accepted.header.created_at(), 1_500_000_000);
+    // With that row gone (only an unrelated key retained), the same backup
+    // verifies nothing.
+    let unrelated = BackupTrustKey::new(Ed25519SecretKey::from_bytes([25; 32]).public_key())?;
+    assert_eq!(
+        verify_backup(
+            backdated_bytes.as_slice(),
+            &StorageMasterKey::from_bytes([19; 32]),
+            &RollbackGuardRootKey::from_bytes([20; 32]),
+            &[unrelated],
+            limits.backup_max_bytes,
+        )
+        .err(),
+        Some(StorageError::AuthenticationFailed)
+    );
     let restore_directory = TestDirectory::create()?;
     let restore_output = restore_directory.path().join("restored-state");
     let construction_directory = ConstructionDirectory::open(&restore_output, false)?;
