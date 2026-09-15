@@ -13,7 +13,7 @@ from typing import NoReturn
 
 RAW_HASHES = {
     "docs/ircd-architecture-and-implementation-spec.md": (
-        "3dcb1f162b93e690cb79f97223ac2aebf5b9f2fd06da0ca91a73aa157ef4b731"
+        "4b8a3b0c9ab8de30b5e0c88f750fece1f32021c6310baa2772cba0253365679b"
     ),
     "docs/irc-mls-e2ee-extension.md": (
         "398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1"
@@ -22,7 +22,7 @@ RAW_HASHES = {
         "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411"
     ),
     "docs/protocol-sources-and-decisions.md": (
-        "9e5f99f09a702e3b65f861920c192d7dbb809649e9c22023149c2dce17bbda67"
+        "a55a3fbbe929b601726097967152af672f90569ab4daefdd26dc6d65d3c75f7c"
     ),
 }
 PROFILE_HASHES = {
