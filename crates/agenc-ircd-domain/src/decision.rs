@@ -2921,9 +2921,6 @@ impl DomainState {
         if channel.memberships.contains_key(&user_id) {
             return Err(DomainError::BadState);
         }
-        if channel.memberships.len() >= self.operational_limits.members_per_channel() {
-            return Err(DomainError::LimitExceeded);
-        }
         let session = self.sessions.get(&user_id).ok_or(DomainError::NotFound)?;
         validate_guest_join(channel, principal)?;
         let matching_invite = matching_join_invite(channel, principal, now)?;
@@ -2931,7 +2928,19 @@ impl DomainState {
         if effective_mask(channel, session, false) {
             return Err(DomainError::Forbidden);
         }
-        validate_join_admission(channel, session, matching_invite, key_supplied, key_ok)?;
+        // The operational member ceiling is a channel-specific capacity
+        // outcome in the spec 14.2 order (limit after visibility-safe lookup,
+        // account, ban, invite and key), so it is checked only after hidden
+        // authorization confirmed the requester may learn the channel exists
+        // (PRV-01); it never precedes that decision.
+        validate_join_admission(
+            channel,
+            session,
+            matching_invite,
+            key_supplied,
+            key_ok,
+            self.operational_limits.members_per_channel(),
+        )?;
         Ok(matching_invite)
     }
 
@@ -4707,6 +4716,7 @@ fn validate_join_admission(
     matching_invite: Option<InviteId>,
     key_supplied: bool,
     key_ok: bool,
+    member_ceiling: usize,
 ) -> Result<(), DomainError> {
     if channel.modes.invite_only
         && matching_invite.is_none()
@@ -4717,16 +4727,24 @@ fn validate_join_admission(
     if channel.modes.join_key && (!key_supplied || !key_ok) {
         return Err(DomainError::SecretUnavailable);
     }
-    if channel
-        .member_limit
-        .is_some_and(|limit| channel.memberships.len() >= usize::from(limit))
-    {
+    if channel_is_full(channel, member_ceiling) {
         return Err(DomainError::LimitExceeded);
     }
     if channel.content_policy == ContentPolicy::E2eeBound && session.account_id.is_none() {
         return Err(DomainError::RegistrationRequired);
     }
     Ok(())
+}
+
+/// Whether the channel's own `+l` limit or the configured member ceiling is
+/// reached. Only a requester already admitted to learn the channel exists
+/// reaches this check (architecture Section 14.2).
+fn channel_is_full(channel: &crate::ChannelState, member_ceiling: usize) -> bool {
+    let members = channel.memberships.len();
+    channel
+        .member_limit
+        .is_some_and(|limit| members >= usize::from(limit))
+        || members >= member_ceiling
 }
 
 fn validate_mode_vector(
@@ -5823,6 +5841,83 @@ mod tests {
 
     fn admission(user_id: UserId) -> Result<AdmissionSnapshot, DomainError> {
         AdmissionSnapshot::new(vec![(RateBucket::RegisteredCommand(user_id), 10)])
+    }
+
+    /// RUN-01 (#44): a full hidden channel still hides its existence from a
+    /// guest and from an authenticated non-member at, below and above a
+    /// lowered operational member ceiling, while a listed channel keeps its
+    /// capacity outcome for the same requester.
+    #[test]
+    fn hidden_full_channel_still_hides_existence() -> Result<(), DomainError> {
+        for visibility in [Visibility::Secret, Visibility::Unlisted] {
+            for ceiling in [1_usize, 2, 3] {
+                let mut f = fixture()?;
+                let stranger_account = account_id(3);
+                f.state.apply_account(
+                    AccountState::new(
+                        stranger_account,
+                        agenc_ircd_types::Generation::new(1)?,
+                        Revision::new(1)?,
+                    ),
+                    Revision::new(1)?,
+                );
+                let stranger = session(4, Some(stranger_account))?;
+                f.state
+                    .apply_session(session(4, Some(stranger_account))?, Revision::new(1)?);
+                let mut limits = crate::OperationalLimits::HARD_MAX.values();
+                limits.members_per_channel = ceiling;
+                f.state
+                    .set_operational_limits(crate::OperationalLimits::new(limits)?);
+                f.state
+                    .channels
+                    .get_mut(&f.channel_id)
+                    .ok_or(DomainError::InvariantViolation)?
+                    .visibility = visibility;
+                for (user_id, principal) in [
+                    (f.outsider.user_id, f.outsider.principal()),
+                    (stranger.user_id, stranger.principal()),
+                ] {
+                    let result = f.state.check_join_existing(
+                        user_id,
+                        principal,
+                        f.state
+                            .channel(f.channel_id)
+                            .ok_or(DomainError::InvariantViolation)?,
+                        false,
+                        false,
+                        None,
+                    );
+                    assert_eq!(
+                        result,
+                        Err(DomainError::SecretUnavailable),
+                        "{visibility:?} at ceiling {ceiling}"
+                    );
+                }
+                // The same population on a listed channel reports capacity to
+                // the authenticated non-member exactly when it is full.
+                f.state
+                    .channels
+                    .get_mut(&f.channel_id)
+                    .ok_or(DomainError::InvariantViolation)?
+                    .visibility = Visibility::Listed;
+                let listed = f.state.check_join_existing(
+                    stranger.user_id,
+                    stranger.principal(),
+                    f.state
+                        .channel(f.channel_id)
+                        .ok_or(DomainError::InvariantViolation)?,
+                    false,
+                    false,
+                    None,
+                );
+                if ceiling <= 2 {
+                    assert_eq!(listed, Err(DomainError::LimitExceeded), "ceiling {ceiling}");
+                } else {
+                    assert_eq!(listed, Ok(None), "ceiling {ceiling}");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn complete_external_inputs() -> ExternalInputs {

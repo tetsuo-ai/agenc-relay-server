@@ -8,8 +8,8 @@ use std::error::Error;
 use agenc_ircd_domain::{
     AdmissionSnapshot, CanonicalCommand, ChannelKeyVerifier, ChannelNameValue, ChannelTarget,
     DomainError, DomainState, EntropyPurpose, ExternalInputRequest, ExternalInputs, MaskList,
-    ModeChange, ModeOperation, NicknameValue, PlanDecision, Principal, RateBucket, Role,
-    Visibility, VisibilityMode,
+    ModeChange, ModeOperation, NicknameValue, OperationalLimits, PlanDecision, Principal,
+    RateBucket, Role, Visibility, VisibilityMode,
 };
 use agenc_ircd_testkit::{
     DomainTestIdentity, apply_plan, bytes, channel_id, create_account, open_session, plan,
@@ -302,6 +302,57 @@ fn authenticated_non_member_join_of_hidden_channel_is_unavailable() -> Result<()
     apply_auto(&mut state, visitor, PLAIN, &join(&unlisted, false))?;
     assert_eq!(member_role(&state, &unlisted, visitor), Some(Role::Member));
     assert_eq!(member_count(&state, &unlisted), Some(2));
+    state.validate()?;
+    Ok(())
+}
+
+/// RUN-01 (#44): the operational member ceiling never reveals a hidden
+/// channel; capacity is reported only to requesters who already may know it.
+#[test]
+fn full_hidden_channel_stays_unavailable_and_listed_capacity_is_reported()
+-> Result<(), Box<dyn Error>> {
+    let (mut state, owner, visitor) = owner_and_visitor()?;
+    let secret = create_hidden_channel(&mut state, owner, "#packed", 13, VisibilityMode::Secret)?;
+    let unlisted =
+        create_hidden_channel(&mut state, owner, "#quiet", 14, VisibilityMode::Unlisted)?;
+    let listed = ChannelNameValue::parse("#open")?;
+    apply_auto(&mut state, owner, creating(15), &join(&listed, false))?;
+    let guest = open_session(&mut state, 3, "guest", None)?;
+    let mut limits = OperationalLimits::HARD_MAX.values();
+    limits.members_per_channel = 1;
+    state.set_operational_limits(OperationalLimits::new(limits)?);
+
+    for name in [&secret, &unlisted] {
+        expect_rejected(
+            plan_auto(&state, guest, PLAIN, &join(name, false))?,
+            DomainError::SecretUnavailable,
+        )?;
+        expect_rejected(
+            plan_auto(&state, visitor, PLAIN, &join(name, false))?,
+            DomainError::SecretUnavailable,
+        )?;
+        assert_eq!(member_count(&state, name), Some(1));
+    }
+    expect_rejected(
+        plan_auto(&state, visitor, PLAIN, &join(&listed, false))?,
+        DomainError::LimitExceeded,
+    )?;
+    // A legitimately invited requester learns the real capacity outcome.
+    apply_auto(&mut state, owner, PLAIN, &|| {
+        Ok(CanonicalCommand::invite(
+            NicknameValue::parse("visitor")?,
+            secret.clone(),
+        ))
+    })?;
+    expect_rejected(
+        plan_auto(&state, visitor, PLAIN, &join(&secret, false))?,
+        DomainError::LimitExceeded,
+    )?;
+    let mut limits = OperationalLimits::HARD_MAX.values();
+    limits.members_per_channel = 2;
+    state.set_operational_limits(OperationalLimits::new(limits)?);
+    apply_auto(&mut state, visitor, PLAIN, &join(&secret, false))?;
+    assert_eq!(member_count(&state, &secret), Some(2));
     state.validate()?;
     Ok(())
 }
