@@ -297,6 +297,8 @@ pub enum SemanticHashDomain {
     AcknowledgementSet,
     /// Reinitialization acknowledgement-set digest.
     ReinitAcknowledgementSet,
+    /// Leaf-membership proof identifier (companion 13.7.3).
+    LeafMembershipId,
 }
 
 impl SemanticHashDomain {
@@ -347,6 +349,7 @@ impl SemanticHashDomain {
             Self::FederationSnapshot => b"IRC-MLS/1 federation snapshot",
             Self::AcknowledgementSet => b"IRC-MLS/1 commit acknowledgement set",
             Self::ReinitAcknowledgementSet => b"IRC-MLS/1 reinit acknowledgement set",
+            Self::LeafMembershipId => b"IRC-MLS/1 leaf membership id",
         }
     }
 }

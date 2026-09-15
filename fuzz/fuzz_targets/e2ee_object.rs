@@ -38,6 +38,7 @@ fuzz_target!(|data: &[u8]| {
         TypedBody::FinalizationRequest(value) => Some(value.encode()),
         TypedBody::FinalizationCertificate(value) => Some(value.encode()),
         TypedBody::AbortRequest(value) => Some(value.encode()),
+        TypedBody::LeafMembershipProof(value) => Some(value.encode()),
         TypedBody::AbortCertificate(value) => Some(value.encode()),
         TypedBody::WelcomeMls(value) => Some(value.encode()),
         TypedBody::RootIdentity(value) => Some(value.encode()),

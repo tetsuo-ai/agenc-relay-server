@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod finalization;
+mod membership;
 mod reinit;
 
 use crate::close::verify_close_approvals;
@@ -72,6 +73,12 @@ pub struct RecordReferences<'a> {
     /// The exact `IrcSequencerCredential` bytes a sequencer transition
     /// installs (no wire arm, as in the initial authority).
     pub sequencer_credential: Option<&'a [u8]>,
+    /// The validated leaf-membership facts the caller holds for this
+    /// conversation (companion 13.7.3). When present, every Commit and
+    /// ReInit ACK a finalization or activation embeds must be signed by the
+    /// distinct continuing leaf a stored proof identifies; when absent, ACK
+    /// signatures remain the endpoint's MLS check.
+    pub memberships: Option<&'a crate::membership::LeafMembershipSet>,
 }
 
 /// One validated chain position: the exact position facts the record was
@@ -534,7 +541,7 @@ impl HistoricalChain {
             }
             IrcSequencerRecord::ReinitActivation(certificate) => {
                 Self::require_no_references(references, true)?;
-                self.adopt_reinit_activation(certificate, record_id)?
+                self.adopt_reinit_activation(certificate, record_id, references)?
             }
             IrcSequencerRecord::ReinitAbort(certificate) => {
                 Self::require_no_references(references, true)?;

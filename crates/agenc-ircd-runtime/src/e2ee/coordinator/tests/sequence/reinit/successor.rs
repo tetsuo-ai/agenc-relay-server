@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod declared_recovery;
-mod reconstruction;
+pub(in crate::e2ee::coordinator::tests::sequence) mod reconstruction;
 
 use super::*;
 use agenc_ircd_domain::e2ee::ConversationId;
@@ -88,6 +88,7 @@ impl Fixture {
         let receipt = staged_receipt(&harness, old)?;
         let (mut ack, _) = ack(old, old_state, receipt.tbs.reinit_attempt_id)?;
         ack.tbs.new_conversation_id = new;
+        let ack = signed_reinit_ack(ack, crate::e2ee::coordinator::tests::LEAF_SEED)?;
         let core = IrcReInitActivationCoreTbs {
             profile_version: 1,
             network_id: NETWORK,

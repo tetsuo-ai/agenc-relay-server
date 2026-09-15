@@ -112,6 +112,7 @@ pub(super) struct Restore {
     candidates: BTreeMap<([u8; 32], u64), CandidateRow>,
     proofs: Vec<(ProofKeyParts, [u8; 32])>,
     policies: BTreeMap<([u8; 32], [u8; 32]), PolicyRow>,
+    memberships: super::membership_restore::Rows,
     directory: Vec<(StoredKey, DirectoryRow)>,
     packages: Vec<(StoredKey, PackageRow)>,
     attachments: Vec<(StoredKey, AttachRow)>,
@@ -241,6 +242,14 @@ impl Restore {
                     generation,
                 },
             ),
+            Ok(SequencerRow::Membership {
+                object_id,
+                epoch,
+                device_id,
+                disposition,
+            }) => self
+                .memberships
+                .admit(key, object_id, epoch, device_id, disposition),
             Err(_) => {}
         }
     }
@@ -482,6 +491,7 @@ pub(super) fn rebuild(
         candidates: restore.candidates,
         proofs: restore.proofs,
         policies: restore.policies,
+        memberships: restore.memberships,
     };
     for (conversation_id, row) in restore.routes {
         restore_route(state, &network_id, &index, &rows, conversation_id, &row);
@@ -1163,6 +1173,7 @@ struct SequencerRows {
     candidates: BTreeMap<([u8; 32], u64), CandidateRow>,
     proofs: Vec<(ProofKeyParts, [u8; 32])>,
     policies: BTreeMap<([u8; 32], [u8; 32]), PolicyRow>,
+    memberships: super::membership_restore::Rows,
 }
 
 impl SequencerRows {
@@ -1915,6 +1926,14 @@ fn restore_route(
         &mut conversation,
         conversation_id,
     );
+    super::membership_restore::restore(
+        &historical,
+        network_id,
+        &state.objects,
+        &rows.memberships,
+        &mut conversation,
+        conversation_id,
+    );
     restore_ledgers(
         &historical,
         network_id,
@@ -1930,6 +1949,7 @@ fn restore_route(
         .cloned()
         .collect();
     fill_proofs(&mut conversation, &proofs);
+    super::membership_restore::restore_signers(&state.objects, &mut conversation);
     state.routes.restore_entry(entry);
     state.logs.insert(conversation_id, log);
     state.lifecycles.insert(conversation_id, lifecycle);

@@ -28,6 +28,15 @@ fn the_completion_table_is_closed() -> Result<(), PlanError> {
         completion_for(Opcode(42), ResultKind::Bound),
         Err(PlanError::UnknownOpcode)
     );
+    assert_eq!(
+        completion_for(Opcode(43), ResultKind::Failed),
+        Err(PlanError::UnknownOpcode)
+    );
+    assert_eq!(
+        completion_for(Opcode(45), ResultKind::Failed),
+        Err(PlanError::UnknownOpcode)
+    );
+    assert!(Opcode::all().any(|opcode| opcode == Opcode::SUBMIT_MEMBERSHIP));
     let semantic = [
         (
             Opcode::APPLICATION_CHANNEL,
@@ -96,6 +105,10 @@ fn the_completion_table_is_closed() -> Result<(), PlanError> {
             ResultKind::Stored(StoreKind::Authorization),
         ),
         (Opcode::SUBMIT_POLICY, ResultKind::Stored(StoreKind::Policy)),
+        (
+            Opcode::SUBMIT_MEMBERSHIP,
+            ResultKind::Stored(StoreKind::Membership),
+        ),
         (
             Opcode::SUBMIT_FINALIZATION,
             ResultKind::Pending(PendingKind::Finalization),

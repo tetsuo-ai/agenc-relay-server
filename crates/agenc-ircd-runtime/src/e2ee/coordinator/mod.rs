@@ -50,6 +50,7 @@ pub mod events;
 pub mod execute;
 pub(crate) mod mailbox_expiry;
 mod mailbox_restore;
+mod membership_restore;
 pub mod ops;
 mod recovery_gates;
 pub mod request;
@@ -228,6 +229,10 @@ pub struct StoredResult {
     pub responses: Vec<[u8; 32]>,
 }
 
+/// The old leaf each signing `(account, device)` acknowledged for one
+/// candidate or attempt.
+pub type AckSigners = BTreeMap<([u8; 24], [u8; 16]), u32>;
+
 /// Retained per-conversation facts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ConversationState {
@@ -255,6 +260,9 @@ pub struct ConversationState {
     pub approvals: BTreeMap<[u8; 32], ApprovalSlots>,
     /// ACK object identifiers per candidate or attempt.
     pub acks: BTreeMap<[u8; 32], BTreeMap<u32, [u8; 32]>>,
+    /// The old leaf each proof-identified signing device acknowledged, per
+    /// candidate or attempt (companion 13.7.3): one ACK per signer.
+    pub ack_signers: BTreeMap<[u8; 32], AckSigners>,
     /// Sequencer record object identifiers by route sequence.
     pub records: BTreeMap<u64, [u8; 32]>,
     /// The retained finality request object per terminal identifier.
@@ -281,6 +289,9 @@ pub struct ConversationState {
     pub policies: BTreeMap<[u8; 32], RetainedPolicy>,
     /// Council votes counted so far per candidate or attempt (12.4).
     pub vote_ledgers: BTreeMap<[u8; 32], agenc_ircd_e2ee::finality::QuorumLedger>,
+    /// Accepted leaf-membership proofs by old leaf (companion 13.7.3):
+    /// the public device-to-leaf mapping that identifies ACK signers.
+    pub memberships: agenc_ircd_e2ee::membership::LeafMembershipSet,
 }
 
 /// One published policy the sequencer retains for its quorum check.

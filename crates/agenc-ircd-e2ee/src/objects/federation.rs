@@ -98,6 +98,8 @@ tls_enum! {
         AcknowledgeMailbox = 40,
         /// Publish a conversation policy.
         SubmitPolicy = 41,
+        /// Store a leaf-membership proof (companion 13.7.3).
+        SubmitMembership = 44,
     }
 }
 
@@ -152,6 +154,8 @@ tls_enum! {
         StoreStagedReinit = 9,
         /// Policy stored.
         StorePolicy = 10,
+        /// Leaf-membership proof stored.
+        StoreMembership = 11,
     }
 }
 

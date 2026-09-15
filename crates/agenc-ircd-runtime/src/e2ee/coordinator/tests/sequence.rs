@@ -44,6 +44,8 @@ mod recovery_pending;
 #[path = "ack_context.rs"]
 mod ack_context;
 
+mod leaf_membership;
+
 mod sequencer_eligibility;
 
 #[test]
@@ -343,9 +345,19 @@ fn ack(
             resulting_ratchet_tree_digest: [3; 32],
             finalization_authenticator: [4; 32],
         },
-        old_leaf_signature: Opaque::new(vec![5; 64])?,
+        old_leaf_signature: Opaque::new(vec![0; 64])?,
     };
-    wire(IrcWireObjectKind::CommitAck, &ack)
+    wire(IrcWireObjectKind::CommitAck, &signed_commit_ack(ack)?)
+}
+
+/// Signs a Commit ACK with the attached device's old leaf key.
+fn signed_commit_ack(mut ack: IrcCommitAck) -> TestResult<IrcCommitAck> {
+    ack.old_leaf_signature = Opaque::from_slice(&sign(
+        &key(super::LEAF_SEED),
+        SignatureDomain::CommitProcessed,
+        &ack.tbs,
+    )?)?;
+    Ok(ack)
 }
 
 /// One council vote of `device` over the exact slot the receipt names.
@@ -723,7 +735,8 @@ mod reinit {
     mod ack_context;
     mod admission;
     mod attempt_authority;
-    mod successor;
+    mod leaf_membership;
+    pub(in crate::e2ee::coordinator::tests::sequence) mod successor;
 
     use agenc_ircd_crypto::SignatureDomain;
     use agenc_ircd_domain::e2ee::projection::{EventKind, PendingKind};
@@ -751,6 +764,8 @@ mod reinit {
     };
 
     const NEW_CONVERSATION: [u8; 32] = [77; 32];
+    /// The old leaf key of `SECOND_DEVICE` when it joins a successor.
+    const JOINER_LEAF_SEED: u8 = 31;
 
     #[test]
     fn reinit_abort_rejects_substituted_attempts_and_receipts() -> TestResult {
@@ -933,10 +948,24 @@ mod reinit {
                 new_leaf_index: 0,
                 key_package_ref: Opaque::new(Vec::new())?,
             },
-            old_leaf_signature: Opaque::new(vec![17; 64])?,
+            old_leaf_signature: Opaque::new(vec![0; 64])?,
         };
+        let ack = signed_reinit_ack(ack, super::super::LEAF_SEED)?;
         let bytes = wire(IrcWireObjectKind::ReinitAck, &ack)?;
         Ok((ack, bytes))
+    }
+
+    /// Signs a ReInit ACK with old leaf key `leaf_seed`.
+    pub(super) fn signed_reinit_ack(
+        mut ack: IrcReInitAck,
+        leaf_seed: u8,
+    ) -> TestResult<IrcReInitAck> {
+        ack.old_leaf_signature = Opaque::from_slice(&super::super::support::sign(
+            &super::super::support::key(leaf_seed),
+            SignatureDomain::ReinitProcessed,
+            &ack.tbs,
+        )?)?;
+        Ok(ack)
     }
 
     #[test]
@@ -1260,6 +1289,7 @@ fn acknowledge(
 fn a_terminal_without_a_published_policy_is_refused_until_it_is_published() -> TestResult {
     let mut harness = Harness::new()?;
     let conversation = harness.bind_channel_unpublished()?;
+    harness.publish_leaf_zero(conversation)?;
     let (receipt, commit_object_id, candidate_id) =
         submit_candidate(&mut harness, conversation, 0, 10)?;
     let ack_bytes = acknowledge(&mut harness, conversation, candidate_id, commit_object_id)?;

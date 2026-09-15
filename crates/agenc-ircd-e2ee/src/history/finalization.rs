@@ -42,6 +42,7 @@ impl HistoricalChain {
         let core = &proof.core;
         self.check_proof_names_candidate(proof, &open)?;
         check_proof_links(proof)?;
+        super::membership::authenticate_finalization(references, proof)?;
         if core.old_policy_id != self.policy.policy_id
             || proof.authorization.tbs.old_policy_id != self.policy.policy_id
         {

@@ -97,6 +97,10 @@ pub enum SignatureDomain {
     ReinitActivation,
     /// Sequencer reinitialization-attempt abort.
     ReinitAttemptAbort,
+    /// Device attestation of one old MLS leaf (companion 13.7.3).
+    LeafMembership,
+    /// Old-leaf possession proof inside a leaf-membership proof.
+    LeafMembershipPossession,
     /// RFC 9420 `KeyPackageTBS`, signed by the leaf signature key.
     MlsKeyPackageTbs,
     /// RFC 9420 `LeafNodeTBS`, signed by the leaf signature key.
@@ -145,6 +149,8 @@ impl SignatureDomain {
             Self::ReinitDisposition => b"IRC-MLS/1 reinit disposition",
             Self::ReinitActivation => b"IRC-MLS/1 reinit activation",
             Self::ReinitAttemptAbort => b"IRC-MLS/1 reinit attempt abort",
+            Self::LeafMembership => b"IRC-MLS/1 leaf membership",
+            Self::LeafMembershipPossession => b"IRC-MLS/1 leaf membership possession",
             Self::MlsKeyPackageTbs => b"MLS 1.0 KeyPackageTBS",
             Self::MlsLeafNodeTbs => b"MLS 1.0 LeafNodeTBS",
         }
@@ -180,7 +186,9 @@ impl SignatureDomain {
             | Self::ReinitProcessed
             | Self::ReinitDisposition
             | Self::ReinitActivation
-            | Self::ReinitAttemptAbort => SignatureEncoding::IrcSignatureInput,
+            | Self::ReinitAttemptAbort
+            | Self::LeafMembership
+            | Self::LeafMembershipPossession => SignatureEncoding::IrcSignatureInput,
             Self::AccountCreationInvite
             | Self::FederationHello
             | Self::AdminSession

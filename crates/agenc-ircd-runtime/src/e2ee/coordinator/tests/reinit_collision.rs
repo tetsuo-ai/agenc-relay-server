@@ -91,6 +91,10 @@ fn successor_activation(
     let id = receipt.tbs.reinit_attempt_id;
     let (mut ack, _) = super::super::super::reinit::ack(old, state, id)?;
     ack.tbs.new_conversation_id = attempt.tbs.new_conversation_id;
+    let ack = super::super::super::reinit::signed_reinit_ack(
+        ack,
+        crate::e2ee::coordinator::tests::LEAF_SEED,
+    )?;
     let core = activation_core(&attempt, &ack, id)?;
     let terminal_id = semantic_id_of(SemanticHashDomain::ReinitActivationId, &core)?;
     let vote = reinit_vote(

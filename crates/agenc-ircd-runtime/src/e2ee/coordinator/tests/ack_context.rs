@@ -1,4 +1,6 @@
-//! ACK context checks are independent of the still-open old-leaf admission contract.
+//! ACK context checks: every changed ACK is re-signed by the attached
+//! device's proof-identified old leaf key, so each refusal is the context
+//! check itself rather than leaf identification (companion 12.3, 13.7.3).
 #![forbid(unsafe_code)]
 use super::*;
 
@@ -14,9 +16,8 @@ fn refuses(change: impl FnOnce(&mut IrcCommitAckTbs), expected: E2eeReplyCode) -
         &mut budget,
     )?;
     let mut ack = IrcCommitAck::decode_exact(object.body(), &mut budget)?;
-    // This proves the signature primitive over each changed TBS, without claiming
-    // that this fixture key is authenticated as an MLS member by the server.
-    let secret = key(113);
+    // The changed TBS is re-signed by the leaf key the stored proof binds.
+    let secret = key(crate::e2ee::coordinator::tests::LEAF_SEED);
     ack.old_leaf_signature =
         Opaque::from_slice(&sign(&secret, SignatureDomain::CommitProcessed, &ack.tbs)?)?;
     let valid = wire(IrcWireObjectKind::CommitAck, &ack)?;
@@ -88,7 +89,7 @@ fn finalization_case(
         change(&mut acknowledgement.tbs);
     }
     acknowledgement.old_leaf_signature = Opaque::from_slice(&sign(
-        &key(113),
+        &key(crate::e2ee::coordinator::tests::LEAF_SEED),
         SignatureDomain::CommitProcessed,
         &acknowledgement.tbs,
     )?)?;

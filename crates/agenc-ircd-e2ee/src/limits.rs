@@ -75,6 +75,9 @@ pub const MAX_COMMIT_APPROVAL_OBJECT: usize = 65_536;
 pub const MAX_COMMIT_ACK_OBJECT: usize = 65_536;
 /// `MAX_REINIT_ACK_OBJECT`.
 pub const MAX_REINIT_ACK_OBJECT: usize = 65_536;
+/// `MAX_LEAF_MEMBERSHIP_OBJECT`: a leaf-membership proof with its envelope
+/// (companion 13.7.3).
+pub const MAX_LEAF_MEMBERSHIP_OBJECT: usize = 8_192;
 /// `MAX_FINALIZATION_OBJECT`.
 pub const MAX_FINALIZATION_OBJECT: usize = 4_190_000;
 /// `MAX_ABORT_OBJECT`.

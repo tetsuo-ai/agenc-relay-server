@@ -63,9 +63,11 @@ record leaves the chain byte-for-byte unchanged, so cancellation or truncated
 paged evidence preserves caller state. No clock, storage owner, signing
 secret, or MLS private state enters the module.
 
-Endpoint-only and therefore not claimed: the leaf membership behind an ACK
-signature (ENC-05 supplies the server-visible mapping), copath coverage, the
-staged result a voter compared, and the exact continuing set of a ReInit.
+Endpoint-only and therefore not claimed: copath coverage, the staged result
+a voter compared, and the exact continuing set of a ReInit. The leaf behind
+an ACK signature is checked only when the caller passes validated
+leaf-membership facts in `RecordReferences::memberships` (ENC-05, see
+`docs/stage-10-leaf-membership.md`).
 
 ## Evidence
 

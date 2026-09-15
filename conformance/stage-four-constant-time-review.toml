@@ -25,9 +25,9 @@ review = "Real and fake selections deserialize one exact-size record and execute
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/hash.rs"
-sha256 = "e3d52975688de0d3029f706bb9e6ee5d808ac74ab26d14df0d7c4487994062ea"
+sha256 = "bbed8a8d197dd7f1479ff49960213ac6afd54582c30253b49e090a0dc6e60e18"
 symbols = ["LoginIndexDigest::matches", "LoginIndexKey::key_id", "derive_fake_credential_id"]
-review = "Login digest equality uses subtle::ConstantTimeEq. The public login-index key identifier is a network-bound SHA-256 derivation over the secret key. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label. The 2026-09-10 re-review against 68defd5 found only the new unkeyed Sha256Stream adapter and the FederationSnapshotHash module export. Their production callers hash release artifacts and public federation snapshots; neither enters login selection, HMAC derivation or secret comparison. The new snapshot adapter bounds its declared input and requires complete consumption. The reviewed login functions are byte-for-byte unchanged."
+review = "Login digest equality uses subtle::ConstantTimeEq. The public login-index key identifier is a network-bound SHA-256 derivation over the secret key. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label. The 2026-09-10 re-review against 68defd5 found only the new unkeyed Sha256Stream adapter and the FederationSnapshotHash module export. Their production callers hash release artifacts and public federation snapshots; neither enters login selection, HMAC derivation or secret comparison. The new snapshot adapter bounds its declared input and requires complete consumption. The reviewed login functions are byte-for-byte unchanged. The 2026-09-15 re-review for the leaf-membership work (ENC-05) found only the added SemanticHashDomain::LeafMembershipId variant and its `IRC-MLS/1 leaf membership id` label: a public semantic-hash domain used for companion object identifiers that enters neither login selection, HMAC derivation nor any secret comparison. The reviewed login functions remain byte-for-byte unchanged."
 
 [[surface]]
 path = "crates/agenc-ircd-crypto/src/storage.rs"

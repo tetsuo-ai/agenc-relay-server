@@ -909,3 +909,88 @@ pub(crate) fn finality_vote(
         device_signature: sign(&key(device), SignatureDomain::DispositionVote, tbs)?,
     })
 }
+
+/// One old leaf a device attests to (companion 13.7.3).
+pub(crate) struct MembershipSpec<'a> {
+    pub(crate) principal: &'a Principal,
+    pub(crate) conversation_id: [u8; 32],
+    pub(crate) device: u8,
+    pub(crate) leaf_seed: u8,
+    pub(crate) leaf_index: u32,
+    pub(crate) old_credential_hash: [u8; 32],
+    pub(crate) epoch: u64,
+    pub(crate) removed: Option<[u8; 32]>,
+}
+
+impl<'a> MembershipSpec<'a> {
+    /// A continuing proof for `leaf_index` at epoch zero, whose credential
+    /// hash repeats the leaf index so distinct leaves never collide.
+    pub(crate) fn continuing(
+        principal: &'a Principal,
+        conversation_id: [u8; 32],
+        device: u8,
+        leaf_seed: u8,
+        leaf_index: u32,
+    ) -> Self {
+        let tag = u8::try_from(leaf_index % 200).unwrap_or(0).wrapping_add(1);
+        Self {
+            principal,
+            conversation_id,
+            device,
+            leaf_seed,
+            leaf_index,
+            old_credential_hash: [tag; 32],
+            epoch: 0,
+            removed: None,
+        }
+    }
+}
+
+/// A leaf-membership proof signed by the device and, for a continuing
+/// leaf, by the old leaf key.
+pub(crate) fn membership_proof(
+    spec: &MembershipSpec<'_>,
+) -> Result<agenc_ircd_e2ee::objects::membership::IrcLeafMembershipProof, E2eeError> {
+    use agenc_ircd_e2ee::objects::membership::{
+        IrcLeafDispositionKind, IrcLeafMembershipProof, IrcLeafMembershipProofTbs,
+    };
+    let principal = spec.principal;
+    let tbs = IrcLeafMembershipProofTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: spec.conversation_id,
+        epoch: spec.epoch,
+        leaf_index: spec.leaf_index,
+        old_credential_hash: spec.old_credential_hash,
+        leaf_signature_scheme: 0x0807,
+        leaf_signature_key: Opaque::from_slice(&public(&key(spec.leaf_seed)))?,
+        account_id: principal.root.tbs.account_id.clone(),
+        device_id: [spec.device; 16],
+        root_generation: principal.root.tbs.root_generation,
+        root_fingerprint: root_fingerprint(&principal.root)?,
+        roster_generation: principal.roster.tbs.roster_generation,
+        roster_id: roster_id(&principal.roster)?,
+        credential_generation: 0,
+        disposition: if spec.removed.is_some() {
+            IrcLeafDispositionKind::Removed
+        } else {
+            IrcLeafDispositionKind::Continuing
+        },
+        removal_finalization_id: spec.removed.unwrap_or([0; 32]),
+    };
+    let possession = if spec.removed.is_some() {
+        Vec::new()
+    } else {
+        sign(
+            &key(spec.leaf_seed),
+            SignatureDomain::LeafMembershipPossession,
+            &tbs,
+        )?
+        .to_vec()
+    };
+    Ok(IrcLeafMembershipProof {
+        device_signature: sign(&key(spec.device), SignatureDomain::LeafMembership, &tbs)?,
+        possession_signature: Opaque::new(possession)?,
+        tbs,
+    })
+}

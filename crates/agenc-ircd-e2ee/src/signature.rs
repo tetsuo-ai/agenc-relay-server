@@ -43,7 +43,8 @@ pub const fn expected_signer(domain: SignatureDomain) -> Option<SignerRole> {
         | SignatureDomain::CloseAuthorization
         | SignatureDomain::DeviceAttachPossession
         | SignatureDomain::DispositionVote
-        | SignatureDomain::ReinitDisposition => Some(SignerRole::Device),
+        | SignatureDomain::ReinitDisposition
+        | SignatureDomain::LeafMembership => Some(SignerRole::Device),
         SignatureDomain::SequencerContinuity
         | SignatureDomain::Reservation
         | SignatureDomain::DeviceAttachChallenge
@@ -56,6 +57,7 @@ pub const fn expected_signer(domain: SignatureDomain) -> Option<SignerRole> {
         SignatureDomain::CommitProcessed
         | SignatureDomain::ReinitAttempt
         | SignatureDomain::ReinitProcessed
+        | SignatureDomain::LeafMembershipPossession
         | SignatureDomain::MlsKeyPackageTbs
         | SignatureDomain::MlsLeafNodeTbs => Some(SignerRole::Leaf),
         _ => None,
