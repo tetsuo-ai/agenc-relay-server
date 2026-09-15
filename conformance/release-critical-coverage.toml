@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 783
-reviewed_source_sha256 = "d30dcf7e731cf6a0ab9f78b104b9957e4231c6e3f852bf68895e3bb5c86aad96"
+reviewed_source_sha256 = "3b9cc48eba7f2f8aac5fd5b20b6e312b21f2685601e5b123f7bd07057d606162"
 deferred = []
 
 [[region]]
@@ -58,9 +58,9 @@ reason = "Sequence-zero admission, nonce accounting, database commit and exclusi
 id = "storage-initial-guard-absence"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/platform.rs"
-source_sha256 = "0321aa07c6e6c93965cc8372df7549b4ce3a868273d1ffa5fb7afcac85cd6973"
-start_line = 560
-end_line = 566
+source_sha256 = "c84c94047219a9d8757e504dafcd2da73c5767eea5abb7424002cee20842b8c5"
+start_line = 637
+end_line = 643
 metric = "branches"
 reason = "Every existing guard entry, including dangling symlinks, and every inspection error must refuse initialization before database creation."
 
@@ -68,11 +68,21 @@ reason = "Every existing guard entry, including dangling symlinks, and every ins
 id = "storage-guard-durable-publication"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/platform.rs"
-source_sha256 = "0321aa07c6e6c93965cc8372df7549b4ce3a868273d1ffa5fb7afcac85cd6973"
-start_line = 578
-end_line = 636
+source_sha256 = "c84c94047219a9d8757e504dafcd2da73c5767eea5abb7424002cee20842b8c5"
+start_line = 655
+end_line = 713
 metric = "branches"
 reason = "Initial no-replace publication and normal replacement retain the file-sync, rename, directory-sync and authenticated readback boundaries."
+
+[[region]]
+id = "storage-backup-publication-retraction"
+category = "persistence-recovery"
+file = "crates/agenc-ircd-storage/src/platform.rs"
+source_sha256 = "c84c94047219a9d8757e504dafcd2da73c5767eea5abb7424002cee20842b8c5"
+start_line = 354
+end_line = 413
+metric = "regions"
+reason = "After the irreversible no-replace rename a backup is accepted only if the final name still refers to the written and verified inode, and any later failure retracts the artifact only with that inode proof, so a failed publication never occupies the final name and a foreign file is never unlinked."
 
 [[region]]
 id = "client-message-error-enum-arms"
@@ -3076,7 +3086,7 @@ reason = "Stopped restore supplies mandatory legacy audit validation from exact 
 id = "storage-admission-engine-validate-recovered-domain-record"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/engine.rs"
-source_sha256 = "6a5101d3a1bc59e0549a4e89a24e2534b3500be3b54e6dc3b2459fd8001ed824"
+source_sha256 = "58fb97ee564b7df309159e6a053073c67acf79af4a23f87df2cae8d0b90875b5"
 start_line = 3185
 end_line = 3226
 metric = "regions"
@@ -10626,9 +10636,9 @@ reason = "Durable channel authority, membership and canonical text validation mu
 id = "storage-descriptor-temporary-cleanup"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/platform.rs"
-source_sha256 = "0321aa07c6e6c93965cc8372df7549b4ce3a868273d1ffa5fb7afcac85cd6973"
-start_line = 872
-end_line = 887
+source_sha256 = "c84c94047219a9d8757e504dafcd2da73c5767eea5abb7424002cee20842b8c5"
+start_line = 949
+end_line = 964
 metric = "branches"
 reason = "Temporary enumeration and deletion must use the same open directory authority and reject malformed owned names."
 

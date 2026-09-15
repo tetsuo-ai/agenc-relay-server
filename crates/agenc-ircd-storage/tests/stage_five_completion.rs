@@ -1736,9 +1736,110 @@ fn real_startup_and_backup_inject_read_and_publication_boundaries() -> Result<()
             )?;
             assert!(completion.wait().is_err());
             faults.verify_fired()?;
+            // Whatever side of whichever boundary failed, the backup
+            // directory holds neither the final name nor a temporary.
+            assert_eq!(
+                directory_names(backup_directory.path())?,
+                Vec::<String>::new(),
+                "{site:?} {boundary:?}"
+            );
+            // The same name publishes on the retry with the same producer,
+            // and the artifact is the exact verified stream for that cut.
+            let receipt = owner
+                .port()
+                .try_backup(
+                    agenc_ircd_storage::BackupDestination::new(
+                        backup_directory.path(),
+                        &backup_name,
+                    )?,
+                    Ed25519SecretKey::from_bytes([209; 32]),
+                    1,
+                    [211; 16],
+                )?
+                .wait()?;
+            assert_eq!(
+                directory_names(backup_directory.path())?,
+                vec![backup_name.clone()],
+                "{site:?} {boundary:?}"
+            );
+            let bytes = fs::read(backup_directory.path().join(&backup_name))?;
+            assert_eq!(u64::try_from(bytes.len())?, receipt.stream_bytes);
+            let verified = agenc_ircd_storage::verify_backup(
+                bytes.as_slice(),
+                &StorageMasterKey::from_bytes([207; 32]),
+                &RollbackGuardRootKey::from_bytes([208; 32]),
+                &[agenc_ircd_storage::BackupTrustKey::new(
+                    Ed25519SecretKey::from_bytes([209; 32]).public_key(),
+                )?],
+                receipt.stream_bytes,
+            )?;
+            assert_eq!(verified.trailer.stream_digest, receipt.stream_digest);
+            assert_eq!(verified.trailer.record_count, receipt.record_count);
             owner.shutdown()?;
         }
     }
+    Ok(())
+}
+
+fn directory_names(directory: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut names = fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
+}
+
+/// Audit regression (issue #48): a failure immediately after the no-replace
+/// rename must not leave the final name occupied by an unverified artifact,
+/// and the same-name retry must succeed. Before the repair this failed with
+/// `final_exists=true` and a `FilesystemRejected` retry.
+#[test]
+fn audit_backup_rename_error_leaves_final_name_and_blocks_retry() -> Result<(), Box<dyn Error>> {
+    let fixture = initialized_live_fixture()?;
+    let faults = StorageFaultInjector::new(
+        StorageFaultCase {
+            site: StorageFaultSite::BackupRename,
+            boundary: StorageFaultBoundary::After,
+        },
+        1,
+    )?;
+    let state = StateDirectory::open_with_faults(
+        fixture.directory.path(),
+        &[fixture.qualification],
+        faults.clone(),
+    )?;
+    let owner = StorageOwner::start(live_open_config(state))?;
+    let backups = TestDirectory::create()?;
+    let name = "audit-backup.agenc";
+    let result = owner
+        .port()
+        .try_backup(
+            agenc_ircd_storage::BackupDestination::new(backups.path(), name)?,
+            Ed25519SecretKey::from_bytes([209; 32]),
+            1,
+            [210; 16],
+        )?
+        .wait();
+    assert!(result.is_err());
+    faults.verify_fired()?;
+    let final_exists = backups.path().join(name).exists();
+    let retry = owner
+        .port()
+        .try_backup(
+            agenc_ircd_storage::BackupDestination::new(backups.path(), name)?,
+            Ed25519SecretKey::from_bytes([209; 32]),
+            1,
+            [211; 16],
+        )?
+        .wait();
+    eprintln!("result={result:?} final_exists={final_exists} retry={retry:?}");
+    owner.shutdown()?;
+    assert!(
+        !final_exists,
+        "undifferentiated failure occupied the final name"
+    );
+    assert!(retry.is_ok(), "failed publication blocked same-name retry");
     Ok(())
 }
 

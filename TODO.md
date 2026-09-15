@@ -1830,10 +1830,18 @@ None blocks the core-v1 gate.
   documents the accepted backdated case beside both boundaries, an unknown
   key, a mismatched key, and a tampered header. Binding `created_at` to an
   external fact would be a separately reviewed versioned design.
-- [ ] If the second `verify_backup` in `BackupJob::finish` fails after
+- [x] If the second `verify_backup` in `BackupJob::finish` fails after
   `publish`, the file stays under its final name while the caller gets an
-  error, and a retry then fails on `RENAME_NOREPLACE`. Unlink on post-publish
-  failure or return a published-but-unverified receipt.
+  error, and a retry then fails on `RENAME_NOREPLACE`. Publication now keeps
+  the verified descriptor through the no-replace rename, proves by inode
+  identity that the final name refers to that file instead of re-reading it,
+  and retracts the artifact (only after proving the name still refers to the
+  written inode, then syncing the directory) when anything after the rename
+  fails, so a failed publication never occupies the final name and the
+  same-name retry publishes. A foreign inode under the name is never touched
+  and a same-name retry against it is refused. The audit regression and the
+  extended fault matrix assert directory contents and the verified retry at
+  every backup boundary; see `docs/stage-10-backup-publication-repair.md`.
 - [x] `cleanup_random_temporaries` enumerates and unlinks through the same
   locked directory descriptor. A regression replaces its original path,
   preserves unrelated replacement-directory files, and verifies a fresh
