@@ -14,7 +14,7 @@ from typing import Any
 from release_qualification.daemon_tests import DaemonTests
 from release_qualification.driver import command, context, finish
 from release_qualification.process import execute
-from release_qualification.records import QualificationError, canonical, read_record, write_once
+from release_qualification.records import QualificationError, canonical, read_record, require_integer, write_once
 
 DRILLS = ["restore", "disaster_restore", "deletion", "rekey", "index_transition", "tls_rotation",
           "federation_rotation", "sequencer_rotation", "backup_rotation", "audit_rotation", "compromise", "rollback",
@@ -22,30 +22,63 @@ DRILLS = ["restore", "disaster_restore", "deletion", "rekey", "index_transition"
 DRILL_TIMEOUT = 900
 MAX_STEPS = 256
 MAX_FACTS = 256
+# The Rust producer (`Drill` in stage_ten_drills.rs) writes exactly these fields;
+# a step name is a static identifier, a detail is one formatted message, and
+# both timing fields are `u64` nanoseconds saturating at `u64::MAX`.
+RECORD_FIELDS = {"schema_version", "drill", "passed", "elapsed_ns", "steps", "facts"}
+STEP_FIELDS = {"name", "elapsed_ns", "detail"}
+U64_MAX = 2**64 - 1
+MAX_STEP_NAME_BYTES = 128
+MAX_STEP_DETAIL_BYTES = 4096
+MAX_FACT_KEY_BYTES = 128
+MAX_FACT_VALUE_BYTES = 4096
 DEPLOY_PROFILES = ["direct.conf", "dual.conf", "onion-local-admin.conf", "onion-remote-admin.conf"]
 FORBIDDEN_HOST_PATTERNS = "LISTEN_FDS|LISTEN_PID|SOCKS_PROXY|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|resolve_addr|lookup_host"
 
 
+def require_text(value: Any, minimum: int, maximum: int, label: str) -> str:
+    """A string whose UTF-8 length lies within the producer's bound."""
+    if type(value) is not str or not minimum <= len(value.encode("utf-8")) <= maximum:
+        raise QualificationError(f"{label} is not a bounded string")
+    return value
+
+
 def validate_record(record: dict[str, Any], name: str) -> bool:
-    """Check one drill record's shape and return whether the drill passed."""
-    if record.get("schema_version") != 1 or record.get("drill") != name:
+    """Check one drill record against the closed producer schema and return its verdict.
+
+    Only the exact JSON booleans are verdicts, both timing fields are `u64`
+    nanoseconds, every step interval lies inside the measured drill interval
+    (the producer records intervals since the previous step, so no sum equality
+    is assumed), and no field outside the closed schema is accepted.
+    """
+    if not isinstance(record, dict) or set(record) != RECORD_FIELDS:
+        raise QualificationError(f"drill record for {name} is outside the closed schema")
+    if type(record["schema_version"]) is not int or record["schema_version"] != 1:
         raise QualificationError(f"drill record for {name} belongs to another schema or drill")
-    if type(record.get("elapsed_ns")) is not int or record["elapsed_ns"] < 0:
-        raise QualificationError(f"drill {name} has no elapsed time")
-    steps = record.get("steps")
+    if type(record["drill"]) is not str or record["drill"] != name:
+        raise QualificationError(f"drill record for {name} belongs to another schema or drill")
+    elapsed = require_integer(record["elapsed_ns"], 0, U64_MAX, f"drill {name} elapsed time")
+    steps = record["steps"]
     if not isinstance(steps, list) or not steps or len(steps) > MAX_STEPS:
         raise QualificationError(f"drill {name} recorded no steps")
     for step in steps:
-        if not isinstance(step, dict) or set(step) != {"name", "elapsed_ns", "detail"} or type(step["elapsed_ns"]) is not int:
+        if not isinstance(step, dict) or set(step) != STEP_FIELDS:
             raise QualificationError(f"drill {name} has a malformed step")
-    facts = record.get("facts")
-    if not isinstance(facts, dict) or len(facts) > MAX_FACTS or any(not isinstance(value, str) for value in facts.values()):
+        require_text(step["name"], 1, MAX_STEP_NAME_BYTES, f"drill {name} step name")
+        require_text(step["detail"], 0, MAX_STEP_DETAIL_BYTES, f"drill {name} step detail")
+        require_integer(step["elapsed_ns"], 0, elapsed, f"drill {name} step time")
+    facts = record["facts"]
+    if not isinstance(facts, dict) or len(facts) > MAX_FACTS:
         raise QualificationError(f"drill {name} has malformed facts")
-    if record.get("passed") not in (True, False):
+    for key, value in facts.items():
+        require_text(key, 1, MAX_FACT_KEY_BYTES, f"drill {name} fact key")
+        require_text(value, 0, MAX_FACT_VALUE_BYTES, f"drill {name} fact value")
+    passed = record["passed"]
+    if type(passed) is not bool:
         raise QualificationError(f"drill {name} has no verdict")
-    if record["passed"] and "error" in facts:
+    if passed and "error" in facts:
         raise QualificationError(f"drill {name} claims a pass while recording an error")
-    return bool(record["passed"])
+    return passed
 
 
 def host_checks(root: Path, attempt: Path) -> dict[str, bool]:

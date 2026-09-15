@@ -898,6 +898,59 @@ class DrillsDriverTests(unittest.TestCase):
             with self.subTest(record=changed), self.assertRaises(QualificationError):
                 driver.validate_record(changed, "restore")
 
+    def test_verdicts_are_exact_booleans_and_times_are_bounded(self) -> None:
+        """QA-01 (#42): the two reproduced counterexamples and their neighbours are refused."""
+        driver = self.driver()
+        u64_max = 2**64 - 1
+        # Genuine producer output keeps its verdict, including saturated timing.
+        saturated = self.record()
+        saturated["elapsed_ns"] = u64_max
+        saturated["steps"][0]["elapsed_ns"] = u64_max
+        self.assertTrue(driver.validate_record(saturated, "restore"))
+        failed = self.record(passed=False)
+        failed["facts"]["error"] = "restore refused"
+        self.assertFalse(driver.validate_record(failed, "restore"))
+        for mutate in (
+            # the reproduced counterexamples
+            lambda record: record.__setitem__("passed", 1),
+            lambda record: record["steps"][0].__setitem__("elapsed_ns", -1),
+            # verdicts
+            lambda record: record.__setitem__("passed", 0),
+            lambda record: record.__setitem__("passed", 1.0),
+            lambda record: record.__setitem__("passed", "true"),
+            lambda record: record.__setitem__("passed", None),
+            lambda record: record.pop("passed"),
+            # timing
+            lambda record: record.__setitem__("elapsed_ns", True),
+            lambda record: record.__setitem__("elapsed_ns", u64_max + 1),
+            lambda record: record.__setitem__("elapsed_ns", 1.0),
+            lambda record: record["steps"][0].__setitem__("elapsed_ns", True),
+            lambda record: record["steps"][0].__setitem__("elapsed_ns", record["elapsed_ns"] + 1),
+            lambda record: record["steps"][0].__setitem__("elapsed_ns", u64_max),
+            lambda record: record["steps"][0].__setitem__("elapsed_ns", "5000"),
+            # step and fact text
+            lambda record: record["steps"][0].__setitem__("name", ""),
+            lambda record: record["steps"][0].__setitem__("name", 7),
+            lambda record: record["steps"][0].__setitem__("name", "n" * 129),
+            lambda record: record["steps"][0].__setitem__("detail", None),
+            lambda record: record["steps"][0].__setitem__("detail", "d" * 4097),
+            lambda record: record["steps"][0].__setitem__("extra", 1),
+            lambda record: record["facts"].__setitem__("", "x"),
+            lambda record: record["facts"].__setitem__("k" * 129, "x"),
+            lambda record: record["facts"].__setitem__("big", "v" * 4097),
+            # closed top-level schema
+            lambda record: record.__setitem__("note", "unexpected"),
+            lambda record: record.pop("facts"),
+            lambda record: record.__setitem__("schema_version", True),
+            lambda record: record.__setitem__("steps", [self.record()["steps"][0]] * 257),
+        ):
+            changed = self.record()
+            mutate(changed)
+            with self.subTest(record=changed), self.assertRaises(QualificationError):
+                driver.validate_record(changed, "restore")
+        with self.assertRaises(QualificationError):
+            driver.validate_record([], "restore")
+
 
 class DependencyDecisionTests(unittest.TestCase):
     """Every NOASSERTION left in a release SBOM must be a reviewed, exact decision."""
