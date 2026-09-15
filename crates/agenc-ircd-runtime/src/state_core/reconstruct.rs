@@ -1474,11 +1474,14 @@ mod tests {
             Some(invite_id) => {
                 body.extend_from_slice(&[1]);
                 body.extend_from_slice(invite_id.as_bytes());
+                // Invitation interval: not_before 3_000 < expires_at 3_600.
+                body.extend_from_slice(&3_000_u64.to_be_bytes());
                 body.extend_from_slice(&3_600_u64.to_be_bytes());
             }
             None => {
                 body.extend_from_slice(&[0]);
                 body.extend_from_slice(&[0; 16]);
+                body.extend_from_slice(&0_u64.to_be_bytes());
                 body.extend_from_slice(&0_u64.to_be_bytes());
             }
         }

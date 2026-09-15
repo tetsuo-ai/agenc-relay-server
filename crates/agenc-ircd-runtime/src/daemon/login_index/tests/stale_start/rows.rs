@@ -156,6 +156,8 @@ fn transaction(
         Some(invite) => {
             body.push(1);
             body.extend_from_slice(invite.as_bytes());
+            // Invitation interval: not_before 3_000 < expires_at 3_600.
+            body.extend_from_slice(&3_000_u64.to_be_bytes());
             body.extend_from_slice(&3600_u64.to_be_bytes());
             vec![RecordReference::new(
                 TableId::RegistrationInvite,
@@ -164,7 +166,7 @@ fn transaction(
         }
         None => {
             body.push(0);
-            body.extend_from_slice(&[0; 24]);
+            body.extend_from_slice(&[0; 32]);
             Vec::new()
         }
     };

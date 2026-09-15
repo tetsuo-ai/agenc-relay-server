@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 782
-reviewed_source_sha256 = "a2437e3de728cbedff5a2ad5647d31400fb45f78698b502aabdc3ee751dd1012"
+reviewed_source_sha256 = "36ec24062b95e8ece3fbc5f56b2e191f415f9c92a35dca4d83a9c5f38d4ad30a"
 deferred = []
 
 [[region]]
@@ -10806,7 +10806,7 @@ reason = "A live authority mismatch refuses the request durably without disconne
 id = "startup-audit-before-images"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/state_core/reconstruct.rs"
-source_sha256 = "57327f805f2267c6f099809c0e1a91eb2e5900627c74f4a3bd84c497d247ea1a"
+source_sha256 = "e95d7d6d6391bcedac72dcb0eba65f793a190f71f17655525d522c20ec0ab2c2"
 start_line = 518
 end_line = 595
 metric = "branches"

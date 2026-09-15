@@ -3,19 +3,19 @@
 //! End-to-end Stage-04 account-protocol and malicious-edge tests.
 
 use agenc_ircd_auth::{
-    ACCOUNT_CREATION_INVITE_BYTES, ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES,
-    AUTHENTICATION_GRANT_RECORD_BYTES, AccountAuthenticationState, AccountCreationStartParameters,
-    AccountCreationState, AccountCredentialRecord, AccountOperationContext, AccountRequestPayload,
-    AccountRouteBinding, AccountServiceEnvelope, AccountServiceResponse,
-    AccountServiceResponsePayload, AccountTransaction, AccountTransactionBinding, AuthError,
-    AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationGrantRecord,
-    AuthenticationLookup, AuthenticationStart, AuthenticationStartParameters, Completion,
-    CreationAdmission, CreationFinish, CreationStart, CredentialChangeFinish,
-    CredentialChangeStart, CredentialChangeState, OPAQUE_KE2_BYTES, OpaqueKe1, OpaqueKe2,
-    OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord, OpaqueRegistrationRequest,
-    OpaqueRegistrationResponse, OpenedAccountServiceRequest, SealedAccountStart, TransactionClass,
-    authentication_completion, begin_account_creation, begin_authentication,
-    encode_request_plaintext as encode_secret_request_plaintext,
+    ACCOUNT_CREATION_INVITE_BYTES, ACCOUNT_CREATION_TIMEOUT_TICKS, ACCOUNT_SERVICE_ENVELOPE_BYTES,
+    ACCOUNT_SERVICE_RESPONSE_BYTES, AUTHENTICATION_GRANT_RECORD_BYTES, AccountAuthenticationState,
+    AccountCreationStartParameters, AccountCreationState, AccountCredentialRecord,
+    AccountOperationContext, AccountRequestPayload, AccountRouteBinding, AccountServiceEnvelope,
+    AccountServiceResponse, AccountServiceResponsePayload, AccountTransaction,
+    AccountTransactionBinding, AuthError, AuthenticatedAccountRequest, AuthenticationFinish,
+    AuthenticationGrantRecord, AuthenticationLookup, AuthenticationStart,
+    AuthenticationStartParameters, Completion, CreationAdmission, CreationFinish, CreationStart,
+    CredentialChangeFinish, CredentialChangeStart, CredentialChangeState, OPAQUE_KE2_BYTES,
+    OpaqueKe1, OpaqueKe2, OpaqueKe3, OpaqueProfile, OpaqueRegistrationRecord,
+    OpaqueRegistrationRequest, OpaqueRegistrationResponse, OpenedAccountServiceRequest,
+    SealedAccountStart, TransactionClass, authentication_completion, begin_account_creation,
+    begin_authentication, encode_request_plaintext as encode_secret_request_plaintext,
     encode_response_plaintext as encode_secret_response_plaintext, finish_account_authentication,
     finish_account_creation, finish_registration, open_and_parse_request, open_and_parse_response,
 };
@@ -645,10 +645,20 @@ fn signed_invitation(
     expires_at: u64,
 ) -> Result<(agenc_ircd_auth::AccountCreationInvite, Ed25519SecretKey), Box<dyn core::error::Error>>
 {
+    signed_invitation_with_id(network_id, 93, not_before, expires_at)
+}
+
+fn signed_invitation_with_id(
+    network_id: NetworkId,
+    invite_id_byte: u8,
+    not_before: u64,
+    expires_at: u64,
+) -> Result<(agenc_ircd_auth::AccountCreationInvite, Ed25519SecretKey), Box<dyn core::error::Error>>
+{
     let mut tbs = Vec::new();
     tbs.extend_from_slice(&1_u16.to_be_bytes());
     tbs.extend_from_slice(network_id.as_bytes());
-    tbs.extend_from_slice(&[93_u8; 16]);
+    tbs.extend_from_slice(&[invite_id_byte; 16]);
     tbs.extend_from_slice(&not_before.to_be_bytes());
     tbs.extend_from_slice(&expires_at.to_be_bytes());
     tbs.extend_from_slice(&1_u16.to_be_bytes());
@@ -3041,6 +3051,231 @@ fn account_service_guards_reject_every_context_and_state_substitution()
         assert!(sealed.result().is_err());
     }
 
+    Ok(())
+}
+
+/// ZDH-A1 (issue #38, #13): an invitation admitted at START just before its
+/// exclusive `expires_at` must not FINISH at or after that boundary while the
+/// separate monotonic transaction TTL is still open.
+#[test]
+fn invited_finish_at_or_after_expiry_is_rejected_inside_the_transaction_ttl()
+-> Result<(), Box<dyn core::error::Error>> {
+    let profile = OpaqueProfile::generate(TEST_NETWORK)?;
+    let login_key = LoginIndexKey::from_bytes([150_u8; 32]);
+    let fixture = protocol_fixture(&profile, &credential(151), b"straddling password")?;
+
+    for (finish_now_utc, start_request_id, finish_request_id) in
+        [(20_u64, 152_u8, 153_u8), (21, 154, 155)]
+    {
+        let (invitation, authority) = signed_invitation(TEST_NETWORK, 10, 20)?;
+        let start = begin_account_creation(
+            &profile,
+            &login_key,
+            AccountCreationStartParameters {
+                context: operation_context(19)?,
+                request: authenticated_creation_start(
+                    start_request_id,
+                    CreationStart {
+                        network_id: TEST_NETWORK,
+                        login: NormalizedLogin::prepare("straddler")?,
+                        registration_request: copy_request(&fixture.registration_request)?,
+                        invitation: Some(invitation),
+                    },
+                )?,
+                admission: CreationAdmission::Invitation {
+                    authority: authority.public_key(),
+                    now: UtcSecond::from_unix_seconds(19),
+                },
+                login_is_available: true,
+                invitation_is_available: true,
+            },
+        )?;
+        let transaction_id = start.transaction_id();
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
+        assert!(finish_now_utc < ACCOUNT_CREATION_TIMEOUT_TICKS);
+        let finish = |request_id| {
+            authenticated_creation_finish(
+                request_id,
+                CreationFinish {
+                    network_id: TEST_NETWORK,
+                    transaction_id,
+                    registration_record: copy_record(&fixture.record)?,
+                },
+            )
+        };
+
+        let outcome = finish_account_creation(
+            &mut transaction,
+            operation_context(finish_now_utc)?,
+            finish(finish_request_id)?,
+        )?;
+        assert_eq!(
+            outcome.result().err(),
+            Some(AuthError::InvitationRejected),
+            "FINISH at UTC {finish_now_utc} must reject the expired invitation"
+        );
+        assert!(outcome.seal(1)?.result().is_err());
+
+        let replay = finish_account_creation(
+            &mut transaction,
+            operation_context(finish_now_utc)?,
+            finish(finish_request_id.wrapping_add(100))?,
+        )?;
+        assert_eq!(replay.result().err(), Some(AuthError::Consumed));
+    }
+    Ok(())
+}
+
+/// ZDH-A1 (issue #38): the FINISH-time recheck is exactly
+/// `not_before <= now_utc < expires_at`, and it leaves every other creation
+/// path untouched.
+#[test]
+fn invited_finish_boundaries_follow_the_exact_interval_and_spare_unrelated_creations()
+-> Result<(), Box<dyn core::error::Error>> {
+    let profile = OpaqueProfile::generate(TEST_NETWORK)?;
+    let login_key = LoginIndexKey::from_bytes([160_u8; 32]);
+    let fixture = protocol_fixture(&profile, &credential(161), b"boundary password")?;
+    let mut next_request_id = 162_u8;
+    let mut request_id = || {
+        let id = next_request_id;
+        next_request_id = next_request_id.wrapping_add(1);
+        id
+    };
+
+    let mut invited_finish = |invite_id_byte: u8,
+                              start_now: u64,
+                              finish_now: u64|
+     -> Result<
+        agenc_ircd_auth::AccountFinishOutcome<agenc_ircd_auth::CreateAccountIntent>,
+        Box<dyn core::error::Error>,
+    > {
+        let (invitation, authority) =
+            signed_invitation_with_id(TEST_NETWORK, invite_id_byte, 10, 20)?;
+        let start = begin_account_creation(
+            &profile,
+            &login_key,
+            AccountCreationStartParameters {
+                context: operation_context(start_now)?,
+                request: authenticated_creation_start(
+                    request_id(),
+                    CreationStart {
+                        network_id: TEST_NETWORK,
+                        login: NormalizedLogin::prepare("boundary")?,
+                        registration_request: copy_request(&fixture.registration_request)?,
+                        invitation: Some(invitation),
+                    },
+                )?,
+                admission: CreationAdmission::Invitation {
+                    authority: authority.public_key(),
+                    now: UtcSecond::from_unix_seconds(start_now),
+                },
+                login_is_available: true,
+                invitation_is_available: true,
+            },
+        )?;
+        let transaction_id = start.transaction_id();
+        let mut transaction = start.seal(0)?.into_transaction_after_commit(1)?;
+        Ok(finish_account_creation(
+            &mut transaction,
+            operation_context(finish_now)?,
+            authenticated_creation_finish(
+                request_id(),
+                CreationFinish {
+                    network_id: TEST_NETWORK,
+                    transaction_id,
+                    registration_record: copy_record(&fixture.record)?,
+                },
+            )?,
+        )?)
+    };
+
+    // FINISH immediately before expiry commits and exposes the exact interval.
+    let before_expiry = invited_finish(93, 19, 19)?;
+    let intent = before_expiry.result()?;
+    assert_eq!(
+        intent.invitation_id(),
+        Some(InviteId::from_bytes([93_u8; 16]))
+    );
+    assert_eq!(
+        intent.invitation_expires_at(),
+        Some(UtcSecond::from_unix_seconds(20))
+    );
+    assert_eq!(
+        intent.invitation_interval(),
+        Some((
+            UtcSecond::from_unix_seconds(10),
+            UtcSecond::from_unix_seconds(20)
+        ))
+    );
+    assert!(before_expiry.seal(1)?.result().is_ok());
+
+    // START and FINISH exactly at not_before succeed.
+    let at_not_before = invited_finish(93, 10, 10)?;
+    assert!(at_not_before.result().is_ok());
+    assert!(at_not_before.seal(1)?.result().is_ok());
+
+    // A UTC rollback to before not_before is refused at FINISH.
+    let rolled_back = invited_finish(93, 10, 9)?;
+    assert_eq!(
+        rolled_back.result().err(),
+        Some(AuthError::InvitationRejected)
+    );
+    assert!(rolled_back.seal(1)?.result().is_err());
+
+    // A distinct, unexpired invitation still commits.
+    let distinct = invited_finish(95, 12, 15)?;
+    let distinct_intent = distinct.result()?;
+    assert_eq!(
+        distinct_intent.invitation_id(),
+        Some(InviteId::from_bytes([95_u8; 16]))
+    );
+    assert_eq!(
+        distinct_intent.invitation_interval(),
+        Some((
+            UtcSecond::from_unix_seconds(10),
+            UtcSecond::from_unix_seconds(20)
+        ))
+    );
+    assert!(distinct.seal(1)?.result().is_ok());
+
+    // An unrelated open-policy creation is unaffected by any UTC value.
+    let open_start = begin_account_creation(
+        &profile,
+        &login_key,
+        AccountCreationStartParameters {
+            context: operation_context(10)?,
+            request: authenticated_creation_start(
+                request_id(),
+                CreationStart {
+                    network_id: TEST_NETWORK,
+                    login: NormalizedLogin::prepare("open-policy")?,
+                    registration_request: copy_request(&fixture.registration_request)?,
+                    invitation: None,
+                },
+            )?,
+            admission: CreationAdmission::Open,
+            login_is_available: true,
+            invitation_is_available: true,
+        },
+    )?;
+    let open_transaction_id = open_start.transaction_id();
+    let mut open_transaction = open_start.seal(0)?.into_transaction_after_commit(1)?;
+    let open_outcome = finish_account_creation(
+        &mut open_transaction,
+        operation_context(25)?,
+        authenticated_creation_finish(
+            request_id(),
+            CreationFinish {
+                network_id: TEST_NETWORK,
+                transaction_id: open_transaction_id,
+                registration_record: copy_record(&fixture.record)?,
+            },
+        )?,
+    )?;
+    let open_intent = open_outcome.result()?;
+    assert_eq!(open_intent.invitation_id(), None);
+    assert_eq!(open_intent.invitation_interval(), None);
+    assert!(open_outcome.seal(1)?.result().is_ok());
     Ok(())
 }
 

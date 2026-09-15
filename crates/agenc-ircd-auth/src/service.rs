@@ -14,6 +14,7 @@ use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use crate::AuthError;
+use crate::invitation::invitation_interval_admits;
 use crate::opaque::{
     OPAQUE_SERVER_LOGIN_STATE_BYTES, OpaqueAuthentication, OpaqueProfile, OpaqueRegistrationRecord,
     OpaqueServerLoginState, finish_authentication,
@@ -428,8 +429,11 @@ pub struct AccountCreationState {
     invitation: Option<ValidatedInvitation>,
 }
 
+/// Authenticated invitation facts carried from START verification to the
+/// FINISH-time interval recheck and into the durable creation record.
 struct ValidatedInvitation {
     invite_id: InviteId,
+    not_before: UtcSecond,
     expires_at: UtcSecond,
 }
 
@@ -496,6 +500,17 @@ impl CreateAccountIntent {
     pub const fn invitation_expires_at(&self) -> Option<UtcSecond> {
         match self.invitation.as_ref() {
             Some(invitation) => Some(invitation.expires_at),
+            None => None,
+        }
+    }
+
+    /// Returns the authenticated invitation interval `(not_before, expires_at)`
+    /// so durable admission can re-evaluate `not_before <= now < expires_at`
+    /// with a fresh trusted UTC read before staging the account.
+    #[must_use]
+    pub const fn invitation_interval(&self) -> Option<(UtcSecond, UtcSecond)> {
+        match self.invitation.as_ref() {
+            Some(invitation) => Some((invitation.not_before, invitation.expires_at)),
             None => None,
         }
     }
@@ -597,6 +612,7 @@ fn evaluate_creation_invitation(
     (
         Some(ValidatedInvitation {
             invite_id: invitation.invite_id(),
+            not_before: invitation.not_before(),
             expires_at: invitation.expires_at(),
         }),
         StartDisposition::SuccessCandidate,
@@ -604,6 +620,24 @@ fn evaluate_creation_invitation(
 }
 
 /// Consumes account-creation state on every finish outcome.
+///
+/// # Invitation validity and the publication point
+///
+/// An invitation admitted at START is rechecked here against the exact
+/// architecture §11.3 interval `not_before <= now < expires_at` using
+/// `context.now_utc`. That value is the coordinator's trusted UTC read taken
+/// when this FINISH was opened; it is the worker-side publication point of
+/// the `CreateAccountIntent`. The runtime re-evaluates the same predicate
+/// (`invitation_interval_admits`) with a fresh trusted UTC read at durable
+/// admission, immediately before the finish durable set is staged, so a
+/// completion delayed across `expires_at` by crypto or queue latency is
+/// refused there. The monotonic transaction TTL bounds only how long the
+/// one-use transaction may be finished; it is never invitation validity.
+///
+/// When the interval refuses `now_utc`, the transaction is already consumed,
+/// so the one-use FINISH is spent, no `CreateAccountIntent` exists, and the
+/// caller receives the same fixed-size rejected completion as every other
+/// semantic rejection.
 pub fn finish_account_creation(
     transaction: &mut AccountTransaction<AccountCreationState>,
     context: AccountOperationContext,
@@ -648,6 +682,21 @@ fn finish_account_creation_with_entropy(
     if let Some(error) = state.disposition.rejection() {
         let response = rejected_creation_response(response_lineage, expected_transaction)?;
         return Ok(AccountFinishOutcome::rejected(error, response));
+    }
+    // ZDH-A1: the invitation interval is rechecked with the trusted FINISH-time
+    // UTC read. A still-open monotonic transaction TTL never extends validity.
+    if let Some(invitation) = state.invitation.as_ref()
+        && !invitation_interval_admits(
+            invitation.not_before,
+            invitation.expires_at,
+            context.now_utc,
+        )
+    {
+        let response = rejected_creation_response(response_lineage, expected_transaction)?;
+        return Ok(AccountFinishOutcome::rejected(
+            AuthError::InvitationRejected,
+            response,
+        ));
     }
     let account_id = fresh_account_id(entropy)?;
     let intent = CreateAccountIntent {
@@ -896,6 +945,10 @@ impl AuthenticationTransactionRecord {
 }
 
 /// Exact version-one bytes of one live account-creation transaction.
+///
+/// The invitation tail is `tag(1) + invite_id(16) + not_before(8) +
+/// expires_at(8)`, so a restored transaction can recheck the exact interval.
+/// Earlier development bodies without `not_before` are rejected by `parse`.
 pub const CREATION_TRANSACTION_RECORD_BYTES: usize = 2
     + 2
     + 16
@@ -908,6 +961,7 @@ pub const CREATION_TRANSACTION_RECORD_BYTES: usize = 2
     + 32
     + 1
     + 16
+    + 8
     + 8;
 
 const CREATION_TRANSACTION_RECORD_VERSION: u16 = 1;
@@ -1423,28 +1477,41 @@ fn put_validated_invitation(
         Some(invitation) => {
             writer.put(&[1])?;
             writer.put(invitation.invite_id.as_bytes())?;
+            writer.put_u64(invitation.not_before.get())?;
             writer.put_u64(invitation.expires_at.get())
         }
         None => {
             writer.put(&[0])?;
             writer.put(&[0_u8; 16])?;
+            writer.put_u64(0)?;
             writer.put_u64(0)
         }
     }
 }
+
+/// Longest invitation lifetime the issuing rule admits, in seconds.
+const MAX_RECORDED_INVITATION_LIFETIME_SECONDS: u64 = 2_592_000;
 
 fn read_validated_invitation(
     reader: &mut AuthenticationRecordReader<'_>,
 ) -> Result<Option<ValidatedInvitation>, AuthError> {
     let tag = reader.read_array::<1>()?[0];
     let invite_id = reader.read_array::<16>()?;
+    let not_before = reader.read_u64()?;
     let expires_at = reader.read_u64()?;
     match tag {
-        0 if invite_id == [0_u8; 16] && expires_at == 0 => Ok(None),
-        1 if expires_at != 0 => Ok(Some(ValidatedInvitation {
-            invite_id: InviteId::from_bytes(invite_id),
-            expires_at: UtcSecond::from_unix_seconds(expires_at),
-        })),
+        0 if invite_id == [0_u8; 16] && not_before == 0 && expires_at == 0 => Ok(None),
+        1 if expires_at != 0
+            && not_before < expires_at
+            && (1..=MAX_RECORDED_INVITATION_LIFETIME_SECONDS)
+                .contains(&(expires_at.wrapping_sub(not_before))) =>
+        {
+            Ok(Some(ValidatedInvitation {
+                invite_id: InviteId::from_bytes(invite_id),
+                not_before: UtcSecond::from_unix_seconds(not_before),
+                expires_at: UtcSecond::from_unix_seconds(expires_at),
+            }))
+        }
         _ => Err(AuthError::InvalidEncoding),
     }
 }
@@ -3715,6 +3782,7 @@ mod tests {
                 credential_id: OpaqueCredentialId::from_bytes(credential_id),
                 invitation: Some(ValidatedInvitation {
                     invite_id,
+                    not_before: UtcSecond::from_unix_seconds(600),
                     expires_at: UtcSecond::from_unix_seconds(900),
                 }),
             },
@@ -3770,7 +3838,49 @@ mod tests {
         );
         let invitation = state.invitation.as_ref().ok_or("invitation was lost")?;
         assert_eq!(invitation.invite_id, invite_id);
+        assert_eq!(invitation.not_before, UtcSecond::from_unix_seconds(600));
         assert_eq!(invitation.expires_at, UtcSecond::from_unix_seconds(900));
+
+        // Interval corruption at the new not_before slot (tag 328, id 329..345,
+        // not_before 345..353, expires_at 353..361) is rejected on restore.
+        let not_before_offset = 345;
+        let expires_at_offset = 353;
+        let restore = |bytes: &[u8; CREATION_TRANSACTION_RECORD_BYTES]| {
+            CreationTransactionRecord::parse(bytes).and_then(|record| {
+                record.restore(
+                    MonotonicTick::from_ticks(2_000),
+                    UtcSecond::from_unix_seconds(501),
+                )
+            })
+        };
+        for not_before in [900_u64, 901, u64::MAX] {
+            let mut corrupted = *record.expose_for_persistence();
+            corrupted
+                .get_mut(not_before_offset..not_before_offset + 8)
+                .ok_or("not_before fixture offset is out of bounds")?
+                .copy_from_slice(&not_before.to_be_bytes());
+            assert_eq!(
+                restore(&corrupted).err(),
+                Some(AuthError::InvalidEncoding),
+                "not_before {not_before} >= expires_at 900 must be rejected"
+            );
+        }
+        let mut oversized = *record.expose_for_persistence();
+        oversized
+            .get_mut(expires_at_offset..expires_at_offset + 8)
+            .ok_or("expires_at fixture offset is out of bounds")?
+            .copy_from_slice(&(600 + 2_592_001_u64).to_be_bytes());
+        assert_eq!(
+            restore(&oversized).err(),
+            Some(AuthError::InvalidEncoding),
+            "a lifetime above 2_592_000 seconds must be rejected"
+        );
+        let mut maximal = *record.expose_for_persistence();
+        maximal
+            .get_mut(expires_at_offset..expires_at_offset + 8)
+            .ok_or("expires_at fixture offset is out of bounds")?
+            .copy_from_slice(&(600 + 2_592_000_u64).to_be_bytes());
+        assert!(restore(&maximal).is_ok());
         Ok(())
     }
 
@@ -3911,6 +4021,13 @@ mod tests {
             .err(),
             Some(AuthError::InvalidEncoding)
         );
+        // The earlier 353-byte development body without not_before is not
+        // migrated; it is rejected outright.
+        assert_eq!(CREATION_TRANSACTION_RECORD_BYTES, 361);
+        assert_eq!(
+            CreationTransactionRecord::parse(&[0_u8; 353]).err(),
+            Some(AuthError::InvalidEncoding)
+        );
 
         let disposition_offset = 262;
         let mut corrupted = *record.expose_for_persistence();
@@ -3933,6 +4050,23 @@ mod tests {
         *corrupted
             .get_mut(invitation_tag_offset)
             .ok_or("invitation fixture offset is out of bounds")? = 2;
+        assert_eq!(
+            CreationTransactionRecord::parse(&corrupted)?
+                .restore(
+                    MonotonicTick::from_ticks(0),
+                    UtcSecond::from_unix_seconds(801),
+                )
+                .err(),
+            Some(AuthError::InvalidEncoding)
+        );
+
+        // An absent invitation (tag 0) must carry an all-zero not_before slot.
+        let invitation_not_before_offset = invitation_tag_offset + 1 + 16;
+        let mut corrupted = *record.expose_for_persistence();
+        corrupted
+            .get_mut(invitation_not_before_offset..invitation_not_before_offset + 8)
+            .ok_or("invitation not_before fixture offset is out of bounds")?
+            .copy_from_slice(&1_u64.to_be_bytes());
         assert_eq!(
             CreationTransactionRecord::parse(&corrupted)?
                 .restore(

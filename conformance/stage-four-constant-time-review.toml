@@ -13,9 +13,9 @@ role = "Supplemental regression signal only. The source-bound path review is the
 
 [[surface]]
 path = "crates/agenc-ircd-auth/src/service.rs"
-sha256 = "05abdc3aa80496f600aeac5037815d6d303f39c451f228767eb963b8098b663f"
+sha256 = "ef96029e0d6340a06358f0eca3490284a706ea17f869a0a90805fcbef81b98e5"
 symbols = ["begin_authentication"]
-review = "Both lookup arms derive the same fixed-key fake credential HMAC, select a 32-byte credential ID and an exact 192-byte record choice, then call OpaqueProfile::authentication_start once. The real digest comparison is constant-time. Stage 05 owns the required fixed storage-lookup schedule."
+review = "Both lookup arms derive the same fixed-key fake credential HMAC, select a 32-byte credential ID and an exact 192-byte record choice, then call OpaqueProfile::authentication_start once. The real digest comparison is constant-time. Stage 05 owns the required fixed storage-lookup schedule. The 2026-09-15 re-review for the ZDH-A1 invitation-interval repair (issue #38) confirmed that begin_authentication and begin_authentication_with_entropy are byte-for-byte unchanged; the only source changes carry the invitation not_before through ValidatedInvitation and the 361-byte creation transaction record and recheck the exact invitation interval in finish_account_creation_with_entropy against public invitation bounds and the trusted FINISH-time UTC read. No secret comparison, fake-credential selection, OPAQUE start or finish work changed."
 
 [[surface]]
 path = "crates/agenc-ircd-auth/src/opaque.rs"
