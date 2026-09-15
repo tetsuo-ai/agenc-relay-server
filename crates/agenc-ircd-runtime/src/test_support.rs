@@ -9,7 +9,7 @@ mod audit;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use std::collections::BTreeMap;
@@ -122,7 +122,48 @@ pub(crate) fn signed_test_qualification(
 /// One private, mode 0700 directory removed when the fixture drops.
 pub(crate) struct TestDirectory(pub(crate) PathBuf);
 
+/// Whether every ancestor of `base` is a non-symlink directory without group
+/// or world write bits, the Section 22.2 rule protected-file reads apply.
+fn ancestors_are_protected(base: &Path) -> bool {
+    base.ancestors().all(|ancestor| {
+        fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
+            metadata.file_type().is_dir() && metadata.permissions().mode() & 0o022 == 0
+        })
+    })
+}
+
 impl TestDirectory {
+    /// Creates the scratch root under the first candidate base whose
+    /// ancestors all pass the protected-file ancestor policy, so fixtures
+    /// inside it can be read through `read_protected_bytes`; `create` stays
+    /// under the system temporary directory for every other test.
+    pub(crate) fn create_protected() -> TestResult<Self> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let bases = [
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            std::env::var_os("CARGO_TARGET_TMPDIR").map(PathBuf::from),
+            home.as_ref().map(|home| home.join(".cache")),
+            home,
+        ];
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            "agenc-ircd-runtime-protected-{}-{sequence}",
+            std::process::id()
+        );
+        for base in bases.into_iter().flatten() {
+            if fs::create_dir_all(&base).is_err() || !ancestors_are_protected(&base) {
+                continue;
+            }
+            let path = base.join(&name);
+            if fs::create_dir(&path).is_err() {
+                continue;
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+            return Ok(Self(path));
+        }
+        Err("no protected scratch base is available".into())
+    }
+
     pub(crate) fn create() -> TestResult<Self> {
         let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(

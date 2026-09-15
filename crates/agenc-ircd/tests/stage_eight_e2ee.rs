@@ -97,6 +97,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "stage_eight_e2ee/close_authority.rs"]
 mod close_authority;
+#[path = "stage_eight_e2ee/credential_bounds.rs"]
+mod credential_bounds;
 #[path = "stage_eight_e2ee/credential_replacement.rs"]
 mod credential_replacement;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]

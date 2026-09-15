@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 783
-reviewed_source_sha256 = "2efaa44f9ddc12e0a99e1444ac6ddacdf164277ffa2757eb8a7b45eb7c50627f"
+reviewed_source_sha256 = "92c0de80154501268cc6ab3aab0f7260df36cd1c51f6e53f2e2460892c3c384d"
 deferred = []
 
 [[region]]
@@ -3196,11 +3196,21 @@ reason = "Cloned reservation-only handles share the existing Arc budget; checked
 id = "companion-daemon-attach-coordinator-role"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/daemon.rs"
-source_sha256 = "3462ef59d8de55c993699a7caaf21f2e090b43766f550fda531ca3dbccc6be38"
-start_line = 1259
-end_line = 1299
+source_sha256 = "d28cd165ea2669f99b5b9fd818c8a27b61b60cc05f9d69764deb1be92a68b61b"
+start_line = 1294
+end_line = 1334
 metric = "regions"
 reason = "Composition passes validated persistent local incarnation to companion installation before serving."
+
+[[region]]
+id = "companion-daemon-bounded-credentials-read"
+category = "authorization-decisions"
+file = "crates/agenc-ircd-runtime/src/daemon.rs"
+source_sha256 = "d28cd165ea2669f99b5b9fd818c8a27b61b60cc05f9d69764deb1be92a68b61b"
+start_line = 1180
+end_line = 1205
+metric = "regions"
+reason = "The sequencer credentials file is read through one bounded protected descriptor whose declared maximum applies before allocation, parsed from exactly that descriptor's bytes, and refused with the closed error that carries no path or content."
 
 [[region]]
 id = "companion-delivery-owner-companioncoordinator-configure-delivery"
