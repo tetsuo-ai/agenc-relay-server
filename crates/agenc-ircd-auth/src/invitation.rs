@@ -26,10 +26,12 @@ pub const ACCOUNT_CREATION_INVITE_BYTES: usize = 132;
 /// START cannot FINISH at or after `expires_at`, or before `not_before` after
 /// a UTC rollback, no matter how much monotonic transaction lifetime remains.
 ///
-/// Crate-visible because the workspace denies `unreachable_pub` and the crate
-/// root does not re-export this module's free functions.
+/// The runtime re-evaluates this same function with a fresh trusted UTC read
+/// at durable admission, immediately before the creation FINISH durable set
+/// is staged, so crypto or queue latency that crosses `expires_at` after the
+/// worker's check cannot publish an account.
 #[must_use]
-pub(crate) fn invitation_interval_admits(
+pub fn invitation_interval_admits(
     not_before: UtcSecond,
     expires_at: UtcSecond,
     now: UtcSecond,

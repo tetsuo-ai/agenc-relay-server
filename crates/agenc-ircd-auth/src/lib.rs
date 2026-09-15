@@ -19,7 +19,9 @@ pub use channel_key::{
     CHANNEL_KEY_SALT_BYTES, derive_channel_key_verifier,
 };
 pub use error::AuthError;
-pub use invitation::{ACCOUNT_CREATION_INVITE_BYTES, AccountCreationInvite};
+pub use invitation::{
+    ACCOUNT_CREATION_INVITE_BYTES, AccountCreationInvite, invitation_interval_admits,
+};
 pub use opaque::{
     OPAQUE_KE1_BYTES, OPAQUE_KE2_BYTES, OPAQUE_KE3_BYTES, OPAQUE_REGISTRATION_RECORD_BYTES,
     OPAQUE_REGISTRATION_REQUEST_BYTES, OPAQUE_REGISTRATION_RESPONSE_BYTES,

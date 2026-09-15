@@ -17,7 +17,7 @@ use agenc_ircd_auth::{
     CreationStart, CredentialChangeFinish, CredentialChangeStart, CredentialChangeStartParameters,
     CredentialChangeState, CredentialReplacementIntent, DestructiveAccountSnapshot,
     FreshAuthenticationProof, OpaqueProfile, OpaqueRegistrationRecord, OpenedAccountServiceRequest,
-    SealedAccountFinishOutcome, SealedAccountStart,
+    SealedAccountFinishOutcome, SealedAccountStart, invitation_interval_admits,
 };
 use agenc_ircd_client_wire::{
     AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountTransfer, ParsedMessage,
@@ -4353,6 +4353,25 @@ impl AccountServiceCoordinator {
         sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
         reservation: Option<CreationReservation>,
     ) -> Result<(), RuntimeError> {
+        // ZDH-A1 durable admission (issue #38): the worker rechecked the
+        // invitation interval against the trusted UTC read taken when FINISH
+        // was opened. Crypto and queue latency can cross `expires_at` before
+        // this stage runs, so the same predicate is re-evaluated with a fresh
+        // trusted UTC read immediately before the finish durable set is
+        // staged. A reading outside `not_before <= now < expires_at`, or an
+        // unavailable trusted clock, fails closed: the caller queues the
+        // creation cleanup (transaction row, login and invitation
+        // reservations) and publishes no account, credential, index entry or
+        // success completion. The monotonic transaction TTL never extends
+        // invitation validity.
+        if let Ok(intent) = sealed.result()
+            && let Some((not_before, expires_at)) = intent.invitation_interval()
+        {
+            let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
+            if !invitation_interval_admits(not_before, expires_at, now_utc) {
+                return Err(RuntimeError::InvalidValue);
+            }
+        }
         let plan = match sealed.result() {
             Ok(intent) => {
                 let generation = Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?;
@@ -6947,6 +6966,7 @@ fn opaque_version_precedes_account(
 
 #[cfg(test)]
 mod tests {
+    mod invitation_window;
     mod shutdown;
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
