@@ -60,7 +60,9 @@ pub use onboarding::{
     MAX_ONBOARDING_DESCRIPTOR_BYTES, OnboardingDescriptor, OnboardingFacts,
     parse_onboarding_descriptor, render_onboarding,
 };
-pub use paths::{PathResolver, load_public_text, read_protected_bytes};
+pub use paths::{
+    PathResolver, load_public_text, read_protected_bytes, read_protected_bytes_with_hook,
+};
 pub use privacy::{HistoryDefault, PrivacyConfig};
 pub use release_decision::{
     MAX_RELEASE_DECISION_BYTES, MAX_RELEASE_PUBLIC_KEY_BYTES, ReleaseArtifact, ReleaseClaim,

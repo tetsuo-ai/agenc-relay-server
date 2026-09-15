@@ -1168,6 +1168,42 @@ struct E2eeSetup {
     executor: Option<CompanionCoordinator>,
 }
 
+/// Reads the sequencer credentials file through one bounded, protected
+/// descriptor read and verifies it as this network's key set (spec 4331,
+/// 9364; companion 9.2). The declared maximum is enforced on the opened
+/// descriptor's status before any allocation, so an oversized or sparse
+/// file is refused before its content is read; the bytes parsed are exactly
+/// the bytes that single descriptor returned, so a file that grows or is
+/// replaced after inspection is refused; and every failure maps to the
+/// closed `E2eeCredentials` error, which carries neither the path nor any
+/// document byte. Offline `print-onboarding` reuses this reader.
+pub(crate) fn load_sequencer_credentials(
+    path: &Path,
+    network: &[u8; 32],
+    after_initial_status: impl FnOnce(),
+) -> Result<
+    (
+        agenc_ircd_e2ee::sequencer::SequencerCredentialsFile,
+        agenc_ircd_e2ee::sequencer::SequencerKeySet,
+    ),
+    DaemonError,
+> {
+    use agenc_ircd_e2ee::sequencer::{
+        MAX_SEQUENCER_CREDENTIALS_FILE_BYTES, SequencerCredentialsFile,
+    };
+    let maximum = u64::try_from(MAX_SEQUENCER_CREDENTIALS_FILE_BYTES)
+        .map_err(|_| DaemonError::E2eeCredentials)?;
+    let bytes =
+        agenc_ircd_config::read_protected_bytes_with_hook(path, maximum, after_initial_status)
+            .map_err(|_| DaemonError::E2eeCredentials)?;
+    let document =
+        SequencerCredentialsFile::parse(&bytes).map_err(|_| DaemonError::E2eeCredentials)?;
+    let key_set = document
+        .key_set(network)
+        .map_err(|_| DaemonError::E2eeCredentials)?;
+    Ok((document, key_set))
+}
+
 /// Reads and verifies the sequencer credentials file when `[e2ee]` is
 /// enabled: the key set must verify for this network, and the coordinator's
 /// sequencer key must be one of the credentials (spec 9200, 9201).
@@ -1175,10 +1211,17 @@ fn e2ee_setup(
     config: &Config,
     sequencer: Option<&[u8; 32]>,
 ) -> Result<Option<E2eeSetup>, DaemonError> {
+    e2ee_setup_with_hook(config, sequencer, || {})
+}
+
+/// [`e2ee_setup`] with the credentials read's post-inspection hook exposed,
+/// so tests can race the real composition path.
+fn e2ee_setup_with_hook(
+    config: &Config,
+    sequencer: Option<&[u8; 32]>,
+    after_initial_status: impl FnOnce(),
+) -> Result<Option<E2eeSetup>, DaemonError> {
     use agenc_ircd_e2ee::profile::EcapTuple;
-    use agenc_ircd_e2ee::sequencer::{
-        MAX_SEQUENCER_CREDENTIALS_FILE_BYTES, SequencerCredentialsFile,
-    };
     use agenc_ircd_e2ee::wire::tokens::base64url_encode;
     if !config.e2ee.enabled {
         return Ok(None);
@@ -1188,16 +1231,8 @@ fn e2ee_setup(
         .sequencer_credentials_file
         .as_ref()
         .ok_or(DaemonError::UnsupportedProfile)?;
-    let bytes = std::fs::read(path).map_err(|_| DaemonError::E2eeCredentials)?;
-    if bytes.len() > MAX_SEQUENCER_CREDENTIALS_FILE_BYTES {
-        return Err(DaemonError::E2eeCredentials);
-    }
-    let document =
-        SequencerCredentialsFile::parse(&bytes).map_err(|_| DaemonError::E2eeCredentials)?;
     let network = *config.network.network_id.as_bytes();
-    let key_set = document
-        .key_set(&network)
-        .map_err(|_| DaemonError::E2eeCredentials)?;
+    let (document, key_set) = load_sequencer_credentials(path, &network, after_initial_status)?;
     let coordinator = config
         .e2ee
         .coordinator_server_id
@@ -4330,6 +4365,223 @@ mod tests {
         Ok(())
     }
 
+    /// Writes or replaces one mode-0600 credentials file, as an operator would.
+    fn write_credentials(path: &Path, bytes: &[u8]) -> Result<(), DaemonError> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let _removed = std::fs::remove_file(path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        file.write_all(bytes)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok(())
+    }
+
+    /// One two-credential (current plus overlap successor) document for the
+    /// public configuration's network.
+    fn sequencer_overlap_document() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        use crate::e2ee::coordinator::tests::support::{key, sequencer_credential_in};
+        use agenc_ircd_e2ee::sequencer::SequencerCredentialsFile;
+        use agenc_ircd_e2ee::tls::{TlsEncode, TlsVec};
+        let network = *public_config()?.network.network_id.as_bytes();
+        let old = sequencer_credential_in(network, &key(90), 0, (0, 1_000), None)?;
+        let next =
+            sequencer_credential_in(network, &key(91), 1, (100, 2_000), Some((&key(90), &old)))?;
+        Ok(SequencerCredentialsFile {
+            set_generation: 1,
+            credentials: TlsVec::new(vec![old, next])?,
+        }
+        .encode()?)
+    }
+
+    /// An enabled coordinator configuration whose credentials file is `path`.
+    fn e2ee_coordinator_config(path: &Path) -> Result<Config, DaemonError> {
+        let mut config = public_config()?;
+        config.federation.enabled = true;
+        config.e2ee.enabled = true;
+        config.e2ee.sequencer_credentials_file = Some(path.to_path_buf());
+        Ok(config)
+    }
+
+    /// ENC-13 (#39): the declared maximum applies on the descriptor before
+    /// any allocation or parsing, at both supported document sizes.
+    #[test]
+    fn credentials_read_admits_supported_sizes_and_refuses_oversize_before_allocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::e2ee::coordinator::tests::support::key;
+        use agenc_ircd_e2ee::sequencer::MAX_SEQUENCER_CREDENTIALS_FILE_BYTES;
+        let directory = crate::test_support::TestDirectory::create_protected()?;
+        let path = directory.0.join("sequencer-credentials.bin");
+        let config = e2ee_coordinator_config(&path)?;
+        let mut edge = config.clone();
+        edge.network.role = NodeRole::Edge;
+
+        write_credentials(&path, &sequencer_credentials_document(&key(90))?)?;
+        assert!(e2ee_setup(&config, Some(&[90; 32]))?.is_some());
+        assert!(e2ee_setup(&edge, None)?.is_some());
+        write_credentials(&path, &sequencer_overlap_document()?)?;
+        assert!(e2ee_setup(&config, Some(&[91; 32]))?.is_some());
+        assert!(e2ee_setup(&edge, None)?.is_some());
+
+        // Limit plus one, written and sparse: refused before the hook that
+        // precedes the read ever runs, so nothing is allocated or parsed.
+        let oversize = MAX_SEQUENCER_CREDENTIALS_FILE_BYTES + 1;
+        write_credentials(&path, &vec![0x5a; oversize])?;
+        let mut hook_fired = false;
+        assert!(matches!(
+            e2ee_setup_with_hook(&edge, None, || hook_fired = true),
+            Err(DaemonError::E2eeCredentials)
+        ));
+        write_credentials(&path, b"")?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)?
+            .set_len(u64::try_from(oversize)?)?;
+        assert!(matches!(
+            e2ee_setup_with_hook(&config, Some(&[90; 32]), || hook_fired = true),
+            Err(DaemonError::E2eeCredentials)
+        ));
+        assert!(
+            !hook_fired,
+            "an oversize document is refused before the read"
+        );
+        Ok(())
+    }
+
+    /// ENC-13 (#39): the bytes parsed are exactly the bytes the single
+    /// descriptor returned; growth or replacement after inspection is refused.
+    #[test]
+    fn credentials_read_refuses_growth_and_replacement_after_inspection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::e2ee::coordinator::tests::support::key;
+        use std::io::Write as _;
+        let directory = crate::test_support::TestDirectory::create_protected()?;
+        let path = directory.0.join("sequencer-credentials.bin");
+        let config = e2ee_coordinator_config(&path)?;
+        let document = sequencer_credentials_document(&key(90))?;
+
+        write_credentials(&path, &document)?;
+        assert!(matches!(
+            e2ee_setup_with_hook(&config, Some(&[90; 32]), || {
+                let mut file = std::fs::OpenOptions::new().append(true).open(&path).ok();
+                assert!(
+                    file.as_mut()
+                        .is_some_and(|file| file.write_all(&[0]).is_ok())
+                );
+            }),
+            Err(DaemonError::E2eeCredentials)
+        ));
+
+        // A valid document for key 91 renamed over the inspected key-90
+        // document never becomes the parsed bytes: the coordinator secret
+        // 91 cannot compose from a descriptor that inspected key 90.
+        write_credentials(&path, &document)?;
+        let replacement = directory.0.join("replacement.bin");
+        write_credentials(&replacement, &sequencer_overlap_document()?)?;
+        assert!(matches!(
+            e2ee_setup_with_hook(&config, Some(&[91; 32]), || {
+                assert!(std::fs::rename(&replacement, &path).is_ok());
+            }),
+            Err(DaemonError::E2eeCredentials)
+        ));
+        // Without the race the replacement document admits key 91 normally.
+        assert!(e2ee_setup(&config, Some(&[91; 32]))?.is_some());
+        Ok(())
+    }
+
+    /// ENC-13 (#39): the protected-file policy applies to the credentials
+    /// path exactly as to every other secret path, with a positive control.
+    #[test]
+    fn credentials_read_applies_the_protected_file_policy() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::e2ee::coordinator::tests::support::key;
+        use rustix::fs::{CWD, Mode, mkfifoat};
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = crate::test_support::TestDirectory::create_protected()?;
+        let document = sequencer_credentials_document(&key(90))?;
+        let real = directory.0.join("real.bin");
+        write_credentials(&real, &document)?;
+        let refused = |path: &Path| -> Result<bool, DaemonError> {
+            let config = e2ee_coordinator_config(path)?;
+            Ok(matches!(
+                e2ee_setup(&config, Some(&[90; 32])),
+                Err(DaemonError::E2eeCredentials)
+            ))
+        };
+
+        let link = directory.0.join("link.bin");
+        std::os::unix::fs::symlink(&real, &link)?;
+        assert!(refused(&link)?, "a symlink is refused");
+
+        let alias = directory.0.join("alias.bin");
+        std::fs::hard_link(&real, &alias)?;
+        assert!(refused(&alias)?, "a hard-linked document is refused");
+        assert!(refused(&real)?, "the linked original is refused too");
+        std::fs::remove_file(&alias)?;
+
+        let fifo = directory.0.join("fifo.bin");
+        mkfifoat(CWD, &fifo, Mode::RUSR | Mode::WUSR)?;
+        assert!(refused(&fifo)?, "a FIFO is refused");
+
+        let loose = directory.0.join("loose.bin");
+        write_credentials(&loose, &document)?;
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o666))?;
+        assert!(
+            refused(&loose)?,
+            "a group- or world-writable document is refused"
+        );
+
+        let shared = directory.0.join("shared");
+        std::fs::create_dir(&shared)?;
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o770))?;
+        let under_shared = shared.join("credentials.bin");
+        write_credentials(&under_shared, &document)?;
+        assert!(
+            refused(&under_shared)?,
+            "a group-writable ancestor is refused"
+        );
+
+        // Positive control: the same document at mode 0600 under the
+        // mode-0700 root is admitted.
+        assert!(e2ee_setup(&e2ee_coordinator_config(&real)?, Some(&[90; 32]))?.is_some());
+        Ok(())
+    }
+
+    /// ENC-13 (#39): a disabled profile never touches the credentials path,
+    /// and the refusal carries neither the path nor any document byte.
+    #[test]
+    fn credentials_refusal_is_inert_when_disabled_and_leaks_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agenc_ircd_e2ee::sequencer::MAX_SEQUENCER_CREDENTIALS_FILE_BYTES;
+        let directory = crate::test_support::TestDirectory::create_protected()?;
+        let missing = directory.0.join("missing-credentials.bin");
+        let oversize = directory.0.join("oversize-credentials.bin");
+        write_credentials(
+            &oversize,
+            &vec![0x5a; MAX_SEQUENCER_CREDENTIALS_FILE_BYTES + 1],
+        )?;
+        for path in [&missing, &oversize] {
+            let mut disabled = e2ee_coordinator_config(path)?;
+            disabled.e2ee.enabled = false;
+            assert!(e2ee_setup(&disabled, Some(&[90; 32]))?.is_none());
+        }
+        let error = e2ee_setup(&e2ee_coordinator_config(&oversize)?, Some(&[90; 32]))
+            .err()
+            .ok_or("an oversize document must be refused")?;
+        assert!(matches!(error, DaemonError::E2eeCredentials));
+        let path_text = oversize.to_string_lossy();
+        for rendered in [format!("{error}"), format!("{error:?}")] {
+            assert!(!rendered.contains(path_text.as_ref()));
+            assert!(!rendered.contains("ZZZZ"));
+            assert!(!rendered.contains(directory.0.to_string_lossy().as_ref()));
+        }
+        Ok(())
+    }
+
     fn sequencer_credentials_document(
         secret: &agenc_ircd_crypto::Ed25519SecretKey,
     ) -> Result<Vec<u8>, DaemonError> {
@@ -4351,12 +4603,11 @@ mod tests {
     #[test]
     fn e2ee_setup_verifies_the_credentials_file_for_both_roles() -> Result<(), DaemonError> {
         use crate::e2ee::coordinator::tests::support::key;
-        let directory =
-            crate::test_support::TestDirectory::create().map_err(|_| RuntimeError::InvalidValue)?;
+        let directory = crate::test_support::TestDirectory::create_protected()
+            .map_err(|_| RuntimeError::InvalidValue)?;
         let path = directory.0.join("sequencer-credentials.bin");
         let sequencer = key(90);
-        std::fs::write(&path, sequencer_credentials_document(&sequencer)?)
-            .map_err(|_| RuntimeError::InvalidValue)?;
+        write_credentials(&path, &sequencer_credentials_document(&sequencer)?)?;
         let seed = [90_u8; 32];
 
         let mut disabled = public_config()?;
@@ -4386,16 +4637,14 @@ mod tests {
 
         // A document that does not parse, or one for another network, is
         // refused before any role composes.
-        std::fs::write(&path, b"not a credentials document")
-            .map_err(|_| RuntimeError::InvalidValue)?;
+        write_credentials(&path, b"not a credentials document")?;
         assert!(matches!(
             e2ee_setup(&edge, None),
             Err(DaemonError::E2eeCredentials)
         ));
         let mut other = edge.clone();
         other.network.network_id = agenc_ircd_types::NetworkId::from_bytes([77; 32]);
-        std::fs::write(&path, sequencer_credentials_document(&sequencer)?)
-            .map_err(|_| RuntimeError::InvalidValue)?;
+        write_credentials(&path, &sequencer_credentials_document(&sequencer)?)?;
         assert!(matches!(
             e2ee_setup(&other, None),
             Err(DaemonError::E2eeCredentials)
@@ -4411,7 +4660,7 @@ mod tests {
         use agenc_ircd_e2ee::ids::semantic_id_of;
         use agenc_ircd_e2ee::sequencer::SequencerCredentialsFile;
         use agenc_ircd_e2ee::tls::{TlsEncode, TlsVec};
-        let directory = crate::test_support::TestDirectory::create()?;
+        let directory = crate::test_support::TestDirectory::create_protected()?;
         let path = directory.0.join("sequencer-overlap.bin");
         let mut config = public_config()?;
         config.federation.enabled = true;
@@ -4425,7 +4674,7 @@ mod tests {
             set_generation: 1,
             credentials: TlsVec::new(vec![old.clone(), next.clone()])?,
         };
-        std::fs::write(&path, document.encode()?)?;
+        write_credentials(&path, &document.encode()?)?;
         for (seed, credential) in [(90, old), (91, next)] {
             let setup = e2ee_setup(&config, Some(&[seed; 32]))?.ok_or("setup")?;
             assert_eq!(setup.profile.local.key_set_generation, 1);

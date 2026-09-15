@@ -80,6 +80,24 @@ pub(crate) fn is_unsafe_component(component: Component<'_>) -> bool {
 /// Returns a closed configuration error when the path, descriptor metadata,
 /// allocation, read, or stability check fails.
 pub fn read_protected_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>, ConfigError> {
+    read_protected_bytes_with_hook(path, maximum, || {})
+}
+
+/// The same as [`read_protected_bytes`] with a hook between the first
+/// descriptor status check and the bounded read, so tests can prove that a
+/// file which grows, changes, or is replaced after inspection is rejected
+/// and that the declared maximum is enforced on the descriptor before any
+/// allocation.
+///
+/// # Errors
+///
+/// Returns a closed configuration error when the path, descriptor metadata,
+/// allocation, read, or stability check fails.
+pub fn read_protected_bytes_with_hook(
+    path: &Path,
+    maximum: u64,
+    after_initial_status: impl FnOnce(),
+) -> Result<Vec<u8>, ConfigError> {
     if !path.is_absolute() || path.components().any(is_unsafe_component) {
         return Err(ConfigError::FileRejected);
     }
@@ -92,7 +110,7 @@ pub fn read_protected_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>, Config
         Mode::empty(),
     )
     .map_err(|_| ConfigError::FileRejected)?;
-    read_opened_protected_bytes(fs::File::from(fd), maximum, || {})
+    read_opened_protected_bytes(fs::File::from(fd), maximum, after_initial_status)
 }
 
 /// Reads one protected regular UTF-8 text file bounded by `maximum` bytes.
@@ -498,7 +516,7 @@ mod tests {
 
     use super::{
         PhysicalDirectory, protected_ancestors, read_opened_protected_bytes, read_protected_bytes,
-        read_protected_text,
+        read_protected_bytes_with_hook, read_protected_text,
     };
     use crate::error::ConfigError;
 
@@ -685,6 +703,40 @@ mod tests {
             physical.contains_path(&missing_path),
             Err(ConfigError::FileRejected)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn protected_bytes_admit_exactly_the_maximum_and_reject_a_sparse_oversize() -> TestResult {
+        let directory = TestDirectory::create()?;
+        let exact = directory.file("exact.bin", &[0x5a; 64], 0o600)?;
+        assert_eq!(read_protected_bytes(&exact, 64)?, vec![0x5a; 64]);
+
+        // A sparse file has the oversize length on its descriptor status
+        // before a single byte is allocated or read.
+        let sparse = directory.file("sparse.bin", b"", 0o600)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&sparse)?
+            .set_len(65)?;
+        let mut hook_fired = false;
+        assert_eq!(
+            read_protected_bytes_with_hook(&sparse, 64, || hook_fired = true),
+            Err(ConfigError::FileRejected)
+        );
+        assert!(!hook_fired, "an oversize file is refused before the read");
+        Ok(())
+    }
+
+    #[test]
+    fn protected_bytes_reject_growth_through_the_public_hook() -> TestResult {
+        let directory = TestDirectory::create()?;
+        let path = directory.file("growing.bin", b"1234", 0o600)?;
+        let result = read_protected_bytes_with_hook(&path, 8, || {
+            assert!(fs::write(&path, b"12345678").is_ok());
+        });
+        assert_eq!(result, Err(ConfigError::FileRejected));
+        assert_eq!(read_protected_bytes(&path, 8)?, b"12345678".to_vec());
         Ok(())
     }
 
