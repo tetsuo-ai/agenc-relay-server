@@ -115,7 +115,7 @@ redb release. The retained allocation prototype is an abort-only probe; it does
 not provide bounded preparation, allocation-free publication and bounded
 cleanup/close. Integrating it as a maintained fork would violate the accepted
 policy. Its engineering contract and experiment are retained in
-[the upstream probe directory](upstream/redb-allocation-probe/README.md).
+[the upstream bounded-transaction directory](upstream/redb-bounded-transaction/README.md), which superseded the allocation probe.
 
 Encrypted recovery remains open under CAP-73 and CAP-74. Pending routes refuse
 new authority, but the public initial-authority validator has no runtime or

@@ -43,7 +43,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Repository history | Push the existing committed branch and open its review | Repair branches pushed in PRs #29–#34; PRs #29–#33 merged, with the final queue repair and completed gate results in #34 |
 | Conformance maintenance | Bind the accepted current-format specification and preserve historical evidence | Baseline and requirement bindings repaired |
 | Storage initialization | Preserve every existing rollback guard and reject reused initialization directories | Implemented; 316 storage tests pass |
-| STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Mutation/abort prototype prepared; full mechanism and upstream release open |
+| STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Upstream mechanism implemented and tested in the isolated checkout (STO-01); upstream publication (STO-02) and application integration (STO-03) open |
 | CAP-73 authority | Authenticate public state and its complete historical transitions without exposing private MLS context | Open |
 | CAP-73 recovery | Ingest signed terminal evidence and atomically install Closed or Conflict | Open |
 | CAP-74 | Resolve retained edge witnesses with authenticated ancestry | Open |
@@ -230,11 +230,17 @@ change can resolve it. The `Record the source identity` step now prints the
 exact revision in every job log once runs start again. Hosted CI is not
 green.
 
-The isolated [upstream allocation probe](upstream/redb-allocation-probe/README.md)
-passes 424 host tests but cannot publish a transaction. Its required upstream
-container gates stop because Podman is unavailable. The normal-API fuzz smoke
-does not exercise the new probe API. Full bounded commit support, upstream
-acceptance and a published dependency remain open under STO-1.
+The isolated [upstream bounded transaction](upstream/redb-bounded-transaction/README.md)
+gives redb 4.2.0 a typed physical allocation allowance with explicit phases:
+charged mutation, abortable preparation that journals and restores every
+allocator change on refusal, allocation-free publication, bounded resumable
+reclamation, and bounded allocator-state persistence at close. It passes the
+433 upstream host tests, clippy, the `panic=abort` no-std check, a fifteen-test
+phase, boundary and crash matrix, and an API-aware fuzz state machine. Its
+required upstream container gates still stop because Podman is unavailable.
+Upstream acceptance and a published dependency remain open under STO-02, and
+application integration with the full nonce/guard/main-commit allowance under
+STO-03.
 
 ## Required production evidence
 
