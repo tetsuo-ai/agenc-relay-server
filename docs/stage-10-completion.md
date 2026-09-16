@@ -22,6 +22,8 @@ The backup post-rename failure repair (STO-06, issue #48) is recorded in
 [the backup publication repair](stage-10-backup-publication-repair.md).
 The LIST selection and scan-charging repair (RUN-02, issue #54) is recorded
 in [the LIST selection repair](stage-10-list-selection-repair.md).
+The historical public authority chain verifier (ENC-02, issue #51) is
+recorded in [the historical chain record](stage-10-historical-chain.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

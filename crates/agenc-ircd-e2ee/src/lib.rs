@@ -75,6 +75,7 @@ pub mod envelope;
 pub mod error;
 pub mod federation;
 pub mod finality;
+pub mod history;
 pub mod identity;
 pub mod ids;
 pub mod initial_authority;
