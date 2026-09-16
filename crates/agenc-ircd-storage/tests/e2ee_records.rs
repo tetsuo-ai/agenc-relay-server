@@ -1299,3 +1299,76 @@ fn every_state_key_splits_back_into_its_parts() -> Result<(), Box<dyn Error>> {
     assert!(SequencerRow::parse_proof_key(&SequencerRow::candidate_key(&digest, 1)?).is_err());
     Ok(())
 }
+
+#[test]
+fn object_owner_rows_round_trip_and_refuse_inconsistent_accounts() -> Result<(), Box<dyn Error>> {
+    use agenc_ircd_storage::e2ee_records::{OWNER_ROW_KIND, ObjectOwnerRow, RetentionClass};
+    let owned = ObjectOwnerRow {
+        kind: IrcWireObjectKind::SequencerRecord.value(),
+        size: 4_096,
+        retention: RetentionClass::SecurityProof,
+        accepted_at: 1_700_000_000,
+        reconstructed: false,
+        retired_at: None,
+    };
+    let retired = ObjectOwnerRow {
+        retention: RetentionClass::Ordinary,
+        retired_at: Some(1_700_000_500),
+        ..owned
+    };
+    let floor = ObjectOwnerRow {
+        reconstructed: true,
+        retention: RetentionClass::Mailbox,
+        ..owned
+    };
+    for row in [&owned, &retired, &floor] {
+        let encoded = row.encode().map_err(|e| format!("encode {row:?}: {e:?}"))?;
+        assert_eq!(
+            &ObjectOwnerRow::decode(&encoded).map_err(|e| format!("decode {row:?}: {e:?}"))?,
+            row
+        );
+        assert!(validate_state_body(OWNER_ROW_KIND, &encoded).is_ok());
+    }
+    assert_eq!(owned.object_kind()?, IrcWireObjectKind::SequencerRecord);
+    for class in RetentionClass::ALL {
+        assert_eq!(RetentionClass::from_wire(class.wire())?, class);
+    }
+    assert!(RetentionClass::from_wire(0).is_err());
+    assert!(RetentionClass::from_wire(5).is_err());
+    let key = ObjectOwnerRow::key(&[3; 32]).map_err(|e| format!("key: {e:?}"))?;
+    assert!(ObjectOwnerRow::matches_key(&key));
+    assert_eq!(
+        ObjectOwnerRow::parse_key(&key).map_err(|e| format!("parse: {e:?}"))?,
+        [3; 32]
+    );
+    assert!(!ObjectOwnerRow::matches_key(&object_key(&[3; 32])?));
+    assert!(ObjectOwnerRow::range().is_ok());
+    // No trusted age, an empty or oversized object, a retirement before
+    // acceptance, and an unknown kind are all refused before encoding.
+    for bad in [
+        ObjectOwnerRow {
+            accepted_at: 0,
+            ..owned
+        },
+        ObjectOwnerRow { size: 0, ..owned },
+        ObjectOwnerRow {
+            size: u64::MAX,
+            ..owned
+        },
+        ObjectOwnerRow {
+            retired_at: Some(1),
+            ..owned
+        },
+        ObjectOwnerRow {
+            kind: 0xFF,
+            ..owned
+        },
+    ] {
+        assert!(bad.encode().is_err(), "{bad:?}");
+    }
+    let mut encoded = owned.encode()?;
+    encoded.push(0);
+    assert!(ObjectOwnerRow::decode(&encoded).is_err(), "trailing bytes");
+    assert!(validate_state_body(OWNER_ROW_KIND, &[]).is_err());
+    Ok(())
+}

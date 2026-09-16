@@ -52,6 +52,7 @@ pub(crate) mod mailbox_expiry;
 mod mailbox_restore;
 mod membership_restore;
 pub mod ops;
+pub(crate) mod owners;
 mod recovery_gates;
 pub mod request;
 pub(crate) mod request_expiry;
@@ -203,6 +204,8 @@ pub struct CompanionState {
     pub binding_locks: BTreeMap<([u8; 32], [u8; 32]), LockChain>,
     /// Restored object bytes drop before their backing reservations.
     pub(crate) object_memory: BTreeMap<[u8; 32], crate::budget::MemoryPermit>,
+    /// The durable ownership account of every retained object (companion 15, 16).
+    pub(crate) owners: owners::Ledger,
 }
 
 /// The root binding locks of one (account, root fingerprint) by sequence.
@@ -396,6 +399,10 @@ pub struct CompanionCoordinator {
     key_set: Option<SequencerKeySet>,
     current_credential: Option<agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential>,
     global_disk_bytes: u64,
+    /// What startup ownership reconstruction concluded without evidence.
+    pub owner_reconstruction: owners::Diagnostics,
+    /// The ownership accounts of the batch in flight, installed on commit.
+    pending_owners: Option<owners::Staged>,
     assembler: E2eeAssembler,
     open: BTreeMap<(ServerId, [u8; 16]), OpenRequest>,
     queued: BTreeMap<ServerId, VecDeque<QueuedCompanion>>,
@@ -451,6 +458,8 @@ impl CompanionCoordinator {
             signer: None,
             key_set: None,
             global_disk_bytes: 0,
+            owner_reconstruction: owners::Diagnostics::default(),
+            pending_owners: None,
             current_credential: None,
             assembler: E2eeAssembler::default(),
             open: BTreeMap::new(),
@@ -867,12 +876,49 @@ impl CompanionCoordinator {
         self.pending = Some(work);
     }
 
+    /// Derives the ownership changes of a batch (companion 15, 16), appends
+    /// the owner rows at `revision`, and returns the accounts to install
+    /// once the batch commits. `now` is the trusted UTC second, or zero when
+    /// none is available, in which case a batch that changes any account is
+    /// refused. The quotas refuse here, before any row is staged.
+    pub(crate) fn stage_owners(
+        &self,
+        writes: &mut Vec<AccountServiceDurableWrite>,
+        now: u64,
+        security_mutation: bool,
+        revision: u64,
+    ) -> Result<owners::Staged, E2eeReplyCode> {
+        let mut staged = owners::stage(
+            &self.state,
+            writes,
+            now,
+            security_mutation,
+            self.global_disk_bytes,
+        )?;
+        for write in staged.writes.drain(..) {
+            writes.push(
+                write
+                    .at_revision(revision)
+                    .map_err(|_| E2eeReplyCode::InvalidFragment)?,
+            );
+        }
+        Ok(staged)
+    }
+
+    /// Keeps the ownership accounts of the batch the owner just staged.
+    pub(crate) fn set_pending_owners(&mut self, staged: owners::Staged) {
+        self.pending_owners = Some(staged);
+    }
+
     /// Applies the committed batch's effects and hands back what to send.
     /// The historical base epoch is part of the captured durable owner.
     pub fn batch_applied(
         &mut self,
         resync_epoch: Option<u64>,
     ) -> Result<Option<sync::Committed>, CompanionFault> {
+        if let Some(staged) = self.pending_owners.take() {
+            staged.apply(&mut self.state);
+        }
         match self.pending.take() {
             None => Ok(None),
             Some(sync::PendingWork::Activate { peer, link, owner }) => self
@@ -901,6 +947,7 @@ impl CompanionCoordinator {
     /// Drops the staged batch after a rejected commit.
     pub fn batch_rejected(&mut self) {
         self.pending = None;
+        self.pending_owners = None;
     }
 
     /// Installs an explicit object in a test fixture. Live requests use resident admission.

@@ -79,6 +79,12 @@ impl RestartFixture {
         let context = self.storage.context_mut()?;
         let plan = context.domain().plan_account_service_checkpoint()?;
         let revision = plan.resulting_revision().get();
+        // The owner rows ride every batch, as the federation coordinator stages them.
+        let mut writes = writes;
+        let owners = self
+            .coordinator
+            .stage_owners(&mut writes, NOW_MILLIS / 1_000, false, revision)
+            .map_err(|code| format!("owner staging: {code:?}"))?;
         let writes = writes
             .into_iter()
             .map(|write| write.at_revision(revision))
@@ -87,7 +93,9 @@ impl RestartFixture {
         context
             .stage_durable_with_account_service(plan, fanout, None, 0, writes)
             .map_err(|error| format!("fixture stage: {error:?}"))?;
-        self.storage.commit_staged_batch().await
+        Box::pin(self.storage.commit_staged_batch()).await?;
+        owners.apply(&mut self.coordinator.state);
+        Ok(())
     }
 
     async fn activate(&mut self) -> TestResult {

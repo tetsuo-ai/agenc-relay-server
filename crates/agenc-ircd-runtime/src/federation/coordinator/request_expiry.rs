@@ -23,6 +23,7 @@ pub(super) struct Receipt {
     pub(super) staged_after: u64,
     revision: u64,
     prepared: Prepared,
+    owners: crate::e2ee::coordinator::owners::Staged,
     _backing: MemoryPermit,
 }
 
@@ -121,8 +122,11 @@ fn prepare(
         .plan_account_service_checkpoint()
         .map_err(|_| CompanionFault::Storage)?;
     let revision = checkpoint.resulting_revision().get();
-    let writes = prepared
+    let mut writes = prepared
         .writes(revision)
+        .map_err(|_| CompanionFault::Storage)?;
+    let owners = executor
+        .stage_owners(&mut writes, now, false, revision)
         .map_err(|_| CompanionFault::Storage)?;
     let fanout = FanoutRequest::new(Vec::new(), Vec::new()).map_err(|_| CompanionFault::Storage)?;
     let accepted = context
@@ -140,6 +144,7 @@ fn prepare(
         staged_after,
         revision,
         prepared,
+        owners,
         _backing: backing,
     }))
 }
@@ -161,7 +166,11 @@ pub(super) fn committed(
         .companion_exec
         .as_mut()
         .ok_or(CompanionFault::Storage)
-        .and_then(|executor| receipt.prepared.apply(executor));
+        .and_then(|executor| {
+            receipt.prepared.apply(executor)?;
+            receipt.owners.apply(&mut executor.state);
+            Ok(())
+        });
     if result.is_err() {
         super::startup::fail_restore(coordinator);
         return;

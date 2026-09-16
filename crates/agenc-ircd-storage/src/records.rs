@@ -925,7 +925,7 @@ const fn record_kind_is_valid(table: TableId, kind: u16) -> bool {
         TableId::Audit => 2,
         TableId::AuditCheckpoint => 1,
         TableId::E2eeObject => 1,
-        TableId::E2eeState => 15,
+        TableId::E2eeState => 16,
         _ => 0,
     };
     kind != 0 && kind <= maximum

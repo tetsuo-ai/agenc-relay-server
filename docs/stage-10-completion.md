@@ -24,6 +24,9 @@ The LIST selection and scan-charging repair (RUN-02, issue #54) is recorded
 in [the LIST selection repair](stage-10-list-selection-repair.md).
 The historical public authority chain verifier (ENC-02, issue #51) is
 recorded in [the historical chain record](stage-10-historical-chain.md).
+Durable object ownership, retention classes, trusted acceptance ages and the
+conversation and global disk quotas (ENC-08, issue #53) are recorded in
+[the object ownership record](stage-10-object-owners.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

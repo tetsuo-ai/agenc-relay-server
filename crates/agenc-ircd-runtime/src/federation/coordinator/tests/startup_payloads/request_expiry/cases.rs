@@ -6,7 +6,7 @@ use agenc_ircd_storage::e2ee_records::{REPLAY_ROW_KIND, ReplayRow};
 
 #[tokio::test]
 async fn rejection_keeps_the_replay_and_result_until_an_idle_retry_commits() -> TestResult {
-    let mut f = Fixture::new(true).await?;
+    let mut f = Box::pin(Fixture::new(true)).await?;
     let budget = f.core.context_mut()?.backing_budget_for_test();
     let baseline = budget.charged();
     f.idle()?;
@@ -34,7 +34,7 @@ async fn rejection_keeps_the_replay_and_result_until_an_idle_retry_commits() -> 
 #[tokio::test]
 async fn lost_publication_after_a_full_page_recovers_two_remaining_results_and_the_final_floor()
 -> TestResult {
-    let mut f = Fixture::many(130, true).await?;
+    let mut f = Box::pin(Fixture::many(130, true)).await?;
     assert_eq!(f.executor()?.state.replays.len(), 130);
     f.idle()?;
     f.core.commit_staged_batch().await?;
@@ -81,7 +81,7 @@ async fn lost_publication_after_a_full_page_recovers_two_remaining_results_and_t
 
 #[tokio::test]
 async fn a_security_retention_deadline_is_not_shortened_to_the_ordinary_window() -> TestResult {
-    let mut f = Fixture::new(true).await?;
+    let mut f = Box::pin(Fixture::new(true)).await?;
     let mut row = f
         .executor()?
         .state
@@ -115,7 +115,7 @@ async fn a_security_retention_deadline_is_not_shortened_to_the_ordinary_window()
 async fn unfinished_unknown_deadline_or_missing_sequence_ownership_keeps_the_result() -> TestResult
 {
     for fault in 0..4 {
-        let mut f = Fixture::new(true).await?;
+        let mut f = Box::pin(Fixture::new(true)).await?;
         let origin_key = f.origin_key();
         let executor = f.coordinator.companion_exec.as_mut().ok_or("executor")?;
         match fault {
@@ -160,7 +160,7 @@ async fn unfinished_unknown_deadline_or_missing_sequence_ownership_keeps_the_res
 #[tokio::test]
 async fn changed_result_or_origin_floor_cannot_publish_a_committed_page() -> TestResult {
     for fault in 0..4 {
-        let mut f = Fixture::new(true).await?;
+        let mut f = Box::pin(Fixture::new(true)).await?;
         f.idle()?;
         let origin_key = f.origin_key();
         let executor = f.coordinator.companion_exec.as_mut().ok_or("executor")?;
@@ -211,7 +211,7 @@ async fn changed_result_or_origin_floor_cannot_publish_a_committed_page() -> Tes
 #[tokio::test]
 async fn metadata_identity_and_size_refusals_cannot_stage_deletion() -> TestResult {
     for fault in 0..3 {
-        let mut f = Fixture::new(true).await?;
+        let mut f = Box::pin(Fixture::new(true)).await?;
         let executor = f.coordinator.companion_exec.as_mut().ok_or("executor")?;
         match fault {
             0 => {
@@ -249,7 +249,7 @@ async fn metadata_identity_and_size_refusals_cannot_stage_deletion() -> TestResu
 #[tokio::test]
 async fn unknown_clock_quiescing_or_memory_refusal_keeps_replay_ownership() -> TestResult {
     for fault in 0..5 {
-        let mut f = Fixture::new(true).await?;
+        let mut f = Box::pin(Fixture::new(true)).await?;
         let budget = f.core.context_mut()?.backing_budget_for_test();
         let held = match fault {
             0 => {
@@ -293,7 +293,7 @@ async fn unknown_clock_quiescing_or_memory_refusal_keeps_replay_ownership() -> T
 
 #[tokio::test]
 async fn timer_exhaustion_uses_the_existing_idle_sweep() -> TestResult {
-    let mut f = Fixture::new(true).await?;
+    let mut f = Box::pin(Fixture::new(true)).await?;
     *f.core.context_mut()?.timers_mut() = TimerHeap::with_ceiling(0);
     f.coordinator.continue_restore(f.core.context_mut()?);
     f.commit().await?;

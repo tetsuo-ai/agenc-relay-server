@@ -49,6 +49,8 @@ pub mod delivery_recovery;
 pub mod mailbox_sequence;
 pub use mailbox_sequence::{MAILBOX_SEQUENCE_ROW_KIND, MailboxSequenceRow};
 pub mod origin;
+pub mod owner;
+pub use owner::{OWNER_ROW_KIND, ObjectOwnerRow, RetentionClass, UNDATED_SECOND};
 
 /// The one live `e2ee_object` arm.
 pub const OBJECT_RECORD_KIND: u16 = 1;
@@ -116,6 +118,8 @@ pub mod prefix {
     pub const POLICY: &[u8] = b"policy/v1/";
     /// Leaf-membership proofs retained to identify ACK signers (13.7.3).
     pub const MEMBERSHIP: &[u8] = b"membership/v1/";
+    /// Object ownership accounts.
+    pub const OWNER: &[u8] = b"owner/v1/";
     /// Identity head rows.
     pub const IDENTITY: &[u8] = b"identity/v1/";
     /// Roster head rows.
@@ -153,7 +157,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 35] = [
+const PREFIX_KINDS: [(&[u8], u16); 36] = [
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -165,6 +169,7 @@ const PREFIX_KINDS: [(&[u8], u16); 35] = [
     (prefix::VOTE, SEQUENCER_ROW_KIND),
     (prefix::POLICY, SEQUENCER_ROW_KIND),
     (prefix::MEMBERSHIP, SEQUENCER_ROW_KIND),
+    (prefix::OWNER, OWNER_ROW_KIND),
     (prefix::IDENTITY, DIRECTORY_ROW_KIND),
     (prefix::ROSTER, DIRECTORY_ROW_KIND),
     (prefix::CAPABILITY, DIRECTORY_ROW_KIND),
@@ -2535,6 +2540,7 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         WITNESS_ROW_KIND => WitnessRow::decode(body).map(|_| ()),
         DELIVERY_RECOVERY_ROW_KIND => delivery_recovery::validate_body(body),
         MAILBOX_SEQUENCE_ROW_KIND => MailboxSequenceRow::decode(body).map(|_| ()),
+        OWNER_ROW_KIND => ObjectOwnerRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),
     }
 }

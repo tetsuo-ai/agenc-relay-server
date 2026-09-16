@@ -6,6 +6,15 @@ use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::IrcFederationEvent;
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode};
 use agenc_ircd_storage::StoredKey;
+
+/// Whether a staged write is an `owner/v1/` account row.
+fn is_owner_row(write: &crate::state_core::durable::AccountServiceDurableWrite) -> bool {
+    write.encoded_record().is_some_and(|(table, _, encoded)| {
+        agenc_ircd_storage::PersistentRecordValue::decode(table, encoded).is_ok_and(|value| {
+            value.record_kind() == agenc_ircd_storage::e2ee_records::OWNER_ROW_KIND
+        })
+    })
+}
 use agenc_ircd_storage::e2ee_records::delivery_recovery::Acknowledgement;
 use replay::{AckRange, AckRangeFields, ReplayLedgerRow, ReplayOwner, ReplayOwnerFields};
 
@@ -176,7 +185,15 @@ async fn bounded_cleanup_restarts_mid_prefix_and_preserves_overlap_unacked_tail_
     assert_eq!(positions(&mut fixture).await?.len(), 132);
     wake(&mut fixture)?;
     assert_eq!(reads(&mut fixture).await?, 2);
-    let deletes = fixture.core.context_mut()?.staged_rows_for_test()?;
+    // The batch also carries the ownership accounts of the retired rows
+    // (companion 15, 16); the cleanup bound counts the maintenance rows.
+    let deletes: Vec<_> = fixture
+        .core
+        .context_mut()?
+        .staged_rows_for_test()?
+        .into_iter()
+        .filter(|write| !is_owner_row(write))
+        .collect();
     assert_eq!(deletes.len(), 128);
     assert!(deletes.iter().all(|write| matches!(
         write,

@@ -362,11 +362,25 @@ impl Harness {
             Ok(prepared) => prepared,
             Err(code) => return Ok(Err(code.into())),
         };
+        // The owner rows ride the same batch; the harness keeps them out of
+        // the operation's own writes so each test sees exactly those.
+        let operation_writes = outcome.writes.len();
+        let owners = match self.coordinator.stage_owners(
+            &mut outcome.writes,
+            NOW,
+            outcome.security_mutation,
+            STATE_GENERATION,
+        ) {
+            Ok(staged) => staged,
+            Err(code) => return Ok(Err(code.into())),
+        };
+        let owner_rows = outcome.writes.split_off(operation_writes);
         resident.apply(&mut self.coordinator.state);
+        owners.apply(&mut self.coordinator.state);
         for effect in std::mem::take(&mut outcome.effects) {
             effect(&mut self.coordinator.state);
         }
-        for write in &outcome.writes {
+        for write in outcome.writes.iter().chain(&owner_rows) {
             self.apply_logical_write(write)?;
         }
         Ok(Ok(outcome))
