@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 
@@ -466,8 +467,102 @@ fn verify_protected_material_locations(config: &Config, sink: &mut IssueSink) {
 }
 
 /// Returns whether a file owner is the daemon's effective UID or root (spec 4329).
+/// The one local account, beyond root and the caller itself, whose file
+/// ownership an offline command trusts (spec Section 22.3). It is set at
+/// most once per process by the explicit `--service-user` option of an
+/// offline command; `serve` never sets it.
+static TRUSTED_SERVICE_UID: OnceLock<u32> = OnceLock::new();
+
+const LOCAL_ACCOUNT_DATABASE: &str = "/etc/passwd";
+const MAX_LOCAL_ACCOUNT_DATABASE_BYTES: u64 = 1_048_576;
+const MAX_ACCOUNT_NAME_BYTES: usize = 32;
+
+/// Trusts the file ownership of the local account `name` for the rest of
+/// the process, resolving it from the local account database read as a
+/// bounded protected file, never from a configuration key, an input file,
+/// or directory ownership (spec Section 22.3).
+///
+/// # Errors
+///
+/// Refused when the caller's effective UID is neither zero nor that
+/// account's UID, when the name is malformed or unknown, when the database
+/// cannot be read as a protected file, or when a different account was
+/// already trusted by this process.
+pub fn trust_service_account(name: &str) -> Result<u32, ConfigError> {
+    let database = read_protected_bytes(
+        Path::new(LOCAL_ACCOUNT_DATABASE),
+        MAX_LOCAL_ACCOUNT_DATABASE_BYTES,
+    )?;
+    let uid = resolve_local_account(name, &database)?;
+    trust_service_uid(uid, rustix::process::geteuid().as_raw())
+}
+
+fn trust_service_uid(uid: u32, effective_uid: u32) -> Result<u32, ConfigError> {
+    if effective_uid != 0 && effective_uid != uid {
+        return Err(ConfigError::HostControl);
+    }
+    if TRUSTED_SERVICE_UID.set(uid).is_err() && TRUSTED_SERVICE_UID.get() != Some(&uid) {
+        return Err(ConfigError::HostControl);
+    }
+    Ok(uid)
+}
+
+/// Resolves one `name:password:uid:...` record of the local account
+/// database. The name is 1 through 32 portable account-name bytes and the
+/// UID is a canonical decimal.
+pub(crate) fn resolve_local_account(name: &str, database: &[u8]) -> Result<u32, ConfigError> {
+    if !portable_account_name(name) {
+        return Err(ConfigError::InvalidValue);
+    }
+    for record in database.split(|byte| *byte == b'\n') {
+        let mut fields = record.split(|byte| *byte == b':');
+        let (Some(account), Some(_password), Some(uid)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if account == name.as_bytes() {
+            return canonical_uid(uid);
+        }
+    }
+    Err(ConfigError::InvalidValue)
+}
+
+/// A portable account name: 1 through 32 bytes of ASCII letters, digits,
+/// `_`, `-`, or `.`, not starting with `-`.
+fn portable_account_name(name: &str) -> bool {
+    let portable = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.');
+    !name.is_empty()
+        && name.len() <= MAX_ACCOUNT_NAME_BYTES
+        && !name.starts_with('-')
+        && name.bytes().all(portable)
+}
+
+/// A canonical decimal UID field: no sign, no leading zero, within `u32`.
+fn canonical_uid(field: &[u8]) -> Result<u32, ConfigError> {
+    let digits = !field.is_empty() && field.iter().all(u8::is_ascii_digit);
+    if !digits || (field.len() > 1 && field.starts_with(b"0")) {
+        return Err(ConfigError::InvalidValue);
+    }
+    std::str::from_utf8(field)
+        .ok()
+        .and_then(|text| text.parse::<u32>().ok())
+        .ok_or(ConfigError::InvalidValue)
+}
+
+/// Root, the executing process, and the explicitly trusted service account
+/// are the only owners a protected file or directory may have (spec 4331,
+/// Section 22.3); every other owner is refused.
+const fn trusted_owner(uid: u32, effective_uid: u32, service_uid: Option<u32>) -> bool {
+    uid == 0 || uid == effective_uid || matches!(service_uid, Some(trusted) if trusted == uid)
+}
+
 pub(crate) fn owned_by_daemon_or_root(uid: u32) -> bool {
-    uid == 0 || uid == rustix::process::geteuid().as_raw()
+    trusted_owner(
+        uid,
+        rustix::process::geteuid().as_raw(),
+        TRUSTED_SERVICE_UID.get().copied(),
+    )
 }
 
 /// Rejects any group- or world-writable directory on the path to a secret (spec 4331).
@@ -515,8 +610,9 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        PhysicalDirectory, protected_ancestors, read_opened_protected_bytes, read_protected_bytes,
-        read_protected_bytes_with_hook, read_protected_text,
+        PhysicalDirectory, TRUSTED_SERVICE_UID, protected_ancestors, read_opened_protected_bytes,
+        read_protected_bytes, read_protected_bytes_with_hook, read_protected_text,
+        resolve_local_account, trust_service_uid, trusted_owner,
     };
     use crate::error::ConfigError;
 
@@ -738,6 +834,78 @@ mod tests {
         assert_eq!(result, Err(ConfigError::FileRejected));
         assert_eq!(read_protected_bytes(&path, 8)?, b"12345678".to_vec());
         Ok(())
+    }
+
+    #[test]
+    fn local_account_resolution_is_exact_and_bounded() {
+        let database = b"root:x:0:0:root:/root:/bin/bash\nagenc-ircd:x:987:987::/var/lib/agenc-ircd:/usr/sbin/nologin\nbroken:x:07:1::/:/bin/false\nempty:x::1::/:/bin/false\nsigned:x:+5:1::/:/bin/false\nhuge:x:4294967296:1::/:/bin/false\n";
+        assert_eq!(resolve_local_account("root", database), Ok(0));
+        assert_eq!(resolve_local_account("agenc-ircd", database), Ok(987));
+        assert_eq!(
+            resolve_local_account("agenc", database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account("broken", database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account("empty", database),
+            Err(ConfigError::InvalidValue)
+        );
+        // `u32::from_str` accepts a leading `+`; a canonical UID field does not.
+        assert_eq!(
+            resolve_local_account("signed", database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account("huge", database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account("", database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account("-root", database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account("ro ot", database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account(&"a".repeat(33), database),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            resolve_local_account("root", b""),
+            Err(ConfigError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn trusted_owners_are_root_the_caller_and_the_named_service_account() {
+        assert!(trusted_owner(0, 1000, None));
+        assert!(trusted_owner(1000, 1000, None));
+        assert!(!trusted_owner(987, 1000, None));
+        assert!(!trusted_owner(987, 0, None));
+        assert!(trusted_owner(987, 0, Some(987)));
+        assert!(!trusted_owner(988, 0, Some(987)));
+        assert!(trusted_owner(0, 0, Some(987)));
+    }
+
+    #[test]
+    fn service_account_trust_requires_root_or_the_account_and_is_set_once() {
+        // A caller that is neither root nor the account cannot widen trust.
+        assert_eq!(trust_service_uid(987, 1000), Err(ConfigError::HostControl));
+        assert_eq!(trust_service_uid(0, 1000), Err(ConfigError::HostControl));
+        // Root trusts the named account once; a different account is refused
+        // for the rest of the process and the first choice stays in force.
+        assert_eq!(trust_service_uid(987, 0), Ok(987));
+        assert_eq!(trust_service_uid(987, 987), Ok(987));
+        assert_eq!(trust_service_uid(988, 0), Err(ConfigError::HostControl));
+        assert_eq!(TRUSTED_SERVICE_UID.get(), Some(&987));
     }
 
     #[test]
