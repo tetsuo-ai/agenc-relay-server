@@ -243,6 +243,16 @@ required upstream container gates still stop because Podman is unavailable.
 Upstream acceptance and a published dependency remain open under STO-02, and
 application integration with the full nonce/guard/main-commit allowance under
 STO-03.
+The x86_64 qualification host, its immutable release and client-tools
+images, the ext4 tuple, the campaign isolation runbook and the AArch64
+external blocker (REL-01, issue #43) are recorded in
+[the qualification hosts record](stage-10-qualification-hosts.md).
+
+The isolated [upstream allocation probe](upstream/redb-allocation-probe/README.md)
+passes 424 host tests but cannot publish a transaction. Its required upstream
+container gates stop because Podman is unavailable. The normal-API fuzz smoke
+does not exercise the new probe API. Full bounded commit support, upstream
+acceptance and a published dependency remain open under STO-1.
 
 ## Required production evidence
 
