@@ -99,7 +99,7 @@ artifact or release qualification is claimed.
   allocation-free publication API. The existing upstream probe cannot commit
   and does not cover physical growth, cleanup or close. The accepted policy
   requires a published upstream release before integration; see the
-  [upstream work and remaining contract](upstream/redb-allocation-probe/README.md).
+  [upstream work and remaining contract](upstream/redb-bounded-transaction/README.md).
 - **Other operations:** OCSP schema reconciliation, service-user ownership
   checks, generated admin access, connection-task failure isolation and the
   remaining capacity and release qualification findings stay open in TODO.md.

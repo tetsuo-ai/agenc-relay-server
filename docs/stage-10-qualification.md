@@ -609,8 +609,18 @@ body sizes and shows why 512-byte pages alone cannot establish the universal
 128 MiB bound. It is an allocation counterexample design, not a measured
 512-byte-page reserve breach. `sto1-allocation-budget-feasibility.md` maps
 the additional transaction lifecycle, commit-tail, cleanup, and close-path
-changes needed for a typed physical allocation budget. No storage engine or
-dependency patch has been applied yet.
+changes needed for a typed physical allocation budget.
+
+The 2026-09-15 upstream work (STO-01, issue #47) implements that budget in an
+isolated redb 4.2.0 checkout, recorded with its provenance and digests in
+`docs/upstream/redb-bounded-transaction/`: every page extent and file
+extension is charged to a typed allowance before allocation, preparation is
+abortable with every prior root intact, publication cannot allocate or extend
+the file, and reclamation and close are bounded and resumable. The pinned
+dependency is unchanged, so this finding stays open until the mechanism is
+published upstream (STO-02), integrated with one allowance across nonce
+reservation, guard replacement, the main transaction and maintenance
+(STO-03), and every storage measurement is rerun on a new candidate.
 
 ### CAP-1: edges refuse explicit directory queries
 

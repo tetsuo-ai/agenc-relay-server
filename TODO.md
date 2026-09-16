@@ -1854,6 +1854,16 @@ None blocks the core-v1 gate.
   Sealing transfers its owned allocation without another ciphertext copy.
   Pointer-identity, boundary and authentication regressions cover the change;
   see `docs/stage-10-storage-copy-repair.md`. STO-1 remains open.
+- [x] The upstream redb bounded-transaction mechanism for STO-1 is implemented
+  in an isolated v4.2.0 checkout (STO-01): a typed physical allocation
+  allowance charged for every page extent and file extension before
+  allocation, latched typed refusals that never poison the database,
+  abortable preparation that journals and restores the allocator on refusal,
+  allocation-free header publication, bounded resumable reclamation, and
+  bounded allocator-state persistence that the close path then skips. The
+  patch, digests, validation commands and results are recorded in
+  `docs/upstream/redb-bounded-transaction/`. STO-1 itself stays open for
+  upstream publication (STO-02) and integration (STO-03).
 - [x] Reverse restore-manifest traversal uses checked addition for its first
   sequence, preserving the existing guarded descending traversal.
 - [ ] `io_rejected` and `rustix_rejected` collapse every errno to

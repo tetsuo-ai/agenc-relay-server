@@ -1,0 +1,2812 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 918ad79..1917dbc 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,14 @@
+ # redb - Changelog
+ 
++## Bounded write transactions (unreleased)
++* Add `Database::begin_write_bounded`, which charges every page extent and file extension of a
++  write transaction to a typed `AllocationAllowance` before allocating, with explicit phases:
++  mutation, abortable `prepare`, allocation-free `publish`, bounded reclamation
++  (`Database::reclaim_bounded`), and bounded allocator-state persistence
++  (`Database::persist_allocator_state_bounded`). A refusal is latched, typed
++  (`AllowanceRefusal`), never an I/O error, and aborts cleanly before publication with every prior
++  root intact.
++
+ ## 5.0.0 - 2026-XX-XX
+ * Under the `experimental-api-5` feature flag, turning off the `std` feature now builds redb as a
+   `no_std` crate, for embedded targets. `alloc` is still required, as is `panic = "abort"` and a
+diff --git a/fuzz/Cargo.toml b/fuzz/Cargo.toml
+index 99b4969..eb639dd 100644
+--- a/fuzz/Cargo.toml
++++ b/fuzz/Cargo.toml
+@@ -28,3 +28,9 @@ name = "fuzz_redb"
+ path = "fuzz_targets/fuzz_redb.rs"
+ test = false
+ doc = false
++
++[[bin]]
++name = "fuzz_bounded"
++path = "fuzz_targets/fuzz_bounded.rs"
++test = false
++doc = false
+diff --git a/fuzz/fuzz_targets/fuzz_bounded.rs b/fuzz/fuzz_targets/fuzz_bounded.rs
+new file mode 100644
+index 0000000..6451a79
+--- /dev/null
++++ b/fuzz/fuzz_targets/fuzz_bounded.rs
+@@ -0,0 +1,274 @@
++#![no_main]
++
++//! State-machine fuzzing of bounded write transactions: mutation with an arbitrary allowance,
++//! ignored refusals, prepare, publish, abort and drop at every phase, live readers, bounded
++//! reclamation, bounded allocator-state persistence, and reopen. A model of the committed state
++//! and of every reader's snapshot is checked after each operation, and every reopen runs a full
++//! integrity check.
++
++use arbitrary::Arbitrary;
++use libfuzzer_sys::fuzz_target;
++use redb::{
++    AllocationAllowance, AllowanceRefusal, BoundedWriteTransaction, CommitError, Database, Error,
++    PreparedTransaction, ReadTransaction, ReadableDatabase, ReadableTable, StorageError,
++    TableDefinition,
++};
++use std::collections::BTreeMap;
++
++const TABLE: TableDefinition<u16, &[u8]> = TableDefinition::new("fuzz");
++const MAX_OPS: usize = 48;
++const MAX_VALUE: usize = 4 * 4096;
++
++#[derive(Arbitrary, Debug)]
++enum Op {
++    Begin { allowance: u32 },
++    Insert { key: u16, len: u16 },
++    Remove { key: u16 },
++    Prepare,
++    Publish,
++    Abort,
++    Drop,
++    BeginReader,
++    DropReader { index: u8 },
++    Reclaim { allowance: u32, records: u8 },
++    Persist { allowance: u32 },
++    Reopen,
++}
++
++#[derive(Arbitrary, Debug)]
++struct Plan {
++    ops: Vec<Op>,
++}
++
++type Model = BTreeMap<u16, Vec<u8>>;
++
++enum Pending {
++    Mutating(BoundedWriteTransaction, bool),
++    Prepared(PreparedTransaction),
++}
++
++struct Machine {
++    path: std::path::PathBuf,
++    database: Option<Database>,
++    committed: Model,
++    // The committed model plus this transaction's changes, if it publishes.
++    tentative: Model,
++    pending: Option<Pending>,
++    readers: Vec<(ReadTransaction, Model)>,
++}
++
++fn read_all(read: &ReadTransaction) -> Model {
++    let Ok(table) = read.open_table(TABLE) else {
++        return Model::new();
++    };
++    table
++        .iter()
++        .unwrap()
++        .map(|entry| {
++            let (key, value) = entry.unwrap();
++            (key.value(), value.value().to_vec())
++        })
++        .collect()
++}
++
++fn value_for(key: u16, len: u16) -> Vec<u8> {
++    let len = usize::from(len) % (MAX_VALUE + 1);
++    vec![(key % 251) as u8; len]
++}
++
++fn is_refusal(error: &StorageError) -> bool {
++    matches!(error, StorageError::Allowance(_))
++}
++
++impl Machine {
++    fn database(&mut self) -> &Database {
++        if self.database.is_none() {
++            self.database = Some(Database::create(&self.path).unwrap());
++        }
++        self.database.as_ref().unwrap()
++    }
++
++    fn verify(&mut self) {
++        // Readers see exactly the snapshot they began with.
++        for (reader, snapshot) in &self.readers {
++            assert_eq!(&read_all(reader), snapshot);
++        }
++        // Only a live write transaction defers the database; readers are independent handles.
++        if self.database.is_some() {
++            let read = self.database().begin_read().unwrap();
++            assert_eq!(read_all(&read), self.committed);
++        }
++    }
++
++    fn step(&mut self, op: Op) {
++        match op {
++            Op::Begin { allowance } => {
++                if self.pending.is_some() {
++                    return;
++                }
++                let allowance = AllocationAllowance::new(u64::from(allowance));
++                let transaction = self.database().begin_write_bounded(allowance).unwrap();
++                self.tentative = self.committed.clone();
++                self.pending = Some(Pending::Mutating(transaction, false));
++            }
++            Op::Insert { key, len } => {
++                let Some(Pending::Mutating(transaction, latched)) = self.pending.as_mut() else {
++                    return;
++                };
++                let value = value_for(key, len);
++                let outcome = match transaction.open_table(TABLE) {
++                    Ok(mut table) => table.insert(key, value.as_slice()).map(|_| ()).map_err(
++                        |error| match error {
++                            StorageError::Allowance(refusal) => refusal,
++                            other => panic!("unexpected insert error: {other:?}"),
++                        },
++                    ),
++                    Err(redb::TableError::Storage(error)) if is_refusal(&error) => {
++                        Err(match error {
++                            StorageError::Allowance(refusal) => refusal,
++                            _ => unreachable!(),
++                        })
++                    }
++                    Err(other) => panic!("unexpected open error: {other:?}"),
++                };
++                match outcome {
++                    Ok(()) => {
++                        self.tentative.insert(key, value);
++                    }
++                    Err(refusal) => {
++                        if *latched {
++                            assert!(matches!(refusal, AllowanceRefusal::Latched { .. }));
++                        }
++                        *latched = true;
++                        assert!(transaction.refusal().unwrap().is_some());
++                    }
++                }
++            }
++            Op::Remove { key } => {
++                let Some(Pending::Mutating(transaction, latched)) = self.pending.as_mut() else {
++                    return;
++                };
++                match transaction.open_table(TABLE) {
++                    Ok(mut table) => match table.remove(key) {
++                        Ok(_) => {
++                            self.tentative.remove(&key);
++                        }
++                        Err(StorageError::Allowance(_)) => *latched = true,
++                        Err(other) => panic!("unexpected remove error: {other:?}"),
++                    },
++                    Err(redb::TableError::Storage(StorageError::Allowance(_))) => {
++                        *latched = true;
++                    }
++                    Err(other) => panic!("unexpected open error: {other:?}"),
++                }
++            }
++            Op::Prepare => {
++                let Some(Pending::Mutating(transaction, latched)) = self.pending.take() else {
++                    return;
++                };
++                match transaction.prepare() {
++                    Ok(prepared) => {
++                        assert!(!latched, "a latched transaction prepared");
++                        self.pending = Some(Pending::Prepared(prepared));
++                    }
++                    Err(CommitError::Allowance(_)) => {
++                        // Aborted cleanly: nothing changed and the next writer is usable.
++                        self.tentative = self.committed.clone();
++                    }
++                    Err(other) => panic!("unexpected prepare error: {other:?}"),
++                }
++            }
++            Op::Publish => {
++                let Some(Pending::Prepared(prepared)) = self.pending.take() else {
++                    return;
++                };
++                prepared.publish().unwrap();
++                self.committed = self.tentative.clone();
++            }
++            Op::Abort => match self.pending.take() {
++                Some(Pending::Mutating(transaction, _)) => {
++                    transaction.abort().unwrap();
++                    self.tentative = self.committed.clone();
++                }
++                Some(Pending::Prepared(prepared)) => {
++                    prepared.abort().unwrap();
++                    self.tentative = self.committed.clone();
++                }
++                None => {}
++            },
++            Op::Drop => {
++                self.pending = None;
++                self.tentative = self.committed.clone();
++            }
++            Op::BeginReader => {
++                if self.readers.len() >= 4 {
++                    return;
++                }
++                let read = self.database().begin_read().unwrap();
++                let snapshot = read_all(&read);
++                assert_eq!(snapshot, self.committed);
++                self.readers.push((read, snapshot));
++            }
++            Op::DropReader { index } => {
++                if self.readers.is_empty() {
++                    return;
++                }
++                let index = usize::from(index) % self.readers.len();
++                self.readers.remove(index);
++            }
++            Op::Reclaim { allowance, records } => {
++                if self.pending.is_some() {
++                    return;
++                }
++                let allowance = AllocationAllowance::new(u64::from(allowance));
++                match self.database().reclaim_bounded(allowance, usize::from(records)) {
++                    Ok(_) | Err(Error::Allowance(_)) => {}
++                    Err(other) => panic!("unexpected reclaim error: {other:?}"),
++                }
++            }
++            Op::Persist { allowance } => {
++                if self.pending.is_some() {
++                    return;
++                }
++                let allowance = AllocationAllowance::new(u64::from(allowance));
++                match self.database().persist_allocator_state_bounded(allowance) {
++                    Ok(()) | Err(Error::Allowance(_)) => {}
++                    Err(other) => panic!("unexpected persist error: {other:?}"),
++                }
++            }
++            Op::Reopen => {
++                self.pending = None;
++                self.tentative = self.committed.clone();
++                self.readers.clear();
++                self.database = None;
++                let mut database = Database::open(&self.path).unwrap();
++                assert!(database.check_integrity().unwrap());
++                self.database = Some(database);
++            }
++        }
++        self.verify();
++    }
++}
++
++fuzz_target!(|plan: Plan| {
++    let file = tempfile::NamedTempFile::new().unwrap();
++    let mut machine = Machine {
++        path: file.path().to_path_buf(),
++        database: None,
++        committed: Model::new(),
++        tentative: Model::new(),
++        pending: None,
++        readers: Vec::new(),
++    };
++    machine.database();
++    for op in plan.ops.into_iter().take(MAX_OPS) {
++        machine.step(op);
++    }
++    machine.pending = None;
++    machine.readers.clear();
++    machine.database = None;
++    let mut database = Database::open(&machine.path).unwrap();
++    assert!(database.check_integrity().unwrap());
++    let read = database.begin_read().unwrap();
++    assert_eq!(read_all(&read), machine.committed);
++});
+diff --git a/src/bounded.rs b/src/bounded.rs
+new file mode 100644
+index 0000000..b084d23
+--- /dev/null
++++ b/src/bounded.rs
+@@ -0,0 +1,201 @@
++//! Write transactions with a typed physical allocation allowance and explicit phases.
++//!
++//! An ordinary [`WriteTransaction`](crate::WriteTransaction) allocates pages and extends the
++//! file whenever a mutation or its commit needs space. A bounded transaction charges every such
++//! allocation to one [`AllocationAllowance`] first and refuses, without side effects, when the
++//! allowance would be exceeded. Its life is:
++//!
++//! 1. `begin_write_bounded`: user writes through the [`BoundedWriteTransaction`], which
++//!    dereferences to the ordinary transaction API.
++//! 2. [`BoundedWriteTransaction::prepare`]: every allocation-bearing step of the commit runs,
++//!    writing only into new pages while every prior user and system root stays valid. A
++//!    refusal here aborts cleanly. The result is a frozen [`PreparedTransaction`].
++//! 3. [`PreparedTransaction::publish`]: the header slots are written and flushed. Nothing is
++//!    allocated and the file is never extended; the account is frozen and would refuse.
++//! 4. Deferred cleanup: [`Database::reclaim_bounded`](crate::Database::reclaim_bounded) frees
++//!    the pages earlier transactions released, a bounded number of records at a time.
++//! 5. Close: [`Database::persist_allocator_state_bounded`](crate::Database::persist_allocator_state_bounded)
++//!    writes the allocator state within an allowance, after which dropping the database only
++//!    flushes and closes the file.
++//!
++//! Real I/O failures keep their ordinary meaning: an uncertain publication latches the
++//! database until it is reopened and repaired.
++
++use crate::error::CommitError;
++use crate::{AllocationPhase, AllowanceRefusal, Result, StorageError, WriteTransaction};
++use core::fmt::{Debug, Formatter};
++use core::ops::Deref;
++
++/// The physical allocation allowance of one bounded transaction, in bytes.
++///
++/// The account debits every page extent at its rounded buddy-allocator size and every file
++/// extension at its exact length before the allocation happens. Nothing is refunded: a page the
++/// transaction frees or reuses does not lower the charge, so the allowance bounds physical
++/// growth from above rather than measuring it exactly. Reader-retained pages cost nothing
++/// directly; they keep freed-page records in the system tables, whose pages are charged like
++/// any other.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct AllocationAllowance(u64);
++
++impl AllocationAllowance {
++    /// An allowance of `bytes`.
++    pub const fn new(bytes: u64) -> Self {
++        Self(bytes)
++    }
++
++    /// The allowance in bytes.
++    pub const fn bytes(self) -> u64 {
++        self.0
++    }
++}
++
++/// What one bounded reclamation removed and whether more is waiting.
++#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++pub struct ReclaimProgress {
++    /// Freed-page records removed from the freed tables.
++    pub records: usize,
++    /// Pages returned to the allocator.
++    pub pages: usize,
++    /// Whether records that no live reader needs remain to be reclaimed.
++    pub remaining: bool,
++}
++
++/// A write transaction in its mutation phase, bounded by an [`AllocationAllowance`].
++///
++/// It dereferences to [`WriteTransaction`] for table access. Dropping it aborts.
++pub struct BoundedWriteTransaction {
++    inner: WriteTransaction,
++}
++
++impl BoundedWriteTransaction {
++    pub(crate) fn new(inner: WriteTransaction) -> Self {
++        Self { inner }
++    }
++
++    fn account_view<T>(&self, read: impl FnOnce(&crate::tree_store::AllocationAccount) -> T) -> Result<T> {
++        let account = self
++            .inner
++            .account()
++            .ok_or_else(|| StorageError::Corrupted("bounded transaction without an account".into()))?;
++        let guard = account.lock()?;
++        Ok(read(&guard))
++    }
++
++    /// The allowance not yet charged, in bytes.
++    pub fn allowance_remaining(&self) -> Result<u64> {
++        self.account_view(|account| account.remaining())
++    }
++
++    /// The bytes charged so far.
++    pub fn allowance_charged(&self) -> Result<u64> {
++        self.account_view(|account| account.charged())
++    }
++
++    /// The refusal that latched this transaction, if any. A latched transaction can only abort;
++    /// `prepare` returns the same refusal.
++    pub fn refusal(&self) -> Result<Option<AllowanceRefusal>> {
++        self.account_view(|account| account.refusal())
++    }
++
++    /// The phase the account is charging: [`AllocationPhase::Mutation`] until `prepare`.
++    pub fn phase(&self) -> Result<AllocationPhase> {
++        self.account_view(|account| account.phase())
++    }
++
++    /// Runs every allocation-bearing step of the commit and freezes the result.
++    ///
++    /// On an [`AllowanceRefusal`] the transaction has been aborted: no root changed, every page
++    /// it freed is allocated again, and the next writer is unaffected. On any other error the
++    /// database refuses further writes until reopened, as an ordinary failed commit does.
++    pub fn prepare(mut self) -> core::result::Result<PreparedTransaction, CommitError> {
++        self.inner.mark_completed();
++        self.inner.prepare_bounded(0)?;
++        Ok(PreparedTransaction {
++            inner: Some(self.inner),
++        })
++    }
++
++    /// Aborts the transaction, rolling back all of its writes.
++    pub fn abort(self) -> Result {
++        self.inner.abort()
++    }
++}
++
++impl Debug for BoundedWriteTransaction {
++    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
++        f.debug_struct("BoundedWriteTransaction")
++            .field("phase", &self.phase().ok())
++            .field("charged", &self.allowance_charged().ok())
++            .field("remaining", &self.allowance_remaining().ok())
++            .finish_non_exhaustive()
++    }
++}
++
++impl Deref for BoundedWriteTransaction {
++    type Target = WriteTransaction;
++
++    fn deref(&self) -> &WriteTransaction {
++        &self.inner
++    }
++}
++
++/// A prepared bounded transaction: frozen, fully written into new pages, and waiting only for
++/// its header publication. Dropping it aborts, exactly like cancelling before preparation.
++pub struct PreparedTransaction {
++    inner: Option<WriteTransaction>,
++}
++
++impl PreparedTransaction {
++    /// The bytes the transaction charged in its mutation and preparation phases.
++    pub fn allowance_charged(&self) -> Result<u64> {
++        let inner = self
++            .inner
++            .as_ref()
++            .ok_or_else(|| StorageError::Corrupted("prepared transaction already consumed".into()))?;
++        let account = inner
++            .account()
++            .ok_or_else(|| StorageError::Corrupted("bounded transaction without an account".into()))?;
++        let charged = account.lock()?.charged();
++        Ok(charged)
++    }
++
++    /// Publishes the prepared state durably. This never allocates or extends the file.
++    pub fn publish(mut self) -> core::result::Result<(), CommitError> {
++        let mut inner = self.inner.take().ok_or_else(|| {
++            CommitError::Storage(StorageError::Corrupted(
++                "prepared transaction already consumed".into(),
++            ))
++        })?;
++        inner.publish_bounded().map(|_| ())
++    }
++
++    /// Abandons the prepared state: every root and page is exactly as before the transaction.
++    pub fn abort(mut self) -> Result {
++        match self.inner.take() {
++            Some(mut inner) => inner.abort_prepared(),
++            None => Ok(()),
++        }
++    }
++}
++
++impl Debug for PreparedTransaction {
++    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
++        f.debug_struct("PreparedTransaction")
++            .field("charged", &self.allowance_charged().ok())
++            .finish_non_exhaustive()
++    }
++}
++
++impl Drop for PreparedTransaction {
++    fn drop(&mut self) {
++        if let Some(mut inner) = self.inner.take()
++            && !crate::panicking()
++        {
++            #[allow(unused_variables)]
++            if let Err(error) = inner.abort_prepared() {
++                #[cfg(feature = "logging")]
++                log::warn!("Failure automatically aborting prepared transaction: {error}");
++            }
++        }
++    }
++}
+diff --git a/src/db.rs b/src/db.rs
+index 7d7dee1..65bdff2 100644
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -2,10 +2,13 @@ use crate::io;
+ use crate::transaction_tracker::{TransactionId, TransactionTracker};
+ #[cfg(not(redb_no_std))]
+ use crate::tree_store::ReadOnlyBackend;
++use crate::bounded::{AllocationAllowance, BoundedWriteTransaction, ReclaimProgress};
+ use crate::tree_store::{
+-    AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
+-    PageResolver, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
++    AllocationAccount, AllocationAccountHandle, AllocationPolicy, BtreeHeader,
++    InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, PageResolver, ShrinkPolicy,
++    TableTree, TableType, TransactionalMemory,
+ };
++use crate::AllocationPhase;
+ use crate::types::{Key, Value};
+ use crate::{
+     CompactionError, DatabaseError, Error, ReadOnlyTable, ReadableTable, SavepointError,
+@@ -1285,8 +1288,93 @@ impl Database {
+             &self.transaction_tracker,
+             &self.mem,
+             AllocationPolicy::Default,
++            None,
+         )
+     }
++
++    /// Begins a write transaction whose physical growth is bounded by `allowance`.
++    ///
++    /// See [`AllocationAllowance`] for the accounting and [`BoundedWriteTransaction`] for the
++    /// explicit phases. Like [`Self::begin_write`], the transaction keeps the database open.
++    pub fn begin_write_bounded(
++        &self,
++        allowance: AllocationAllowance,
++    ) -> Result<BoundedWriteTransaction, TransactionError> {
++        let account = AllocationAccount::new(allowance.bytes(), AllocationPhase::Mutation);
++        let inner = begin_write_with_allocation_policy(
++            &self.transaction_tracker,
++            &self.mem,
++            AllocationPolicy::Default,
++            Some(account),
++        )?;
++        Ok(BoundedWriteTransaction::new(inner))
++    }
++
++    /// Reclaims pages freed by earlier transactions in one bounded publication.
++    ///
++    /// Bounded transactions never reclaim on their own; this is their deferred cleanup. At most
++    /// `max_records` freed-page records (each naming up to a few hundred pages) of transactions
++    /// no live reader or savepoint still needs are removed and their pages returned to the
++    /// allocator, all within `allowance`. Progress is monotonic: every publication removes its
++    /// records durably, so repeating the call with the same arguments finishes once every reader
++    /// has released. A refusal reclaims nothing and leaves the database usable.
++    ///
++    /// `remaining` describes the horizon of this publication. The records an ordinary
++    /// [`WriteTransaction`] commit's epilogue stores stay pinned until a durable commit clears
++    /// that epilogue, so they become eligible one publication later; a workload of bounded
++    /// transactions alone has no epilogues.
++    pub fn reclaim_bounded(
++        &self,
++        allowance: AllocationAllowance,
++        max_records: usize,
++    ) -> Result<ReclaimProgress, Error> {
++        let account = AllocationAccount::new(allowance.bytes(), AllocationPhase::Cleanup);
++        let mut transaction = begin_write_with_allocation_policy(
++            &self.transaction_tracker,
++            &self.mem,
++            AllocationPolicy::Default,
++            Some(account),
++        )?;
++        transaction.disable_post_commit_free();
++        let publication = transaction.commit_bounded(max_records)?;
++        Ok(ReclaimProgress {
++            records: publication.reclaimed_records,
++            pages: publication.reclaimed_pages,
++            remaining: publication.more_reclaimable,
++        })
++    }
++
++    /// Persists the allocator state within `allowance`, so that the next open needs no repair,
++    /// and takes that duty away from the close path.
++    ///
++    /// Dropping a [`Database`] otherwise runs an unbounded transaction that writes the allocator
++    /// state and trims the file. After this call, whatever its outcome, the drop only flushes
++    /// and closes the file: on a refusal the state is not written and the next open repairs it,
++    /// which is the same recovery a crash requires. A later write transaction restores the
++    /// ordinary close behavior.
++    pub fn persist_allocator_state_bounded(
++        &self,
++        allowance: AllocationAllowance,
++    ) -> Result<(), Error> {
++        let account = AllocationAccount::new(allowance.bytes(), AllocationPhase::Close);
++        let result = (|| -> Result<(), Error> {
++            let mut transaction = begin_write_with_allocation_policy(
++                &self.transaction_tracker,
++                &self.mem,
++                AllocationPolicy::Lowest,
++                Some(account),
++            )?;
++            transaction.set_quick_repair(true);
++            transaction.disable_post_commit_free();
++            transaction.set_shrink_policy(ShrinkPolicy::Maximum);
++            transaction.commit_bounded(0)?;
++            Ok(())
++        })();
++        // Set after the transaction began, which cleared it, and regardless of the outcome:
++        // the close path must never run its own unmetered allocations after a bounded close.
++        self.mem.set_close_persist_handled(true);
++        result
++    }
+ }
+ 
+ // The allocation policy is fixed for the lifetime of the transaction; every page allocation
+@@ -1295,9 +1383,12 @@ fn begin_write_with_allocation_policy(
+     transaction_tracker: &Arc<TransactionTracker>,
+     mem: &Arc<TransactionalMemory>,
+     allocation_policy: AllocationPolicy,
++    account: Option<AllocationAccountHandle>,
+ ) -> Result<WriteTransaction, TransactionError> {
+     // Fail early if there has been an I/O error -- nothing can be committed in that case
+     mem.check_io_errors()?;
++    // Any new writer may change what the persisted allocator state would describe.
++    mem.set_close_persist_handled(false);
+     let guard = TransactionGuard::new_write(
+         transaction_tracker.start_write_transaction(),
+         transaction_tracker.clone(),
+@@ -1318,6 +1409,7 @@ fn begin_write_with_allocation_policy(
+         transaction_tracker.clone(),
+         mem.clone(),
+         allocation_policy,
++        account,
+     )
+     .map_err(|e| e.into())
+ }
+@@ -1333,8 +1425,12 @@ fn ensure_allocator_state_table_and_trim(
+     // commit's writes at high page indices (see AllocationPolicy::Lowest)
+     // and try_shrink can't reclaim the growth. See
+     // https://github.com/cberner/redb/issues/1165
+-    let mut tx =
+-        begin_write_with_allocation_policy(transaction_tracker, mem, AllocationPolicy::Lowest)?;
++    let mut tx = begin_write_with_allocation_policy(
++        transaction_tracker,
++        mem,
++        AllocationPolicy::Lowest,
++        None,
++    )?;
+     tx.set_quick_repair(true);
+     tx.disable_post_commit_free();
+     tx.set_shrink_policy(ShrinkPolicy::Maximum);
+@@ -1350,7 +1446,11 @@ fn ensure_allocator_state_table_and_trim(
+ // transaction can be started concurrently and the commit in here cannot block on the
+ // write-transaction slot.
+ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
++    // A bounded close (`Database::persist_allocator_state_bounded`) already decided whether the
++    // allocator state is written; running the unbounded transaction here would hide unmetered
++    // allocations outside its account.
+     if !crate::panicking()
++        && !mem.close_persist_handled()
+         && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
+     {
+         #[cfg(feature = "logging")]
+diff --git a/src/error.rs b/src/error.rs
+index 27ebbce..963d046 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -8,10 +8,108 @@ use alloc::string::String;
+ use core::fmt::{Display, Formatter};
+ use core::panic;
+ 
++/// The phase of a bounded write transaction in which an allocation was requested.
++///
++/// See [`crate::AllocationAllowance`] for what each phase may allocate.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum AllocationPhase {
++    /// User table mutations through the transaction handle.
++    Mutation,
++    /// Abortable commit preparation: system tables, freed-page and allocation records, and
++    /// allocator metadata, all written into new pages while every prior root stays valid.
++    Preparation,
++    /// The prepared state is frozen: publication may not allocate or extend the file.
++    Frozen,
++    /// Bounded reclamation of pages freed by earlier transactions.
++    Cleanup,
++    /// Persisting the allocator state before the database closes.
++    Close,
++}
++
++impl Display for AllocationPhase {
++    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
++        let text = match self {
++            Self::Mutation => "mutation",
++            Self::Preparation => "preparation",
++            Self::Frozen => "frozen",
++            Self::Cleanup => "cleanup",
++            Self::Close => "close",
++        };
++        f.write_str(text)
++    }
++}
++
++/// A bounded write transaction's allowance could not admit an allocation.
++///
++/// A refusal is latched: once one occurs, every later allocation of the same transaction is
++/// refused too, and `prepare` or `publish` aborts the transaction cleanly. A refusal is never an
++/// I/O error and never poisons the database.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum AllowanceRefusal {
++    /// The cumulative allowance could not cover `requested` more bytes.
++    Exhausted {
++        /// The phase that requested the allocation.
++        phase: AllocationPhase,
++        /// The rounded extent or file extension that was requested, in bytes.
++        requested: u64,
++        /// The allowance that remained when the request was refused, in bytes.
++        remaining: u64,
++    },
++    /// An earlier refusal latched the transaction; nothing further is admitted.
++    Latched {
++        /// The phase of the earlier refusal.
++        phase: AllocationPhase,
++    },
++    /// The extent or extension arithmetic overflowed.
++    Overflow {
++        /// The phase that requested the allocation.
++        phase: AllocationPhase,
++    },
++    /// An allocation was requested after preparation froze the account, which publication must
++    /// never do.
++    Frozen,
++}
++
++impl AllowanceRefusal {
++    /// The phase in which the allowance refused.
++    pub fn phase(&self) -> AllocationPhase {
++        match self {
++            Self::Exhausted { phase, .. } | Self::Latched { phase } | Self::Overflow { phase } => {
++                *phase
++            }
++            Self::Frozen => AllocationPhase::Frozen,
++        }
++    }
++}
++
++impl Display for AllowanceRefusal {
++    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
++        match self {
++            Self::Exhausted {
++                phase,
++                requested,
++                remaining,
++            } => write!(
++                f,
++                "Allocation allowance exhausted during {phase}: {requested} bytes requested, {remaining} remaining"
++            ),
++            Self::Latched { phase } => {
++                write!(f, "Allocation allowance latched by a refusal during {phase}")
++            }
++            Self::Overflow { phase } => {
++                write!(f, "Allocation allowance arithmetic overflowed during {phase}")
++            }
++            Self::Frozen => write!(f, "Allocation requested after the allowance was frozen"),
++        }
++    }
++}
++
+ /// General errors directly from the storage layer
+ #[derive(Debug)]
+ #[non_exhaustive]
+ pub enum StorageError {
++    /// A bounded transaction's allowance refused before the requested allocation.
++    Allowance(AllowanceRefusal),
+     /// The Database is corrupted
+     Corrupted(String),
+     /// The value being inserted exceeds the maximum of 3GiB
+@@ -40,6 +138,7 @@ impl From<io::Error> for StorageError {
+ impl From<StorageError> for Error {
+     fn from(err: StorageError) -> Error {
+         match err {
++            StorageError::Allowance(reason) => Error::Allowance(reason),
+             StorageError::Corrupted(msg) => Error::Corrupted(msg),
+             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
+             #[cfg(feature = "experimental_cursor")]
+@@ -55,6 +154,7 @@ impl From<StorageError> for Error {
+ impl Display for StorageError {
+     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+         match self {
++            StorageError::Allowance(reason) => reason.fmt(f),
+             StorageError::Corrupted(msg) => {
+                 write!(f, "DB corrupted: {msg}")
+             }
+@@ -482,6 +582,8 @@ impl core::error::Error for TransactionError {}
+ #[derive(Debug)]
+ #[non_exhaustive]
+ pub enum CommitError {
++    /// A bounded transaction's allowance refused; the transaction was aborted cleanly.
++    Allowance(AllowanceRefusal),
+     /// Error from underlying storage
+     Storage(StorageError),
+     /// The transaction was poisoned by a panic and can no longer be committed
+@@ -491,6 +593,7 @@ pub enum CommitError {
+ impl CommitError {
+     pub(crate) fn into_storage_error(self) -> StorageError {
+         match self {
++            CommitError::Allowance(reason) => StorageError::Allowance(reason),
+             CommitError::Storage(storage) => storage,
+             CommitError::TransactionPoisoned => unreachable!(),
+         }
+@@ -500,6 +603,7 @@ impl CommitError {
+ impl From<CommitError> for Error {
+     fn from(err: CommitError) -> Error {
+         match err {
++            CommitError::Allowance(reason) => Error::Allowance(reason),
+             CommitError::Storage(storage) => storage.into(),
+             CommitError::TransactionPoisoned => Error::TransactionPoisoned,
+         }
+@@ -515,6 +619,7 @@ impl From<StorageError> for CommitError {
+ impl Display for CommitError {
+     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+         match self {
++            CommitError::Allowance(reason) => reason.fmt(f),
+             CommitError::Storage(storage) => storage.fmt(f),
+             CommitError::TransactionPoisoned => {
+                 write!(f, "Transaction was poisoned by a panic")
+@@ -529,6 +634,8 @@ impl core::error::Error for CommitError {}
+ #[derive(Debug)]
+ #[non_exhaustive]
+ pub enum Error {
++    /// A bounded transaction's allowance refused an allocation.
++    Allowance(AllowanceRefusal),
+     /// The Database is already open. Cannot acquire lock.
+     DatabaseAlreadyOpen,
+     /// This savepoint is invalid or cannot be created.
+@@ -605,6 +712,7 @@ impl From<io::Error> for Error {
+ impl Display for Error {
+     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+         match self {
++            Error::Allowance(reason) => reason.fmt(f),
+             Error::Corrupted(msg) => {
+                 write!(f, "DB corrupted: {msg}")
+             }
+diff --git a/src/lib.rs b/src/lib.rs
+index dacb629..278de65 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -70,6 +70,9 @@
+ // std builds.
+ extern crate alloc;
+ 
++pub use bounded::{
++    AllocationAllowance, BoundedWriteTransaction, PreparedTransaction, ReclaimProgress,
++};
+ #[cfg(not(redb_no_std))]
+ pub use db::ReadOnlyDatabase;
+ pub use db::{
+@@ -78,8 +81,8 @@ pub use db::{
+     UntypedTableHandle,
+ };
+ pub use error::{
+-    CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
+-    StorageError, TableError, TransactionError,
++    AllocationPhase, AllowanceRefusal, CommitError, CompactionError, DatabaseError, Error,
++    SavepointError, SetDurabilityError, StorageError, TableError, TransactionError,
+ };
+ #[cfg(feature = "experimental-api-5")]
+ pub use key_range::KeyRange;
+@@ -104,6 +107,7 @@ pub use types::{Key, MutInPlaceValue, TypeName, Value};
+ pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
+ 
+ pub mod backends;
++mod bounded;
+ mod complex_types;
+ mod db;
+ mod error;
+diff --git a/src/transactions.rs b/src/transactions.rs
+index 0a73882..f1e92be 100644
+--- a/src/transactions.rs
++++ b/src/transactions.rs
+@@ -5,17 +5,18 @@ use crate::sealed::Sealed;
+ use crate::sync::Mutex;
+ use crate::table::ReadOnlyUntypedTable;
+ use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
+-#[cfg(all(debug_assertions, not(redb_no_std)))]
+ use crate::tree_store::PageNumberHashSet;
+ use crate::tree_store::{
+-    AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
++    AllocationAccountHandle, AllocationPolicy, Btree, BtreeHeader, BtreeMut,
++    InternalTableDefinition, MAX_PAIR_LENGTH,
+     MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageNumberHashMap,
+     PageResolver, PageTracker, SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut,
+     TableType, TransactionalMemory,
+ };
+ use crate::types::{Key, Value};
+ use crate::{
+-    AccessGuard, AccessGuardMutInPlace, ExtractIf, MultimapTable, MultimapTableDefinition,
++    AccessGuard, AccessGuardMutInPlace, AllocationPhase, ExtractIf, MultimapTable,
++    MultimapTableDefinition,
+     MultimapTableHandle, MutInPlaceValue, Range, ReadOnlyMultimapTable, ReadOnlyTable, Result,
+     Savepoint, SavepointError, SetDurabilityError, StorageError, Table, TableDefinition,
+     TableError, TableHandle, TransactionError, TypeName, UntypedMultimapTableHandle,
+@@ -922,6 +923,60 @@ pub struct WriteTransaction {
+     // All transaction-local savepoint lifecycle state. See
+     // `SavepointTransactionState` for the commit/abort contract.
+     savepoint_state: Mutex<SavepointTransactionState>,
++    // Whether the user table tree has been flushed and its page tracker closed, so that a later
++    // abort does not close the tracker again.
++    user_tree: UserTree,
++    // Pages of earlier transactions that bounded preparation returned to the allocator. A
++    // publication makes those frees final; an abort re-marks every page allocated, restoring the
++    // allocator exactly, because the durable freed tables still name them.
++    freed_journal: Vec<PageNumber>,
++    prepared: Option<PreparedState>,
++}
++
++#[derive(Clone, Copy, Eq, PartialEq)]
++enum UserTree {
++    Open,
++    Closed,
++}
++
++/// The frozen result of bounded preparation, waiting for publication.
++struct PreparedState {
++    user_root: Option<BtreeHeader>,
++    system_root: Option<BtreeHeader>,
++    processed_transactions: Vec<TransactionId>,
++    reclaimed_records: usize,
++    reclaimed_pages: usize,
++    more_reclaimable: bool,
++}
++
++/// What a bounded publication reclaimed from the freed-page tables.
++#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++pub(crate) struct BoundedPublication {
++    pub(crate) reclaimed_records: usize,
++    pub(crate) reclaimed_pages: usize,
++    pub(crate) more_reclaimable: bool,
++}
++
++fn lock_account(
++    account: &AllocationAccountHandle,
++) -> Result<crate::sync::MutexGuard<'_, crate::tree_store::AllocationAccount>> {
++    Ok(account.lock()?)
++}
++
++// A refusal raised inside the storage layer surfaces as the commit-level refusal it is.
++fn normalize_refusal(error: CommitError) -> CommitError {
++    match error {
++        CommitError::Storage(StorageError::Allowance(refusal)) => CommitError::Allowance(refusal),
++        other => other,
++    }
++}
++
++/// Freed-page records taken out of the freed tables.
++struct FreedExtraction {
++    transactions: Vec<TransactionId>,
++    records: usize,
++    pages: usize,
++    remaining: bool,
+ }
+ 
+ impl WriteTransaction {
+@@ -930,6 +985,7 @@ impl WriteTransaction {
+         transaction_tracker: Arc<TransactionTracker>,
+         mem: Arc<TransactionalMemory>,
+         allocation_policy: AllocationPolicy,
++        account: Option<AllocationAccountHandle>,
+     ) -> Result<Self> {
+         let transaction_id = guard.id();
+         let guard = Arc::new(guard);
+@@ -937,7 +993,7 @@ impl WriteTransaction {
+         let root_page = mem.get_data_root();
+         let system_page = mem.get_system_root();
+ 
+-        let page_allocator = PageAllocator::new(mem.clone(), allocation_policy);
++        let page_allocator = PageAllocator::with_account(mem.clone(), allocation_policy, account);
+         let tables = TableNamespace::new(root_page, guard.clone(), page_allocator.clone());
+         let system_tables = SystemNamespace::new(system_page, guard.clone(), page_allocator);
+ 
+@@ -958,9 +1014,24 @@ impl WriteTransaction {
+             restored_transaction: None,
+             shrink_policy: ShrinkPolicy::Default,
+             savepoint_state: Mutex::new(SavepointTransactionState::default()),
++            user_tree: UserTree::Open,
++            freed_journal: Vec::new(),
++            prepared: None,
+         })
+     }
+ 
++    pub(crate) fn mark_completed(&mut self) {
++        self.completed = true;
++    }
++
++    pub(crate) fn is_bounded(&self) -> bool {
++        self.page_allocator().account().is_some()
++    }
++
++    pub(crate) fn account(&self) -> Option<AllocationAccountHandle> {
++        self.page_allocator().account().cloned()
++    }
++
+     pub(crate) fn set_shrink_policy(&mut self, shrink_policy: ShrinkPolicy) {
+         self.shrink_policy = shrink_policy;
+     }
+@@ -1632,6 +1703,9 @@ impl WriteTransaction {
+     /// transaction unable to commit. In that case the transaction is rolled back and the database
+     /// remains usable.
+     ///
++    /// An allocation probe is also explicitly aborted and returns
++    /// [`CommitError::AllocationProbe`]; it never enters commit preparation.
++    ///
+     /// On any other error the commit did not complete cleanly: the transaction's changes are
+     /// applied atomically -- fully or not at all -- but may already have become durable, so they
+     /// must not be assumed rolled back. The database refuses further write transactions; closing
+@@ -1639,6 +1713,11 @@ impl WriteTransaction {
+     pub fn commit(mut self) -> Result<(), CommitError> {
+         // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
+         self.completed = true;
++        if self.is_bounded() {
++            // A bounded transaction always commits through its two explicit steps.
++            self.prepare_bounded(0)?;
++            return self.publish_bounded().map(|_| ());
++        }
+         if self.is_poisoned() {
+             self.abort_inner()?;
+             return Err(CommitError::TransactionPoisoned);
+@@ -1646,6 +1725,296 @@ impl WriteTransaction {
+         self.commit_inner()
+     }
+ 
++    /// Prepares and publishes a bounded transaction, reclaiming at most `reclaim_limit`
++    /// freed-page records on the way.
++    pub(crate) fn commit_bounded(
++        mut self,
++        reclaim_limit: usize,
++    ) -> Result<BoundedPublication, CommitError> {
++        self.completed = true;
++        self.prepare_bounded(reclaim_limit)?;
++        self.publish_bounded()
++    }
++
++    /// Runs every allocation-bearing step of a bounded commit and freezes the result.
++    ///
++    /// All prior user and system roots stay valid: preparation writes only into pages it
++    /// allocates itself, and the old pages it returns to the allocator are journaled. An
++    /// allowance refusal undoes the journal, aborts the transaction like any other, and leaves
++    /// the next writer usable; it never poisons the database. Any other error keeps upstream's
++    /// contract: the allocator state is invalidated and the database refuses further writes
++    /// until it is reopened.
++    pub(crate) fn prepare_bounded(&mut self, reclaim_limit: usize) -> Result<(), CommitError> {
++        let Some(account) = self.account() else {
++            return Err(CommitError::Storage(StorageError::Corrupted(
++                "prepare_bounded() on an unbounded transaction".to_string(),
++            )));
++        };
++        if self.is_poisoned() {
++            self.abort_inner()?;
++            return Err(CommitError::TransactionPoisoned);
++        }
++        if self.prepared.is_some() {
++            return Ok(());
++        }
++        {
++            let mut account = lock_account(&account)?;
++            // Reclamation and close keep their own phase labels through preparation.
++            if account.phase() == AllocationPhase::Mutation {
++                account.set_phase(AllocationPhase::Preparation);
++            }
++        }
++        if let Some(refusal) = lock_account(&account)?.refusal() {
++            // An ignored mutation refusal: nothing of this transaction may publish.
++            self.abort_inner()?;
++            return Err(CommitError::Allowance(refusal));
++        }
++        let latch = AllocatorStateLatch::arm(self.mem.clone());
++        match self.prepare_bounded_helper(reclaim_limit).map_err(normalize_refusal) {
++            Ok(prepared) => {
++                self.prepared = Some(prepared);
++                // Publication must not allocate or extend the file; the account now refuses.
++                lock_account(&account)?.freeze();
++                latch.disarm();
++                Ok(())
++            }
++            Err(CommitError::Allowance(refusal)) => {
++                // Nothing was published and every old page is intact. Roll this transaction's
++                // pages back and re-mark the journaled frees, then the allocator state is exact.
++                self.abort_inner()?;
++                latch.disarm();
++                Err(CommitError::Allowance(refusal))
++            }
++            Err(error) => Err(error),
++        }
++    }
++
++    fn prepare_bounded_helper(&mut self, reclaim_limit: usize) -> Result<PreparedState, CommitError> {
++        // Quick-repair requires 2-phase commit
++        if self.quick_repair {
++            self.two_phase_commit = true;
++        }
++        if self.durability != InternalDurability::Immediate {
++            return Err(CommitError::Storage(StorageError::Corrupted(
++                "bounded transactions are always durable".to_string(),
++            )));
++        }
++        if let Some(transaction_id) = self.restored_transaction {
++            self.mem.drop_unpersisted_data_freed_after(transaction_id);
++        }
++
++        self.user_tree = UserTree::Closed;
++        let (user_root, allocated_pages, data_freed) =
++            self.tables.lock().unwrap().table_tree.flush_and_close()?;
++
++        // The previous epilogue's pages are not adopted: adoption is only sound once a commit can
++        // no longer abort. They are freed later as ordinary committed pages instead.
++        self.store_data_freed_pages(data_freed)?;
++        // Records that earlier non-durable commits keep in memory are copied out here and only
++        // discarded by publication, so a refusal loses nothing.
++        for (transaction_id, pages) in self.mem.peek_unpersisted_data_freed() {
++            self.store_data_freed_pages_for(transaction_id, pages)?;
++        }
++
++        let free_until_transaction = self
++            .transaction_tracker
++            .oldest_live_read_transaction()
++            .map_or(self.transaction_id, |x| x.next());
++        let reclaimed = self.reclaim_freed_pages_journaled(free_until_transaction, reclaim_limit)?;
++        let allocated_pages: Vec<PageNumber> = allocated_pages.into_iter().collect();
++        let _savepoint_horizon = self
++            .flush_data_allocated_pages(self.mem.peek_unpersisted_allocations(), allocated_pages)?;
++        let system_root = self.prepare_system_root()?;
++
++        Ok(PreparedState {
++            user_root,
++            system_root,
++            processed_transactions: reclaimed.transactions,
++            reclaimed_records: reclaimed.records,
++            reclaimed_pages: reclaimed.pages,
++            more_reclaimable: reclaimed.remaining,
++        })
++    }
++
++    /// Makes a prepared bounded transaction durable and visible.
++    ///
++    /// Only the header slots are written: the account is frozen, so any allocation here would be
++    /// refused and surface as an error rather than grow the file. After publication the journaled
++    /// frees are final and the bookkeeping that preparation deferred is applied.
++    pub(crate) fn publish_bounded(&mut self) -> Result<BoundedPublication, CommitError> {
++        let Some(prepared) = self.prepared.take() else {
++            return Err(CommitError::Storage(StorageError::Corrupted(
++                "publish_bounded() without a prepared transaction".to_string(),
++            )));
++        };
++        let latch = AllocatorStateLatch::arm(self.mem.clone());
++        let page_allocator = self.page_allocator();
++        let system_freed_pages = self.system_tables.lock().unwrap().system_freed_pages();
++        self.mem
++            .commit(
++                prepared.user_root,
++                prepared.system_root,
++                self.transaction_id,
++                self.two_phase_commit,
++                self.shrink_policy,
++            )
++            .map_err(|error| normalize_refusal(error.into()))?;
++        // Every journaled free is now described by the durable roots.
++        self.freed_journal.clear();
++        // All of this transaction's allocations are durable; discard the per-txn tracker.
++        let _ = page_allocator.take_allocated_since_commit();
++        self.transaction_tracker.clear_pending_non_durable_commits();
++        self.transaction_tracker
++            .mark_non_durable_freed_pages_processed(prepared.processed_transactions);
++        // System-tree pages are only read by write transactions, so they are freed at once.
++        for page in system_freed_pages.lock().unwrap().drain(..) {
++            page_allocator.free(page, &PageTracker::ignore());
++        }
++        self.apply_savepoint_state_on_commit();
++        latch.disarm();
++        Ok(BoundedPublication {
++            reclaimed_records: prepared.reclaimed_records,
++            reclaimed_pages: prepared.reclaimed_pages,
++            more_reclaimable: prepared.more_reclaimable,
++        })
++    }
++
++    pub(crate) fn abort_prepared(&mut self) -> Result {
++        self.abort_inner()
++    }
++
++    // Returns the journaled frees to the allocator state, exactly as before preparation. Runs
++    // after `rollback_all`, so a journaled page this transaction reused is free again first.
++    fn revert_freed_journal(&mut self) -> Result {
++        for page in mem::take(&mut self.freed_journal) {
++            self.mem.mark_page_allocated(page)?;
++        }
++        Ok(())
++    }
++
++    // Frees at most `limit` freed-page records of transactions before `free_until`, journaling
++    // every page so that an abort can restore it.
++    fn reclaim_freed_pages_journaled(
++        &mut self,
++        free_until: TransactionId,
++        limit: usize,
++    ) -> Result<FreedExtraction> {
++        let page_allocator = self.page_allocator();
++        let mut journal = Vec::new();
++        let extraction = self.extract_freed_pages_limited(free_until, Some(limit), |page| {
++            // See process_freed_pages(): free_until excludes every page a live reader or pending
++            // non-durable commit still needs.
++            debug_assert!(!self.mem.unpersisted(page));
++            page_allocator.free(page, &PageTracker::ignore());
++            journal.push(page);
++        })?;
++        self.freed_journal.extend(journal);
++        Ok(extraction)
++    }
++
++    // Extracts freed-page records of transactions before `free_until` from both freed tables,
++    // at most `limit` records when given, offering every page to `process_page`.
++    fn extract_freed_pages_limited(
++        &self,
++        free_until: TransactionId,
++        limit: Option<usize>,
++        mut process_page: impl FnMut(PageNumber),
++    ) -> Result<FreedExtraction> {
++        assert_eq!(PageNumber::serialized_size(), 8);
++        let mut budget = limit;
++        let mut extraction = FreedExtraction {
++            transactions: vec![],
++            records: 0,
++            pages: 0,
++            remaining: false,
++        };
++        let mut system_tables = self.system_tables.lock().unwrap();
++        for definition in [DATA_FREED_TABLE, SYSTEM_FREED_TABLE] {
++            if system_tables.get_system_table_root(definition)?.is_none() {
++                continue;
++            }
++            let mut freed = system_tables.open_system_table(self, definition)?;
++            let key = || TransactionIdWithPagination {
++                transaction_id: free_until.raw_id(),
++                pagination_id: 0,
++            };
++            for entry in freed.extract_from_if(..key(), |_, _| match budget.as_mut() {
++                Some(0) => false,
++                Some(remaining) => {
++                    *remaining -= 1;
++                    true
++                }
++                None => true,
++            })? {
++                let (key, page_list) = entry?;
++                let transaction_id = TransactionId::new(key.value().transaction_id);
++                if extraction.transactions.last().copied() != Some(transaction_id) {
++                    extraction.transactions.push(transaction_id);
++                }
++                let page_list = page_list.value();
++                extraction.records += 1;
++                extraction.pages += page_list.len();
++                for i in 0..page_list.len() {
++                    process_page(page_list.get(i));
++                }
++            }
++            if freed.range(..key())?.next().is_some() {
++                extraction.remaining = true;
++            }
++        }
++        Ok(extraction)
++    }
++
++    // Flushes the system tree, replaces the allocator state table when quick repair is enabled,
++    // and returns the system root. Everything here writes into new pages.
++    fn prepare_system_root(&self) -> Result<Option<BtreeHeader>> {
++        let mut system_tables = self.system_tables.lock().unwrap();
++        let system_freed_pages = system_tables.system_freed_pages();
++        let system_tree = system_tables.table_tree.flush_table_root_updates()?;
++        system_tree
++            .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
++            .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
++
++        if self.quick_repair {
++            system_tree.create_table_and_flush_table_root(
++                ALLOCATOR_STATE_TABLE_NAME,
++                |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
++                    loop {
++                        let num_regions = self
++                            .mem
++                            .reserve_allocator_state(tree, self.transaction_id)?;
++
++                        // The allocator snapshot must match the committed system root. Pages
++                        // freed while building that root stay allocated in the snapshot and are
++                        // recorded in SYSTEM_FREED_TABLE before the allocator state is saved.
++                        self.store_system_freed_pages(
++                            system_tree_ref,
++                            self.transaction_id,
++                            system_freed_pages.clone(),
++                            None,
++                        )?;
++
++                        if self.mem.try_save_allocator_state(tree, num_regions)? {
++                            return Ok(());
++                        }
++
++                        // Clear out the table before retrying, just in case the number of regions
++                        // has somehow shrunk. Don't use retain_in() for this, since it doesn't
++                        // free the pages immediately -- we need to reuse those pages to guarantee
++                        // that our retry loop will eventually terminate
++                        while let Some(guards) = tree.last()? {
++                            let key = guards.0.value();
++                            drop(guards);
++                            tree.remove(&key)?;
++                        }
++                    }
++                },
++            )?;
++        }
++
++        system_tree.finalize_dirty_checksums()
++    }
++
+     fn commit_inner(&mut self) -> Result<(), CommitError> {
+         // Covers both the error and the panic-unwind path. Without an allocator state,
+         // begin_write() refuses new write transactions and the next open repairs.
+@@ -1800,7 +2169,11 @@ impl WriteTransaction {
+     // savepoint survives this commit). `process_data_freed_pages_after_commit()` clamps its free
+     // horizon to this value so that a savepoint dropped concurrently after the purge cannot cause
+     // the epilogue to free a page that a surviving DATA_ALLOCATED_TABLE entry still names.
+-    fn flush_data_allocated_pages(&self, data_allocated_pages: Vec<PageNumber>) -> Result<u64> {
++    fn flush_data_allocated_pages(
++        &self,
++        unpersisted: BTreeMap<TransactionId, PageNumberHashSet>,
++        data_allocated_pages: Vec<PageNumber>,
++    ) -> Result<u64> {
+         // Catch scenarios like a page getting allocated and then deallocated within the same
+         // transaction, but errantly left in the allocated pages list.
+         #[cfg(debug_assertions)]
+@@ -1818,7 +2191,6 @@ impl WriteTransaction {
+             }
+         }
+ 
+-        let unpersisted = self.mem.take_unpersisted_allocations();
+         let mut system_tables = self.system_tables.lock().unwrap();
+         let mut allocated_table = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
+         for (txn_id, pages) in unpersisted {
+@@ -1893,11 +2265,14 @@ impl WriteTransaction {
+     fn abort_inner(&mut self) -> Result {
+         #[cfg(feature = "logging")]
+         debug!("Aborting transaction id={:?}", self.transaction_id);
+-        self.tables
+-            .lock()
+-            .unwrap()
+-            .table_tree
+-            .clear_root_updates_and_close();
++        self.prepared = None;
++        if self.user_tree == UserTree::Open {
++            self.tables
++                .lock()
++                .unwrap()
++                .table_tree
++                .clear_root_updates_and_close();
++        }
+         // Release all transaction-local savepoint state. The on-disk mutations
+         // (SAVEPOINT_TABLE / NEXT_SAVEPOINT_TABLE) are reverted by the
+         // `PageAllocator::rollback_all` call below; `apply_on_abort` handles
+@@ -1908,6 +2283,7 @@ impl WriteTransaction {
+             .apply_on_abort(&self.transaction_tracker);
+         self.mem.check_io_errors()?;
+         self.page_allocator().rollback_all();
++        self.revert_freed_journal()?;
+         #[cfg(feature = "logging")]
+         debug!("Finished abort of transaction id={:?}", self.transaction_id);
+         Ok(())
+@@ -1932,55 +2308,11 @@ impl WriteTransaction {
+         // Flush allocated pages (including previously unpersisted allocations that are now
+         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
+         // already been dropped from the in-memory `unpersisted_allocations` map.
+-        let savepoint_horizon = self.flush_data_allocated_pages(allocated_pages)?;
++        let savepoint_horizon = self
++            .flush_data_allocated_pages(self.mem.take_unpersisted_allocations(), allocated_pages)?;
+ 
+-        let mut system_tables = self.system_tables.lock().unwrap();
+-        let system_freed_pages = system_tables.system_freed_pages();
+-        let system_root = {
+-            let system_tree = system_tables.table_tree.flush_table_root_updates()?;
+-            system_tree
+-                .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
+-                .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
+-
+-            if self.quick_repair {
+-                system_tree.create_table_and_flush_table_root(
+-                    ALLOCATOR_STATE_TABLE_NAME,
+-                    |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
+-                        loop {
+-                            let num_regions = self
+-                                .mem
+-                                .reserve_allocator_state(tree, self.transaction_id)?;
+-
+-                            // The allocator snapshot must match the committed system root. Pages
+-                            // freed while building that root stay allocated in the snapshot and are
+-                            // recorded in SYSTEM_FREED_TABLE before the allocator state is saved.
+-                            self.store_system_freed_pages(
+-                                system_tree_ref,
+-                                self.transaction_id,
+-                                system_freed_pages.clone(),
+-                                None,
+-                            )?;
+-
+-                            if self.mem.try_save_allocator_state(tree, num_regions)? {
+-                                return Ok(());
+-                            }
+-
+-                            // Clear out the table before retrying, just in case the number of regions
+-                            // has somehow shrunk. Don't use retain_in() for this, since it doesn't
+-                            // free the pages immediately -- we need to reuse those pages to guarantee
+-                            // that our retry loop will eventually terminate
+-                            while let Some(guards) = tree.last()? {
+-                                let key = guards.0.value();
+-                                drop(guards);
+-                                tree.remove(&key)?;
+-                            }
+-                        }
+-                    },
+-                )?;
+-            }
+-
+-            system_tree.finalize_dirty_checksums()?
+-        };
++        let system_root = self.prepare_system_root()?;
++        let system_freed_pages = self.system_tables.lock().unwrap().system_freed_pages();
+ 
+         let page_allocator = self.page_allocator();
+         self.mem.commit(
+@@ -2002,8 +2334,6 @@ impl WriteTransaction {
+             page_allocator.free(page, &PageTracker::ignore());
+         }
+ 
+-        drop(system_tables);
+-
+         self.apply_savepoint_state_on_commit();
+ 
+         if self.post_commit_free == PostCommitFree::Enabled {
+@@ -2561,7 +2891,7 @@ impl Drop for WriteTransaction {
+                 #[cfg(feature = "logging")]
+                 warn!("Failure automatically aborting transaction: {error}");
+             }
+-        } else if !self.completed && self.mem.storage_failure() {
++        } else if !self.completed && self.mem.storage_failure() && self.user_tree == UserTree::Open {
+             self.tables
+                 .lock()
+                 .unwrap()
+diff --git a/src/tree_store/mod.rs b/src/tree_store/mod.rs
+index 2edcc87..946e981 100644
+--- a/src/tree_store/mod.rs
++++ b/src/tree_store/mod.rs
+@@ -27,7 +27,7 @@ pub(crate) use page_store::ReadOnlyBackend;
+ #[cfg(not(redb_no_std))]
+ pub use page_store::file_backend;
+ pub(crate) use page_store::{
+-    AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
++    AllocationAccount, AllocationAccountHandle, AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
+     PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageNumberHashSet, PageResolver,
+     PageTracker, SerializedSavepoint, ShrinkPolicy, TransactionalMemory,
+ };
+diff --git a/src/tree_store/page_store/mod.rs b/src/tree_store/page_store/mod.rs
+index a3c4a63..72248e9 100644
+--- a/src/tree_store/page_store/mod.rs
++++ b/src/tree_store/page_store/mod.rs
+@@ -22,7 +22,8 @@ pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNum
+ pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
+ pub(crate) use header::PAGE_SIZE;
+ pub(crate) use page_manager::{
+-    AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
++    AllocationAccount, AllocationAccountHandle, AllocationPolicy, FILE_FORMAT_VERSION3,
++    PageAllocator, PageResolver, ShrinkPolicy,
+     TransactionalMemory, xxh3_checksum,
+ };
+ pub use savepoint::Savepoint;
+diff --git a/src/tree_store/page_store/page_manager.rs b/src/tree_store/page_store/page_manager.rs
+index 23773c0..0f172c2 100644
+--- a/src/tree_store/page_store/page_manager.rs
++++ b/src/tree_store/page_store/page_manager.rs
+@@ -14,7 +14,8 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
+ use crate::tree_store::page_store::region::{Allocators, RegionTracker};
+ use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
+ use crate::tree_store::{Page, PageNumber, PageTracker};
+-use crate::{CacheStats, StorageBackend};
++use crate::{AllocationPhase, AllowanceRefusal, CacheStats, StorageBackend};
++use core::sync::atomic::{AtomicBool, Ordering};
+ use crate::{DatabaseError, Result, StorageError};
+ use alloc::boxed::Box;
+ use alloc::collections::BTreeMap;
+@@ -168,17 +169,143 @@ pub(crate) struct PageAllocator {
+     mem: Arc<TransactionalMemory>,
+     policy: AllocationPolicy,
+     allocated_since_commit: Arc<UncommittedPages>,
++    account: Option<AllocationAccountHandle>,
++}
++
++/// One bounded write transaction's cumulative physical allocation account.
++///
++/// Every page extent is debited at its rounded buddy size and every file extension at its exact
++/// length before the allocation happens, and nothing is ever refunded, so the account bounds a
++/// transaction's physical growth from above: pages it reuses or frees never lower the charge. A
++/// refusal latches the account, so ignoring one cannot let later work through. `freeze` ends
++/// preparation; after it any request is a publication defect and is refused as `Frozen`.
++pub(crate) struct AllocationAccount {
++    remaining: u64,
++    charged: u64,
++    phase: AllocationPhase,
++    latched: Option<AllowanceRefusal>,
++}
++
++pub(crate) type AllocationAccountHandle = Arc<Mutex<AllocationAccount>>;
++
++impl AllocationAccount {
++    pub(crate) fn new(allowance: u64, phase: AllocationPhase) -> AllocationAccountHandle {
++        Arc::new(Mutex::new(Self {
++            remaining: allowance,
++            charged: 0,
++            phase,
++            latched: None,
++        }))
++    }
++
++    /// The bytes one allocation of `size` occupies: whole pages rounded up to the buddy order.
++    pub(crate) fn extent_bytes(size: usize, page_size: usize) -> Option<u64> {
++        size.div_ceil(page_size)
++            .checked_next_power_of_two()
++            .and_then(|pages| pages.checked_mul(page_size))
++            .and_then(|bytes| u64::try_from(bytes).ok())
++    }
++
++    fn refuse(&mut self, refusal: AllowanceRefusal) -> StorageError {
++        if self.latched.is_none() {
++            self.latched = Some(refusal);
++        }
++        StorageError::Allowance(refusal)
++    }
++
++    fn debit(&mut self, requested: Option<u64>) -> Result<()> {
++        if let Some(latched) = self.latched {
++            return Err(StorageError::Allowance(AllowanceRefusal::Latched {
++                phase: latched.phase(),
++            }));
++        }
++        if self.phase == AllocationPhase::Frozen {
++            return Err(self.refuse(AllowanceRefusal::Frozen));
++        }
++        let phase = self.phase;
++        let Some(requested) = requested else {
++            return Err(self.refuse(AllowanceRefusal::Overflow { phase }));
++        };
++        match self.remaining.checked_sub(requested) {
++            Some(remaining) => {
++                self.remaining = remaining;
++                self.charged = self.charged.saturating_add(requested);
++                Ok(())
++            }
++            None => Err(self.refuse(AllowanceRefusal::Exhausted {
++                phase,
++                requested,
++                remaining: self.remaining,
++            })),
++        }
++    }
++
++    pub(crate) fn charge_extent(&mut self, size: usize, page_size: usize) -> Result<()> {
++        self.debit(Self::extent_bytes(size, page_size))
++    }
++
++    pub(crate) fn charge_extension(&mut self, bytes: u64) -> Result<()> {
++        self.debit(Some(bytes))
++    }
++
++    pub(crate) fn set_phase(&mut self, phase: AllocationPhase) {
++        self.phase = phase;
++    }
++
++    pub(crate) fn freeze(&mut self) {
++        self.phase = AllocationPhase::Frozen;
++    }
++
++    pub(crate) fn phase(&self) -> AllocationPhase {
++        self.phase
++    }
++
++    pub(crate) fn refusal(&self) -> Option<AllowanceRefusal> {
++        self.latched
++    }
++
++    pub(crate) fn remaining(&self) -> u64 {
++        self.remaining
++    }
++
++    pub(crate) fn charged(&self) -> u64 {
++        self.charged
++    }
+ }
+ 
+ impl PageAllocator {
++    #[cfg(test)]
+     pub(crate) fn new(mem: Arc<TransactionalMemory>, policy: AllocationPolicy) -> Self {
++        Self::with_account(mem, policy, None)
++    }
++
++    pub(crate) fn with_account(
++        mem: Arc<TransactionalMemory>,
++        policy: AllocationPolicy,
++        account: Option<AllocationAccountHandle>,
++    ) -> Self {
+         Self {
+             mem,
+             policy,
+             allocated_since_commit: Arc::new(UncommittedPages::new()),
++            account,
+         }
+     }
+ 
++    // Debits the page extent before the allocator is consulted. The account lock is released
++    // before the memory state lock is taken, so a file extension charged under the state lock
++    // (see `TransactionalMemory::allocate_helper`) cannot deadlock against this.
++    fn charge_extent(&self, size: usize) -> Result<()> {
++        if let Some(account) = &self.account {
++            account.lock()?.charge_extent(size, self.mem.get_page_size())?;
++        }
++        Ok(())
++    }
++
++    pub(crate) fn account(&self) -> Option<&AllocationAccountHandle> {
++        self.account.as_ref()
++    }
++
+     /// Returns a `PageResolver` for constructing read-only views of this transaction's pages.
+     pub(crate) fn resolver(&self) -> PageResolver {
+         PageResolver::new(self.mem.clone())
+@@ -213,9 +340,11 @@ impl PageAllocator {
+     }
+ 
+     pub(crate) fn allocate<'a>(&self, size: usize, allocated: &PageTracker) -> Result<PageMut<'a>> {
++        self.charge_extent(size)?;
++        let account = self.account.as_ref();
+         let page = match self.policy {
+-            AllocationPolicy::Default => self.mem.allocate(size, allocated)?,
+-            AllocationPolicy::Lowest => self.mem.allocate_lowest(size, allocated)?,
++            AllocationPolicy::Default => self.mem.allocate(size, allocated, account)?,
++            AllocationPolicy::Lowest => self.mem.allocate_lowest(size, allocated, account)?,
+         };
+         self.allocated_since_commit.insert(page.get_page_number());
+         Ok(page)
+@@ -229,7 +358,10 @@ impl PageAllocator {
+         size: usize,
+         allocated: &PageTracker,
+     ) -> Result<PageMut<'a>> {
+-        let page = self.mem.allocate_lowest(size, allocated)?;
++        self.charge_extent(size)?;
++        let page = self
++            .mem
++            .allocate_lowest(size, allocated, self.account.as_ref())?;
+         self.allocated_since_commit.insert(page.get_page_number());
+         Ok(page)
+     }
+@@ -516,6 +648,7 @@ pub(crate) struct TransactionalMemory {
+     // code path where there is no locking
+     region_size: u64,
+     region_header_with_padding_size: u64,
++    close_persist_handled: AtomicBool,
+ }
+ 
+ impl TransactionalMemory {
+@@ -658,6 +791,7 @@ impl TransactionalMemory {
+             page_size: page_size.try_into().unwrap(),
+             region_size,
+             region_header_with_padding_size: region_header_size,
++            close_persist_handled: AtomicBool::new(false),
+         })
+     }
+ 
+@@ -1332,6 +1466,29 @@ impl TransactionalMemory {
+         self.unpersisted.lock().unwrap().take_allocations()
+     }
+ 
++    // A copy of the unpersisted allocation records. Bounded preparation writes the copy out and
++    // leaves the records in place, so a refusal before publication loses nothing.
++    pub(crate) fn peek_unpersisted_allocations(
++        &self,
++    ) -> BTreeMap<TransactionId, PageNumberHashSet> {
++        self.unpersisted.lock().unwrap().allocations.clone()
++    }
++
++    // A copy of the unpersisted freed-page records; see `peek_unpersisted_allocations`.
++    pub(crate) fn peek_unpersisted_data_freed(&self) -> BTreeMap<TransactionId, Vec<PageNumber>> {
++        self.unpersisted.lock().unwrap().data_freed.clone()
++    }
++
++    // Whether a bounded close already decided the allocator state's fate, so that the close path
++    // must not run its own unbounded persisting transaction.
++    pub(crate) fn close_persist_handled(&self) -> bool {
++        self.close_persist_handled.load(Ordering::Acquire)
++    }
++
++    pub(crate) fn set_close_persist_handled(&self, handled: bool) {
++        self.close_persist_handled.store(handled, Ordering::Release);
++    }
++
+     pub(crate) fn record_post_commit_allocations(
+         &self,
+         pages: impl IntoIterator<Item = PageNumber>,
+@@ -1423,6 +1580,7 @@ impl TransactionalMemory {
+         &self,
+         allocation_size: usize,
+         lowest: bool,
++        account: Option<&AllocationAccountHandle>,
+     ) -> Result<PageMut<'txn>> {
+         let required_pages = allocation_size.div_ceil(self.get_page_size());
+         let required_order = ceil_log2(required_pages);
+@@ -1434,7 +1592,17 @@ impl TransactionalMemory {
+         {
+             page_number
+         } else {
+-            self.grow(&mut state, required_order)?;
++            // The file extension is charged before the file grows, so a refusal leaves the
++            // layout, the file, and the allocator exactly as they were.
++            let new_layout = self.plan_growth(&state, required_order);
++            if let Some(account) = account {
++                let extension = new_layout
++                    .len()
++                    .checked_sub(state.header.layout().len())
++                    .unwrap_or(u64::MAX);
++                account.lock()?.charge_extension(extension)?;
++            }
++            self.apply_growth(&mut state, new_layout)?;
+             Self::allocate_helper_retry(&mut state, required_order, lowest)?.unwrap()
+         };
+ 
+@@ -1543,7 +1711,8 @@ impl TransactionalMemory {
+         Ok(true)
+     }
+ 
+-    fn grow(&self, state: &mut InMemoryState, required_order_allocation: u8) -> Result<()> {
++    // The layout the file grows to for one allocation of `required_order_allocation`.
++    fn plan_growth(&self, state: &InMemoryState, required_order_allocation: u8) -> DatabaseLayout {
+         let layout = state.header.layout();
+         let required_growth =
+             2u64.pow(required_order_allocation.into()) * u64::from(state.header.page_size());
+@@ -1579,7 +1748,11 @@ impl TransactionalMemory {
+             self.page_size,
+         );
+         assert!(new_layout.len() >= layout.len());
++        new_layout
++    }
+ 
++    // Extends the file to `new_layout` and installs it.
++    fn apply_growth(&self, state: &mut InMemoryState, new_layout: DatabaseLayout) -> Result<()> {
+         self.storage.resize(new_layout.len())?;
+         // Make the larger file durable before its layout can reach the on-disk header. A
+         // subsequent commit writes this layout into the header, whose layout fields are shared by
+@@ -1598,8 +1771,9 @@ impl TransactionalMemory {
+         &self,
+         allocation_size: usize,
+         allocated: &PageTracker,
++        account: Option<&AllocationAccountHandle>,
+     ) -> Result<PageMut<'txn>> {
+-        let result = self.allocate_helper(allocation_size, false);
++        let result = self.allocate_helper(allocation_size, false, account);
+         if let Ok(ref page) = result {
+             allocated.insert(page.get_page_number());
+         }
+@@ -1610,8 +1784,9 @@ impl TransactionalMemory {
+         &self,
+         allocation_size: usize,
+         allocated: &PageTracker,
++        account: Option<&AllocationAccountHandle>,
+     ) -> Result<PageMut<'txn>> {
+-        let result = self.allocate_helper(allocation_size, true);
++        let result = self.allocate_helper(allocation_size, true, account);
+         if let Ok(ref page) = result {
+             allocated.insert(page.get_page_number());
+         }
+@@ -1669,7 +1844,85 @@ impl TransactionalMemory {
+ #[cfg(test)]
+ mod test {
+     use crate::tree_store::page_store::page_manager::INITIAL_REGIONS;
+-    use crate::{Database, TableDefinition};
++    use crate::{Database, StorageError, TableDefinition};
++
++    #[test]
++    fn allocation_account_rounds_every_extent_and_never_refunds() {
++        use super::{AllocationAccount, AllocationPhase, AllowanceRefusal};
++        for page_size in [512, 4096] {
++            let account = AllocationAccount::new(3 * page_size as u64, AllocationPhase::Mutation);
++            let mut account = account.lock().unwrap();
++            assert!(account.charge_extent(page_size + 1, page_size).is_ok());
++            assert_eq!(account.remaining(), page_size as u64);
++            assert_eq!(account.charged(), 2 * page_size as u64);
++            assert!(account.charge_extent(1, page_size).is_ok());
++            assert_eq!(account.remaining(), 0);
++            assert_eq!(
++                account.charge_extent(1, page_size).unwrap_err().to_string(),
++                format!(
++                    "Allocation allowance exhausted during mutation: {page_size} bytes requested, 0 remaining"
++                )
++            );
++            assert!(matches!(
++                account.refusal(),
++                Some(AllowanceRefusal::Exhausted { .. })
++            ));
++        }
++    }
++
++    #[test]
++    fn allocation_account_latches_the_first_refusal_with_unused_allowance() {
++        use super::{AllocationAccount, AllocationPhase, AllowanceRefusal};
++        let account = AllocationAccount::new(4096, AllocationPhase::Preparation);
++        let mut account = account.lock().unwrap();
++        let first = account.charge_extent(4097, 4096).unwrap_err();
++        assert!(matches!(
++            first,
++            StorageError::Allowance(AllowanceRefusal::Exhausted {
++                phase: AllocationPhase::Preparation,
++                requested: 8192,
++                remaining: 4096
++            })
++        ));
++        assert_eq!(account.remaining(), 4096);
++        let later = account.charge_extension(1).unwrap_err();
++        assert!(matches!(
++            later,
++            StorageError::Allowance(AllowanceRefusal::Latched {
++                phase: AllocationPhase::Preparation
++            })
++        ));
++        assert_eq!(account.remaining(), 4096);
++        assert!(matches!(
++            account.refusal(),
++            Some(AllowanceRefusal::Exhausted { requested: 8192, .. })
++        ));
++    }
++
++    #[test]
++    fn allocation_account_refuses_overflow_and_frozen_requests() {
++        use super::{AllocationAccount, AllocationPhase, AllowanceRefusal};
++        let account = AllocationAccount::new(u64::MAX, AllocationPhase::Cleanup);
++        let mut account = account.lock().unwrap();
++        assert!(matches!(
++            account.charge_extent(usize::MAX, 4096).unwrap_err(),
++            StorageError::Allowance(AllowanceRefusal::Overflow {
++                phase: AllocationPhase::Cleanup
++            })
++        ));
++        assert_eq!(account.remaining(), u64::MAX);
++
++        let frozen = AllocationAccount::new(u64::MAX, AllocationPhase::Mutation);
++        let mut frozen = frozen.lock().unwrap();
++        assert!(frozen.charge_extent(1, 4096).is_ok());
++        frozen.freeze();
++        assert_eq!(frozen.phase(), AllocationPhase::Frozen);
++        assert!(matches!(
++            frozen.charge_extent(1, 4096).unwrap_err(),
++            StorageError::Allowance(AllowanceRefusal::Frozen)
++        ));
++        assert_eq!(frozen.refusal(), Some(AllowanceRefusal::Frozen));
++    }
+ 
+     // Test that the region tracker expansion code works, by adding more data than fits into the initial max regions
+     #[test]
+@@ -1825,7 +2078,7 @@ mod test {
+         .unwrap();
+         mem.reset_allocator_state().unwrap();
+ 
+-        let valid = mem.allocate_helper(1, false).unwrap();
++        let valid = mem.allocate_helper(1, false, None).unwrap();
+         let valid_page = valid.get_page_number();
+         drop(valid);
+ 
+@@ -1874,7 +2127,7 @@ mod test {
+         // first, which marks region 0 full at every order.
+         let mut region0_pages = vec![];
+         loop {
+-            let page = mem.allocate_helper(1, false).unwrap();
++            let page = mem.allocate_helper(1, false, None).unwrap();
+             let number = page.get_page_number();
+             drop(page);
+             if number.region == 0 {
+@@ -1901,7 +2154,7 @@ mod test {
+         // An order-1 allocation must reuse region 0's merged free block. Before the fix the tracker
+         // still marked region 0 full above order 0, so find_free skipped it and this landed in a
+         // higher region.
+-        let reused = mem.allocate_helper(2 * page_size, false).unwrap();
++        let reused = mem.allocate_helper(2 * page_size, false, None).unwrap();
+         assert_eq!(
+             reused.get_page_number().region,
+             0,
+diff --git a/tests/bounded_transaction.rs b/tests/bounded_transaction.rs
+new file mode 100644
+index 0000000..3f766a8
+--- /dev/null
++++ b/tests/bounded_transaction.rs
+@@ -0,0 +1,895 @@
++#![forbid(unsafe_code)]
++
++//! Bounded write transactions: typed allowance, explicit phases, clean refusal, crash safety,
++//! bounded reclamation, and bounded close.
++
++use redb::backends::InMemoryBackend;
++use redb::{
++    AllocationAllowance, AllocationPhase, AllowanceRefusal, CommitError, Database, Error,
++    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend, StorageError,
++    TableDefinition, TableError,
++};
++use std::io::ErrorKind;
++use std::sync::{Arc, Mutex};
++
++const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("bounded");
++const OTHER: TableDefinition<u64, &[u8]> = TableDefinition::new("other");
++const GENEROUS: AllocationAllowance = AllocationAllowance::new(1 << 30);
++type TestResult = Result<(), Box<dyn std::error::Error>>;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum Op {
++    Write { offset: u64, len: usize },
++    SetLen(u64),
++    Sync,
++}
++
++#[derive(Debug, Default)]
++struct State {
++    live: Vec<u8>,
++    durable: Vec<u8>,
++    last_header: Vec<u8>,
++    syncs: u64,
++    freeze_from: Option<u64>,
++    writes: u64,
++    fail_write_at: Option<u64>,
++    log: Vec<Op>,
++}
++
++/// An in-memory backend that records every operation, can freeze durability at a sync count to
++/// produce the file image a crash at that sync leaves, and can fail one write.
++#[derive(Clone, Debug, Default)]
++struct RecordingBackend {
++    state: Arc<Mutex<State>>,
++}
++
++impl RecordingBackend {
++    fn from_image(image: Vec<u8>) -> Self {
++        let backend = Self::default();
++        {
++            let mut state = backend.state.lock().unwrap();
++            state.durable = image.clone();
++            state.live = image;
++        }
++        backend
++    }
++
++    fn syncs(&self) -> u64 {
++        self.state.lock().unwrap().syncs
++    }
++
++    fn freeze_at(&self, sync: u64) {
++        self.state.lock().unwrap().freeze_from = Some(sync);
++    }
++
++    fn fail_write_at(&self, write: u64) {
++        self.state.lock().unwrap().fail_write_at = Some(write);
++    }
++
++    fn crash_image(&self) -> Vec<u8> {
++        let state = self.state.lock().unwrap();
++        let mut image = state.durable.clone();
++        if !state.last_header.is_empty() && image.len() >= state.last_header.len() {
++            image[..state.last_header.len()].copy_from_slice(&state.last_header);
++        }
++        image
++    }
++
++    fn log_len(&self) -> usize {
++        self.state.lock().unwrap().log.len()
++    }
++
++    fn log_since(&self, start: usize) -> Vec<Op> {
++        self.state.lock().unwrap().log[start..].to_vec()
++    }
++
++    fn len(&self) -> u64 {
++        self.state.lock().unwrap().live.len() as u64
++    }
++}
++
++impl StorageBackend for RecordingBackend {
++    fn len(&self) -> Result<u64, std::io::Error> {
++        Ok(self.state.lock().unwrap().live.len() as u64)
++    }
++
++    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
++        let state = self.state.lock().unwrap();
++        let offset = usize::try_from(offset).unwrap();
++        if offset + out.len() > state.live.len() {
++            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
++        }
++        out.copy_from_slice(&state.live[offset..offset + out.len()]);
++        Ok(())
++    }
++
++    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
++        let mut state = self.state.lock().unwrap();
++        state.log.push(Op::SetLen(len));
++        state.live.resize(usize::try_from(len).unwrap(), 0);
++        Ok(())
++    }
++
++    fn sync_data(&self) -> Result<(), std::io::Error> {
++        let mut state = self.state.lock().unwrap();
++        state.log.push(Op::Sync);
++        state.syncs += 1;
++        if state.freeze_from.is_none_or(|f| state.syncs < f) {
++            state.durable = state.live.clone();
++        }
++        Ok(())
++    }
++
++    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
++        let mut state = self.state.lock().unwrap();
++        state.writes += 1;
++        if state.fail_write_at == Some(state.writes) {
++            return Err(std::io::Error::other("injected write failure"));
++        }
++        state.log.push(Op::Write {
++            offset,
++            len: data.len(),
++        });
++        let offset = usize::try_from(offset).unwrap();
++        if offset + data.len() > state.live.len() {
++            state.live.resize(offset + data.len(), 0);
++        }
++        state.live[offset..offset + data.len()].copy_from_slice(data);
++        // A header write reaches the disk page cache even when the following sync does not
++        // complete, but nothing written after the crash point exists at all.
++        if offset == 0 && state.freeze_from.is_none_or(|f| state.syncs < f) {
++            state.last_header = data.to_vec();
++        }
++        Ok(())
++    }
++}
++
++fn memory_database() -> Result<Database, Box<dyn std::error::Error>> {
++    Ok(Database::builder().create_with_backend(InMemoryBackend::new())?)
++}
++
++fn seeded_file() -> Result<(tempfile::NamedTempFile, Database), Box<dyn std::error::Error>> {
++    let file = tempfile::NamedTempFile::new()?;
++    let database = Database::create(file.path())?;
++    seed(&database)?;
++    Ok((file, database))
++}
++
++fn seed(database: &Database) -> TestResult {
++    let transaction = database.begin_write()?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        table.insert(1, b"original".as_slice())?;
++    }
++    transaction.commit()?;
++    Ok(())
++}
++
++fn rows(database: &Database, definition: TableDefinition<u64, &[u8]>) -> Vec<(u64, Vec<u8>)> {
++    let read = database.begin_read().unwrap();
++    let Ok(table) = read.open_table(definition) else {
++        return vec![];
++    };
++    table
++        .iter()
++        .unwrap()
++        .map(|entry| {
++            let (key, value) = entry.unwrap();
++            (key.value(), value.value().to_vec())
++        })
++        .collect()
++}
++
++fn assert_original(database: &Database) {
++    assert_eq!(rows(database, TABLE), vec![(1, b"original".to_vec())]);
++}
++
++fn assert_reusable(database: &Database) -> TestResult {
++    let transaction = database.begin_write()?;
++    transaction
++        .open_table(TABLE)?
++        .insert(4, b"later writer".as_slice())?;
++    transaction.commit()?;
++    let transaction = database.begin_write()?;
++    transaction.open_table(TABLE)?.remove(4)?;
++    transaction.commit()?;
++    Ok(())
++}
++
++fn refusal_of(error: CommitError) -> AllowanceRefusal {
++    match error {
++        CommitError::Allowance(refusal) => refusal,
++        other => panic!("expected an allowance refusal, got {other:?}"),
++    }
++}
++
++fn storage_refusal(error: StorageError) -> AllowanceRefusal {
++    match error {
++        StorageError::Allowance(refusal) => refusal,
++        other => panic!("expected an allowance refusal, got {other:?}"),
++    }
++}
++
++#[test]
++fn bounded_commit_publishes_every_kind_of_change_and_survives_reopen() -> TestResult {
++    let (file, database) = seeded_file()?;
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    assert_eq!(transaction.phase()?, AllocationPhase::Mutation);
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        table.insert(1, b"replaced".as_slice())?;
++        table.insert(2, b"inserted".as_slice())?;
++        table.insert(3, b"doomed".as_slice())?;
++        table.remove(3)?;
++        let mut other = transaction.open_table(OTHER)?;
++        other.insert(10, b"".as_slice())?;
++        other.insert(11, vec![7; 1 << 20].as_slice())?;
++    }
++    assert!(transaction.allowance_charged()? > 0);
++    let prepared = transaction.prepare()?;
++    let charged = prepared.allowance_charged()?;
++    prepared.publish()?;
++    assert_eq!(
++        rows(&database, TABLE),
++        vec![(1, b"replaced".to_vec()), (2, b"inserted".to_vec())]
++    );
++    assert_reusable(&database)?;
++    drop(database);
++    let reopened = Database::open(file.path())?;
++    assert_eq!(
++        rows(&reopened, TABLE),
++        vec![(1, b"replaced".to_vec()), (2, b"inserted".to_vec())]
++    );
++    let other = rows(&reopened, OTHER);
++    assert_eq!(other.len(), 2);
++    assert_eq!(other[0], (10, vec![]));
++    assert_eq!(other[1].1.len(), 1 << 20);
++    assert!(charged >= 1 << 20, "the large value was charged: {charged}");
++    Ok(())
++}
++
++/// The exact charge of a fixed workload on a fresh database is deterministic: one byte less
++/// refuses, the exact allowance and one more publish, and zero refuses the first page.
++#[test]
++fn zero_exact_one_less_and_one_more_allowances() -> TestResult {
++    fn workload(database: &Database, allowance: AllocationAllowance) -> Result<u64, CommitError> {
++        let transaction = database.begin_write_bounded(allowance).map_err(|e| {
++            CommitError::Storage(StorageError::Corrupted(format!("begin: {e}")))
++        })?;
++        let value = [9; 300];
++        {
++            let mut table = transaction.open_table(TABLE).map_err(|e| {
++                CommitError::Storage(StorageError::Corrupted(format!("open: {e}")))
++            })?;
++            for key in 10..60 {
++                table.insert(key, value.as_slice())?;
++            }
++        }
++        let prepared = transaction.prepare()?;
++        let charged = prepared.allowance_charged()?;
++        prepared.publish()?;
++        Ok(charged)
++    }
++    let exact = workload(&memory_database()?, GENEROUS)?;
++    assert!(exact > 0);
++    assert_eq!(exact % 4096, 0, "extents are whole pages");
++
++    let database = memory_database()?;
++    let refusal = refusal_of(workload(&database, AllocationAllowance::new(exact - 1)).unwrap_err());
++    assert!(matches!(refusal, AllowanceRefusal::Exhausted { .. }), "{refusal:?}");
++    assert!(rows(&database, TABLE).is_empty(), "a refused workload published nothing");
++    assert_reusable(&database)?;
++
++    assert_eq!(
++        workload(&memory_database()?, AllocationAllowance::new(exact))?,
++        exact
++    );
++    assert_eq!(
++        workload(&memory_database()?, AllocationAllowance::new(exact + 1))?,
++        exact
++    );
++
++    let database = memory_database()?;
++    let transaction = database.begin_write_bounded(AllocationAllowance::new(0))?;
++    let refusal = match transaction.open_table(TABLE) {
++        Err(TableError::Storage(error)) => storage_refusal(error),
++        Err(other) => panic!("{other:?}"),
++        Ok(_) => panic!("a zero allowance admitted the first page"),
++    };
++    assert!(matches!(
++        refusal,
++        AllowanceRefusal::Exhausted {
++            phase: AllocationPhase::Mutation,
++            remaining: 0,
++            ..
++        }
++    ));
++    assert_eq!(transaction.refusal()?, Some(refusal));
++    transaction.abort()?;
++    assert_reusable(&database)?;
++    Ok(())
++}
++
++#[test]
++fn cumulative_allocations_across_tables_share_one_allowance_and_reuse_never_refunds() -> TestResult {
++    let (_file, database) = seeded_file()?;
++    let seed = database.begin_write()?;
++    seed.open_table(OTHER)?.insert(1, b"other".as_slice())?;
++    seed.commit()?;
++    let transaction = database.begin_write_bounded(AllocationAllowance::new(8192))?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"tentative".as_slice())?;
++    let charged_after_first = transaction.allowance_charged()?;
++    assert!(charged_after_first > 0);
++    {
++        // Rewriting the same leaf reuses this transaction's own page: no new extent.
++        let mut table = transaction.open_table(TABLE)?;
++        table.insert(2, b"tentative again".as_slice())?;
++        table.remove(2)?;
++    }
++    assert!(
++        transaction.allowance_charged()? >= charged_after_first,
++        "freeing never refunds"
++    );
++    {
++        let mut other = transaction.open_table(OTHER)?;
++        let refusal = storage_refusal(other.insert(2, vec![1; 12_000].as_slice()).err().expect("expected an error"));
++        assert!(matches!(
++            refusal,
++            AllowanceRefusal::Exhausted {
++                phase: AllocationPhase::Mutation,
++                ..
++            }
++        ));
++    }
++    let refusal = refusal_of(transaction.prepare().unwrap_err());
++    assert!(matches!(refusal, AllowanceRefusal::Exhausted { .. }));
++    assert_original(&database);
++    assert_eq!(rows(&database, OTHER), vec![(1, b"other".to_vec())]);
++    assert_reusable(&database)?;
++    Ok(())
++}
++
++#[test]
++fn sticky_exhaustion_after_a_partial_operation_and_ignored_refusal_cannot_publish() -> TestResult {
++    let (file, database) = seeded_file()?;
++    let transaction = database.begin_write_bounded(AllocationAllowance::new(8192))?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        table.insert(2, b"tentative".as_slice())?;
++        let first = storage_refusal(table.insert(3, vec![7; 65536].as_slice()).err().expect("expected an error"));
++        assert!(matches!(first, AllowanceRefusal::Exhausted { .. }));
++        // The refusal is latched with allowance to spare: a write that fits this transaction's
++        // own page needs no allocation and goes through, but any new page is refused.
++        assert!(transaction.allowance_remaining()? > 0);
++        table.insert(4, b"small".as_slice())?;
++        let later = storage_refusal(
++            table
++                .insert(5, vec![2; 5_000].as_slice())
++                .err()
++                .expect("expected a refusal"),
++        );
++        assert_eq!(
++            later,
++            AllowanceRefusal::Latched {
++                phase: AllocationPhase::Mutation
++            }
++        );
++    }
++    let refusal = refusal_of(transaction.prepare().unwrap_err());
++    assert!(matches!(refusal, AllowanceRefusal::Exhausted { .. }));
++    assert_original(&database);
++    assert_reusable(&database)?;
++    drop(database);
++    assert_original(&Database::open(file.path())?);
++    Ok(())
++}
++
++#[test]
++fn a_preparation_refusal_aborts_cleanly_and_the_next_writer_is_unaffected() -> TestResult {
++    let (file, database) = seeded_file()?;
++    // Fill the freed tables with work for preparation: many pages freed by earlier commits.
++    let transaction = database.begin_write()?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        for key in 100..400 {
++            table.insert(key, [5; 512].as_slice())?;
++        }
++    }
++    transaction.commit()?;
++    let transaction = database.begin_write()?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        for key in 100..400 {
++            table.remove(key)?;
++        }
++    }
++    transaction.commit()?;
++    let before = rows(&database, TABLE);
++
++    // Find the mutation charge of one small write, then allow exactly that: preparation's own
++    // system-table pages cannot fit.
++    let probe = database.begin_write_bounded(GENEROUS)?;
++    probe.open_table(TABLE)?.insert(2, b"tentative".as_slice())?;
++    let mutation_charge = probe.allowance_charged()?;
++    probe.abort()?;
++    let pinned = database.begin_read()?;
++    let transaction = database.begin_write_bounded(AllocationAllowance::new(mutation_charge))?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"tentative".as_slice())?;
++    assert_eq!(transaction.refusal()?, None);
++    let refusal = refusal_of(transaction.prepare().unwrap_err());
++    assert!(
++        matches!(
++            refusal,
++            AllowanceRefusal::Exhausted {
++                phase: AllocationPhase::Preparation,
++                ..
++            }
++        ),
++        "{refusal:?}"
++    );
++    assert_eq!(rows(&database, TABLE), before);
++    assert_eq!(
++        pinned.open_table(TABLE)?.get(1)?.unwrap().value(),
++        b"original"
++    );
++    drop(pinned);
++    assert_reusable(&database)?;
++    // The allocator state was restored exactly: a full integrity check agrees with it.
++    drop(database);
++    let mut reopened = Database::open(file.path())?;
++    assert!(reopened.check_integrity()?);
++    assert_eq!(rows(&reopened, TABLE), before);
++    Ok(())
++}
++
++#[test]
++fn cancellation_before_and_after_prepare_and_dropping_a_prepared_transaction_abort() -> TestResult {
++    let (file, database) = seeded_file()?;
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"before".as_slice())?;
++    transaction.abort()?;
++    assert_original(&database);
++
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"after".as_slice())?;
++    let prepared = transaction.prepare()?;
++    prepared.abort()?;
++    assert_original(&database);
++
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"dropped".as_slice())?;
++    let prepared = transaction.prepare()?;
++    drop(prepared);
++    assert_original(&database);
++
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"dropped early".as_slice())?;
++    drop(transaction);
++    assert_original(&database);
++    assert_reusable(&database)?;
++    drop(database);
++    let mut reopened = Database::open(file.path())?;
++    assert!(reopened.check_integrity()?);
++    assert_original(&reopened);
++    Ok(())
++}
++
++#[test]
++fn held_readers_retry_and_a_second_ordinary_writer_follow_a_refusal_over_fragmented_pages()
++-> TestResult {
++    let (_file, database) = seeded_file()?;
++    let transaction = database.begin_write()?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        for key in 100..1_100 {
++            table.insert(key, [3; 700].as_slice())?;
++        }
++    }
++    transaction.commit()?;
++    // Free every other leaf so later allocations land in fragmented free space.
++    let transaction = database.begin_write()?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        for key in (100..1_100).step_by(2) {
++            table.remove(key)?;
++        }
++    }
++    transaction.commit()?;
++    let reader = database.begin_read()?;
++    let before = rows(&database, TABLE);
++
++    let transaction = database.begin_write_bounded(AllocationAllowance::new(4096))?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        let mut refused = None;
++        for key in 2_000..2_100 {
++            if let Err(error) = table.insert(key, [4; 700].as_slice()) {
++                refused = Some(storage_refusal(error));
++                break;
++            }
++        }
++        assert!(matches!(refused, Some(AllowanceRefusal::Exhausted { .. })));
++    }
++    assert!(transaction.prepare().is_err());
++    assert_eq!(rows(&database, TABLE), before);
++
++    let retry = database.begin_write_bounded(GENEROUS)?;
++    {
++        let mut table = retry.open_table(TABLE)?;
++        for key in 2_000..2_100 {
++            table.insert(key, [4; 700].as_slice())?;
++        }
++    }
++    retry.prepare()?.publish()?;
++    assert_eq!(rows(&database, TABLE).len(), before.len() + 100);
++    assert_eq!(reader.open_table(TABLE)?.len()?, before.len() as u64);
++    drop(reader);
++    assert_reusable(&database)?;
++    Ok(())
++}
++
++#[test]
++fn publication_writes_only_the_header_and_never_extends_the_file() -> TestResult {
++    let backend = RecordingBackend::default();
++    let database = Database::builder().create_with_backend(backend.clone())?;
++    seed(&database)?;
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        for key in 10..2_000 {
++            table.insert(key, [8; 1024].as_slice())?;
++        }
++    }
++    let prepared = transaction.prepare()?;
++    let start = backend.log_len();
++    let length = backend.len();
++    prepared.publish()?;
++    let publication = backend.log_since(start);
++    assert!(!publication.is_empty());
++    for op in &publication {
++        match op {
++            Op::Write { offset, .. } => {
++                assert!(*offset < length, "publication wrote inside the prepared file: {op:?}");
++            }
++            Op::SetLen(len) => assert!(*len <= length, "publication extended the file: {op:?}"),
++            Op::Sync => {}
++        }
++    }
++    let syncs = publication.iter().filter(|op| **op == Op::Sync).count();
++    assert!(syncs >= 1, "publication flushes: {publication:?}");
++    let header_writes = publication
++        .iter()
++        .filter(|op| matches!(op, Op::Write { offset: 0, .. }))
++        .count();
++    assert!(header_writes >= 1, "publication writes the header: {publication:?}");
++    assert_eq!(backend.len(), length, "the file length is unchanged by publication");
++    assert_eq!(rows(&database, TABLE).len(), 1_991);
++    Ok(())
++}
++
++/// A crash at any sync of the publication, or before it, leaves exactly the old or the new
++/// roots: never a hybrid, and the reopened database passes a full integrity check and keeps
++/// accepting writes.
++#[test]
++fn crash_before_preparation_after_preparation_and_at_every_publish_sync_recovers_old_or_new()
++-> TestResult {
++    fn workload(database: &Database) -> Result<(u64, u64), Box<dyn std::error::Error>> {
++        let transaction = database.begin_write_bounded(GENEROUS)?;
++        {
++            let mut table = transaction.open_table(TABLE)?;
++            table.insert(1, b"new".as_slice())?;
++            for key in 10..1_500 {
++                table.insert(key, [6; 1024].as_slice())?;
++            }
++        }
++        let prepared = transaction.prepare()?;
++        let syncs_before_publish = prepared.allowance_charged().map(|_| 0)?;
++        let _ = syncs_before_publish;
++        prepared.publish()?;
++        Ok((0, 0))
++    }
++    // Count the syncs the seed and the workload perform.
++    let probe = RecordingBackend::default();
++    let (after_seed, total) = {
++        let database = Database::builder().create_with_backend(probe.clone())?;
++        seed(&database)?;
++        let after_seed = probe.syncs();
++        workload(&database)?;
++        (after_seed, probe.syncs())
++    };
++    assert!(total > after_seed);
++
++    let mut outcomes = vec![];
++    for freeze in after_seed + 1..=total + 1 {
++        let backend = RecordingBackend::default();
++        let database = Database::builder().create_with_backend(backend.clone())?;
++        seed(&database)?;
++        backend.freeze_at(freeze);
++        let _ = workload(&database);
++        let image = backend.crash_image();
++        std::mem::forget(database);
++        let mut reopened = Database::builder()
++            .create_with_backend(RecordingBackend::from_image(image))?;
++        assert!(reopened.check_integrity()?, "freeze at sync {freeze}");
++        let rows = rows(&reopened, TABLE);
++        let outcome = match rows.first() {
++            Some((1, value)) if value == b"original" => {
++                assert_eq!(rows.len(), 1, "old roots at sync {freeze}");
++                "old"
++            }
++            Some((1, value)) if value == b"new" => {
++                assert_eq!(rows.len(), 1_491, "new roots at sync {freeze}");
++                "new"
++            }
++            other => panic!("hybrid state at sync {freeze}: {other:?}"),
++        };
++        outcomes.push(outcome);
++        // No double free or reused reader page: more writes and another check succeed.
++        let transaction = reopened.begin_write()?;
++        {
++            let mut table = transaction.open_table(TABLE)?;
++            for key in 5_000..5_500 {
++                table.insert(key, [2; 1024].as_slice())?;
++            }
++        }
++        transaction.commit()?;
++        assert!(reopened.check_integrity()?);
++    }
++    assert!(outcomes.contains(&"old"), "{outcomes:?}");
++    assert!(outcomes.contains(&"new"), "{outcomes:?}");
++    Ok(())
++}
++
++#[test]
++fn an_io_failure_during_publication_latches_the_database_until_reopened() -> TestResult {
++    let backend = RecordingBackend::default();
++    let database = Database::builder().create_with_backend(backend.clone())?;
++    seed(&database)?;
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"tentative".as_slice())?;
++    let prepared = transaction.prepare()?;
++    let writes = backend.state.lock().unwrap().writes;
++    backend.fail_write_at(writes + 1);
++    let error = prepared.publish().unwrap_err();
++    assert!(matches!(error, CommitError::Storage(StorageError::Io(_))), "{error:?}");
++    // Real uncertain I/O forces reconciliation: no further writer until the database is reopened.
++    assert!(database.begin_write().is_err());
++    assert!(database
++        .begin_write_bounded(GENEROUS)
++        .is_err());
++    let image = backend.crash_image();
++    std::mem::forget(database);
++    let mut reopened = Database::builder().create_with_backend(RecordingBackend::from_image(image))?;
++    assert!(reopened.check_integrity()?);
++    let rows = rows(&reopened, TABLE);
++    assert!(rows.len() == 1 || rows.len() == 2, "{rows:?}");
++    assert_reusable(&reopened)?;
++    Ok(())
++}
++
++#[test]
++fn an_io_failure_during_mutation_makes_the_abort_fail_without_hiding_it() -> TestResult {
++    let backend = RecordingBackend::default();
++    // A small cache makes a large value reach the backend during the mutation itself.
++    let database = Database::builder()
++        .set_cache_size(256 * 1024)
++        .create_with_backend(backend.clone())?;
++    seed(&database)?;
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    transaction
++        .open_table(TABLE)?
++        .insert(2, b"tentative".as_slice())?;
++    let writes = backend.state.lock().unwrap().writes;
++    backend.fail_write_at(writes + 1);
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        // A large value is written straight through the cache to the backend.
++        let error = table.insert(3, vec![1; 1 << 21].as_slice()).err().expect("expected an error");
++        assert!(matches!(error, StorageError::Io(_)), "{error:?}");
++    }
++    let error = transaction.abort().unwrap_err();
++    assert!(
++        matches!(error, StorageError::Io(_) | StorageError::PreviousIo),
++        "{error:?}"
++    );
++    assert!(database.begin_write().is_err());
++    Ok(())
++}
++
++#[test]
++fn bounded_reclamation_is_refused_whole_makes_monotonic_progress_and_finishes_after_readers_release()
++-> TestResult {
++    let (file, database) = seeded_file()?;
++    let transaction = database.begin_write()?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        for key in 100..2_100 {
++            table.insert(key, [1; 900].as_slice())?;
++        }
++    }
++    transaction.commit()?;
++    // Drain the records the seeding left, so the reader below pins everything that follows. An
++    // ordinary commit's epilogue records become eligible one publication after a durable commit
++    // clears their pending marker, so the drain runs until two rounds reclaim nothing.
++    let mut idle_rounds = 0;
++    while idle_rounds < 2 {
++        let progress = database.reclaim_bounded(GENEROUS, 1_000)?;
++        if progress.records == 0 && !progress.remaining {
++            idle_rounds += 1;
++        } else {
++            idle_rounds = 0;
++        }
++    }
++    let reader = database.begin_read()?;
++    // Free thousands of pages; a bounded commit stores their records and reclaims nothing.
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    {
++        let mut table = transaction.open_table(TABLE)?;
++        for key in 100..2_100 {
++            table.remove(key)?;
++        }
++    }
++    transaction.prepare()?.publish()?;
++    assert_original(&database);
++
++    // The reader pins every freed page: nothing is eligible yet.
++    let progress = database.reclaim_bounded(GENEROUS, 1_000)?;
++    assert_eq!(progress.records, 0);
++    assert_eq!(progress.pages, 0);
++    assert_eq!(reader.open_table(TABLE)?.len()?, 2_001);
++    drop(reader);
++
++    // A refused reclamation removes nothing.
++    let refused = database.reclaim_bounded(AllocationAllowance::new(0), 1);
++    let refusal = match refused.unwrap_err() {
++        Error::Allowance(refusal) => refusal,
++        other => panic!("{other:?}"),
++    };
++    assert_eq!(refusal.phase(), AllocationPhase::Cleanup);
++
++    let mut rounds = 0;
++    let mut total_records = 0;
++    let mut total_pages = 0;
++    loop {
++        let progress = database.reclaim_bounded(AllocationAllowance::new(1 << 20), 1)?;
++        rounds += 1;
++        total_records += progress.records;
++        total_pages += progress.pages;
++        assert!(progress.records >= 1, "every round makes progress: {progress:?}");
++        assert!(progress.records <= 1, "the record bound holds: {progress:?}");
++        if !progress.remaining {
++            break;
++        }
++        assert!(rounds < 1_000);
++    }
++    assert!(total_records >= 2, "{total_records} records over {rounds} rounds");
++    assert!(total_pages >= 500, "{total_pages} pages reclaimed");
++    let done = database.reclaim_bounded(GENEROUS, 1_000)?;
++    assert_eq!(done.records, 0);
++    assert!(!done.remaining);
++    assert_reusable(&database)?;
++    drop(database);
++    let mut reopened = Database::open(file.path())?;
++    assert!(reopened.check_integrity()?);
++    assert_original(&reopened);
++    Ok(())
++}
++
++#[test]
++fn bounded_close_persists_the_allocator_state_or_leaves_the_repair_to_the_next_open() -> TestResult {
++    fn reopen_counting_repairs(path: &std::path::Path) -> Result<(Database, bool), Box<dyn std::error::Error>> {
++        let repaired = Arc::new(Mutex::new(false));
++        let flag = repaired.clone();
++        let database = Database::builder()
++            .set_repair_callback(move |_| *flag.lock().unwrap() = true)
++            .open(path)?;
++        let repaired = *repaired.lock().unwrap();
++        Ok((database, repaired))
++    }
++
++    let (file, database) = seeded_file()?;
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    transaction.open_table(TABLE)?.insert(2, b"kept".as_slice())?;
++    transaction.prepare()?.publish()?;
++    // A refused persist writes no allocator state, and the drop must not write it either.
++    let refused = database.persist_allocator_state_bounded(AllocationAllowance::new(0));
++    let refusal = match refused.unwrap_err() {
++        Error::Allowance(refusal) => refusal,
++        other => panic!("{other:?}"),
++    };
++    assert_eq!(refusal.phase(), AllocationPhase::Close);
++    drop(database);
++    let (reopened, repaired) = reopen_counting_repairs(file.path())?;
++    assert!(repaired, "the next open repaired the allocator state");
++    assert_eq!(
++        rows(&reopened, TABLE),
++        vec![(1, b"original".to_vec()), (2, b"kept".to_vec())]
++    );
++
++    // A successful bounded persist leaves nothing for the next open to repair.
++    reopened.persist_allocator_state_bounded(GENEROUS)?;
++    drop(reopened);
++    let (reopened, repaired) = reopen_counting_repairs(file.path())?;
++    assert!(!repaired, "the persisted allocator state was used");
++    assert_eq!(rows(&reopened, TABLE).len(), 2);
++
++    // A later writer restores the ordinary close, which persists the state unbounded.
++    let transaction = reopened.begin_write()?;
++    transaction.open_table(TABLE)?.insert(3, b"later".as_slice())?;
++    transaction.commit()?;
++    drop(reopened);
++    let (reopened, repaired) = reopen_counting_repairs(file.path())?;
++    assert!(!repaired);
++    assert_eq!(rows(&reopened, TABLE).len(), 3);
++    Ok(())
++}
++
++#[test]
++fn a_bounded_transaction_keeps_the_database_open_and_its_reader_pages_intact() -> TestResult {
++    let (file, database) = seeded_file()?;
++    let reader = database.begin_read()?;
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    drop(database);
++    transaction.open_table(TABLE)?.insert(1, b"changed".as_slice())?;
++    transaction.prepare()?.publish()?;
++    assert_eq!(
++        reader.open_table(TABLE)?.get(1)?.unwrap().value(),
++        b"original",
++        "a retained reader keeps its snapshot"
++    );
++    drop(reader);
++    let reopened = Database::open(file.path())?;
++    assert_eq!(rows(&reopened, TABLE), vec![(1, b"changed".to_vec())]);
++    Ok(())
++}
++
++#[test]
++fn extreme_key_and_value_shapes_publish_and_survive_reopen() -> TestResult {
++    const SHAPES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("shapes");
++    let (file, database) = seeded_file()?;
++    let long_key = vec![0xAB; 4_000];
++    let big_value = vec![0xCD; 3 << 20];
++    let transaction = database.begin_write_bounded(GENEROUS)?;
++    {
++        let mut table = transaction.open_table(SHAPES)?;
++        table.insert(b"".as_slice(), b"".as_slice())?;
++        table.insert(b"k".as_slice(), big_value.as_slice())?;
++        table.insert(long_key.as_slice(), b"v".as_slice())?;
++        // Mixed large and small leaves in one ordering.
++        for key in 0..64_u8 {
++            let value = if key % 2 == 0 {
++                vec![key; 5_000]
++            } else {
++                vec![key; 3]
++            };
++            table.insert([key].as_slice(), value.as_slice())?;
++        }
++    }
++    let prepared = transaction.prepare()?;
++    assert!(prepared.allowance_charged()? >= 3 << 20);
++    prepared.publish()?;
++    drop(database);
++    let mut reopened = Database::open(file.path())?;
++    assert!(reopened.check_integrity()?);
++    let read = reopened.begin_read()?;
++    let table = read.open_table(SHAPES)?;
++    assert_eq!(table.get(b"".as_slice())?.unwrap().value(), b"");
++    assert_eq!(table.get(b"k".as_slice())?.unwrap().value().len(), 3 << 20);
++    assert_eq!(table.get(long_key.as_slice())?.unwrap().value(), b"v");
++    assert_eq!(table.len()?, 67);
++    Ok(())
++}

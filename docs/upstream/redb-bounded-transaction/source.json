@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "upstream_repository": "https://github.com/cberner/redb",
+  "upstream_commit": "23b6ba05473b13e69ed4db82f4b5bc07f0c33be9",
+  "upstream_tag": "v4.2.0",
+  "patch_sha256": "a210fb6523d8ef3ca35831bb1e90a354f5214a5b967448592f59a350f60c43e9",
+  "apply": "git apply bounded-transaction.patch",
+  "files": {
+    "CHANGELOG.md": {
+      "before_sha256": "a7f205654695bc31595b0fd2cf72f037fb6a1b532019d7e21fbe99d835cd7cec",
+      "after_sha256": "ceb4f5602f4fe96e46ab0f31840198a1f77350bf322b8acbeaa922fd2a36f5be"
+    },
+    "fuzz/Cargo.toml": {
+      "before_sha256": "77f77619aae341c4f9c98718aeeb42f27da5dbcae9ebc8e77df466b5a1e26aa1",
+      "after_sha256": "e2d02697f038d14c41352f2418f339fc012b14fba721d6d1f034fda3e3f23b2a"
+    },
+    "fuzz/fuzz_targets/fuzz_bounded.rs": {
+      "before_sha256": null,
+      "after_sha256": "6397db87941574539a1e47697a0f2354eae566f1ebf59c7f5ec8dcc1d0a5e20c"
+    },
+    "src/bounded.rs": {
+      "before_sha256": null,
+      "after_sha256": "c4bcb4177a664684094c9b97d49c99266f5b9487494c016654ba7ffb633dd0a1"
+    },
+    "src/db.rs": {
+      "before_sha256": "ae0e73b1fd57f9c40ff00568dfc3869f6037d6863233868b1b3978744bc26dbc",
+      "after_sha256": "7421ca597e325fee2f2add22eb0cf80c1ddf2be54760c8489e2c68aa51da169f"
+    },
+    "src/error.rs": {
+      "before_sha256": "0b394a9fa15e2ccc59a836f5a280bb19d62a382ea98123bc238531cbb11eaee7",
+      "after_sha256": "b117d882357238867c61f468aa32b70186886f0b5d48bcd7c83bc7adaf753bf8"
+    },
+    "src/lib.rs": {
+      "before_sha256": "81db5d7d7cbc62a22d62854eb0de0793a62a33be620a3be1bb3cd4730899ce3f",
+      "after_sha256": "03bfe6fe522302a84a6e77361a35c500b2ffc6b066bc75d07e769ec000ea6c8e"
+    },
+    "src/transactions.rs": {
+      "before_sha256": "18fc74991b203b8426275d095c21ba60fc9a10eb63ffbbb84ad3908d6e7f474e",
+      "after_sha256": "c73f5896213c8ef6bb47727136c4a5f80b737b78721c728b4985a13178899e2d"
+    },
+    "src/tree_store/mod.rs": {
+      "before_sha256": "b8d1fd29ad6ec673ef00bfe9544586736fcc66e5048fb4fa5a11e075a5137a2a",
+      "after_sha256": "4a84597326ecf32ddc90b9f85e4c14eb0677dc2fb544c81ecb5dae0c4182e77c"
+    },
+    "src/tree_store/page_store/mod.rs": {
+      "before_sha256": "d8b37c9f5edfd92b8ad0f7ddd47e402b9e5a093a93c62767d97812c5d97e5a87",
+      "after_sha256": "a2f7565da14e1bdad92cd584a27fdb7022b0d86f22670d99b0a47515a34b918d"
+    },
+    "src/tree_store/page_store/page_manager.rs": {
+      "before_sha256": "b20394a7904eb8d79a6920070caf8de1a56237288501449532af47e471e2271b",
+      "after_sha256": "e3278b5238854499eadd5dcfea6aae8084f928470e977ee9af61b1027f9c7293"
+    },
+    "tests/bounded_transaction.rs": {
+      "before_sha256": null,
+      "after_sha256": "b07da903c1b3b5a5b3d7bc17997f4fd833fcfed7f3956a6ec184c41489602aca"
+    }
+  }
+}
