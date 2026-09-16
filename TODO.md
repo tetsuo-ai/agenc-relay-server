@@ -1613,6 +1613,17 @@ the closure branch at review time.
   reserved before allocation. Boundary, concurrent-producer, shutdown, actor
   admission and durable-command ordering regressions cover the new path.
   See `docs/stage-10-client-input-repair.md` for validation and limits.
+- [x] Output queue and input queue backing are acquired on demand (RUN-04).
+  An idle connection holds only its 65,536-byte base charge: the writer
+  queue keeps a fixed 24-entry ring in connection state and charges one
+  exact frame-reference allocation per multi-frame demand, created by
+  `prepare` after its permit and released with the demand's final frame;
+  the input queue keeps one line inline and charges overflow storage before
+  allocating it, growing to the request maximum and releasing on drain.
+  Commit stays allocation-free, whole-sink refusal never delivers partially,
+  and reload changes apply only to new reservations. 50,000 idle clients fit
+  the default pool; the Section 19.3 thresholds against that pool are the
+  open conflict in #113. See `docs/stage-10-idle-backing.md`.
 - [x] Connection `JoinError` outcomes retain the registered task identity and
   failure policy. They cancel only that child's token; listeners keep accepting
   and existing clients remain usable. Critical task failures still cancel the

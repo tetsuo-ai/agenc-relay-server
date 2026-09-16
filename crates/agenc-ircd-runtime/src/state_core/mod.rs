@@ -4361,15 +4361,9 @@ mod lifecycle_tests {
     fn open_queued_connection(
         core: &mut StateCore,
     ) -> crate::test_support::TestResult<Arc<crate::connection::WriterQueue>> {
-        use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort};
         use crate::connection::{ClientSink, QueueLimits, WriterQueue};
         let generation = ConnectionGeneration::new(1);
-        let limits = QueueLimits::DEFAULT;
-        let charge = limits.backing_charge()?;
-        let budget = MemoryBudget::new(charge.bytes());
-        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
-        let backing = permits.split_exact(charge.bytes()).ok_or("queue backing")?;
-        let queue = WriterQueue::new(generation, limits, backing)?;
+        let queue = WriterQueue::new(generation, QueueLimits::DEFAULT)?;
         let (acknowledgement, mut accepted) = tokio::sync::oneshot::channel();
         assert!(
             core.step_message(StateCoreMessage::Opened {

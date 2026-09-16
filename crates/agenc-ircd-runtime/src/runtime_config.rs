@@ -991,7 +991,6 @@ mod tests {
     use agenc_ircd_types::{AdminPermission, AdminPermissionSet, OperatorId};
 
     use super::*;
-    use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort};
     use crate::connection::{
         CONTROL_ITEM_SLOTS, ClientQueueDemand, ClientSink, ConnectionGeneration, ConnectionLimits,
         MAX_DEMAND_FRAMES, QueueLimits, SinkReserveError, WriterQueue,
@@ -1125,18 +1124,8 @@ mod tests {
         let initial = snapshot()?;
         let handle = RuntimeConfigHandle::new(initial);
         let initial_limits = ConnectionLimits::DEFAULT.queue;
-        let budget = MemoryBudget::new(64 * 1_048_576);
-        let charge = initial_limits.backing_charge()?;
-        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
-        let backing = batch
-            .split_exact(charge.bytes())
-            .ok_or(RuntimeError::InvalidValue)?;
-        let queue = WriterQueue::new_live(
-            ConnectionGeneration::new(1),
-            initial_limits,
-            backing,
-            handle.clone(),
-        )?;
+        let queue =
+            WriterQueue::new_live(ConnectionGeneration::new(1), initial_limits, handle.clone())?;
         let first = queue
             .try_reserve(ClientQueueDemand::new(vec![1])?)
             .map_err(|_| RuntimeError::LimitExceeded)?;
@@ -1184,6 +1173,66 @@ mod tests {
             .try_reserve(ClientQueueDemand::new(vec![1])?)
             .map_err(|_| RuntimeError::LimitExceeded)?;
         drop(newly_admitted);
+        Ok(())
+    }
+
+    /// RUN-04: queue backing is on demand, so a reload that raises the
+    /// response ceiling admits more work for an existing queue, each new
+    /// multi-frame demand bringing its own charge; lowering again refuses new
+    /// work while accepted reservations stay valid.
+    #[test]
+    fn live_queue_increase_admits_only_charged_new_work() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let one_batch = QueueLimits::new(262_144, 65_536, MAX_DEMAND_FRAMES + CONTROL_ITEM_SLOTS)?;
+        let publish = |handle: &RuntimeConfigHandle,
+                       revision: u64,
+                       batches: u64,
+                       queue: QueueLimits|
+         -> Result<(), Box<dyn std::error::Error>> {
+            let mut candidate_config = config()?;
+            candidate_config.limits.values = candidate_config
+                .limits
+                .values
+                .with(LimitKey::ResponseBatchesPerConnection, batches);
+            let mut candidate_parts = parts()?;
+            candidate_parts.connection_limits.queue = queue;
+            let candidate = Arc::new(RuntimeConfigSnapshot::from_parts(
+                ConfigRevision::new(revision)?,
+                candidate_config,
+                candidate_parts,
+            ));
+            let _previous =
+                handle.publish_after(ConfigRevision::new(revision - 1)?, candidate, || Ok(()))?;
+            Ok(())
+        };
+        let handle = RuntimeConfigHandle::new(snapshot()?);
+        publish(&handle, 2, 1, one_batch)?;
+        let queue = WriterQueue::new_live(ConnectionGeneration::new(1), one_batch, handle.clone())?;
+        let first = queue
+            .try_reserve(ClientQueueDemand::new(vec![1; 2])?)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        assert_eq!(
+            queue.try_reserve(ClientQueueDemand::new(vec![1; 2])?).err(),
+            Some(SinkReserveError::Full),
+            "one response batch is configured"
+        );
+        publish(&handle, 3, 4, ConnectionLimits::DEFAULT.queue)?;
+        let second = queue
+            .try_reserve(ClientQueueDemand::new(vec![1; 2])?)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        assert_eq!(
+            second.backing_charge(),
+            4_096,
+            "the increase is still charged"
+        );
+        publish(&handle, 4, 1, one_batch)?;
+        assert_eq!(
+            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
+            Some(SinkReserveError::Full),
+            "lowering refuses new work while accepted reservations remain"
+        );
+        drop((first, second));
+        assert_eq!(queue.normal_bytes(), 0);
         Ok(())
     }
 

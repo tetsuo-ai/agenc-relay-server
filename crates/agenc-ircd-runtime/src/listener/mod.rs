@@ -747,14 +747,7 @@ fn admit(
             return;
         }
     };
-    let admission = match prepare_admission(
-        shared,
-        spec,
-        connection_token,
-        source,
-        limits,
-        tls.is_some(),
-    ) {
+    let admission = match prepare_admission(shared, spec, connection_token, source, tls.is_some()) {
         Ok(admission) => admission,
         Err(AdmissionFailure { reason, lease }) => {
             drop(accepted);
@@ -855,7 +848,6 @@ fn prepare_admission(
     spec: &ValidatedSpec,
     connection_token: &CancellationToken,
     source: SourceAddressKey,
-    limits: ConnectionLimits,
     tls: bool,
 ) -> Result<Admission, AdmissionFailure> {
     let global_slot = global_slot(shared, spec.purpose).map_err(|reason| AdmissionFailure {
@@ -880,7 +872,7 @@ fn prepare_admission(
     } else {
         None
     };
-    let Ok(permits) = acquire_charges(shared, spec.purpose, limits, tls) else {
+    let Ok(permits) = acquire_charges(shared, spec.purpose, tls) else {
         return Err(AdmissionFailure {
             reason: RefusalReason::MemoryExhausted,
             lease: None,
@@ -946,37 +938,36 @@ fn global_slot(
 fn acquire_charges(
     shared: &ListenerShared,
     purpose: ListenerPurpose,
-    limits: ConnectionLimits,
     tls: bool,
 ) -> Result<MemoryPermitBatch, RuntimeError> {
     shared
         .budget
-        .try_acquire_batch(connection_charges(purpose, limits, tls)?)
+        .try_acquire_batch(connection_charges(purpose, tls)?)
         .map_err(Into::into)
 }
 
-fn connection_charges(
+/// The fixed charges one accepted socket acquires before any task spawns.
+pub(crate) fn connection_charges(
     purpose: ListenerPurpose,
-    limits: ConnectionLimits,
     tls: bool,
 ) -> Result<BoundedMemoryCharges, RuntimeError> {
     let base = match purpose {
         ListenerPurpose::AdminLocal | ListenerPurpose::AdminTls => ADMIN_CONNECTION_BASE_BYTES,
         _ => CLIENT_CONNECTION_BASE_BYTES,
     };
+    // Queue and input backing are charged on demand; an idle connection holds
+    // only its base charge once the setup increments are released.
     let base = MemoryCharge::fixed(base);
-    let queue = limits.queue.backing_charge()?;
     let charges = if purpose == ListenerPurpose::ClientWss {
         BoundedMemoryCharges::new(&[
             base,
-            queue,
             MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES),
             MemoryCharge::fixed(WEBSOCKET_SETUP_INCREMENT_BYTES),
         ])?
     } else if tls {
-        BoundedMemoryCharges::new(&[base, queue, MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES)])?
+        BoundedMemoryCharges::new(&[base, MemoryCharge::fixed(TLS_SETUP_INCREMENT_BYTES)])?
     } else {
-        BoundedMemoryCharges::new(&[base, queue])?
+        BoundedMemoryCharges::new(&[base])?
     };
     Ok(charges)
 }
@@ -1027,18 +1018,10 @@ async fn serve_inner(
         listener_slot,
         handshake_slot,
     } = accepted;
-    let queue_backing = endpoint
-        .limits
-        .queue
-        .backing_charge()
-        .ok()
-        .and_then(|charge| permits.split_exact(charge.bytes()))
-        .ok_or(RefusalReason::MemoryExhausted)?;
     let resources = move |permits| ConnectionResources {
         permits,
         global_slot,
         listener_slot,
-        queue_backing,
     };
     match (transport, endpoint.tls, endpoint.profile) {
         (AcceptedTransport::Tcp(stream, _), Some(config), Some(profile)) => {
@@ -1531,14 +1514,11 @@ mod tests {
     #[cfg(feature = "wss")]
     fn websocket_setup_is_reserved_before_spawn_and_released_after_upgrade()
     -> Result<(), RuntimeError> {
-        let limits = ConnectionLimits::DEFAULT;
-        let queue = limits.queue.backing_charge()?.bytes();
         let budget = MemoryBudget::new(16 * 1_048_576);
-        let charges = connection_charges(ListenerPurpose::ClientWss, limits, true)?;
+        let charges = connection_charges(ListenerPurpose::ClientWss, true)?;
         assert_eq!(
             charges.total(),
             CLIENT_CONNECTION_BASE_BYTES
-                + queue
                 + TLS_SETUP_INCREMENT_BYTES
                 + WEBSOCKET_SETUP_INCREMENT_BYTES
         );
@@ -1552,10 +1532,10 @@ mod tests {
             .ok_or(RuntimeError::InvalidValue)?;
         assert_eq!(
             budget.charged(),
-            CLIENT_CONNECTION_BASE_BYTES + queue + WEBSOCKET_SETUP_INCREMENT_BYTES
+            CLIENT_CONNECTION_BASE_BYTES + WEBSOCKET_SETUP_INCREMENT_BYTES
         );
         drop(upgrade);
-        assert_eq!(budget.charged(), CLIENT_CONNECTION_BASE_BYTES + queue);
+        assert_eq!(budget.charged(), CLIENT_CONNECTION_BASE_BYTES);
         drop(held);
         assert_eq!(budget.charged(), 0);
         let insufficient = MemoryBudget::new(charges.total() - 1);

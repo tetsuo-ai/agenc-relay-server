@@ -7,15 +7,17 @@
 //! backing permit, and commits without allocation. Every type here has
 //! private fields so a mismatched or duplicated reservation cannot be built.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agenc_ircd_client_wire::{MAX_PHYSICAL_LINE_BYTES, MAX_SEMANTIC_REPLIES, RenderedMessage};
 use tokio::sync::Notify;
 
 use crate::RuntimeError;
-use crate::budget::MemoryPermit;
+use crate::budget::{ALLOCATION_BOOKKEEPING_BYTES, MEMORY_QUANTUM_BYTES, MemoryPermit};
 use crate::state_core::inbox::CloseReason;
 use crate::sync::Arc;
 
@@ -26,6 +28,29 @@ pub const MAX_DEMAND_FRAMES: usize = MAX_SEMANTIC_REPLIES * 2;
 /// Maximum bytes in one sink demand: the normal outbound queue hard maximum
 /// of 4 MiB (spec 19.2, line 2660).
 pub const MAX_DEMAND_BYTES: usize = 4_194_304;
+/// Frames of one demand a queue holds in its existing per-connection state.
+/// A larger demand brings exactly one charged storage allocation.
+pub const INLINE_DEMAND_FRAMES: usize = 1;
+
+/// One encoded frame shared between every queue that received it.
+pub type SharedClientFrame = Arc<RenderedMessage<MemoryPermit>>;
+
+/// The exact additional backing charge of a demand of `frame_count` frames:
+/// zero within [`INLINE_DEMAND_FRAMES`], otherwise `allocation_charge` of
+/// one exact-capacity frame-reference allocation (spec 19.2). Demands hold
+/// at most [`MAX_DEMAND_FRAMES`] frames, so the arithmetic cannot overflow;
+/// it saturates rather than wrap for any larger count.
+#[must_use]
+pub const fn frame_storage_charge(frame_count: usize) -> u64 {
+    if frame_count <= INLINE_DEMAND_FRAMES {
+        return 0;
+    }
+    let bytes = (frame_count as u64).saturating_mul(size_of::<SharedClientFrame>() as u64);
+    bytes
+        .saturating_add(ALLOCATION_BOOKKEEPING_BYTES)
+        .div_ceil(MEMORY_QUANTUM_BYTES)
+        .saturating_mul(MEMORY_QUANTUM_BYTES)
+}
 
 struct FlushState {
     acknowledged: AtomicBool,
@@ -399,18 +424,56 @@ impl Drop for TentativeClientQueueReservation {
     }
 }
 
-/// A tentative reservation paired with exactly its backing permit.
+/// Exact-capacity storage for one demand's frame references, created by
+/// `prepare` after its permit exists so `commit` fills it without allocating.
+pub struct PreparedFrameStorage {
+    frames: VecDeque<SharedClientFrame>,
+}
+
+impl PreparedFrameStorage {
+    fn allocate(frame_count: usize) -> Result<Self, QueueAllocationError> {
+        let mut frames = VecDeque::new();
+        frames
+            .try_reserve_exact(frame_count)
+            .map_err(|_| QueueAllocationError::AllocationFailed)?;
+        Ok(Self { frames })
+    }
+
+    /// Returns the frame references the storage holds without growing.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.frames.capacity()
+    }
+
+    /// Moves `frames` in order into the prepared capacity, or returns `None`
+    /// without allocating when they exceed it.
+    #[must_use]
+    pub fn fill(mut self, frames: Vec<SharedClientFrame>) -> Option<VecDeque<SharedClientFrame>> {
+        if frames.len() > self.frames.capacity() {
+            return None;
+        }
+        self.frames.extend(frames);
+        Some(self.frames)
+    }
+}
+
+/// A tentative reservation paired with exactly its backing permit and the
+/// one backing allocation that permit pays for.
 #[must_use = "dropping a prepared reservation rolls back its logical counts and permit"]
 pub struct ClientQueueReservation {
     tentative: TentativeClientQueueReservation,
+    // Fields drop in declaration order: free the storage before its permit.
+    storage: Option<PreparedFrameStorage>,
     backing: Option<MemoryPermit>,
     query_snapshot: Option<QuerySnapshotPermit>,
 }
 
 impl ClientQueueReservation {
     /// Pairs a reservation with its permit: none when the backing charge is
-    /// zero, exactly one matching permit otherwise. A mismatch drops the
-    /// tentative reservation, rolling the whole demand back.
+    /// zero, exactly one matching permit otherwise. A matching permit pays
+    /// for the one exact-capacity frame storage created here. A mismatch or
+    /// allocation failure drops the tentative reservation, rolling the whole
+    /// demand back before any visible effect (spec 21.3).
     pub fn prepare(
         tentative: TentativeClientQueueReservation,
         backing: Option<MemoryPermit>,
@@ -424,8 +487,15 @@ impl ClientQueueReservation {
         if !matches {
             return Err(QueueAllocationError::PermitMismatch);
         }
+        let storage = match backing {
+            Some(_) => Some(PreparedFrameStorage::allocate(
+                tentative.demand().frame_count(),
+            )?),
+            None => None,
+        };
         Ok(Self {
             tentative,
+            storage,
             backing,
             query_snapshot: None,
         })
@@ -464,6 +534,7 @@ impl ClientQueueReservation {
             generation: self.tentative.generation(),
             frame_count: self.tentative.demand().frame_count(),
             total_bytes: self.tentative.demand().total_bytes(),
+            storage: self.storage.take(),
             backing: self.backing.take(),
             query_snapshot: self.query_snapshot.take(),
             ledger,
@@ -471,12 +542,15 @@ impl ClientQueueReservation {
     }
 }
 
-/// The counts and permit moved into a queue by a committed reservation.
+/// The counts, storage, and permit moved into a queue by a committed
+/// reservation.
 #[must_use]
 pub struct QueueTransfer {
     generation: ConnectionGeneration,
     frame_count: usize,
     total_bytes: usize,
+    // Fields drop in declaration order: free the storage before its permit.
+    storage: Option<PreparedFrameStorage>,
     backing: Option<MemoryPermit>,
     query_snapshot: Option<QuerySnapshotPermit>,
     ledger: Option<Arc<dyn QueueReservationLedger>>,
@@ -506,6 +580,11 @@ impl QueueTransfer {
         self.backing.take()
     }
 
+    /// Takes the storage `prepare` created for this demand, if it was charged.
+    pub fn take_storage(&mut self) -> Option<PreparedFrameStorage> {
+        self.storage.take()
+    }
+
     pub(crate) fn query_snapshot_usage(&self) -> Option<(u64, u64)> {
         self.query_snapshot
             .as_ref()
@@ -523,6 +602,7 @@ impl QueueTransfer {
         if let Some(ledger) = self.ledger.take() {
             ledger.rollback(self.frame_count, self.total_bytes);
         }
+        self.storage = None;
         self.backing = None;
         self.query_snapshot = None;
     }
@@ -534,14 +614,14 @@ impl QueueTransfer {
 /// demand, so `ClientSink::commit` never inspects the frames again.
 pub struct BoundedSharedClientFrames {
     token: ReservationToken,
-    frames: Vec<Arc<RenderedMessage<MemoryPermit>>>,
+    frames: Vec<SharedClientFrame>,
 }
 
 impl BoundedSharedClientFrames {
     /// Binds encoded frames to the reservation they were measured for.
     pub fn for_reservation(
         reservation: &ClientQueueReservation,
-        frames: Vec<Arc<RenderedMessage<MemoryPermit>>>,
+        frames: Vec<SharedClientFrame>,
     ) -> Result<Self, RuntimeError> {
         let expected = reservation.demand().frame_bytes();
         if frames.len() != expected.len() {
@@ -566,7 +646,7 @@ impl BoundedSharedClientFrames {
 
     /// Consumes the frames in output order.
     #[must_use]
-    pub fn into_frames(self) -> Vec<Arc<RenderedMessage<MemoryPermit>>> {
+    pub fn into_frames(self) -> Vec<SharedClientFrame> {
         self.frames
     }
 
@@ -741,6 +821,38 @@ mod tests {
             "every mismatched permit returned its bytes and the batch is fully split"
         );
         assert_eq!(batch.total(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_storage_takes_exactly_its_capacity() -> Result<(), RuntimeError> {
+        use crate::budget::PermitCursor;
+        use agenc_ircd_client_wire::WireMessage;
+        let budget = MemoryBudget::new(100_000);
+        let message = WireMessage::new("server.test", "NOTICE", &["*"], Some("fill"))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let measured = message.measure().map_err(|_| RuntimeError::InvalidValue)?;
+        let bytes = u64::try_from(measured.bytes()).map_err(|_| RuntimeError::Overflow)?;
+        let mut batch =
+            budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::allocation(
+                bytes,
+            )?])?)?;
+        let frame: SharedClientFrame = Arc::new(
+            measured
+                .encode(&mut PermitCursor::new(&mut batch))
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        );
+        let storage = PreparedFrameStorage::allocate(2).map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(storage.capacity() >= 2);
+        assert!(
+            storage.fill(vec![frame.clone(); 3]).is_none(),
+            "more frames than the prepared capacity are refused"
+        );
+        let storage = PreparedFrameStorage::allocate(2).map_err(|_| RuntimeError::InvalidValue)?;
+        let filled = storage
+            .fill(vec![frame.clone(), frame])
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(filled.len(), 2);
         Ok(())
     }
 

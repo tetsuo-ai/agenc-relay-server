@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 783
-reviewed_source_sha256 = "a5d884f900d0ca68285e27c156d2220e4dcd0aa5ac0477816e62b23dc79886f3"
+reviewed_source_files = 785
+reviewed_source_sha256 = "8c273633d56517569d2f92cbdfbf4f0c529dc0b3da24879eac42cea23a477948"
 deferred = []
 
 [[region]]
@@ -211,8 +211,8 @@ reason = "Borrowing ciphertext retains the exact authentication-tag minimum and 
 id = "connection-input-publication"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/state_core/client_input.rs"
-source_sha256 = "4b18c16825dc5dca79e3120094930033e1898b93ad813cf8a3797b3fb46b327f"
-start_line = 60
-end_line = 90
+source_sha256 = "fc56984bae0f4cebbd1a82d71eb3ef5de52c84c4616ad7b7752e3ac120122f17"
+start_line = 208
+end_line = 249
 metric = "branches"
 reason = "Connection input publication checks generation, consumer lifetime and independent queue capacity before publishing one ready entry."

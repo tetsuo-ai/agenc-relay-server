@@ -54,10 +54,7 @@ async fn independent_connections_exceed_shared_64_bound_and_dispatch_round_robin
     for sequence in 1..=128 {
         a.send(line(1, sequence)?)?;
     }
-    assert!(matches!(
-        a.send(line(1, 129)?),
-        Err(RuntimeError::LimitExceeded)
-    ));
+    assert!(matches!(a.send(line(1, 129)?), Err(InputRefusal::Closed)));
     for sequence in 1..=40 {
         b.send(line(2, sequence)?)?;
     }
@@ -83,7 +80,7 @@ async fn producer_drop_keeps_queued_lines_and_slot_reserved_until_drain() -> Tes
     let (inputs, budget) = inputs(1)?;
     let baseline = budget.charged();
     let a = inputs.open(ConnectionGeneration::new(1))?;
-    assert!(budget.charged() > baseline);
+    assert_eq!(budget.charged(), baseline, "an idle port holds no charge");
     a.send(line(1, 1)?)?;
     drop(a);
     assert!(matches!(
@@ -103,13 +100,10 @@ async fn producer_drop_keeps_queued_lines_and_slot_reserved_until_drain() -> Tes
 async fn invalid_authority_and_consumer_close_refuse_publication_and_wake_waiters() -> TestResult {
     let (inputs, budget) = inputs(1)?;
     let a = inputs.open(ConnectionGeneration::new(1))?;
-    assert!(matches!(
-        a.send(line(2, 1)?),
-        Err(RuntimeError::InvalidValue)
-    ));
+    assert!(matches!(a.send(line(2, 1)?), Err(InputRefusal::Closed)));
     assert!(matches!(
         a.send(StateCoreMessage::Signal(SignalEvent::Reload)),
-        Err(RuntimeError::InvalidValue)
+        Err(InputRefusal::Closed)
     ));
     assert_eq!(inputs.len(), 0);
     a.send(line(1, 1)?)?;
@@ -124,12 +118,9 @@ async fn invalid_authority_and_consumer_close_refuse_publication_and_wake_waiter
         drop(inputs);
         tokio::time::timeout(Duration::from_secs(1), closed).await?;
     }
-    assert!(lock(&a.queue.state).messages.is_empty());
+    assert!(lock(&a.queue.state).is_empty());
     tokio::time::timeout(Duration::from_secs(1), a.closed()).await?;
-    assert!(matches!(
-        a.send(line(1, 2)?),
-        Err(RuntimeError::LimitExceeded)
-    ));
+    assert!(matches!(a.send(line(1, 2)?), Err(InputRefusal::Closed)));
     drop(a);
     assert_eq!(budget.charged(), 0);
     Ok(())
@@ -153,15 +144,152 @@ fn invalid_capacity_and_unfunded_backing_refuse_without_leaking_reservations() -
     let (funded, budget) = inputs(1)?;
     let exact = Arc::new(MemoryBudget::new(budget.charged()));
     let unfunded = ClientInputs::new(1, BackingReservationPort::new(Arc::clone(&exact)))?;
+    let port = unfunded.open(ConnectionGeneration::new(1))?;
+    port.send(line(1, 1)?)?;
     for _ in 0..2 {
-        assert!(matches!(
-            unfunded.open(ConnectionGeneration::new(1)),
-            Err(RuntimeError::MemoryExhausted)
-        ));
-        assert_eq!(unfunded.slots.available_permits(), 1);
+        let Err(InputRefusal::MemoryExhausted(returned)) = port.send(line(1, 2)?) else {
+            return Err("overflow storage was not refused".into());
+        };
+        assert_line(returned, 1, 2)?;
+        assert_eq!(unfunded.len(), 1, "a refused line publishes nothing");
+        assert_eq!(unfunded.slots.available_permits(), 0);
     }
-    drop((funded, unfunded));
+    assert_line(unfunded.take().ok_or("queued line")?, 1, 1)?;
+    drop((funded, port, unfunded));
     assert_eq!(exact.charged(), 0);
+    Ok(())
+}
+
+/// Exact input permits: idle is free, the second outstanding line brings one
+/// quantum, growth replaces it with the request maximum, and the overflow's
+/// allocation and charge leave together when it drains.
+#[tokio::test]
+async fn input_overflow_is_charged_on_demand_and_released_when_drained() -> TestResult {
+    let (inputs, budget) = inputs(1)?;
+    let fixed = budget.charged();
+    let port = inputs.open(ConnectionGeneration::new(3))?;
+    assert_eq!(FIRST_OVERFLOW_SLOTS, 68);
+    assert_eq!(MAX_OVERFLOW_SLOTS, 127);
+    port.send(line(3, 1)?)?;
+    assert_eq!(budget.charged(), fixed, "one line waits inline");
+    port.send(line(3, 2)?)?;
+    assert_eq!(
+        budget.charged(),
+        fixed + 4_096,
+        "the first overflow is one quantum"
+    );
+    for sequence in 3..=69 {
+        port.send(line(3, sequence)?)?;
+    }
+    assert_eq!(
+        budget.charged(),
+        fixed + 4_096,
+        "68 overflow lines fit one quantum"
+    );
+    port.send(line(3, 70)?)?;
+    assert_eq!(
+        budget.charged(),
+        fixed + 8_192,
+        "growth replaced the quantum with the request maximum"
+    );
+    for sequence in 71..=128 {
+        port.send(line(3, sequence)?)?;
+    }
+    assert_eq!(budget.charged(), fixed + 8_192);
+    assert!(matches!(
+        port.send(line(3, 129)?),
+        Err(InputRefusal::Closed)
+    ));
+    for sequence in 1..=127 {
+        assert_line(inputs.recv().await, 3, sequence)?;
+        assert_eq!(
+            budget.charged(),
+            fixed + 8_192,
+            "partial drain keeps the storage"
+        );
+    }
+    assert_line(inputs.recv().await, 3, 128)?;
+    assert_eq!(
+        budget.charged(),
+        fixed,
+        "the drained overflow released its charge"
+    );
+    port.send(line(3, 129)?)?;
+    assert_eq!(budget.charged(), fixed, "an emptied queue is inline again");
+    drop((port, inputs));
+    assert_eq!(budget.charged(), 0);
+    Ok(())
+}
+
+/// Arrival order holds across the inline slot and the overflow: after the
+/// inline line drains, new lines follow the overflow rather than jump ahead.
+#[tokio::test]
+async fn inline_and_overflow_lines_keep_arrival_order() -> TestResult {
+    let (inputs, budget) = inputs(1)?;
+    let fixed = budget.charged();
+    let port = inputs.open(ConnectionGeneration::new(4))?;
+    for sequence in 1..=3 {
+        port.send(line(4, sequence)?)?;
+    }
+    assert_line(inputs.recv().await, 4, 1)?;
+    port.send(line(4, 4)?)?;
+    for sequence in 2..=4 {
+        assert_line(inputs.recv().await, 4, sequence)?;
+    }
+    assert_eq!(budget.charged(), fixed);
+    Ok(())
+}
+
+/// A reader whose overflow cannot be charged stays paused, retries, and
+/// delivers once memory returns; a starved reader closes after the stall
+/// budget without publishing a partial line.
+#[tokio::test(start_paused = true)]
+async fn exhausted_input_storage_pauses_the_reader_until_memory_returns_or_the_stall_ends()
+-> TestResult {
+    let (inputs, budget) = inputs(2)?;
+    let spare = budget.available();
+    let hold = BackingReservationPort::new(Arc::clone(&budget))
+        .reserve(usize::try_from(spare).map_err(|_| "spare")? - 256)?;
+    assert_eq!(budget.available(), 0);
+    let port = inputs.open(ConnectionGeneration::new(5))?;
+    let task = tokio::spawn(crate::connection::reader::run_reader_sequenced(
+        &b"PING :one\r\nPING :two\r\n"[..],
+        ConnectionGeneration::new(5),
+        crate::connection::ReaderLimits::new(4, 131_072)?,
+        None,
+        port,
+        crate::cancel::CancellationToken::root(),
+        Arc::new(AtomicU64::new(0)),
+    ));
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(
+        inputs.len(),
+        1,
+        "the second line waits for overflow storage"
+    );
+    assert!(!task.is_finished());
+    drop(hold);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(inputs.len(), 2);
+    assert_line(inputs.recv().await, 5, 1)?;
+    assert_line(inputs.recv().await, 5, 2)?;
+
+    let hold = BackingReservationPort::new(Arc::clone(&budget))
+        .reserve(usize::try_from(budget.available()).map_err(|_| "spare")? - 256)?;
+    let starved = inputs.open(ConnectionGeneration::new(6))?;
+    let task_two = tokio::spawn(crate::connection::reader::run_reader_sequenced(
+        &b"PING :one\r\nPING :two\r\n"[..],
+        ConnectionGeneration::new(6),
+        crate::connection::ReaderLimits::new(4, 131_072)?,
+        None,
+        starved,
+        crate::cancel::CancellationToken::root(),
+        Arc::new(AtomicU64::new(0)),
+    ));
+    assert_eq!(task_two.await?, CloseReason::ReadStall);
+    assert_line(inputs.recv().await, 6, 1)?;
+    assert_eq!(inputs.len(), 0);
+    drop((hold, task));
     Ok(())
 }
 
@@ -276,5 +404,87 @@ async fn continuously_ready_input_yields_to_other_runtime_tasks() -> TestResult 
         "ready input monopolized the runtime worker"
     );
     task.await?;
+    Ok(())
+}
+
+/// The queue state's own rules, driven directly: a line arriving after the
+/// consumer drained the queue discards the storage prepared for it, a full
+/// overflow or a missing one refuses a push, and the inline slot returns
+/// after every drain.
+#[test]
+fn queue_state_discards_unneeded_growth_and_refuses_pushes_without_room() -> TestResult {
+    let budget = Arc::new(MemoryBudget::new(16 * 1_048_576));
+    let backing = BackingReservationPort::new(Arc::clone(&budget));
+    let mut state = QueueState {
+        inline: None,
+        overflow: None,
+        scheduled: false,
+    };
+    assert_eq!(state.growth(), None, "an empty queue needs no storage");
+    state.push(line(1, 1)?).map_err(|_| "inline push")?;
+    assert_eq!(state.growth(), Some(FIRST_OVERFLOW_SLOTS));
+    let prepared = Overflow::reserve(&backing, FIRST_OVERFLOW_SLOTS)?;
+    assert_eq!(budget.charged(), 4_096);
+    assert_line(state.pop().ok_or("inline line")?, 1, 1)?;
+    state.install(prepared);
+    assert!(
+        state.overflow.is_none(),
+        "growth computed before a drain is not installed"
+    );
+    assert_eq!(
+        budget.charged(),
+        0,
+        "the unneeded storage returned its charge"
+    );
+
+    state.push(line(1, 2)?).map_err(|_| "inline push")?;
+    let refused = state.push(line(1, 3)?).err().ok_or("no overflow refuses")?;
+    assert_line(refused, 1, 3)?;
+    state.install(Overflow::reserve(&backing, 1)?);
+    state.push(line(1, 3)?).map_err(|_| "overflow push")?;
+    let refused = state
+        .push(line(1, 4)?)
+        .err()
+        .ok_or("a full overflow refuses")?;
+    assert_line(refused, 1, 4)?;
+    assert_eq!(state.growth(), Some(MAX_OVERFLOW_SLOTS));
+    state.install(Overflow::reserve(&backing, MAX_OVERFLOW_SLOTS)?);
+    assert_eq!(
+        budget.charged(),
+        8_192,
+        "the replaced storage returned its charge"
+    );
+    assert_line(state.pop().ok_or("line 2")?, 1, 2)?;
+    assert_line(state.pop().ok_or("line 3")?, 1, 3)?;
+    assert!(state.pop().is_none());
+    assert_eq!(budget.charged(), 0);
+    Ok(())
+}
+
+/// The reader inbox reports a closed port at once and keeps retrying a port
+/// whose overflow storage the budget refuses until the line is published.
+#[tokio::test(start_paused = true)]
+async fn reader_inbox_reports_closed_ports_and_retries_exhausted_overflow() -> TestResult {
+    use crate::connection::reader::inbox::ReaderInbox;
+    let (inputs, budget) = inputs(1)?;
+    let inbox = ReaderInbox::from(inputs.open(ConnectionGeneration::new(9))?);
+    inbox.send(line(9, 1)?).await.map_err(|()| "first line")?;
+    let hold = BackingReservationPort::new(Arc::clone(&budget))
+        .reserve(usize::try_from(budget.available()).map_err(|_| "spare")? - 256)?;
+    let retrying = tokio::spawn(async move {
+        let outcome = inbox
+            .send(line(9, 2).map_err(|error| error.to_string())?)
+            .await;
+        Ok::<_, String>((inbox, outcome))
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!retrying.is_finished(), "the exhausted line waits");
+    drop(hold);
+    let (inbox, outcome) = retrying.await??;
+    assert_eq!(outcome, Ok(()));
+    assert_line(inputs.recv().await, 9, 1)?;
+    assert_line(inputs.recv().await, 9, 2)?;
+    drop(inputs);
+    assert_eq!(inbox.send(line(9, 3)?).await, Err(()));
     Ok(())
 }

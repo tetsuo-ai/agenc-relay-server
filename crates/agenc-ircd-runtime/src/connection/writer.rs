@@ -124,12 +124,7 @@ mod tests {
         use crate::budget::{MemoryCharge, PermitCursor};
         use agenc_ircd_client_wire::WireMessage;
         let budget = MemoryBudget::new(1_048_576);
-        let charge = QueueLimits::DEFAULT.backing_charge()?;
-        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
-        let backing = permits
-            .split_exact(charge.bytes())
-            .ok_or(RuntimeError::InvalidValue)?;
-        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT, backing)?;
+        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT)?;
         let message = WireMessage::new("server.test", "ERROR", &[], Some("Closing connection"))
             .map_err(|_| RuntimeError::InvalidValue)?;
         let measured = message.measure().map_err(|_| RuntimeError::InvalidValue)?;
@@ -214,13 +209,7 @@ mod tests {
     #[tokio::test]
     async fn orderly_shutdown_acknowledges_only_after_the_writer_finishes()
     -> Result<(), RuntimeError> {
-        let budget = MemoryBudget::new(1_048_576);
-        let charge = QueueLimits::DEFAULT.backing_charge()?;
-        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
-        let backing = permits
-            .split_exact(charge.bytes())
-            .ok_or(RuntimeError::InvalidValue)?;
-        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT, backing)?;
+        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT)?;
         let (_peer, transport) = tokio::io::duplex(1_024);
         let acknowledgement = queue.shutdown_after_flush();
         assert!(!acknowledgement.is_acknowledged());
@@ -243,13 +232,7 @@ mod tests {
     #[tokio::test]
     async fn orderly_shutdown_remembers_a_writer_that_already_finished() -> Result<(), RuntimeError>
     {
-        let budget = MemoryBudget::new(1_048_576);
-        let charge = QueueLimits::DEFAULT.backing_charge()?;
-        let mut permits = budget.try_acquire_batch(BoundedMemoryCharges::new(&[charge])?)?;
-        let backing = permits
-            .split_exact(charge.bytes())
-            .ok_or(RuntimeError::InvalidValue)?;
-        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT, backing)?;
+        let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT)?;
         let (_peer, transport) = tokio::io::duplex(1_024);
         let writer = tokio::spawn(run_writer(
             transport,
