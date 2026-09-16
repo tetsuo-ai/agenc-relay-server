@@ -1864,6 +1864,14 @@ None blocks the core-v1 gate.
   patch, digests, validation commands and results are recorded in
   `docs/upstream/redb-bounded-transaction/`. STO-1 itself stays open for
   upstream publication (STO-02) and integration (STO-03).
+- [x] The x86_64 qualification host is prepared and recorded (REL-01): native
+  identity, the ext4 NVMe tuple, pinned toolchains, Docker, delegated cgroups,
+  Tor and ACL tools, the release and client-tools images built by the
+  repository scripts with their records, and the isolation, reservation,
+  retention and resumption runbook are in
+  `docs/stage-10-qualification-hosts.md`. The AArch64 host remains an explicit
+  external blocker: no native host is available and the hosted ARM build path
+  is behind the organization Actions block (#41).
 - [x] Reverse restore-manifest traversal uses checked addition for its first
   sequence, preserving the existing guarded descending traversal.
 - [x] `io_rejected` and `rustix_rejected` collapse every errno to
