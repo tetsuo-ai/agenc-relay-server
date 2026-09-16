@@ -361,3 +361,91 @@ fn a_failed_fixture_retains_only_bounded_logs_and_diagnostics() -> TestResult {
     assert!(logs.contains("event=connection_closed"), "{logs}");
     Ok(())
 }
+
+/// Registers one guest under `nickname` on a fresh connection.
+fn guest_named(fixture: &LiveFixture, nickname: &str) -> TestResult<IrcClient> {
+    let mut client = IrcClient::connect(fixture)?;
+    let registered = client.complete_registration(nickname)?;
+    assert_contains(&registered, &format!(" 001 {nickname} "))?;
+    Ok(client)
+}
+
+/// LIST selection precedes the 200-row page and the scan is charged first
+/// (spec 14.3, Appendix A.1): with more than 200 listed channels an explicit
+/// name still returns its row wherever it sorts, the unselected page holds
+/// exactly 200 rows for ten query tokens, the next unselected LIST is
+/// refused before any scan while the bucket is empty, and a named LIST is
+/// admitted again once the bucket refilled one token.
+#[test]
+fn list_selection_precedes_the_page_and_the_scan_is_charged_first() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    // The shared fixture refills two query tokens a second, so under a loaded
+    // gate the page's own scan can refill the burst it just spent. One token
+    // per twenty seconds keeps the refusal independent of load.
+    let mut config = fs::read_to_string(&fixture.config_path)?;
+    replace_once(
+        &mut config,
+        "[limits.rate.expensive_query]\nrefill_tokens = 2\nrefill_seconds = 1\nburst = 10",
+        "[limits.rate.expensive_query]\nrefill_tokens = 1\nrefill_seconds = 20\nburst = 10",
+    )?;
+    fs::write(&fixture.config_path, config)?;
+    let fixture = &fixture;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let mut creators = Vec::new();
+    let mut joined = Vec::new();
+    for creator in 1..=4_u32 {
+        let mut client = guest_named(fixture, &format!("Lister{creator}"))?;
+        for index in 1..=51_u32 {
+            let channel = format!("#late-{creator}-{index}");
+            client.send_until(&format!("JOIN {channel}"), " 366 ")?;
+            joined.push(channel);
+        }
+        creators.push(client);
+    }
+    assert_eq!(joined.len(), 204);
+    let mut lister = guest_named(fixture, "Lister5")?;
+    let page = lister.send_until("LIST", " 323 ")?;
+    let rows = page.iter().filter(|line| line.contains(" 322 ")).count();
+    assert_eq!(rows, 200, "the page holds exactly the ceiling: {rows} rows");
+    let missing = joined
+        .iter()
+        .find(|channel| {
+            !page
+                .iter()
+                .any(|line| line.contains(&format!(" {channel} ")))
+        })
+        .cloned()
+        .ok_or_else(|| failure("every channel fit the page"))?;
+    // The page cost the whole ten-token burst: another unselected LIST
+    // is refused before scanning, with nothing listed.
+    let refused = send_and_sync(&mut lister, &["LIST".to_owned()])?;
+    assert!(
+        refused
+            .iter()
+            .any(|line| line.contains(" 481 ") || line.contains("SERVER_BUSY")),
+        "an empty bucket refuses the scan: {refused:?}"
+    );
+    assert!(!refused.iter().any(|line| line.contains(" 322 ")));
+    // One token refills within the interval; a named LIST costs one and
+    // returns the late channel the page could not hold.
+    thread::sleep(Duration::from_millis(20_500));
+    let named = lister.send_until(&format!("LIST {missing}"), " 323 ")?;
+    assert_eq!(
+        named.iter().filter(|line| line.contains(" 322 ")).count(),
+        1,
+        "{named:?}"
+    );
+    assert_contains(&named, &format!(" {missing} "))?;
+    // Two names cost one token as well, and an absent name yields no row.
+    thread::sleep(Duration::from_millis(20_500));
+    let mixed = lister.send_until(&format!("LIST {missing},#late-absent"), " 323 ")?;
+    assert_eq!(
+        mixed.iter().filter(|line| line.contains(" 322 ")).count(),
+        1
+    );
+    drop(creators);
+    let mut admin = AdminClient::connect(fixture)?;
+    admin.confirm_process("DIE :list selection complete")?;
+    assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
+    Ok(())
+}

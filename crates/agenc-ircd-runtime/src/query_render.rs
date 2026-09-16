@@ -121,14 +121,17 @@ fn render_list_snapshot(
     nickname: &str,
     selected: &[agenc_ircd_domain::ChannelNameValue],
 ) -> Result<(), RuntimeError> {
-    let max_rows = context.domain().channel_count().min(200);
+    // Selection precedes the ceiling: an explicit vector never yields more
+    // rows than names, an unselected request at most the 200-row page.
+    let max_rows = context.domain().list_scan_bound(selected).min(200);
     let max_backing = snapshot_backing_bytes::<ChannelListProjection<'static>>(max_rows)?;
     let prepared = context.prepare_query_snapshot(reply.generation, max_rows, max_backing)?;
     let (frames, rows, backing) = {
-        let projections = context
+        let scan = context
             .domain()
-            .project_channel_list()
+            .select_channel_list(selected)
             .map_err(|_| RuntimeError::InvalidValue)?;
+        let projections = scan.rows();
         let backing = snapshot_backing_bytes::<ChannelListProjection<'static>>(projections.len())?;
         let mut frames = Vec::new();
         push_numeric(
@@ -140,10 +143,7 @@ fn render_list_snapshot(
             "Users Name",
         )?;
         let mut rows = 0_usize;
-        for channel in &projections {
-            if !selected.is_empty() && !selected.iter().any(|name| name == channel.name()) {
-                continue;
-            }
+        for channel in projections {
             rows = rows.checked_add(1).ok_or(RuntimeError::Overflow)?;
             render_list_row(context.server_prefix(), nickname, channel, &mut frames)?;
         }
@@ -1600,9 +1600,11 @@ fn list_frames(
     nickname: &str,
     selected: &[agenc_ircd_domain::ChannelNameValue],
 ) -> Result<Vec<WireMessage>, RuntimeError> {
-    let projections = context
+    // The same selection semantics as the local renderer: names resolve
+    // before the 200-row ceiling.
+    let scan = context
         .domain()
-        .project_channel_list()
+        .select_channel_list(selected)
         .map_err(|_| RuntimeError::InvalidValue)?;
     let mut frames = Vec::new();
     push_numeric(
@@ -1613,10 +1615,7 @@ fn list_frames(
         &["Channel"],
         "Users Name",
     )?;
-    for channel in &projections {
-        if !selected.is_empty() && !selected.iter().any(|name| name == channel.name()) {
-            continue;
-        }
+    for channel in scan.rows() {
         render_list_row(context.server_prefix(), nickname, channel, &mut frames)?;
     }
     push_numeric(
