@@ -27,7 +27,11 @@ async fn settle_closed_origin(refuse: bool) -> TestResult {
     let origin_id = origin.origin_id;
     assert_eq!(fixture.context_mut()?.pending_len(), 1);
     if refuse {
-        reject_request(&mut edge, &mut fixture, StorageError::FilesystemRejected)?;
+        reject_request(
+            &mut edge,
+            &mut fixture,
+            StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
+        )?;
     }
     edge.connection_closed(fixture.context_mut()?, connection, "client left");
     edge.phase = Phase::Origins;

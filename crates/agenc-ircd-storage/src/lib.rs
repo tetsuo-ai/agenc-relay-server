@@ -75,7 +75,7 @@ pub use engine::{
     StorageInspectionConfig, StorageOpenConfig, StorageRuntimeLimits, StorageStatistics,
     inspect_storage,
 };
-pub use error::StorageError;
+pub use error::{FilesystemCause, FilesystemFailure, StorageError, filesystem_rejected};
 pub use fault::{
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSchedule,
     StorageFaultSite,

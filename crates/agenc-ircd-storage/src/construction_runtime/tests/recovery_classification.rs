@@ -140,7 +140,7 @@ fn recovery_selection(row: &RecoveryRow) -> Result<RestoreSelection, StorageErro
     let source = backup_source(TableId::E2eeState, &row.key, 1)?;
     let result = select_restore_record(&mut builder, &source, &recovery_record(row)?);
     drop(builder);
-    std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+    std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
     result
 }
 

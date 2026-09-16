@@ -736,7 +736,9 @@ impl EngineStateDirectory {
     fn replace_guard(&self, bytes: &[u8]) -> Result<(), StorageError> {
         match self {
             Self::Writable(directory) => directory.replace_guard(bytes),
-            Self::Inspection(_) => Err(StorageError::FilesystemRejected),
+            Self::Inspection(_) => Err(StorageError::FilesystemRejected(
+                crate::FilesystemCause::PermissionRejected,
+            )),
         }
     }
 
@@ -767,7 +769,9 @@ impl EngineStateDirectory {
             Self::Writable(directory) => {
                 directory.admit_transaction(fixed_reserve_bytes, reserve_percent)
             }
-            Self::Inspection(_) => Err(StorageError::FilesystemRejected),
+            Self::Inspection(_) => Err(StorageError::FilesystemRejected(
+                crate::FilesystemCause::PermissionRejected,
+            )),
         }
     }
 
@@ -1054,7 +1058,7 @@ impl StorageEngine {
             .state_directory
             .open_database_file()?
             .metadata()
-            .map_err(|_| StorageError::FilesystemRejected)?
+            .map_err(crate::filesystem_rejected)?
             .len();
         let capacity = self
             .state_directory
@@ -1553,7 +1557,7 @@ impl StorageEngine {
         let writer_file = output
             .file()
             .try_clone()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let writer = BackupStreamWriter::start(writer_file, &header, backup_stream_bytes)?;
         self.backup_job = Some(BackupJob {
             scan: self.store.snapshot_scan()?,
@@ -3527,11 +3531,11 @@ impl BackupJob {
         output
             .file_mut()
             .sync_all()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let actual_bytes = output
             .file()
             .metadata()
-            .map_err(|_| StorageError::FilesystemRejected)?
+            .map_err(crate::filesystem_rejected)?
             .len();
         if actual_bytes != self.expected_stream_bytes {
             return Err(StorageError::StaleState);
@@ -3539,7 +3543,7 @@ impl BackupJob {
         output
             .file_mut()
             .seek(SeekFrom::Start(0))
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let trusted_key = BackupTrustKey::new(self.signing_key.public_key())?;
         let verified = verify_backup(
             output.file_mut(),
@@ -3565,7 +3569,7 @@ impl BackupJob {
         let published_bytes = published
             .file_mut()
             .metadata()
-            .map_err(|_| StorageError::FilesystemRejected)?
+            .map_err(crate::filesystem_rejected)?
             .len();
         if published_bytes != actual_bytes {
             return Err(StorageError::AuthenticationFailed);
@@ -3867,16 +3871,16 @@ pub(crate) mod tests {
         ) -> Result<Self, StorageError> {
             let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::current_dir()
-                .map_err(|_| StorageError::FilesystemRejected)?
+                .map_err(crate::filesystem_rejected)?
                 .join("target")
                 .join("engine-unit-tests")
                 .join(format!("{}-{sequence}", std::process::id()));
-            std::fs::create_dir_all(&path).map_err(|_| StorageError::FilesystemRejected)?;
+            std::fs::create_dir_all(&path).map_err(crate::filesystem_rejected)?;
             std::fs::set_permissions(
                 &path,
                 <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
             )
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
             let qualifications = vec![test_qualification(&path)?];
             let network = NetworkId::from_bytes([21; 32]);
             let server = ServerId::from_bytes([22; 16]);
@@ -4002,7 +4006,11 @@ pub(crate) mod tests {
         let target = match tuple.target {
             "x86_64-unknown-linux-gnu" => QualificationTarget::X86_64UnknownLinuxGnu,
             "aarch64-unknown-linux-gnu" => QualificationTarget::Aarch64UnknownLinuxGnu,
-            _ => return Err(StorageError::FilesystemRejected),
+            _ => {
+                return Err(StorageError::FilesystemRejected(
+                    crate::FilesystemCause::Unqualified,
+                ));
+            }
         };
         let mut cases = crate::REQUIRED_QUALIFICATION_CASES
             .iter()
@@ -4048,21 +4056,16 @@ pub(crate) mod tests {
     }
 
     fn directory_fingerprint(path: &Path) -> Result<DirectoryFingerprint, StorageError> {
-        let directory =
-            std::fs::symlink_metadata(path).map_err(|_| StorageError::FilesystemRejected)?;
+        let directory = std::fs::symlink_metadata(path).map_err(crate::filesystem_rejected)?;
         let mut entries = std::fs::read_dir(path)
-            .map_err(|_| StorageError::FilesystemRejected)?
+            .map_err(crate::filesystem_rejected)?
             .map(|entry| {
-                let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
-                let name = entry
-                    .file_name()
-                    .into_string()
-                    .map_err(|_| StorageError::FilesystemRejected)?;
-                let metadata = entry
-                    .metadata()
-                    .map_err(|_| StorageError::FilesystemRejected)?;
-                let bytes =
-                    std::fs::read(entry.path()).map_err(|_| StorageError::FilesystemRejected)?;
+                let entry = entry.map_err(crate::filesystem_rejected)?;
+                let name = entry.file_name().into_string().map_err(|_| {
+                    StorageError::FilesystemRejected(crate::FilesystemCause::UnsafePath)
+                })?;
+                let metadata = entry.metadata().map_err(crate::filesystem_rejected)?;
+                let bytes = std::fs::read(entry.path()).map_err(crate::filesystem_rejected)?;
                 Ok(FileFingerprint {
                     name,
                     inode: metadata.ino(),
@@ -4766,12 +4769,12 @@ pub(crate) mod tests {
         let (writer, reader) = storage_limit_pair(initial);
         let mut fixture = EngineFixture::create()?;
         let backup_directory = fixture.path().join("live-limit-backups");
-        std::fs::create_dir(&backup_directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::create_dir(&backup_directory).map_err(crate::filesystem_rejected)?;
         std::fs::set_permissions(
             &backup_directory,
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         let engine = fixture.engine_mut()?;
         engine.runtime_limits = reader;
         engine.publish_runtime_facts();
@@ -5228,7 +5231,7 @@ pub(crate) mod tests {
         let expected = fixture.engine()?.startup_scan()?;
         drop(fixture.engine.take());
         let writer_lock = fixture.path.join("writer.lock");
-        std::fs::remove_file(&writer_lock).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::remove_file(&writer_lock).map_err(crate::filesystem_rejected)?;
         for name in [
             format!(".agenc-recovery-scratch-v1-{}", "a".repeat(32)),
             format!(".rollback.guard.agenc-tmp-v1-{}", "b".repeat(32)),
@@ -5238,7 +5241,7 @@ pub(crate) mod tests {
                 .create_new(true)
                 .mode(0o600)
                 .open(fixture.path.join(name))
-                .map_err(|_| StorageError::FilesystemRejected)?;
+                .map_err(crate::filesystem_rejected)?;
         }
         let before = directory_fingerprint(&fixture.path)?;
 
@@ -5287,8 +5290,7 @@ pub(crate) mod tests {
             faults.verify_fired()?;
             drop(fixture.engine.take());
             let guard_path = fixture.path.join("rollback.guard");
-            let guard_before =
-                std::fs::read(&guard_path).map_err(|_| StorageError::FilesystemRejected)?;
+            let guard_before = std::fs::read(&guard_path).map_err(crate::filesystem_rejected)?;
 
             let recovered = inspect_storage(inspection_config(&fixture.path)?)?;
             assert_eq!(
@@ -5296,7 +5298,7 @@ pub(crate) mod tests {
                 expected_commit_sequence
             );
             assert_eq!(
-                std::fs::read(guard_path).map_err(|_| StorageError::FilesystemRejected)?,
+                std::fs::read(guard_path).map_err(crate::filesystem_rejected)?,
                 guard_before
             );
         }
@@ -5972,12 +5974,12 @@ pub(crate) mod tests {
     fn active_backup_rejects_competing_backup_and_checkpoint_jobs() -> Result<(), StorageError> {
         let mut fixture = EngineFixture::create()?;
         let backup_directory = fixture.path.join("backups");
-        std::fs::create_dir(&backup_directory).map_err(|_| StorageError::FilesystemRejected)?;
+        std::fs::create_dir(&backup_directory).map_err(crate::filesystem_rejected)?;
         std::fs::set_permissions(
             &backup_directory,
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         let engine = fixture.engine_mut()?;
         engine.start_backup(
             BackupDestination::new(&backup_directory, "first.backup")?,

@@ -1866,9 +1866,15 @@ None blocks the core-v1 gate.
   upstream publication (STO-02) and integration (STO-03).
 - [x] Reverse restore-manifest traversal uses checked addition for its first
   sequence, preserving the existing guarded descending traversal.
-- [ ] `io_rejected` and `rustix_rejected` collapse every errno to
+- [x] `io_rejected` and `rustix_rejected` collapse every errno to
   `FilesystemRejected`, so a missing guard, EACCES, ENOSPC, and EIO are
-  indistinguishable to operators and tests.
+  indistinguishable to operators and tests. `FilesystemRejected` now carries
+  a closed `FilesystemCause` (missing state, permission, capacity,
+  unqualified, I/O failure, unsafe path, unknown) classified at the platform
+  and backup adapters from the raw errno and at every explicit policy check;
+  the outer Rejected/Indeterminate outcome never depends on it, the Display
+  and the `error=filesystem_<cause>` log label are fixed text, and the
+  operator guide maps each cause to an action.
 - [x] Channel body encoding and decoding validate topic text through the
   domain parser and require canonical typed masks in all three lists.
   Regressions reject controls, malformed masks and normalized aliases;

@@ -67,7 +67,7 @@ impl ConstructionDirectory {
         let parent_input = output_path.parent().ok_or(StorageError::InvalidEncoding)?;
         let parent_path = parent_input
             .canonicalize()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let canonical_output = parent_path.join(&output_name);
         let canonical_text = canonical_output
             .to_str()
@@ -80,15 +80,15 @@ impl ConstructionDirectory {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         require_kind_and_mode(&parent_fd, FileType::Directory, None)?;
         let output_exists = directory_exists(&parent_path.join(&output_name))?;
         let staging_exists = directory_exists(&parent_path.join(&staging_name))?;
         let phase = match (resume, staging_exists, output_exists) {
             (false, false, false) => {
                 mkdirat(&parent_fd, staging_name.as_str(), Mode::RWXU)
-                    .map_err(|_| StorageError::FilesystemRejected)?;
-                fsync(&parent_fd).map_err(|_| StorageError::FilesystemRejected)?;
+                    .map_err(crate::filesystem_rejected)?;
+                fsync(&parent_fd).map_err(crate::filesystem_rejected)?;
                 ConstructionDirectoryPhase::Staging
             }
             (true, true, false) => ConstructionDirectoryPhase::Staging,
@@ -105,7 +105,7 @@ impl ConstructionDirectory {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         require_kind_and_mode(&selected, FileType::Directory, Some(Mode::RWXU))?;
         Ok(Self {
             parent: File::from(parent_fd),
@@ -160,10 +160,10 @@ impl ConstructionDirectory {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         match unlinkat(&staging, CONSTRUCTION_PLAN_FILE, AtFlags::empty()) {
             Ok(()) | Err(Errno::NOENT) => {}
-            Err(_) => return Err(StorageError::FilesystemRejected),
+            Err(error) => return Err(crate::filesystem_rejected(error)),
         }
         let plan = openat(
             &staging,
@@ -171,9 +171,9 @@ impl ConstructionDirectory {
             OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         require_kind_and_mode(&plan, FileType::RegularFile, Some(Mode::RUSR | Mode::WUSR))?;
-        fsync(&staging).map_err(|_| StorageError::FilesystemRejected)?;
+        fsync(&staging).map_err(crate::filesystem_rejected)?;
         self.faults.check(
             StorageFaultSite::ConstructionPlanRebuild,
             StorageFaultBoundary::After,
@@ -192,10 +192,10 @@ impl ConstructionDirectory {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         unlinkat(&staging, CONSTRUCTION_PLAN_FILE, AtFlags::empty())
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        fsync(&staging).map_err(|_| StorageError::FilesystemRejected)
+            .map_err(crate::filesystem_rejected)?;
+        fsync(&staging).map_err(crate::filesystem_rejected)
     }
 
     /// Creates an unlinked mode-0600 scratch file inside the validated parent directory.
@@ -212,10 +212,10 @@ impl ConstructionDirectory {
             OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         let unlinked = unlinkat(&self.parent, name.as_str(), AtFlags::empty());
         require_kind_and_mode(&file, FileType::RegularFile, Some(Mode::RUSR | Mode::WUSR))?;
-        unlinked.map_err(|_| StorageError::FilesystemRejected)?;
+        unlinked.map_err(crate::filesystem_rejected)?;
         Ok(File::from(file))
     }
 
@@ -236,7 +236,7 @@ impl ConstructionDirectory {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         require_kind_and_mode(&staging, FileType::Directory, Some(Mode::RWXU))?;
         validate_completed_membership(&self.selected_path())?;
         let database = open_regular(&staging, DATABASE_FILE)?;
@@ -246,10 +246,10 @@ impl ConstructionDirectory {
         writer_lock
             .try_lock()
             .map_err(|_| StorageError::WriterLocked)?;
-        fsync(&database).map_err(|_| StorageError::FilesystemRejected)?;
-        fsync(&guard).map_err(|_| StorageError::FilesystemRejected)?;
-        fsync(&writer_lock).map_err(|_| StorageError::FilesystemRejected)?;
-        fsync(&staging).map_err(|_| StorageError::FilesystemRejected)?;
+        fsync(&database).map_err(crate::filesystem_rejected)?;
+        fsync(&guard).map_err(crate::filesystem_rejected)?;
+        fsync(&writer_lock).map_err(crate::filesystem_rejected)?;
+        fsync(&staging).map_err(crate::filesystem_rejected)?;
         self.faults.check(
             StorageFaultSite::ConstructionDirectoryRename,
             StorageFaultBoundary::Before,
@@ -261,15 +261,17 @@ impl ConstructionDirectory {
             self.output_name.as_str(),
             RenameFlags::NOREPLACE,
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         self.faults.check(
             StorageFaultSite::ConstructionDirectoryRename,
             StorageFaultBoundary::After,
         )?;
-        fsync(&self.parent).map_err(|_| StorageError::FilesystemRejected)?;
+        fsync(&self.parent).map_err(crate::filesystem_rejected)?;
         let output = self.output_path();
         if !directory_exists(&output)? {
-            return Err(StorageError::FilesystemRejected);
+            return Err(StorageError::FilesystemRejected(
+                crate::FilesystemCause::MissingState,
+            ));
         }
         Ok(output)
     }
@@ -291,9 +293,11 @@ fn directory_exists(path: &Path) -> Result<bool, StorageError> {
         Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
             Ok(true)
         }
-        Ok(_) => Err(StorageError::FilesystemRejected),
+        Ok(_) => Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::UnsafePath,
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(StorageError::FilesystemRejected),
+        Err(error) => Err(crate::filesystem_rejected(error)),
     }
 }
 
@@ -304,7 +308,7 @@ fn open_regular(directory: &OwnedFd, name: &str) -> Result<OwnedFd, StorageError
         OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|_| StorageError::FilesystemRejected)?;
+    .map_err(crate::filesystem_rejected)?;
     require_kind_and_mode(&file, FileType::RegularFile, Some(Mode::RUSR | Mode::WUSR))?;
     Ok(file)
 }
@@ -327,23 +331,27 @@ fn require_kind_and_mode(
     expected_kind: FileType,
     expected_mode: Option<Mode>,
 ) -> Result<(), StorageError> {
-    let status = fstat(file).map_err(|_| StorageError::FilesystemRejected)?;
+    let status = fstat(file).map_err(crate::filesystem_rejected)?;
     let actual_mode = Mode::from_raw_mode(status.st_mode);
-    if (
-        FileType::from_raw_mode(status.st_mode),
-        expected_mode.is_none_or(|mode| actual_mode & Mode::RWXU == mode),
-        actual_mode.intersects(Mode::RWXG | Mode::RWXO),
-    ) != (expected_kind, true, false)
+    if FileType::from_raw_mode(status.st_mode) != expected_kind {
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::UnsafePath,
+        ));
+    }
+    if !expected_mode.is_none_or(|mode| actual_mode & Mode::RWXU == mode)
+        || actual_mode.intersects(Mode::RWXG | Mode::RWXO)
     {
-        return Err(StorageError::FilesystemRejected);
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::PermissionRejected,
+        ));
     }
     Ok(())
 }
 
 fn validate_completed_membership(path: &Path) -> Result<(), StorageError> {
     let mut names = Vec::with_capacity(3);
-    for entry in read_dir(path).map_err(|_| StorageError::FilesystemRejected)? {
-        let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
+    for entry in read_dir(path).map_err(crate::filesystem_rejected)? {
+        let entry = entry.map_err(crate::filesystem_rejected)?;
         let name = entry
             .file_name()
             .into_string()
@@ -379,9 +387,9 @@ mod tests {
                 "agenc-construction-directory-{label}-{}-{sequence}",
                 std::process::id()
             ));
-            fs::create_dir(&path).map_err(|_| StorageError::FilesystemRejected)?;
+            fs::create_dir(&path).map_err(crate::filesystem_rejected)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-                .map_err(|_| StorageError::FilesystemRejected)?;
+                .map_err(crate::filesystem_rejected)?;
             Ok(Self(path))
         }
 
@@ -402,7 +410,7 @@ mod tests {
             .create_new(true)
             .mode(0o600)
             .open(path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         Ok(())
     }
 
@@ -422,10 +430,10 @@ mod tests {
         assert!(!directory_exists(&directory.path().join("missing"))?);
         let file = directory.path().join("file");
         private_file(&file)?;
-        assert_eq!(
+        assert!(matches!(
             directory_exists(&file),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
         assert!(directory_exists(directory.path())?);
         Ok(())
     }
@@ -471,7 +479,7 @@ mod tests {
 
         let staging_name = ".output.agenc-construction-v1";
         fs::rename(parent.path().join(staging_name), &output)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let installed = ConstructionDirectory::open(&output, true)?;
         assert_eq!(installed.phase(), ConstructionDirectoryPhase::Installed);
         assert!(matches!(
@@ -494,13 +502,11 @@ mod tests {
         let output = parent.path().join("output");
         let directory = ConstructionDirectory::open(&output, false)?;
         let file = directory.anonymous_plan_file()?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+        let metadata = file.metadata().map_err(crate::filesystem_rejected)?;
         assert_eq!(metadata.mode() & 0o777, 0o600);
         assert_eq!(metadata.nlink(), 0);
-        for entry in read_dir(parent.path()).map_err(|_| StorageError::FilesystemRejected)? {
-            let entry = entry.map_err(|_| StorageError::FilesystemRejected)?;
+        for entry in read_dir(parent.path()).map_err(crate::filesystem_rejected)? {
+            let entry = entry.map_err(crate::filesystem_rejected)?;
             assert!(
                 !entry
                     .file_name()
@@ -520,18 +526,18 @@ mod tests {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| StorageError::FilesystemRejected)?;
+        .map_err(crate::filesystem_rejected)?;
         require_kind_and_mode(&fd, FileType::Directory, Some(Mode::RWXU))?;
-        assert_eq!(
+        assert!(matches!(
             require_kind_and_mode(&fd, FileType::RegularFile, Some(Mode::RWXU)),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o750))
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        assert_eq!(
+            .map_err(crate::filesystem_rejected)?;
+        assert!(matches!(
             require_kind_and_mode(&fd, FileType::Directory, Some(Mode::RWXU)),
-            Err(StorageError::FilesystemRejected)
-        );
+            Err(StorageError::FilesystemRejected(_))
+        ));
         Ok(())
     }
 }

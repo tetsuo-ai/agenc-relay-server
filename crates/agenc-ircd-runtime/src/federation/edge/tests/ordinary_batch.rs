@@ -260,11 +260,15 @@ async fn rejected_ordinary_prefix_publishes_nothing_and_replays_exactly() -> Tes
         .core
         .state_mut()?
         .reject_fixture_batch_before_submission(
-            agenc_ircd_storage::StorageError::FilesystemRejected,
+            agenc_ircd_storage::StorageError::FilesystemRejected(
+                agenc_ircd_storage::FilesystemCause::IoFailure,
+            ),
         )?;
     fixture.edge.batch_rejected_with_error(
         fixture.core.context_mut()?,
-        agenc_ircd_storage::StorageError::FilesystemRejected,
+        agenc_ircd_storage::StorageError::FilesystemRejected(
+            agenc_ircd_storage::FilesystemCause::IoFailure,
+        ),
     );
     assert_outputs(&fixture.sink, 1);
     assert_eq!(fixture.head()?, head);

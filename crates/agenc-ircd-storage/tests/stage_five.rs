@@ -97,7 +97,7 @@ fn expected_backup_flip_rejections(offset: usize) -> &'static [StorageError] {
         // envelopes validate their fields, and every other flip fails authentication or
         // the StateMeta cross-check.
         &[
-            StorageError::FilesystemRejected,
+            StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
             StorageError::InvalidEncoding,
             StorageError::UnsupportedVersion,
             StorageError::LimitExceeded,
@@ -345,10 +345,10 @@ fn storage_engine_limits_enforce_the_appendix_c_profile() {
 #[test]
 fn backup_output_rejects_paths_and_cleans_unpublished_files() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::create()?;
-    assert_eq!(
+    assert!(matches!(
         BackupDestination::new(directory.path(), "../escape").err(),
-        Some(StorageError::FilesystemRejected)
-    );
+        Some(StorageError::FilesystemRejected(_))
+    ));
     let destination = BackupDestination::new(directory.path(), "unused.backup")?;
     assert_eq!(fs::read_dir(directory.path())?.count(), 0);
     drop(destination);
@@ -962,16 +962,18 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         let candidate = backup_bytes
             .get(..length)
             .ok_or_else(|| std::io::Error::other("backup truncation is out of range"))?;
-        assert_eq!(
-            verify_backup(
-                candidate,
-                &StorageMasterKey::from_bytes([19; 32]),
-                &RollbackGuardRootKey::from_bytes([20; 32]),
-                &[trusted],
-                limits.backup_max_bytes,
-            )
-            .err(),
-            Some(StorageError::FilesystemRejected),
+        assert!(
+            matches!(
+                verify_backup(
+                    candidate,
+                    &StorageMasterKey::from_bytes([19; 32]),
+                    &RollbackGuardRootKey::from_bytes([20; 32]),
+                    &[trusted],
+                    limits.backup_max_bytes,
+                )
+                .err(),
+                Some(StorageError::FilesystemRejected(_))
+            ),
             "truncation at {length}"
         );
     }
@@ -996,7 +998,7 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         );
     }
     let replacement = BackupDestination::new(directory.path(), "verified.backup")?;
-    assert_eq!(
+    assert!(matches!(
         port.try_backup(
             replacement,
             Ed25519SecretKey::from_bytes([22; 32]),
@@ -1005,8 +1007,8 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         )?
         .wait()
         .err(),
-        Some(StorageError::FilesystemRejected)
-    );
+        Some(StorageError::FilesystemRejected(_))
+    ));
     assert!(fs::read_dir(directory.path())?.all(|entry| {
         entry
             .ok()

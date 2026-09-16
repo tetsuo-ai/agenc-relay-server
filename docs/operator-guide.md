@@ -60,6 +60,18 @@ agenc-ircd check-config --config /etc/agenc-ircd/config.toml
 
 The command parses the complete document, opens every configured secret under the protected-file rules, reconstructs the authenticated database through a read-only handle, checks the database identity, and prints the observed host controls. It does not create the writer lock, repair the database, replace the rollback guard, or remove stale temporary files. Exit status 2 means at least one required control was observed absent. An unreadable control is reported as unknown instead of present.
 
+A storage refusal names its closed cause after the fixed text `filesystem policy rejected storage:`; the same label appears as `error=filesystem_<cause>` on the daemon's log events. The cause is diagnostic only: it never changes whether an operation was refused, committed, or left indeterminate, and it never carries a path, an errno string, or content.
+
+| Cause | Meaning | Action |
+| --- | --- | --- |
+| `missing_state` | a required entry (rollback guard, database, lock, directory, plan) is absent | do not create or regenerate it by hand; restore from a verified backup into a new directory, or run the stopped construction command that owns it |
+| `permission_rejected` | ownership, mode, or an access check refused the entry | fix the owner and mode to the documented values (directories 0700, secrets 0600, owned by the service account or root); never widen the checks |
+| `insufficient_capacity` | the free-space reserve, quota, or configured ceiling is exhausted | free space or raise the ceiling within its table range after a fresh free-space check; an uncertain write that hit this cause still requires the normal stop and reopen |
+| `unqualified` | the filesystem, mount, target, or measured tuple is not the qualified one | move the state to a qualified ext4 mount or re-run the storage qualification on this host |
+| `io_failure` | the kernel reported an input/output error | treat the device as failing; preserve evidence and restore elsewhere |
+| `unsafe_path` | the path, name, link count, type, or filesystem boundary is unsafe | remove the symlink, foreign file, or cross-filesystem layout; the daemon never follows or replaces it |
+| `unknown` | an operating-system error outside the classified set | read the kernel and service-manager logs; the daemon keeps no raw error text |
+
 Run the stopped-node commands either as the service account or as root. As the service account (for example through `runuser -u agenc-ircd -- agenc-ircd check-config --config /etc/agenc-ircd/config.toml`) the command trusts the account's own files. As root, name the service account explicitly so its material is trusted without weakening any other file check:
 
 ```sh

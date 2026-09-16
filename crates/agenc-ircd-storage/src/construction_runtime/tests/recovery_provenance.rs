@@ -86,7 +86,7 @@ fn plan_rows(rows: &[RecoveryRow]) -> Result<Vec<StorageConstructionPlanEntry>, 
         }
         Ok(entries)
     })();
-    std::fs::remove_file(path).map_err(|_| StorageError::FilesystemRejected)?;
+    std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
     result
 }
 

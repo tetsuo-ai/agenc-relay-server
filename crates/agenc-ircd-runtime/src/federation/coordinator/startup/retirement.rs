@@ -192,7 +192,7 @@ fn retryable(error: StorageError) -> bool {
         StorageError::AllocationFailed
             | StorageError::QueueFull
             | StorageError::LimitExceeded
-            | StorageError::FilesystemRejected
+            | StorageError::FilesystemRejected(_)
             | StorageError::DatabaseRejected
     )
 }

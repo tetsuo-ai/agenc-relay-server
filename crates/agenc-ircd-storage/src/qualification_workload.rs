@@ -204,15 +204,25 @@ fn qualify_inner(
 }
 
 fn require_empty_private_directory(path: &Path) -> Result<(), StorageError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| StorageError::FilesystemRejected)?;
-    if !metadata.is_dir()
-        || metadata.permissions().mode() & 0o777 != 0o700
-        || fs::read_dir(path)
-            .map_err(|_| StorageError::FilesystemRejected)?
-            .next()
-            .is_some()
+    let metadata = fs::symlink_metadata(path).map_err(crate::filesystem_rejected)?;
+    if !metadata.is_dir() {
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::UnsafePath,
+        ));
+    }
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::PermissionRejected,
+        ));
+    }
+    if fs::read_dir(path)
+        .map_err(crate::filesystem_rejected)?
+        .next()
+        .is_some()
     {
-        return Err(StorageError::FilesystemRejected);
+        return Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::UnsafePath,
+        ));
     }
     Ok(())
 }
@@ -784,14 +794,12 @@ impl Ballast {
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|_| StorageError::FilesystemRejected)?;
+            .map_err(crate::filesystem_rejected)?;
         let ballast = Self { path, bytes };
-        fallocate(&file, FallocateFlags::empty(), 0, bytes)
-            .map_err(|_| StorageError::FilesystemRejected)?;
-        file.sync_all()
-            .map_err(|_| StorageError::FilesystemRejected)?;
+        fallocate(&file, FallocateFlags::empty(), 0, bytes).map_err(crate::filesystem_rejected)?;
+        file.sync_all().map_err(crate::filesystem_rejected)?;
         Ok(Some(ballast))
     }
 }
@@ -874,9 +882,9 @@ impl BoundaryDatabase {
         let directory = request.scratch_directory.join("boundary-state");
         let backups = request.scratch_directory.join("boundary-backups");
         for path in [&directory, &backups] {
-            fs::create_dir(path).map_err(|_| StorageError::FilesystemRejected)?;
+            fs::create_dir(path).map_err(crate::filesystem_rejected)?;
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                .map_err(|_| StorageError::FilesystemRejected)?;
+                .map_err(crate::filesystem_rejected)?;
         }
         let probe = Arc::new(StorageGrowthProbe::new(&directory)?);
         let identity = Identity::random()?;
@@ -984,7 +992,7 @@ fn boundary_case(
         let after = allocated_directory_bytes(&database.directory)?;
         let (admitted, step) = match outcome.admission {
             Ok(()) => (true, "admitted"),
-            Err(StorageError::FilesystemRejected) => (false, outcome.step),
+            Err(StorageError::FilesystemRejected(_)) => (false, outcome.step),
             Err(error) => {
                 log.line(&format!(
                     "boundary-error|{name}|{attempt}|{}|{error}",
@@ -998,7 +1006,7 @@ fn boundary_case(
             // The shutdown checkpoint is itself admitted against the reserve, so
             // a boundary session that admitted its one write refuses it; the
             // next open reconciles and checkpoints under the normal reserve.
-            Err(StorageError::FilesystemRejected) => "checkpoint-refused",
+            Err(StorageError::FilesystemRejected(_)) => "checkpoint-refused",
             Err(error) => {
                 log.line(&format!("boundary-error|{name}|{attempt}|shutdown|{error}"));
                 return Err(error);

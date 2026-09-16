@@ -53,7 +53,7 @@ fn require_refusal(directory: &TestDirectory) -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .err()
                 .and_then(|error| error.downcast_ref::<StorageError>()),
-            Some(StorageError::FilesystemRejected)
+            Some(StorageError::FilesystemRejected(_))
         ),
         "unexpected initialization outcome: {outcome:?}"
     );

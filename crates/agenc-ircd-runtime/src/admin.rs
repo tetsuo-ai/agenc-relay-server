@@ -2549,7 +2549,7 @@ fn map_backup_failure(error: StorageError) -> AdminCoreFailure {
         | StorageError::AuthenticationFailed
         | StorageError::StaleState
         | StorageError::Unavailable
-        | StorageError::FilesystemRejected
+        | StorageError::FilesystemRejected(_)
         | StorageError::WriterLocked
         | StorageError::DatabaseRejected
         | StorageError::ResumeMismatch => AdminCoreFailure::StorageUnavailable,
@@ -2823,10 +2823,12 @@ mod tests {
                 "agenc-admin-backup-{}-{sequence}",
                 std::process::id()
             ));
-            fs::create_dir(&path)
-                .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-                .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
+            fs::create_dir(&path).map_err(|error| {
+                RuntimeError::Storage(agenc_ircd_storage::filesystem_rejected(error))
+            })?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                RuntimeError::Storage(agenc_ircd_storage::filesystem_rejected(error))
+            })?;
             Ok(Self(path))
         }
     }
@@ -2916,10 +2918,14 @@ mod tests {
             .create_new(true)
             .mode(0o600)
             .open(directory.0.join(name))
-            .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
+            .map_err(|error| {
+                RuntimeError::Storage(agenc_ircd_storage::filesystem_rejected(error))
+            })?;
         candidate
             .write_all(b"not a signed backup")
-            .map_err(|_| RuntimeError::Storage(StorageError::FilesystemRejected))?;
+            .map_err(|error| {
+                RuntimeError::Storage(agenc_ircd_storage::filesystem_rejected(error))
+            })?;
         drop(candidate);
 
         assert!(backup_reconciliation_job(&directory, 7, 50)?.run().is_err());
@@ -4642,7 +4648,7 @@ mod tests {
             StorageError::AuthenticationFailed,
             StorageError::StaleState,
             StorageError::Unavailable,
-            StorageError::FilesystemRejected,
+            StorageError::FilesystemRejected(agenc_ircd_storage::FilesystemCause::IoFailure),
             StorageError::WriterLocked,
             StorageError::DatabaseRejected,
             StorageError::ResumeMismatch,
