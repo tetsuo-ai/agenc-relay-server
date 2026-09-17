@@ -114,7 +114,12 @@ fn independent_root(conversation: [u8; 32]) -> TestResult<Harness> {
     independent_root_with_group(conversation, SUCCESSOR_GROUP)
 }
 
-fn independent_root_with_group(conversation: [u8; 32], group: [u8; 32]) -> TestResult<Harness> {
+/// A harness with `#room` and an independent `#other` conversation of
+/// `group`, both bound with their policies and leaf-zero proofs.
+pub(in crate::e2ee::coordinator::tests::sequence) fn independent_root_with_group(
+    conversation: [u8; 32],
+    group: [u8; 32],
+) -> TestResult<Harness> {
     let mut harness = Harness::new()?;
     harness.bind_channel()?;
     let (package, initial, operational) = independent_package(&harness, conversation, group)?;
@@ -133,6 +138,7 @@ fn independent_root_with_group(conversation: [u8; 32], group: [u8; 32]) -> TestR
     ok(harness.run(Op::BindGroup, &parameters, Some(&bytes))?)?;
     harness.publish_policy(conversation, &initial)?;
     harness.publish_policy(conversation, &operational)?;
+    harness.publish_leaf_zero(conversation)?;
     Ok(harness)
 }
 

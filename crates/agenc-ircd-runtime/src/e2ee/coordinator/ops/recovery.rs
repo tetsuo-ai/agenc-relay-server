@@ -28,7 +28,8 @@ pub(super) fn admit(exec: &Exec<'_>) -> Result<(), Fail> {
         | Op::SubmitAbort
         | Op::SubmitReinitAck
         | Op::SubmitReinitAbort
-        | Op::SubmitPolicy => direct_mutation(exec),
+        | Op::SubmitPolicy
+        | Op::SubmitMembership => direct_mutation(exec),
         Op::SubmitReinitAttempt | Op::SubmitReinitActivate => reinit(exec),
         Op::ReserveChannel => reserve_channel(exec),
         Op::ReserveDirect => reserve_direct(exec),

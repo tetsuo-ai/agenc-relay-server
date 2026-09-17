@@ -7,7 +7,7 @@ use crate::limits::{
     MAX_APPLICATION_MLS_OBJECT, MAX_BINDING_OBJECT, MAX_LIVE_OBJECT, MAX_WELCOME_MAILBOX_OBJECT,
 };
 
-const CLIENT_CARRIERS: [CarrierCommand; 21] = [
+const CLIENT_CARRIERS: [CarrierCommand; 22] = [
     CarrierCommand::Tagmsg,
     CarrierCommand::Edirect,
     CarrierCommand::SubmitCandidate,
@@ -20,6 +20,7 @@ const CLIENT_CARRIERS: [CarrierCommand; 21] = [
     CarrierCommand::SubmitReinitActivate,
     CarrierCommand::SubmitReinitAbort,
     CarrierCommand::SubmitPolicy,
+    CarrierCommand::SubmitMembership,
     CarrierCommand::Bind,
     CarrierCommand::Close,
     CarrierCommand::PublishIdentity,
@@ -59,6 +60,12 @@ fn every_client_carrier_accepts_exactly_its_matrix_kinds() {
     assert!(!CarrierCommand::Tagmsg.accepts(IrcWireObjectKind::CommitMls));
     assert!(!CarrierCommand::Edirect.accepts(IrcWireObjectKind::CommitMls));
     assert!(CarrierCommand::SubmitCandidate.accepts(IrcWireObjectKind::CommitMls));
+    assert_eq!(
+        CarrierCommand::SubmitMembership.accepted_kinds(),
+        &[IrcWireObjectKind::LeafMembershipProof]
+    );
+    assert_eq!(CarrierCommand::SubmitMembership.limit().max_bytes, 8_192);
+    assert!(!CarrierCommand::SubmitMembership.is_live());
 }
 
 #[test]

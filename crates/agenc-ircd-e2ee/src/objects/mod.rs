@@ -17,6 +17,7 @@ pub mod content;
 pub mod conversation;
 pub mod federation;
 pub mod identity;
+pub mod membership;
 pub mod recovery;
 pub mod reinit;
 pub mod sequencing;
@@ -138,6 +139,8 @@ pub enum TypedBody {
     FederationEvent(Box<federation::IrcFederationEvent>),
     /// `IrcPolicy`.
     Policy(Box<conversation::IrcPolicy>),
+    /// `IrcLeafMembershipProof`.
+    LeafMembershipProof(Box<membership::IrcLeafMembershipProof>),
 }
 
 fn typed<T: TlsDecode>(body: &[u8], budget: &mut DecodeBudget) -> Result<Box<T>, E2eeError> {
@@ -156,7 +159,7 @@ fn private_message(
 }
 
 /// Decodes the body of `object` as exactly the type its kind names.
-// agenc-review: focus owner=e2ee reviewed=2026-09-03 reason=one closed thirty-three-arm dispatch table mirrors the Section 11.4 kind matrix in place
+// agenc-review: focus owner=e2ee reviewed=2026-09-03 reason=one closed thirty-five-arm dispatch table mirrors the Section 11.4 kind matrix in place
 pub fn decode_body(
     object: &IrcWireObject,
     budget: &mut DecodeBudget,
@@ -224,6 +227,9 @@ pub fn decode_body(
         IrcWireObjectKind::FederationResult => TypedBody::FederationResult(typed(body, budget)?),
         IrcWireObjectKind::FederationEvent => TypedBody::FederationEvent(typed(body, budget)?),
         IrcWireObjectKind::Policy => TypedBody::Policy(typed(body, budget)?),
+        IrcWireObjectKind::LeafMembershipProof => {
+            TypedBody::LeafMembershipProof(typed(body, budget)?)
+        }
     })
 }
 
@@ -266,6 +272,7 @@ impl TypedBody {
             Self::FederationResult(_) => IrcWireObjectKind::FederationResult,
             Self::FederationEvent(_) => IrcWireObjectKind::FederationEvent,
             Self::Policy(_) => IrcWireObjectKind::Policy,
+            Self::LeafMembershipProof(_) => IrcWireObjectKind::LeafMembershipProof,
         }
     }
 }

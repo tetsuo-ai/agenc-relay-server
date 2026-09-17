@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 //! A real-signature conversation log: the pinned genesis authority plus a
 //! sequencer that signs records at exact positions, controllers that approve
-//! authorizations, and council devices that vote. Inner MLS evidence
-//! (ACK leaf signatures, digests, Commit bytes) stays synthetic; every
-//! outer signature and identifier the verifier checks is real.
+//! authorizations, and council devices that vote. ACKs carry real old-leaf
+//! signatures (creator leaf key 150, joiner leaf key 151) so supplied
+//! leaf-membership facts can authenticate them; other inner MLS evidence
+//! (digests, Commit bytes) stays synthetic.
 
 use agenc_ircd_crypto::{SemanticHashDomain, SignatureDomain};
 use agenc_ircd_e2ee::finality::{ReinitVoteSlot, Terminal, VoteSlot, reinit_vote_tbs, vote_tbs};
@@ -28,6 +29,10 @@ pub(super) const GROUP: [u8; 32] = [25; 32];
 pub(super) const SEQUENCER_SEED: u8 = 60;
 /// Inside every roster and credential interval of the fixture.
 pub(super) const VALIDATION_TIME: u64 = 150;
+/// The old leaf key of leaf 0, held by device 7 of `ACCOUNT`.
+pub(super) const CREATOR_LEAF_SEED: u8 = 150;
+/// The old leaf key of leaf 1, held by device 9 of `OTHER`.
+pub(super) const JOINER_LEAF_SEED: u8 = 151;
 
 pub(super) fn budget() -> DecodeBudget {
     DecodeBudget::new(64 * 1024 * 1024, 1 << 18)
@@ -440,6 +445,14 @@ impl Log {
             },
             old_leaf_signature: Opaque::new(vec![57; 64])?,
         };
+        let ack = IrcCommitAck {
+            old_leaf_signature: Opaque::from_slice(&sign(
+                &key(CREATOR_LEAF_SEED),
+                SignatureDomain::CommitProcessed,
+                &ack.tbs,
+            )?)?,
+            tbs: ack.tbs,
+        };
         let core = IrcFinalizationCoreTbs {
             profile_version: 1,
             network_id: NETWORK,
@@ -762,6 +775,21 @@ impl Log {
             },
             old_leaf_signature: Opaque::new(vec![89; 64])?,
         })
+        .and_then(|ack| {
+            let seed = if creator {
+                CREATOR_LEAF_SEED
+            } else {
+                JOINER_LEAF_SEED
+            };
+            Ok(IrcReInitAck {
+                old_leaf_signature: Opaque::from_slice(&sign(
+                    &key(seed),
+                    SignatureDomain::ReinitProcessed,
+                    &ack.tbs,
+                )?)?,
+                tbs: ack.tbs,
+            })
+        })
     }
 
     pub(super) fn reinit_activation(
@@ -997,4 +1025,62 @@ pub(super) fn adopt(
     record: &Built,
 ) -> Result<agenc_ircd_e2ee::history::ChainStep, E2eeError> {
     chain.advance(&record.bytes, &RecordReferences::default(), &mut budget())
+}
+
+/// One old leaf a principal's device attests to: principal index, device
+/// seed, leaf key seed, leaf index, and old credential hash.
+pub(super) type Leaf = (usize, u8, u8, u32, [u8; 32]);
+
+/// The validated leaf-membership facts for `leaves` at epoch zero, each
+/// proof verified under its principal's genesis root and roster.
+pub(super) fn memberships(
+    genesis: &Genesis,
+    leaves: &[Leaf],
+) -> Result<agenc_ircd_e2ee::membership::LeafMembershipSet, Box<dyn std::error::Error>> {
+    use agenc_ircd_e2ee::identity::{verify_root_identity, verify_roster};
+    use agenc_ircd_e2ee::membership::verify_leaf_membership_proof;
+    use agenc_ircd_e2ee::objects::membership::{
+        IrcLeafDispositionKind, IrcLeafMembershipProof, IrcLeafMembershipProofTbs,
+    };
+    let mut set = agenc_ircd_e2ee::membership::LeafMembershipSet::default();
+    for (index, device, leaf_seed, leaf, credential) in leaves {
+        let principal = genesis.principal(*index)?;
+        let root = verify_root_identity(&NETWORK, &principal.root, None)?;
+        let roster = verify_roster(&root, &principal.roster, None)?;
+        let tbs = IrcLeafMembershipProofTbs {
+            profile_version: 1,
+            network_id: NETWORK,
+            conversation_id: genesis.conversation,
+            epoch: 0,
+            leaf_index: *leaf,
+            old_credential_hash: *credential,
+            leaf_signature_scheme: 0x0807,
+            leaf_signature_key: Opaque::from_slice(&public(&key(*leaf_seed)))?,
+            account_id: principal.root.tbs.account_id.clone(),
+            device_id: [*device; 16],
+            root_generation: principal.root.tbs.root_generation,
+            root_fingerprint: root_fingerprint(&principal.root)?,
+            roster_generation: principal.roster.tbs.roster_generation,
+            roster_id: roster_id(&principal.roster)?,
+            credential_generation: 0,
+            disposition: IrcLeafDispositionKind::Continuing,
+            removal_finalization_id: [0; 32],
+        };
+        let proof = IrcLeafMembershipProof {
+            device_signature: sign(&key(*device), SignatureDomain::LeafMembership, &tbs)?,
+            possession_signature: Opaque::from_slice(&sign(
+                &key(*leaf_seed),
+                SignatureDomain::LeafMembershipPossession,
+                &tbs,
+            )?)?,
+            tbs,
+        };
+        let verified =
+            verify_leaf_membership_proof(&NETWORK, &genesis.conversation, &proof, &root, &roster)
+                .map_err(|refusal| format!("{refusal:?}"))?;
+        let object_id =
+            *ObjectId::compute(&object(IrcWireObjectKind::LeafMembershipProof, &proof)?).as_bytes();
+        set.insert(object_id, verified);
+    }
+    Ok(set)
 }

@@ -3576,6 +3576,14 @@ leaf's signer. Those operation-matrix obligations remain open and require a
 validated device-to-leaf admission contract; account membership alone does
 not prove them.
 
+ENC-05 (issue #52) implements that contract through the companion 13.7.3
+leaf-membership proof: attempt and abort now require an old-group device,
+activation a continuing planned device with exact ACK coverage, and every
+standalone or embedded Commit and ReInit ACK a proof-identified, roster-active
+signer. The record and its evidence are in
+`docs/stage-10-leaf-membership.md`; four specification questions it exposed
+are issue #111.
+
 ### CAP-87: reconnect drops a closed origin while its journal write is unsettled
 
 The diagnostic campaign on checkpoint `52808b9` fails pressure recovery before

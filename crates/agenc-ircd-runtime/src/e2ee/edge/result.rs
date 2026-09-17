@@ -491,7 +491,9 @@ fn command_name(command: &Resolved) -> &'static str {
 
 fn store_kind(kind: IrcFederationStoreKind) -> Option<StoreKind> {
     Some(match kind {
-        IrcFederationStoreKind::StoreAuthorization | IrcFederationStoreKind::StorePolicy => {
+        IrcFederationStoreKind::StoreAuthorization
+        | IrcFederationStoreKind::StorePolicy
+        | IrcFederationStoreKind::StoreMembership => {
             return None;
         }
         IrcFederationStoreKind::StoreIdentity => StoreKind::Identity,
@@ -549,6 +551,9 @@ fn scalar_line(value: &ResultValue, pending: &PendingRequest) -> Option<SuccessL
         }
         ResultValue::Stored(IrcFederationStoreKind::StorePolicy, object) => {
             SuccessLine::StoredPolicy(route, subject, *object)
+        }
+        ResultValue::Stored(IrcFederationStoreKind::StoreMembership, object) => {
+            SuccessLine::StoredMembership(route, subject, *object)
         }
         ResultValue::Stored(kind, object) => SuccessLine::Stored(store_kind(*kind)?, *object),
         ResultValue::Triple(a, b, c) => SuccessLine::Acked(*a, *b, *c),

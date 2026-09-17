@@ -411,11 +411,18 @@ impl Harness {
     /// Runs the attach challenge and returns the new session generation
     /// with the attach object that finished it.
     fn attach(&mut self) -> TestResult<(u64, Vec<u8>)> {
-        let outcome = ok(self.run(Op::AttachBegin, &DEVICE_ID, None)?)?;
+        self.attach_as(DEVICE)
+    }
+
+    /// Attaches the principal's device `seed` to the origin in place of
+    /// the currently attached one.
+    fn attach_as(&mut self, seed: u8) -> TestResult<(u64, Vec<u8>)> {
+        let device_id = [seed; 16];
+        let outcome = ok(self.run(Op::AttachBegin, &device_id, None)?)?;
         let ResultBody::AttachChallenge(named, challenge_object) = outcome.result else {
             return Err("expected an attach challenge".into());
         };
-        assert_eq!(named, DEVICE_ID);
+        assert_eq!(named, device_id);
         let response = outcome.responses.first().ok_or("challenge response")?;
         assert_eq!(object_id(&response.bytes), challenge_object);
         let mut budget = DecodeBudget::new(1 << 16, 1 << 10);
@@ -427,7 +434,7 @@ impl Harness {
         let challenge = IrcDeviceAttachChallenge::decode_exact(object.body(), &mut budget)?;
         assert_eq!(challenge.tbs.connection_nonce, NONCE);
         let device_signature = sign(
-            &key(DEVICE),
+            &key(seed),
             SignatureDomain::DeviceAttachPossession,
             &challenge.tbs,
         )?;
@@ -438,17 +445,53 @@ impl Harness {
                 device_signature,
             },
         )?;
-        let outcome = ok(self.run(Op::AttachFinish, &DEVICE_ID, Some(&attach))?)?;
+        let outcome = ok(self.run(Op::AttachFinish, &device_id, Some(&attach))?)?;
         let ResultBody::Attached(named, generation) = outcome.result else {
             return Err("expected an attached result".into());
         };
-        assert_eq!(named, DEVICE_ID);
+        assert_eq!(named, device_id);
         // The edge follows with the base generation transition and the
         // EORIGIN UPDATE that carries the attachment; mirror its outcome.
         if let Some(origin) = self.coordinator.state.origins.get_mut(&origin_key()) {
-            origin.device = Some((DEVICE_ID, generation));
+            origin.device = Some((device_id, generation));
         }
         Ok((generation, attach))
+    }
+
+    /// Publishes one leaf-membership proof as the attached device and
+    /// returns its retained object identifier.
+    fn publish_membership(
+        &mut self,
+        conversation: [u8; 32],
+        proof: &agenc_ircd_e2ee::objects::membership::IrcLeafMembershipProof,
+    ) -> TestResult<[u8; 32]> {
+        let bytes = wire(IrcWireObjectKind::LeafMembershipProof, proof)?;
+        let outcome = ok(self.run(Op::SubmitMembership, &conversation, Some(&bytes))?)?;
+        assert_eq!(
+            outcome.result,
+            ResultBody::Stored(StoreKind::Membership, object_id(&bytes))
+        );
+        Ok(object_id(&bytes))
+    }
+
+    /// The attached device's continuing proof for old leaf `leaf_index`
+    /// under leaf key `leaf_seed`.
+    fn leaf_proof(
+        &self,
+        conversation: [u8; 32],
+        device: u8,
+        leaf_seed: u8,
+        leaf_index: u32,
+    ) -> TestResult<agenc_ircd_e2ee::objects::membership::IrcLeafMembershipProof> {
+        Ok(support::membership_proof(
+            &support::MembershipSpec::continuing(
+                &self.principal,
+                conversation,
+                device,
+                leaf_seed,
+                leaf_index,
+            ),
+        )?)
     }
 
     fn binding_bytes(&self) -> TestResult<Vec<u8>> {
@@ -469,15 +512,24 @@ impl Harness {
         wire(IrcWireObjectKind::ConversationBinding, &package)
     }
 
-    /// Binds the channel and publishes its two policies, as a client does
-    /// before its first Commit (companion 9.3).
+    /// Binds the channel and publishes its two policies and the attached
+    /// device's leaf-membership proof, as a client does before its first
+    /// Commit (companion 9.3 and 13.7.3).
     fn bind_channel(&mut self) -> TestResult<[u8; 32]> {
         let conversation = self.bind_channel_unpublished()?;
         let initial = self.initial_policy.clone();
         let operational = self.operational_policy.clone();
         self.publish_policy(conversation, &initial)?;
         self.publish_policy(conversation, &operational)?;
+        self.publish_leaf_zero(conversation)?;
         Ok(conversation)
+    }
+
+    /// The attached device holds old leaf 0 under `LEAF_SEED`; its proof
+    /// precedes every ACK it signs (companion 13.7.3).
+    fn publish_leaf_zero(&mut self, conversation: [u8; 32]) -> TestResult<[u8; 32]> {
+        let proof = self.leaf_proof(conversation, DEVICE, LEAF_SEED, 0)?;
+        self.publish_membership(conversation, &proof)
     }
 
     /// Publishes the principal, attaches its device, reserves the channel,

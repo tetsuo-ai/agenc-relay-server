@@ -193,6 +193,10 @@ fn keys_classify_by_prefix_and_lay_out_exactly() -> TestResult {
             DirectoryRow::binding_lock_key(&ACCOUNT, &[1; 32], 0)?,
             DIRECTORY_ROW_KIND,
         ),
+        (
+            SequencerRow::membership_key(&CONVERSATION, 0, &[1; 32])?,
+            SEQUENCER_ROW_KIND,
+        ),
         (PackageRow::package_key(&[1; 32])?, PACKAGE_ROW_KIND),
         (PackageRow::claim_key(&ACCOUNT, &[1; 16])?, PACKAGE_ROW_KIND),
         (AttachRow::key(&ACCOUNT, &DEVICE)?, ATTACH_ROW_KIND),
@@ -483,9 +487,29 @@ fn sequencer_rows_round_trip_and_keep_slot_invariants() -> TestResult {
         generation: 1,
         previous_policy_id: [9; 32],
     };
-    for row in [&record, &candidate, &proof, &policy] {
+    let membership = SequencerRow::Membership {
+        object_id: [11; 32],
+        epoch: 3,
+        device_id: DEVICE,
+        disposition: 1,
+    };
+    for row in [&record, &candidate, &proof, &policy, &membership] {
         assert_eq!(&SequencerRow::decode(&row.encode()?)?, row);
     }
+    let membership_key = SequencerRow::membership_key(&CONVERSATION, 7, &[12; 32])?;
+    assert!(membership.matches_key(&membership_key));
+    assert!(!policy.matches_key(&membership_key));
+    assert_eq!(
+        SequencerRow::parse_membership_key(&membership_key)?,
+        (CONVERSATION, 7, [12; 32])
+    );
+    let unknown_disposition = SequencerRow::Membership {
+        object_id: [11; 32],
+        epoch: 3,
+        device_id: DEVICE,
+        disposition: 3,
+    };
+    assert!(SequencerRow::decode(&unknown_disposition.encode()?).is_err());
     let policy_key = SequencerRow::policy_key(&CONVERSATION, &[10; 32])?;
     assert!(policy.matches_key(&policy_key));
     assert!(!proof.matches_key(&policy_key));

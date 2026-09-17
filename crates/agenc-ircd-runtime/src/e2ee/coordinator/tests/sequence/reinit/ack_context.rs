@@ -17,9 +17,8 @@ fn refuses(change: impl FnOnce(&mut IrcReInitAckTbs), expected: E2eeReplyCode) -
     ok(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
     let receipt = staged_receipt(&harness, conversation)?;
     let (mut ack, _) = ack(conversation, old_state, receipt.tbs.reinit_attempt_id)?;
-    // The key signs each TBS correctly; binding it to an authenticated old leaf
-    // is CAP-86's separate obligation and is not established by this fixture.
-    let secret = key(113);
+    // The changed TBS is re-signed by the leaf key the stored proof binds.
+    let secret = key(crate::e2ee::coordinator::tests::LEAF_SEED);
     ack.old_leaf_signature =
         Opaque::from_slice(&sign(&secret, SignatureDomain::ReinitProcessed, &ack.tbs)?)?;
     let valid = wire(IrcWireObjectKind::ReinitAck, &ack)?;
@@ -97,7 +96,7 @@ fn activation_case(
         change(&mut ack.tbs);
     }
     ack.old_leaf_signature = Opaque::from_slice(&sign(
-        &key(113),
+        &key(crate::e2ee::coordinator::tests::LEAF_SEED),
         SignatureDomain::ReinitProcessed,
         &ack.tbs,
     )?)?;
@@ -353,7 +352,7 @@ fn reinit_ack_refuses_a_missing_retained_attempt_before_writing() -> TestResult 
 
 #[test]
 fn reinit_ack_accepts_a_reserved_welcome_ref_and_refuses_an_unknown_ref() -> TestResult {
-    let mut harness = Harness::new()?;
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
     let conversation = harness.bind_channel()?;
     let old_state = *harness
         .coordinator
@@ -372,35 +371,31 @@ fn reinit_ack_accepts_a_reserved_welcome_ref_and_refuses_an_unknown_ref() -> Tes
         .clone();
     let mut joiner = creator.clone();
     joiner.creator = 0;
-    joiner.device_id = [88; 16];
+    joiner.device_id = [SECOND_DEVICE; 16];
     joiner.key_package_ref = Opaque::new(vec![88; 32])?;
     attempt.key_package_plan.entries = TlsVec::new(vec![creator, joiner])?;
     super::attempt_authority::authorize_attempt(&harness, &mut attempt)?;
     let bytes = wire(IrcWireObjectKind::ReinitAttempt, &attempt)?;
     ok(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
     let receipt = staged_receipt(&harness, conversation)?;
+    // The joiner device attests to old leaf 1 under its own leaf key.
+    harness.attach_as(SECOND_DEVICE)?;
+    let proof = harness.leaf_proof(conversation, SECOND_DEVICE, JOINER_LEAF_SEED, 1)?;
+    harness.publish_membership(conversation, &proof)?;
     let (mut ack, _) = ack(conversation, old_state, receipt.tbs.reinit_attempt_id)?;
-    // Public plan membership is tested here; the new entry is not an authenticated old leaf.
     ack.tbs.ack_kind = IrcReInitAckKind::WelcomeJoin;
     ack.tbs.old_leaf_index = 1;
-    ack.tbs.old_credential_hash = [88; 32];
+    ack.tbs.old_credential_hash = proof.tbs.old_credential_hash;
     ack.tbs.new_leaf_index = 1;
     ack.tbs.key_package_ref = Opaque::new(vec![88; 32])?;
-    ack.old_leaf_signature = Opaque::from_slice(&sign(
-        &key(113),
-        SignatureDomain::ReinitProcessed,
-        &ack.tbs,
-    )?)?;
+    let ack = signed_reinit_ack(ack, JOINER_LEAF_SEED)?;
     let bytes = wire(IrcWireObjectKind::ReinitAck, &ack)?;
     ok(harness.run(Op::SubmitReinitAck, &conversation, Some(&bytes))?)?;
     for reference in [Vec::new(), vec![99; 32], vec![14; 32]] {
-        ack.tbs.key_package_ref = Opaque::new(reference)?;
-        ack.old_leaf_signature = Opaque::from_slice(&sign(
-            &key(113),
-            SignatureDomain::ReinitProcessed,
-            &ack.tbs,
-        )?)?;
-        let bytes = wire(IrcWireObjectKind::ReinitAck, &ack)?;
+        let mut changed = ack.clone();
+        changed.tbs.key_package_ref = Opaque::new(reference)?;
+        let changed = signed_reinit_ack(changed, JOINER_LEAF_SEED)?;
+        let bytes = wire(IrcWireObjectKind::ReinitAck, &changed)?;
         let writes = harness.writes.len();
         assert_eq!(
             code(harness.run(Op::SubmitReinitAck, &conversation, Some(&bytes))?),
@@ -422,7 +417,7 @@ fn creator_ack_cannot_name_a_key_package_ref() -> TestResult {
     )?;
     ack.tbs.key_package_ref = Opaque::new(vec![14; 32])?;
     ack.old_leaf_signature = Opaque::from_slice(&sign(
-        &key(113),
+        &key(crate::e2ee::coordinator::tests::LEAF_SEED),
         SignatureDomain::ReinitProcessed,
         &ack.tbs,
     )?)?;

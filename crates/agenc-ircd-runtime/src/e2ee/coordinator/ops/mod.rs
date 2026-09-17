@@ -1,4 +1,4 @@
-//! The forty opcode handlers, grouped by the state they touch. Each handler
+//! The forty-one opcode handlers, grouped by the state they touch. Each handler
 //! reads the committed companion state, validates through the e2ee crate,
 //! and returns an [`Outcome`] whose rows and effects apply only when the
 //! batch commits.
@@ -22,6 +22,7 @@ pub mod mailbox;
 mod mailbox_grant;
 mod mailbox_recovery;
 pub(crate) mod mailbox_snapshot;
+pub mod membership;
 pub mod policy;
 mod recovery;
 mod recovery_read;
@@ -322,6 +323,7 @@ pub fn execute(exec: &mut Exec<'_>) -> Result<Prepared, Fail> {
         Op::FetchMailbox => mailbox::fetch_mailbox(exec),
         Op::AcknowledgeMailbox => mailbox::acknowledge_mailbox(exec),
         Op::SubmitPolicy => policy::submit_policy(exec),
+        Op::SubmitMembership => membership::submit_membership(exec),
     }?;
     super::recovery_gates::normal::prepare(exec, &mut outcome)?;
     Ok(Prepared::Complete(Box::new(outcome)))

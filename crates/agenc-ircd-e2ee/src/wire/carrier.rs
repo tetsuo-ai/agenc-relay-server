@@ -37,6 +37,8 @@ pub enum CarrierCommand {
     SubmitReinitAbort,
     /// `EGROUP SUBMIT POLICY`.
     SubmitPolicy,
+    /// `EGROUP SUBMIT MEMBERSHIP`.
+    SubmitMembership,
     /// `EGROUP BIND`.
     Bind,
     /// `EGROUP CLOSE`.
@@ -115,6 +117,7 @@ impl CarrierCommand {
             Self::SubmitReinitActivate => &[ReinitActivationRequest],
             Self::SubmitReinitAbort => &[ReinitAbortRequest],
             Self::SubmitPolicy => &[Policy],
+            Self::SubmitMembership => &[IrcWireObjectKind::LeafMembershipProof],
             Self::Bind | Self::DeliverBinding => &[ConversationBinding],
             Self::Close => &[CloseAuthorization],
             Self::PublishIdentity => &[RootIdentity],

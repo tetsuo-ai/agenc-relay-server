@@ -114,6 +114,8 @@ pub mod prefix {
     pub const VOTE: &[u8] = b"vote/v1/";
     /// Published policies retained for the sequencer's quorum check.
     pub const POLICY: &[u8] = b"policy/v1/";
+    /// Leaf-membership proofs retained to identify ACK signers (13.7.3).
+    pub const MEMBERSHIP: &[u8] = b"membership/v1/";
     /// Identity head rows.
     pub const IDENTITY: &[u8] = b"identity/v1/";
     /// Roster head rows.
@@ -151,7 +153,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 34] = [
+const PREFIX_KINDS: [(&[u8], u16); 35] = [
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -162,6 +164,7 @@ const PREFIX_KINDS: [(&[u8], u16); 34] = [
     (prefix::ACK, SEQUENCER_ROW_KIND),
     (prefix::VOTE, SEQUENCER_ROW_KIND),
     (prefix::POLICY, SEQUENCER_ROW_KIND),
+    (prefix::MEMBERSHIP, SEQUENCER_ROW_KIND),
     (prefix::IDENTITY, DIRECTORY_ROW_KIND),
     (prefix::ROSTER, DIRECTORY_ROW_KIND),
     (prefix::CAPABILITY, DIRECTORY_ROW_KIND),
@@ -368,6 +371,32 @@ fn take_bool(decoder: &mut Decoder<'_>) -> Result<bool, StorageError> {
         1 => Ok(true),
         _ => Err(StorageError::InvalidEncoding),
     }
+}
+
+fn encode_policy(
+    encoder: &mut Encoder,
+    object_id: &[u8; HASH_BYTES],
+    generation: u64,
+    previous_policy_id: &[u8; HASH_BYTES],
+) -> Result<(), StorageError> {
+    encoder.put_u16(POLICY_ARM)?;
+    encoder.put_fixed(object_id)?;
+    encoder.put_u64(generation)?;
+    encoder.put_fixed(previous_policy_id)
+}
+
+fn encode_membership(
+    encoder: &mut Encoder,
+    object_id: &[u8; HASH_BYTES],
+    epoch: u64,
+    device_id: &[u8; ID_BYTES],
+    disposition: u8,
+) -> Result<(), StorageError> {
+    encoder.put_u16(MEMBERSHIP_ARM)?;
+    encoder.put_fixed(object_id)?;
+    encoder.put_u64(epoch)?;
+    encoder.put_fixed(device_id)?;
+    encoder.put_u16(u16::from(disposition))
 }
 
 fn put_optional_hash(
@@ -836,12 +865,24 @@ pub enum SequencerRow {
         /// The predecessor policy identifier, all zero at generation zero.
         previous_policy_id: [u8; HASH_BYTES],
     },
+    /// One retained leaf-membership proof of an old leaf (companion 13.7.3).
+    Membership {
+        /// The retained `leaf_membership_proof` object identifier.
+        object_id: [u8; HASH_BYTES],
+        /// The MLS epoch the proof names.
+        epoch: u64,
+        /// The attesting device.
+        device_id: [u8; ID_BYTES],
+        /// `IrcLeafDispositionKind`: 1 continuing, 2 removed.
+        disposition: u8,
+    },
 }
 
 const RECORD_ARM: u16 = 1;
 const CANDIDATE_ARM: u16 = 2;
 const PROOF_ARM: u16 = 3;
 const POLICY_ARM: u16 = 4;
+const MEMBERSHIP_ARM: u16 = 5;
 
 impl SequencerRow {
     /// The `record/v1/<conversation-id><route-sequence>` key.
@@ -937,6 +978,39 @@ impl SequencerRow {
         Ok((slice_array(rest, 0)?, slice_array(rest, HASH_BYTES)?))
     }
 
+    /// The `membership/v1/<conversation-id><leaf-index><old-credential-hash>` key.
+    pub fn membership_key(
+        conversation_id: &[u8; HASH_BYTES],
+        leaf_index: u32,
+        old_credential_hash: &[u8; HASH_BYTES],
+    ) -> Result<StoredKey, StorageError> {
+        key_of(&[
+            prefix::MEMBERSHIP,
+            conversation_id,
+            &leaf_index.to_be_bytes(),
+            old_credential_hash,
+        ])
+    }
+
+    /// Splits a membership key into the conversation, leaf index, and old
+    /// credential hash.
+    pub fn parse_membership_key(
+        key: &StoredKey,
+    ) -> Result<([u8; HASH_BYTES], u32, [u8; HASH_BYTES]), StorageError> {
+        let rest = suffix(key, prefix::MEMBERSHIP, HASH_BYTES * 2 + 4)?;
+        Ok((
+            slice_array(rest, 0)?,
+            u32::from_be_bytes(slice_array(rest, HASH_BYTES)?),
+            slice_array(rest, HASH_BYTES + 4)?,
+        ))
+    }
+
+    /// Every retained membership proof of one conversation.
+    pub fn membership_range(conversation_id: &[u8; HASH_BYTES]) -> Result<ReadPlan, StorageError> {
+        let start = key_of(&[prefix::MEMBERSHIP, conversation_id])?;
+        prefix_range(start.as_bytes(), PAGE_LIMIT)
+    }
+
     /// Every retained policy of one conversation.
     pub fn policy_range(conversation_id: &[u8; HASH_BYTES]) -> Result<ReadPlan, StorageError> {
         let start = key_of(&[prefix::POLICY, conversation_id])?;
@@ -1019,12 +1093,13 @@ impl SequencerRow {
                 object_id,
                 generation,
                 previous_policy_id,
-            } => {
-                encoder.put_u16(POLICY_ARM)?;
-                encoder.put_fixed(object_id)?;
-                encoder.put_u64(*generation)?;
-                encoder.put_fixed(previous_policy_id)?;
-            }
+            } => encode_policy(&mut encoder, object_id, *generation, previous_policy_id)?,
+            Self::Membership {
+                object_id,
+                epoch,
+                device_id,
+                disposition,
+            } => encode_membership(&mut encoder, object_id, *epoch, device_id, *disposition)?,
         }
         wrap(SEQUENCER_ROW_KIND, encoder.finish())
     }
@@ -1061,6 +1136,13 @@ impl SequencerRow {
                 generation: decoder.u64()?,
                 previous_policy_id: decoder.array()?,
             },
+            MEMBERSHIP_ARM => Self::Membership {
+                object_id: decoder.array()?,
+                epoch: decoder.u64()?,
+                device_id: decoder.array()?,
+                disposition: u8::try_from(decoder.u16()?)
+                    .map_err(|_| StorageError::InvalidEncoding)?,
+            },
             _ => return Err(StorageError::InvalidEncoding),
         };
         decoder.finish()?;
@@ -1082,6 +1164,7 @@ impl SequencerRow {
                 previous_policy_id,
                 ..
             } => (*generation == 0) == (*previous_policy_id == [0; HASH_BYTES]),
+            Self::Membership { disposition, .. } => matches!(disposition, 1 | 2),
             Self::Record { .. } => true,
         };
         if consistent {
@@ -1100,6 +1183,7 @@ impl SequencerRow {
             Self::Candidate { .. } => bytes.starts_with(prefix::CANDIDATE),
             Self::Proof { role, .. } => bytes.starts_with(role.prefix()),
             Self::Policy { .. } => bytes.starts_with(prefix::POLICY),
+            Self::Membership { .. } => bytes.starts_with(prefix::MEMBERSHIP),
         }
     }
 }

@@ -566,6 +566,10 @@ fn subject_of(command: &Resolved, payload: Option<&[u8]>) -> Option<[u8; 32]> {
             IrcWireObjectKind::Policy,
             agenc_ircd_e2ee::limits::MAX_POLICY_OBJECT,
         ),
+        SubmitKind::Membership => (
+            IrcWireObjectKind::LeafMembershipProof,
+            agenc_ircd_e2ee::limits::MAX_LEAF_MEMBERSHIP_OBJECT,
+        ),
         _ => return None,
     };
     let mut budget = DecodeBudget::new(limit, 1 << 16);
@@ -581,6 +585,18 @@ fn subject_of(command: &Resolved, payload: Option<&[u8]>) -> Option<[u8; 32]> {
             agenc_ircd_e2ee::ids::semantic_id_of(
                 agenc_ircd_crypto::SemanticHashDomain::PolicyId,
                 &policy.tbs,
+            )
+            .ok()
+        }
+        SubmitKind::Membership => {
+            let proof = agenc_ircd_e2ee::objects::membership::IrcLeafMembershipProof::decode_exact(
+                object.body(),
+                &mut budget,
+            )
+            .ok()?;
+            agenc_ircd_e2ee::ids::semantic_id_of(
+                agenc_ircd_crypto::SemanticHashDomain::LeafMembershipId,
+                &proof.tbs,
             )
             .ok()
         }
@@ -634,6 +650,7 @@ const fn submit_opcode(kind: SubmitKind) -> IrcFederationOpcode {
         SubmitKind::Ack => Op::SubmitCommitAck,
         SubmitKind::Finalization => Op::SubmitFinalization,
         SubmitKind::Policy => Op::SubmitPolicy,
+        SubmitKind::Membership => Op::SubmitMembership,
         SubmitKind::Abort => Op::SubmitAbort,
         SubmitKind::ReinitAttempt => Op::SubmitReinitAttempt,
         SubmitKind::ReinitAck => Op::SubmitReinitAck,

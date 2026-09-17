@@ -56,6 +56,9 @@ use agenc_ircd_testkit::e2ee::objects::conversation::{
     IrcCommitAuthorizationTbs, IrcConversationBindingPackage, IrcConversationKind, IrcPolicy,
     IrcReservation, IrcSemanticRouteTbs, action_bits,
 };
+use agenc_ircd_testkit::e2ee::objects::membership::{
+    IrcLeafDispositionKind, IrcLeafMembershipProof, IrcLeafMembershipProofTbs,
+};
 use agenc_ircd_testkit::e2ee::objects::sequencing::{
     IrcCandidateReceipt, IrcCommitAck, IrcCommitAckTbs, IrcFinalizationCoreTbs,
     IrcFinalizationProof, IrcFinalizationRequest, IrcGroupGenesisTbs,
@@ -2090,6 +2093,52 @@ fn hash_at(lines: &[String], verb: &str, index: usize) -> TestResult<[u8; 32]> {
         .map_err(|_| failure(format!("token {word} is not 32 bytes")))
 }
 
+/// The old leaf key the binder's device holds as leaf 0 of a new group.
+const BINDER_LEAF_SEED: u8 = 158;
+
+/// The binder device's continuing proof for old leaf 0 at `epoch`
+/// (companion 13.7.3), signed by the device and by the leaf key.
+fn binder_leaf_membership(
+    binder: &Principal,
+    network: [u8; 32],
+    conversation: [u8; 32],
+    epoch: u64,
+) -> TestResult<IrcLeafMembershipProof> {
+    let leaf = builders::key(BINDER_LEAF_SEED);
+    let tbs = IrcLeafMembershipProofTbs {
+        profile_version: 1,
+        network_id: network,
+        conversation_id: conversation,
+        epoch,
+        leaf_index: 0,
+        old_credential_hash: [5; 32],
+        leaf_signature_scheme: 0x0807,
+        leaf_signature_key: Opaque::from_slice(&builders::public(&leaf))?,
+        account_id: binder.keys.root.tbs.account_id.clone(),
+        device_id: [binder.device; 16],
+        root_generation: binder.keys.root.tbs.root_generation,
+        root_fingerprint: builders::root_fingerprint(&binder.keys.root)?,
+        roster_generation: binder.keys.roster.tbs.roster_generation,
+        roster_id: builders::roster_id(&binder.keys.roster)?,
+        credential_generation: 0,
+        disposition: IrcLeafDispositionKind::Continuing,
+        removal_finalization_id: [0; 32],
+    };
+    Ok(IrcLeafMembershipProof {
+        device_signature: builders::sign(
+            &builders::key(binder.device),
+            SignatureDomain::LeafMembership,
+            &tbs,
+        )?,
+        possession_signature: Opaque::from_slice(&builders::sign(
+            &leaf,
+            SignatureDomain::LeafMembershipPossession,
+            &tbs,
+        )?)?,
+        tbs,
+    })
+}
+
 /// Registers an authenticated client on `fixture`: one connection creates
 /// the account and a second authenticates and registers.
 fn authenticated_client(
@@ -2590,6 +2639,36 @@ fn activate_bootstrap(
             finalization_authenticator: [4; 32],
         },
         old_leaf_signature: Opaque::new(vec![6; 64])?,
+    };
+    // The binder's device attests to its old leaf 0 before the finalization
+    // embeds that leaf's ACK (companion 13.7.3).
+    let membership = binder_leaf_membership(binder, network, conversation, 0)?;
+    let membership_object = wire_object(IrcWireObjectKind::LeafMembershipProof, &membership)?;
+    let label = binder.label();
+    send_object(
+        client,
+        &label,
+        &format!("EGROUP SUBMIT MEMBERSHIP {conversation_token}"),
+        &membership_object,
+    )?;
+    assert_contains(
+        &labeled_reply(client, &label)?,
+        &format!(
+            " EGROUP STORED MEMBERSHIP {conversation_token} {} {}",
+            base64url_encode(&semantic_id_of(
+                SemanticHashDomain::LeafMembershipId,
+                &membership.tbs
+            )?),
+            base64url_encode(e2ee::ObjectId::compute(&membership_object).as_bytes())
+        ),
+    )?;
+    let ack = IrcCommitAck {
+        old_leaf_signature: Opaque::from_slice(&builders::sign(
+            &builders::key(BINDER_LEAF_SEED),
+            SignatureDomain::CommitProcessed,
+            &ack.tbs,
+        )?)?,
+        tbs: ack.tbs,
     };
     core.acknowledgement_set_digest = e2ee::ids::proof_set_digest(
         SemanticHashDomain::AcknowledgementSet,
@@ -3459,6 +3538,47 @@ mod real_clients {
                 finalization_authenticator: [4; 32],
             },
             old_leaf_signature: Opaque::new(vec![6; 64])?,
+        };
+        // An ACK that no stored leaf key verifies identifies no signer.
+        let unproven = wire_object(IrcWireObjectKind::CommitAck, &ack)?;
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT ACK {conversation_token}"),
+            &unproven,
+        )?;
+        assert_contains(
+            &labeled_reply(client, &label)?,
+            "FAIL EGROUP E2EE_BINDING_AUTH_INVALID",
+        )?;
+        // The binder's device attests to leaf 0, then signs with that leaf key.
+        let membership = binder_leaf_membership(binder, network, conversation, prior_epoch)?;
+        let membership_object = wire_object(IrcWireObjectKind::LeafMembershipProof, &membership)?;
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT MEMBERSHIP {conversation_token}"),
+            &membership_object,
+        )?;
+        let stored = labeled_reply(client, &label)?;
+        let membership_id = semantic_id_of(SemanticHashDomain::LeafMembershipId, &membership.tbs)?;
+        assert_contains(
+            &stored,
+            &format!(
+                " EGROUP STORED MEMBERSHIP {conversation_token} {} {}",
+                base64url_encode(&membership_id),
+                base64url_encode(e2ee::ObjectId::compute(&membership_object).as_bytes())
+            ),
+        )?;
+        let ack = IrcCommitAck {
+            old_leaf_signature: Opaque::from_slice(&builders::sign(
+                &builders::key(BINDER_LEAF_SEED),
+                SignatureDomain::CommitProcessed,
+                &ack.tbs,
+            )?)?,
+            tbs: ack.tbs,
         };
         core.acknowledgement_set_digest = e2ee::ids::proof_set_digest(
             SemanticHashDomain::AcknowledgementSet,

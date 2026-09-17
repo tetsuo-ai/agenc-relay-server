@@ -10,6 +10,9 @@
 mod support;
 use support::*;
 
+#[path = "history/membership.rs"]
+mod membership;
+
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_e2ee::history::{
     AlternativeRecord, ChainLimits, ChainStep, HistoricalChain, Lifecycle, RecordReferences,

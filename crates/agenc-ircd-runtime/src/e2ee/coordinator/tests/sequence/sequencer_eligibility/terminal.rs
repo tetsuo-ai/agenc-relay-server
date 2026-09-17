@@ -14,6 +14,7 @@ fn bound() -> TestResult<(Harness, [u8; 32])> {
     let operational = harness.operational_policy.clone();
     harness.publish_policy(conversation, &initial)?;
     harness.publish_policy(conversation, &operational)?;
+    harness.publish_leaf_zero(conversation)?;
     Ok((harness, conversation))
 }
 

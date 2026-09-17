@@ -44,6 +44,7 @@ use agenc_ircd_storage::e2ee_records::{
 
 use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
 use super::super::{CompanionCoordinator, ConversationState};
+use super::ack_context::AckSigner;
 use super::route::audience;
 use super::{Exec, Fail, cursor};
 
@@ -521,9 +522,24 @@ pub fn submit_commit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         })
         .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &conversation_id))?;
     super::ack_context::commit_submission(exec, &conversation_id, &ack.tbs, slot)?;
+    let signer = super::ack_context::identify_submitter(
+        exec,
+        &conversation_id,
+        &AckSigner::commit(&ack),
+        &ack.tbs,
+    )?;
     let candidate_id = slot.candidate_id;
     let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let leaf = ack.tbs.old_leaf_index;
+    super::ack_context::admit_standalone(
+        exec,
+        &conversation_id,
+        &candidate_id,
+        leaf,
+        &object_id,
+        signer,
+    )?;
+    let signing_device = super::ack_context::signer_key(signer);
     let mut outcome = Outcome::scalar(ResultBody::CommitAcked(
         conversation_id,
         candidate_id,
@@ -568,6 +584,11 @@ pub fn submit_commit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 .entry(candidate_id)
                 .or_default()
                 .insert(leaf, object_id);
+            state
+                .ack_signers
+                .entry(candidate_id)
+                .or_default()
+                .insert(signing_device, leaf);
         }
     }));
     Ok(outcome)
@@ -612,6 +633,16 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         &IrcSequencerRecord::Candidate(request.proof.receipt.clone()),
     )?;
     super::terminal_proof::finalization(&request.proof)?;
+    super::ack_context::identify_set(
+        exec,
+        &conversation_id,
+        request
+            .proof
+            .acknowledgements
+            .as_slice()
+            .iter()
+            .map(|ack| (AckSigner::commit(ack), &ack.tbs)),
+    )?;
     if core.profile_version != 1
         || core.network_id != exec.coordinator.network_id
         || core.prior_epoch != slot.position.prior_epoch
@@ -780,6 +811,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(finalization_id, request_object_id);
             state.acks.remove(&candidate_id);
+            state.ack_signers.remove(&candidate_id);
             state.vote_ledgers.remove(&candidate_id);
             state.current_policy_id = resulting_policy_id;
             state.route_object_id = route_object_id;
@@ -948,6 +980,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(abort_id, request_object_id);
             state.acks.remove(&candidate_id);
+            state.ack_signers.remove(&candidate_id);
             state.vote_ledgers.remove(&candidate_id);
             state.route_object_id = route_object_id;
         }
@@ -963,6 +996,7 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     super::route_successor::owner(exec, &old_conversation_id)?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
+    super::ack_context::old_group_device(exec, &old_conversation_id)?;
     let attempt: IrcReInitAttempt = decode(object.body(), MAX_REINIT_OBJECT)?;
     let tbs = &attempt.tbs;
     if tbs.old_conversation_id != old_conversation_id
@@ -1083,10 +1117,26 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .reinit_attempt()
         .filter(|slot| slot.attempt_id == ack.tbs.reinit_attempt_id)
         .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
-    super::ack_context::reinit_submission(exec, &old_conversation_id, &ack.tbs, slot)?;
+    super::ack_context::reinit_submission(exec, &old_conversation_id, &ack.tbs)?;
+    let signer = super::ack_context::identify_submitter(
+        exec,
+        &old_conversation_id,
+        &AckSigner::reinit(&ack, log.accepted_epoch()),
+        &ack.tbs,
+    )?;
+    super::ack_context::reinit_retained(exec, &old_conversation_id, &ack.tbs, slot, signer)?;
     let attempt_id = slot.attempt_id;
     let object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let leaf = ack.tbs.old_leaf_index;
+    super::ack_context::admit_standalone(
+        exec,
+        &old_conversation_id,
+        &attempt_id,
+        leaf,
+        &object_id,
+        signer,
+    )?;
+    let signing_device = super::ack_context::signer_key(signer);
     let mut outcome = Outcome::scalar(ResultBody::ReinitAcked(
         old_conversation_id,
         attempt_id,
@@ -1131,6 +1181,11 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 .entry(attempt_id)
                 .or_default()
                 .insert(leaf, object_id);
+            state
+                .ack_signers
+                .entry(attempt_id)
+                .or_default()
+                .insert(signing_device, leaf);
         }
     }));
     Ok(outcome)
@@ -1144,6 +1199,8 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
     super::route_successor::owner(exec, &old_conversation_id)?;
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
+    let accepted_epoch = log.accepted_epoch();
+    super::ack_context::old_group_device(exec, &old_conversation_id)?;
     let request_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let (attempt_id, quorum, terminal, terminal_id, new_conversation, record) = if activate {
         let mut request: IrcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
@@ -1154,6 +1211,13 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             &request.attempt,
         )?;
         super::terminal_proof::reinit_activation(&request)?;
+        super::ack_context::continuing_device(exec, &old_conversation_id, &request.attempt)?;
+        super::ack_context::activation_coverage(
+            exec,
+            &old_conversation_id,
+            accepted_epoch,
+            &request,
+        )?;
         let signer = super::super::sequencer_signing::for_receipt(
             exec.coordinator,
             request.receipt.tbs.sequencer_key_id,
@@ -1452,7 +1516,10 @@ pub fn fetch_object(exec: &mut Exec<'_>) -> Result<super::Prepared, Fail> {
             .map(Vec::as_slice),
     };
     let bytes = bytes
-        .filter(|bytes| super::recovery_read::permitted(exec, &conversation_id, bytes))
+        .filter(|bytes| {
+            super::recovery_read::permitted(exec, &conversation_id, bytes)
+                && super::membership::readable(exec, &conversation_id, bytes)
+        })
         .map(<[u8]>::to_vec);
     page(exec, bytes.into_iter().collect(), EmptyKind::Objects, None)
         .map(|outcome| super::Prepared::Complete(Box::new(outcome)))

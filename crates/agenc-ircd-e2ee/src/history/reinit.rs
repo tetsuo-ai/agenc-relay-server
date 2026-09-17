@@ -88,6 +88,7 @@ impl HistoricalChain {
         &mut self,
         certificate: &IrcReInitActivationCertificate,
         activation_id: SemanticId,
+        references: &super::RecordReferences<'_>,
     ) -> Result<ChainStep, E2eeError> {
         let state = self.reinit_state()?;
         let open = state.attempt.ok_or(E2eeError::InvalidValue)?;
@@ -113,6 +114,7 @@ impl HistoricalChain {
             return Err(E2eeError::InvalidValue);
         }
         check_ack_set(request, core, &open.attempt_id)?;
+        super::membership::authenticate_activation(references, request, self.epoch)?;
         let terminal = Terminal::finalize(activation_id);
         let quorum_votes = self.reinit_quorum(&state, &open, terminal, request.votes.as_slice())?;
         self.lifecycle = Lifecycle::Activated {

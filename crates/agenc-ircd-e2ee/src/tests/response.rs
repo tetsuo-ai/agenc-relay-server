@@ -65,6 +65,19 @@ fn scalar_success_lines_render_exactly() -> TestResult {
         render_labeled(
             "x",
             SERVER,
+            &SuccessLine::StoredMembership([1; 32], [2; 32], [3; 32])
+        )?,
+        format!(
+            "@label=x :{SERVER} EGROUP STORED MEMBERSHIP {} {} {}\r\n",
+            h(1),
+            h(2),
+            h(3)
+        )
+    );
+    assert_eq!(
+        render_labeled(
+            "x",
+            SERVER,
             &SuccessLine::EmptyGroup(EmptyGroupKind::Receipts)
         )?,
         format!("@label=x :{SERVER} EGROUP EMPTY RECEIPTS\r\n")
