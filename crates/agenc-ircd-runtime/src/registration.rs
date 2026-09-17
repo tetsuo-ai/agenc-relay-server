@@ -328,7 +328,7 @@ impl RegistrationRouter {
         keys: &crate::state_core::durable::KeyDeriver,
         head: crate::state_core::durable::HeadCounters,
         backing: crate::budget::BackingReservationPort,
-    ) -> Result<(), crate::RuntimeError> {
+    ) -> Result<(), crate::federation::edge::EdgeRestoreRefusal> {
         if let Some(edge) = self.edge.as_mut() {
             edge.restore(port, keys, self.e2ee.as_mut(), head, Some(backing))?;
         }

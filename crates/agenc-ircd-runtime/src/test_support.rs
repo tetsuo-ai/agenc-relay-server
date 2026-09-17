@@ -571,6 +571,16 @@ impl StateCoreFixture {
         edge: &mut crate::federation::edge::EdgeFederation,
         companion: Option<&mut crate::e2ee::edge::E2eeEdge>,
     ) -> TestResult {
+        self.restore_edge_refusal(edge, companion)?
+            .map_err(Into::into)
+    }
+
+    /// The edge reload's own refusal, so a test can pin the step it names.
+    pub(crate) fn restore_edge_refusal(
+        &self,
+        edge: &mut crate::federation::edge::EdgeFederation,
+        companion: Option<&mut crate::e2ee::edge::E2eeEdge>,
+    ) -> TestResult<Result<(), crate::federation::edge::EdgeRestoreRefusal>> {
         let owner = self.owner.as_ref().ok_or("storage owner")?;
         let recovered = owner.recovered_state();
         let keys = KeyDeriver::new(
@@ -578,7 +588,7 @@ impl StateCoreFixture {
             recovered.database_binding(),
             recovered.storage_key_generation(),
         )?;
-        edge.restore(
+        Ok(edge.restore(
             &owner.port(),
             &keys,
             companion,
@@ -589,8 +599,7 @@ impl StateCoreFixture {
             self.state
                 .as_ref()
                 .map(|state| state.context().backing_reservations()),
-        )?;
-        Ok(())
+        ))
     }
 
     /// Commits a crash image through real storage, then reloads a fresh edge owner.

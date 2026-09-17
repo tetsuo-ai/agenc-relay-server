@@ -62,6 +62,7 @@ use crate::sync::Arc;
 
 pub(crate) use request::is_local_user_mode_query;
 pub use request::{EdgeCompletion, RemoteCarrierOutcome};
+pub use startup::{EdgeRestoreRefusal, EdgeRestoreStep};
 
 /// Events held while one durable batch is in flight.
 const MAX_QUEUED_EVENTS: usize = 256;
