@@ -102,6 +102,12 @@ drift that moved them, the audit that found sixty-seven more and the refusal
 that now names a mis-anchored span apart from an unexercised file (COV-06,
 issue #142) are recorded in
 [the region anchors record](stage-10-region-anchors.md).
+The sequencer rotation drill rewritten to the overlap, the finalized
+`SEQUENCER` transition and the retained predecessor ENC-07 requires, the
+receipts and refusals it now asserts at every step, the ordinary test that
+guards its key sets outside the native campaign, and the audit of every other
+ignored Stage 10 drill (QA-02, issue #137) are recorded in
+[the rotation drill repair record](stage-10-rotation-drill-repair.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
