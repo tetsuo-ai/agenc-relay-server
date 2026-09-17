@@ -10976,6 +10976,9 @@ mod tests {
         }
         Ok(())
     }
+
+    #[path = "authority_fences.rs"]
+    mod authority_fences;
 }
 
 #[cfg(test)]

@@ -3265,4 +3265,7 @@ mod tests {
         )?;
         Ok(())
     }
+
+    #[path = "admin_fences.rs"]
+    mod admin_fences;
 }

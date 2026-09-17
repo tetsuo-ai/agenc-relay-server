@@ -4,6 +4,9 @@
 use crate::AdminError;
 use crate::codec::{Reader, Writer};
 
+#[cfg(test)]
+mod tests;
+
 /// The two stopped maintenance operations admitted by encoding two.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaintenanceOperation {
