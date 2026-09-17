@@ -331,6 +331,7 @@ fn a_restored_coordinator_adopts_the_signed_lineage_and_closes_permanently() -> 
     let network = build_network_with(Some(CapacityPlan {
         max_connections: 32,
         connections_per_address: 32,
+        memory_budget_bytes: STAGE_EIGHT_MEMORY_BUDGET_BYTES,
     }))?;
     let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
     let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;

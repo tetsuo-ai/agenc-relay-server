@@ -44,6 +44,9 @@ in [the secret-lookup floor record](stage-10-secret-lookup-floor.md).
 The re-verification and disposition of the four secondary 2026-09-01 audit
 findings ZDH-C3, C4, C5 and A1 (issue #13) are recorded in
 [the secondary audit findings record](stage-10-audit-secondary-findings.md).
+The advertised capacity workload, the per-node occupancy measurement and the
+advertised-limit profiling matrix (CAP-01, issue #56) are recorded in
+[the capacity workload record](stage-10-capacity-workload.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
@@ -82,7 +85,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired. Capability refusals, channel privacy, per-connection accounting, maintenance isolation and independent round-robin input scheduling repaired; other items open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding, temporary cleanup, borrowed ciphertext decoding/opening and reverse-manifest arithmetic repaired; checkpoint/backup capacity and publication remain open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Disabled material, same-class key sharing, generated administrator UID and OCSP schema/WSS admission repaired, preserving edge outbound TLS; service-user checks remain open |
-| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; idle connections hold only the base charge and the default model admits 50,000 within the pool (Section 19.3 thresholds conflict recorded in #113); full workload open |
+| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Workload matrix, per-node occupancy accounting, generator and default node budget implemented, and one node's 50,000 idle connections measured (CAP-01); the production campaign and the seven-day soak remain unrun, blocked on the Section 19.3 conflict in #113 |
 
 Earlier findings remain in `TODO.md` and `stage-10-qualification.md`. A finding
 is closed here only with a current regression or a recorded current-source
