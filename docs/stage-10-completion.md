@@ -92,6 +92,11 @@ under neither metric, the audit that found nine more rows with the same
 declaration defect, and the refusal that now names an unscoreable declaration
 apart from an untested span (COV-05, issue #135) are recorded in
 [the region metric decisions record](stage-10-region-metric-decisions.md).
+The thirty-five reviewed spans re-anchored onto the item their row names, the
+drift that moved them, the audit that found sixty-seven more and the refusal
+that now names a mis-anchored span apart from an unexercised file (COV-06,
+issue #142) are recorded in
+[the region anchors record](stage-10-region-anchors.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
