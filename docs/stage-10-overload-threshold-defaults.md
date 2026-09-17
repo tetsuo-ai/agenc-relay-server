@@ -55,6 +55,14 @@ The projection now subtracts the queue bytes and the base charge together.
 Backing beyond those two is still not projected, which can only select one
 connection too many, never one too few, so the fail-safe direction is kept.
 
+`select_evictions` has no production caller. Verifying that the eviction class
+is reachable showed that it has no owner either: the only enforcement of any
+class is `admission::transport`, which refuses accepts at
+`>= OverloadClass::NoNewConnections`, so the 80% class refuses nothing, the 90%
+class does not reach channel creation, and no connection is ever marked closing
+by overload. That gap is issue #131 and is not resolved here; this change makes
+the classes reachable and the selector correct for the owner that will call it.
+
 ## Evidence
 
 - `cargo test -p agenc-ircd-runtime --all-features --lib`: 1,532 passed.
