@@ -151,23 +151,38 @@ fn a_signer_is_a_continuing_proof_no_later_than_the_prior_epoch() -> TestResult 
 }
 
 #[test]
-fn the_expected_continuing_set_skips_removed_leaves_and_inactive_devices() -> TestResult {
+fn one_device_states_one_claim_at_the_highest_epoch_it_reached() -> TestResult {
     let mut set = LeafMembershipSet::default();
-    set.insert(object(1), proof(0, 1, 7, 0, true));
-    set.insert(object(2), proof(1, 2, 8, 0, true));
-    set.insert(object(3), proof(2, 3, 9, 0, false));
-    let all: Vec<_> = set
-        .expected_continuing(|_, _| true)
-        .iter()
-        .map(|entry| entry.proof.leaf_index)
-        .collect();
-    assert_eq!(all, vec![0, 1]);
-    let active: Vec<_> = set
-        .expected_continuing(|_, device| *device != [8; 16])
-        .iter()
-        .map(|entry| entry.proof.leaf_index)
-        .collect();
-    assert_eq!(active, vec![0]);
+    // Device 7 rotated its leaf key: both credentials stay retained under
+    // leaf 0, and only the higher epoch is still claimed.
+    set.insert(object(1), proof(0, 1, 7, 2, true));
+    set.insert(object(2), proof(0, 9, 7, 5, true));
+    // Device 8 continues at the only epoch it reached.
+    set.insert(object(3), proof(1, 2, 8, 3, true));
+    // Device 9 continues at leaf 2 but stated its own removal of leaf 3
+    // later, so it claims nothing at all.
+    set.insert(object(4), proof(2, 3, 9, 1, true));
+    set.insert(object(5), proof(3, 4, 9, 4, false));
+    let claimed = |active: fn(&[u8; 24], &[u8; 16]) -> bool| -> Vec<(u32, u8, u64)> {
+        set.expected_continuing(active)
+            .iter()
+            .map(|entry| {
+                (
+                    entry.proof.leaf_index,
+                    entry.proof.old_credential_hash[0],
+                    entry.proof.epoch,
+                )
+            })
+            .collect()
+    };
+    assert_eq!(claimed(|_, _| true), vec![(0, 9, 5), (1, 2, 3)]);
+    // A superseded credential still identifies the ACKs of its own epoch.
+    assert_eq!(
+        set.signer(0, &[1; 32], 2).map(|entry| entry.object_id),
+        Some(object(1))
+    );
+    // A revoked device states no claim.
+    assert_eq!(claimed(|_, device| *device != [8; 16]), vec![(0, 9, 5)]);
     Ok(())
 }
 
