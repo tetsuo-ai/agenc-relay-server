@@ -113,6 +113,12 @@ against items they never declared, the nine the audit had miscounted, and the
 `item` and `span_sha256` fields that now bind every row to its item instead of
 to a line range an insertion above can silently invalidate (COV-07, issue #145)
 are recorded in [the region drift record](stage-10-region-drift.md).
+The account-deletion drill given the account-controls capability its `ACCT`
+surface requires and the readiness wait its restarts lacked, the refusal it
+now proves writes nothing, the rows it reads for what a deletion removes and
+retains, and the ordinary test that guards both preconditions outside the
+native campaign (QA-03, issue #147) are recorded in
+[the deletion drill repair record](stage-10-deletion-drill-repair.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

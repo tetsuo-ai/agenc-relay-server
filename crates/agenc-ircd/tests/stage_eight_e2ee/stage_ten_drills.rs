@@ -287,10 +287,17 @@ struct DrillNodes {
 
 impl DrillNodes {
     fn start(network: &Network, drill: &Drill) -> TestResult<Self> {
+        Self::start_capturing(network, &drill.stderr_logs)
+    }
+
+    /// Starts every node with each one's stderr captured under `logs`, which
+    /// a drill points at its own record directory and the ordinary signal
+    /// below points at a temporary root of its own.
+    fn start_capturing(network: &Network, logs: &Path) -> TestResult<Self> {
         let stderr = [
-            drill.stderr_logs.join("coordinator.stderr"),
-            drill.stderr_logs.join("edge-a.stderr"),
-            drill.stderr_logs.join("edge-b.stderr"),
+            logs.join("coordinator.stderr"),
+            logs.join("edge-a.stderr"),
+            logs.join("edge-b.stderr"),
         ];
         let nodes = Self {
             coordinator: DaemonProcess::start_logged(
@@ -337,12 +344,19 @@ impl DrillNodes {
     }
 
     /// Restarts one node on its current configuration and waits for the
-    /// federation links the restart interrupts.
+    /// federation links the restart interrupts and for the account authority
+    /// behind them, which is the wait `restart_all` performs. A link is
+    /// established before the edge can serve an account, so waiting only for
+    /// the link leaves a window in which a drill that addresses the node is
+    /// answered `FAIL ACCTCREATE UNAVAILABLE :Account creation unavailable`.
     fn restart(&mut self, network: &Network, index: usize) -> TestResult {
         let before_a = links_established(&network.edge_a);
         let before_b = links_established(&network.edge_b);
-        let running_a = self.edge_a.child.is_some();
-        let running_b = self.edge_b.child.is_some();
+        let (await_a, await_b) = match index {
+            0 => (self.edge_a.child.is_some(), self.edge_b.child.is_some()),
+            1 => (true, false),
+            _ => (false, true),
+        };
         let stderr = self.stderr.get(index).cloned();
         *self.daemon(index) = DaemonProcess::start_logged(
             &node(network, index).config_path,
@@ -350,19 +364,16 @@ impl DrillNodes {
             stderr.as_deref(),
         )?;
         self.check_alive(index)?;
-        match index {
-            0 => {
-                if running_a {
-                    wait_for_link(&network.edge_a, before_a)?;
-                }
-                if running_b {
-                    wait_for_link(&network.edge_b, before_b)?;
-                }
-                Ok(())
+        for (edge, before, awaited) in [
+            (&network.edge_a, before_a, await_a),
+            (&network.edge_b, before_b, await_b),
+        ] {
+            if awaited {
+                wait_for_link(edge, before)?;
+                wait_for_account_authority(edge)?;
             }
-            1 => wait_for_link(&network.edge_a, before_a),
-            _ => wait_for_link(&network.edge_b, before_b),
         }
+        Ok(())
     }
 
     /// A node that exits within a second of starting failed closed; its
@@ -929,6 +940,123 @@ fn drill_disaster_restore() -> TestResult {
 // Deletion followed by a rekey
 // ---------------------------------------------------------------------------
 
+/// The login of the account every deletion step here authenticates.
+const DELETION_LOGIN: &str = "delete-account";
+/// Architecture Section 14.6 opens the `ACCT` surface through the vendor
+/// capability of Section 9.3, and `standard-replies` carries its replies. A
+/// session that negotiates one without the other is answered
+/// `481 :Permission denied` on every `ACCT` line it sends, before the
+/// account service ever sees the command.
+const DELETION_CAPS: &str = "standard-replies agenc.ag/account-controls";
+/// A canonical 16-byte deletion token no `ACCT DELETE START` ever issued;
+/// confirming it is the refusal path Section 14.6 gives a client whose
+/// token did not survive the daemon's challenge epoch.
+const UNISSUED_DELETION_TOKEN: [u8; 16] = [0x5a; 16];
+
+/// Opens one authenticated session carrying `caps` beyond the account
+/// carriers `negotiate_sasl` requests.
+///
+/// An authentication that reaches an edge while the account's own creation
+/// is still settling is refused outright with `904` rather than delayed, so
+/// the attempt is repeated inside the ordinary network wait. No refusal this
+/// module proves is read from this carrier: the capability refusal is read
+/// from the `ACCT` reply and the deleted-login refusal from
+/// `deleted_account_login_refused`, which uses the strict helper.
+fn deletion_session(
+    fixture: &NodeFixture,
+    account: AccountId,
+    nick: &str,
+    caps: &str,
+) -> TestResult<IrcClient> {
+    let deadline = Instant::now() + NETWORK_WAIT;
+    loop {
+        wait_for_account_authority(fixture)?;
+        match open_deletion_session(fixture, account, nick, caps) {
+            Ok(client) => return Ok(client),
+            Err(error) if Instant::now() < deadline => {
+                let _retried = error;
+                thread::sleep(Duration::from_secs(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// One attempt at the session `deletion_session` retries, which proves the
+/// server acknowledged exactly the capabilities the caller asked for.
+fn open_deletion_session(
+    fixture: &NodeFixture,
+    account: AccountId,
+    nick: &str,
+    caps: &str,
+) -> TestResult<IrcClient> {
+    let mut client = IrcClient::connect(fixture)?;
+    client.negotiate_sasl()?;
+    let acknowledged = client.send_until(&format!("CAP REQ :{caps}"), " CAP * ACK ")?;
+    for capability in caps.split_whitespace() {
+        assert_contains(&acknowledged, capability)?;
+    }
+    authenticate_live_account_with(
+        &mut client,
+        fixture,
+        DELETION_LOGIN,
+        ACCOUNT_PASSWORD,
+        fresh_requests(),
+        account,
+    )?;
+    client.complete_registration(nick)?;
+    Ok(client)
+}
+
+/// Sends `QUIT` and waits for the server's own close, so a step that reads
+/// durable state or opens the next session never races this connection's
+/// teardown. A dropped connection is torn down as `transport_loss` instead,
+/// after the drill has moved on.
+fn quit_and_drain(client: &mut IrcClient, reason: &str) -> TestResult {
+    client.send(&format!("QUIT :{reason}"))?;
+    let deadline = Instant::now() + REPLY_DEADLINE;
+    for _ in 0..TRANSCRIPT_LINES {
+        if Instant::now() > deadline {
+            return Err(failure("a quitting connection did not close in time"));
+        }
+        let mut line = String::new();
+        match client.reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return Ok(()),
+            Ok(_) => continue,
+        }
+    }
+    Err(failure(
+        "a quitting connection exceeded its transcript bound",
+    ))
+}
+
+/// Reads the one reply an `ACCT` line draws, whichever arm answers it.
+fn acct_reply(client: &mut IrcClient) -> TestResult<String> {
+    let lines = client.read_until(|line| {
+        line.contains(" NOTE ACCT ") || line.contains(" FAIL ACCT ") || line.contains(" 481 ")
+    })?;
+    lines
+        .last()
+        .cloned()
+        .ok_or_else(|| failure("an ACCT command drew no reply"))
+}
+
+/// Confirms a deletion the server issued no challenge for. Section 14.6
+/// refuses it `BAD_STATE`, and the drill then proves the refusal wrote
+/// nothing: it is the authorization failure that must change nothing.
+fn refuse_unissued_deletion(
+    fixture: &NodeFixture,
+    account: AccountId,
+    nick: &str,
+) -> TestResult<String> {
+    let mut client = deletion_session(fixture, account, nick, DELETION_CAPS)?;
+    let token = URL_SAFE_NO_PAD.encode(UNISSUED_DELETION_TOKEN);
+    client.send(&format!("ACCT DELETE CONFIRM {token}"))?;
+    let refusal = acct_reply(&mut client)?;
+    quit_and_drain(&mut client, "refused")?;
+    Ok(refusal)
+}
+
 /// Deletes an account through the client protocol and returns the closing
 /// lines the server sent.
 fn delete_account(
@@ -936,18 +1064,7 @@ fn delete_account(
     account: AccountId,
     nick: &str,
 ) -> TestResult<Vec<String>> {
-    let mut client = IrcClient::connect(fixture)?;
-    client.negotiate_sasl()?;
-    client.send_until("CAP REQ :standard-replies", " CAP * ACK ")?;
-    authenticate_live_account_with(
-        &mut client,
-        fixture,
-        "delete-account",
-        ACCOUNT_PASSWORD,
-        fresh_requests(),
-        account,
-    )?;
-    client.complete_registration(nick)?;
+    let mut client = deletion_session(fixture, account, nick, DELETION_CAPS)?;
     // The same connection's initial OPAQUE grant supplies fresh authority.
     client.send("ACCT LABEL deletion-check")?;
     client.read_until(|line| line.contains(" NOTE ACCT UPDATED "))?;
@@ -1315,6 +1432,18 @@ fn deleted_deletion_account(rows: &DeletionAccountRows) -> bool {
             if *deleted_account_id == rows.account_id && *expires_at != 0)
 }
 
+/// A refused deletion writes nothing durable. Both accounts are still live
+/// and carry the account body, the OPAQUE credential and the login-index row
+/// the creation left, with only the session bookkeeping an authentication of
+/// its own advances.
+fn deletion_refusal_changed_nothing(
+    created: &DeletionStateEvidence,
+    refused: &DeletionStateEvidence,
+) -> TestResult<bool> {
+    Ok(survivor_is_preserved(&created.target, &refused.target)?
+        && survivor_is_preserved(&created.survivor, &refused.survivor)?)
+}
+
 fn survivor_is_preserved(
     before: &DeletionAccountRows,
     after: &DeletionAccountRows,
@@ -1519,8 +1648,8 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
         format!("{before_records} rows, {before_bytes} bytes"),
     );
     let (mut creator, account) =
-        authenticated_client(&network.edge_a, "delete-me", "delete-account", 190)?;
-    creator.send("QUIT :created")?;
+        authenticated_client(&network.edge_a, "delete-me", DELETION_LOGIN, 190)?;
+    quit_and_drain(&mut creator, "created")?;
     drop(creator);
     nodes.stop(&network, 0, "deletion after create")?;
     let (_, created_records, created_bytes) =
@@ -1535,6 +1664,23 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
         "create",
         format!("account created: {created_records} rows, {created_bytes} bytes"),
     );
+    // The refusal arm first, so the deletion that follows is measured against
+    // a state a refused confirmation demonstrably did not touch. The session
+    // opens immediately after the restart above, which is itself the check
+    // that the restart waited for the edge's account authority.
+    let refusal = refuse_unissued_deletion(&network.edge_a, account, "delete-probe")?;
+    let refused = refusal.contains(" FAIL ACCT BAD_STATE ");
+    drill.fact("unissued_confirm_reply", &refusal);
+    nodes.stop(&network, 0, "deletion after refusal")?;
+    let refused_state = read_deletion_state(&network.coordinator, account, seed)?;
+    let unchanged = deletion_refusal_changed_nothing(&created_state, &refused_state)?;
+    drill.fact("unissued_confirm_refused", refused);
+    drill.fact("refusal_left_state_unchanged", unchanged);
+    nodes.restart(&network, 0)?;
+    drill.step(
+        "refuse",
+        format!("unissued DELETE CONFIRM refused={refused}, state unchanged={unchanged}"),
+    );
     thread::sleep(Duration::from_secs(3));
     let closing = match delete_account(&network.edge_a, account, "delete-me") {
         Ok(closing) => closing,
@@ -1547,8 +1693,16 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
         }
     };
     drill.fact("deletion_reply", closing.last().map_or("", String::as_str));
+    let final_note = closing.last().is_some_and(|line| is_deletion_note(line));
+    drill.fact("deletion_closed_on_its_final_note", final_note);
     let denied = deleted_account_login_refused(&network.edge_a, account)?;
     drill.fact("deleted_login_refused", denied);
+    // The deletion is confined to its own account: the seeded account still
+    // authenticates on the other edge before anything is restored.
+    let mut survivor = account_login(&network.edge_b, seed, "survivor-check")?;
+    survivor.send("QUIT :unaffected")?;
+    drop(survivor);
+    drill.fact("unrelated_login_after_delete", true);
     drill.step("delete", format!("deleted; later login refused={denied}"));
     nodes.stop(&network, 0, "deletion after delete")?;
     let (backup, deleted_records, deleted_bytes) =
@@ -1607,6 +1761,9 @@ fn run_deletion(drill: &mut Drill) -> TestResult<bool> {
     drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
     Ok(denied
         && still_denied
+        && refused
+        && unchanged
+        && final_note
         && deletion_state_is_complete(
             &created_state,
             &deleted_state,
@@ -1639,6 +1796,83 @@ fn drill_deletion() -> TestResult {
     let mut drill = Drill::begin("deletion")?;
     let outcome = run_deletion(&mut drill);
     drill.finish(outcome)
+}
+
+/// The number of federation peers an edge reports as active, which is what
+/// `wait_for_account_authority` waits for before an account may be served.
+fn active_peers(fixture: &NodeFixture) -> TestResult<u64> {
+    Ok(AdminSession::connect(&admin_identity(fixture))?
+        .stats("FEDERATION")?
+        .into_iter()
+        .find(|(name, _)| name == "active_peers")
+        .ok_or_else(|| failure("federation readiness counter missing"))?
+        .1)
+}
+
+/// The ordinary suite's signal for the deletion drill: the two preconditions
+/// the drill depends on, checked against the daemon rather than assumed.
+/// `drill_deletion` carries `#[ignore = "Stage 10 drill; run through the
+/// qualification driver"]`, so without this test a regression in either one
+/// is invisible until the native campaign runs.
+///
+/// The first is the capability set. Section 14.6 opens the `ACCT` surface
+/// through the Section 9.3 vendor capability, so the session the drill's
+/// deletion sequence negotiates must carry `agenc.ag/account-controls` and
+/// not `standard-replies` alone; the second is the readiness
+/// `DrillNodes::restart` waits for, which a drill that addresses a node the
+/// moment a restart returns depends on.
+#[test]
+fn deletion_drill_preconditions_are_the_ones_the_daemon_requires() -> TestResult {
+    let network = drill_network()?;
+    let logs = TestRoot::create()?;
+    let mut nodes = DrillNodes::start_capturing(&network, logs.path())?;
+    let (mut owner, account) =
+        authenticated_client(&network.edge_a, "acct-caps", DELETION_LOGIN, 210)?;
+    quit_and_drain(&mut owner, "negotiated")?;
+    drop(owner);
+    // `standard-replies` alone is what the drill used to negotiate: the
+    // daemon refuses the whole surface, and the refusal is a numeric.
+    let mut short = deletion_session(&network.edge_a, account, "acct-short", "standard-replies")?;
+    short.send("ACCT LABEL deletion-precondition")?;
+    let refused = acct_reply(&mut short)?;
+    quit_and_drain(&mut short, "refused")?;
+    drop(short);
+    assert!(
+        refused.contains(" 481 ") && refused.contains("Permission denied"),
+        "ACCT without agenc.ag/account-controls is refused 481: {refused}"
+    );
+    // The set the drill now negotiates is the one the daemon accepts.
+    let mut full = deletion_session(&network.edge_a, account, "acct-full", DELETION_CAPS)?;
+    full.send("ACCT LABEL deletion-precondition")?;
+    let accepted = acct_reply(&mut full)?;
+    quit_and_drain(&mut full, "accepted")?;
+    drop(full);
+    assert!(
+        accepted.contains(" NOTE ACCT UPDATED "),
+        "ACCT under the capabilities the drill negotiates is accepted: {accepted}"
+    );
+    // A node the drill restarts is serving accounts when `restart` returns:
+    // both edges already report the peer their account authority needs, read
+    // with no wait of its own, and the surface answers on the far edge.
+    nodes.stop(&network, 0, "deletion precondition")?;
+    nodes.restart(&network, 0)?;
+    assert_eq!(active_peers(&network.edge_a)?, 1);
+    assert_eq!(active_peers(&network.edge_b)?, 1);
+    let mut ready = deletion_session(&network.edge_b, account, "acct-ready", DELETION_CAPS)?;
+    ready.send("ACCT LABEL deletion-precondition")?;
+    let served = acct_reply(&mut ready)?;
+    quit_and_drain(&mut ready, "ready")?;
+    drop(ready);
+    assert!(
+        served.contains(" NOTE ACCT UPDATED "),
+        "a restarted network serves the account surface at once: {served}"
+    );
+    let clean = nodes.stop_all();
+    assert!(
+        clean.iter().all(|stopped| *stopped),
+        "every node stopped cleanly: {clean:?}"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
