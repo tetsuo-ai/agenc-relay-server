@@ -86,12 +86,12 @@ async fn refused_snapshot_admission_restores_the_removed_route() -> TestResult {
     companion.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
     companion
-        .state_begin([6; 32], 5, 2, 0, 0, 0, digest)
+        .state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
         .map_err(|e| e.code.to_string())?;
     quiesce(&mut fixture)?;
     assert!(
         companion
-            .state_end(fixture.context_mut()?, &mut base, [6; 32], 0, None)
+            .state_end(fixture.context_mut()?, [6; 32], 0, None)
             .is_err()
     );
     assert_eq!(companion.conversations, before);
@@ -131,23 +131,32 @@ async fn failed_barrier_preparation_restores_prior_parts_and_keeps_violation_evi
 }
 
 #[tokio::test]
-async fn snapshot_commit_after_link_loss_keeps_the_committed_delivery_generation() -> TestResult {
+async fn ready_commit_after_link_loss_keeps_the_generation_pending_until_active() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     let mut companion = edge();
     companion.delivery.generation = 1;
     let mut base = base_edge();
+    base.note_companion_delivery(1, None);
     companion.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
     companion
-        .state_begin([6; 32], 5, 2, 0, 0, 0, digest)
+        .state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
         .map_err(|e| e.code.to_string())?;
     companion
-        .state_end(fixture.context_mut()?, &mut base, [6; 32], 0, None)
+        .state_end(fixture.context_mut()?, [6; 32], 0, None)
         .map_err(|e| e.code.to_string())?;
     companion.link_down();
+    fixture.context_mut()?.discard_pending_for_test();
     companion.batch_applied(fixture.context_mut()?, &mut base);
-    assert_eq!(companion.delivery.generation, 2);
-    assert_eq!(base.companion_cursor(), (2, None));
+    // READY is durable, but the generation is not in use: the delivery
+    // position stays in the previous generation until ACTIVE, and the
+    // durable READY survives the link loss.
+    assert_eq!(companion.delivery.generation, 1);
+    assert_eq!(base.companion_cursor(), (1, None));
+    assert!(companion.snapshot_ready_pending());
     assert_eq!(companion.phase(), crate::e2ee::edge::Phase::Down);
+    // A later link announces the identical READY instead of ERESUME.
+    companion.link_active(fixture.context_mut()?, &mut base);
+    assert_eq!(companion.phase(), crate::e2ee::edge::Phase::AwaitingActive);
     Ok(())
 }

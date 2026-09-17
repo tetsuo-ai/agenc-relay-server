@@ -78,6 +78,13 @@ pub const RECOVERY_SUBMISSION_ROW_KIND: u16 = 17;
 pub const RECOVERY_RECORD_ROW_KIND: u16 = 18;
 /// One accepted sequencer credential's permanent history (companion 9.2.1).
 pub const SEQUENCER_HISTORY_ROW_KIND: u16 = 19;
+/// A route row staged in the edge's pending snapshot generation (companion
+/// 12.5): the same body as a `route/v1/` row under
+/// `pending-route/v1/<delivery-generation><conversation>`.
+pub const PENDING_ROUTE_ROW_KIND: u16 = 20;
+/// The edge's durable snapshot marker: the pending or active generation's
+/// exact cut and its staging, READY, ACTIVE, and migration progress.
+pub const SNAPSHOT_MARKER_ROW_KIND: u16 = 21;
 /// Companion request replay rows and durable operation sequence floors.
 pub const REPLAY_ROW_KIND: u16 = 9;
 /// Companion edge delivery checkpoints.
@@ -164,6 +171,10 @@ pub mod prefix {
     pub const KEYSET: &[u8] = b"keyset/v1";
     /// The credential history, one row per accepted sequencer credential.
     pub const SEQUENCER_HISTORY: &[u8] = b"sequencer-history/v1/";
+    /// `pending-route/v1/<delivery-generation><conversation-id>`.
+    pub const PENDING_ROUTE: &[u8] = b"pending-route/v1/";
+    /// `edge-snapshot/v1/<coordinator-server-id>`.
+    pub const SNAPSHOT_MARKER: &[u8] = b"edge-snapshot/v1/";
     /// Barrier head rows.
     pub const BARRIER_HEAD: &[u8] = b"cross-profile/head/v1/";
     /// Barrier part rows.
@@ -171,7 +182,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 39] = [
+const PREFIX_KINDS: [(&[u8], u16); 41] = [
     (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
     (prefix::RECOVERY_RECORD, RECOVERY_RECORD_ROW_KIND),
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
@@ -201,6 +212,8 @@ const PREFIX_KINDS: [(&[u8], u16); 39] = [
     (prefix::DELIVERY, DELIVERY_ROW_KIND),
     (prefix::KEYSET, KEYSET_ROW_KIND),
     (prefix::SEQUENCER_HISTORY, SEQUENCER_HISTORY_ROW_KIND),
+    (prefix::PENDING_ROUTE, PENDING_ROUTE_ROW_KIND),
+    (prefix::SNAPSHOT_MARKER, SNAPSHOT_MARKER_ROW_KIND),
     (prefix::BARRIER_HEAD, BARRIER_ROW_KIND),
     (prefix::BARRIER_PART, BARRIER_ROW_KIND),
     (prefix::WITNESS, WITNESS_ROW_KIND),
@@ -2583,6 +2596,186 @@ impl SequencerHistoryRow {
     }
 }
 
+/// A route row the edge staged in a pending snapshot generation: exactly the
+/// `route/v1/` body under the generation's key (companion 12.5).
+pub struct PendingRouteRow;
+
+impl PendingRouteRow {
+    /// The `pending-route/v1/<delivery-generation><conversation-id>` key.
+    pub fn key(
+        delivery_generation: u64,
+        conversation_id: &[u8; HASH_BYTES],
+    ) -> Result<StoredKey, StorageError> {
+        key_of(&[
+            prefix::PENDING_ROUTE,
+            &delivery_generation.to_be_bytes(),
+            conversation_id,
+        ])
+    }
+
+    /// Splits a pending route key into its generation and conversation.
+    pub fn parse_key(key: &StoredKey) -> Result<(u64, [u8; HASH_BYTES]), StorageError> {
+        let rest = suffix(key, prefix::PENDING_ROUTE, 8 + HASH_BYTES)?;
+        Ok((
+            u64::from_be_bytes(slice_array(rest, 0)?),
+            slice_array(rest, 8)?,
+        ))
+    }
+
+    /// Every pending route row of one generation, in conversation order.
+    pub fn range(delivery_generation: u64) -> Result<ReadPlan, StorageError> {
+        let start = key_of(&[prefix::PENDING_ROUTE, &delivery_generation.to_be_bytes()])?;
+        prefix_range(start.as_bytes(), PAGE_LIMIT)
+    }
+
+    /// Encodes a route row under the pending kind.
+    pub fn encode_route(row: &RouteRow) -> Result<Vec<u8>, StorageError> {
+        let inner = unwrap(ROUTE_ROW_KIND, &row.encode()?)?;
+        wrap(PENDING_ROUTE_ROW_KIND, inner)
+    }
+
+    /// Decodes the route row a pending row carries.
+    pub fn decode(body: &[u8]) -> Result<RouteRow, StorageError> {
+        let inner = unwrap(PENDING_ROUTE_ROW_KIND, body)?;
+        RouteRow::decode(&wrap(ROUTE_ROW_KIND, inner)?)
+    }
+}
+
+/// Where the edge's snapshot generation stands (companion 12.5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotPhase {
+    /// Pages are being staged; the marker is discarded on link loss.
+    Staging,
+    /// Every page is durable and verified; READY was or is being sent and
+    /// is resent after reconnect until ACTIVE.
+    Ready,
+    /// ACTIVE was recorded: the generation is in use and its rows migrate
+    /// into the active keys in bounded batches.
+    Active,
+}
+
+impl SnapshotPhase {
+    fn value(self) -> u16 {
+        match self {
+            Self::Staging => 0,
+            Self::Ready => 1,
+            Self::Active => 2,
+        }
+    }
+
+    fn from_value(value: u16) -> Result<Self, StorageError> {
+        match value {
+            0 => Ok(Self::Staging),
+            1 => Ok(Self::Ready),
+            2 => Ok(Self::Active),
+            _ => Err(StorageError::InvalidEncoding),
+        }
+    }
+}
+
+/// The edge's durable snapshot marker: the exact cut of the pending or
+/// newly active generation and its progress (companion 12.5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SnapshotMarkerRow {
+    /// The snapshot token.
+    pub token: [u8; HASH_BYTES],
+    /// The cut's state generation.
+    pub state_generation: u64,
+    /// The cut's delivery generation, which keys the pending rows.
+    pub delivery_generation: u64,
+    /// The declared entry count.
+    pub total_entries: u32,
+    /// The declared snapshot digest.
+    pub digest: [u8; HASH_BYTES],
+    /// Entries staged durably so far, in page order.
+    pub staged_entries: u32,
+    /// Encoded object bytes staged so far.
+    pub staged_bytes: u64,
+    /// The generation's phase.
+    pub phase: SnapshotPhase,
+    /// The monotonic millisecond the transfer opened at (page zero).
+    pub opened_at: u64,
+    /// While `Active`: the last conversation whose row migrated into the
+    /// active keys, or none before the first migration batch.
+    pub switched_through: Option<[u8; HASH_BYTES]>,
+}
+
+impl SnapshotMarkerRow {
+    /// The `edge-snapshot/v1/<coordinator-server-id>` key.
+    pub fn key(coordinator: &[u8; ID_BYTES]) -> Result<StoredKey, StorageError> {
+        key_of(&[prefix::SNAPSHOT_MARKER, coordinator])
+    }
+
+    /// The coordinator a marker key names.
+    pub fn parse_key(key: &StoredKey) -> Result<[u8; ID_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::SNAPSHOT_MARKER, ID_BYTES)?, 0)
+    }
+
+    fn check(&self) -> Result<(), StorageError> {
+        let valid = self.staged_entries <= self.total_entries
+            && (self.phase == SnapshotPhase::Staging || self.staged_entries == self.total_entries)
+            && (self.phase == SnapshotPhase::Active || self.switched_through.is_none());
+        if valid {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidEncoding)
+        }
+    }
+
+    /// Encodes a valid marker.
+    pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
+        self.check()?;
+        let mut encoder = encoder()?;
+        encoder.put_fixed(&self.token)?;
+        encoder.put_u64(self.state_generation)?;
+        encoder.put_u64(self.delivery_generation)?;
+        encoder.put_u32(self.total_entries)?;
+        encoder.put_fixed(&self.digest)?;
+        encoder.put_u32(self.staged_entries)?;
+        encoder.put_u64(self.staged_bytes)?;
+        encoder.put_u16(self.phase.value())?;
+        encoder.put_u64(self.opened_at)?;
+        put_bool(&mut encoder, self.switched_through.is_some())?;
+        encoder.put_fixed(&self.switched_through.unwrap_or([0; HASH_BYTES]))?;
+        wrap(SNAPSHOT_MARKER_ROW_KIND, encoder.finish())
+    }
+
+    /// Decodes and checks a marker.
+    pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
+        let inner = unwrap(SNAPSHOT_MARKER_ROW_KIND, body)?;
+        let mut decoder = decoder(&inner)?;
+        let token = decoder.array()?;
+        let state_generation = decoder.u64()?;
+        let delivery_generation = decoder.u64()?;
+        let total_entries = decoder.u32()?;
+        let digest = decoder.array()?;
+        let staged_entries = decoder.u32()?;
+        let staged_bytes = decoder.u64()?;
+        let phase = SnapshotPhase::from_value(decoder.u16()?)?;
+        let opened_at = decoder.u64()?;
+        let switched = take_bool(&mut decoder)?;
+        let switched_through: [u8; HASH_BYTES] = decoder.array()?;
+        decoder.finish()?;
+        if !switched && switched_through != [0; HASH_BYTES] {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let row = Self {
+            token,
+            state_generation,
+            delivery_generation,
+            total_entries,
+            digest,
+            staged_entries,
+            staged_bytes,
+            phase,
+            opened_at,
+            switched_through: switched.then_some(switched_through),
+        };
+        row.check()?;
+        Ok(row)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kind 13: edge witness violations.
 
@@ -2690,6 +2883,8 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         DELIVERY_ROW_KIND => DeliveryRow::decode(body).map(|_| ()),
         KEYSET_ROW_KIND => KeySetRow::decode(body).map(|_| ()),
         SEQUENCER_HISTORY_ROW_KIND => SequencerHistoryRow::decode(body).map(|_| ()),
+        PENDING_ROUTE_ROW_KIND => PendingRouteRow::decode(body).map(|_| ()),
+        SNAPSHOT_MARKER_ROW_KIND => SnapshotMarkerRow::decode(body).map(|_| ()),
         BARRIER_ROW_KIND => barrier::validate_body(body),
         WITNESS_ROW_KIND => WitnessRow::decode(body).map(|_| ()),
         DELIVERY_RECOVERY_ROW_KIND => delivery_recovery::validate_body(body),
@@ -2792,6 +2987,27 @@ pub mod fixtures {
         .encode()
     }
 
+    /// The edge's pending route and snapshot marker bodies.
+    fn snapshot_body(kind: u16, seed: u8) -> Result<Vec<u8>, StorageError> {
+        if kind == PENDING_ROUTE_ROW_KIND {
+            let route = RouteRow::decode(&structural_body(ROUTE_ROW_KIND, seed)?)?;
+            return PendingRouteRow::encode_route(&route);
+        }
+        SnapshotMarkerRow {
+            token: [seed; HASH_BYTES],
+            state_generation: u64::from(seed),
+            delivery_generation: u64::from(seed),
+            total_entries: u32::from(seed),
+            digest: [seed; HASH_BYTES],
+            staged_entries: u32::from(seed),
+            staged_bytes: u64::from(seed),
+            phase: SnapshotPhase::Staging,
+            opened_at: u64::from(seed),
+            switched_through: None,
+        }
+        .encode()
+    }
+
     /// Package, attach, mailbox, replay, delivery, key set, and barrier bodies.
     fn operational_body(kind: u16, seed: u8) -> Result<Vec<u8>, StorageError> {
         let hash = [seed; HASH_BYTES];
@@ -2836,6 +3052,7 @@ pub mod fixtures {
             }
             .encode(),
             KEYSET_ROW_KIND | SEQUENCER_HISTORY_ROW_KIND => signer_body(kind, seed),
+            PENDING_ROUTE_ROW_KIND | SNAPSHOT_MARKER_ROW_KIND => snapshot_body(kind, seed),
             BARRIER_ROW_KIND => BarrierHead::Stage(BarrierStage::empty(BarrierIdentity {
                 network_id: hash,
                 coordinator_server_id: id,

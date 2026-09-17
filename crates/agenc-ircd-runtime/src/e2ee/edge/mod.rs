@@ -14,6 +14,7 @@ mod response_validation;
 mod result;
 mod retry;
 mod router;
+mod snapshot;
 mod startup;
 mod sync;
 #[cfg(test)]
@@ -165,7 +166,17 @@ pub(crate) enum PendingCommit {
         outputs: Vec<ClientOutput>,
     },
     /// The READY of a snapshot was recorded.
-    Ready { delivery_generation: u64 },
+    /// One accepted snapshot page is durable; the next page is fetched.
+    SnapshotPage { cursor: [u8; 32] },
+    /// The last page and the READY marker are durable.
+    Ready,
+    /// The ACTIVE marker and the new delivery cursor are durable.
+    SnapshotActive,
+    /// One migration or cleanup batch is durable.
+    SnapshotStep {
+        done: bool,
+        switched_through: Option<[u8; 32]>,
+    },
     /// A witness violation row awaits its exact durable receipt.
     Witness,
 }
@@ -183,7 +194,10 @@ pub struct E2eeEdge {
     phase: Phase,
     delivery: sync::DeliveryState,
     witness_snapshot_required: bool,
-    snapshot: Option<sync::SnapshotInstall>,
+    snapshot: Option<snapshot::SnapshotInstall>,
+    snapshot_backing: Option<crate::budget::BackingReservationPort>,
+    snapshot_strays: BTreeMap<u64, Vec<[u8; 32]>>,
+    snapshot_stray_generations: BTreeMap<u64, Vec<[u8; 32]>>,
     origins: BTreeMap<ConnectionGeneration, LocalOrigin>,
     pending: BTreeMap<[u8; 16], PendingRequest>,
     by_completion: BTreeMap<[u8; 16], [u8; 16]>,
@@ -241,6 +255,9 @@ impl E2eeEdge {
             delivery: sync::DeliveryState::default(),
             witness_snapshot_required: true,
             snapshot: None,
+            snapshot_backing: None,
+            snapshot_strays: BTreeMap::new(),
+            snapshot_stray_generations: BTreeMap::new(),
             origins: BTreeMap::new(),
             pending: BTreeMap::new(),
             by_completion: BTreeMap::new(),
@@ -293,7 +310,7 @@ impl E2eeEdge {
     pub fn link_down(&mut self) {
         self.barrier_completions.clear();
         self.phase = Phase::Down;
-        self.snapshot = None;
+        self.snapshot_link_down();
         self.queued.clear();
         self.events_in.clear();
         self.barrier_pending = None;

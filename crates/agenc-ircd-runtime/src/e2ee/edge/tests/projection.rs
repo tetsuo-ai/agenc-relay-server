@@ -23,8 +23,8 @@ use crate::federation::edge::{EdgeConfig, EdgeFederation};
 use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::test_support::StateCoreFixture;
 
-const CONVERSATION: [u8; 32] = [9; 32];
-const CHANNEL: ChannelInstanceId = ChannelInstanceId::from_bytes([8; 16]);
+pub(super) const CONVERSATION: [u8; 32] = [9; 32];
+pub(super) const CHANNEL: ChannelInstanceId = ChannelInstanceId::from_bytes([8; 16]);
 const MUTATION: [u8; 16] = [7; 16];
 
 mod rollback;
@@ -127,7 +127,7 @@ async fn refused_storage_does_not_complete_or_cache_a_request() -> TestResult {
     Ok(())
 }
 
-fn base_edge() -> EdgeFederation {
+pub(super) fn base_edge() -> EdgeFederation {
     EdgeFederation::new(EdgeConfig {
         network_id: NetworkId::from_bytes([1; 32]),
         server_id: ServerId::from_bytes([2; 16]),
@@ -144,7 +144,7 @@ fn base_edge() -> EdgeFederation {
     })
 }
 
-fn install_route(edge: &mut E2eeEdge) -> TestResult {
+pub(super) fn install_route(edge: &mut E2eeEdge) -> TestResult {
     let state = IrcFederationRouteState {
         profile_version: 1,
         network_id: [1; 32],
@@ -300,21 +300,34 @@ async fn a_hidden_route_is_removed_from_every_projection_index() -> TestResult {
 }
 
 #[tokio::test]
-async fn an_empty_snapshot_removes_every_prior_route() -> TestResult {
+async fn an_empty_snapshot_removes_every_prior_route_only_once_active() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     let mut edge = edge();
+    super::snapshot::install_backing(&mut edge);
     install_route(&mut edge)?;
     edge.link_down();
     let mut base = base_edge();
     edge.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
-    edge.state_begin([6; 32], 5, 2, 0, 0, 0, digest)
+    edge.state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
         .map_err(|refusal| refusal.code.to_string())?;
-    edge.state_end(fixture.context_mut()?, &mut base, [6; 32], 0, None)
+    edge.state_end(fixture.context_mut()?, [6; 32], 0, None)
         .map_err(|refusal| refusal.code.to_string())?;
+    // The prior projection stays live through READY.
+    assert_eq!(edge.conversations.len(), 1);
+    assert_eq!(edge.routes.routes().count(), 1);
+    fixture.context_mut()?.discard_pending_for_test();
+    edge.batch_applied(fixture.context_mut()?, &mut base);
+    assert_eq!(edge.phase(), Phase::AwaitingActive);
+    assert_eq!(edge.conversations.len(), 1);
+    edge.state_active(fixture.context_mut()?, [6; 32], 5, 2, digest)
+        .map_err(|refusal| refusal.code.to_string())?;
+    fixture.context_mut()?.discard_pending_for_test();
+    edge.batch_applied(fixture.context_mut()?, &mut base);
     assert!(edge.conversations.is_empty());
     assert!(edge.route_objects.is_empty());
     assert_eq!(edge.routes.routes().count(), 0);
+    assert_eq!(edge.delivery.generation, 2);
     Ok(())
 }
 
@@ -361,6 +374,7 @@ async fn refused_event_storage_keeps_the_previous_resume_cursor() -> TestResult 
 async fn refused_snapshot_storage_keeps_the_previous_delivery_generation() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     let mut edge = edge();
+    super::snapshot::install_backing(&mut edge);
     edge.delivery.generation = 1;
     edge.delivery.cursor = Some((6, [12; 16]));
     let before = (edge.delivery.generation, edge.delivery.cursor);
@@ -368,7 +382,7 @@ async fn refused_snapshot_storage_keeps_the_previous_delivery_generation() -> Te
     base.note_companion_delivery(before.0, before.1);
     edge.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
-    edge.state_begin([6; 32], 5, 2, 0, 0, 0, digest)
+    edge.state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
         .map_err(|refusal| refusal.code.to_string())?;
     fixture
         .state_mut()?
@@ -376,7 +390,7 @@ async fn refused_snapshot_storage_keeps_the_previous_delivery_generation() -> Te
             crate::state_core::inbox::SignalEvent::Terminate,
         ));
     assert!(
-        edge.state_end(fixture.context_mut()?, &mut base, [6; 32], 0, None)
+        edge.state_end(fixture.context_mut()?, [6; 32], 0, None)
             .is_err()
     );
     edge.link_down();
