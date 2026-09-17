@@ -122,6 +122,7 @@ pub(super) struct Restore {
     origin_sequences: Vec<(StoredKey, OriginSequenceRow)>,
     pub(super) delivery: super::delivery_owner::restore::Restore,
     owners: super::owners::Rebuild,
+    object_expiry: Option<super::object_expiry::Progress>,
     recovery: super::recovery_lineage::Recoveries,
     key_set: Option<agenc_ircd_storage::e2ee_records::KeySetRow>,
     history: BTreeMap<[u8; 32], agenc_ircd_storage::e2ee_records::SequencerHistoryRow>,
@@ -173,6 +174,9 @@ impl Restore {
             agenc_ircd_storage::e2ee_records::MAILBOX_SEQUENCE_ROW_KIND => {
                 self.mailbox_sequences.admit(key, body);
             }
+            agenc_ircd_storage::e2ee_records::EXPIRY_PROGRESS_ROW_KIND => {
+                self.admit_expiry_progress(body);
+            }
             REPLAY_ROW_KIND => {
                 if key
                     .as_bytes()
@@ -215,6 +219,16 @@ impl Restore {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The collector's durable continuation; a malformed row poisons the
+    /// reload rather than restarting the sweep at an invented position.
+    fn admit_expiry_progress(&mut self, body: &[u8]) {
+        use agenc_ircd_storage::e2ee_records::ObjectExpiryProgressRow;
+        match ObjectExpiryProgressRow::decode(body) {
+            Ok(row) => self.object_expiry = Some(super::object_expiry::Progress::from_row(row)),
+            Err(_) => self.objects.poison(),
         }
     }
 
@@ -550,6 +564,7 @@ pub(super) fn rebuild(
     restore_successors(state, &index)?;
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.finish(state);
+    state.object_expiry = restore.object_expiry.unwrap_or_default();
     state.recovery = restore.recovery;
     coordinator.signer_history = restore.history.clone();
     // A coordinator without an installed key set (no signer configured)

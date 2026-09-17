@@ -16,6 +16,7 @@ mod grace;
 mod history;
 mod mailbox_expiry;
 mod maintenance;
+mod object_expiry;
 mod object_read;
 mod origin;
 mod query;
@@ -218,6 +219,7 @@ enum PendingCommit {
     CompanionReplayMaintenance(Box<replay_maintenance::Receipt>),
     CompanionMailboxExpiry(Box<mailbox_expiry::Receipt>),
     CompanionRequestExpiry(Box<request_expiry::Receipt>),
+    CompanionObjectExpiry(Box<object_expiry::Receipt>),
     /// A companion request batch; the executor holds its result.
     Companion {
         peer: ServerId,
@@ -303,6 +305,7 @@ pub struct FederationCoordinator {
     replay_maintenance: replay_maintenance::Worker,
     mailbox_expiry: mailbox_expiry::Worker,
     request_expiry: request_expiry::Worker,
+    object_expiry: object_expiry::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
     barriers: BTreeMap<ServerId, OpenBarrier>,
@@ -384,6 +387,7 @@ impl FederationCoordinator {
             replay_maintenance: replay_maintenance::Worker::default(),
             mailbox_expiry: mailbox_expiry::Worker::default(),
             request_expiry: request_expiry::Worker::default(),
+            object_expiry: object_expiry::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
         }
@@ -1281,15 +1285,26 @@ impl FederationCoordinator {
         entry: crate::state_core::timers::TimerEntry,
     ) -> bool {
         grace::timer_fired(self, context, entry)
-            || replay_maintenance::timer_fired(self, context, entry)
-            || mailbox_expiry::timer_fired(self, context, entry)
-            || request_expiry::timer_fired(self, context, entry)
+            || self.maintenance_timer_fired(context, entry)
             || resume_reconciliation::timer_fired(self, context, entry)
             || snapshot::timer_fired(self, context, entry)
             || self.companion_timer_fired(context, entry)
             || companion::snapshot_timer_fired(self, context, entry)
             || companion::mailbox_timer_fired(self, context, entry)
             || self.queries.timer_fired(context, entry)
+    }
+
+    /// The bounded companion maintenance wakes: replay, mailbox, request
+    /// result and expired-object collection.
+    fn maintenance_timer_fired(
+        &mut self,
+        context: &mut StateCoreContext,
+        entry: crate::state_core::timers::TimerEntry,
+    ) -> bool {
+        replay_maintenance::timer_fired(self, context, entry)
+            || mailbox_expiry::timer_fired(self, context, entry)
+            || request_expiry::timer_fired(self, context, entry)
+            || object_expiry::timer_fired(self, context, entry)
     }
 
     fn settle_request(&mut self, context: &mut StateCoreContext, pending: PendingCommit) -> bool {
@@ -1417,6 +1432,7 @@ impl FederationCoordinator {
             Some(
                 pending @ (PendingCommit::CompanionRequestExpiry(_)
                 | PendingCommit::CompanionMailboxExpiry(_)
+                | PendingCommit::CompanionObjectExpiry(_)
                 | PendingCommit::CompanionReplayMaintenance(_)),
             ) => maintenance::committed(self, context, pending),
             Some(PendingCommit::History(prepared)) => history::committed(self, context, *prepared),
@@ -1586,6 +1602,7 @@ impl FederationCoordinator {
         replay_maintenance::advance(self, context);
         mailbox_expiry::advance(self, context);
         request_expiry::advance(self, context);
+        object_expiry::advance(self, context);
     }
 
     fn replay_io_busy(&self) -> bool {
@@ -1639,6 +1656,7 @@ impl FederationCoordinator {
             Some(
                 pending @ (PendingCommit::CompanionRequestExpiry(_)
                 | PendingCommit::CompanionMailboxExpiry(_)
+                | PendingCommit::CompanionObjectExpiry(_)
                 | PendingCommit::CompanionReplayMaintenance(_)),
             ) => maintenance::rejected(self, context, pending),
             Some(PendingCommit::ResumeAcknowledged(receipt)) => {
@@ -1646,38 +1664,8 @@ impl FederationCoordinator {
             }
             Some(PendingCommit::History(prepared)) => history::rejected(self, *prepared),
             Some(PendingCommit::Cleanup { peer }) => grace::continue_cleanup(self, context, peer),
-            Some(PendingCommit::Request {
-                peer,
-                link,
-                key,
-                request_object_id,
-                descriptor,
-                header,
-                result,
-                query,
-                ..
-            }) => {
-                // The serialized page must die before its last query permit.
-                drop(result);
-                if let Some(receipt) = query {
-                    self.queries.reject_page(receipt, context.now());
-                }
-                request::rejected(
-                    self,
-                    context,
-                    link,
-                    peer,
-                    FreshRequest {
-                        key,
-                        header,
-                        descriptor,
-                        request_object_id,
-                        bound: None,
-                        command: None,
-                        mutation: agenc_ircd_domain::federation::MutationContext::default(),
-                        charge: None,
-                    },
-                );
+            Some(pending @ PendingCommit::Request { .. }) => {
+                self.reject_request_batch(context, pending);
             }
             Some(PendingCommit::OriginAck { peer, link, .. })
             | Some(PendingCommit::OriginReady { peer, link })
@@ -1707,6 +1695,45 @@ impl FederationCoordinator {
             }
             _ => {}
         }
+    }
+
+    /// The refusal path of one companion request batch: the serialized page
+    /// dies before its last query permit, then the request itself refuses.
+    fn reject_request_batch(&mut self, context: &mut StateCoreContext, pending: PendingCommit) {
+        let PendingCommit::Request {
+            peer,
+            link,
+            key,
+            request_object_id,
+            descriptor,
+            header,
+            result,
+            query,
+            ..
+        } = pending
+        else {
+            return;
+        };
+        drop(result);
+        if let Some(receipt) = query {
+            self.queries.reject_page(receipt, context.now());
+        }
+        request::rejected(
+            self,
+            context,
+            link,
+            peer,
+            FreshRequest {
+                key,
+                header,
+                descriptor,
+                request_object_id,
+                bound: None,
+                command: None,
+                mutation: agenc_ircd_domain::federation::MutationContext::default(),
+                charge: None,
+            },
+        );
     }
 
     /// Replays backlogged link traffic in arrival order until a replayed

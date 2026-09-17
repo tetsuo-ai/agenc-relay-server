@@ -85,6 +85,8 @@ pub enum TimerKind {
     CompanionMailboxMaintenance,
     /// Bounded expiry of completed companion request results and replay metadata.
     CompanionRequestMaintenance,
+    /// Bounded physical deletion of expired unowned companion objects.
+    CompanionObjectMaintenance,
     /// The reserved retry wake for an edge's pending witness metadata.
     CompanionWitnessRetry,
     /// Expiry of process-local mailbox cursors and their immutable backing.

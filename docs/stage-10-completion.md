@@ -27,6 +27,9 @@ recorded in [the historical chain record](stage-10-historical-chain.md).
 Durable object ownership, retention classes, trusted acceptance ages and the
 conversation and global disk quotas (ENC-08, issue #53) are recorded in
 [the object ownership record](stage-10-object-owners.md).
+Bounded, race-safe physical deletion of expired unowned objects (ENC-09,
+issue #67) is recorded in
+[the object expiry record](stage-10-object-expiry.md).
 The recovery submission carrier that lets a restored pending route become
 permanently closed or conflict (ENC-03, issue #57) is recorded in
 [the recovery submission record](stage-10-recovery-submission.md).
@@ -74,7 +77,7 @@ unsupported. The current-format backup and restore contract remains required.
 | CAP-74 | Resolve retained edge witnesses with authenticated ancestry | Open |
 | CAP-86 | Bind ReInit admission and ACK signatures to the required old and continuing leaves | Open |
 | CAP-101 | Select per-conversation credentials and retain exact old signers for unfinished records | Open |
-| CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
+| CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Owner accounts implemented (ENC-08); bounded race-safe collection of expired unowned objects implemented (ENC-09), with native ext4 growth and reuse qualification still owned by STO-03 and REL-08 |
 | Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Implemented; real daemon replacement, registered reauthentication, session revocation, restart and receipt-order tests pass |
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired. Capability refusals, channel privacy, per-connection accounting, maintenance isolation and independent round-robin input scheduling repaired; other items open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding, temporary cleanup, borrowed ciphertext decoding/opening and reverse-manifest arithmetic repaired; checkpoint/backup capacity and publication remain open |
