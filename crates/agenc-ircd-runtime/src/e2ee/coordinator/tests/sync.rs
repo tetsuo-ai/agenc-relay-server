@@ -702,9 +702,13 @@ fn a_base_reset_opens_the_next_delivery_generation() -> TestResult {
             .map(|stream| stream.generation),
         Some(1)
     );
-    // Link loss alone retains this pending cut and cannot mint a new generation.
+    // Link loss alone retains this pending cut and cannot mint a new
+    // generation: the resume on the next link publishes the same cut again
+    // from its first page.
     sync.harness.coordinator.link_closed(home());
-    assert_eq!(sync.resume(1, None).err(), Some(CompanionFault::Protocol));
+    let page = frames(&sync.resume(1, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (retained, _, _) = begin_cut(&page)?;
+    assert_eq!(retained, next);
     assert_eq!(
         sync.harness
             .coordinator
@@ -1108,5 +1112,50 @@ pub(super) fn initial_ready_peer(
         Some(Committed::Lines(_))
     ));
     assert!(coordinator.delivering(peer));
+    Ok(())
+}
+
+#[test]
+fn a_resume_on_an_active_stream_is_a_violation() -> TestResult {
+    let mut sync = Sync::new()?;
+    let page = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (cut, _, _) = begin_cut(&page)?;
+    sync.ready(cut)?;
+    assert_eq!(sync.resume(0, None).err(), Some(CompanionFault::Protocol));
+    Ok(())
+}
+
+#[test]
+fn a_base_epoch_behind_the_stream_scope_is_a_violation() -> TestResult {
+    let mut sync = Sync::new()?;
+    let page = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (cut, _, _) = begin_cut(&page)?;
+    sync.ready(cut)?;
+    sync.harness.coordinator.link_closed(home());
+    sync.host.resync_epoch = 1;
+    let page = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (next, _, _) = begin_cut(&page)?;
+    sync.ready(next)?;
+    // The stream scope now covers base epoch one; an older base epoch on
+    // the next link cannot resume it.
+    sync.harness.coordinator.link_closed(home());
+    sync.host.resync_epoch = 0;
+    assert_eq!(sync.resume(1, None).err(), Some(CompanionFault::Protocol));
+    Ok(())
+}
+
+#[test]
+fn an_expired_pending_cut_resets_to_the_next_delivery_generation() -> TestResult {
+    let mut sync = Sync::new()?;
+    entitle(&mut sync, 40)?;
+    let first = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (cut, _, _) = begin_cut(&first)?;
+    let late = NOW_MILLIS + 15 * 60 * 1_000;
+    assert!(sync.harness.coordinator.snapshot_expired(home(), late));
+    sync.harness.coordinator.link_closed(home());
+    let page = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (next, _, _) = begin_cut(&page)?;
+    assert_eq!(next.delivery_generation, 1);
+    assert_ne!(next.token, cut.token);
     Ok(())
 }

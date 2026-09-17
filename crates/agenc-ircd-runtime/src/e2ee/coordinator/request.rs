@@ -94,6 +94,14 @@ pub enum ResultBody {
     ReinitAborted([u8; 32], [u8; 32], [u8; 32], [u8; 32]),
     /// `mailbox_acked`.
     MailboxAcked([u8; 32], [u8; 32]),
+    /// `recovery_accepted`: conversation and submission identifiers.
+    RecoveryAccepted([u8; 32], [u8; 32]),
+    /// `recovery_extended`: conversation, route sequence and record identifier.
+    RecoveryExtended([u8; 32], u64, [u8; 32]),
+    /// `recovery_closed`: conversation and close identifiers.
+    RecoveryClosed([u8; 32], [u8; 32]),
+    /// `recovery_conflict`: conversation, route sequence and both record identifiers.
+    RecoveryConflict([u8; 32], u64, [u8; 32], [u8; 32]),
 }
 
 impl ResultBody {
@@ -124,6 +132,10 @@ impl ResultBody {
             Self::ReinitActivated(..) => ResultKind::ReinitActivated,
             Self::ReinitAborted(..) => ResultKind::ReinitAborted,
             Self::MailboxAcked(..) => ResultKind::MailboxAcked,
+            Self::RecoveryAccepted(..) => ResultKind::RecoveryAccepted,
+            Self::RecoveryExtended(..) => ResultKind::RecoveryExtended,
+            Self::RecoveryClosed(..) => ResultKind::RecoveryClosed,
+            Self::RecoveryConflict(..) => ResultKind::RecoveryConflict,
         }
     }
 
@@ -153,6 +165,10 @@ impl ResultBody {
             Self::ReinitActivated(..) => W::ReinitActivated,
             Self::ReinitAborted(..) => W::ReinitAborted,
             Self::MailboxAcked(..) => W::MailboxAcked,
+            Self::RecoveryAccepted(..) => W::RecoveryAccepted,
+            Self::RecoveryExtended(..) => W::RecoveryExtended,
+            Self::RecoveryClosed(..) => W::RecoveryClosed,
+            Self::RecoveryConflict(..) => W::RecoveryConflict,
         }
     }
 
@@ -165,6 +181,18 @@ impl ResultBody {
                 .opaque(code.token().as_bytes(), 1, 64)
                 .and_then(|()| writer.opaque(context, 0, 255)),
             Self::AcceptedEvent | Self::ObjectPage | Self::MailboxPage => Ok(()),
+            Self::RecoveryAccepted(a, b) | Self::RecoveryClosed(a, b) => {
+                writer.fixed(a).and_then(|()| writer.fixed(b))
+            }
+            Self::RecoveryExtended(a, sequence, c) => writer
+                .fixed(a)
+                .and_then(|()| writer.u64(*sequence))
+                .and_then(|()| writer.fixed(c)),
+            Self::RecoveryConflict(a, sequence, c, d) => writer
+                .fixed(a)
+                .and_then(|()| writer.u64(*sequence))
+                .and_then(|()| writer.fixed(c))
+                .and_then(|()| writer.fixed(d)),
             Self::Bound {
                 conversation_id,
                 binding_id,

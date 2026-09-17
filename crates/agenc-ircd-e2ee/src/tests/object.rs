@@ -69,7 +69,16 @@ fn envelope_bounds_are_checked_before_the_body_is_copied() -> TestResult {
 
 #[test]
 fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
-    assert_eq!(IrcWireObjectKind::ALL.len(), 35);
+    assert_eq!(IrcWireObjectKind::ALL.len(), 36);
+    assert_eq!(IrcWireObjectKind::RecoverySubmission.value(), 35);
+    assert_eq!(
+        IrcWireObjectKind::RecoverySubmission.token(),
+        "RECOVERY-SUBMISSION"
+    );
+    assert_eq!(
+        IrcWireObjectKind::RecoverySubmission.maximum_object_bytes(),
+        4_096
+    );
     assert_eq!(IrcWireObjectKind::LeafMembershipProof.value(), 37);
     assert_eq!(
         IrcWireObjectKind::LeafMembershipProof.token(),
@@ -79,9 +88,9 @@ fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
         IrcWireObjectKind::LeafMembershipProof.maximum_object_bytes(),
         8_192
     );
-    // The recovery kinds 35 and 36 are not registered by this implementation.
+    // The witness-resolution kind 36 is not registered by this implementation.
     assert_eq!(
-        IrcWireObject::peek(&[0, 1, 35, 0, 0, 1, 0]),
+        IrcWireObject::peek(&[0, 1, 36, 0, 0, 1, 0]),
         Err(E2eeError::UnknownDiscriminant)
     );
     for kind in IrcWireObjectKind::ALL {

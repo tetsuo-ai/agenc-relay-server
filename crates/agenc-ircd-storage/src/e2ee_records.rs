@@ -50,7 +50,9 @@ pub mod mailbox_sequence;
 pub use mailbox_sequence::{MAILBOX_SEQUENCE_ROW_KIND, MailboxSequenceRow};
 pub mod origin;
 pub mod owner;
+pub mod recovery;
 pub use owner::{OWNER_ROW_KIND, ObjectOwnerRow, RetentionClass, UNDATED_SECOND};
+pub use recovery::{RecoveryOutcome, RecoveryRecordRow, RecoverySubmissionRow};
 
 /// The one live `e2ee_object` arm.
 pub const OBJECT_RECORD_KIND: u16 = 1;
@@ -70,6 +72,10 @@ pub const PACKAGE_ROW_KIND: u16 = 6;
 pub const ATTACH_ROW_KIND: u16 = 7;
 /// Mailbox item, token, and acknowledgement rows.
 pub const MAILBOX_ROW_KIND: u16 = 8;
+/// Accepted recovery submissions (companion 13.7.4).
+pub const RECOVERY_SUBMISSION_ROW_KIND: u16 = 17;
+/// Sequencer records a recovery installed beyond the restored head.
+pub const RECOVERY_RECORD_ROW_KIND: u16 = 18;
 /// Companion request replay rows and durable operation sequence floors.
 pub const REPLAY_ROW_KIND: u16 = 9;
 /// Companion edge delivery checkpoints.
@@ -120,6 +126,10 @@ pub mod prefix {
     pub const MEMBERSHIP: &[u8] = b"membership/v1/";
     /// Object ownership accounts.
     pub const OWNER: &[u8] = b"owner/v1/";
+    /// Accepted recovery submissions.
+    pub const RECOVERY_SUBMISSION: &[u8] = b"recovery-submission/v1/";
+    /// Records a recovery installed.
+    pub const RECOVERY_RECORD: &[u8] = b"recovery-record/v1/";
     /// Identity head rows.
     pub const IDENTITY: &[u8] = b"identity/v1/";
     /// Roster head rows.
@@ -157,7 +167,9 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 36] = [
+const PREFIX_KINDS: [(&[u8], u16); 38] = [
+    (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
+    (prefix::RECOVERY_RECORD, RECOVERY_RECORD_ROW_KIND),
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
     (prefix::ROUTE, ROUTE_ROW_KIND),
     (prefix::LOCK, CLAIM_ROW_KIND),
@@ -2541,6 +2553,8 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         DELIVERY_RECOVERY_ROW_KIND => delivery_recovery::validate_body(body),
         MAILBOX_SEQUENCE_ROW_KIND => MailboxSequenceRow::decode(body).map(|_| ()),
         OWNER_ROW_KIND => ObjectOwnerRow::decode(body).map(|_| ()),
+        RECOVERY_SUBMISSION_ROW_KIND => RecoverySubmissionRow::decode(body).map(|_| ()),
+        RECOVERY_RECORD_ROW_KIND => RecoveryRecordRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),
     }
 }

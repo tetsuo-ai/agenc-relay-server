@@ -25,8 +25,9 @@ use agenc_ircd_storage::e2ee_records::{
     ATTACH_ROW_KIND, AttachRow, BARRIER_ROW_KIND, CLAIM_ROW_KIND, ClaimRow,
     DELIVERY_RECOVERY_ROW_KIND, DIRECTORY_ROW_KIND, DirectoryRow, MAILBOX_ROW_KIND, MailboxRow,
     OBJECT_RECORD_KIND, OWNER_ROW_KIND, ObjectOwnerRow, ObjectRow, PACKAGE_ROW_KIND, PackageRow,
-    REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayRow, RetentionClass, RouteRow, SEQUENCER_ROW_KIND,
-    SequencerRow, barrier, prefix,
+    RECOVERY_RECORD_ROW_KIND, RECOVERY_SUBMISSION_ROW_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND,
+    RecoveryRecordRow, RecoverySubmissionRow, ReplayRow, RetentionClass, RouteRow,
+    SEQUENCER_ROW_KIND, SequencerRow, barrier, prefix,
 };
 use agenc_ircd_storage::{
     MAX_RECORD_REFERENCES, PersistentRecordValue, RecordReference, StoredKey, TableId,
@@ -215,6 +216,8 @@ pub(crate) fn owned_by(key: &StoredKey, kind: u16, body: &[u8]) -> Result<Vec<Ow
         REPLAY_ROW_KIND if bytes.starts_with(prefix::REPLAY) => replay_owned(body)?,
         BARRIER_ROW_KIND if bytes.starts_with(prefix::BARRIER_PART) => barrier_owned(body)?,
         DELIVERY_RECOVERY_ROW_KIND if bytes.starts_with(OUTBOX_PREFIX) => outbox_owned(body)?,
+        RECOVERY_SUBMISSION_ROW_KIND => recovery_submission_owned(key, body)?,
+        RECOVERY_RECORD_ROW_KIND => recovery_record_owned(key, body)?,
         // Other key families of these kinds (delivery owners, ACK ranges, cut
         // pages, barrier heads, origin sequences) name no retained object.
         _ => vec![],
@@ -319,6 +322,37 @@ fn outbox_owned(body: &[u8]) -> Result<Vec<Owned>, Code> {
         | DeliveryRecoveryRow::CutPage(_)
         | DeliveryRecoveryRow::Barrier(_) => vec![],
     })
+}
+
+fn recovery_submission_owned(key: &StoredKey, body: &[u8]) -> Result<Vec<Owned>, Code> {
+    let row = RecoverySubmissionRow::decode(body).map_err(invalid)?;
+    let (conversation, _) = RecoverySubmissionRow::parse_key(key).map_err(invalid)?;
+    let mut owned_objects = vec![owned(
+        row.submission_object_id,
+        RetentionClass::Ordinary,
+        Some(conversation),
+    )];
+    if row.element_retained {
+        // Records and closes are the proofs a recovery adopts; references
+        // are the ordinary material they name.
+        let class = if row.element_kind == 3 {
+            RetentionClass::Ordinary
+        } else {
+            RetentionClass::SecurityProof
+        };
+        owned_objects.push(owned(row.element_object_id, class, Some(conversation)));
+    }
+    Ok(owned_objects)
+}
+
+fn recovery_record_owned(key: &StoredKey, body: &[u8]) -> Result<Vec<Owned>, Code> {
+    let row = RecoveryRecordRow::decode(body).map_err(invalid)?;
+    let (conversation, _) = RecoveryRecordRow::parse_key(key).map_err(invalid)?;
+    Ok(vec![owned(
+        row.record_object_id,
+        RetentionClass::SecurityProof,
+        Some(conversation),
+    )])
 }
 
 fn sequencer_owned(key: &StoredKey, body: &[u8]) -> Result<Vec<Owned>, Code> {

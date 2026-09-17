@@ -1844,3 +1844,49 @@ fn a_reloaded_coordinator_completes_a_quorum_it_had_begun() -> TestResult {
 pub(super) fn fresh_fetch_fixture() -> TestResult<super::FreshFetchFixture> {
     recovery_pending::fresh_fetch_fixture()
 }
+
+#[test]
+fn a_bootstrap_activation_needs_the_resulting_council_too() -> TestResult {
+    // The bootstrap council is the first device alone; the operational
+    // council the activation installs holds both devices with fault bound
+    // zero, so the activation needs the old council's vote and both of the
+    // resulting council's (companion 9.5).
+    let mut harness = Harness::with_councils(
+        &[DEVICE, SECOND_DEVICE],
+        &[DEVICE],
+        &[DEVICE, SECOND_DEVICE],
+    )?;
+    let conversation = harness.bind_channel()?;
+    let opened =
+        recovery_pending::close_authorization::open_finalization(&mut harness, conversation, 0)?;
+    let (old_council_only, _) = recovery_pending::close_authorization::finalization_bytes(
+        &harness,
+        &opened,
+        None,
+        &[DEVICE],
+    )?;
+    let outcome = ok(harness.run(
+        Op::SubmitFinalization,
+        &conversation,
+        Some(&old_council_only),
+    )?)?;
+    assert!(matches!(
+        outcome.result,
+        ResultBody::Pending(_, PendingKind::Finalization, _)
+    ));
+    // The second device sits on the resulting council alone; its vote is
+    // counted there and completes both quorums.
+    let (resulting_member, terminal) = recovery_pending::close_authorization::finalization_bytes(
+        &harness,
+        &opened,
+        None,
+        &[SECOND_DEVICE],
+    )?;
+    let outcome = ok(harness.run(
+        Op::SubmitFinalization,
+        &conversation,
+        Some(&resulting_member),
+    )?)?;
+    assert!(matches!(outcome.result, ResultBody::Finalized(_, _, id, _) if id == terminal));
+    Ok(())
+}

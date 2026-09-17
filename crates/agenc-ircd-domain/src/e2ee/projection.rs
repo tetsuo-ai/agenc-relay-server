@@ -103,19 +103,22 @@ impl Opcode {
     pub const ACKNOWLEDGE_MAILBOX: Self = Self(40);
     /// `submit_policy`.
     pub const SUBMIT_POLICY: Self = Self(41);
+    /// `submit_recovery` (companion 13.7.4).
+    pub const SUBMIT_RECOVERY: Self = Self(42);
+    /// `submit_recovery_element` (companion 13.7.4).
+    pub const SUBMIT_RECOVERY_ELEMENT: Self = Self(43);
     /// `submit_membership` (companion 13.7.3).
     pub const SUBMIT_MEMBERSHIP: Self = Self(44);
 
-    /// Every registered opcode. The recovery-submission opcodes 42 and 43
-    /// are not registered by this implementation.
+    /// Every registered opcode.
     pub fn all() -> impl Iterator<Item = Self> {
-        (1..=41).chain(std::iter::once(44)).map(Self)
+        (1..=44).map(Self)
     }
 
     /// Whether the value is a registered opcode.
     #[must_use]
     pub const fn is_valid(self) -> bool {
-        (self.0 >= 1 && self.0 <= 41) || self.0 == 44
+        self.0 >= 1 && self.0 <= 44
     }
 }
 
@@ -168,6 +171,14 @@ pub enum ResultKind {
     ReinitAborted,
     /// `mailbox_acked`.
     MailboxAcked,
+    /// `recovery_accepted` (companion 13.7.4).
+    RecoveryAccepted,
+    /// `recovery_extended`.
+    RecoveryExtended,
+    /// `recovery_closed`.
+    RecoveryClosed,
+    /// `recovery_conflict`.
+    RecoveryConflict,
 }
 
 /// `IrcFederationStoreKind`.
@@ -420,6 +431,14 @@ pub fn completion_for(opcode: Opcode, result: ResultKind) -> Result<Completion, 
         (Opcode::SUBMIT_AUTHORIZATION, R::Stored(StoreKind::Authorization)) => Generic,
         (Opcode::SUBMIT_POLICY, R::Stored(StoreKind::Policy)) => Generic,
         (Opcode::SUBMIT_MEMBERSHIP, R::Stored(StoreKind::Membership)) => Generic,
+        (Opcode::SUBMIT_RECOVERY, R::RecoveryAccepted) => Generic,
+        // The closing submitter's edge need not host the route it closes:
+        // the closed route's own event goes to the hosting edges, and the
+        // submitter's completion is generic like every other recovery reply.
+        (
+            Opcode::SUBMIT_RECOVERY_ELEMENT,
+            R::RecoveryExtended | R::RecoveryConflict | R::RecoveryClosed,
+        ) => Generic,
         (Opcode::SUBMIT_COMMIT_ACK, R::CommitAcked) => Semantic(EventKind::CommitAck),
         (Opcode::SUBMIT_FINALIZATION, R::Pending(PendingKind::Finalization)) => Generic,
         (Opcode::SUBMIT_FINALIZATION, R::Finalized) => Semantic(EventKind::Finalized),

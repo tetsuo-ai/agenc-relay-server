@@ -39,6 +39,10 @@ pub enum CarrierCommand {
     SubmitPolicy,
     /// `EGROUP SUBMIT MEMBERSHIP`.
     SubmitMembership,
+    /// `EGROUP SUBMIT RECOVERY`.
+    SubmitRecovery,
+    /// `EGROUP SUBMIT RECOVERY-ELEMENT`.
+    SubmitRecoveryElement,
     /// `EGROUP BIND`.
     Bind,
     /// `EGROUP CLOSE`.
@@ -118,6 +122,16 @@ impl CarrierCommand {
             Self::SubmitReinitAbort => &[ReinitAbortRequest],
             Self::SubmitPolicy => &[Policy],
             Self::SubmitMembership => &[IrcWireObjectKind::LeafMembershipProof],
+            Self::SubmitRecovery => &[IrcWireObjectKind::RecoverySubmission],
+            Self::SubmitRecoveryElement => &[
+                IrcWireObjectKind::SequencerRecord,
+                CloseAuthorization,
+                Policy,
+                RootIdentity,
+                DeviceRoster,
+                ConversationBinding,
+                ReinitAttempt,
+            ],
             Self::Bind | Self::DeliverBinding => &[ConversationBinding],
             Self::Close => &[CloseAuthorization],
             Self::PublishIdentity => &[RootIdentity],

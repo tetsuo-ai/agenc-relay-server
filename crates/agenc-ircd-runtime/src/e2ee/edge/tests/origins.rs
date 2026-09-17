@@ -139,3 +139,62 @@ async fn reconnect_replays_the_exact_companion_origin_declaration() -> TestResul
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn requests_wait_for_the_declaration_that_carries_a_new_attachment() -> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let connection = ConnectionGeneration::new(1);
+    edge.declare_origin(fixture.context_mut()?, &mut base, connection, &facts(0), 0)
+        .map_err(|error| error.code.to_string())?;
+    let _initial = next_declaration(&mut queue).await?;
+    edge.acknowledge_origin([9; 16], 0);
+    assert!(super::super::router::settled(
+        edge.origins.get(&connection).ok_or("origin")?
+    ));
+    // The attachment advances the base generation; until that generation's
+    // declaration is acknowledged the origin is not settled.
+    edge.device_attached(fixture.context_mut()?, &mut base, connection, [12; 16], 1);
+    let origin = edge.origins.get(&connection).ok_or("origin")?;
+    assert_eq!(origin.device, Some(([12; 16], 1)));
+    assert_eq!(origin.predates_device, Some(0));
+    assert!(!super::super::router::settled(origin));
+    // An acknowledgement of the same generation changes nothing; the next
+    // generation's does.
+    edge.acknowledge_origin([9; 16], 0);
+    assert_eq!(
+        edge.origins
+            .get(&connection)
+            .ok_or("origin")?
+            .predates_device,
+        Some(0)
+    );
+    edge.origins.get_mut(&connection).ok_or("origin")?.declared = Some(1);
+    edge.acknowledge_origin([9; 16], 1);
+    let origin = edge.origins.get(&connection).ok_or("origin")?;
+    assert_eq!(origin.predates_device, None);
+    assert!(super::super::router::settled(origin));
+    // An acknowledgement of an undeclared generation changes nothing, and
+    // an attachment on an unknown connection installs no origin.
+    edge.acknowledge_origin([9; 16], 5);
+    assert_eq!(
+        edge.origins.get(&connection).ok_or("origin")?.acked,
+        Some(1)
+    );
+    let unknown = ConnectionGeneration::new(7);
+    edge.device_attached(fixture.context_mut()?, &mut base, unknown, [13; 16], 1);
+    assert!(!edge.origins.contains_key(&unknown));
+    // The gate needs an acknowledged declaration of the declared generation
+    // and no attachment awaiting its declaration.
+    let candidate = edge.origins.get_mut(&connection).ok_or("origin")?;
+    candidate.acked = None;
+    assert!(!super::super::router::settled(candidate));
+    candidate.acked = Some(0);
+    assert!(!super::super::router::settled(candidate));
+    candidate.acked = Some(1);
+    assert!(super::super::router::settled(candidate));
+    candidate.predates_device = Some(1);
+    assert!(!super::super::router::settled(candidate));
+    Ok(())
+}

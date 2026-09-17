@@ -106,6 +106,8 @@ tls_enum! {
         FederationEvent = 33,
         /// `IrcPolicy`, published to the server (9.3).
         Policy = 34,
+        /// `IrcRecoverySubmission`, published to the server (13.7.4).
+        RecoverySubmission = 35,
         /// `IrcLeafMembershipProof`, published to the server (13.7.3).
         LeafMembershipProof = 37,
     }
@@ -149,6 +151,7 @@ impl IrcWireObjectKind {
             | Self::FederationEvent => limits::MAX_FEDERATION_CONTROL_OBJECT,
             Self::Policy => limits::MAX_POLICY_OBJECT,
             Self::LeafMembershipProof => limits::MAX_LEAF_MEMBERSHIP_OBJECT,
+            Self::RecoverySubmission => limits::MAX_RECOVERY_SUBMISSION_OBJECT,
         }
     }
 
@@ -204,6 +207,7 @@ impl IrcWireObjectKind {
             Self::FederationEvent => "FEDERATION-EVENT",
             Self::Policy => "POLICY",
             Self::LeafMembershipProof => "LEAF-MEMBERSHIP-PROOF",
+            Self::RecoverySubmission => "RECOVERY-SUBMISSION",
         }
     }
 

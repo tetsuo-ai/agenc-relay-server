@@ -97,6 +97,38 @@ pub struct ChainHead {
     pub credential_id: SemanticId,
 }
 
+/// The authorizing prior state a restored server resumes a chain from
+/// (companion 13.7.2): the binding, principal rosters, policy and
+/// sequencer credential the retained finalized history committed, and the
+/// exact head position the durable gate pins.
+#[derive(Clone, Debug)]
+pub struct ResumedChain {
+    /// The current verified binding.
+    pub binding: VerifiedBinding,
+    /// The current root and roster heads of the binding principals.
+    pub principals: PrincipalRosters,
+    /// The last finalized policy.
+    pub policy: VerifiedPolicy,
+    /// The credential committed for the next position.
+    pub sequencer: VerifiedSequencerCredential,
+    /// The binding's required operational policy.
+    pub required_operational_policy_id: SemanticId,
+    /// Whether the bootstrap has not completed.
+    pub bootstrap_pending: bool,
+    /// The accepted epoch.
+    pub epoch: u64,
+    /// The accepted state identifier.
+    pub accepted_state_id: SemanticId,
+    /// The head record, or the anchor when nothing is recorded.
+    pub head: ChainHead,
+    /// The open candidate at the head, if the head is one.
+    pub candidate: Option<OpenCandidate>,
+    /// The candidate sequence the next candidate must carry.
+    pub next_candidate_sequence: u32,
+    /// The lifecycle the finalized history reached.
+    pub lifecycle: Lifecycle,
+}
+
 /// The open candidate of the current epoch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenCandidate {
@@ -327,6 +359,47 @@ impl HistoricalChain {
             candidate: None,
             next_candidate_sequence: 0,
             lifecycle: Lifecycle::Active,
+            records_left: limits.max_records,
+        })
+    }
+
+    /// Resumes a chain at the authorizing prior state a restored server
+    /// already holds (companion 13.7.2): every anchor is validated retained
+    /// state derived from the durable gate, never an uploaded object. The
+    /// resumed chain adopts records exactly as an opened one does.
+    pub fn resume(
+        network_id: &[u8; 32],
+        conversation_id: &SemanticId,
+        resumed: ResumedChain,
+        limits: ChainLimits,
+    ) -> Result<Self, E2eeError> {
+        let head = resumed.head;
+        let candidate_agrees = resumed.candidate.is_none_or(|candidate| {
+            head.sequence == Some(candidate.route_sequence)
+                && head.record_id == candidate.candidate_id
+                && head.predecessor_record_id == candidate.predecessor_record_id
+        });
+        if resumed.binding.conversation_id != *conversation_id
+            || !candidate_agrees
+            || (head.sequence.is_none() && head.record_id != resumed.accepted_state_id)
+        {
+            return Err(E2eeError::InvalidValue);
+        }
+        Ok(Self {
+            network_id: *network_id,
+            conversation_id: *conversation_id,
+            binding: resumed.binding,
+            principals: resumed.principals,
+            policy: resumed.policy,
+            sequencer: resumed.sequencer,
+            required_operational_policy_id: resumed.required_operational_policy_id,
+            bootstrap_pending: resumed.bootstrap_pending,
+            epoch: resumed.epoch,
+            accepted_state_id: resumed.accepted_state_id,
+            head,
+            candidate: resumed.candidate,
+            next_candidate_sequence: resumed.next_candidate_sequence,
+            lifecycle: resumed.lifecycle,
             records_left: limits.max_records,
         })
     }

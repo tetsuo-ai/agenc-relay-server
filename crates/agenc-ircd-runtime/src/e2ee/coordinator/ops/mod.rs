@@ -26,6 +26,7 @@ pub mod membership;
 pub mod policy;
 mod recovery;
 mod recovery_read;
+mod recovery_submission;
 mod reinit_authority;
 pub mod route;
 pub(super) mod route_successor;
@@ -324,7 +325,16 @@ pub fn execute(exec: &mut Exec<'_>) -> Result<Prepared, Fail> {
         Op::AcknowledgeMailbox => mailbox::acknowledge_mailbox(exec),
         Op::SubmitPolicy => policy::submit_policy(exec),
         Op::SubmitMembership => membership::submit_membership(exec),
+        Op::SubmitRecovery => recovery_submission::submit_recovery(exec),
+        Op::SubmitRecoveryElement => recovery_submission::submit_recovery_element(exec),
     }?;
-    super::recovery_gates::normal::prepare(exec, &mut outcome)?;
+    // Recovery installs its own gate transitions; every other route write
+    // declares a Normal gate.
+    if !matches!(
+        exec.opcode(),
+        Op::SubmitRecovery | Op::SubmitRecoveryElement
+    ) {
+        super::recovery_gates::normal::prepare(exec, &mut outcome)?;
+    }
     Ok(Prepared::Complete(Box::new(outcome)))
 }

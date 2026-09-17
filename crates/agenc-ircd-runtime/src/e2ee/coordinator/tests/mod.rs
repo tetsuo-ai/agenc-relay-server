@@ -110,6 +110,8 @@ struct Harness {
     query_limits: crate::runtime_config::RuntimeResourceLimits,
     backing: crate::budget::BackingReservationPort,
     monotonic_millis: u64,
+    /// The trusted UTC second every request is admitted with.
+    now: u64,
     coordinator: CompanionCoordinator,
     entropy: Counter,
     sequence: u64,
@@ -131,16 +133,35 @@ impl Harness {
 
     /// A harness whose principal holds `devices`, all on the council.
     fn with_devices(devices: &[u8]) -> TestResult<Self> {
+        Self::with_councils(devices, devices, devices)
+    }
+
+    /// A harness whose principal holds `devices`, with the bootstrap and
+    /// the operational council each naming the given subsets of them.
+    fn with_councils(
+        devices: &[u8],
+        bootstrap_council: &[u8],
+        operational_council: &[u8],
+    ) -> TestResult<Self> {
         let account = account_bytes(9)?;
         let principal = principal(ROOT_SEED, &account, devices)?;
         let conversation = conversation_id(&NETWORK, &GROUP)?;
-        let bootstrap = PolicySpec::bootstrap(
+        let mut bootstrap = PolicySpec::bootstrap(
             std::slice::from_ref(&principal),
             conversation,
             IrcConversationKind::Channel,
         );
+        bootstrap.council = bootstrap_council
+            .iter()
+            .map(|device| (0, *device))
+            .collect();
         let initial_policy = policy(&bootstrap)?;
-        let operational_policy = policy(&bootstrap.successor(policy_id_of(&initial_policy)?))?;
+        let mut operational = bootstrap.successor(policy_id_of(&initial_policy)?);
+        operational.council = operational_council
+            .iter()
+            .map(|device| (0, *device))
+            .collect();
+        let operational_policy = policy(&operational)?;
         let mut coordinator = CompanionCoordinator::new(
             NETWORK,
             ServerId::from_bytes(COORDINATOR),
@@ -176,6 +197,7 @@ impl Harness {
             query_sessions: crate::state_core::session::SessionTable::new(),
             query_limits: crate::runtime_config::RuntimeResourceLimits::HARD_MAX,
             monotonic_millis: NOW * 1_000,
+            now: NOW,
             backing: crate::budget::BackingReservationPort::new(crate::sync::Arc::new(
                 crate::budget::MemoryBudget::new(512 * 1024 * 1024),
             )),
@@ -344,6 +366,7 @@ impl Harness {
             state_generation: STATE_GENERATION,
             source_view: Vec::new(),
         };
+        exec.now = self.now;
         let outcome = ops::execute(&mut exec).and_then(ops::Prepared::complete);
         self.sequence += 1;
         if let Some(origin) = self.coordinator.state.origins.get_mut(&origin_key()) {
@@ -367,7 +390,7 @@ impl Harness {
         let operation_writes = outcome.writes.len();
         let owners = match self.coordinator.stage_owners(
             &mut outcome.writes,
-            NOW,
+            self.now,
             outcome.security_mutation,
             STATE_GENERATION,
         ) {

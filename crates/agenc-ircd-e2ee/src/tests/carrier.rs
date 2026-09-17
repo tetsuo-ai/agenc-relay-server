@@ -66,6 +66,16 @@ fn every_client_carrier_accepts_exactly_its_matrix_kinds() {
     );
     assert_eq!(CarrierCommand::SubmitMembership.limit().max_bytes, 8_192);
     assert!(!CarrierCommand::SubmitMembership.is_live());
+    assert_eq!(
+        CarrierCommand::SubmitRecovery.accepted_kinds(),
+        &[IrcWireObjectKind::RecoverySubmission]
+    );
+    assert_eq!(CarrierCommand::SubmitRecovery.limit().max_bytes, 4_096);
+    assert!(CarrierCommand::SubmitRecoveryElement.accepts(IrcWireObjectKind::SequencerRecord));
+    assert!(CarrierCommand::SubmitRecoveryElement.accepts(IrcWireObjectKind::CloseAuthorization));
+    assert!(CarrierCommand::SubmitRecoveryElement.accepts(IrcWireObjectKind::Policy));
+    assert!(!CarrierCommand::SubmitRecoveryElement.accepts(IrcWireObjectKind::ApplicationMls));
+    assert!(!CarrierCommand::SubmitRecovery.is_live());
 }
 
 #[test]

@@ -52,7 +52,7 @@ async fn restored(
 
 #[tokio::test]
 async fn sealed_replay_results_reserve_their_second_persistent_body_copy() -> TestResult {
-    let mut fixture = Fixture::many(3, true).await?;
+    let mut fixture = Box::pin(Fixture::many(3, true)).await?;
     let budget = Arc::new(MemoryBudget::new(16 * 1024 * 1024));
     let fresh = restored(&mut fixture, BackingReservationPort::new(budget.clone())).await?;
     assert_eq!(fresh.state.results.len(), 3);
@@ -81,7 +81,7 @@ async fn sealed_replay_results_reserve_their_second_persistent_body_copy() -> Te
 
 #[tokio::test]
 async fn result_rebuild_refusal_releases_partial_results_and_object_backing() -> TestResult {
-    let mut fixture = Fixture::many(3, true).await?;
+    let mut fixture = Box::pin(Fixture::many(3, true)).await?;
     // Three object permits plus temporary selection fit; three persistent
     // result copies also need backing after selection releases its temporary map.
     let budget = Arc::new(MemoryBudget::new(24_576));

@@ -134,6 +134,7 @@ impl E2eeEdge {
             origin_id: facts.origin_id,
             declared: None,
             acked: None,
+            predates_device: None,
             next_sequence: 0,
             sequenced: None,
             state_id: [0; 32],
@@ -201,12 +202,37 @@ impl E2eeEdge {
         for origin in self.origins.values_mut() {
             if origin.origin_id == origin_id && origin.declared == Some(generation) {
                 origin.acked = Some(generation);
+                if origin
+                    .predates_device
+                    .is_some_and(|stale| generation > stale)
+                {
+                    origin.predates_device = None;
+                }
                 if origin.sequenced != Some(generation) {
                     origin.next_sequence = 0;
                     origin.sequenced = Some(generation);
                 }
             }
         }
+    }
+
+    /// A device attached on `generation`: the shared base origin generation
+    /// advances and the companion declaration follows with the device.
+    pub fn device_attached(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        generation: ConnectionGeneration,
+        device: [u8; 16],
+        session_generation: u64,
+    ) {
+        if let Some(origin) = self.origins.get_mut(&generation) {
+            origin.device = Some((device, session_generation));
+            // The acknowledged declaration predates the device; requests wait
+            // for the declaration the advanced base generation carries.
+            origin.predates_device = origin.acked;
+        }
+        edge.advance_origin(context, generation);
     }
 
     /// A connection ended: its companion origin is deleted at the next
@@ -233,21 +259,5 @@ impl E2eeEdge {
             self.send(context, edge, vec![line]);
         }
         self.connection_closed(generation);
-    }
-
-    /// A device attached on `generation`: the shared base origin generation
-    /// advances and the companion declaration follows with the device.
-    pub fn device_attached(
-        &mut self,
-        context: &mut StateCoreContext,
-        edge: &mut EdgeFederation,
-        generation: ConnectionGeneration,
-        device: [u8; 16],
-        session_generation: u64,
-    ) {
-        if let Some(origin) = self.origins.get_mut(&generation) {
-            origin.device = Some((device, session_generation));
-        }
-        edge.advance_origin(context, generation);
     }
 }

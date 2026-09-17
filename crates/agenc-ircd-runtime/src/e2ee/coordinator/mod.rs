@@ -54,6 +54,7 @@ mod membership_restore;
 pub mod ops;
 pub(crate) mod owners;
 mod recovery_gates;
+pub(crate) mod recovery_lineage;
 pub mod request;
 pub(crate) mod request_expiry;
 mod resident;
@@ -206,6 +207,8 @@ pub struct CompanionState {
     pub(crate) object_memory: BTreeMap<[u8; 32], crate::budget::MemoryPermit>,
     /// The durable ownership account of every retained object (companion 15, 16).
     pub(crate) owners: owners::Ledger,
+    /// The recovery submissions and records of pending routes (companion 13.7.4).
+    pub recovery: recovery_lineage::Recoveries,
 }
 
 /// The root binding locks of one (account, root fingerprint) by sequence.
@@ -513,6 +516,21 @@ impl CompanionCoordinator {
     ) -> Result<(), CompanionFault> {
         self.restore.set_backing(backing);
         self.finish_restore()
+    }
+
+    /// The installed current verified sequencer credential, if any.
+    pub(crate) fn current_verified_credential(
+        &self,
+    ) -> Option<&agenc_ircd_e2ee::sequencer::VerifiedSequencerCredential> {
+        self.key_set.as_ref()?.current()
+    }
+
+    /// The verified sequencer credential with `credential_id`, if installed.
+    pub(crate) fn credential(
+        &self,
+        credential_id: &[u8; 32],
+    ) -> Option<&agenc_ircd_e2ee::sequencer::VerifiedSequencerCredential> {
+        self.key_set.as_ref()?.credential(credential_id)
     }
 
     /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.

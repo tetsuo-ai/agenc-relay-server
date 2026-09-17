@@ -164,7 +164,7 @@ async fn sealed_reconstruction_preserves_all_unresolved_historical_witnesses() -
     Ok(())
 }
 
-fn negotiated_capabilities() -> TestResult<CapabilityState> {
+pub(super) fn negotiated_capabilities() -> TestResult<CapabilityState> {
     let names = [
         "message-tags",
         "echo-message",

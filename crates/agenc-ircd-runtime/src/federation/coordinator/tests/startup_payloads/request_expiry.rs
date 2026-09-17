@@ -18,7 +18,7 @@ use fixture::Fixture;
 #[tokio::test]
 async fn idle_maintenance_retires_an_expired_request_result_but_keeps_its_origin_floor()
 -> TestResult {
-    let mut f = Fixture::new(true).await?;
+    let mut f = Box::pin(Fixture::new(true)).await?;
     let executor = f.coordinator.companion_executor().ok_or("executor")?;
     assert!(executor.state.replays.contains_key(&f.key));
     assert!(executor.state.results.contains_key(&f.request_object_id));
@@ -82,7 +82,7 @@ async fn idle_maintenance_retires_an_expired_request_result_but_keeps_its_origin
 
 #[tokio::test]
 async fn startup_does_not_warm_a_result_without_a_retained_replay_owner() -> TestResult {
-    let f = Fixture::new(false).await?;
+    let f = Box::pin(Fixture::new(false)).await?;
     let executor = f.coordinator.companion_executor().ok_or("executor")?;
     assert!(executor.state.replays.is_empty());
     assert!(executor.state.results.is_empty());

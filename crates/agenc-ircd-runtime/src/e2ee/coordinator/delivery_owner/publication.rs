@@ -175,6 +175,25 @@ impl CompanionCoordinator {
     }
 }
 
+impl CompanionCoordinator {
+    /// Publishes the pending cut of `peer` again from its first page, for a
+    /// resume on a link that replaced the one the transfer started on.
+    pub(in crate::e2ee::coordinator) fn restart_transfer(
+        &mut self,
+        peer: ServerId,
+        now_millis: u64,
+        host: &dyn CompanionHost,
+    ) -> Result<Vec<Action>, CompanionFault> {
+        let snapshot = self
+            .peers
+            .get_mut(&peer)
+            .and_then(|sync| sync.snapshot.as_mut())
+            .ok_or(CompanionFault::Protocol)?;
+        snapshot.pages_sent = 1;
+        publish_first_page(self, peer, now_millis, host)
+    }
+}
+
 fn publish_first_page(
     coordinator: &mut CompanionCoordinator,
     peer: ServerId,

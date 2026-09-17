@@ -70,6 +70,9 @@ impl Resolved {
                 EgroupCommand::Submit {
                     conversation_id, ..
                 }
+                | EgroupCommand::SubmitRecoveryElement {
+                    conversation_id, ..
+                }
                 | EgroupCommand::Close {
                     conversation_id, ..
                 },
@@ -185,11 +188,7 @@ impl E2eeEdge {
         if requires_device(&command) && device.is_none() {
             return Err(E2eeReplyCode::DeviceRequired.into());
         }
-        if !self
-            .origins
-            .get(&generation)
-            .is_some_and(|origin| origin.acked.is_some() && origin.acked == origin.declared)
-        {
+        if !self.origins.get(&generation).is_some_and(settled) {
             return Err(E2eeReplyCode::Syncing.into());
         }
         let label = message
@@ -427,7 +426,7 @@ impl E2eeEdge {
         let origin = self
             .origins
             .get_mut(&generation)
-            .filter(|origin| origin.acked.is_some() && origin.acked == origin.declared)
+            .filter(|origin| settled(origin))
             .ok_or(E2eeReplyCode::Syncing)?;
         let mut request_id = [0; 16];
         context
@@ -604,6 +603,13 @@ fn subject_of(command: &Resolved, payload: Option<&[u8]>) -> Option<[u8; 32]> {
     }
 }
 
+/// Whether the coordinator holds this origin's current declaration: the
+/// declared generation is acknowledged and no attachment awaits the
+/// declaration of the advanced base generation.
+pub(super) fn settled(origin: &super::LocalOrigin) -> bool {
+    origin.acked.is_some() && origin.acked == origin.declared && origin.predates_device.is_none()
+}
+
 fn requires_device(command: &Resolved) -> bool {
     let Resolved::Command(command) = command else {
         return matches!(command, Resolved::ChannelApplication { .. });
@@ -651,6 +657,7 @@ const fn submit_opcode(kind: SubmitKind) -> IrcFederationOpcode {
         SubmitKind::Finalization => Op::SubmitFinalization,
         SubmitKind::Policy => Op::SubmitPolicy,
         SubmitKind::Membership => Op::SubmitMembership,
+        SubmitKind::Recovery => Op::SubmitRecovery,
         SubmitKind::Abort => Op::SubmitAbort,
         SubmitKind::ReinitAttempt => Op::SubmitReinitAttempt,
         SubmitKind::ReinitAck => Op::SubmitReinitAck,
@@ -737,6 +744,14 @@ pub(super) fn encode_parameters(
         }) => {
             writer.fixed(conversation_id)?;
             submit_opcode(*kind)
+        }
+        ClientCommand::Egroup(EgroupCommand::SubmitRecoveryElement {
+            conversation_id,
+            submission_id,
+        }) => {
+            writer.fixed(conversation_id)?;
+            writer.fixed(submission_id)?;
+            Op::SubmitRecoveryElement
         }
         ClientCommand::Egroup(EgroupCommand::FetchObject {
             conversation_id,

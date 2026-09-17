@@ -27,6 +27,9 @@ recorded in [the historical chain record](stage-10-historical-chain.md).
 Durable object ownership, retention classes, trusted acceptance ages and the
 conversation and global disk quotas (ENC-08, issue #53) are recorded in
 [the object ownership record](stage-10-object-owners.md).
+The recovery submission carrier that lets a restored pending route become
+permanently closed or conflict (ENC-03, issue #57) is recorded in
+[the recovery submission record](stage-10-recovery-submission.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

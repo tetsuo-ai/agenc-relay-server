@@ -73,6 +73,14 @@ impl Gates {
         self.rows.get(id).map(|owned| owned.row)
     }
 
+    /// Replaces a retained gate row with its committed successor, keeping
+    /// the row's backing.
+    pub(crate) fn replace(&mut self, id: &[u8; 32], row: E2eeRecoveryGate) {
+        if let Some(owned) = self.rows.get_mut(id) {
+            owned.row = row;
+        }
+    }
+
     pub(super) fn install(self, state: &mut CompanionState) -> Result<(), CompanionFault> {
         if self.rows.is_empty() {
             return Ok(());

@@ -132,6 +132,14 @@ pub enum SuccessLine {
     StoredPolicy([u8; 32], [u8; 32], [u8; 32]),
     /// `EGROUP STORED MEMBERSHIP <conversation-id> <leaf-membership-id> <membership-object-id>`.
     StoredMembership([u8; 32], [u8; 32], [u8; 32]),
+    /// `EGROUP RECOVERY-ACCEPTED <conversation-id> <submission-id>`.
+    RecoveryAccepted([u8; 32], [u8; 32]),
+    /// `EGROUP RECOVERY-EXTENDED <conversation-id> <route-sequence> <record-id>`.
+    RecoveryExtended([u8; 32], u64, [u8; 32]),
+    /// `EGROUP RECOVERY-CLOSED <conversation-id> <close-id>`.
+    RecoveryClosed([u8; 32], [u8; 32]),
+    /// `EGROUP RECOVERY-CONFLICT <conversation-id> <route-sequence> <first-record-id> <second-record-id>`.
+    RecoveryConflict([u8; 32], u64, [u8; 32], [u8; 32]),
     /// `EGROUP ACKED <conversation-id> <candidate-id> <ack-object-id>`.
     Acked([u8; 32], [u8; 32], [u8; 32]),
     /// `EGROUP PENDING <conversation-id> <kind> <object-id>`.
@@ -169,9 +177,46 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 impl SuccessLine {
+    /// The bodies of the companion 13.7.4 recovery replies.
+    fn recovery_body(&self) -> Option<String> {
+        Some(match self {
+            Self::RecoveryAccepted(a, b) => {
+                format!("EGROUP RECOVERY-ACCEPTED {} {}", hash(a), hash(b))
+            }
+            Self::RecoveryExtended(a, sequence, c) => {
+                format!(
+                    "EGROUP RECOVERY-EXTENDED {} {sequence} {}",
+                    hash(a),
+                    hash(c)
+                )
+            }
+            Self::RecoveryClosed(a, b) => {
+                format!("EGROUP RECOVERY-CLOSED {} {}", hash(a), hash(b))
+            }
+            Self::RecoveryConflict(a, sequence, c, d) => {
+                format!(
+                    "EGROUP RECOVERY-CONFLICT {} {sequence} {} {}",
+                    hash(a),
+                    hash(c),
+                    hash(d)
+                )
+            }
+            _ => return None,
+        })
+    }
+
     /// The line body without prefix, tags, or CRLF.
     pub fn body(&self) -> Result<String, E2eeError> {
+        self.recovery_body()
+            .map_or_else(|| self.ordinary_body(), Ok)
+    }
+
+    fn ordinary_body(&self) -> Result<String, E2eeError> {
         Ok(match self {
+            Self::RecoveryAccepted(..)
+            | Self::RecoveryExtended(..)
+            | Self::RecoveryClosed(..)
+            | Self::RecoveryConflict(..) => return Err(E2eeError::InvalidValue),
             Self::Bound(a, b) | Self::Closed(a, b) => {
                 format!("EGROUP {} {} {}", self.verb(), hash(a), hash(b))
             }

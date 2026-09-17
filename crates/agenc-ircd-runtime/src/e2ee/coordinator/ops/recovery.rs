@@ -59,6 +59,9 @@ pub(super) fn admit(exec: &Exec<'_>) -> Result<(), Fail> {
         | Op::DeliverWelcome
         | Op::FetchMailbox
         | Op::AcknowledgeMailbox => Ok(()),
+        // The recovery carrier is the one mutation a pending route accepts;
+        // its handler checks the gate itself.
+        Op::SubmitRecovery | Op::SubmitRecoveryElement => Ok(()),
     }
 }
 

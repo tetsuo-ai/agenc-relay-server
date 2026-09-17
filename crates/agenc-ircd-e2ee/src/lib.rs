@@ -87,6 +87,7 @@ pub mod objects;
 pub mod policy;
 pub mod profile;
 pub mod record_authentication;
+pub mod recovery;
 pub mod reinit_authorization;
 pub mod route;
 pub mod sequencer;

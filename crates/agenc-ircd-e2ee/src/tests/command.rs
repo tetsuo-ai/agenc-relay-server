@@ -148,6 +148,11 @@ fn every_egroup_production_parses_with_its_exact_arity() -> TestResult {
             SubmitKind::Membership,
             CarrierCommand::SubmitMembership,
         ),
+        (
+            vec!["RECOVERY"],
+            SubmitKind::Recovery,
+            CarrierCommand::SubmitRecovery,
+        ),
     ];
     for (words, kind, carrier) in submits {
         let mut params = vec!["SUBMIT"];
@@ -164,6 +169,20 @@ fn every_egroup_production_parses_with_its_exact_arity() -> TestResult {
         assert_eq!(command.carrier(), Some(carrier));
         assert_eq!(command.request_command(), "EGROUP");
     }
+    let h2 = hash(2);
+    let command = parse_command("EGROUP", &["SUBMIT", "RECOVERY-ELEMENT", &h1, &h2])?;
+    assert_eq!(
+        command,
+        ClientCommand::Egroup(SubmitRecoveryElement {
+            conversation_id: [1; 32],
+            submission_id: [2; 32],
+        })
+    );
+    assert_eq!(
+        command.carrier(),
+        Some(CarrierCommand::SubmitRecoveryElement)
+    );
+    assert!(parse_command("EGROUP", &["SUBMIT", "RECOVERY-ELEMENT", &h1]).is_err());
     Ok(())
 }
 
