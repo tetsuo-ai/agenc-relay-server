@@ -60,6 +60,7 @@ use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::{CloseReason, SourceAddressKey};
 use crate::state_core::reconstruct::reconstruct;
 use crate::state_core::session::BoundSession;
+use crate::state_core::timers::SECRET_CHANNEL_FLOOR_MILLIS;
 use crate::state_core::{
     CommandRouter, DefaultRouter, StateCore, StateCoreClocks, StateCoreConfig, StateCoreContext,
     StateCoreInputs,
@@ -353,6 +354,7 @@ fn compose_test_state(
             },
             motd: None,
             public_info: None,
+            secret_lookup_floor_millis: SECRET_CHANNEL_FLOOR_MILLIS,
         },
         reconstruction,
         keys,

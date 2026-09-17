@@ -23,6 +23,7 @@ pub mod projector;
 pub(crate) mod query_usage;
 pub mod reconstruct;
 pub(crate) mod remote_result;
+pub(crate) mod secret_floor;
 pub mod session;
 pub mod timers;
 pub(crate) mod whowas;
@@ -130,6 +131,10 @@ pub struct StateCoreConfig {
     pub motd: Option<Arc<str>>,
     /// Content-loaded public ADMIN/INFO text.
     pub public_info: Option<Arc<str>>,
+    /// `privacy.secret_lookup_floor_milliseconds` (architecture 13.5): the
+    /// minimum time a concealed or missing JOIN, NAMES, TOPIC, or MODE
+    /// target takes to answer. Restart-only; zero disables the floor.
+    pub secret_lookup_floor_millis: u64,
 }
 
 /// The explicit clocks StateCore consults (spec 24.2, line 6549).
@@ -601,6 +606,7 @@ pub struct StateCoreContext {
     federation: Option<FederationProjector>,
     next_mutation: MutationContext,
     remote_account_results: BTreeMap<ConnectionGeneration, remote_result::RemoteResultBinding>,
+    secret_floor: secret_floor::SecretFloor,
     next_correlation: Option<RequestBinding>,
     next_cross_profile: BTreeMap<ServerId, projector::CrossProfileAssignment>,
     outbound_events: Vec<OutboundEvent>,
@@ -837,6 +843,12 @@ impl StateCoreContext {
         generation: ConnectionGeneration,
         frames: Vec<WireMessage>,
     ) -> Result<FanoutCommitReport, FanoutRefused> {
+        // A connection owing a floored response sees everything the server
+        // told it afterwards in that order, not before it.
+        let frames = match self.queue_behind_secret_floor(generation, frames) {
+            Ok(()) => return Ok(FanoutCommitReport::retained()),
+            Err(frames) => frames,
+        };
         let request = self.fanout_request_to(generation, frames)?;
         self.fanout_now(request)
     }
@@ -2210,6 +2222,9 @@ impl StateCore {
                 federation: None,
                 next_mutation: MutationContext::default(),
                 remote_account_results: BTreeMap::new(),
+                secret_floor: secret_floor::SecretFloor::new(
+                    inputs.config.secret_lookup_floor_millis,
+                ),
                 next_correlation: None,
                 next_cross_profile: BTreeMap::new(),
                 outbound_events: Vec::new(),
