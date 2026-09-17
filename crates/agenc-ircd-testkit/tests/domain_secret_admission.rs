@@ -425,3 +425,77 @@ fn member_limit_mode_requires_operator_authority() -> Result<(), Box<dyn Error>>
     state.validate()?;
     Ok(())
 }
+
+/// ZDH-C4 (issue #13, RUN-01 #44): the ban and `+i` refusals of a hidden
+/// channel never precede its existence decision. An unauthorized guest or
+/// account learns only that the channel is unavailable, exactly as for an
+/// absent name; a requester the invite rules already admit still learns the
+/// real ban outcome, and a listed channel reports its `+i` refusal unchanged.
+#[test]
+fn hidden_invite_only_and_banned_joins_report_only_unavailability() -> Result<(), Box<dyn Error>> {
+    let (mut state, owner, visitor) = owner_and_visitor()?;
+    let closed = create_hidden_channel(&mut state, owner, "#closed", 21, VisibilityMode::Secret)?;
+    let barred = create_hidden_channel(&mut state, owner, "#barred", 22, VisibilityMode::Unlisted)?;
+    let open = ChannelNameValue::parse("#open-invite")?;
+    apply_auto(&mut state, owner, creating(23), &join(&open, false))?;
+    let guest = open_session(&mut state, 3, "guest", None)?;
+    for name in [&closed, &open] {
+        apply_auto(&mut state, owner, PLAIN, &|| {
+            CanonicalCommand::mode(name.clone(), vec![ModeChange::InviteOnly(true)])
+        })?;
+    }
+    apply_auto(&mut state, owner, PLAIN, &|| {
+        CanonicalCommand::mode(
+            barred.clone(),
+            vec![ModeChange::AddMask {
+                list: MaskList::Ban,
+                mask: TypedMask::parse("$n:visitor")?,
+            }],
+        )
+    })?;
+
+    // Neither the invite-only channel nor the banning channel may answer an
+    // unauthorized requester with its own refusal.
+    for name in [&closed, &barred] {
+        for requester in [guest, visitor] {
+            expect_rejected(
+                plan_auto(&state, requester, PLAIN, &join(name, false))?,
+                DomainError::SecretUnavailable,
+            )?;
+        }
+        assert_eq!(member_count(&state, name), Some(1));
+        assert_eq!(member_role(&state, name, visitor), None);
+    }
+    // The same `+i` refusal on a listed channel is reported in full.
+    expect_rejected(
+        plan_auto(&state, visitor, PLAIN, &join(&open, false))?,
+        DomainError::Forbidden,
+    )?;
+
+    // A `+I` match authorizes the secret channel, and the invited requester
+    // of the banning channel now receives its real ban refusal.
+    apply_auto(&mut state, owner, PLAIN, &|| {
+        CanonicalCommand::mode(
+            closed.clone(),
+            vec![ModeChange::AddMask {
+                list: MaskList::InviteException,
+                mask: TypedMask::parse("$n:visitor")?,
+            }],
+        )
+    })?;
+    apply_auto(&mut state, visitor, PLAIN, &join(&closed, false))?;
+    assert_eq!(member_role(&state, &closed, visitor), Some(Role::Member));
+    apply_auto(&mut state, owner, PLAIN, &|| {
+        Ok(CanonicalCommand::invite(
+            NicknameValue::parse("visitor")?,
+            barred.clone(),
+        ))
+    })?;
+    expect_rejected(
+        plan_auto(&state, visitor, PLAIN, &join(&barred, false))?,
+        DomainError::Forbidden,
+    )?;
+    assert_eq!(member_count(&state, &barred), Some(1));
+    state.validate()?;
+    Ok(())
+}
