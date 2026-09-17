@@ -33,6 +33,7 @@ use agenc_ircd_storage::{
     MAX_RECORD_REFERENCES, PersistentRecordValue, RecordReference, StoredKey, TableId,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Unbounded};
 
 /// The table-23 key bytes of one owning row.
 pub(crate) type OwnerKey = Vec<u8>;
@@ -115,6 +116,24 @@ impl Ledger {
 
     pub(crate) fn owned_by(&self, owner: &[u8]) -> Option<&BTreeSet<[u8; 32]>> {
         self.by_owner.get(owner)
+    }
+
+    /// Every account after `cursor`, in the key order of the `owner/v1/`
+    /// rows, so a persisted continuation resumes exactly where a committed
+    /// pass stopped.
+    pub(crate) fn after(
+        &self,
+        cursor: Option<[u8; 32]>,
+    ) -> impl Iterator<Item = (&[u8; 32], &Account)> {
+        let start = cursor.map_or(Unbounded, Excluded);
+        self.accounts.range((start, Unbounded))
+    }
+
+    /// Drops one account and unwinds every index and charge it made. The
+    /// caller invokes this only after the batch that deleted the object and
+    /// its `owner/v1/` row committed.
+    pub(crate) fn remove(&mut self, id: &[u8; 32]) {
+        self.retire_indexes(id);
     }
 
     /// Installs one account, replacing the previous one and its indexes.
@@ -426,6 +445,12 @@ impl Staged {
         }
         sync_conversation_bytes(state);
     }
+}
+
+/// Mirrors the ledger's per-conversation charge into each retained
+/// conversation's `stored_bytes` after a collector released accounts.
+pub(crate) fn sync_charges(state: &mut CompanionState) {
+    sync_conversation_bytes(state);
 }
 
 /// Mirrors the ledger's per-conversation charge into each retained

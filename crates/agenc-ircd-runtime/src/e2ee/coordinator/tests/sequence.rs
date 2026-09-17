@@ -45,6 +45,7 @@ pub(super) mod recovery_pending;
 mod ack_context;
 
 mod leaf_membership;
+mod object_expiry;
 mod owners;
 
 mod sequencer_eligibility;

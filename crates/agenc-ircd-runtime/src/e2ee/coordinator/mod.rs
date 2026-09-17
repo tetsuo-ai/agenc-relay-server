@@ -51,6 +51,7 @@ pub mod execute;
 pub(crate) mod mailbox_expiry;
 mod mailbox_restore;
 mod membership_restore;
+pub(crate) mod object_expiry;
 pub mod ops;
 pub(crate) mod owners;
 mod recovery_gates;
@@ -219,6 +220,8 @@ pub struct CompanionState {
     pub objects: BTreeMap<[u8; 32], Vec<u8>>,
     /// Retained object bytes.
     pub object_bytes: usize,
+    /// The durable continuation of the expired-object collector.
+    pub(crate) object_expiry: object_expiry::Progress,
     /// Replay rows by key.
     pub replays: BTreeMap<agenc_ircd_storage::e2ee_records::ReplayKey, ReplayRow>,
     /// Durable next-sequence floors, independent of replay result retention.
@@ -1026,6 +1029,12 @@ impl CompanionCoordinator {
     /// Marks the batch the owner just staged for this executor.
     pub fn set_pending(&mut self, work: sync::PendingWork) {
         self.pending = Some(work);
+    }
+
+    /// The durable continuation of the expired-object collector, restored
+    /// from the `object-expiry/v1` row and advanced only by a commit.
+    pub(crate) const fn expiry_progress(&self) -> object_expiry::Progress {
+        self.state.object_expiry
     }
 
     /// Derives the ownership changes of a batch (companion 15, 16), appends
