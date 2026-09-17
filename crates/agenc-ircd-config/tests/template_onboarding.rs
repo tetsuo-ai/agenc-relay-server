@@ -8,8 +8,8 @@ mod support;
 use agenc_ircd_config::{
     BASE_PROFILE_SHA256_TOKEN, ConfigError, DisplayLabel, DnsName, E2EE_PROFILE_SHA256_TOKEN,
     InitProfile, InitValues, MAX_ONBOARDING_DESCRIPTOR_BYTES, NodeRole, OnboardingFacts,
-    OperatorTemplate, ValidationStage, parse_onboarding_descriptor, render_onboarding,
-    render_template,
+    OperatorTemplate, SequencerKeySetFacts, ValidationStage, parse_onboarding_descriptor,
+    render_onboarding, render_template,
 };
 use agenc_ircd_types::{NetworkId, OperatorId, RecoveryEpoch, ServerId};
 use support::{DUAL, ONION, PUBLIC, parse};
@@ -123,8 +123,10 @@ fn facts() -> OnboardingFacts {
     OnboardingFacts {
         recovery_epoch: RecoveryEpoch::from_bytes([9; 16]),
         account_service_hpke_key_id: [10; 32],
-        sequencer_key_set_generation: 3,
-        sequencer_key_set_hash: [11; 32],
+        sequencer_key_set: Some(SequencerKeySetFacts {
+            generation: 3,
+            hash: [11; 32],
+        }),
     }
 }
 
@@ -225,8 +227,13 @@ fn descriptor_parser_requires_exact_order_tokens_and_endpoint_units() -> TestRes
     assert_eq!(parsed.recovery_epoch, RecoveryEpoch::from_bytes([9; 16]));
     assert_eq!(parsed.account_service_hpke_key_id, [10; 32]);
     assert_eq!(parsed.account_service_hpke_public_key, [5; 32]);
-    assert_eq!(parsed.sequencer_key_set_generation, 3);
-    assert_eq!(parsed.sequencer_key_set_hash, [11; 32]);
+    assert_eq!(
+        parsed.sequencer_key_set,
+        Some(SequencerKeySetFacts {
+            generation: 3,
+            hash: [11; 32],
+        })
+    );
 
     let onion = render_onboarding(&parse(ONION)?, &facts())?;
     assert!(parse_onboarding_descriptor(&onion)?.onion.is_some());
@@ -318,6 +325,32 @@ fn edge_template_omits_every_coordinator_only_secret_path() -> TestResult {
         "sequencer_credentials_file",
     ] {
         assert!(!text.contains(forbidden), "{forbidden}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_disabled_profile_omits_the_four_e2ee_lines_as_one_unit() -> TestResult {
+    let mut facts = facts();
+    facts.sequencer_key_set = None;
+    let public = render_onboarding(&parse(PUBLIC)?, &facts)?;
+    assert_eq!(public.lines().count(), 8);
+    assert!(!public.contains("e2ee-profile") && !public.contains("sequencer-key-set"));
+    let parsed = parse_onboarding_descriptor(&public)?;
+    assert_eq!(parsed.sequencer_key_set, None);
+    // A present block is parsed as a unit: a partial block, or one with
+    // another profile, is refused.
+    let offered = render_onboarding(&parse(PUBLIC)?, &self::facts())?;
+    let generation_line = offered
+        .lines()
+        .find(|line| line.starts_with("sequencer-key-set-generation="))
+        .ok_or("missing generation")?;
+    for broken in [
+        offered.replacen(&format!("{generation_line}\n"), "", 1),
+        offered.replacen("e2ee-profile=IRC-MLS/1\n", "", 1),
+        offered.replacen("e2ee-profile=IRC-MLS/1", "e2ee-profile=IRC-MLS/2", 1),
+    ] {
+        assert!(parse_onboarding_descriptor(&broken).is_err());
     }
     Ok(())
 }

@@ -684,9 +684,8 @@ fn a_binding_migration_installs_the_exact_successor_binding() -> TestResult {
         plan_devices: vec![(&ACCOUNT, authority, 7)],
         initial_policy_id: genesis.package.binding.tbs.initial_policy_id,
         required_operational_policy_id: genesis.package.binding.tbs.required_operational_policy_id,
+        sequencer_credential_id: genesis.package.binding.tbs.sequencer_credential_id,
     })?;
-    successor.binding.tbs.sequencer_credential_id =
-        genesis.package.binding.tbs.sequencer_credential_id;
     successor.binding.tbs.context_core_id = genesis.package.binding.tbs.context_core_id;
     let successor_id = semantic_id_of(SemanticHashDomain::BindingId, &successor.binding.tbs)?;
     let binding_object = object(IrcWireObjectKind::ConversationBinding, &successor)?;

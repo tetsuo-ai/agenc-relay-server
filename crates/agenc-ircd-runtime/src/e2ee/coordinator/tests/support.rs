@@ -417,6 +417,8 @@ pub(crate) struct BindingSpec<'a> {
     pub(crate) plan_devices: Vec<(&'a [u8; 24], [u8; 32], u8)>,
     pub(crate) initial_policy_id: [u8; 32],
     pub(crate) required_operational_policy_id: [u8; 32],
+    /// The sequencer credential the binding pins.
+    pub(crate) sequencer_credential_id: [u8; 32],
 }
 
 /// A complete binding package signed by every binding-authorized device of
@@ -499,7 +501,7 @@ pub(crate) fn binding_package(
         required_operational_policy_id: spec.required_operational_policy_id,
         initial_member_plan_id: semantic_id_of(SemanticHashDomain::InitialMemberPlanId, &plan)?,
         context_core_id: [30; 32],
-        sequencer_credential_id: [31; 32],
+        sequencer_credential_id: spec.sequencer_credential_id,
         principals: TlsVec::new(principals)?,
     };
     let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &tbs)?;

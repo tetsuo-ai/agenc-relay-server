@@ -29,6 +29,10 @@ pub fn submit_policy(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         return Err(Fail::with(E2eeReplyCode::InvalidFragment, &conversation_id));
     }
     let state = conversation(exec, &conversation_id)?;
+    // A route blocked on a retired credential accepts no policy change.
+    state
+        .blocked_credential_id
+        .map_or(Ok(()), |_| Err(Fail::from(E2eeReplyCode::Syncing)))?;
     let mut budget = DecodeBudget::new(MAX_POLICY_OBJECT, 1 << 16);
     let policy = IrcPolicy::decode_exact(object.body(), &mut budget)
         .map_err(|_| Fail::with(E2eeReplyCode::InvalidFragment, &conversation_id))?;

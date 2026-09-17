@@ -30,6 +30,9 @@ conversation and global disk quotas (ENC-08, issue #53) are recorded in
 The recovery submission carrier that lets a restored pending route become
 permanently closed or conflict (ENC-03, issue #57) is recorded in
 [the recovery submission record](stage-10-recovery-submission.md).
+The three sequencer signer roles, per-conversation credential pins and the
+startup reconciliation across a key rotation (ENC-07, issue #58) are recorded
+in [the sequencer signer record](stage-10-sequencer-signers.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

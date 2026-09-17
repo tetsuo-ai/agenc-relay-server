@@ -61,6 +61,8 @@ mod resident;
 pub(crate) mod response_read;
 pub mod results;
 mod sequencer_signing;
+pub(crate) mod signer_startup;
+pub use signer_startup::SignerReport;
 mod startup;
 pub mod sync;
 #[cfg(test)]
@@ -78,6 +80,46 @@ pub struct SequencerSigner {
     pub key: Ed25519SecretKey,
     /// The credential identifier of the key.
     pub credential_id: [u8; 32],
+}
+
+/// The at most three private signers a coordinator holds, one per
+/// companion 9.2.1 role: the active signer every new binding pins, the
+/// successor signer present while the advertised set holds a successor, and
+/// the retired-retained signer of a credential absent from the advertised set
+/// that a live route still pins or an unfinished receipt still names.
+pub struct SequencerSigners {
+    /// The active signer.
+    pub active: SequencerSigner,
+    /// The successor signer.
+    pub successor: Option<SequencerSigner>,
+    /// The retired-retained signer with its public credential, which the
+    /// advertised set no longer carries.
+    pub retired: Option<(
+        SequencerSigner,
+        agenc_ircd_e2ee::sequencer::VerifiedSequencerCredential,
+    )>,
+}
+
+impl SequencerSigners {
+    /// The signer of `credential_id` in any role.
+    #[must_use]
+    pub fn owner(&self, credential_id: &[u8; 32]) -> Option<&SequencerSigner> {
+        self.issuing_owner(credential_id).or_else(|| {
+            self.retired
+                .as_ref()
+                .map(|(signer, _)| signer)
+                .filter(|signer| signer.credential_id == *credential_id)
+        })
+    }
+
+    /// The signer of `credential_id` that may issue a new receipt: the
+    /// active or the successor signer, never the retired-retained one.
+    #[must_use]
+    pub fn issuing_owner(&self, credential_id: &[u8; 32]) -> Option<&SequencerSigner> {
+        std::iter::once(&self.active)
+            .chain(self.successor.as_ref())
+            .find(|signer| signer.credential_id == *credential_id)
+    }
 }
 
 impl SequencerSigner {
@@ -289,6 +331,13 @@ pub struct ConversationState {
     /// The policy the last finalization installed: the binding's initial
     /// policy before the first, and the old policy of the next candidate.
     pub current_policy_id: [u8; 32],
+    /// The sequencer credential the current accepted context pins: new
+    /// receipts are signed under it alone (companion 9.2.1).
+    pub sequencer_credential_id: [u8; 32],
+    /// The retired credential this route is blocked on: it accepts no
+    /// candidate, ReInit attempt or policy change until it closes or an
+    /// already issued old-credential transition terminal completes.
+    pub blocked_credential_id: Option<[u8; 32]>,
     /// The close this incarnation succeeds, for the route row.
     pub predecessor_close_id: Option<[u8; 32]>,
     /// Published policies by policy identifier (companion 9.3).
@@ -398,7 +447,16 @@ pub struct CompanionCoordinator {
     /// The local server name for rendered lines.
     pub server_name: String,
     delivery_identity: Option<delivery_owner::LocalIdentity>,
-    signer: Option<SequencerSigner>,
+    signer: Option<SequencerSigners>,
+    /// The configured retired-retained key, held until startup matches it
+    /// to the credential history and installs it or refuses it.
+    pending_retired_key: Option<Ed25519SecretKey>,
+    /// The permanent credential history, by credential identifier.
+    signer_history: BTreeMap<[u8; 32], agenc_ircd_storage::e2ee_records::SequencerHistoryRow>,
+    /// What startup found before its reconciliation batch committed.
+    signer_startup: Option<Box<signer_startup::Proposal>>,
+    /// The signer facts the last startup reported.
+    signer_report: SignerReport,
     key_set: Option<SequencerKeySet>,
     current_credential: Option<agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential>,
     global_disk_bytes: u64,
@@ -459,6 +517,10 @@ impl CompanionCoordinator {
             server_name,
             delivery_identity: None,
             signer: None,
+            pending_retired_key: None,
+            signer_history: BTreeMap::new(),
+            signer_startup: None,
+            signer_report: SignerReport::default(),
             key_set: None,
             global_disk_bytes: 0,
             owner_reconstruction: owners::Diagnostics::default(),
@@ -530,7 +592,16 @@ impl CompanionCoordinator {
         &self,
         credential_id: &[u8; 32],
     ) -> Option<&agenc_ircd_e2ee::sequencer::VerifiedSequencerCredential> {
-        self.key_set.as_ref()?.credential(credential_id)
+        self.key_set
+            .as_ref()
+            .and_then(|set| set.credential(credential_id))
+            .or_else(|| {
+                self.signer
+                    .as_ref()
+                    .and_then(|signers| signers.retired.as_ref())
+                    .map(|(_, credential)| credential)
+                    .filter(|credential| credential.credential_id == *credential_id)
+            })
     }
 
     /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.
@@ -583,12 +654,72 @@ impl CompanionCoordinator {
         key_set: SequencerKeySet,
         current: agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential,
     ) -> Result<(), E2eeError> {
-        let credential_id =
-            sequencer_signing::selected_credential(&self.network_id, &key, &key_set, &current)?;
-        self.signer = Some(SequencerSigner { key, credential_id });
+        self.install_signers(key, key_set, current, None, None)
+    }
+
+    /// Installs the active signer of `current` together with the successor
+    /// signer the set may name and a retired-retained signer, or changes
+    /// nothing: every key is verified against the exact credential it
+    /// serves before any owner is replaced (companion 9.2.1).
+    pub fn install_signers(
+        &mut self,
+        key: Ed25519SecretKey,
+        key_set: SequencerKeySet,
+        current: agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential,
+        successor: Option<Ed25519SecretKey>,
+        retired: Option<(
+            Ed25519SecretKey,
+            agenc_ircd_e2ee::sequencer::VerifiedSequencerCredential,
+        )>,
+    ) -> Result<(), E2eeError> {
+        let signers = sequencer_signing::verify_owners(
+            &self.network_id,
+            key,
+            &key_set,
+            &current,
+            successor,
+            retired,
+        )?;
+        self.signer = Some(signers);
         self.key_set = Some(key_set);
         self.current_credential = Some(current);
         Ok(())
+    }
+
+    /// The installed signers, if any.
+    #[must_use]
+    pub const fn signers(&self) -> Option<&SequencerSigners> {
+        self.signer.as_ref()
+    }
+
+    /// Holds the configured retired-retained key for startup, which
+    /// installs it for the one retired credential the durable history and
+    /// the live routes or unfinished receipts still require.
+    pub fn configure_retired_key(&mut self, key: Ed25519SecretKey) {
+        self.pending_retired_key = Some(key);
+    }
+
+    /// The signer facts the last startup reported.
+    #[must_use]
+    pub const fn signer_report(&self) -> SignerReport {
+        self.signer_report
+    }
+
+    /// The routes blocked on a retired credential right now.
+    #[must_use]
+    pub fn blocked_routes(&self) -> u64 {
+        let blocked = self
+            .state
+            .conversations
+            .values()
+            .filter(|state| state.blocked_credential_id.is_some())
+            .count();
+        u64::try_from(blocked).unwrap_or(u64::MAX)
+    }
+
+    /// The startup proposal awaiting its durable reconciliation, if any.
+    pub(crate) fn take_signer_startup(&mut self) -> Option<Box<signer_startup::Proposal>> {
+        self.signer_startup.take()
     }
 
     /// The raw current sequencer credential.
@@ -602,7 +733,10 @@ impl CompanionCoordinator {
     /// The sequencer signer, if this node is the coordinator.
     #[must_use]
     pub const fn signer(&self) -> Option<&SequencerSigner> {
-        self.signer.as_ref()
+        match self.signer.as_ref() {
+            Some(signers) => Some(&signers.active),
+            None => None,
+        }
     }
 
     /// The key set.

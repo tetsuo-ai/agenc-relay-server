@@ -128,10 +128,35 @@ fn coordinator_material(config: &Config, sink: &mut IssueSink) {
     {
         issue(sink, stage, "accounts", "invite_verification_key_file");
     }
+    sequencer_material(config, sink);
+}
+
+/// The active sequencer key is required on the E2EE coordinator and
+/// forbidden elsewhere; the successor and retired-retained keys belong to
+/// the coordinator alone, and whether each is required is decided against
+/// the credentials file and the durable state at startup (companion 9.2.1).
+fn sequencer_material(config: &Config, sink: &mut IssueSink) {
+    let stage = ValidationStage::LocalIdentity;
+    let e2ee = &config.e2ee;
     let e2ee_coordinator =
-        config.e2ee.enabled && config.e2ee.coordinator_server_id == Some(config.server.server_id);
-    if config.e2ee.sequencer_private_key_file.is_some() != e2ee_coordinator {
+        e2ee.enabled && e2ee.coordinator_server_id == Some(config.server.server_id);
+    let optional = [
+        (
+            "sequencer_successor_private_key_file",
+            e2ee.sequencer_successor_private_key_file.is_some(),
+        ),
+        (
+            "sequencer_retired_private_key_file",
+            e2ee.sequencer_retired_private_key_file.is_some(),
+        ),
+    ];
+    if e2ee.sequencer_private_key_file.is_some() != e2ee_coordinator {
         issue(sink, stage, "e2ee", "sequencer_private_key_file");
+    }
+    for (field, present) in optional {
+        if present && !e2ee_coordinator {
+            issue(sink, stage, "e2ee", field);
+        }
     }
 }
 

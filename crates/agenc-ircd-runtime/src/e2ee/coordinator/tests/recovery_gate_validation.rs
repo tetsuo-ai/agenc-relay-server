@@ -117,6 +117,8 @@ fn terminal_metadata_keeps_its_source_epoch_and_requires_a_closed_tombstone() ->
         predecessor_close_id: None,
         recovery_gate: true,
         stored_bytes: 0,
+        sequencer_credential_id: None,
+        blocked_credential_id: None,
     };
     let closed = gate(E2eeRecoveryKind::Closed);
     let later_epoch = Some(RecoveryEpoch::from_bytes([17; 16]));

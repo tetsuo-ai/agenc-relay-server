@@ -139,3 +139,105 @@ fn key_sets_hold_the_current_key_and_at_most_its_successor() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn a_file_opening_above_generation_zero_verifies_structurally() -> TestResult {
+    let first_secret = key(60);
+    let first = sequencer_credential(&first_secret, 0, (0, 1_000_000), None)?;
+    let second = sequencer_credential(
+        &key(61),
+        1,
+        (500_000, 2_000_000),
+        Some((&first_secret, &first)),
+    )?;
+    let verified_first = verify_sequencer_credential(&NETWORK, &first, None)?;
+    // The opened set names the same credential, digest, and predecessor as
+    // the set verified with the predecessor at hand.
+    let with_head = SequencerKeySet::verify(
+        &NETWORK,
+        std::slice::from_ref(&second),
+        2,
+        Some(&verified_first),
+    )?;
+    let opened = SequencerKeySet::verify_opened(&NETWORK, std::slice::from_ref(&second), 2)?;
+    assert_eq!(opened, with_head);
+    assert_eq!(
+        SequencerKeySet::verify(&NETWORK, std::slice::from_ref(&second), 2, None).map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "a lone successor has no predecessor at hand"
+    );
+    // A generation-zero opening still verifies fully, and a successor
+    // still chains from the opened credential.
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[first.clone(), second.clone()], 1)?,
+        SequencerKeySet::verify(&NETWORK, &[first.clone(), second.clone()], 1, None)?
+    );
+    let third = sequencer_credential(&key(62), 2, (600_000, 3_000_000), Some((&key(61), &second)))?;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[second.clone(), third.clone()], 3)?
+            .credentials
+            .len(),
+        2
+    );
+    let mut forged = third.clone();
+    forged.tbs.not_before = 700_000;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[second.clone(), forged], 3).map(|_| ()),
+        Err(E2eeError::SignatureInvalid),
+        "the successor's continuity is verified against the opened credential"
+    );
+    // The opened credential itself must carry a continuity signature and a
+    // predecessor, and match the network.
+    let mut unsigned = second.clone();
+    unsigned.continuity_signature = Opaque::new(Vec::new())?;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, std::slice::from_ref(&unsigned), 2).map(|_| ()),
+        Err(E2eeError::InvalidValue)
+    );
+    let mut rootless = second.clone();
+    rootless.tbs.previous_key_id = [0; 32];
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, std::slice::from_ref(&rootless), 2).map(|_| ()),
+        Err(E2eeError::InvalidValue)
+    );
+    let mut inverted = second.clone();
+    inverted.tbs.not_after = inverted.tbs.not_before;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, std::slice::from_ref(&inverted), 2).map(|_| ()),
+        Err(E2eeError::InvalidValue)
+    );
+    let mut zero_generation = second.clone();
+    zero_generation.tbs.key_generation = 0;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, std::slice::from_ref(&zero_generation), 2)
+            .map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "generation zero opens only without a predecessor"
+    );
+    assert_eq!(
+        verify_opened_credential(&NETWORK, &zero_generation).map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "an opened credential is never generation zero"
+    );
+    let mut wrong_profile = second.clone();
+    wrong_profile.tbs.profile_version = 2;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, std::slice::from_ref(&wrong_profile), 2)
+            .map(|_| ()),
+        Err(E2eeError::ProfileMismatch)
+    );
+    assert_eq!(
+        SequencerKeySet::verify_opened(&[2; 32], std::slice::from_ref(&second), 2).map(|_| ()),
+        Err(E2eeError::ProfileMismatch)
+    );
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[second, third.clone(), third], 3).map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "at most one successor"
+    );
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[], 0).map(|_| ()),
+        Err(E2eeError::InvalidValue)
+    );
+    Ok(())
+}

@@ -688,6 +688,8 @@ impl Element<'_> {
             predecessor_close_id: state.predecessor_close_id,
             recovery_gate: false,
             stored_bytes: state.stored_bytes,
+            sequencer_credential_id: Some(state.sequencer_credential_id),
+            blocked_credential_id: None,
         };
         Ok(Closing {
             close_id,

@@ -7,6 +7,7 @@ use agenc_ircd_e2ee::sequencer::SequencerKeySet;
 use super::super::support::sequencer_credential;
 
 mod installation;
+mod rotation;
 mod terminal;
 use super::*;
 

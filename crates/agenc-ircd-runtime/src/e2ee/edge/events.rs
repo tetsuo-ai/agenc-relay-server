@@ -654,6 +654,8 @@ impl E2eeEdge {
             predecessor_close_id: None,
             recovery_gate: false,
             stored_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            sequencer_credential_id: None,
+            blocked_credential_id: None,
         };
         state_row(
             RouteRow::key(&state.conversation_id).map_err(|_| E2eeReplyCode::InvalidFragment)?,

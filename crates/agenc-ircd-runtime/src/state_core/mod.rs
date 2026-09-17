@@ -636,6 +636,13 @@ impl PreparedQuerySnapshot {
 }
 
 impl StateCoreContext {
+    /// Reports a coordinator startup's signer facts through the observer.
+    pub(crate) fn e2ee_signer_report(&self, blocked_routes: u64, retired_missing: bool) {
+        if let Some(observer) = &self.observer {
+            observer.e2ee_signer_report(blocked_routes, retired_missing);
+        }
+    }
+
     fn begin_command_observation(&self, command: &str) -> CommandObservation {
         let class = RuntimeObserver::classify_command(command);
         if class == CommandClass::Authentication

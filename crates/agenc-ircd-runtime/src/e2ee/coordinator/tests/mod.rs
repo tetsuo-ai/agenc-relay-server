@@ -53,7 +53,7 @@ const DEVICE: u8 = 7;
 const DEVICE_ID: [u8; 16] = [DEVICE; 16];
 const ROOT_SEED: u8 = 40;
 const LEAF_SEED: u8 = 30;
-const NOW: u64 = 500;
+pub(super) const NOW: u64 = 500;
 const STATE_GENERATION: u64 = 7;
 const LEAF_INTERVAL: (u64, u64) = (100, 100_000);
 const GROUP: [u8; 32] = [33; 32];
@@ -217,8 +217,19 @@ impl Harness {
     /// harness staged, as the daemon rebuilds it at startup; it continues
     /// the request sequence.
     fn reloaded(&self) -> TestResult<Harness> {
+        self.reloaded_with(|_| Ok(()))
+    }
+
+    /// [`Self::reloaded`] with `install` run on the fresh coordinator before
+    /// any row is admitted, as the daemon installs the configured signers
+    /// before the durable reload.
+    fn reloaded_with(
+        &self,
+        install: impl FnOnce(&mut CompanionCoordinator) -> TestResult,
+    ) -> TestResult<Harness> {
         use crate::state_core::durable::AccountServiceDurableWrite as Write;
         let mut fresh = Harness::with_devices(&self.devices)?;
+        install(&mut fresh.coordinator)?;
         for write in &self.writes {
             let Write::Put {
                 table,
@@ -545,6 +556,7 @@ impl Harness {
             plan_devices: vec![(&self.account, fingerprint, DEVICE)],
             initial_policy_id: policy_id_of(&self.initial_policy)?,
             required_operational_policy_id: policy_id_of(&self.operational_policy)?,
+            sequencer_credential_id: self.pinned_credential(),
         })?;
         wire(IrcWireObjectKind::ConversationBinding, &package)
     }
@@ -552,6 +564,13 @@ impl Harness {
     /// Binds the channel and publishes its two policies and the attached
     /// device's leaf-membership proof, as a client does before its first
     /// Commit (companion 9.3 and 13.7.3).
+    /// The credential new bindings pin: the active signer's.
+    pub(crate) fn pinned_credential(&self) -> [u8; 32] {
+        self.coordinator
+            .signer()
+            .map_or([31; 32], |signer| signer.credential_id)
+    }
+
     fn bind_channel(&mut self) -> TestResult<[u8; 32]> {
         let conversation = self.bind_channel_unpublished()?;
         let initial = self.initial_policy.clone();

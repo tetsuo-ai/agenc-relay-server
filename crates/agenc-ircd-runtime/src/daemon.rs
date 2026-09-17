@@ -612,7 +612,15 @@ fn build_live_state(
         };
         let e2ee = e2ee_setup(
             config,
-            secrets.sequencer_private().map(SecretBytes32::expose),
+            SequencerSecrets {
+                active: secrets.sequencer_private().map(SecretBytes32::expose),
+                successor: secrets
+                    .sequencer_successor_private()
+                    .map(SecretBytes32::expose),
+                retired: secrets
+                    .sequencer_retired_private()
+                    .map(SecretBytes32::expose),
+            },
         )?;
         let mut router = attach_federation_role(config, federation, e2ee, router)?;
         router.restore_edge(
@@ -1207,9 +1215,17 @@ pub(crate) fn load_sequencer_credentials(
 /// Reads and verifies the sequencer credentials file when `[e2ee]` is
 /// enabled: the key set must verify for this network, and the coordinator's
 /// sequencer key must be one of the credentials (spec 9200, 9201).
+/// The configured sequencer private key seeds by companion 9.2.1 role.
+#[derive(Clone, Copy, Default)]
+struct SequencerSecrets<'a> {
+    active: Option<&'a [u8; 32]>,
+    successor: Option<&'a [u8; 32]>,
+    retired: Option<&'a [u8; 32]>,
+}
+
 fn e2ee_setup(
     config: &Config,
-    sequencer: Option<&[u8; 32]>,
+    sequencer: SequencerSecrets<'_>,
 ) -> Result<Option<E2eeSetup>, DaemonError> {
     e2ee_setup_with_hook(config, sequencer, || {})
 }
@@ -1218,7 +1234,7 @@ fn e2ee_setup(
 /// so tests can race the real composition path.
 fn e2ee_setup_with_hook(
     config: &Config,
-    sequencer: Option<&[u8; 32]>,
+    sequencer: SequencerSecrets<'_>,
     after_initial_status: impl FnOnce(),
 ) -> Result<Option<E2eeSetup>, DaemonError> {
     use agenc_ircd_e2ee::profile::EcapTuple;
@@ -1247,24 +1263,35 @@ fn e2ee_setup_with_hook(
     let profile = CompanionProfile { local: tuple };
     let executor = match config.network.role {
         NodeRole::Coordinator => {
-            let seed = sequencer.ok_or(DaemonError::UnsupportedProfile)?;
+            let seed = sequencer.active.ok_or(DaemonError::UnsupportedProfile)?;
             let key = Ed25519SecretKey::from_bytes(*seed);
             let public = *key.public_key().as_bytes();
+            // The active key serves the credential the file lists first; the
+            // successor key is required exactly when the file holds a
+            // successor (spec 9457).
             let current = document
                 .credentials
                 .as_slice()
-                .iter()
-                .find(|credential| credential.tbs.sequencer_public_key == public)
+                .first()
+                .filter(|credential| credential.tbs.sequencer_public_key == public)
                 .cloned()
                 .ok_or(DaemonError::E2eeCredentials)?;
+            let successor = match (sequencer.successor, document.credentials.as_slice().len()) {
+                (Some(seed), 2) => Some(Ed25519SecretKey::from_bytes(*seed)),
+                (None, 1) => None,
+                _ => return Err(DaemonError::E2eeCredentials),
+            };
             let mut executor = CompanionCoordinator::new(
                 network,
                 config.server.server_id,
                 config.server.name.as_str().to_owned(),
             );
             executor
-                .install_sequencer(key, key_set, current)
+                .install_signers(key, key_set, current, successor, None)
                 .map_err(|_| DaemonError::E2eeCredentials)?;
+            if let Some(seed) = sequencer.retired {
+                executor.configure_retired_key(Ed25519SecretKey::from_bytes(*seed));
+            }
             executor.set_global_disk_bytes(config.e2ee.global_disk_bytes);
             Some(executor)
         }
@@ -3962,6 +3989,24 @@ async fn shutdown_blocking_owners(
 
 #[cfg(test)]
 mod tests {
+    /// The active sequencer seed alone.
+    fn active(seed: &[u8; 32]) -> super::SequencerSecrets<'_> {
+        super::SequencerSecrets {
+            active: Some(seed),
+            successor: None,
+            retired: None,
+        }
+    }
+
+    /// The active and successor seeds of the overlap document.
+    fn overlap_secrets() -> super::SequencerSecrets<'static> {
+        super::SequencerSecrets {
+            active: Some(&[90; 32]),
+            successor: Some(&[91; 32]),
+            retired: None,
+        }
+    }
+
     use agenc_ircd_config::{PathResolver, RateTable};
     use agenc_ircd_testkit::DeterministicMonotonicClock;
     use agenc_ircd_types::ServerId;
@@ -4421,11 +4466,11 @@ mod tests {
         edge.network.role = NodeRole::Edge;
 
         write_credentials(&path, &sequencer_credentials_document(&key(90))?)?;
-        assert!(e2ee_setup(&config, Some(&[90; 32]))?.is_some());
-        assert!(e2ee_setup(&edge, None)?.is_some());
+        assert!(e2ee_setup(&config, active(&[90; 32]))?.is_some());
+        assert!(e2ee_setup(&edge, SequencerSecrets::default())?.is_some());
         write_credentials(&path, &sequencer_overlap_document()?)?;
-        assert!(e2ee_setup(&config, Some(&[91; 32]))?.is_some());
-        assert!(e2ee_setup(&edge, None)?.is_some());
+        assert!(e2ee_setup(&config, overlap_secrets())?.is_some());
+        assert!(e2ee_setup(&edge, SequencerSecrets::default())?.is_some());
 
         // Limit plus one, written and sparse: refused before the hook that
         // precedes the read ever runs, so nothing is allocated or parsed.
@@ -4433,7 +4478,7 @@ mod tests {
         write_credentials(&path, &vec![0x5a; oversize])?;
         let mut hook_fired = false;
         assert!(matches!(
-            e2ee_setup_with_hook(&edge, None, || hook_fired = true),
+            e2ee_setup_with_hook(&edge, SequencerSecrets::default(), || hook_fired = true),
             Err(DaemonError::E2eeCredentials)
         ));
         write_credentials(&path, b"")?;
@@ -4442,7 +4487,7 @@ mod tests {
             .open(&path)?
             .set_len(u64::try_from(oversize)?)?;
         assert!(matches!(
-            e2ee_setup_with_hook(&config, Some(&[90; 32]), || hook_fired = true),
+            e2ee_setup_with_hook(&config, active(&[90; 32]), || hook_fired = true),
             Err(DaemonError::E2eeCredentials)
         ));
         assert!(
@@ -4466,7 +4511,7 @@ mod tests {
 
         write_credentials(&path, &document)?;
         assert!(matches!(
-            e2ee_setup_with_hook(&config, Some(&[90; 32]), || {
+            e2ee_setup_with_hook(&config, active(&[90; 32]), || {
                 let mut file = std::fs::OpenOptions::new().append(true).open(&path).ok();
                 assert!(
                     file.as_mut()
@@ -4483,13 +4528,13 @@ mod tests {
         let replacement = directory.0.join("replacement.bin");
         write_credentials(&replacement, &sequencer_overlap_document()?)?;
         assert!(matches!(
-            e2ee_setup_with_hook(&config, Some(&[91; 32]), || {
+            e2ee_setup_with_hook(&config, overlap_secrets(), || {
                 assert!(std::fs::rename(&replacement, &path).is_ok());
             }),
             Err(DaemonError::E2eeCredentials)
         ));
-        // Without the race the replacement document admits key 91 normally.
-        assert!(e2ee_setup(&config, Some(&[91; 32]))?.is_some());
+        // Without the race the replacement document admits both keys normally.
+        assert!(e2ee_setup(&config, overlap_secrets())?.is_some());
         Ok(())
     }
 
@@ -4508,7 +4553,7 @@ mod tests {
         let refused = |path: &Path| -> Result<bool, DaemonError> {
             let config = e2ee_coordinator_config(path)?;
             Ok(matches!(
-                e2ee_setup(&config, Some(&[90; 32])),
+                e2ee_setup(&config, active(&[90; 32])),
                 Err(DaemonError::E2eeCredentials)
             ))
         };
@@ -4547,7 +4592,7 @@ mod tests {
 
         // Positive control: the same document at mode 0600 under the
         // mode-0700 root is admitted.
-        assert!(e2ee_setup(&e2ee_coordinator_config(&real)?, Some(&[90; 32]))?.is_some());
+        assert!(e2ee_setup(&e2ee_coordinator_config(&real)?, active(&[90; 32]))?.is_some());
         Ok(())
     }
 
@@ -4567,9 +4612,9 @@ mod tests {
         for path in [&missing, &oversize] {
             let mut disabled = e2ee_coordinator_config(path)?;
             disabled.e2ee.enabled = false;
-            assert!(e2ee_setup(&disabled, Some(&[90; 32]))?.is_none());
+            assert!(e2ee_setup(&disabled, active(&[90; 32]))?.is_none());
         }
-        let error = e2ee_setup(&e2ee_coordinator_config(&oversize)?, Some(&[90; 32]))
+        let error = e2ee_setup(&e2ee_coordinator_config(&oversize)?, active(&[90; 32]))
             .err()
             .ok_or("an oversize document must be refused")?;
         assert!(matches!(error, DaemonError::E2eeCredentials));
@@ -4612,41 +4657,42 @@ mod tests {
 
         let mut disabled = public_config()?;
         disabled.federation.enabled = true;
-        assert!(e2ee_setup(&disabled, Some(&seed))?.is_none());
+        assert!(e2ee_setup(&disabled, active(&seed))?.is_none());
 
         let mut coordinator = disabled.clone();
         coordinator.e2ee.enabled = true;
         coordinator.e2ee.sequencer_credentials_file = Some(path.clone());
-        let setup = e2ee_setup(&coordinator, Some(&seed))?.ok_or(RuntimeError::InvalidValue)?;
+        let setup = e2ee_setup(&coordinator, active(&seed))?.ok_or(RuntimeError::InvalidValue)?;
         assert!(setup.executor.is_some());
         assert_eq!(setup.profile.local.key_set_generation, 0);
         // The sequencer key must be one of the credentials.
         assert!(matches!(
-            e2ee_setup(&coordinator, Some(&[91; 32])),
+            e2ee_setup(&coordinator, active(&[91; 32])),
             Err(DaemonError::E2eeCredentials)
         ));
         assert!(matches!(
-            e2ee_setup(&coordinator, None),
+            e2ee_setup(&coordinator, SequencerSecrets::default()),
             Err(DaemonError::UnsupportedProfile)
         ));
 
         let mut edge = coordinator.clone();
         edge.network.role = NodeRole::Edge;
-        let setup = e2ee_setup(&edge, None)?.ok_or(RuntimeError::InvalidValue)?;
+        let setup =
+            e2ee_setup(&edge, SequencerSecrets::default())?.ok_or(RuntimeError::InvalidValue)?;
         assert!(setup.executor.is_none());
 
         // A document that does not parse, or one for another network, is
         // refused before any role composes.
         write_credentials(&path, b"not a credentials document")?;
         assert!(matches!(
-            e2ee_setup(&edge, None),
+            e2ee_setup(&edge, SequencerSecrets::default()),
             Err(DaemonError::E2eeCredentials)
         ));
         let mut other = edge.clone();
         other.network.network_id = agenc_ircd_types::NetworkId::from_bytes([77; 32]);
         write_credentials(&path, &sequencer_credentials_document(&sequencer)?)?;
         assert!(matches!(
-            e2ee_setup(&other, None),
+            e2ee_setup(&other, SequencerSecrets::default()),
             Err(DaemonError::E2eeCredentials)
         ));
         Ok(())
@@ -4675,26 +4721,110 @@ mod tests {
             credentials: TlsVec::new(vec![old.clone(), next.clone()])?,
         };
         write_credentials(&path, &document.encode()?)?;
-        for (seed, credential) in [(90, old), (91, next)] {
-            let setup = e2ee_setup(&config, Some(&[seed; 32]))?.ok_or("setup")?;
-            assert_eq!(setup.profile.local.key_set_generation, 1);
-            let executor = setup.executor.ok_or("executor")?;
-            let signer = executor.signer().ok_or("signer")?;
-            let expected = semantic_id_of(SemanticHashDomain::SequencerKey, &credential.tbs)?;
-            assert_eq!(signer.credential_id, expected);
-            assert_eq!(executor.current_credential(), Some(&credential));
-            let signature = signer.sign(SignatureDomain::Reservation, &credential.tbs)?;
-            executor
-                .key_set()
-                .and_then(|set| set.credential(&expected))
-                .ok_or("credential")?
-                .key
-                .verify(
-                    SignatureDomain::Reservation,
-                    &credential.tbs.encode()?,
-                    &signature,
-                )?;
+        // The active key serves the first credential and the successor key
+        // the second; either key alone cannot install a two-credential set.
+        let setup = e2ee_setup(&config, overlap_secrets())?.ok_or("setup")?;
+        assert_eq!(setup.profile.local.key_set_generation, 1);
+        let executor = setup.executor.ok_or("executor")?;
+        let signers = executor.signers().ok_or("signers")?;
+        assert_eq!(
+            signers.active.credential_id,
+            semantic_id_of(SemanticHashDomain::SequencerKey, &old.tbs)?
+        );
+        assert_eq!(
+            signers
+                .successor
+                .as_ref()
+                .map(|signer| signer.credential_id),
+            Some(semantic_id_of(SemanticHashDomain::SequencerKey, &next.tbs)?)
+        );
+        let tbs = [7_u8; 8];
+        for (signer, credential) in [
+            (&signers.active, &old),
+            (signers.successor.as_ref().ok_or("successor")?, &next),
+        ] {
+            let signature = signer.sign(SignatureDomain::CandidateReceipt, &tbs)?;
+            let public = agenc_ircd_crypto::Ed25519PublicKey::from_bytes(
+                credential.tbs.sequencer_public_key,
+            )?;
+            assert!(
+                agenc_ircd_crypto::verify_canonical(
+                    public,
+                    SignatureDomain::CandidateReceipt,
+                    &tbs.encode()?,
+                    agenc_ircd_crypto::Ed25519Signature::from_bytes(signature),
+                )
+                .is_ok()
+            );
         }
+        for seed in [90_u8, 91] {
+            assert!(matches!(
+                e2ee_setup(&config, active(&[seed; 32])),
+                Err(DaemonError::E2eeCredentials)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sequencer_setup_loads_a_retired_set_with_the_configured_retired_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::e2ee::coordinator::tests::support::{key, sequencer_credential_in};
+        use agenc_ircd_crypto::SemanticHashDomain;
+        use agenc_ircd_e2ee::ids::semantic_id_of;
+        use agenc_ircd_e2ee::sequencer::{SequencerCredentialsFile, SequencerKeySet};
+        use agenc_ircd_e2ee::tls::{TlsEncode, TlsVec};
+        let directory = crate::test_support::TestDirectory::create_protected()?;
+        let path = directory.0.join("sequencer-retired.bin");
+        let mut config = public_config()?;
+        config.federation.enabled = true;
+        config.e2ee.enabled = true;
+        config.e2ee.sequencer_credentials_file = Some(path.clone());
+        let network = *config.network.network_id.as_bytes();
+        let old = sequencer_credential_in(network, &key(90), 0, (0, 1_000), None)?;
+        let next =
+            sequencer_credential_in(network, &key(91), 1, (100, 2_000), Some((&key(90), &old)))?;
+        // After the old credential retired the file opens at generation 1
+        // with the successor alone, which every role verifies structurally
+        // and advertises with the digest of that one credential.
+        let document = SequencerCredentialsFile {
+            set_generation: 2,
+            credentials: TlsVec::new(vec![next.clone()])?,
+        };
+        write_credentials(&path, &document.encode()?)?;
+        let expected = SequencerKeySet::verify_opened(&network, std::slice::from_ref(&next), 2)?;
+        let secrets = super::SequencerSecrets {
+            active: Some(&[91; 32]),
+            successor: None,
+            retired: Some(&[90; 32]),
+        };
+        let setup = e2ee_setup(&config, secrets)?.ok_or("setup")?;
+        assert_eq!(setup.profile.local.key_set_generation, 2);
+        let executor = setup.executor.ok_or("executor")?;
+        assert_eq!(executor.key_set(), Some(&expected));
+        let signers = executor.signers().ok_or("signers")?;
+        assert_eq!(
+            signers.active.credential_id,
+            semantic_id_of(SemanticHashDomain::SequencerKey, &next.tbs)?
+        );
+        assert!(signers.successor.is_none());
+        // The retired key waits for the durable reload to decide whether
+        // any route or receipt still requires it.
+        assert!(signers.retired.is_none());
+        let mut edge = config.clone();
+        edge.network.role = NodeRole::Edge;
+        let edge_setup = e2ee_setup(&edge, super::SequencerSecrets::default())?.ok_or("edge")?;
+        assert_eq!(edge_setup.profile.local, setup.profile.local);
+        // The old key is not the key of the file's first credential, and a
+        // successor key is refused when the file names no successor.
+        assert!(matches!(
+            e2ee_setup(&config, active(&[90; 32])),
+            Err(DaemonError::E2eeCredentials)
+        ));
+        assert!(matches!(
+            e2ee_setup(&config, overlap_secrets()),
+            Err(DaemonError::E2eeCredentials)
+        ));
         Ok(())
     }
 

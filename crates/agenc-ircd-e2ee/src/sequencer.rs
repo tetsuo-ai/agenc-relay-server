@@ -7,7 +7,7 @@ use crate::error::E2eeError;
 use crate::identity::{Interval, ValidationTime};
 use crate::ids::{SemanticId, semantic_id_of, sequencer_key_set_digest};
 use crate::limits::{MAX_SEQUENCER_KEY_OVERLAP_SECONDS, PROFILE_VERSION};
-use crate::objects::conversation::IrcSequencerCredential;
+use crate::objects::conversation::{IrcSequencerCredential, IrcSequencerCredentialTbs};
 use crate::signature::{RoleKey, SignerRole};
 use crate::tls::TlsEncode;
 
@@ -72,6 +72,36 @@ pub fn verify_sequencer_credential(
             )?;
         }
     }
+    verified(tbs, key)
+}
+
+/// Verifies the credential a key set opens with above generation zero when
+/// its predecessor is not at hand: the structural facts every peer can
+/// check. The continuity signature must be present; it was verified when
+/// the predecessor set was accepted, and the coordinator refuses a set
+/// whose opening credential its durable history never accepted (companion
+/// 9.2.1).
+pub fn verify_opened_credential(
+    network_id: &[u8; 32],
+    credential: &IrcSequencerCredential,
+) -> Result<VerifiedSequencerCredential, E2eeError> {
+    let tbs = &credential.tbs;
+    if tbs.profile_version != PROFILE_VERSION || tbs.network_id != *network_id {
+        return Err(E2eeError::ProfileMismatch);
+    }
+    if tbs.not_before >= tbs.not_after || tbs.key_generation == 0 || tbs.previous_key_id == [0; 32]
+    {
+        return Err(E2eeError::InvalidValue);
+    }
+    let key = RoleKey::new(SignerRole::Sequencer, tbs.sequencer_public_key)?;
+    let _present = credential.continuity_signature.exactly::<64>()?;
+    verified(tbs, key)
+}
+
+fn verified(
+    tbs: &IrcSequencerCredentialTbs,
+    key: RoleKey,
+) -> Result<VerifiedSequencerCredential, E2eeError> {
     Ok(VerifiedSequencerCredential {
         credential_id: semantic_id_of(SemanticHashDomain::SequencerKey, tbs)?,
         generation: tbs.key_generation,
@@ -106,15 +136,48 @@ impl SequencerKeySet {
         set_generation: u64,
         head: Option<&VerifiedSequencerCredential>,
     ) -> Result<Self, E2eeError> {
-        if credentials.is_empty() || credentials.len() > 2 {
+        let (first, rest) = credentials.split_first().ok_or(E2eeError::InvalidValue)?;
+        let opened = verify_sequencer_credential(network_id, first, head)?;
+        Self::chain(network_id, opened, rest, set_generation)
+    }
+
+    /// Verifies a credentials file's set whose predecessor is not at hand:
+    /// a first credential above generation zero is checked structurally
+    /// (see [`verify_opened_credential`]) and every later credential chains
+    /// from it. The coordinator checks the succession against its durable
+    /// credential history at startup (companion 9.2.1).
+    pub fn verify_opened(
+        network_id: &[u8; 32],
+        credentials: &[IrcSequencerCredential],
+        set_generation: u64,
+    ) -> Result<Self, E2eeError> {
+        let (first, rest) = credentials.split_first().ok_or(E2eeError::InvalidValue)?;
+        let opened = if first.tbs.key_generation == 0 {
+            verify_sequencer_credential(network_id, first, None)?
+        } else {
+            verify_opened_credential(network_id, first)?
+        };
+        Self::chain(network_id, opened, rest, set_generation)
+    }
+
+    /// At most one successor chains from the opened credential.
+    fn chain(
+        network_id: &[u8; 32],
+        opened: VerifiedSequencerCredential,
+        rest: &[IrcSequencerCredential],
+        set_generation: u64,
+    ) -> Result<Self, E2eeError> {
+        if rest.len() > 1 {
             return Err(E2eeError::InvalidValue);
         }
-        let mut verified = Vec::new();
-        let mut previous = head.copied();
-        for credential in credentials {
-            let current = verify_sequencer_credential(network_id, credential, previous.as_ref())?;
-            verified.push(current);
-            previous = Some(current);
+        let mut verified = vec![opened];
+        for credential in rest {
+            let previous = verified.last().copied();
+            verified.push(verify_sequencer_credential(
+                network_id,
+                credential,
+                previous.as_ref(),
+            )?);
         }
         let ids: Vec<SemanticId> = verified
             .iter()
@@ -203,11 +266,6 @@ impl SequencerCredentialsFile {
 
     /// Verifies the credentials as the key set of `network_id`.
     pub fn key_set(&self, network_id: &[u8; 32]) -> Result<SequencerKeySet, E2eeError> {
-        SequencerKeySet::verify(
-            network_id,
-            self.credentials.as_slice(),
-            self.set_generation,
-            None,
-        )
+        SequencerKeySet::verify_opened(network_id, self.credentials.as_slice(), self.set_generation)
     }
 }

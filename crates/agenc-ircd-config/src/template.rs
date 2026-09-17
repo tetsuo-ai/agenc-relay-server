@@ -519,6 +519,16 @@ fn render_e2ee(out: &mut String, values: &InitValues, keys: &Path) {
         );
         let _ = writeln!(
             out,
+            "# sequencer_successor_private_key_file = \"{}\"",
+            path(keys, "sequencer-successor.key")
+        );
+        let _ = writeln!(
+            out,
+            "# sequencer_retired_private_key_file = \"{}\"",
+            path(keys, "sequencer-retired.key")
+        );
+        let _ = writeln!(
+            out,
             "# sequencer_credentials_file = \"{}\"",
             path(keys, "sequencer-credentials.toml")
         );

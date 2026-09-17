@@ -1537,7 +1537,9 @@ impl FederationCoordinator {
     }
 
     fn continue_after_commit(&mut self, context: &mut StateCoreContext) {
-        self.continue_background(context);
+        // A startup write that just committed resumes the reload here rather
+        // than at the next maintenance tick.
+        self.continue_restore(context);
         request::drain_queued(self, context);
         companion::drain_queued(self, context);
         self.drain_backlog(context);

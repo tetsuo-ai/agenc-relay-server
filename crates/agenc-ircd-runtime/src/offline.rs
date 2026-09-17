@@ -32,8 +32,8 @@ use agenc_ircd_config::{
 };
 use agenc_ircd_crypto::{
     AccountHpkePrivateKey, AccountHpkePublicKey, Ed25519SecretKey, LoginIndexKey, OsEntropy,
-    RollbackGuardRootKey, SemanticHashDomain, StorageDigest, StorageMasterKey,
-    audit_signing_key_id, backup_signing_key_id, semantic_digest,
+    RollbackGuardRootKey, StorageDigest, StorageMasterKey, audit_signing_key_id,
+    backup_signing_key_id,
 };
 use agenc_ircd_storage::{
     DatabaseHeaderTbs, InitialStorageRecord, InspectionStateDirectory, LIVE_RECORD_KIND,
@@ -1358,13 +1358,34 @@ pub fn render_onboarding(config_path: &Path) -> Result<String, OfflineError> {
     let header = verify_database_header(&config, &secrets)?;
     let hpke = AccountHpkePublicKey::from_bytes(config.accounts.account_service_hpke_public_key)
         .map_err(|_| OfflineError::Cryptography)?;
-    let empty_key_set = semantic_digest(SemanticHashDomain::SequencerKeySet, &[])
-        .map_err(|_| OfflineError::Cryptography)?;
+    // The descriptor pins the verified key set the daemon advertises in
+    // ECAP: the same bounded read of the credentials file, on either role.
+    // A disabled profile omits the four E2EE lines as one unit (appendix
+    // C.8).
+    let sequencer_key_set = match config
+        .e2ee
+        .sequencer_credentials_file
+        .as_deref()
+        .filter(|_| config.e2ee.enabled)
+    {
+        Some(path) => {
+            let (_, key_set) = crate::daemon::load_sequencer_credentials(
+                path,
+                config.network.network_id.as_bytes(),
+                || {},
+            )
+            .map_err(|_| OfflineError::InvalidRequest)?;
+            Some(agenc_ircd_config::SequencerKeySetFacts {
+                generation: key_set.set_generation,
+                hash: key_set.digest,
+            })
+        }
+        None => None,
+    };
     let facts = OnboardingFacts {
         recovery_epoch: header.recovery_epoch,
         account_service_hpke_key_id: *hpke.key_id().as_bytes(),
-        sequencer_key_set_generation: 0,
-        sequencer_key_set_hash: *empty_key_set.as_bytes(),
+        sequencer_key_set,
     };
     Ok(render_config_onboarding(&config, &facts)?)
 }
@@ -2817,6 +2838,90 @@ mod tests {
         assert!(!request.operator_signing_key_file.exists());
         assert!(!request.config_path.exists());
         assert!(!staging_root.exists());
+        Ok(())
+    }
+
+    /// The quoted path of the commented `# <key> = "<path>"` template line.
+    fn commented_path(text: &str, key: &str) -> Result<String, OfflineError> {
+        let prefix = format!("# {key} = \"");
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .ok_or(OfflineError::Configuration)?;
+        Ok(line[prefix.len()..line.len() - 1].to_owned())
+    }
+
+    #[test]
+    fn onboarding_pins_the_verified_sequencer_key_set() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::e2ee::coordinator::tests::support::{key, sequencer_credential_in};
+        use agenc_ircd_e2ee::sequencer::{SequencerCredentialsFile, SequencerKeySet};
+        use agenc_ircd_e2ee::tls::{TlsEncode, TlsVec};
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        let config_path = request.config_path.clone();
+        initialize_node(request)?;
+        enable_test_listener(&root.0)?;
+        // The generated profile is disabled: the four E2EE lines are omitted
+        // as one unit and an importer is offered no E2EE.
+        let disabled = render_onboarding(&config_path)?;
+        assert!(!disabled.contains("e2ee-profile") && !disabled.contains("sequencer-key-set"));
+        assert!(
+            agenc_ircd_config::parse_onboarding_descriptor(&disabled)?
+                .sequencer_key_set
+                .is_none()
+        );
+        let text = fs::read_to_string(&config_path)?;
+        let credentials_path = commented_path(&text, "sequencer_credentials_file")?;
+        let key_path = commented_path(&text, "sequencer_private_key_file")?;
+        // The set opens at generation 1 with the successor alone, as after
+        // a retirement: the descriptor pins exactly what ECAP advertises.
+        let network = [1; 32];
+        let old = sequencer_credential_in(network, &key(90), 0, (0, 4_000_000_000), None)?;
+        let next = sequencer_credential_in(
+            network,
+            &key(91),
+            1,
+            (100, 4_000_000_000),
+            Some((&key(90), &old)),
+        )?;
+        let document = SequencerCredentialsFile {
+            set_generation: 2,
+            credentials: TlsVec::new(vec![next.clone()])?,
+        };
+        write_secret(Path::new(&credentials_path), &document.encode()?)?;
+        if !Path::new(&key_path).exists() {
+            write_secret(Path::new(&key_path), &[91; 32])?;
+        }
+        let enabled = text
+            .replacen(
+                "# Disabled until the sequencer credentials are published; false is core-only.\nenabled = false",
+                "enabled = true",
+                1,
+            )
+            .replacen(
+                "# sequencer_private_key_file = ",
+                "sequencer_private_key_file = ",
+                1,
+            )
+            .replacen(
+                "# sequencer_credentials_file = ",
+                "sequencer_credentials_file = ",
+                1,
+            );
+        fs::write(&config_path, enabled)?;
+        let expected = SequencerKeySet::verify_opened(&network, std::slice::from_ref(&next), 2)?;
+        let descriptor = render_onboarding(&config_path)?;
+        assert!(descriptor.contains("\nsequencer-key-set-generation=2\n"));
+        assert!(descriptor.contains(&format!(
+            "\nsequencer-key-set-hash={}\n",
+            encode_base64url_32(&expected.digest)
+        )));
+        // A document that does not verify renders no descriptor.
+        fs::write(&credentials_path, b"not a credentials document")?;
+        assert_eq!(
+            render_onboarding(&config_path).err(),
+            Some(OfflineError::InvalidRequest)
+        );
         Ok(())
     }
 

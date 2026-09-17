@@ -32,7 +32,13 @@ struct RestartFixture {
 }
 
 impl RestartFixture {
+    /// The construction future is boxed so every test's own future stays
+    /// small.
     async fn new() -> TestResult<Self> {
+        Box::pin(Self::build()).await
+    }
+
+    async fn build() -> TestResult<Self> {
         let storage = StateCoreFixture::new(vec![44; 65_536])?;
         let mut coordinator = CompanionCoordinator::new(
             *storage.identity.network_id.as_bytes(),

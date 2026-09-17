@@ -3,7 +3,7 @@
 
 use super::super::{FederationCoordinator, PendingCommit, Violation};
 use crate::budget::MemoryPermit;
-use crate::e2ee::coordinator::sync::RestoredRetirement;
+use crate::e2ee::coordinator::sync::RestoredWrite;
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::{StageAccepted, StageRefused, StateCoreContext};
 use agenc_ircd_storage::StorageError;
@@ -13,7 +13,7 @@ const WRITE_BACKING_BYTES: usize = 8_192;
 
 #[derive(Default)]
 pub(super) struct Loader {
-    candidate: Option<RestoredRetirement>,
+    candidate: Option<RestoredWrite>,
     retry_at: u64,
 }
 
@@ -21,7 +21,7 @@ pub(super) struct Loader {
 pub(in super::super) struct Receipt {
     pub(in super::super) staged_after: u64,
     revision: u64,
-    candidate: RestoredRetirement,
+    candidate: RestoredWrite,
     owners: crate::e2ee::coordinator::owners::Staged,
     _backing: MemoryPermit,
 }
@@ -39,7 +39,7 @@ pub(super) fn advance(
     {
         return false;
     }
-    match choose(coordinator) {
+    match choose(coordinator, context) {
         Ok(false) => return true,
         Ok(true) => {}
         Err(_) => {
@@ -57,17 +57,49 @@ pub(super) fn advance(
     false
 }
 
-fn choose(coordinator: &mut FederationCoordinator) -> Result<bool, Violation> {
+fn choose(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+) -> Result<bool, Violation> {
     if coordinator.loader.retirement.candidate.is_none() {
-        coordinator.loader.retirement.candidate = coordinator
-            .companion_exec
-            .as_ref()
-            .map(|executor| executor.next_restored_retirement())
-            .transpose()
-            .map_err(|_| Violation::Codec)?
-            .flatten();
+        // The signer reconciliation is decided at the trusted time; without
+        // a trusted clock no overlap deadline can have passed.
+        let now = super::super::trusted_unix_now(context).unwrap_or(0);
+        coordinator.loader.retirement.candidate = next_write(coordinator, context, now)?;
     }
     Ok(coordinator.loader.retirement.candidate.is_some())
+}
+
+/// The next durable startup write. A signer reconciliation with nothing to
+/// persist is applied at once and the owner retirement search continues.
+fn next_write(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    now: u64,
+) -> Result<Option<RestoredWrite>, Violation> {
+    let Some(executor) = coordinator.companion_exec.as_mut() else {
+        return Ok(None);
+    };
+    let candidate = executor
+        .next_restored_write(now)
+        .map_err(|_| Violation::Codec)?;
+    let durable = candidate
+        .as_ref()
+        .map(|write| write.writes().map(|writes| !writes.is_empty()))
+        .transpose()
+        .map_err(|_| Violation::Codec)?;
+    match (candidate, durable) {
+        (Some(write @ RestoredWrite::Signers(_)), Some(false)) => {
+            write.apply(executor).map_err(|_| Violation::Codec)?;
+            let report = executor.signer_report();
+            context.e2ee_signer_report(report.blocked_routes, report.retired_missing);
+            Ok(executor
+                .next_restored_retirement()
+                .map_err(|_| Violation::Codec)?
+                .map(|retirement| RestoredWrite::Retirement(Box::new(retirement))))
+        }
+        (candidate, _) => Ok(candidate),
+    }
 }
 
 fn stage(
@@ -132,7 +164,7 @@ fn stage(
 fn retirement_writes(
     coordinator: &FederationCoordinator,
     context: &StateCoreContext,
-    candidate: &RestoredRetirement,
+    candidate: &RestoredWrite,
     revision: u64,
 ) -> Result<
     (
@@ -141,13 +173,12 @@ fn retirement_writes(
     ),
     Violation,
 > {
-    let mut writes = vec![
-        candidate
-            .write()
-            .map_err(|_| Violation::Codec)?
-            .at_revision(revision)
-            .map_err(|_| Violation::Codec)?,
-    ];
+    let mut writes = candidate
+        .writes()
+        .map_err(|_| Violation::Codec)?
+        .into_iter()
+        .map(|write| write.at_revision(revision).map_err(|_| Violation::Codec))
+        .collect::<Result<Vec<_>, _>>()?;
     let owners = coordinator
         .companion_exec
         .as_ref()
@@ -178,6 +209,7 @@ pub(in super::super) fn committed(
         super::fail_restore(coordinator);
         return;
     }
+    let signers = matches!(receipt.candidate, RestoredWrite::Signers(_));
     let applied = coordinator
         .companion_exec
         .as_mut()
@@ -188,6 +220,10 @@ pub(in super::super) fn committed(
                 .apply(executor)
                 .map_err(|_| Violation::Codec)?;
             receipt.owners.apply(&mut executor.state);
+            if signers {
+                let report = executor.signer_report();
+                context.e2ee_signer_report(report.blocked_routes, report.retired_missing);
+            }
             Ok(())
         });
     if applied.is_err() {
@@ -195,8 +231,7 @@ pub(in super::super) fn committed(
         return;
     }
     coordinator.loader.pinned_commit = Some(context.head().storage_commit_sequence);
-    // The run loop's maintenance resumes after receipt/index callback drain.
-    retry(coordinator, context);
+    // The receipt path continues the reload at once (`continue_after_commit`).
 }
 
 pub(in super::super) fn rejected(

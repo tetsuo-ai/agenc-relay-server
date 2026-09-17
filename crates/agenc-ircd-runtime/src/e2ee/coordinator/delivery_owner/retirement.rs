@@ -69,7 +69,66 @@ impl Retirement {
     }
 }
 
+/// One durable write startup stages before the coordinator serves: the
+/// signer reconciliation first, then every restored delivery retirement.
+pub(crate) enum RestoredWrite {
+    /// The companion 9.2.1 signer reconciliation of this startup.
+    Signers(Box<super::super::signer_startup::Reconciliation>),
+    /// One restored delivery-owner retirement.
+    Retirement(Box<Retirement>),
+}
+
+impl RestoredWrite {
+    /// The durable writes of this step.
+    pub(crate) fn writes(&self) -> Result<Vec<AccountServiceDurableWrite>, CompanionFault> {
+        match self {
+            Self::Signers(reconciliation) => reconciliation.writes(),
+            Self::Retirement(retirement) => Ok(vec![retirement.write()?]),
+        }
+    }
+
+    /// Checks the step against the coordinator before it is staged.
+    pub(crate) fn validate(
+        &self,
+        coordinator: &CompanionCoordinator,
+    ) -> Result<(), CompanionFault> {
+        match self {
+            Self::Signers(_) => Ok(()),
+            Self::Retirement(retirement) => retirement.validate(coordinator),
+        }
+    }
+
+    /// Installs the step once its batch is durable.
+    pub(crate) fn apply(
+        self,
+        coordinator: &mut CompanionCoordinator,
+    ) -> Result<(), CompanionFault> {
+        match self {
+            Self::Signers(reconciliation) => {
+                reconciliation.apply(coordinator);
+                Ok(())
+            }
+            Self::Retirement(retirement) => retirement.apply(coordinator),
+        }
+    }
+}
+
 impl CompanionCoordinator {
+    /// The next startup write: the signer reconciliation decided at the
+    /// trusted time `now`, then each restored retirement.
+    pub(crate) fn next_restored_write(
+        &mut self,
+        now: u64,
+    ) -> Result<Option<RestoredWrite>, CompanionFault> {
+        if let Some(proposal) = self.take_signer_startup() {
+            let reconciliation = proposal.decide(self, now)?;
+            return Ok(Some(RestoredWrite::Signers(Box::new(reconciliation))));
+        }
+        Ok(self
+            .next_restored_retirement()?
+            .map(|retirement| RestoredWrite::Retirement(Box::new(retirement))))
+    }
+
     pub(crate) fn next_restored_retirement(&self) -> Result<Option<Retirement>, CompanionFault> {
         for (peer, sync) in &self.peers {
             let Some(snapshot) = sync.snapshot.as_ref() else {

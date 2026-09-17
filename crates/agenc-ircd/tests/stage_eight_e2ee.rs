@@ -1191,6 +1191,18 @@ fn build_network() -> TestResult<Network> {
     build_network_with(None)
 }
 
+/// The credential every binding pins: the coordinator's active sequencer
+/// credential, as `NodeFixture::create` writes it for the seed-20
+/// coordinator of every network here.
+fn active_sequencer_credential_id() -> TestResult<[u8; 32]> {
+    let sequencer = Ed25519SecretKey::from_bytes([20_u8.wrapping_add(15); 32]);
+    Ok(builders::sequencer_credential_id(
+        *NETWORK_ID.as_bytes(),
+        &sequencer,
+        (0, 4_000_000_000),
+    )?)
+}
+
 /// One coordinator and two edges, optionally configured for the campaign.
 fn build_network_with(capacity: Option<CapacityPlan>) -> TestResult<Network> {
     let coordinator = NodeIdentity::new(20, NodeRole::Coordinator, "core.test")?;
@@ -2426,6 +2438,7 @@ fn reserve_and_bind_direct(
         previous_lock_ids: builders::lock_ids(&previous.package)?,
         initial_policy_id: builders::policy_id_of(&policies[0])?,
         required_operational_policy_id: builders::policy_id_of(&policies[1])?,
+        sequencer_credential_id: active_sequencer_credential_id()?,
         plan_devices: vec![
             (
                 &binder.account,
@@ -2488,6 +2501,7 @@ fn reserve_and_bind(
         previous_lock_ids: Vec::new(),
         initial_policy_id: builders::policy_id_of(&policies[0])?,
         required_operational_policy_id: builders::policy_id_of(&policies[1])?,
+        sequencer_credential_id: active_sequencer_credential_id()?,
         plan_devices: vec![
             (&binder.account, fingerprint, binder.device),
             (
