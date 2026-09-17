@@ -952,4 +952,7 @@ mod tests {
         );
         Ok(())
     }
+
+    #[path = "export_records.rs"]
+    mod export_records;
 }

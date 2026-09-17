@@ -26,6 +26,9 @@ const REMOTE: ServerId = ServerId::from_bytes([11; 16]);
 #[path = "replica/durable_changes.rs"]
 mod durable_changes;
 
+#[path = "replica/reference_fences.rs"]
+mod reference_fences;
+
 fn revision(value: u64) -> Revision {
     Revision::new(value).unwrap_or_else(|_| revision(0))
 }

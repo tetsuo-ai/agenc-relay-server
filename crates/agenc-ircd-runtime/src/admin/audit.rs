@@ -2721,4 +2721,7 @@ mod tests {
         assert!(authority.commit_retention(&checkpoint).is_err());
         Ok(())
     }
+
+    #[path = "authority_fences.rs"]
+    mod authority_fences;
 }

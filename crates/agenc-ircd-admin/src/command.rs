@@ -559,4 +559,7 @@ mod tests {
         assert!(AuditRange::parse("0", "18446744073709551615").is_ok());
         Ok(())
     }
+
+    #[path = "argument_refusals.rs"]
+    mod argument_refusals;
 }

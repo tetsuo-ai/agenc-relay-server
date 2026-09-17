@@ -921,4 +921,7 @@ mod tests {
     fn test_error(message: &'static str) -> io::Error {
         io::Error::other(message)
     }
+
+    #[path = "control_account_fence.rs"]
+    mod control_account_fence;
 }

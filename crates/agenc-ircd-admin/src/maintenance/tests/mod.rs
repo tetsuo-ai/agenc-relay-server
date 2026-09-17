@@ -355,3 +355,31 @@ fn strict_signature_verification_rejects_an_identity_point_even_with_matching_ke
     assert_eq!(event.verify_scope(scope(), key), Err(AdminError::Signature));
     Ok(())
 }
+
+/// COV-01: the maintenance TBS decoder accepts exactly its fixed 358-byte
+/// length; every shorter and every longer buffer is refused before any field
+/// is read, so a truncated or padded body can never authenticate.
+#[test]
+fn the_maintenance_tbs_decoder_accepts_only_its_exact_length() -> TestResult {
+    let encoded = start_tbs()?.encode()?;
+    assert_eq!(encoded.len(), MAINTENANCE_AUDIT_TBS_BYTES);
+    assert_eq!(
+        MaintenanceAuditEventTbs::decode_exact(&encoded)?,
+        start_tbs()?
+    );
+    for length in [0, 1, MAINTENANCE_AUDIT_TBS_BYTES - 1] {
+        let prefix = encoded.get(..length).ok_or("prefix")?;
+        assert_eq!(
+            MaintenanceAuditEventTbs::decode_exact(prefix),
+            Err(AdminError::Audit),
+            "prefix of {length} bytes"
+        );
+    }
+    let mut padded = encoded.clone();
+    padded.push(0);
+    assert_eq!(
+        MaintenanceAuditEventTbs::decode_exact(&padded),
+        Err(AdminError::Audit)
+    );
+    Ok(())
+}
