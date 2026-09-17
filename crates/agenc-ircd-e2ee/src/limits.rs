@@ -265,6 +265,15 @@ pub const RECOVERY_HEADROOM_BYTES: u64 = (MAX_FINALIZATION_OBJECT
     + MAX_FEDERATION_CONTROL_OBJECT
     + MAX_OPEN_RECOVERY_SUBMISSIONS * MAX_RECOVERY_SUBMISSION_OBJECT
     + 2 * MAX_LEAF_MEMBERSHIP_OBJECT) as u64;
+/// `MAX_WITNESS_RESOLUTION_RECORDS`: the records one edge witness
+/// resolution may carry (companion 12.5.1).
+pub const MAX_WITNESS_RESOLUTION_RECORDS: u32 = 1_024;
+/// `MAX_WITNESS_RESOLUTION_BYTES`: the complete `sequencer_record` objects
+/// one resolution set may carry (companion 12.5.1).
+pub const MAX_WITNESS_RESOLUTION_BYTES: u64 = 268_435_456;
+/// `MAX_WITNESS_RESOLUTION_SECONDS`: how long the edge waits before it
+/// repeats an unanswered `EWITNESS REQUEST` (companion 12.5.1).
+pub const MAX_WITNESS_RESOLUTION_SECONDS: u64 = 300;
 /// `MAX_SEQUENCER_KEY_OVERLAP` in seconds.
 pub const MAX_SEQUENCER_KEY_OVERLAP_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// `REINIT_RESUMPTION_PSK_RETENTION` in seconds.

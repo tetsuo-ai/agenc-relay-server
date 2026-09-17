@@ -43,7 +43,7 @@ async fn persist_original_cut(fixture: &mut WitnessFixture) -> TestResult {
     Ok(())
 }
 
-async fn durable_fault() -> TestResult<WitnessFixture> {
+pub(super) async fn durable_fault() -> TestResult<WitnessFixture> {
     let mut fixture = WitnessFixture::new().await?;
     persist_original_cut(&mut fixture).await?;
     fixture.violate()?;
@@ -63,7 +63,21 @@ async fn durable_fault() -> TestResult<WitnessFixture> {
     Ok(fixture)
 }
 
-async fn assert_reconnect_gated(fixture: &mut WitnessFixture, link_id: u64) -> TestResult {
+pub(super) async fn next_line(queue: &mut LinkQueue) -> TestResult<String> {
+    let line = tokio::time::timeout(Duration::from_secs(1), queue.recv())
+        .await?
+        .ok_or("the companion link closed instead of sending a line")?;
+    Ok(line.as_str().to_owned())
+}
+
+/// The blocked witness phase: the resume itself is admitted, because only
+/// the coordinator can prove the retained chain, and every frame but the
+/// EWITNESS family is dropped (companion 12.5.1).
+async fn assert_reconnect_gated(
+    fixture: &mut WitnessFixture,
+    link_id: u64,
+    rows: &[[u8; 32]],
+) -> TestResult {
     let (replacement, mut queue) = link_queue(1 << 20);
     establish(&mut fixture.core, &mut fixture.base, &replacement, link_id)?;
     while let Ok(line) = tokio::time::timeout(Duration::from_millis(5), queue.recv()).await {
@@ -71,12 +85,12 @@ async fn assert_reconnect_gated(fixture: &mut WitnessFixture, link_id: u64) -> T
         assert!(!line.as_str().contains(" ERESUME "));
     }
     assert!(
-        !fixture
+        fixture
             .companion
-            .link_active(fixture.core.context_mut()?, &mut fixture.base),
-        "an unresolved durable witness resumed ordinary companion delivery"
+            .link_active(fixture.core.context_mut()?, &mut fixture.base)
     );
-    assert_open_and_silent(&mut queue).await?;
+    assert!(next_line(&mut queue).await?.contains(" ERESUME "));
+    assert_eq!(fixture.companion.phase, Phase::Resuming);
     assert!(
         fixture
             .companion
@@ -98,8 +112,22 @@ async fn assert_reconnect_gated(fixture: &mut WitnessFixture, link_id: u64) -> T
             )
             .is_empty()
     );
+    // One request per durable row, in conversation order; the origin READY
+    // that followed it was dropped unread.
+    for conversation in rows {
+        let expected = fixture
+            .companion
+            .line(&CompanionFrame::WitnessRequest {
+                coordinator_server_id: [3; 16],
+                conversation_id: *conversation,
+                expected_sequence: 5,
+                expected_head_id: [59; 32],
+            })
+            .map_err(|refusal| refusal.code.to_string())?;
+        assert_eq!(next_line(&mut queue).await?, expected.as_str());
+    }
     assert_open_and_silent(&mut queue).await?;
-    assert_eq!(fixture.companion.phase, Phase::Down);
+    assert_eq!(fixture.companion.phase, Phase::Witness);
     assert!(!fixture.companion.is_active());
     assert!(fixture.companion.retention_blocked());
     assert_eq!(fixture.companion.delivery.cursor, Some((6, [12; 16])));
@@ -120,11 +148,11 @@ async fn assert_reconnect_gated(fixture: &mut WitnessFixture, link_id: u64) -> T
 }
 
 #[tokio::test]
-async fn a_durable_witness_blocks_ordinary_resume_on_a_replacement_link() -> TestResult {
+async fn a_durable_witness_blocks_ordinary_delivery_on_a_replacement_link() -> TestResult {
     let mut fixture = durable_fault().await?;
-    assert_reconnect_gated(&mut fixture, 2).await?;
+    assert_reconnect_gated(&mut fixture, 2, &[CONVERSATION]).await?;
     fixture.companion.link_down();
-    assert_reconnect_gated(&mut fixture, 3).await
+    assert_reconnect_gated(&mut fixture, 3, &[CONVERSATION]).await
 }
 
 #[tokio::test]
@@ -132,11 +160,12 @@ async fn sealed_reconstruction_preserves_all_unresolved_historical_witnesses() -
     let mut fixture = durable_fault().await?;
     let historical = WitnessRow {
         event_kind: IrcFederationEventKind::ClosedEvent.value(),
-        expected_sequence: 3,
-        expected_head_id: [35; 32],
-        observed_sequence: 4,
+        expected_sequence: 5,
+        expected_head_id: [59; 32],
+        observed_sequence: 6,
         observed_id: [36; 32],
         observed_predecessor_id: None,
+        conflict: false,
     };
     let write = crate::e2ee::edge::events::state_row(
         WitnessRow::key(&[10; 32])?,
@@ -152,7 +181,7 @@ async fn sealed_reconstruction_preserves_all_unresolved_historical_witnesses() -
         fixture
             .core
             .restore_edge_state(&mut fixture.base, Some(&mut fixture.companion))?;
-        assert_reconnect_gated(&mut fixture, id).await?;
+        assert_reconnect_gated(&mut fixture, id, &[CONVERSATION, [10; 32]]).await?;
         for conversation in [CONVERSATION, [10; 32]] {
             assert!(
                 fixture

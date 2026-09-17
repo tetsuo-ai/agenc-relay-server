@@ -19,12 +19,44 @@ mod retry;
 mod scope;
 mod snapshot;
 
+/// The private key behind the single credential of the test key set.
+pub(super) const SEQUENCER_SEED: [u8; 32] = [60; 32];
+
+/// The verified sequencer key set the test edge negotiated: one credential
+/// whose private key signs the records a witness resolution delivers.
+pub(super) fn sequencer_key_set() -> Option<agenc_ircd_e2ee::sequencer::SequencerKeySet> {
+    use agenc_ircd_e2ee::objects::conversation::{
+        IrcSequencerCredential, IrcSequencerCredentialTbs,
+    };
+    let secret = agenc_ircd_crypto::Ed25519SecretKey::from_bytes(SEQUENCER_SEED);
+    let credential = IrcSequencerCredential {
+        tbs: IrcSequencerCredentialTbs {
+            profile_version: 1,
+            network_id: [1; 32],
+            key_generation: 0,
+            sequencer_public_key: *secret.public_key().as_bytes(),
+            not_before: 0,
+            not_after: u64::MAX,
+            previous_key_id: [0; 32],
+        },
+        continuity_signature: agenc_ircd_e2ee::tls::Opaque::new(Vec::new()).ok()?,
+    };
+    agenc_ircd_e2ee::sequencer::SequencerKeySet::verify(
+        &[1; 32],
+        std::slice::from_ref(&credential),
+        0,
+        None,
+    )
+    .ok()
+}
+
 fn edge() -> E2eeEdge {
     E2eeEdge::new(E2eeEdgeConfig {
         network_id: [1; 32],
         server_id: ServerId::from_bytes([2; 16]),
         server_name: "edge.example".to_owned(),
         coordinator_server_id: ServerId::from_bytes([3; 16]),
+        sequencer_key_set: sequencer_key_set(),
         incarnation: [4; 16],
         global_disk_bytes: 1 << 20,
     })

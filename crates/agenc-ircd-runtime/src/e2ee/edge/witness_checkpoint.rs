@@ -41,6 +41,20 @@ impl E2eeEdge {
         let Some(known) = self.conversations.get(&conversation) else {
             return Ok(None);
         };
+        self.route_checkpoint(conversation, known.head)
+    }
+
+    /// The route row of `conversation` with `head` as its witnessed record
+    /// head, without touching the live projection: an authenticated witness
+    /// resolution installs its proven head this way (companion 12.5.1).
+    pub(super) fn route_checkpoint(
+        &self,
+        conversation: [u8; 32],
+        head: super::events::ChainHead,
+    ) -> Result<Option<AccountServiceDurableWrite>, Refusal> {
+        if !self.conversations.contains_key(&conversation) {
+            return Ok(None);
+        }
         let bytes = self
             .route_objects
             .get(&conversation)
@@ -65,8 +79,8 @@ impl E2eeEdge {
             binding_id: cut.binding_id,
             lock_id: cut.semantic_route_lock_id,
             accepted_state_id: cut.accepted_state_id,
-            sequencer_head_id: known.head.record_id,
-            route_sequence: known.head.sequence,
+            sequencer_head_id: head.record_id,
+            route_sequence: head.sequence,
             close_id: tombstone.then_some(cut.sequencer_record_head_id),
             predecessor_close_id: None,
             recovery_gate: false,

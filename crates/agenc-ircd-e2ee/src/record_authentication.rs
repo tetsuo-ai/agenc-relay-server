@@ -54,6 +54,50 @@ impl AuthenticatedRecord {
     }
 }
 
+/// The exact position and credential one decoded record claims for itself.
+///
+/// This reads the record's own outer fields; it verifies nothing. A caller
+/// that does not yet know which position or credential to expect uses it to
+/// learn what the record asserts, checks that assertion against its own
+/// trusted history, and only then calls [`authenticate_record`] with the
+/// value it accepted.
+#[must_use]
+pub fn declared_position(record: &IrcSequencerRecord) -> ExpectedRecord {
+    fields::position(record)
+}
+
+/// Decodes one complete `sequencer_record` object and returns it with the
+/// position it claims, so a caller can choose the credential that position
+/// names before any signature is checked.
+pub fn decode_record(
+    bytes: &[u8],
+    budget: &mut DecodeBudget,
+) -> Result<(IrcSequencerRecord, ExpectedRecord), E2eeError> {
+    let object =
+        IrcWireObject::decode_kind(bytes, Some(IrcWireObjectKind::SequencerRecord), budget)?;
+    let record = IrcSequencerRecord::decode_exact(object.body(), budget)?;
+    let declared = declared_position(&record);
+    Ok((record, declared))
+}
+
+/// Authenticates one already decoded record at `expected` and returns its
+/// identities, for a caller that decoded the object with [`decode_record`].
+pub fn authenticate_decoded(
+    record: &IrcSequencerRecord,
+    bytes: &[u8],
+    attempt_object: Option<&[u8]>,
+    expected: &ExpectedRecord,
+    credential: &VerifiedSequencerCredential,
+    budget: &mut DecodeBudget,
+) -> Result<AuthenticatedRecord, E2eeError> {
+    let semantic_id =
+        authenticate_decoded_record(record, attempt_object, expected, credential, budget)?;
+    Ok(AuthenticatedRecord {
+        semantic_id,
+        object_id: ObjectId::compute(bytes),
+    })
+}
+
 /// Authenticates a complete `sequencer_record` without changing caller state.
 ///
 /// `attempt_object` must contain the exact referenced `reinit_attempt` object

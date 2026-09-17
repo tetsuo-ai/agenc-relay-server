@@ -547,3 +547,36 @@ tls_struct! {
 
 /// The Account ID envelope shared with request parameters.
 pub type FederationAccountId = AccountIdField;
+
+tls_struct! {
+    /// `IrcFederationWitnessResolution`, the `witness_resolution` body
+    /// (companion 12.5.1): the coordinator's proof of how the retained
+    /// record chain continues from one edge's durable witnessed head.
+    pub struct IrcFederationWitnessResolution {
+        /// Profile version.
+        pub profile_version: u16,
+        /// Network identity.
+        pub network_id: [u8; 32],
+        /// Coordinator server identity.
+        pub coordinator_server_id: [u8; 16],
+        /// Target edge server identity.
+        pub target_server_id: [u8; 16],
+        /// Conversation identifier.
+        pub conversation_id: [u8; 32],
+        /// The token of this one open resolution.
+        pub resolution_token: [u8; 16],
+        /// The route sequence the first delivered record occupies.
+        pub expected_sequence: u64,
+        /// The head identifier the edge retained.
+        pub expected_head_id: [u8; 32],
+        /// The delivered record count.
+        pub record_count: u32,
+        /// The route sequence of the claimed new head.
+        pub new_head_sequence: u64,
+        /// The semantic identifier of the claimed new head.
+        pub new_head_id: [u8; 32],
+        /// Exactly `record_count` concatenated 32-byte object IDs in chain
+        /// order.
+        pub record_object_ids: Opaque<0, 32_768>,
+    }
+}

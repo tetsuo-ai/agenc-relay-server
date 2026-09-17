@@ -1175,6 +1175,9 @@ async fn edge_dial_plan(
 struct E2eeSetup {
     profile: CompanionProfile,
     executor: Option<CompanionCoordinator>,
+    /// The verified key set the ECAP tuple advertises: an edge authenticates
+    /// every witness-resolution record under it (companion 12.5.1).
+    key_set: agenc_ircd_e2ee::sequencer::SequencerKeySet,
 }
 
 /// Reads the sequencer credentials file through one bounded, protected
@@ -1262,6 +1265,7 @@ fn e2ee_setup_with_hook(
     )
     .map_err(|_| DaemonError::E2eeCredentials)?;
     let profile = CompanionProfile { local: tuple };
+    let negotiated = key_set.clone();
     let executor = match config.network.role {
         NodeRole::Coordinator => {
             let seed = sequencer.active.ok_or(DaemonError::UnsupportedProfile)?;
@@ -1298,7 +1302,11 @@ fn e2ee_setup_with_hook(
         }
         NodeRole::Edge => None,
     };
-    Ok(Some(E2eeSetup { profile, executor }))
+    Ok(Some(E2eeSetup {
+        profile,
+        executor,
+        key_set: negotiated,
+    }))
 }
 
 /// Attaches the coordinator or edge role to the registration router, with
@@ -1391,6 +1399,7 @@ fn attach_edge_role(
         server_id: config.server.server_id,
         server_name,
         coordinator_server_id,
+        sequencer_key_set: Some(e2ee.key_set),
         incarnation: *setup.local.incarnation().as_bytes(),
         global_disk_bytes: config.e2ee.global_disk_bytes,
     });

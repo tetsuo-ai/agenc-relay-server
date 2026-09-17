@@ -488,3 +488,6 @@ async fn a_witness_rejection_is_not_hidden_by_a_newly_staged_unrelated_batch() -
 
 #[path = "witness_gating.rs"]
 mod gating;
+
+#[path = "witness_resolution.rs"]
+mod resolution;

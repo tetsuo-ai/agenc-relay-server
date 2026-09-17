@@ -2802,6 +2802,10 @@ pub struct WitnessRow {
     pub observed_id: [u8; HASH_BYTES],
     /// The predecessor a candidate receipt named, when the event carried one.
     pub observed_predecessor_id: Option<[u8; HASH_BYTES]>,
+    /// Whether an authenticated resolution proved an unresolvable fork at
+    /// the expected position (companion 12.5.1). A conflict row keeps its
+    /// conversation blocked permanently and is never cleared.
+    pub conflict: bool,
 }
 
 /// The accepted key set and credential history bodies.
@@ -2847,6 +2851,7 @@ impl WitnessRow {
         encoder.put_u64(self.observed_sequence)?;
         encoder.put_fixed(&self.observed_id)?;
         put_optional_hash(&mut encoder, self.observed_predecessor_id.as_ref())?;
+        put_bool(&mut encoder, self.conflict)?;
         wrap(WITNESS_ROW_KIND, encoder.finish())
     }
 
@@ -2862,6 +2867,7 @@ impl WitnessRow {
             observed_sequence: decoder.u64()?,
             observed_id: decoder.array()?,
             observed_predecessor_id: take_optional_hash(&mut decoder)?,
+            conflict: take_bool(&mut decoder)?,
         };
         decoder.finish()?;
         Ok(row)
@@ -2989,6 +2995,7 @@ pub mod fixtures {
             observed_sequence: u64::from(seed).saturating_add(2),
             observed_id: [seed; HASH_BYTES],
             observed_predecessor_id: None,
+            conflict: false,
         }
         .encode()
     }

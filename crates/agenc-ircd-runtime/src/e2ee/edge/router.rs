@@ -179,6 +179,9 @@ impl E2eeEdge {
             return Err(E2eeReplyCode::Syncing.into());
         }
         let command = self.parse_line(edge, message)?;
+        if self.witness_blocks(&command) {
+            return Err(E2eeReplyCode::Syncing.into());
+        }
         let account = facts.account.ok_or(E2eeReplyCode::AccountRequired)?;
         let _ = account;
         let device = self
@@ -312,6 +315,20 @@ impl E2eeEdge {
             instance,
             name: name.clone(),
         })
+    }
+
+    /// Whether a durable `witness/v1` row still blocks the conversation this
+    /// command names, including one an unresolvable fork blocked for good
+    /// (companion 12.5.1).
+    pub(super) fn witness_blocks(&self, command: &Resolved) -> bool {
+        let named = match command {
+            Resolved::ChannelRoute { instance, .. } => self
+                .routes
+                .channel_route(instance)
+                .map(|route| route.conversation_id.0),
+            other => Some(other.route_key()),
+        };
+        named.is_some_and(|conversation| self.blocked_conversation(&conversation))
     }
 
     /// The channel instance and conversation of a bound channel name.
