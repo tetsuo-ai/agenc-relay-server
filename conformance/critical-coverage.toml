@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 824
-reviewed_source_sha256 = "288aeef28075aa2b649e289802462e917d0f6519aa3dfcf61f471f762dc82821"
+reviewed_source_sha256 = "6d380bb875bb2601c9ab1b271ecf9a0b513889ce98fb471162940f1c806918f5"
 deferred = []
 
 [[region]]
@@ -61,9 +61,9 @@ reason = "Every current domain cross-index and authority-fence check must take b
 id = "storage-recovery-state-classification"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/recovery.rs"
-source_sha256 = "0ad662a9cfe3699b5b28ab7de8e1c9c8fae16696aabc02140c559f9cb75baa41"
+source_sha256 = "e2966384987bcb95a1c776bdcd093dd6ffc4ed6ad266142b0db759f85b0e7be0"
 start_line = 1
-end_line = 857
+end_line = 869
 metric = "branches"
 reason = "Every enumerated rollback-guard, reservation, and database recovery state must be exercised."
 

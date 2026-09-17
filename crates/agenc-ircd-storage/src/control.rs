@@ -647,6 +647,13 @@ impl StateMeta {
 }
 
 /// Requires exact repetition between the database reservation record and guard.
+///
+/// The fence is an exact equality and reconciles nothing. Both publication steps of every
+/// durable operation make the in-database reservation record durable before they replace the
+/// guard file, so a guard can only ever lag its record and only ever by one step. Naming and
+/// repairing those two lags is `classify_recovery_state`'s work, against the authenticated
+/// StateMeta; a disagreement this function reports is one the publication order cannot reach, so
+/// it is refused rather than guessed and a reopen never trusts a guard it cannot prove.
 // agenc-review: focus owner=storage reviewed=2026-08-27 reason=one exhaustive equality fence prevents omitted control-field bindings
 pub fn verify_guard_pair(
     header: &DatabaseHeader,

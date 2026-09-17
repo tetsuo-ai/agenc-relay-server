@@ -4125,6 +4125,27 @@ mod tests {
         .map_err(DaemonError::Configuration)
     }
 
+    /// A refusal from the storage open and a refusal raised after it are the same
+    /// `StorageError` but two different daemon failures, and the single operator line each one
+    /// prints is what tells them apart: only the second carries the runtime-startup prefix,
+    /// because only `DaemonError::Runtime` adds one. Stage 10's CAP-01 record read a
+    /// two-prefix line as a rollback-guard refusal from `verify_guard_pair`, which cannot
+    /// produce one; this keeps that distinction checkable against the real strings.
+    #[test]
+    fn a_storage_open_refusal_and_a_later_startup_refusal_print_different_lines() {
+        let opening = DaemonError::Storage(StorageError::StaleState);
+        let after_open = DaemonError::Runtime(RuntimeError::Storage(StorageError::StaleState));
+        assert_eq!(
+            opening.to_string(),
+            "storage owner failed: storage state is stale or inconsistent",
+        );
+        assert_eq!(
+            after_open.to_string(),
+            "runtime startup failed: storage owner failed: storage state is stale or inconsistent",
+        );
+        assert!(!opening.to_string().starts_with("runtime startup failed: "));
+    }
+
     #[test]
     fn pending_maintenance_coalesces_without_dropping_distinct_work() {
         let mut pending = PendingMaintenance::default();

@@ -55,6 +55,10 @@ The bounded four-phase stop of a coordinator and an edge while federation
 recovery is live and acknowledgement work is still outstanding (RUN-05, issue
 #64) is recorded in
 [the shutdown-during-recovery record](stage-10-shutdown-during-recovery.md).
+The database/guard publication window a kill can interrupt, and the withdrawal
+of CAP-01's reading that a killed edge's restart was refused by
+`verify_guard_pair` (STO-10, issue #124), are recorded in
+[the storage guard reopen record](stage-10-storage-guard-reopen.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

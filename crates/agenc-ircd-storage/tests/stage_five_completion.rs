@@ -3870,7 +3870,7 @@ impl ConstructionSourceReader for TestConstructionSource {
     }
 }
 
-struct TestDirectory(PathBuf);
+pub(crate) struct TestDirectory(PathBuf);
 
 impl TestDirectory {
     fn create() -> Result<Self, Box<dyn Error>> {
@@ -3884,7 +3884,7 @@ impl TestDirectory {
         Ok(Self(path))
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 }
@@ -4717,7 +4717,7 @@ fn rekey_entry(
     )
 }
 
-fn test_limits() -> StorageEngineLimits {
+pub(crate) fn test_limits() -> StorageEngineLimits {
     StorageEngineLimits {
         redb_cache_bytes: 8 * 1_024 * 1_024,
         fixed_reserve_bytes: 64 * 1_024 * 1_024,
@@ -4973,11 +4973,11 @@ fn cloned_domain_key(
     StoredKey::new(key.as_bytes().to_vec())
 }
 
-struct InitializedLiveFixture {
-    directory: TestDirectory,
-    qualification: agenc_ircd_storage::StorageQualification,
-    logical_database_bytes: u64,
-    backup_stream_bytes: u64,
+pub(crate) struct InitializedLiveFixture {
+    pub(crate) directory: TestDirectory,
+    pub(crate) qualification: agenc_ircd_storage::StorageQualification,
+    pub(crate) logical_database_bytes: u64,
+    pub(crate) backup_stream_bytes: u64,
 }
 
 impl InitializedLiveFixture {
@@ -4991,7 +4991,7 @@ impl InitializedLiveFixture {
     }
 }
 
-fn initialized_live_fixture() -> Result<InitializedLiveFixture, Box<dyn Error>> {
+pub(crate) fn initialized_live_fixture() -> Result<InitializedLiveFixture, Box<dyn Error>> {
     let network = NetworkId::from_bytes([201; 32]);
     let login_key = LoginIndexKey::from_bytes([203; 32]);
     let key_state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
@@ -5119,7 +5119,7 @@ fn initialized_live_fixture_from(
     })
 }
 
-fn live_open_config(state_directory: StateDirectory) -> StorageOpenConfig {
+pub(crate) fn live_open_config(state_directory: StateDirectory) -> StorageOpenConfig {
     StorageOpenConfig {
         expected_network_id: NetworkId::from_bytes([201; 32]),
         expected_server_id: ServerId::from_bytes([202; 16]),
