@@ -108,6 +108,11 @@ receipts and refusals it now asserts at every step, the ordinary test that
 guards its key sets outside the native campaign, and the audit of every other
 ignored Stage 10 drill (QA-02, issue #137) are recorded in
 [the rotation drill repair record](stage-10-rotation-drill-repair.md).
+The fifty-nine reviewed spans that had drifted onto executable code and scored
+against items they never declared, the nine the audit had miscounted, and the
+`item` and `span_sha256` fields that now bind every row to its item instead of
+to a line range an insertion above can silently invalidate (COV-07, issue #145)
+are recorded in [the region drift record](stage-10-region-drift.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
