@@ -16,6 +16,10 @@ Three of the four resolutions the issue listed take the classes against a
 larger quantity. They are refused because a class above the admission ceiling
 is not a class at all: admission already fails at `P`, so a threshold beyond
 `P` can never be entered and the graceful degradation it names never happens.
+The figures below are the four-GiB arithmetic the issue was filed against; the
+retirement is structural and survives any budget, only moving which classes it
+takes. At the six-GiB default chosen here it would retire the 95% class
+against `B - H`, and the 90% and 95% classes against `B`.
 
 | Classified against | 80% | 90% | 95% | Entered before admission fails at `P` |
 | --- | ---: | ---: | ---: | --- |

@@ -2990,10 +2990,11 @@ Capacity claims are valid only for a named workload that passes Section 28.7.
 The Section 19.3 overload percentages are taken against this same `P`, so
 every overload class is entered strictly before the pool is exhausted and a
 graceful class always precedes a hard admission refusal. Classifying against a
-larger quantity such as `B` or `B - H` would place classes above the admission
-ceiling and retire them: at the Appendix C defaults the 90% and 95% classes
-taken against `B - H`, and all three taken against `B`, exceed `P` and could
-never be entered. A configured client population is therefore bounded by
+larger quantity such as `B` or `B - H` places the highest classes above the
+admission ceiling and retires them, because a charge beyond `P` is refused
+before any percentage of a larger quantity is reached: at the defaults below,
+the 95% class taken against `B - H`, and the 90% and 95% classes taken against
+`B`, exceed `P` and could never be entered. A configured client population is therefore bounded by
 Section 19.3 rather than by `client_connections` whenever
 `client_connections * 65,536` reaches 90% of `P`, and it is already degraded
 at the 80% class below that. The default configuration is funded so the
