@@ -12,9 +12,22 @@ from .records import (MAX_LOG_BYTES, QualificationError, canonical, digest, file
 RESULT_FIELDS = {"schema_version", "candidate_sha256", "start_sha256", "finished_at", "job_id", "target", "outcome", "measurement", "report_sha256"}
 MEASUREMENT_FIELDS = {"exit_code", "failure", "elapsed_ns", "cpu_user_ns", "cpu_system_ns", "maximum_rss_kib", "log_sha256", "log_bytes"}
 REPORT_FIELDS = {"schema_version", "job_id", "candidate_sha256", "target", "facts", "artifacts"}
-CAPACITY_CONNECTION_FLOOR = 50_000
+# Nodes that admit campaign clients. Section 19.2 publishes its limits per
+# node, so capacity evidence must show one node holding the default population
+# and never an aggregate spread across the daemons.
+CLIENT_NODES = 2
+CAPACITY_PER_NODE_FLOOR = 50_000
+CAPACITY_CONNECTION_FLOOR = CAPACITY_PER_NODE_FLOOR * CLIENT_NODES
 SOAK_CONNECTION_FLOOR = 256
+SOAK_PER_NODE_FLOOR = SOAK_CONNECTION_FLOOR // CLIENT_NODES
 MAX_CAMPAIGN_CONNECTIONS = 250_000
+# The Section 19.2 startup arithmetic of the unchanged Appendix C defaults.
+DEFAULT_NODE_BUDGET = {"budget_bytes": 4_294_967_296, "headroom_bytes": 536_870_912,
+                       "storage_handoff_bytes": 117_440_480, "crypto_pool_bytes": 301_989_888,
+                       "protocol_pool_bytes": 3_338_666_016}
+# Only a production capacity population closes the capacity claim; the
+# seven-day soak runs the 256-client minimum and closes sustained operation.
+CAMPAIGN_WORKLOADS = {"capacity": ("production", True), "soak": ("below-default", False)}
 # Boolean qualification facts every driver of that job must attest; each must be exactly true.
 REQUIRED_FACTS = {
     "models": {"models", "loom", "cancellation", "overload", "panic_containment", "shutdown", "miri", "sanitizers"},
@@ -58,10 +71,20 @@ def verify_report(attempt: Path, report: dict[str, Any], job: dict[str, Any], ca
         require_hash(facts["corpus_before"], "initial corpus")
         require_hash(facts["corpus_after"], "final corpus")
     elif name in ("capacity", "soak"):
-        require_fields(facts, {"elapsed_ns", "samples", "missed_events", "envelope_violations", "returned_to_envelope", "scenario_counts", "latency_classes", "workload_demonstrated", "connections", "peak_live_connections", "hardware", "resource_source", "messages_refused"}, "capacity facts")
+        require_fields(facts, {"elapsed_ns", "samples", "missed_events", "envelope_violations", "returned_to_envelope", "scenario_counts", "latency_classes", "workload_demonstrated", "connections", "peak_live_connections", "per_node_connections", "peak_node_live_connections", "workload_profile", "capacity_qualifying", "node_budget", "hardware", "resource_source", "messages_refused"}, "capacity facts")
         connection_floor = CAPACITY_CONNECTION_FLOOR if name == "capacity" else SOAK_CONNECTION_FLOOR
+        per_node_floor = CAPACITY_PER_NODE_FLOOR if name == "capacity" else SOAK_PER_NODE_FLOOR
         require_integer(facts["connections"], connection_floor, MAX_CAMPAIGN_CONNECTIONS, "qualified connection population")
         require_integer(facts["peak_live_connections"], facts["connections"], 3 * MAX_CAMPAIGN_CONNECTIONS, "observed connection population")
+        require_integer(facts["per_node_connections"], per_node_floor, MAX_CAMPAIGN_CONNECTIONS, "qualified per-node population")
+        # The per-node observation is what refuses an aggregate substitute: a
+        # population summed over three daemons never reaches this floor.
+        require_integer(facts["peak_node_live_connections"], facts["per_node_connections"], MAX_CAMPAIGN_CONNECTIONS, "observed per-node population")
+        if facts["node_budget"] != DEFAULT_NODE_BUDGET:
+            raise QualificationError("capacity evidence did not run the unchanged default node budget")
+        profile, qualifying = CAMPAIGN_WORKLOADS[name]
+        if facts["workload_profile"] != profile or facts["capacity_qualifying"] is not qualifying:
+            raise QualificationError("campaign workload profile does not match the job it closed")
         require_integer(facts["elapsed_ns"], (604800 if name == "soak" else 300) * 10**9, 10**18, "campaign duration")
         if facts["resource_source"] not in ("cgroup", "procfs"):
             raise QualificationError("capacity evidence does not name how daemon resources were measured")

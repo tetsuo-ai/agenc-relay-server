@@ -10969,3 +10969,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "decision/tests/advertised_scans.rs"]
+mod advertised_scans;

@@ -35,6 +35,11 @@ use super::*;
 #[path = "stage_ten_capacity/index_transition.rs"]
 mod index_transition;
 
+#[path = "stage_ten_capacity/workload.rs"]
+mod workload;
+
+use workload::{CLIENT_NODES, DEFAULT_BUDGET_BYTES, MAX_CLIENT_CONNECTIONS, Workload};
+
 #[path = "../support/admin_client.rs"]
 pub(super) mod admin_client;
 
@@ -46,7 +51,6 @@ const CONNECTIONS_ENV: &str = "AGENC_STAGE10_CAMPAIGN_CONNECTIONS";
 const MIN_CAMPAIGN_SECONDS: u64 = 60;
 const MAX_CAMPAIGN_SECONDS: u64 = 1_209_600;
 const DEFAULT_CONNECTIONS: usize = 48;
-const MAX_CONNECTIONS: usize = 4_096;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const QUIESCE_WINDOW: Duration = Duration::from_secs(8);
 /// How long a quiescence check waits for the whole population to be back:
@@ -60,7 +64,12 @@ const FINAL_RESERVE: Duration = Duration::from_secs(45);
 const INTER_CYCLE_REST: Duration = Duration::from_secs(60);
 /// The most the campaign waits for the federation to drain before stopping.
 const FEDERATION_DRAIN_WAIT: Duration = Duration::from_secs(60);
-const LOAD_CHANNEL: &str = "#load";
+/// Load channels are `#load<n>`; the population is partitioned across them
+/// so no channel exceeds the Section 19.2 default member ceiling.
+const LOAD_CHANNEL_PREFIX: &str = "#load";
+/// Client sockets the controller opens beside the load population: the
+/// registration probes, the snapshot probe, and the OPAQUE logins.
+const CONTROLLER_PROBES: u64 = 16;
 const CHANNEL_MESSAGE_PERIOD: Duration = Duration::from_secs(1);
 const DIRECT_MESSAGE_PERIOD: Duration = Duration::from_secs(2);
 const TOPIC_PERIOD: Duration = Duration::from_secs(5);
@@ -82,13 +91,14 @@ const PHYSICAL_GROWTH_BYTES: u64 = 268_435_456;
 const RESERVE_CLEARANCE_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;
 const PRESSURE_MARGIN_BYTES: u64 = 64 * 1_024 * 1_024;
 const REGISTRATION_PROBE_WAIT: Duration = Duration::from_secs(10);
-/// Spacing between two workers connecting or resuming after a maintenance
-/// window. Every campaign client shares one loopback address, and the
-/// per-address pre-authentication bucket admits at most 10 commands per
-/// second (its configuration ceiling), which is about 1.25 registrations per
-/// second per edge. Consecutive indices land on alternate edges, so 400 ms
-/// per index keeps each edge at that rate instead of a herd that the bucket
-/// closes and that then retries from scratch.
+/// Spacing between two workers that share one generator source address when
+/// they connect or resume after a maintenance window. The per-address
+/// pre-authentication bucket admits at most 10 commands per second (its
+/// configuration ceiling), which is about 1.25 registrations per second from
+/// one address, so 400 ms per slot keeps each source under that rate instead
+/// of a herd that the bucket closes and that then retries from scratch. Only
+/// the workers on one address wait for each other, so the warm-up scales with
+/// the generator's spread and not with the population.
 const RESUME_SLOT: Duration = Duration::from_millis(400);
 /// The shortest warm-up before the baseline sample.
 const MINIMUM_WARM_UP: Duration = Duration::from_secs(20);
@@ -97,11 +107,13 @@ const PRESSURE_RECOVERY_WAIT: Duration = Duration::from_secs(45);
 const POST_RESTART_READY_WAIT: Duration = Duration::from_secs(30);
 const CAMPAIGN_ACCOUNT_LOGIN: &str = "campaign-account";
 
-/// Campaign inputs read from the environment the driver sets.
+/// Campaign inputs read from the environment the driver sets, with the
+/// workload matrix the selected population implies.
 struct Settings {
     directory: PathBuf,
     seconds: u64,
     connections: usize,
+    workload: Workload,
 }
 
 impl Settings {
@@ -114,17 +126,24 @@ impl Settings {
         if !(MIN_CAMPAIGN_SECONDS..=MAX_CAMPAIGN_SECONDS).contains(&seconds) {
             return Err(failure("campaign duration is outside its bound"));
         }
-        let connections = match std::env::var(CONNECTIONS_ENV) {
+        let requested = match std::env::var(CONNECTIONS_ENV) {
             Ok(text) => text.parse()?,
             Err(_) => DEFAULT_CONNECTIONS,
         };
-        if !(4..=MAX_CONNECTIONS).contains(&connections) {
+        let ceiling = usize::try_from(MAX_CLIENT_CONNECTIONS)?
+            .checked_mul(CLIENT_NODES)
+            .ok_or_else(|| failure("campaign ceiling overflows"))?;
+        if !(4..=ceiling).contains(&requested) {
             return Err(failure("campaign connection count is outside its bound"));
         }
+        // The workload is derived from the per-node share, so an aggregate
+        // that only sums to the default population is a pilot.
+        let workload = Workload::select(u64::try_from(requested)?)?;
         Ok(Self {
             directory,
             seconds,
-            connections,
+            connections: usize::try_from(workload.total_connections())?,
+            workload,
         })
     }
 }
@@ -209,12 +228,17 @@ impl Shared {
     }
 }
 
-/// One client's place in the load.
+/// One client's place in the load: its nickname, its direct-message peer,
+/// the edge that admits it, the load channel it joins, and the generator
+/// source address it connects from.
 struct WorkerPlan {
     index: usize,
     nick: String,
     peer: String,
     edge: usize,
+    load_channel: String,
+    source: Ipv4Addr,
+    slot_index: u64,
 }
 
 /// A worker's live session: the client plus the sequence bookkeeping.
@@ -237,14 +261,15 @@ struct Session {
 impl Session {
     fn open(fixture: &NodeFixture, plan: &WorkerPlan, shared: &Shared) -> TestResult<Self> {
         let started = Instant::now();
-        let mut client = register_worker(fixture, &plan.nick)?;
+        let mut client = register_worker(fixture, &plan.nick, plan.source)?;
         shared.record(
             |latencies| &mut latencies.admission,
             u64::try_from(started.elapsed().as_nanos())?,
         );
         let join_sent = shared.nanos();
-        client.send(&format!("JOIN {LOAD_CHANNEL}"))?;
-        client.read_until(|line| line.contains(&format!(" 366 {} {LOAD_CHANNEL} ", plan.nick)))?;
+        let load = &plan.load_channel;
+        client.send(&format!("JOIN {load}"))?;
+        client.read_until(|line| line.contains(&format!(" 366 {} {load} ", plan.nick)))?;
         shared.record(
             |latencies| &mut latencies.snapshot,
             shared.nanos().saturating_sub(join_sent),
@@ -303,7 +328,8 @@ impl Session {
                 self.sequence = self.sequence.wrapping_add(1);
             }
             self.client.send(&format!(
-                "PRIVMSG {LOAD_CHANNEL} :seq={} t={}",
+                "PRIVMSG {} :seq={} t={}",
+                plan.load_channel,
                 self.sequence,
                 shared.nanos()
             ))?;
@@ -333,7 +359,7 @@ impl Session {
             self.client.send(&format!("PONG {token}"))?;
             return Ok(());
         }
-        if line.contains(" 366 ") && line.contains(LOAD_CHANNEL) {
+        if line.contains(" 366 ") && line.contains(&plan.load_channel) {
             if let Some(sent) = self.join_sent.take() {
                 shared.record(
                     |latencies| &mut latencies.snapshot,
@@ -350,7 +376,7 @@ impl Session {
             return Ok(());
         };
         let sender = prefix.split('!').next().unwrap_or_default().to_owned();
-        if let Some(text) = rest.strip_prefix(&format!("PRIVMSG {LOAD_CHANNEL} :seq=")) {
+        if let Some(text) = rest.strip_prefix(&format!("PRIVMSG {} :seq=", plan.load_channel)) {
             let (sequence, stamp) = text.split_once(" t=").unwrap_or(("", ""));
             let sequence: u64 = sequence.parse()?;
             let stamp: u64 = stamp.parse()?;
@@ -422,11 +448,15 @@ impl Session {
 /// channel message reaches the worker as `FAIL PRIVMSG` instead of a legacy
 /// numeric it would not recognize, retrying transient failures like
 /// `register_when_available`.
-fn register_worker(fixture: &NodeFixture, nickname: &str) -> TestResult<IrcClient> {
+fn register_worker(
+    fixture: &NodeFixture,
+    nickname: &str,
+    source: Ipv4Addr,
+) -> TestResult<IrcClient> {
     let deadline = Instant::now() + NETWORK_WAIT;
     loop {
         let attempt = (|| -> TestResult<Option<IrcClient>> {
-            let mut client = IrcClient::connect(fixture)?;
+            let mut client = IrcClient::connect_from(fixture, Some(source))?;
             client.send("CAP LS 302")?;
             client.read_until(|line| {
                 line.contains(" CAP * LS ") && !line.contains(" CAP * LS * :")
@@ -514,7 +544,7 @@ fn worker(shared: &Shared, fixtures: [&NodeFixture; 2], plan: &WorkerPlan) {
     let Some(fixture) = fixtures.get(plan.edge % 2).copied() else {
         return;
     };
-    let slot = RESUME_SLOT * u32::try_from(plan.index).unwrap_or(0);
+    let slot = RESUME_SLOT * u32::try_from(plan.slot_index).unwrap_or(0);
     // The population connects in index order at the paced rate, as it does
     // after every maintenance window.
     thread::sleep(slot);
@@ -592,9 +622,11 @@ fn run_session(
             if (plan.index as u64 + churn).is_multiple_of(3) {
                 session
                     .client
-                    .send(&format!("PART {LOAD_CHANNEL} :churn"))?;
+                    .send(&format!("PART {} :churn", plan.load_channel))?;
                 session.join_sent = Some(shared.nanos());
-                session.client.send(&format!("JOIN {LOAD_CHANNEL}"))?;
+                session
+                    .client
+                    .send(&format!("JOIN {}", plan.load_channel))?;
                 shared.churns.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -926,7 +958,9 @@ pub(super) fn admin_identity(fixture: &NodeFixture) -> AdminIdentity {
     }
 }
 
-/// One ten-second sample across the three nodes.
+/// One ten-second sample across the three nodes. Occupancy, charged bytes,
+/// and the configured budget are per node: an aggregate hides which daemon
+/// actually held the population and against which budget (spec 28.7).
 struct Sample {
     at_ns: u64,
     resources: [Resources; 3],
@@ -934,8 +968,62 @@ struct Sample {
     client_queued_bytes: u64,
     federation_queued_bytes: u64,
     storage_jobs_in_flight: u64,
-    live_client_connections: u64,
-    memory_charged_bytes: u64,
+    live_client_connections: [u64; 3],
+    memory_charged_bytes: [u64; 3],
+    memory_budget_bytes: [u64; 3],
+}
+
+impl Sample {
+    /// Clients admitted across the three nodes at this instant.
+    fn total_live(&self) -> u64 {
+        self.live_client_connections.iter().copied().sum()
+    }
+
+    /// The smallest population any client-admitting edge held. Node 0 is the
+    /// coordinator, which admits no campaign client, so only the two edges
+    /// count towards the per-node occupancy requirement.
+    fn edge_minimum_live(&self) -> u64 {
+        self.live_client_connections
+            .iter()
+            .skip(1)
+            .copied()
+            .min()
+            .unwrap_or(0)
+    }
+}
+
+/// Records one node's `RUNTIME` and `QUEUES` counters into the sample.
+fn record_node_stats(
+    sample: &mut Sample,
+    admin: &mut AdminSession<'_>,
+    index: usize,
+) -> TestResult<()> {
+    for (name, value) in admin.stats("QUEUES")? {
+        match name.as_str() {
+            "client_queued_bytes" => {
+                sample.client_queued_bytes = sample.client_queued_bytes.max(value);
+            }
+            "federation_queued_bytes" => {
+                sample.federation_queued_bytes = sample.federation_queued_bytes.max(value);
+            }
+            "storage_jobs_in_flight" => {
+                sample.storage_jobs_in_flight = sample.storage_jobs_in_flight.max(value);
+            }
+            _ => {}
+        }
+    }
+    for (name, value) in admin.stats("RUNTIME")? {
+        let slot = match name.as_str() {
+            "live_client_connections" => sample.live_client_connections.get_mut(index),
+            "memory_charged_bytes" => sample.memory_charged_bytes.get_mut(index),
+            "memory_budget_bytes" => sample.memory_budget_bytes.get_mut(index),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            *slot = value;
+        }
+    }
+    Ok(())
 }
 
 fn take_sample(shared: &Shared, nodes: &Nodes, admins: &[AdminIdentity; 3]) -> TestResult<Sample> {
@@ -947,35 +1035,14 @@ fn take_sample(shared: &Shared, nodes: &Nodes, admins: &[AdminIdentity; 3]) -> T
         client_queued_bytes: 0,
         federation_queued_bytes: 0,
         storage_jobs_in_flight: 0,
-        live_client_connections: 0,
-        memory_charged_bytes: 0,
+        live_client_connections: [0; 3],
+        memory_charged_bytes: [0; 3],
+        memory_budget_bytes: [0; 3],
     };
     for (index, identity) in admins.iter().enumerate() {
         let mut admin = AdminSession::connect(identity)
             .map_err(|error| failure(format!("admin session to node {index}: {error}")))?;
-        for (name, value) in admin.stats("QUEUES")? {
-            match name.as_str() {
-                "client_queued_bytes" => {
-                    sample.client_queued_bytes = sample.client_queued_bytes.max(value)
-                }
-                "federation_queued_bytes" => {
-                    sample.federation_queued_bytes = sample.federation_queued_bytes.max(value);
-                }
-                "storage_jobs_in_flight" => {
-                    sample.storage_jobs_in_flight = sample.storage_jobs_in_flight.max(value);
-                }
-                _ => {}
-            }
-        }
-        for (name, value) in admin.stats("RUNTIME")? {
-            match name.as_str() {
-                "live_client_connections" => sample.live_client_connections += value,
-                "memory_charged_bytes" => {
-                    sample.memory_charged_bytes = sample.memory_charged_bytes.max(value);
-                }
-                _ => {}
-            }
-        }
+        record_node_stats(&mut sample, &mut admin, index)?;
         admin.quit()?;
     }
     Ok(sample)
@@ -1191,18 +1258,19 @@ impl Campaign<'_> {
         Ok(())
     }
 
-    /// The snapshot class: a fresh member joins `#load` and the paged NAMES
-    /// snapshot the coordinator serves through the edge closes with 366.
-    /// Explicit directory queries at an edge are recorded as observed: the
-    /// edge currently refuses them (finding CAP-1), so the reply numeric is
-    /// logged rather than assumed.
+    /// The snapshot class: a fresh member joins the first load channel and
+    /// the paged NAMES snapshot the coordinator serves through the edge
+    /// closes with 366. Explicit directory queries at an edge are recorded as
+    /// observed: the edge currently refuses them (finding CAP-1), so the
+    /// reply numeric is logged rather than assumed.
     fn scenario_snapshot(&mut self) -> TestResult {
         let started = self.shared.nanos();
+        let load = self.settings.workload.load_channel(0)?;
         let mut client = register_when_available(&self.network.edge_a, "snapshot-probe")?;
         let sent = self.shared.nanos();
-        client.send(&format!("JOIN {LOAD_CHANNEL}"))?;
+        client.send(&format!("JOIN {load}"))?;
         let joined = client.read_until_within(BUSY_TRANSCRIPT_LINES, |line| {
-            line.contains(&format!(" 366 snapshot-probe {LOAD_CHANNEL} "))
+            line.contains(&format!(" 366 snapshot-probe {load} "))
         })?;
         self.shared.record(
             |latencies| &mut latencies.snapshot,
@@ -1210,10 +1278,7 @@ impl Campaign<'_> {
         );
         let pages = joined.iter().filter(|line| line.contains(" 353 ")).count();
         let mut observed = Vec::new();
-        for query in [
-            format!("NAMES {LOAD_CHANNEL}"),
-            format!("WHO {LOAD_CHANNEL}"),
-        ] {
+        for query in [format!("NAMES {load}"), format!("WHO {load}")] {
             client.send(&query)?;
             let reply = client.read_until_within(BUSY_TRANSCRIPT_LINES, |line| {
                 line.contains(" snapshot-probe ")
@@ -1648,17 +1713,22 @@ impl Campaign<'_> {
         // again after a scenario is a loss the resource envelope cannot see.
         // It returns paced, so the check waits a bounded time for it.
         let expected = u64::try_from(self.settings.connections).unwrap_or(u64::MAX);
+        let per_node = self.settings.workload.per_node_connections();
         let deadline = Instant::now() + POPULATION_WAIT;
         let mut sample = take_sample(self.shared, &self.nodes, &self.admins)?;
-        while sample.live_client_connections != expected && Instant::now() < deadline {
+        while sample.total_live() != expected && Instant::now() < deadline {
             thread::sleep(Duration::from_secs(2));
             sample = take_sample(self.shared, &self.nodes, &self.admins)?;
         }
         let inside = within_envelope(&self.baseline, &sample.resources);
-        let live = sample.live_client_connections;
-        let population = live == expected;
+        let live = sample.total_live();
+        // The aggregate alone never satisfies the per-node requirement: each
+        // client-admitting edge must hold its own share simultaneously.
+        let population = live == expected && sample.edge_minimum_live() >= per_node;
         self.note(format!(
-            "quiescence: inside={inside} population={population} live={live}/{expected} memory={:?} sockets={:?} tasks={:?} links={}",
+            "quiescence: inside={inside} population={population} live={live}/{expected} per_node={:?}/{per_node} charged={:?} memory={:?} sockets={:?} tasks={:?} links={}",
+            sample.live_client_connections,
+            sample.memory_charged_bytes,
             sample.resources.map(|r| r.anonymous_bytes),
             sample.resources.map(|r| r.sockets),
             sample.resources.map(|r| r.tasks),
@@ -1798,6 +1868,45 @@ pub(super) fn hardware() -> TestResult<String> {
         .collect())
 }
 
+/// Renders one per-node triple as a JSON array.
+fn values(triple: &[u64; 3]) -> String {
+    let rendered: Vec<String> = triple.iter().map(u64::to_string).collect();
+    format!("[{}]", rendered.join(","))
+}
+
+/// Renders the selected workload matrix, so a record always says which
+/// population it ran, whether that population can close production capacity,
+/// and every blocker between the two.
+fn workload_json(workload: &Workload) -> String {
+    let generator = workload.generator();
+    let blockers: Vec<String> = workload
+        .blockers()
+        .iter()
+        .map(|blocker| format!("\"{}\"", blocker.label()))
+        .collect();
+    let budget = workload.budget().parts();
+    format!(
+        "\"workload\":{{\"profile\":\"{}\",\"qualifying\":{},\"per_node_connections\":{},\
+\"total_connections\":{},\"load_channels\":{},\"connections_per_address\":{},\
+\"generator_addresses_per_node\":{},\"generator_subnets_per_node\":{},\"blockers\":[{}]}},\
+\"node_budget\":{}",
+        workload.profile().label(),
+        workload.qualifying(),
+        workload.per_node_connections(),
+        workload.total_connections(),
+        workload.load_channels(),
+        generator.connections_per_address(),
+        generator.addresses_per_node(),
+        generator.subnets_per_node(),
+        blockers.join(","),
+        format_args!(
+            "{{\"budget_bytes\":{},\"headroom_bytes\":{},\"storage_handoff_bytes\":{},\
+\"crypto_pool_bytes\":{},\"protocol_pool_bytes\":{}}}",
+            budget[0], budget[1], budget[2], budget[3], budget[4]
+        )
+    )
+}
+
 fn percentiles(samples: &mut [u64]) -> (u64, u64, u64, usize) {
     samples.sort_unstable();
     let pick = |percent: usize| -> u64 {
@@ -1838,13 +1947,13 @@ fn write_report(
             json.push(',');
         }
         let triple = |select: fn(&Resources) -> u64| {
-            let values = sample.resources.map(|resources| select(&resources));
-            format!("[{},{},{}]", values[0], values[1], values[2])
+            values(&sample.resources.map(|resources| select(&resources)))
         };
         json.push_str(&format!(
             "{{\"at_ns\":{},\"anonymous_bytes\":{},\"sockets\":{},\"close_wait\":{},\"tasks\":{},\
 \"federation_links\":{},\"client_queued_bytes\":{},\"federation_queued_bytes\":{},\
-\"storage_jobs_in_flight\":{},\"live_client_connections\":{},\"memory_charged_bytes\":{}}}",
+\"storage_jobs_in_flight\":{},\"live_client_connections\":{},\"memory_charged_bytes\":{},\
+\"memory_budget_bytes\":{}}}",
             sample.at_ns,
             triple(|r| r.anonymous_bytes),
             triple(|r| r.sockets),
@@ -1854,8 +1963,9 @@ fn write_report(
             sample.client_queued_bytes,
             sample.federation_queued_bytes,
             sample.storage_jobs_in_flight,
-            sample.live_client_connections,
-            sample.memory_charged_bytes
+            values(&sample.live_client_connections),
+            values(&sample.memory_charged_bytes),
+            values(&sample.memory_budget_bytes)
         ));
     }
     json.push_str("],\"latency_classes\":{");
@@ -1875,7 +1985,7 @@ fn write_report(
         scenarios.snapshot, scenarios.backup, scenarios.disk_pressure, scenarios.peer_loss
     ));
     json.push_str(&format!(
-        "\"missed_events\":{},\"envelope_violations\":{},\"population_shortfalls\":{},\"sample_failures\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"refused_by_code\":{{{}}},\"refused_by_time\":{{{}}},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},\"log\":[",
+        "\"missed_events\":{},\"envelope_violations\":{},\"population_shortfalls\":{},\"sample_failures\":{},\"returned_to_envelope\":{returned},\"worker_reconnects\":{},\"worker_churns\":{},\"messages_sent\":{},\"messages_received\":{},\"messages_refused\":{},\"refused_by_code\":{{{}}},\"refused_by_time\":{{{}}},\"daemons_stopped_cleanly\":[{},{},{}],\"reserve_bytes\":{},\"hardware\":\"{}\",\"worker_errors\":{},",
         shared.missed_events.load(Ordering::Relaxed),
         campaign.envelope_violations,
         campaign.population_shortfalls,
@@ -1910,6 +2020,7 @@ fn write_report(
         hardware()?.replace('"', "'"),
         shared.worker_errors.lock().map_or(0, |errors| errors.len()),
     ));
+    json.push_str(&format!("{},\"log\":[", workload_json(&settings.workload)));
     for (index, line) in campaign.log.iter().enumerate() {
         if index > 0 {
             json.push(',');
@@ -1954,8 +2065,11 @@ fn control<'a>(
     returned: &mut bool,
 ) -> TestResult<Campaign<'a>> {
     // The warm-up covers the paced connection of every worker plus settling.
+    // Workers on distinct generator source addresses connect concurrently, so
+    // only one address's queue of workers has to drain.
     let warm_up = MINIMUM_WARM_UP.max(
-        RESUME_SLOT * u32::try_from(settings.connections).unwrap_or(0) + Duration::from_secs(5),
+        RESUME_SLOT * u32::try_from(settings.workload.workers_per_address()).unwrap_or(0)
+            + Duration::from_secs(5),
     );
     println!("[controller] warming up for {} seconds", warm_up.as_secs());
     thread::sleep(warm_up);
@@ -1979,7 +2093,7 @@ fn control<'a>(
         reserve,
         log: Vec::new(),
     };
-    let live = baseline.live_client_connections;
+    let live = baseline.total_live();
     let version = AdminSession::connect(&campaign.admins[0])?.version()?;
     campaign.note(format!("coordinator version reply: {version}"));
     campaign.samples.push(baseline);
@@ -2145,13 +2259,17 @@ fn preserve_logs(network: &Network, directory: &Path) -> TestResult {
 fn sustained_operation_campaign() -> TestResult {
     let settings = Settings::from_environment()?;
     fs::create_dir_all(&settings.directory)?;
-    let connections = u64::try_from(settings.connections)?;
     let network = build_network_with(Some(CapacityPlan {
-        max_connections: connections + 16,
-        // Half the clients land on each edge; reconnect and churn rounds and
-        // the controller's probes need headroom above that share. The config
-        // ceiling for this key is 256, which the 256-client soak fits under.
-        connections_per_address: (connections.div_ceil(2) + 16).min(256),
+        // One edge's own share plus the controller's probes, never above the
+        // Section 19.2 hard maximum.
+        max_connections: settings.workload.listener_ceiling(CONTROLLER_PROBES)?,
+        // The per-/32 ceiling stays at its published hard maximum. The
+        // generator spreads its population over enough loopback source
+        // addresses to stay under it rather than raising it to pass.
+        connections_per_address: settings.workload.generator().connections_per_address(),
+        // The advertised claim is about the default node budget, so the
+        // campaign restores it over the Stage 08 fixture's lowered one.
+        memory_budget_bytes: DEFAULT_BUDGET_BYTES,
     }))?;
     let outcome = run_campaign(&settings, &network);
     preserve_logs(&network, &settings.directory)?;
@@ -2186,13 +2304,19 @@ fn run_campaign(settings: &Settings, network: &Network) -> TestResult {
         admin_identity(&network.edge_b),
     ];
     let plans = (0..settings.connections)
-        .map(|index| WorkerPlan {
-            index,
-            nick: format!("load{index:04}"),
-            peer: format!("load{:04}", (index + 2) % settings.connections),
-            edge: index % 2,
+        .map(|index| -> TestResult<WorkerPlan> {
+            let edge = index % CLIENT_NODES;
+            Ok(WorkerPlan {
+                index,
+                nick: format!("load{index:04}"),
+                peer: format!("load{:04}", (index + 2) % settings.connections),
+                edge,
+                load_channel: settings.workload.load_channel(index)?,
+                source: settings.workload.generator().source_address(edge, index)?,
+                slot_index: settings.workload.slot_index(index)?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<TestResult<Vec<_>>>()?;
     let mut returned = false;
     let mut stop_statuses = [false; 3];
     let outcome: TestResult<Campaign<'_>> = thread::scope(|scope| {
