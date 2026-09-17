@@ -47,6 +47,7 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 mod command_privacy;
 mod durability;
 mod journal_retry;
+mod kill_reconstruction;
 mod ordinary_batch;
 
 pub(crate) use ordinary_batch::committed_ordinary_acknowledgements;

@@ -177,6 +177,49 @@ pub enum DaemonError {
     /// The sequencer credentials file did not parse, did not verify for
     /// this network, or names no key the coordinator holds.
     E2eeCredentials,
+    /// One named startup reconstruction refused the recovered state. The
+    /// error keeps the meaning it had; the surface is the identification the
+    /// daemon adds so an operator knows which owner refused and on what.
+    Reconstruction(ReconstructionSurface, RuntimeError),
+}
+
+/// Names the startup reconstruction that refused a recovered state.
+///
+/// `storage state is stale or inconsistent` names neither the surface nor the
+/// record, so a refusal reported without this identification cannot be
+/// attributed to an owner from the daemon's stderr line alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconstructionSurface {
+    /// The durable account, channel, session and account-service scan.
+    DurableState,
+    /// The startup reconciliation of every session recovered from storage.
+    RecoveredSessions,
+    /// The authenticated edge federation restore, naming the step it reached.
+    EdgeFederation(crate::federation::edge::EdgeRestoreStep),
+    /// The optional durable history index load.
+    History,
+}
+
+impl fmt::Display for ReconstructionSurface {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DurableState => formatter.write_str("durable state reconstruction"),
+            Self::RecoveredSessions => formatter.write_str("recovered session reconciliation"),
+            Self::EdgeFederation(step) => {
+                write!(formatter, "edge federation restore at {}", step.label())
+            }
+            Self::History => formatter.write_str("history reconstruction"),
+        }
+    }
+}
+
+impl From<crate::federation::edge::EdgeRestoreRefusal> for DaemonError {
+    fn from(refusal: crate::federation::edge::EdgeRestoreRefusal) -> Self {
+        Self::Reconstruction(
+            ReconstructionSurface::EdgeFederation(refusal.step),
+            refusal.error,
+        )
+    }
 }
 
 impl fmt::Display for DaemonError {
@@ -206,6 +249,10 @@ impl fmt::Display for DaemonError {
             ),
             Self::E2eeCredentials => formatter.write_str(
                 "E2EE sequencer credentials file is invalid or does not match the sequencer key",
+            ),
+            Self::Reconstruction(surface, error) => write!(
+                formatter,
+                "runtime startup failed: {surface} refused the recovered state: {error}",
             ),
         }
     }
@@ -452,7 +499,8 @@ impl LiveStorage {
             &keys,
             process_clock.now(),
             reconstruction_utc,
-        )?;
+        )
+        .map_err(|error| DaemonError::Reconstruction(ReconstructionSurface::DurableState, error))?;
         reconcile_recovered_sessions(
             &owner.port(),
             &mut reconstruction,
@@ -637,7 +685,8 @@ fn build_live_state(
             &storage.reconstruction.domain,
             &mut storage.reconstruction.index,
             Arc::clone(&budget),
-        )?;
+        )
+        .map_err(|error| DaemonError::Reconstruction(ReconstructionSurface::History, error))?;
         Ok((crypto_config, router, limits, history))
     })();
     let (crypto_config, router, limits, history) = match prepared {
@@ -854,8 +903,12 @@ fn refresh_startup_rows(
     Ok(())
 }
 
+/// The recovered-session reconciliation could not prove the state it read.
 fn startup_stale_state() -> DaemonError {
-    DaemonError::Runtime(RuntimeError::Storage(StorageError::StaleState))
+    DaemonError::Reconstruction(
+        ReconstructionSurface::RecoveredSessions,
+        RuntimeError::Storage(StorageError::StaleState),
+    )
 }
 
 fn registration_config(
@@ -3999,6 +4052,80 @@ async fn shutdown_blocking_owners(
 
 #[cfg(test)]
 mod tests {
+    use super::{DaemonError, ReconstructionSurface};
+    use crate::RuntimeError;
+    use crate::federation::edge::EdgeRestoreStep;
+    use agenc_ircd_storage::StorageError;
+
+    /// A storage-open refusal, an unlabelled runtime refusal and each labelled
+    /// reconstruction refusal print lines an operator can tell apart. The bare
+    /// two-prefix line names neither a surface nor a record, which is why the
+    /// first report of this failure was filed against the wrong component.
+    #[test]
+    fn every_startup_refusal_prints_the_reconstruction_that_refused() {
+        let stale = StorageError::StaleState;
+        assert_eq!(
+            DaemonError::Storage(stale).to_string(),
+            "storage owner failed: storage state is stale or inconsistent",
+        );
+        assert_eq!(
+            DaemonError::Runtime(RuntimeError::Storage(stale)).to_string(),
+            "runtime startup failed: storage owner failed: storage state is stale or inconsistent",
+        );
+        assert_eq!(
+            DaemonError::Reconstruction(
+                ReconstructionSurface::DurableState,
+                RuntimeError::Storage(stale),
+            )
+            .to_string(),
+            "runtime startup failed: durable state reconstruction refused the recovered state: \
+             storage owner failed: storage state is stale or inconsistent",
+        );
+        assert_eq!(
+            DaemonError::Reconstruction(
+                ReconstructionSurface::RecoveredSessions,
+                RuntimeError::Storage(stale),
+            )
+            .to_string(),
+            "runtime startup failed: recovered session reconciliation refused the recovered \
+             state: storage owner failed: storage state is stale or inconsistent",
+        );
+        assert_eq!(
+            DaemonError::Reconstruction(
+                ReconstructionSurface::EdgeFederation(EdgeRestoreStep::BarrierInstall),
+                RuntimeError::Storage(stale),
+            )
+            .to_string(),
+            "runtime startup failed: edge federation restore at barrier-install refused the \
+             recovered state: storage owner failed: storage state is stale or inconsistent",
+        );
+    }
+
+    /// Every edge restore step prints a distinct, fixed lowercase label.
+    #[test]
+    fn every_edge_restore_step_names_a_distinct_record_family() {
+        let steps = [
+            EdgeRestoreStep::WitnessBacking,
+            EdgeRestoreStep::PeerRecord,
+            EdgeRestoreStep::ProjectionEntries,
+            EdgeRestoreStep::ProjectionInstall,
+            EdgeRestoreStep::OriginJournal,
+            EdgeRestoreStep::RequestJournal,
+            EdgeRestoreStep::CompanionState,
+            EdgeRestoreStep::CompanionSnapshot,
+            EdgeRestoreStep::BarrierInstall,
+        ];
+        let mut labels: Vec<&str> = steps.iter().map(|step| step.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), steps.len());
+        assert!(
+            labels
+                .iter()
+                .all(|label| !label.is_empty() && *label == label.to_lowercase())
+        );
+    }
+
     /// The active sequencer seed alone.
     fn active(seed: &[u8; 32]) -> super::SequencerSecrets<'_> {
         super::SequencerSecrets {

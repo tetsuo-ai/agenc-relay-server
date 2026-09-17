@@ -53,6 +53,69 @@ pub(super) fn invalid() -> RuntimeError {
     RuntimeError::Storage(StorageError::StaleState)
 }
 
+/// Names the reconstruction step an edge restore was performing when it
+/// refused, so one operator-visible refusal line identifies the record family
+/// that could not be proved instead of naming storage in general.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EdgeRestoreStep {
+    /// Reserving the memory backing the companion's witness recovery needs.
+    WitnessBacking,
+    /// The `FederationPeer` row naming this edge's coordinator.
+    PeerRecord,
+    /// The `EdgeProjection` entry and generation-marker rows.
+    ProjectionEntries,
+    /// Installing the restored projection against the peer row that counts it.
+    ProjectionInstall,
+    /// The `FederationOrigin` rows carrying durable connection ownership.
+    OriginJournal,
+    /// The `RequestResult` rows carrying the durable request journal.
+    RequestJournal,
+    /// The `E2eeState` companion cursor, route, witness and barrier rows.
+    CompanionState,
+    /// Completing the companion's restored snapshot generation.
+    CompanionSnapshot,
+    /// Installing the restored barrier heads, parts and receipts.
+    BarrierInstall,
+}
+
+impl EdgeRestoreStep {
+    /// Returns the fixed lowercase label this step prints in a refusal line.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::WitnessBacking => "companion-witness-backing",
+            Self::PeerRecord => "federation-peer-record",
+            Self::ProjectionEntries => "edge-projection-rows",
+            Self::ProjectionInstall => "edge-projection-install",
+            Self::OriginJournal => "federation-origin-journal",
+            Self::RequestJournal => "request-result-journal",
+            Self::CompanionState => "e2ee-state-rows",
+            Self::CompanionSnapshot => "companion-snapshot-restore",
+            Self::BarrierInstall => "barrier-install",
+        }
+    }
+}
+
+/// One refused edge restore: the step that refused and the error it raised.
+///
+/// The error keeps its own meaning; the step is the identification the daemon
+/// adds when it reports the refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EdgeRestoreRefusal {
+    /// The reconstruction step that refused.
+    pub step: EdgeRestoreStep,
+    /// The refusal the step raised, unchanged.
+    pub error: RuntimeError,
+}
+
+impl core::fmt::Display for EdgeRestoreRefusal {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{}: {}", self.step.label(), self.error)
+    }
+}
+
+impl core::error::Error for EdgeRestoreRefusal {}
+
 impl EdgeFederation {
     /// The collecting mutation, including an admitted part awaiting storage.
     pub(crate) fn collecting_barrier(&self) -> Option<[u8; 16]> {
@@ -66,13 +129,31 @@ impl EdgeFederation {
     }
 
     /// Reloads authenticated committed rows on the blocking startup thread.
+    ///
+    /// A refusal names the step that raised it so the daemon can report which
+    /// reconstruction refused and on which record family.
     pub(crate) fn restore(
+        &mut self,
+        port: &StoragePort,
+        keys: &KeyDeriver,
+        companion: Option<&mut E2eeEdge>,
+        head: HeadCounters,
+        backing: Option<crate::budget::BackingReservationPort>,
+    ) -> Result<(), EdgeRestoreRefusal> {
+        let mut step = EdgeRestoreStep::WitnessBacking;
+        self.restore_steps(port, keys, companion, head, backing, &mut step)
+            .map_err(|error| EdgeRestoreRefusal { step, error })
+    }
+
+    /// Runs the restore steps, recording each one in `step` before it begins.
+    fn restore_steps(
         &mut self,
         port: &StoragePort,
         keys: &KeyDeriver,
         mut companion: Option<&mut E2eeEdge>,
         head: HeadCounters,
         backing: Option<crate::budget::BackingReservationPort>,
+        step: &mut EdgeRestoreStep,
     ) -> Result<(), RuntimeError> {
         if let Some(companion) = companion.as_deref_mut() {
             let backing = backing.ok_or_else(invalid)?;
@@ -80,6 +161,7 @@ impl EdgeFederation {
             companion.restore_witness_backing(backing)?;
         }
         let mut restored = Restore::default();
+        *step = EdgeRestoreStep::PeerRecord;
         scan_values(port, keys, TableId::FederationPeer, |key, value| {
             if key == peer_key(self.config.coordinator.server_id())? {
                 if value.record_kind() != PEER_RECORD_KIND {
@@ -89,16 +171,20 @@ impl EdgeFederation {
             }
             Ok(())
         })?;
+        *step = EdgeRestoreStep::ProjectionEntries;
         scan_values(port, keys, TableId::EdgeProjection, |key, value| {
             restored.projection(self, key, value)
         })?;
+        *step = EdgeRestoreStep::ProjectionInstall;
         restored.install_projection(self)?;
+        *step = EdgeRestoreStep::OriginJournal;
         scan_values(port, keys, TableId::FederationOrigin, |key, value| {
             if value.record_kind() == agenc_ircd_storage::federation_records::ORIGIN_RECORD_KIND {
                 super::journal::restore_origin(self, &key, &value)?;
             }
             Ok(())
         })?;
+        *step = EdgeRestoreStep::RequestJournal;
         scan_values(port, keys, TableId::RequestResult, |key, value| {
             if value.record_kind() == agenc_ircd_storage::federation_records::EDGE_REQUEST_KIND {
                 super::journal::restore_request(self, &key, &value)
@@ -107,16 +193,19 @@ impl EdgeFederation {
             }
         })?;
         super::journal::finish_restore(self);
+        *step = EdgeRestoreStep::CompanionState;
         scan_values(port, keys, TableId::E2eeState, |key, value| {
             restored.admit_state(self, companion.as_deref_mut(), key, value)
         })?;
         if let Some(companion) = companion.as_deref_mut() {
+            *step = EdgeRestoreStep::CompanionSnapshot;
             companion.finish_snapshot_restore()?;
             companion.restore_base_cursor(self);
             if companion.needs_witness_snapshot() {
                 self.installed_epoch = None;
             }
         }
+        *step = EdgeRestoreStep::BarrierInstall;
         restored.install_barriers(self, companion, port, keys, head)
     }
 }

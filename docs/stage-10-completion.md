@@ -76,6 +76,12 @@ The base runtime, domain and wire critical-branch regressions, the
 forty-one regions they bring to 100 percent and the region-metric corrections
 they required (COV-01, issue #66) are recorded in
 [the base coverage record](stage-10-base-coverage.md).
+
+The durable-prefix sweep of an edge restarted after a kill under load, the
+unreproduced CAP-01 startup refusal it narrows, and the reconstruction surface
+and record family the daemon now names in that refusal (RUN-08, issue #134) are
+recorded in
+[the edge startup reconstruction record](stage-10-edge-startup-reconstruction.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
