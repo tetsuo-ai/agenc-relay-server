@@ -2397,40 +2397,40 @@ id = "cap80-startup-mailboxrows-admit-item"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 983
-end_line = 1015
+start_line = 1127
+end_line = 1159
 metric = "regions"
-reason = "Retain the Item grant as persisted; reconstruction cannot discard its current token binding."
+reason = "Retain the Item grant as persisted; reconstruction cannot discard its current token binding. COV-06: re-anchored from 983-1015, which held no item this row describes, to `MailboxRows::admit_item`, and the span it now covers was re-reviewed. It is 27/29: the early returns for a row of another kind and an unparsable item key are reachable test work."
 
 [[region]]
 id = "cap80-startup-mailboxrows-admit-token"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 1017
-end_line = 1046
+start_line = 1161
+end_line = 1190
 metric = "regions"
-reason = "Retain Token object identity and full grant; no key-order winner."
+reason = "Retain Token object identity and full grant; no key-order winner. COV-06: re-anchored from 1017-1046, which held no item this row describes, to `MailboxRows::admit_token`, and the span it now covers was re-reviewed. It is 22/24: the early returns for a row of another kind and an unparsable token key are reachable test work."
 
 [[region]]
 id = "cap80-startup-validate-mailbox-grants"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 1089
-end_line = 1117
+start_line = 1233
+end_line = 1261
 metric = "regions"
-reason = "Reject duplicate grants per item, orphans, missing tokens and any object/token/session/expiry contradiction."
+reason = "Reject duplicate grants per item, orphans, missing tokens and any object/token/session/expiry contradiction. COV-06: re-anchored from 1089-1117, which held no item this row describes, to `validate_mailbox_grants`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap80-startup-restore-mailboxes"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 1068
-end_line = 1087
+start_line = 1212
+end_line = 1231
 metric = "regions"
-reason = "Validate every cross-row grant relation before applying any reconstructed mailbox."
+reason = "Validate every cross-row grant relation before applying any reconstructed mailbox. COV-06: re-anchored from 1068-1087, which held no item this row describes, to `restore_mailboxes`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap77-mailbox-restore-restore-admit"
@@ -2717,20 +2717,20 @@ id = "cap78-session-sessiontable-queue-snapshot"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/state_core/session.rs"
 source_sha256 = "eb112cc9da0095f157d52c4e47b1da8e503cf67eb33909e65936dd43c3a18a6e"
-start_line = 506
-end_line = 510
+start_line = 525
+end_line = 529
 metric = "regions"
-reason = "Reload floors/statistics see the combined shared ledger plus physical/virtual queued snapshots."
+reason = "Reload floors/statistics see the combined shared ledger plus physical/virtual queued snapshots. COV-06: re-anchored from 506-510, which held no item this row describes, to `SessionTable::queue_snapshot`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap78-session-sessiontable-query-snapshot-for"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/state_core/session.rs"
 source_sha256 = "eb112cc9da0095f157d52c4e47b1da8e503cf67eb33909e65936dd43c3a18a6e"
-start_line = 572
-end_line = 586
+start_line = 591
+end_line = 605
 metric = "regions"
-reason = "Local snapshot admission includes retained mailbox/FQUERY usage of its bound user."
+reason = "Local snapshot admission includes retained mailbox/FQUERY usage of its bound user. COV-06: re-anchored from 572-586, which held no item this row describes, to `SessionTable::query_snapshot_for`, and the span it now covers was re-reviewed. It is 18/19: the refusal for a generation whose sink is gone is reachable test work."
 
 [[region]]
 id = "cap81-backing-directoryqueryreservation-prepare"
@@ -3027,30 +3027,30 @@ id = "cap76-startup-rebuild"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 469
-end_line = 502
+start_line = 534
+end_line = 580
 metric = "regions"
-reason = "Propagate successor authority contradictions before delivery restoration or outer loader admission; startup cannot publish a partially accepted lineage."
+reason = "Propagate successor authority contradictions before delivery restoration or outer loader admission; startup cannot publish a partially accepted lineage. COV-06: re-anchored from 469-502, which held no item this row describes, to `rebuild`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap76-startup-restore-successors"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 506
-end_line = 557
+start_line = 650
+end_line = 701
 metric = "regions"
-reason = "Reject duplicate target ownership before choosing an anchor; occupied or partial targets require exact compatible lineage and cannot be discarded or overwritten."
+reason = "Reject duplicate target ownership before choosing an anchor; occupied or partial targets require exact compatible lineage and cannot be discarded or overwritten. COV-06: re-anchored from 506-557, which held no item this row describes, to `restore_successors`, and the span it now covers was re-reviewed. It is 71/72: the Storage refusal for a target that already owns a log, lifecycle or route is reachable test work."
 
 [[region]]
 id = "cap76-startup-restore-successor-binding"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 605
-end_line = 642
+start_line = 749
+end_line = 786
 metric = "regions"
-reason = "Verify exact retained activation/binding and preserve a valid successor later head, recovery gate, removal state and route index."
+reason = "Verify exact retained activation/binding and preserve a valid successor later head, recovery gate, removal state and route index. COV-06: re-anchored from 605-642, which held no item this row describes, to `restore_successor_binding`, and the span it now covers was re-reviewed. It is 55/62: the activation, binding, verify, log, head, route and lifecycle refusals are all reachable and interleaved with the accepted path, so none may be narrowed away."
 
 [[region]]
 id = "storage-admission-construction-schema-from-generation"
@@ -4157,30 +4157,30 @@ id = "companion-mod-companioncoordinator-set-pending"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 866
-end_line = 868
+start_line = 1030
+end_line = 1032
 metric = "regions"
-reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
+reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority. COV-06: re-anchored from 866-868, which held no item this row describes, to `CompanionCoordinator::set_pending`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "companion-mod-companioncoordinator-batch-applied"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 872
-end_line = 899
+start_line = 1076
+end_line = 1106
 metric = "regions"
-reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
+reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority. COV-06: re-anchored from 872-899, which held no item this row describes, to `CompanionCoordinator::batch_applied`, and the span it now covers was re-reviewed. It is 39/40: the acknowledgement apply failure is reachable test work."
 
 [[region]]
 id = "companion-mod-companioncoordinator-batch-rejected"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 902
-end_line = 904
+start_line = 1109
+end_line = 1112
 metric = "regions"
-reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority."
+reason = "Exactly one pending companion owner; successful receipt moves its precise work; rejection discards unpublished authority. COV-06: re-anchored from 902-904, which held no item this row describes, to `CompanionCoordinator::batch_rejected`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "companion-startup-restore-admit-state"
@@ -4707,30 +4707,30 @@ id = "companion-e2ee-records-record-kind-for-key"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 212
-end_line = 220
+start_line = 252
+end_line = 260
 metric = "regions"
-reason = "Register all kind14 disjoint prefixes and dispatch complete inner validation; kind15 dispatch is a shared integration hunk, not delivery authority."
+reason = "Register all kind14 disjoint prefixes and dispatch complete inner validation; kind15 dispatch is a shared integration hunk, not delivery authority. COV-06: re-anchored from 212-220, which held no item this row describes, to `record_kind_for_key`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "companion-e2ee-records-check-state-key"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 223
-end_line = 228
+start_line = 263
+end_line = 268
 metric = "regions"
-reason = "Register all kind14 disjoint prefixes and dispatch complete inner validation; kind15 dispatch is a shared integration hunk, not delivery authority."
+reason = "Register all kind14 disjoint prefixes and dispatch complete inner validation; kind15 dispatch is a shared integration hunk, not delivery authority. COV-06: re-anchored from 223-228, which held no item this row describes, to `check_state_key`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "companion-e2ee-records-validate-state-body"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2520
-end_line = 2540
+start_line = 2882
+end_line = 2909
 metric = "regions"
-reason = "Register all kind14 disjoint prefixes and dispatch complete inner validation; kind15 dispatch is a shared integration hunk, not delivery authority."
+reason = "Register all kind14 disjoint prefixes and dispatch complete inner validation; kind15 dispatch is a shared integration hunk, not delivery authority. COV-06: re-anchored from 2520-2540, which held no item this row describes, to `validate_state_body`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "companion-delivery-recovery-deliveryrecoveryrow-decode"
@@ -5697,40 +5697,40 @@ id = "cap74-e2ee-records-key"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2787
-end_line = 2789
+start_line = 2836
+end_line = 2838
 metric = "regions"
-reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority."
+reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority. COV-06: re-anchored from 2787-2789, which held no item this row describes, to `WitnessRow::key`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap74-e2ee-records-parse-key"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2486
-end_line = 2488
+start_line = 2841
+end_line = 2843
 metric = "regions"
-reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority."
+reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority. COV-06: re-anchored from 2486-2488, which held no item this row describes, to `WitnessRow::parse_key`, and the span it now covers was re-reviewed. It is 6/7: the refusal for a key without the witness prefix is reachable test work."
 
 [[region]]
 id = "cap74-e2ee-records-encode"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2486
-end_line = 2495
+start_line = 2846
+end_line = 2856
 metric = "regions"
-reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority."
+reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority. COV-06: re-anchored from 2486-2495, which held no item this row describes, to `WitnessRow::encode`, and the span it now covers was re-reviewed. It is 30/38: the eight encoder propagations cannot fail for a fixed-width row but are interleaved with the field writes, so no narrower span excludes them."
 
 [[region]]
 id = "cap74-e2ee-records-decode"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2498
-end_line = 2512
+start_line = 2859
+end_line = 2874
 metric = "regions"
-reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority."
+reason = "The closed schema-three witness envelope binds exact conversation key and canonical evidence fields; unsupported discriminants or malformed bodies cannot become recovery authority. COV-06: re-anchored from 2498-2512, which held no item this row describes, to `WitnessRow::decode`, and the span it now covers was re-reviewed. It is 31/41: the ten decoder propagations include reachable truncation and trailing-input refusals, so none may be narrowed away."
 
 [[region]]
 id = "cap74-mod-is-active"
@@ -8497,10 +8497,10 @@ id = "cap97-recent-001-replay-recent"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 719
-end_line = 761
+start_line = 883
+end_line = 925
 metric = "regions"
-reason = "The recent-fragment replay shortcut must resolve every response in original descriptor order before rendering any output; one absent body refuses the whole replay."
+reason = "The recent-fragment replay shortcut must resolve every response in original descriptor order before rendering any output; one absent body refuses the whole replay. COV-06: re-anchored from 719-761, which held no item this row describes, to `CompanionCoordinator::replay_recent`, and the span it now covers was re-reviewed. It is 49/51: the absent stored result and the render failure are reachable test work."
 
 [[region]]
 id = "cap79-response-001-missing"
@@ -9027,20 +9027,20 @@ id = "cap79-selective-012-select-objects"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 1961
-end_line = 1966
+start_line = 2109
+end_line = 2114
 metric = "regions"
-reason = "Metadata is sealed before selective body loading and cannot change the required set afterward."
+reason = "Metadata is sealed before selective body loading and cannot change the required set afterward. COV-06: re-anchored from 1961-1966, which held no item this row describes, to `Restore::select_objects`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap79-selective-013-select-restored-objects"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 985
-end_line = 990
+start_line = 1193
+end_line = 1198
 metric = "regions"
-reason = "The composed loader explicitly selects objects only after collecting complete mailbox metadata."
+reason = "The composed loader explicitly selects objects only after collecting complete mailbox metadata. COV-06: re-anchored from 985-990, which held no item this row describes, to `CompanionCoordinator::select_restored_objects`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap79-selective-014-request-page"
@@ -9787,20 +9787,20 @@ id = "cap73-declared-gates-008-admit-gate"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 192
-end_line = 201
+start_line = 235
+end_line = 244
 metric = "regions"
-reason = "Recovery capture errors remain fatal, metadata precedes object selection, and declared owners are installed after successor validation."
+reason = "Recovery capture errors remain fatal, metadata precedes object selection, and declared owners are installed after successor validation. COV-06: re-anchored from 192-201, which held no item this row describes, to `Restore::admit_gate`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap73-declared-gates-011-admit-restored-with-backing"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 478
-end_line = 492
+start_line = 555
+end_line = 569
 metric = "regions"
-reason = "The storage startup adapter supplies memory backing before declared recovery metadata is captured."
+reason = "The storage startup adapter supplies memory backing before declared recovery metadata is captured. COV-06: re-anchored from 478-492, which held no item this row describes, to `CompanionCoordinator::admit_restored_with_backing`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap73-declared-head-predicate-001-matches-restored-heads"
@@ -10147,30 +10147,30 @@ id = "cap79-result-memory-005-set-backing"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 127
-end_line = 130
+start_line = 132
+end_line = 135
 metric = "regions"
-reason = "Startup supplies the process budget and prepares every retained result owner before installing the complete map; refusal releases partial results."
+reason = "Startup supplies the process budget and prepares every retained result owner before installing the complete map; refusal releases partial results. COV-06: re-anchored from 127-130, which held no item this row describes, to `Restore::set_backing`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap79-result-memory-006-restore-replays"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/startup.rs"
 source_sha256 = "269b486e376055b435f651691472c976aaeca8f635bac3e5f11996efdc983642"
-start_line = 1135
-end_line = 1165
+start_line = 1279
+end_line = 1309
 metric = "regions"
-reason = "Startup supplies the process budget and prepares every retained result owner before installing the complete map; refusal releases partial results."
+reason = "Startup supplies the process budget and prepares every retained result owner before installing the complete map; refusal releases partial results. COV-06: re-anchored from 1135-1165, which held no item this row describes, to `restore_replays`, and the span it now covers was re-reviewed. It is 42/46: the two unparsable-key skips and the Ceiling refusal without backing are reachable test work."
 
 [[region]]
 id = "cap79-result-memory-009-finish-restore-with-backing"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 501
-end_line = 507
+start_line = 578
+end_line = 584
 metric = "regions"
-reason = "The composed reconstruction path supplies existing process backing to every retained-result admission."
+reason = "The composed reconstruction path supplies existing process backing to every retained-result admission. COV-06: re-anchored from 501-507, which held no item this row describes, to `CompanionCoordinator::finish_restore_with_backing`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap99-ack-context-001-commit-submission"
@@ -10437,10 +10437,10 @@ id = "cap101-sequencer-eligibility-003-install-sequencer"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/mod.rs"
 source_sha256 = "edd5f10da48de79a4767053822e53ad30dc6fe198cbe454adedf772d22c8895c"
-start_line = 553
-end_line = 565
+start_line = 654
+end_line = 661
 metric = "regions"
-reason = "An invalid selected credential cannot replace any installed signing or advertised material."
+reason = "An invalid selected credential cannot replace any installed signing or advertised material. COV-06: re-anchored from 553-565, which held no item this row describes, to `CompanionCoordinator::install_sequencer`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "cap101-terminal-key-001-for-receipt"
@@ -10597,60 +10597,60 @@ id = "edge-delivery-checkpoint-parse-cursor-key"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2329
-end_line = 2331
+start_line = 2378
+end_line = 2380
 metric = "regions"
-reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected."
+reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected. COV-06: re-anchored from 2329-2331, which held no item this row describes, to `DeliveryRow::parse_cursor_key`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "edge-delivery-checkpoint-cursor-key"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2347
-end_line = 2349
+start_line = 2383
+end_line = 2385
 metric = "regions"
-reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected."
+reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected. COV-06: re-anchored from 2347-2349, which held no item this row describes, to `DeliveryRow::cursor_key`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "edge-delivery-checkpoint-encode"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2339
-end_line = 2355
+start_line = 2388
+end_line = 2403
 metric = "regions"
-reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected."
+reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected. COV-06: re-anchored from 2339-2355, which held no item this row describes, to `DeliveryRow::encode`, and the span it now covers was re-reviewed. It is 29/36: the seven encoder propagations cannot fail for the single cursor arm but are interleaved with the field writes, so no narrower span excludes them."
 
 [[region]]
 id = "edge-delivery-checkpoint-decode"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2358
-end_line = 2374
+start_line = 2407
+end_line = 2423
 metric = "regions"
-reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected."
+reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected. COV-06: re-anchored from 2358-2374, which held no item this row describes, to `DeliveryRow::decode`, and the span it now covers was re-reviewed. It is 30/38: the eight decoder propagations include reachable truncation and trailing-input refusals, so none may be narrowed away."
 
 [[region]]
 id = "edge-delivery-checkpoint-check"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2376
-end_line = 2393
+start_line = 2425
+end_line = 2442
 metric = "regions"
-reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected."
+reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected. COV-06: re-anchored from 2376-2393, which held no item this row describes, to `DeliveryRow::check`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "edge-delivery-checkpoint-matches-key"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/e2ee_records.rs"
 source_sha256 = "a35be857dd55c67cf663f5a27a759e29bdc772cf8b9c6b891a40303cf0658b50"
-start_line = 2429
-end_line = 2431
+start_line = 2446
+end_line = 2448
 metric = "regions"
-reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected."
+reason = "The only edge delivery checkpoint arm requires exact cursor keys and a contiguous applied position; unsupported arms and incomplete bodies are rejected. COV-06: re-anchored from 2429-2431, which held no item this row describes, to `DeliveryRow::matches_key`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "storage-domain-envelope-decode"
@@ -11250,10 +11250,10 @@ id = "edge-origin-settled-gate"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/edge/router.rs"
 source_sha256 = "f768de1d9ae00d6b4d8f1a025c5f7f42ca4b2308e5daf93020bdeabeed433941"
-start_line = 609
-end_line = 611
+start_line = 626
+end_line = 628
 metric = "branches"
-reason = "Requests leave the edge only under an acknowledged declaration that carries the current attachment."
+reason = "Requests leave the edge only under an acknowledged declaration that carries the current attachment. COV-06: re-anchored from 609-611, which held no item this row describes, to `settled`, and the span it now covers was re-reviewed."
 
 [[region]]
 id = "coordinator-bootstrap-dual-council"
