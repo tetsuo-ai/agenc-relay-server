@@ -174,11 +174,9 @@ impl Config {
         for (field, path) in self.account_secret_paths() {
             push_optional(&mut paths, SchemaKey::new("accounts", field), path);
         }
-        push_optional(
-            &mut paths,
-            SchemaKey::new("e2ee", "sequencer_private_key_file"),
-            self.e2ee.sequencer_private_key_file.as_ref(),
-        );
+        for (field, path) in self.sequencer_secret_paths() {
+            push_optional(&mut paths, SchemaKey::new("e2ee", field), path);
+        }
         for (index, listener) in self.listeners.iter().enumerate() {
             if !self.listener_material_required(listener) {
                 continue;
@@ -195,6 +193,24 @@ impl Config {
             );
         }
         paths
+    }
+
+    /// The three sequencer signer key paths (companion 9.2.1).
+    fn sequencer_secret_paths(&self) -> [(&'static str, Option<&PathBuf>); 3] {
+        [
+            (
+                "sequencer_private_key_file",
+                self.e2ee.sequencer_private_key_file.as_ref(),
+            ),
+            (
+                "sequencer_successor_private_key_file",
+                self.e2ee.sequencer_successor_private_key_file.as_ref(),
+            ),
+            (
+                "sequencer_retired_private_key_file",
+                self.e2ee.sequencer_retired_private_key_file.as_ref(),
+            ),
+        ]
     }
 
     fn account_secret_paths(&self) -> [(&'static str, Option<&PathBuf>); 4] {

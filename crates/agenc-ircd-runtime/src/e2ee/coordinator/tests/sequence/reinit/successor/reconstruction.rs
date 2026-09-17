@@ -164,6 +164,7 @@ fn independent_package(
         plan_devices: vec![(&harness.account, fingerprint, DEVICE)],
         initial_policy_id: policy_id_of(&initial)?,
         required_operational_policy_id: policy_id_of(&operational)?,
+        sequencer_credential_id: harness.pinned_credential(),
     })?;
     let digest = account_id_digest(&NETWORK, &harness.account)?;
     let (sequence, prior) = harness

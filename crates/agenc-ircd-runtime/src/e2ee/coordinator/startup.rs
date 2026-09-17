@@ -123,6 +123,8 @@ pub(super) struct Restore {
     pub(super) delivery: super::delivery_owner::restore::Restore,
     owners: super::owners::Rebuild,
     recovery: super::recovery_lineage::Recoveries,
+    key_set: Option<agenc_ircd_storage::e2ee_records::KeySetRow>,
+    history: BTreeMap<[u8; 32], agenc_ircd_storage::e2ee_records::SequencerHistoryRow>,
 }
 
 impl Restore {
@@ -199,6 +201,10 @@ impl Restore {
                         .insert_submission(conversation, submission, row);
                 }
             }
+            agenc_ircd_storage::e2ee_records::KEYSET_ROW_KIND
+            | agenc_ircd_storage::e2ee_records::SEQUENCER_HISTORY_ROW_KIND => {
+                self.admit_signer_row(value.record_kind(), key, body);
+            }
             agenc_ircd_storage::e2ee_records::RECOVERY_RECORD_ROW_KIND => {
                 use agenc_ircd_storage::e2ee_records::RecoveryRecordRow;
                 if let (Ok((conversation, sequence)), Ok(row)) = (
@@ -220,6 +226,28 @@ impl Restore {
     ) {
         if self.objects.selected() || self.gates.admit(key, value, backing).is_err() {
             self.objects.poison();
+        }
+    }
+
+    /// The accepted key set and the credential history rows (companion
+    /// 9.2.1); a malformed row poisons the reload.
+    fn admit_signer_row(&mut self, kind: u16, key: &StoredKey, body: &[u8]) {
+        use agenc_ircd_storage::e2ee_records::{KeySetRow, SequencerHistoryRow};
+        if kind == agenc_ircd_storage::e2ee_records::KEYSET_ROW_KIND {
+            match KeySetRow::decode(body) {
+                Ok(row) => self.key_set = Some(row),
+                Err(_) => self.objects.poison(),
+            }
+            return;
+        }
+        match (
+            SequencerHistoryRow::parse_key(key),
+            SequencerHistoryRow::decode(body),
+        ) {
+            (Ok(id), Ok(row)) => {
+                self.history.insert(id, row);
+            }
+            _ => self.objects.poison(),
         }
     }
 
@@ -523,7 +551,83 @@ pub(super) fn rebuild(
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.finish(state);
     state.recovery = restore.recovery;
+    coordinator.signer_history = restore.history.clone();
+    // A coordinator without an installed key set (no signer configured)
+    // has no signer ownership to reconcile.
+    coordinator.signer_startup = coordinator.key_set().is_some().then(|| {
+        Box::new(signer_proposal(
+            coordinator,
+            restore.key_set,
+            restore.history,
+        ))
+    });
     restore.delivery.apply(coordinator)
+}
+
+/// What the startup signer reconciliation compares: the durable set and
+/// history, the credential every `normal` live route pins, and the
+/// credentials the unfinished receipts name (companion 9.2.1).
+fn signer_proposal(
+    coordinator: &CompanionCoordinator,
+    accepted: Option<agenc_ircd_storage::e2ee_records::KeySetRow>,
+    history: BTreeMap<[u8; 32], agenc_ircd_storage::e2ee_records::SequencerHistoryRow>,
+) -> super::signer_startup::Proposal {
+    use agenc_ircd_domain::e2ee::{RecoveryState, RouteLifecycle};
+    let state = &coordinator.state;
+    let mut pins = BTreeMap::new();
+    let mut receipts = std::collections::BTreeSet::new();
+    for (conversation_id, conversation) in &state.conversations {
+        let live = state
+            .routes
+            .route(&ConversationId(*conversation_id))
+            .is_some_and(|route| {
+                route.recovery == RecoveryState::Normal
+                    && !matches!(route.lifecycle, RouteLifecycle::Tombstone { .. })
+            });
+        if !live {
+            continue;
+        }
+        pins.insert(*conversation_id, conversation.sequencer_credential_id);
+        if let Some(credential) = open_receipt_credential(coordinator, conversation_id) {
+            receipts.insert(credential);
+        }
+    }
+    super::signer_startup::Proposal {
+        accepted,
+        history,
+        pins,
+        receipts,
+    }
+}
+
+/// The credential the unfinished candidate or ReInit-attempt receipt of a
+/// conversation names: the head record is that receipt while a candidate
+/// or an attempt is open.
+fn open_receipt_credential(
+    coordinator: &CompanionCoordinator,
+    conversation_id: &[u8; 32],
+) -> Option<[u8; 32]> {
+    let log = coordinator.state.logs.get(conversation_id)?;
+    if !log.has_candidate() && log.reinit_attempt().is_none() {
+        return None;
+    }
+    let head = log.head();
+    let object_id = coordinator
+        .state
+        .conversations
+        .get(conversation_id)?
+        .records
+        .get(&head.sequence)?;
+    let bytes = coordinator.state.objects.get(object_id)?;
+    let mut budget = DecodeBudget::new(MAX_FEDERATION_CONTROL_OBJECT, 1 << 16);
+    let object =
+        IrcWireObject::decode_kind(bytes, Some(IrcWireObjectKind::SequencerRecord), &mut budget)
+            .ok()?;
+    match IrcSequencerRecord::decode_exact(object.body(), &mut budget).ok()? {
+        IrcSequencerRecord::Candidate(receipt) => Some(receipt.tbs.sequencer_key_id),
+        IrcSequencerRecord::ReinitAttempt(receipt) => Some(receipt.tbs.sequencer_key_id),
+        _ => None,
+    }
 }
 
 /// Activation creates a successor anchor before that conversation has its
@@ -1938,6 +2042,10 @@ fn restore_route(
         initial_policy_id: tbs.initial_policy_id,
         required_operational_policy_id: tbs.required_operational_policy_id,
         current_policy_id: current_policy(state, &records, tbs.initial_policy_id),
+        sequencer_credential_id: row
+            .sequencer_credential_id
+            .unwrap_or(tbs.sequencer_credential_id),
+        blocked_credential_id: row.blocked_credential_id,
         predecessor_close_id: row.predecessor_close_id,
         last_validation_time,
         ..ConversationState::default()

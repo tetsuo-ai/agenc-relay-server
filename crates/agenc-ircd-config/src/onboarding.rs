@@ -36,17 +36,24 @@ pub struct OnboardingDescriptor {
     pub account_service_hpke_key_id: [u8; 32],
     /// Pinned account-service HPKE public key.
     pub account_service_hpke_public_key: [u8; 32],
+    /// The published sequencer key set, absent when the coordinator offers
+    /// no E2EE (spec C.8): an importer then never enables E2EE.
+    pub sequencer_key_set: Option<SequencerKeySetFacts>,
+}
+
+/// The advertised sequencer key set an onboarding descriptor pins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SequencerKeySetFacts {
     /// Published sequencer key-set generation.
-    pub sequencer_key_set_generation: u64,
+    pub generation: u64,
     /// Published sequencer key-set hash.
-    pub sequencer_key_set_hash: [u8; 32],
+    pub hash: [u8; 32],
 }
 
 struct DescriptorProfile {
     account_service_hpke_key_id: [u8; 32],
     account_service_hpke_public_key: [u8; 32],
-    sequencer_key_set_generation: u64,
-    sequencer_key_set_hash: [u8; 32],
+    sequencer_key_set: Option<SequencerKeySetFacts>,
 }
 
 /// Parses the exact LF-terminated descriptor grammar and fixed profile pins.
@@ -78,8 +85,7 @@ pub fn parse_onboarding_descriptor(text: &str) -> Result<OnboardingDescriptor, C
         recovery_epoch,
         account_service_hpke_key_id: profile.account_service_hpke_key_id,
         account_service_hpke_public_key: profile.account_service_hpke_public_key,
-        sequencer_key_set_generation: profile.sequencer_key_set_generation,
-        sequencer_key_set_hash: profile.sequencer_key_set_hash,
+        sequencer_key_set: profile.sequencer_key_set,
     })
 }
 
@@ -97,7 +103,7 @@ fn descriptor_body(text: &str) -> Result<&str, ConfigError> {
 }
 
 fn parse_profile<'a>(
-    lines: &mut impl Iterator<Item = &'a str>,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<DescriptorProfile, ConfigError> {
     if required_value(lines, "base-profile-sha256=")? != BASE_PROFILE_SHA256_TOKEN {
         return Err(ConfigError::InvalidValue);
@@ -106,19 +112,28 @@ fn parse_profile<'a>(
         base64url_32(required_value(lines, "account-service-hpke-key-id=")?)?;
     let account_service_hpke_public_key =
         base64url_32(required_value(lines, "account-service-hpke-public-key=")?)?;
-    if required_value(lines, "e2ee-profile=")? != E2EE_PROFILE_TOKEN
-        || required_value(lines, "e2ee-profile-sha256=")? != E2EE_PROFILE_SHA256_TOKEN
+    // The four E2EE lines are present or absent as one unit; a present
+    // block must still carry the build's exact profile.
+    let sequencer_key_set = if lines
+        .peek()
+        .is_some_and(|line| line.starts_with("e2ee-profile="))
     {
-        return Err(ConfigError::InvalidValue);
-    }
-    let sequencer_key_set_generation =
-        canonical_u64(required_value(lines, "sequencer-key-set-generation=")?)?;
-    let sequencer_key_set_hash = base64url_32(required_value(lines, "sequencer-key-set-hash=")?)?;
+        if required_value(lines, "e2ee-profile=")? != E2EE_PROFILE_TOKEN
+            || required_value(lines, "e2ee-profile-sha256=")? != E2EE_PROFILE_SHA256_TOKEN
+        {
+            return Err(ConfigError::InvalidValue);
+        }
+        Some(SequencerKeySetFacts {
+            generation: canonical_u64(required_value(lines, "sequencer-key-set-generation=")?)?,
+            hash: base64url_32(required_value(lines, "sequencer-key-set-hash=")?)?,
+        })
+    } else {
+        None
+    };
     Ok(DescriptorProfile {
         account_service_hpke_key_id,
         account_service_hpke_public_key,
-        sequencer_key_set_generation,
-        sequencer_key_set_hash,
+        sequencer_key_set,
     })
 }
 
@@ -203,10 +218,9 @@ pub struct OnboardingFacts {
     pub recovery_epoch: RecoveryEpoch,
     /// Derived account-service HPKE key identifier.
     pub account_service_hpke_key_id: [u8; 32],
-    /// Sequencer key-set generation.
-    pub sequencer_key_set_generation: u64,
-    /// Sequencer key-set hash.
-    pub sequencer_key_set_hash: [u8; 32],
+    /// The verified sequencer key set, or `None` when `e2ee.enabled` is
+    /// false: the four E2EE lines are then omitted as one unit (spec C.8).
+    pub sequencer_key_set: Option<SequencerKeySetFacts>,
 }
 
 /// Renders the LF-terminated descriptor with lines in the fixed order, omitting
@@ -247,16 +261,18 @@ pub fn render_onboarding(config: &Config, facts: &OnboardingFacts) -> Result<Str
         "account-service-hpke-public-key={}",
         encode_base64url_32(&config.accounts.account_service_hpke_public_key)
     ));
-    lines.push(format!("e2ee-profile={E2EE_PROFILE_TOKEN}"));
-    lines.push(format!("e2ee-profile-sha256={E2EE_PROFILE_SHA256_TOKEN}"));
-    lines.push(format!(
-        "sequencer-key-set-generation={}",
-        facts.sequencer_key_set_generation
-    ));
-    lines.push(format!(
-        "sequencer-key-set-hash={}",
-        encode_base64url_32(&facts.sequencer_key_set_hash)
-    ));
+    if let Some(key_set) = &facts.sequencer_key_set {
+        lines.push(format!("e2ee-profile={E2EE_PROFILE_TOKEN}"));
+        lines.push(format!("e2ee-profile-sha256={E2EE_PROFILE_SHA256_TOKEN}"));
+        lines.push(format!(
+            "sequencer-key-set-generation={}",
+            key_set.generation
+        ));
+        lines.push(format!(
+            "sequencer-key-set-hash={}",
+            encode_base64url_32(&key_set.hash)
+        ));
+    }
     let mut descriptor = lines.join("\n");
     descriptor.push('\n');
     if !descriptor

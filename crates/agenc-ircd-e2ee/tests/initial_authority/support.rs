@@ -57,7 +57,8 @@ impl Fixture {
             policy_id_of(&policy)?,
         )?)?;
         let authority = root_fingerprint(&principals.first().ok_or(E2eeError::InvalidValue)?.root)?;
-        let mut package = binding_package(&BindingSpec {
+        let credential = sequencer_credential(&key(60), 0, (0, 1_000_000), None)?;
+        let package = binding_package(&BindingSpec {
             principals: &refs,
             route: channel_route(b"#room", authority)?,
             channel_instance_id: Some([1; 16]),
@@ -70,10 +71,11 @@ impl Fixture {
             plan_devices: vec![(&ACCOUNT, authority, 7)],
             initial_policy_id: policy_id_of(&policy)?,
             required_operational_policy_id: policy_id_of(&operational)?,
+            sequencer_credential_id: semantic_id_of(
+                SemanticHashDomain::SequencerKey,
+                &credential.tbs,
+            )?,
         })?;
-        let credential = sequencer_credential(&key(60), 0, (0, 1_000_000), None)?;
-        package.binding.tbs.sequencer_credential_id =
-            semantic_id_of(SemanticHashDomain::SequencerKey, &credential.tbs)?;
         let tbs = &package.binding.tbs;
         let core = IrcContextCoreTbs {
             profile_version: 1,

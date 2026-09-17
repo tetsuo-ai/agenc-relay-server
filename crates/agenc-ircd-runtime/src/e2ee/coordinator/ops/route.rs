@@ -497,6 +497,8 @@ pub(super) fn refresh_head(
         predecessor_close_id: state.predecessor_close_id,
         recovery_gate: entry.recovery == RecoveryState::Pending,
         stored_bytes: state.stored_bytes,
+        sequencer_credential_id: Some(state.sequencer_credential_id),
+        blocked_credential_id: state.blocked_credential_id,
     };
     let writes = vec![
         CompanionCoordinator::object_write(&route_object)?,
@@ -581,6 +583,14 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             &conversation_id,
         ));
     }
+    // The binding pins a credential this coordinator issues receipts under:
+    // the active credential the reservation named or the advertised
+    // successor (companion 9.2.1).
+    exec.coordinator
+        .signers()
+        .and_then(|signers| signers.issuing_owner(&verified.sequencer_credential_id))
+        .map(|_| ())
+        .ok_or_else(|| Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id))?;
     let owner = AccountId::parse_wire_bytes(&account)
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
     let locks = chained_locks(exec, &package, &verified, &conversation_id)?;
@@ -679,6 +689,7 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         channel_name_hash,
         direct_accounts,
         binding: verified.binding_id,
+        sequencer_credential_id: verified.sequencer_credential_id,
         principal_accounts: principal_accounts(&package)?,
         initial_policy_id: package.binding.tbs.initial_policy_id,
         required_operational_policy_id: package.binding.tbs.required_operational_policy_id,
@@ -743,6 +754,8 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             .then_some(verified.route.predecessor_close_id),
         recovery_gate: false,
         stored_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        sequencer_credential_id: Some(verified.sequencer_credential_id),
+        blocked_credential_id: None,
     };
     outcome.writes.push(state_row(
         TableId::E2eeState,
@@ -950,6 +963,8 @@ pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         predecessor_close_id: None,
         recovery_gate: false,
         stored_bytes: state.stored_bytes,
+        sequencer_credential_id: Some(state.sequencer_credential_id),
+        blocked_credential_id: None,
     };
     outcome.writes.push(state_row(
         TableId::E2eeState,

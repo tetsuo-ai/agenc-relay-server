@@ -2,7 +2,10 @@
 #![forbid(unsafe_code)]
 use super::*;
 use crate::budget::{BackingReservationPort, MemoryBudget};
+use crate::e2ee::coordinator::CompanionCoordinator;
+use crate::e2ee::coordinator::tests::support::sequencer_credential;
 use crate::sync::Arc;
+use agenc_ircd_e2ee::sequencer::SequencerKeySet;
 
 #[test]
 fn a_valid_close_survives_reconstruction_and_its_tombstone_survives_another_reload() -> TestResult {
@@ -161,5 +164,49 @@ fn close_verification_refuses_memory_and_releases_its_temporary_reservation() ->
         }
         assert_eq!(budget.charged(), 0);
     }
+    Ok(())
+}
+
+/// A closed route is never live for signer purposes: its pin requires no
+/// private signer and never blocks (companion 9.2.1).
+#[test]
+fn a_closed_route_pins_no_signer_at_startup() -> TestResult {
+    let install_rotated = |coordinator: &mut CompanionCoordinator| -> TestResult {
+        let old = sequencer_credential(&key(90), 0, (0, 2_000_000), None)?;
+        let next = sequencer_credential(&key(91), 1, (100, 3_000_000), Some((&key(90), &old)))?;
+        let head = agenc_ircd_e2ee::sequencer::verify_sequencer_credential(&NETWORK, &old, None)?;
+        let set = SequencerKeySet::verify(&NETWORK, std::slice::from_ref(&next), 1, Some(&head))?;
+        coordinator.install_sequencer(key(91), set, next)?;
+        Ok(())
+    };
+    let mut fixture = Fixture::ready(true)?;
+    // While the route is normal, a first startup under a set that omits its
+    // pinned credential blocks the route and requires the retired signer.
+    let mut open = fixture.source.reloaded_with(install_rotated)?;
+    open.coordinator
+        .next_restored_write(0)?
+        .ok_or("the reconciliation")?
+        .apply(&mut open.coordinator)?;
+    assert_eq!(open.coordinator.blocked_routes(), 1);
+    assert!(open.coordinator.signer_report().retired_missing);
+    // Once closed, the same startup counts no pin for the route.
+    let bytes = wire(IrcWireObjectKind::CloseAuthorization, &fixture.close)?;
+    let mut parameters = fixture.conversation.to_vec();
+    parameters.extend_from_slice(&fixture.close.tbs.close_intent.reason_code.to_be_bytes());
+    let outcome = ok(fixture
+        .source
+        .run(Op::CloseGroup, &parameters, Some(&bytes))?)?;
+    assert!(matches!(outcome.result, ResultBody::Closed { .. }));
+    let mut closed = fixture.source.reloaded_with(install_rotated)?;
+    closed
+        .coordinator
+        .next_restored_write(0)?
+        .ok_or("the reconciliation")?
+        .apply(&mut closed.coordinator)?;
+    assert_eq!(closed.coordinator.blocked_routes(), 0);
+    assert_eq!(
+        closed.coordinator.signer_report(),
+        crate::e2ee::coordinator::SignerReport::default()
+    );
     Ok(())
 }

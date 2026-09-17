@@ -498,6 +498,21 @@ pub struct BindingSpec<'a> {
     pub initial_policy_id: [u8; 32],
     /// The binding's required operational policy identifier.
     pub required_operational_policy_id: [u8; 32],
+    /// The sequencer credential the binding pins: the coordinator's active
+    /// credential (companion 9.2.1), see [`sequencer_credential_id`].
+    pub sequencer_credential_id: [u8; 32],
+}
+
+/// The credential identifier of the generation-zero sequencer credential
+/// `secret` signs over `interval`: what a binding pins on a network whose
+/// credentials document was built by [`sequencer_credentials_document`].
+pub fn sequencer_credential_id(
+    network_id: [u8; 32],
+    secret: &Ed25519SecretKey,
+    interval: (u64, u64),
+) -> Result<[u8; 32], E2eeError> {
+    let credential = sequencer_credential_in(network_id, secret, 0, interval, None)?;
+    semantic_id_of(SemanticHashDomain::SequencerKey, &credential.tbs)
 }
 
 /// A complete binding package signed by every binding-authorized device of
@@ -581,7 +596,7 @@ pub fn binding_package(
         required_operational_policy_id: spec.required_operational_policy_id,
         initial_member_plan_id: semantic_id_of(SemanticHashDomain::InitialMemberPlanId, &plan)?,
         context_core_id: [30; 32],
-        sequencer_credential_id: [31; 32],
+        sequencer_credential_id: spec.sequencer_credential_id,
         principals: TlsVec::new(principals)?,
     };
     let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &tbs)?;

@@ -241,6 +241,8 @@ pub struct SecretSet {
     opaque_fake_credential: Option<SecretBytes32>,
     opaque_server_setup: Option<SecretBlob>,
     sequencer_private: Option<SecretBytes32>,
+    sequencer_successor_private: Option<SecretBytes32>,
+    sequencer_retired_private: Option<SecretBytes32>,
     tls_private_keys: Vec<(ListenerName, SecretBlob)>,
 }
 
@@ -306,6 +308,8 @@ impl SecretSet {
             opaque_fake_credential: optional.opaque_fake_credential?,
             opaque_server_setup: optional.opaque_server_setup?,
             sequencer_private: optional.sequencer_private?,
+            sequencer_successor_private: optional.sequencer_successor_private?,
+            sequencer_retired_private: optional.sequencer_retired_private?,
             tls_private_keys: tls_private_keys?,
         })
     }
@@ -388,6 +392,18 @@ impl SecretSet {
         self.sequencer_private.as_ref()
     }
 
+    /// The successor sequencer credential's private key bytes.
+    #[must_use]
+    pub fn sequencer_successor_private(&self) -> Option<&SecretBytes32> {
+        self.sequencer_successor_private.as_ref()
+    }
+
+    /// The retired-retained sequencer credential's private key bytes.
+    #[must_use]
+    pub fn sequencer_retired_private(&self) -> Option<&SecretBytes32> {
+        self.sequencer_retired_private.as_ref()
+    }
+
     /// TLS private key file bytes by listener name.
     #[must_use]
     pub fn tls_private_key(&self, listener: &ListenerName) -> Option<&SecretBlob> {
@@ -415,6 +431,8 @@ struct OptionalKeys {
     opaque_fake_credential: Option<Option<SecretBytes32>>,
     opaque_server_setup: Option<Option<SecretBlob>>,
     sequencer_private: Option<Option<SecretBytes32>>,
+    sequencer_successor_private: Option<Option<SecretBytes32>>,
+    sequencer_retired_private: Option<Option<SecretBytes32>>,
 }
 
 /// Tracks secret identities and bytes with same-class TLS alias exceptions.
@@ -615,6 +633,18 @@ impl Loader {
                 "e2ee",
                 "sequencer_private_key_file",
                 config.e2ee.sequencer_private_key_file.as_deref(),
+            ),
+            sequencer_successor_private: self.optional32(
+                sink,
+                "e2ee",
+                "sequencer_successor_private_key_file",
+                config.e2ee.sequencer_successor_private_key_file.as_deref(),
+            ),
+            sequencer_retired_private: self.optional32(
+                sink,
+                "e2ee",
+                "sequencer_retired_private_key_file",
+                config.e2ee.sequencer_retired_private_key_file.as_deref(),
             ),
         }
     }

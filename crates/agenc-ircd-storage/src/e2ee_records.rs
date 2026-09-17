@@ -76,6 +76,8 @@ pub const MAILBOX_ROW_KIND: u16 = 8;
 pub const RECOVERY_SUBMISSION_ROW_KIND: u16 = 17;
 /// Sequencer records a recovery installed beyond the restored head.
 pub const RECOVERY_RECORD_ROW_KIND: u16 = 18;
+/// One accepted sequencer credential's permanent history (companion 9.2.1).
+pub const SEQUENCER_HISTORY_ROW_KIND: u16 = 19;
 /// Companion request replay rows and durable operation sequence floors.
 pub const REPLAY_ROW_KIND: u16 = 9;
 /// Companion edge delivery checkpoints.
@@ -160,6 +162,8 @@ pub mod prefix {
     pub const DELIVERY: &[u8] = b"delivery/v1/";
     /// The key set row.
     pub const KEYSET: &[u8] = b"keyset/v1";
+    /// The credential history, one row per accepted sequencer credential.
+    pub const SEQUENCER_HISTORY: &[u8] = b"sequencer-history/v1/";
     /// Barrier head rows.
     pub const BARRIER_HEAD: &[u8] = b"cross-profile/head/v1/";
     /// Barrier part rows.
@@ -167,7 +171,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 38] = [
+const PREFIX_KINDS: [(&[u8], u16); 39] = [
     (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
     (prefix::RECOVERY_RECORD, RECOVERY_RECORD_ROW_KIND),
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
@@ -196,6 +200,7 @@ const PREFIX_KINDS: [(&[u8], u16); 38] = [
     (prefix::ORIGIN_SEQUENCE, REPLAY_ROW_KIND),
     (prefix::DELIVERY, DELIVERY_ROW_KIND),
     (prefix::KEYSET, KEYSET_ROW_KIND),
+    (prefix::SEQUENCER_HISTORY, SEQUENCER_HISTORY_ROW_KIND),
     (prefix::BARRIER_HEAD, BARRIER_ROW_KIND),
     (prefix::BARRIER_PART, BARRIER_ROW_KIND),
     (prefix::WITNESS, WITNESS_ROW_KIND),
@@ -547,6 +552,11 @@ pub struct RouteRow {
     pub recovery_gate: bool,
     /// Retained object bytes charged to this conversation.
     pub stored_bytes: u64,
+    /// The sequencer credential the conversation's current accepted context
+    /// pins (companion 9.2.1); `None` on an edge's projected copy.
+    pub sequencer_credential_id: Option<[u8; HASH_BYTES]>,
+    /// The retired credential the route is blocked on, if any.
+    pub blocked_credential_id: Option<[u8; HASH_BYTES]>,
 }
 
 impl RouteRow {
@@ -577,6 +587,8 @@ impl RouteRow {
         put_optional_hash(&mut encoder, self.predecessor_close_id.as_ref())?;
         put_bool(&mut encoder, self.recovery_gate)?;
         encoder.put_u64(self.stored_bytes)?;
+        put_optional_hash(&mut encoder, self.sequencer_credential_id.as_ref())?;
+        put_optional_hash(&mut encoder, self.blocked_credential_id.as_ref())?;
         wrap(ROUTE_ROW_KIND, encoder.finish())
     }
 
@@ -600,6 +612,8 @@ impl RouteRow {
             predecessor_close_id: take_optional_hash(&mut decoder)?,
             recovery_gate: take_bool(&mut decoder)?,
             stored_bytes: decoder.u64()?,
+            sequencer_credential_id: take_optional_hash(&mut decoder)?,
+            blocked_credential_id: take_optional_hash(&mut decoder)?,
         };
         decoder.finish()?;
         if row.lifecycle != RouteLifecycle::Active && row.close_id.is_none() {
@@ -2466,6 +2480,110 @@ impl KeySetRow {
 }
 
 // ---------------------------------------------------------------------------
+// Kind 19: the permanent sequencer credential history.
+
+/// One accepted public sequencer credential, keyed by its credential
+/// identifier under `sequencer-history/v1/`: its key generation, public
+/// key, validity interval and previous key identifier, the key-set
+/// generations that introduced and (once) retired it, and whether its
+/// private signer was released (companion 9.2.1). Rows are never deleted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SequencerHistoryRow {
+    /// The credential's key generation.
+    pub key_generation: u64,
+    /// The credential's public key.
+    pub public_key: [u8; HASH_BYTES],
+    /// The credential's validity interval, first and last valid second.
+    pub interval: (u64, u64),
+    /// The credential's previous key identifier (all zero at generation zero).
+    pub previous_key_id: [u8; HASH_BYTES],
+    /// The accepted key-set generation that introduced the credential.
+    pub introduced_set: u64,
+    /// The accepted key-set generation that first omitted the credential.
+    pub retired_set: Option<u64>,
+    /// Whether the private signer was durably released; a released
+    /// credential's key is refused as unrelated from then on.
+    pub released: bool,
+}
+
+impl SequencerHistoryRow {
+    /// The `sequencer-history/v1/<credential-id>` key.
+    pub fn key(credential_id: &[u8; HASH_BYTES]) -> Result<StoredKey, StorageError> {
+        key_of(&[prefix::SEQUENCER_HISTORY, credential_id])
+    }
+
+    /// Splits a history key.
+    pub fn parse_key(key: &StoredKey) -> Result<[u8; HASH_BYTES], StorageError> {
+        slice_array(suffix(key, prefix::SEQUENCER_HISTORY, HASH_BYTES)?, 0)
+    }
+
+    /// The read plan over every history row.
+    pub fn range() -> Result<ReadPlan, StorageError> {
+        let start = key_of(&[prefix::SEQUENCER_HISTORY])?;
+        prefix_range(start.as_bytes(), PAGE_LIMIT)
+    }
+
+    fn check(&self) -> Result<(), StorageError> {
+        let valid = self.public_key != [0; HASH_BYTES]
+            && self.interval.0 < self.interval.1
+            && self
+                .retired_set
+                .is_none_or(|retired| retired > self.introduced_set)
+            && (!self.released || self.retired_set.is_some());
+        if valid {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidEncoding)
+        }
+    }
+
+    /// Encodes a valid row.
+    pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
+        self.check()?;
+        let mut encoder = encoder()?;
+        encoder.put_u64(self.key_generation)?;
+        encoder.put_fixed(&self.public_key)?;
+        encoder.put_u64(self.interval.0)?;
+        encoder.put_u64(self.interval.1)?;
+        encoder.put_fixed(&self.previous_key_id)?;
+        encoder.put_u64(self.introduced_set)?;
+        put_bool(&mut encoder, self.retired_set.is_some())?;
+        encoder.put_u64(self.retired_set.unwrap_or(0))?;
+        put_bool(&mut encoder, self.released)?;
+        wrap(SEQUENCER_HISTORY_ROW_KIND, encoder.finish())
+    }
+
+    /// Decodes an exact row body.
+    pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
+        let inner = unwrap(SEQUENCER_HISTORY_ROW_KIND, body)?;
+        let mut decoder = decoder(&inner)?;
+        let key_generation = decoder.u64()?;
+        let public_key = decoder.array()?;
+        let interval = (decoder.u64()?, decoder.u64()?);
+        let previous_key_id = decoder.array()?;
+        let introduced_set = decoder.u64()?;
+        let retired = take_bool(&mut decoder)?;
+        let retired_at = decoder.u64()?;
+        let released = take_bool(&mut decoder)?;
+        decoder.finish()?;
+        if !retired && retired_at != 0 {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let row = Self {
+            key_generation,
+            public_key,
+            interval,
+            previous_key_id,
+            introduced_set,
+            retired_set: retired.then_some(retired_at),
+            released,
+        };
+        row.check()?;
+        Ok(row)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kind 13: edge witness violations.
 
 /// The last sequencer record-chain violation an edge witnessed on one
@@ -2486,6 +2604,29 @@ pub struct WitnessRow {
     pub observed_id: [u8; HASH_BYTES],
     /// The predecessor a candidate receipt named, when the event carried one.
     pub observed_predecessor_id: Option<[u8; HASH_BYTES]>,
+}
+
+/// The accepted key set and credential history bodies.
+fn signer_body(kind: u16, seed: u8) -> Result<Vec<u8>, StorageError> {
+    let hash = [seed; HASH_BYTES];
+    if kind == KEYSET_ROW_KIND {
+        return KeySetRow {
+            generation: u64::from(seed),
+            digest: hash,
+            credential_ids: vec![hash],
+        }
+        .encode();
+    }
+    SequencerHistoryRow {
+        key_generation: u64::from(seed),
+        public_key: hash,
+        interval: (0, 1),
+        previous_key_id: hash,
+        introduced_set: u64::from(seed),
+        retired_set: None,
+        released: false,
+    }
+    .encode()
 }
 
 impl WitnessRow {
@@ -2548,6 +2689,7 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
             .or_else(|_| origin::OriginSequenceRow::decode(body).map(|_| ())),
         DELIVERY_ROW_KIND => DeliveryRow::decode(body).map(|_| ()),
         KEYSET_ROW_KIND => KeySetRow::decode(body).map(|_| ()),
+        SEQUENCER_HISTORY_ROW_KIND => SequencerHistoryRow::decode(body).map(|_| ()),
         BARRIER_ROW_KIND => barrier::validate_body(body),
         WITNESS_ROW_KIND => WitnessRow::decode(body).map(|_| ()),
         DELIVERY_RECOVERY_ROW_KIND => delivery_recovery::validate_body(body),
@@ -2610,6 +2752,8 @@ pub mod fixtures {
                 predecessor_close_id: None,
                 recovery_gate: false,
                 stored_bytes: 0,
+                sequencer_credential_id: Some(hash),
+                blocked_credential_id: None,
             }
             .encode(),
             CLAIM_ROW_KIND => ClaimRow::Lock {
@@ -2691,12 +2835,7 @@ pub mod fixtures {
                 barrier_open: false,
             }
             .encode(),
-            KEYSET_ROW_KIND => KeySetRow {
-                generation: u64::from(seed),
-                digest: hash,
-                credential_ids: vec![hash],
-            }
-            .encode(),
+            KEYSET_ROW_KIND | SEQUENCER_HISTORY_ROW_KIND => signer_body(kind, seed),
             BARRIER_ROW_KIND => BarrierHead::Stage(BarrierStage::empty(BarrierIdentity {
                 network_id: hash,
                 coordinator_server_id: id,

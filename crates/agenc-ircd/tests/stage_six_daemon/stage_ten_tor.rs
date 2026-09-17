@@ -73,8 +73,10 @@ async fn exercise_contexts(
         recovery_epoch: RecoveryEpoch::from_bytes([9; 16]),
         account_service_hpke_key_id: [10; 32],
         account_service_hpke_public_key: [11; 32],
-        sequencer_key_set_generation: 12,
-        sequencer_key_set_hash: [13; 32],
+        sequencer_key_set: Some(agenc_ircd_config::SequencerKeySetFacts {
+            generation: 12,
+            hash: [13; 32],
+        }),
     };
     let first = TorIsolationContext::network(fixture.network_id);
     let second = TorIsolationContext::account(

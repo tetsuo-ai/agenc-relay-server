@@ -39,7 +39,7 @@ const COMMIT_CONTENT_TYPE: u8 = 3;
 mod restart;
 
 #[path = "recovery_pending.rs"]
-mod recovery_pending;
+pub(super) mod recovery_pending;
 
 #[path = "ack_context.rs"]
 mod ack_context;

@@ -115,6 +115,8 @@ fn route_row() -> RouteRow {
         predecessor_close_id: Some([6; 32]),
         recovery_gate: false,
         stored_bytes: 700,
+        sequencer_credential_id: Some([7; 32]),
+        blocked_credential_id: None,
     }
 }
 

@@ -7,7 +7,8 @@ use crate::e2ee::coordinator::tests::support::commit_approval;
 mod cases;
 use agenc_ircd_e2ee::authorization::{CandidateBinding, verify_commit_authorization};
 use agenc_ircd_e2ee::objects::conversation::{
-    IrcCloseAuthorization, IrcCloseAuthorizationTbs, IrcCloseIntent, action_bits,
+    IrcCloseAuthorization, IrcCloseAuthorizationTbs, IrcCloseIntent, IrcCommitAuthorizationTbs,
+    action_bits,
 };
 
 struct Fixture {
@@ -156,6 +157,41 @@ pub(in crate::e2ee::coordinator::tests) fn finalization_bytes(
     closing: Option<[u8; 32]>,
     voters: &[u8],
 ) -> TestResult<(Vec<u8>, [u8; 32])> {
+    let epoch = opened.epoch;
+    finalization_with(source, opened, voters, |authorization| {
+        if epoch == 0 {
+            authorization.authorization_rule = IrcCommitAuthorizationRule::BootstrapActivation;
+            authorization.action_bits = action_bits::POLICY | action_bits::BOOTSTRAP;
+        } else if let Some(intent) = closing {
+            authorization.authorization_rule = IrcCommitAuthorizationRule::ControlledTransition;
+            authorization.action_bits = action_bits::CLOSE_INTENT;
+            authorization.transition_target_digest = intent;
+        }
+    })
+}
+
+/// The finalization request of `opened` as the controlled `SEQUENCER`
+/// transition whose resulting context names the advertised successor
+/// credential (companion 9.2.1).
+pub(in crate::e2ee::coordinator::tests) fn transition_bytes(
+    source: &Harness,
+    opened: &Opened,
+    voters: &[u8],
+) -> TestResult<(Vec<u8>, [u8; 32])> {
+    finalization_with(source, opened, voters, |authorization| {
+        authorization.authorization_rule = IrcCommitAuthorizationRule::ControlledTransition;
+        authorization.action_bits = action_bits::SEQUENCER;
+    })
+}
+
+/// The finalization request of `opened` with the finality votes of
+/// `voters`, after `patch` set the authorization's rule and action bits.
+fn finalization_with(
+    source: &Harness,
+    opened: &Opened,
+    voters: &[u8],
+    patch: impl FnOnce(&mut IrcCommitAuthorizationTbs),
+) -> TestResult<(Vec<u8>, [u8; 32])> {
     let bytes = finalization_request_under(
         source,
         opened.conversation,
@@ -182,14 +218,7 @@ pub(in crate::e2ee::coordinator::tests) fn finalization_bytes(
     authorization.canonical_validation_time = opened.validation_time;
     authorization.resulting_group_context_digest = core.resulting_group_context_digest;
     authorization.resulting_ratchet_tree_digest = core.resulting_ratchet_tree_digest;
-    if opened.epoch == 0 {
-        authorization.authorization_rule = IrcCommitAuthorizationRule::BootstrapActivation;
-        authorization.action_bits = action_bits::POLICY | action_bits::BOOTSTRAP;
-    } else if let Some(intent) = closing {
-        authorization.authorization_rule = IrcCommitAuthorizationRule::ControlledTransition;
-        authorization.action_bits = action_bits::CLOSE_INTENT;
-        authorization.transition_target_digest = intent;
-    }
+    patch(&mut authorization);
     request.proof.authorization =
         commit_authorization(authorization, &[(&source.principal, DEVICE)])?;
     validate_public_authorization(source, &request)?;

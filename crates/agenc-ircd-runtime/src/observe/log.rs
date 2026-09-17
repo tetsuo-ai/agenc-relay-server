@@ -173,6 +173,20 @@ enum LogQueueItem {
     Stop(std::sync::mpsc::SyncSender<()>),
 }
 
+#[cfg(test)]
+impl<T: LogTarget> LogWriter<T> {
+    /// Writes every event queued so far and returns the target, so a test
+    /// can read the lines an observer emitted.
+    pub(super) fn drain_into_target(mut self) -> T {
+        while let Ok(item) = self.receiver.try_recv() {
+            if let LogQueueItem::Event(event) = item {
+                self.write(&event);
+            }
+        }
+        self.target
+    }
+}
+
 /// Where segments are written.
 pub trait LogTarget: Send {
     /// Opens the segment for `hour` atomically, creating it if absent.

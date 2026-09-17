@@ -4,4 +4,3 @@
 
 pub mod ecap;
 pub mod frames;
-pub mod keyset_file;

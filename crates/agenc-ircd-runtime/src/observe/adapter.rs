@@ -266,6 +266,31 @@ impl RuntimeObserver {
         );
     }
 
+    /// Records what a coordinator startup found about its sequencer signers:
+    /// the routes blocked on a retired credential, in a count bucket, and a
+    /// required retired-retained signer that is not configured. Neither
+    /// event names a conversation or a credential.
+    pub fn e2ee_signer_report(&self, blocked_routes: u64, retired_missing: bool) {
+        if blocked_routes > 0 {
+            self.emit(
+                LogEventCode::E2eeRoutesBlocked,
+                Severity::Warning,
+                None,
+                None,
+                Some(CountBucket::from_count(blocked_routes)),
+            );
+        }
+        if retired_missing {
+            self.emit(
+                LogEventCode::E2eeRetiredSignerMissing,
+                Severity::Warning,
+                None,
+                None,
+                None,
+            );
+        }
+    }
+
     /// Records one durable batch byte count in fixed buckets.
     pub fn storage_batch(&self, bytes: u64) {
         self.observe_count(MetricName::BatchBytes, &[], bytes);
@@ -900,6 +925,24 @@ mod tests {
                 .iter()
                 .all(|(key, _)| key.name != MetricName::LogEventsDropped)
         );
+    }
+
+    #[test]
+    fn signer_reports_emit_blocked_routes_and_the_missing_retired_signer() {
+        let (observer, writer) = observer();
+        // Nothing to report emits nothing; each fact emits its own event.
+        observer.e2ee_signer_report(0, false);
+        observer.e2ee_signer_report(3, false);
+        observer.e2ee_signer_report(0, true);
+        let lines = writer.drain_into_target().0;
+        assert_eq!(lines.len(), 2);
+        assert!(lines.first().is_some_and(|line| {
+            line.contains("event=e2ee_routes_blocked severity=warning")
+                && line.contains("count=le_10")
+        }));
+        assert!(lines.get(1).is_some_and(|line| {
+            line.contains("event=e2ee_retired_signer_missing severity=warning")
+        }));
     }
 
     #[test]

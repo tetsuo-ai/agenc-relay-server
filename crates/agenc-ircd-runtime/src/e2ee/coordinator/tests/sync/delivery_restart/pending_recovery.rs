@@ -9,7 +9,12 @@ use agenc_ircd_storage::e2ee_records::delivery_recovery::{
     RetirementReason,
 };
 
+/// The construction future is boxed so every test's own future stays small.
 async fn pending_fixture(count: usize) -> TestResult<RestartFixture> {
+    Box::pin(build_pending_fixture(count)).await
+}
+
+async fn build_pending_fixture(count: usize) -> TestResult<RestartFixture> {
     let storage = StateCoreFixture::new(vec![44; 65_536])?;
     let mut coordinator = CompanionCoordinator::new(
         *storage.identity.network_id.as_bytes(),

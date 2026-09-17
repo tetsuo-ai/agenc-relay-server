@@ -28,6 +28,8 @@ pub(crate) const E2EE_KEYS: &[&str] = &[
     "profile_version",
     "sequencer_credentials_file",
     "sequencer_private_key_file",
+    "sequencer_retired_private_key_file",
+    "sequencer_successor_private_key_file",
     "stored_bytes_per_conversation",
 ];
 
@@ -42,6 +44,13 @@ pub struct E2eeConfig {
     pub coordinator_server_id: Option<ServerId>,
     /// Sequencer private key file, only on the logical E2EE coordinator.
     pub sequencer_private_key_file: Option<PathBuf>,
+    /// The successor credential's private key, present exactly while the
+    /// credentials file holds a successor.
+    pub sequencer_successor_private_key_file: Option<PathBuf>,
+    /// The retired-retained private key of one credential absent from the
+    /// advertised set that a normal route or an unfinished receipt still
+    /// names.
+    pub sequencer_retired_private_key_file: Option<PathBuf>,
     /// Public sequencer credentials, required when enabled.
     pub sequencer_credentials_file: Option<PathBuf>,
     /// Group leaf ceiling.
@@ -88,6 +97,14 @@ pub(crate) fn parse(
         key("sequencer_private_key_file"),
         optional_path(table, "sequencer_private_key_file", resolver),
     );
+    let sequencer_successor_private_key_file = sink.field(
+        key("sequencer_successor_private_key_file"),
+        optional_path(table, "sequencer_successor_private_key_file", resolver),
+    );
+    let sequencer_retired_private_key_file = sink.field(
+        key("sequencer_retired_private_key_file"),
+        optional_path(table, "sequencer_retired_private_key_file", resolver),
+    );
     let sequencer_credentials_file = sink.field(
         key("sequencer_credentials_file"),
         parse_credentials(table, resolver, enabled.unwrap_or(true)),
@@ -99,6 +116,8 @@ pub(crate) fn parse(
         profile_version: profile_version?,
         coordinator_server_id: coordinator_server_id?,
         sequencer_private_key_file: sequencer_private_key_file?,
+        sequencer_successor_private_key_file: sequencer_successor_private_key_file?,
+        sequencer_retired_private_key_file: sequencer_retired_private_key_file?,
         sequencer_credentials_file: sequencer_credentials_file?,
         max_group_leaves: ceilings.max_group_leaves,
         max_devices_per_account: ceilings.max_devices_per_account,

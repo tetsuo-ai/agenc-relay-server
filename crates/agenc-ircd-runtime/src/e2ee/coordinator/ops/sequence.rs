@@ -223,6 +223,31 @@ fn count_votes(
     })
 }
 
+/// The credential a finalized `SEQUENCER` transition pins from now on: the
+/// advertised credential whose predecessor is the conversation's current
+/// pin (companion 9.2.1). Every later record signs under it; the receipt,
+/// votes and this finalization stayed under the old credential.
+fn sequencer_transition(
+    exec: &Exec<'_>,
+    conversation_id: &[u8; 32],
+    authorization: &agenc_ircd_e2ee::objects::conversation::IrcCommitAuthorizationTbs,
+) -> Result<Option<[u8; 32]>, Fail> {
+    use agenc_ircd_e2ee::objects::conversation::action_bits;
+    if authorization.action_bits & action_bits::SEQUENCER == 0 {
+        return Ok(None);
+    }
+    let pin = conversation(exec, conversation_id)?.sequencer_credential_id;
+    exec.coordinator
+        .key_set()
+        .and_then(|set| {
+            set.credentials
+                .iter()
+                .find(|credential| credential.previous_key_id == pin)
+        })
+        .map(|successor| Some(successor.credential_id))
+        .ok_or_else(|| Fail::with(E2eeReplyCode::BindingAuthInvalid, conversation_id))
+}
+
 /// The resulting council of a bootstrap activation, which votes beside the
 /// old council (companion 9.5); every other rule has no second council.
 fn resulting_council(
@@ -377,9 +402,18 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             _ => Fail::with(E2eeReplyCode::RateLimited, &conversation_id),
         }
     })?;
-    let signer =
-        super::super::sequencer_signing::at_time(exec.coordinator, envelope.aad.validation_time)
-            .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    // A blocked route issues no receipt, and a receipt is signed only under
+    // the credential the conversation pins while it covers the Commit's
+    // canonical validation time (companion 9.2.1).
+    state
+        .blocked_credential_id
+        .map_or(Ok(()), |_| Err(Fail::from(E2eeReplyCode::Syncing)))?;
+    let signer = super::super::sequencer_signing::at_time(
+        exec.coordinator,
+        &state.sequencer_credential_id,
+        envelope.aad.validation_time,
+    )
+    .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let commit_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
     let tbs = IrcCandidateReceiptTbs {
         profile_version: 1,
@@ -710,6 +744,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             ));
         }
     }
+    let next_pin = sequencer_transition(exec, &conversation_id, authorization)?;
     let terminal = Terminal::finalize(finalization_id);
     let tbs = vote_tbs(
         &vote_slot(exec, conversation_id, slot),
@@ -801,12 +836,14 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     next_log
         .finalize(&core.candidate_id, finalization_id, resulting_epoch)
         .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
-    let refresh = super::route::refresh_head(
-        exec,
-        conversation_id,
-        conversation(exec, &conversation_id)?,
-        &next_log,
-    )?;
+    // The finalized transition, if any, moves the pin before the route row
+    // is refreshed so the row and the state agree in one batch.
+    let mut pinned = conversation(exec, &conversation_id)?.clone();
+    if let Some(pin) = next_pin {
+        pinned.sequencer_credential_id = pin;
+        pinned.blocked_credential_id = None;
+    }
+    let refresh = super::route::refresh_head(exec, conversation_id, &pinned, &next_log)?;
     let mut outcome = Outcome::scalar(ResultBody::Finalized(
         conversation_id,
         resulting_epoch,
@@ -859,6 +896,10 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.vote_ledgers.remove(&candidate_id);
             state.current_policy_id = resulting_policy_id;
             state.route_object_id = route_object_id;
+            if let Some(pin) = next_pin {
+                state.sequencer_credential_id = pin;
+                state.blocked_credential_id = None;
+            }
         }
         if activates_bootstrap
             && let Some(lifecycle) = companion.lifecycles.get_mut(&conversation_id)
@@ -1069,10 +1110,18 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     super::reinit_authority::verify(exec, &attempt)?;
     let attempt_id = CompanionCoordinator::id_of(SemanticHashDomain::ReinitAttemptId, tbs)?;
     let attempt_object_id = *agenc_ircd_e2ee::ObjectId::compute(bytes).as_bytes();
-    let signer = exec
-        .coordinator
-        .signer()
-        .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
+    // The attempt receipt is signed under the old conversation's pin at the
+    // attempt's trusted time; a blocked old group attempts nothing.
+    let old_state = conversation(exec, &old_conversation_id)?;
+    old_state
+        .blocked_credential_id
+        .map_or(Ok(()), |_| Err(Fail::from(E2eeReplyCode::Syncing)))?;
+    let signer = super::super::sequencer_signing::at_time(
+        exec.coordinator,
+        &old_state.sequencer_credential_id,
+        exec.now,
+    )
+    .ok_or_else(|| Fail::from(E2eeReplyCode::Syncing))?;
     let receipt_tbs = IrcReInitAttemptReceiptTbs {
         profile_version: 1,
         network_id: exec.coordinator.network_id,

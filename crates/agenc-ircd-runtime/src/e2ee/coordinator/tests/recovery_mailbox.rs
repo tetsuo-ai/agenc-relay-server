@@ -155,6 +155,7 @@ fn other_binding(fixture: &Harness) -> TestResult<OtherBinding> {
         plan_devices: vec![(&fixture.account, fingerprint, DEVICE)],
         initial_policy_id: policy_id_of(&initial)?,
         required_operational_policy_id: policy_id_of(&operational)?,
+        sequencer_credential_id: fixture.pinned_credential(),
     })?;
     let digest = agenc_ircd_e2ee::ids::account_id_digest(&NETWORK, &fixture.account)?;
     let head = fixture

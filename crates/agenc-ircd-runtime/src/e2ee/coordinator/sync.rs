@@ -35,7 +35,7 @@ pub(crate) use super::delivery_owner::fetch::{
     Output as SnapshotPageOutput, Request as SnapshotPageRequest,
 };
 pub use super::delivery_owner::publication::Publication as SnapshotPublication;
-pub(crate) use super::delivery_owner::retirement::Retirement as RestoredRetirement;
+pub(crate) use super::delivery_owner::retirement::RestoredWrite;
 
 /// Exact page identity supplied by one already decoded FETCH frame.
 pub(super) struct FetchPage {

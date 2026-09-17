@@ -71,6 +71,8 @@ impl E2eeEdge {
             predecessor_close_id: None,
             recovery_gate: false,
             stored_bytes: u64::try_from(bytes.len()).map_err(|_| E2eeReplyCode::ObjectTooLarge)?,
+            sequencer_credential_id: None,
+            blocked_credential_id: None,
         };
         let key = RouteRow::key(&conversation).map_err(|_| E2eeReplyCode::InvalidFragment)?;
         let encoded = PersistentRecordValue::new(

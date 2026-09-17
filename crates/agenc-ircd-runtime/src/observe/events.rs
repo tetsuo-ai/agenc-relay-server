@@ -88,6 +88,14 @@ pub enum LogEventCode {
     /// The peer acknowledged the IRC-MLS companion profile on one link
     /// (companion 12.5); only the count leaves the process.
     E2eeProfileAcknowledged,
+    /// Startup accepted a key set that retired a credential some live routes
+    /// still pin; the count bucket carries how many routes are blocked
+    /// (companion 9.2.1).
+    E2eeRoutesBlocked,
+    /// A retired credential that a live route or an unfinished receipt still
+    /// requires has no configured retired-retained key; those routes stay
+    /// blocked and the receipts unfinished (companion 9.2.1).
+    E2eeRetiredSignerMissing,
     /// A task panicked; the process terminates after this event.
     Crash,
     /// Events were dropped because the log queue was full; the count bucket
@@ -97,7 +105,7 @@ pub enum LogEventCode {
 
 impl LogEventCode {
     /// Every registered code.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 35] = [
         Self::ProcessStarted,
         Self::ConfigurationRejected,
         Self::StorageRecovered,
@@ -129,6 +137,8 @@ impl LogEventCode {
         Self::FederationLinkEstablished,
         Self::FederationLinkClosed,
         Self::E2eeProfileAcknowledged,
+        Self::E2eeRoutesBlocked,
+        Self::E2eeRetiredSignerMissing,
         Self::Crash,
         Self::LogDropped,
     ];
@@ -168,6 +178,8 @@ impl LogEventCode {
             Self::FederationLinkEstablished => "federation_link_established",
             Self::FederationLinkClosed => "federation_link_closed",
             Self::E2eeProfileAcknowledged => "e2ee_profile_acknowledged",
+            Self::E2eeRoutesBlocked => "e2ee_routes_blocked",
+            Self::E2eeRetiredSignerMissing => "e2ee_retired_signer_missing",
             Self::Crash => "crash",
             Self::LogDropped => "log_dropped",
         }
