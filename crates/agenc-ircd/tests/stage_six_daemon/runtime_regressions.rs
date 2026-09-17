@@ -449,3 +449,40 @@ fn list_selection_precedes_the_page_and_the_scan_is_charged_first() -> TestResul
     assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
     Ok(())
 }
+
+/// ZDH-C5 (issue #13, RUN-02 #54): LIST is the only directory query that
+/// resolves client-supplied channel names, so on the real daemon a named LIST
+/// of a secret channel returns exactly the frames of a named LIST of an
+/// absent name, and the unselected page omits the secret channel entirely.
+#[test]
+fn named_list_answers_a_secret_name_exactly_like_an_absent_name() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let (mut owner, account) = exercise_account_client(&fixture)?;
+    owner.send_until("JOIN #hidden-directory", " 366 ")?;
+    owner.send_until("MODE #hidden-directory +s", " MODE #hidden-directory ")?;
+    owner.send_until("JOIN #public-directory", " 366 ")?;
+    let mut outsider = connect_registered_account(&fixture, "Outside", 93, account)?;
+    outsider.send_until("CAP REQ :standard-replies", " ACK ")?;
+    let hidden = outsider.send_until("LIST #hidden-directory", " 323 ")?;
+    let absent = outsider.send_until("LIST #absent-directory", " 323 ")?;
+    assert_eq!(hidden, absent, "a secret name must read as an absent one");
+    assert!(
+        !hidden.iter().any(|line| line.contains(" 322 ")),
+        "no row may name a hidden channel: {hidden:?}"
+    );
+    // The same query shape returns the row of a listed channel, so the
+    // identical pair above is a privacy decision and not a dead selector.
+    let named = outsider.send_until("LIST #public-directory", " 323 ")?;
+    assert_contains(&named, " #public-directory ")?;
+    let page = outsider.send_until("LIST", " 323 ")?;
+    assert_contains(&page, " #public-directory ")?;
+    assert!(
+        !page.iter().any(|line| line.contains("#hidden-directory")),
+        "the unselected page omits the secret channel: {page:?}"
+    );
+    let mut admin = AdminClient::connect(&fixture)?;
+    admin.confirm_process("DIE :named list privacy regression complete")?;
+    assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
+    Ok(())
+}
