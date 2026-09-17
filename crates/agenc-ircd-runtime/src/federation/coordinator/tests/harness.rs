@@ -70,6 +70,9 @@ mod startup_payloads;
 #[path = "query_receipt.rs"]
 mod query_receipt;
 
+#[path = "shutdown_recovery.rs"]
+mod shutdown_recovery;
+
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
 const COORDINATOR: ServerId = ServerId::from_bytes([32; 16]);
 const COORDINATOR_NAME: &str = "server.example";

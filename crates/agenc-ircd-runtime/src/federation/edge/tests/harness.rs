@@ -51,6 +51,7 @@ mod ordinary_batch;
 
 pub(crate) use ordinary_batch::committed_ordinary_acknowledgements;
 mod restart;
+mod shutdown_recovery;
 
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
 const EDGE: ServerId = ServerId::from_bytes([36; 16]);

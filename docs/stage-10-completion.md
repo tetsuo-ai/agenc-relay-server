@@ -51,6 +51,10 @@ The authenticated `EWITNESS` resolution that lets a durable edge witness
 install a proven head, or block its conversation for good (ENC-04, issue #62),
 is recorded in
 [the edge witness resolution record](stage-10-edge-witness-resolution.md).
+The bounded four-phase stop of a coordinator and an edge while federation
+recovery is live and acknowledgement work is still outstanding (RUN-05, issue
+#64) is recorded in
+[the shutdown-during-recovery record](stage-10-shutdown-during-recovery.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
