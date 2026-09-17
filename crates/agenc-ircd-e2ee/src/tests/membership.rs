@@ -454,3 +454,6 @@ mod verification {
         Ok(())
     }
 }
+
+#[path = "membership/fences.rs"]
+mod fences;

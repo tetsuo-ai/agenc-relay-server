@@ -330,3 +330,6 @@ fn approval_envelopes_share_one_authorization_id() -> TestResult {
     );
     Ok(())
 }
+
+#[path = "authorization/fences.rs"]
+mod fences;

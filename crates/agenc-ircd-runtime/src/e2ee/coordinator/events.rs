@@ -6,6 +6,9 @@
 use std::collections::{BTreeMap, VecDeque};
 
 #[cfg(test)]
+#[path = "events/tests/barrier_resume.rs"]
+mod barrier_resume_tests;
+#[cfg(test)]
 #[path = "events/cache/tests/mod.rs"]
 mod cache_tests;
 mod row_storage;

@@ -445,4 +445,7 @@ mod tests {
         );
         Ok(())
     }
+
+    #[path = "domains.rs"]
+    mod domains;
 }

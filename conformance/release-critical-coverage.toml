@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 834
-reviewed_source_sha256 = "dbb53784115747ff7aa286a438a27fe74d2e7d0989fc172d1d113da27f7d5e8c"
+reviewed_source_files = 842
+reviewed_source_sha256 = "9a2cdaade69822133f8cd4d2a7978bd88df8a58fdf1b849420d3e0fe7d63c4f8"
 deferred = []
 
 [[region]]
@@ -1606,20 +1606,20 @@ reason = "Hash only the exact 358-byte maintenance TBS under agenc-chat maintena
 id = "cap5-signature-signaturedomain-label"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-crypto/src/signature.rs"
-source_sha256 = "b11bedb9dac7d07337eaf8b374a2b4d819b2ae71b523412463d7b07d263bcccd"
+source_sha256 = "42ae472ed7ad69891ca797ef157a783c0a39923fd1f8f32dc1c988e5aa5891d8"
 start_line = 111
 end_line = 157
-metric = "branches"
+metric = "regions"
 reason = "MaintenanceAuditEvent selects agenc-chat maintenance audit signature v1 with DirectPrefix; preserve every existing domain label and encoding arm. These candidates span the complete closed functions, not only the added arm."
 
 [[region]]
 id = "cap5-signature-signaturedomain-encoding"
 category = "protocol-enum-arms"
 file = "crates/agenc-ircd-crypto/src/signature.rs"
-source_sha256 = "b11bedb9dac7d07337eaf8b374a2b4d819b2ae71b523412463d7b07d263bcccd"
+source_sha256 = "42ae472ed7ad69891ca797ef157a783c0a39923fd1f8f32dc1c988e5aa5891d8"
 start_line = 159
 end_line = 204
-metric = "branches"
+metric = "regions"
 reason = "MaintenanceAuditEvent selects agenc-chat maintenance audit signature v1 with DirectPrefix; preserve every existing domain label and encoding arm. These candidates span the complete closed functions, not only the added arm."
 
 [[region]]
@@ -3247,8 +3247,8 @@ id = "companion-daemon-attach-coordinator-role"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/daemon.rs"
 source_sha256 = "063211d4c00616e582bf62c0ddceab5c6291ba57eb0ed83e0571a06ad68658a9"
-start_line = 1347
-end_line = 1387
+start_line = 1294
+end_line = 1334
 metric = "regions"
 reason = "Composition passes validated persistent local incarnation to companion installation before serving."
 
@@ -3257,8 +3257,8 @@ id = "companion-daemon-bounded-credentials-read"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/daemon.rs"
 source_sha256 = "063211d4c00616e582bf62c0ddceab5c6291ba57eb0ed83e0571a06ad68658a9"
-start_line = 1233
-end_line = 1258
+start_line = 1180
+end_line = 1205
 metric = "regions"
 reason = "The sequencer credentials file is read through one bounded protected descriptor whose declared maximum applies before allocation, parsed from exactly that descriptor's bytes, and refused with the closed error that carries no path or content."
 
@@ -4076,9 +4076,9 @@ reason = "Preserve original absolute deadline and clock coordinate across restar
 id = "companion-events-deliverystream-unacked"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 89
-end_line = 101
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 92
+end_line = 104
 metric = "regions"
 reason = "Reject wrong ACK ID/order and impossible byte/count admission; preserve stream bounds."
 
@@ -4086,9 +4086,9 @@ reason = "Reject wrong ACK ID/order and impossible byte/count admission; preserv
 id = "companion-events-deliverystream-would-block"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 105
-end_line = 109
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 108
+end_line = 112
 metric = "regions"
 reason = "Reject wrong ACK ID/order and impossible byte/count admission; preserve stream bounds."
 
@@ -4096,9 +4096,9 @@ reason = "Reject wrong ACK ID/order and impossible byte/count admission; preserv
 id = "companion-events-deliverystream-acknowledge"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 112
-end_line = 142
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 115
+end_line = 145
 metric = "regions"
 reason = "Reject wrong ACK ID/order and impossible byte/count admission; preserve stream bounds."
 
@@ -4106,9 +4106,9 @@ reason = "Reject wrong ACK ID/order and impossible byte/count admission; preserv
 id = "companion-events-sequence-copies"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 322
-end_line = 465
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 325
+end_line = 468
 metric = "regions"
 reason = "Sequence event and payload copies under exact current scope; persist content objects, scoped row and refreshed owner cursor with the same mutation."
 
@@ -4116,9 +4116,9 @@ reason = "Sequence event and payload copies under exact current scope; persist c
 id = "companion-events-encode-event"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 477
-end_line = 524
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 480
+end_line = 527
 metric = "regions"
 reason = "Sequence event and payload copies under exact current scope; persist content objects, scoped row and refreshed owner cursor with the same mutation."
 
@@ -4126,9 +4126,9 @@ reason = "Sequence event and payload copies under exact current scope; persist c
 id = "companion-events-outbox-write"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 526
-end_line = 561
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 529
+end_line = 564
 metric = "regions"
 reason = "Sequence event and payload copies under exact current scope; persist content objects, scoped row and refreshed owner cursor with the same mutation."
 
@@ -4136,9 +4136,9 @@ reason = "Sequence event and payload copies under exact current scope; persist c
 id = "companion-events-cursor-write"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 564
-end_line = 573
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 567
+end_line = 576
 metric = "regions"
 reason = "Sequence event and payload copies under exact current scope; persist content objects, scoped row and refreshed owner cursor with the same mutation."
 
@@ -4146,9 +4146,9 @@ reason = "Sequence event and payload copies under exact current scope; persist c
 id = "companion-events-on-ack"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 621
-end_line = 635
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 624
+end_line = 638
 metric = "regions"
 reason = "Delegate EACK to receipt-owned validation with existing trusted wall-clock observation; no direct in-memory acknowledgement before durable receipt."
 
@@ -6217,8 +6217,8 @@ id = "cap13-mod-link-established"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/edge/mod.rs"
 source_sha256 = "c8f377953518f74773398ec99d37800571f5449cb887d41ed217bc512ee39a81"
-start_line = 708
-end_line = 730
+start_line = 707
+end_line = 729
 metric = "regions"
 reason = "Exact link replacement/loss releases old ACK reservations; a pending ordinary receipt defers both profile synchronization paths so neither resumes from a tentative projection or starts a conflicting checkpoint."
 
@@ -6227,8 +6227,8 @@ id = "cap13-mod-begin-link-sync"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/edge/mod.rs"
 source_sha256 = "c8f377953518f74773398ec99d37800571f5449cb887d41ed217bc512ee39a81"
-start_line = 734
-end_line = 746
+start_line = 733
+end_line = 745
 metric = "regions"
 reason = "Exact link replacement/loss releases old ACK reservations; a pending ordinary receipt defers both profile synchronization paths so neither resumes from a tentative projection or starts a conflicting checkpoint."
 
@@ -6237,8 +6237,8 @@ id = "cap13-mod-link-closed"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/edge/mod.rs"
 source_sha256 = "c8f377953518f74773398ec99d37800571f5449cb887d41ed217bc512ee39a81"
-start_line = 748
-end_line = 770
+start_line = 747
+end_line = 769
 metric = "regions"
 reason = "Exact link replacement/loss releases old ACK reservations; a pending ordinary receipt defers both profile synchronization paths so neither resumes from a tentative projection or starts a conflicting checkpoint."
 
@@ -6247,8 +6247,8 @@ id = "cap13-mod-fail-link"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/edge/mod.rs"
 source_sha256 = "c8f377953518f74773398ec99d37800571f5449cb887d41ed217bc512ee39a81"
-start_line = 797
-end_line = 805
+start_line = 796
+end_line = 804
 metric = "regions"
 reason = "Exact link replacement/loss releases old ACK reservations; a pending ordinary receipt defers both profile synchronization paths so neither resumes from a tentative projection or starts a conflicting checkpoint."
 
@@ -6257,8 +6257,8 @@ id = "cap13-mod-batch-applied"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/edge/mod.rs"
 source_sha256 = "c8f377953518f74773398ec99d37800571f5449cb887d41ed217bc512ee39a81"
-start_line = 1269
-end_line = 1354
+start_line = 1268
+end_line = 1353
 metric = "regions"
 reason = "Settle only the owned ordinary receipt; success advances exact head and private completion owners, while determinate rejection cannot consume an interposed newer exclusive batch and restores prior projection before recovery."
 
@@ -6267,8 +6267,8 @@ id = "cap13-mod-batch-rejected-with-error"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/edge/mod.rs"
 source_sha256 = "c8f377953518f74773398ec99d37800571f5449cb887d41ed217bc512ee39a81"
-start_line = 1426
-end_line = 1479
+start_line = 1425
+end_line = 1478
 metric = "regions"
 reason = "Settle only the owned ordinary receipt; success advances exact head and private completion owners, while determinate rejection cannot consume an interposed newer exclusive batch and restores prior projection before recovery."
 
@@ -6277,8 +6277,8 @@ id = "cap13-mod-index-refreshed"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/federation/edge/mod.rs"
 source_sha256 = "c8f377953518f74773398ec99d37800571f5449cb887d41ed217bc512ee39a81"
-start_line = 1261
-end_line = 1266
+start_line = 1260
+end_line = 1265
 metric = "regions"
 reason = "Queued ordinary events resume only from the explicit notification after complete authenticated batch-index installation."
 
@@ -6499,7 +6499,7 @@ file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/delivery_owner/restore/ba
 source_sha256 = "ed12daecccdec8aa37aa08e4d0f8b82e675f233d5eea6bafb38da4e7e5f62d5d"
 start_line = 128
 end_line = 140
-metric = "branches"
+metric = "regions"
 reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
 
 [[region]]
@@ -6646,9 +6646,9 @@ reason = "Combined barrier construction, recovery, and receipt decisions require
 id = "s10-cap94-validate-barrier-resume"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 145
-end_line = 175
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 148
+end_line = 178
 metric = "branches"
 reason = "Final barrier resume coverage and its receipt-owned cursor update require complete branch evidence before release."
 
@@ -6656,9 +6656,9 @@ reason = "Final barrier resume coverage and its receipt-owned cursor update requ
 id = "s10-cap94-acknowledge-barrier-resume"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 177
-end_line = 189
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 180
+end_line = 192
 metric = "branches"
 reason = "Final barrier resume coverage and its receipt-owned cursor update require complete branch evidence before release."
 
@@ -6666,9 +6666,9 @@ reason = "Final barrier resume coverage and its receipt-owned cursor update requ
 id = "s10-cap94-record-acknowledgement"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 191
-end_line = 209
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 194
+end_line = 212
 metric = "branches"
 reason = "Final barrier resume coverage and its receipt-owned cursor update require complete branch evidence before release."
 
@@ -7906,9 +7906,9 @@ reason = "Startup owns every raw result and decoding reservation until exact com
 id = "cap79-replay-103-trim-acknowledged-cache"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/events.rs"
-source_sha256 = "23cd2ccfbac0ed9f937d32ccf46950e86121e11c73eee06b11dd9c15ac8eb857"
-start_line = 211
-end_line = 232
+source_sha256 = "75e215fc69f1fa5073aabc537630e17cd274afda81ebe6462b7845fe1b9e1c62"
+start_line = 214
+end_line = 235
 metric = "regions"
 reason = "Hot cache row and byte bounds release only acknowledged body handles and preserve the complete unacknowledged tail."
 
@@ -11079,7 +11079,7 @@ file = "crates/agenc-ircd-e2ee/src/membership.rs"
 source_sha256 = "070588b97d0eb60c4620b65f7dd34f329d93151968f0c88654ef355939ac444e"
 start_line = 387
 end_line = 399
-metric = "branches"
+metric = "regions"
 reason = "A ReInit ACK's role resolves to exactly the creator entry or the non-creator entry holding its reserved ref."
 
 [[region]]
@@ -11099,7 +11099,7 @@ file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/owners.rs"
 source_sha256 = "7ab675f3acf765dac20aa5fec21573141543cbc82c9044e799e00e25740d40da"
 start_line = 113
 end_line = 153
-metric = "branches"
+metric = "regions"
 reason = "Installing or replacing an account keeps the owner index, per-conversation charge and global total exact, releasing the previous account's charges before adding the new ones."
 
 [[region]]
@@ -11360,8 +11360,8 @@ id = "daemon-sequencer-signer-setup"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/daemon.rs"
 source_sha256 = "063211d4c00616e582bf62c0ddceab5c6291ba57eb0ed83e0571a06ad68658a9"
-start_line = 1288
-end_line = 1354
+start_line = 1235
+end_line = 1301
 metric = "branches"
 reason = "The coordinator installs the active key for the file's first credential, the successor key exactly when the file names a successor, and holds a configured retired key for the durable reload; an edge installs no signer (architecture 9457)."
 

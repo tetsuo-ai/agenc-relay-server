@@ -452,3 +452,6 @@ fn close_authorization_ids_bind_the_intent() -> TestResult {
     assert_ne!(channel_name_hash(b"#a")?, channel_name_hash(b"#b")?);
     Ok(())
 }
+
+#[path = "route/fences.rs"]
+mod fences;
