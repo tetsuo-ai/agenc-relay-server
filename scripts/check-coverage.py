@@ -20,6 +20,9 @@ from typing import NoReturn
 MINIMUM_BRANCH_PERCENT = 75.0
 MINIMUM_LINE_PERCENT = 90.0
 CRITICAL_PERCENT = 100.0
+# An upper bound on any source line number, used to count one file's whole
+# executable extent when a reviewed span matches nothing inside it.
+MAX_SOURCE_LINE = 2**31 - 1
 CARGO_LLVM_COV_VERSION = "0.9.0"
 LLVM_COVERAGE_EXPORT_TYPE = "llvm.coverage.json.export"
 LLVM_COVERAGE_EXPORT_VERSION = "3.1.0"
@@ -525,10 +528,29 @@ def validate_report(
                     "metric or narrowed"
                 )
             else:
-                failures.append(
-                    f"critical region {identifier} ({region['file']}:{start_line}-{end_line}) "
-                    "matched no executable coverage data"
-                )
+                # A span that matches no region entry at all holds no
+                # executable code. Say which of the two causes it is: a span
+                # anchored on a doc comment, a declaration or a field list
+                # inside a file the report does cover, or a file the report
+                # never exercised. Both keep the message above as their stem.
+                elsewhere = region_counts(file_record, 1, MAX_SOURCE_LINE)[1]
+                if elsewhere:
+                    failures.append(
+                        f"critical region {identifier} "
+                        f"({region['file']}:{start_line}-{end_line}) "
+                        "matched no executable coverage data although the file reports "
+                        f"{elsewhere} executable regions elsewhere, so the span is "
+                        "anchored on non-executable text rather than on the item the "
+                        "row names and must be re-anchored onto that item"
+                    )
+                else:
+                    failures.append(
+                        f"critical region {identifier} "
+                        f"({region['file']}:{start_line}-{end_line}) "
+                        "matched no executable coverage data, and neither does any "
+                        "other line of the file, so the report does not exercise this "
+                        "file at all and cannot decide the row"
+                    )
         elif covered != total:
             percent = 100.0 * covered / total
             failures.append(
@@ -886,7 +908,18 @@ def self_test(root: Path, policy_path: Path) -> int:
     expect_rejection(
         "empty critical range",
         lambda: validate_report(report, [empty_range]),
-        "matched no executable",
+        "anchored on non-executable text",
+    )
+    cases += 1
+    # The same empty span in a file the report never exercised is a report
+    # defect, not a mis-anchored span, and must not share the message above.
+    unexercised_file = copy.deepcopy(report)
+    unexercised_file["data"][0]["files"][0]["segments"] = []  # type: ignore[index]
+    unexercised_file["data"][0]["files"][0]["branches"] = []  # type: ignore[index]
+    expect_rejection(
+        "reviewed span in an unexercised file",
+        lambda: validate_report(unexercised_file, [empty_range]),
+        "does not exercise this file at all",
     )
     cases += 1
     # The same empty branch count over a span that does emit executable
