@@ -26,11 +26,26 @@ fn the_completion_table_is_closed() -> Result<(), PlanError> {
     );
     assert_eq!(
         completion_for(Opcode(42), ResultKind::Bound),
-        Err(PlanError::UnknownOpcode)
+        Err(PlanError::ResultNotPermitted)
     );
     assert_eq!(
-        completion_for(Opcode(43), ResultKind::Failed),
-        Err(PlanError::UnknownOpcode)
+        completion_for(Opcode::SUBMIT_RECOVERY, ResultKind::RecoveryAccepted)?,
+        Completion::Generic
+    );
+    assert_eq!(
+        completion_for(Opcode::SUBMIT_RECOVERY_ELEMENT, ResultKind::RecoveryClosed)?,
+        Completion::Generic
+    );
+    assert_eq!(
+        completion_for(
+            Opcode::SUBMIT_RECOVERY_ELEMENT,
+            ResultKind::RecoveryConflict
+        )?,
+        Completion::Generic
+    );
+    assert_eq!(
+        completion_for(Opcode(43), ResultKind::Failed)?,
+        Completion::None
     );
     assert_eq!(
         completion_for(Opcode(45), ResultKind::Failed),

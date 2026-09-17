@@ -32,7 +32,10 @@ mod declared_gates;
 mod normal_gates;
 
 #[path = "close_authorization.rs"]
-mod close_authorization;
+pub(super) mod close_authorization;
+
+#[path = "recovery_submission.rs"]
+mod recovery_submission;
 
 #[test]
 fn a_pending_restored_route_cannot_sign_a_new_finalization() -> TestResult {

@@ -104,6 +104,8 @@ mod close_authority;
 mod credential_bounds;
 #[path = "stage_eight_e2ee/credential_replacement.rs"]
 mod credential_replacement;
+#[path = "stage_eight_e2ee/recovery_submission.rs"]
+mod recovery_submission;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
 mod stage_ten_capacity;
 #[path = "stage_eight_e2ee/stage_ten_drills.rs"]
@@ -2528,10 +2530,14 @@ fn fragments_object(lines: &[String]) -> TestResult<Vec<u8>> {
 /// Commit candidate sequenced by the coordinator, then its finalization
 /// with the binder's council vote; returns the finalization identifier,
 /// which is the next accepted state.
-fn activate_bootstrap(
+/// Activates the bootstrap with the finality votes of `co_voters` beside
+/// the binder's: both councils vote on a bootstrap activation (companion
+/// 9.5), so every principal of the resulting council signs.
+fn activate_bootstrap_with(
     client: &mut IrcClient,
     binder: &mut Principal,
     bound: &BoundConversation,
+    co_voters: &[&Principal],
 ) -> TestResult<[u8; 32]> {
     let network = *NETWORK_ID.as_bytes();
     let conversation = bound.conversation;
@@ -2683,11 +2689,12 @@ fn activate_bootstrap(
         candidate_sequence: receipt.tbs.candidate_sequence,
         predecessor_record_id: receipt.tbs.predecessor_record_id,
     };
-    let vote = builders::finality_vote(
-        &binder.keys,
-        binder.device,
-        &vote_tbs(&slot, candidate_id, Terminal::finalize(finalization_id)),
-    )?;
+    let tbs = vote_tbs(&slot, candidate_id, Terminal::finalize(finalization_id));
+    let mut votes = vec![builders::finality_vote(&binder.keys, binder.device, &tbs)?];
+    for voter in co_voters {
+        votes.push(builders::finality_vote(&voter.keys, voter.device, &tbs)?);
+    }
+    votes.sort_by_key(|vote| (vote.signer_root_fingerprint, vote.signer_device_id));
     let request = IrcFinalizationRequest {
         proof: IrcFinalizationProof {
             core,
@@ -2695,7 +2702,7 @@ fn activate_bootstrap(
             authorization,
             acknowledgements: TlsVec::new(vec![ack])?,
         },
-        votes: TlsVec::new(vec![vote])?,
+        votes: TlsVec::new(votes)?,
     };
     let request = wire_object(IrcWireObjectKind::FinalizationRequest, &request)?;
     let label = binder.label();
@@ -2871,7 +2878,7 @@ fn direct_round(
     )?;
     let terminal = step(
         "direct activation",
-        activate_bootstrap(first, first_keys, &direct),
+        activate_bootstrap_with(first, first_keys, &direct, &[&*second_keys]),
     )?;
     let note = step(
         "direct note",
@@ -3055,7 +3062,7 @@ fn exercise_encrypted_network(network: &Network, coordinator: &mut DaemonProcess
 
     let finalization_id = step(
         "channel activation",
-        activate_bootstrap(&mut alice, &mut alice_keys, &bound),
+        activate_bootstrap_with(&mut alice, &mut alice_keys, &bound, &[&bob_keys]),
     )?;
     let broadcast = bob.read_until(|line| line.contains(" EGROUP FINALIZED "))?;
     assert_contains(
@@ -4002,7 +4009,7 @@ mod real_clients {
             certify_commit(
                 &mut alice,
                 &mut alice_keys,
-                &[],
+                &[&bob_keys],
                 &bound,
                 &activation.commit().to_bytes()?,
                 (0, genesis),

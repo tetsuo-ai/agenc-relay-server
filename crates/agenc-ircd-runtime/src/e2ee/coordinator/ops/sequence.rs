@@ -223,6 +223,35 @@ fn count_votes(
     })
 }
 
+/// The resulting council of a bootstrap activation, which votes beside the
+/// old council (companion 9.5); every other rule has no second council.
+fn resulting_council(
+    exec: &Exec<'_>,
+    conversation_id: &[u8; 32],
+    authorization: &agenc_ircd_e2ee::objects::conversation::IrcCommitAuthorizationTbs,
+) -> Result<Option<VerifiedPolicy>, Fail> {
+    use agenc_ircd_e2ee::objects::conversation::IrcCommitAuthorizationRule;
+    if authorization.authorization_rule != IrcCommitAuthorizationRule::BootstrapActivation {
+        return Ok(None);
+    }
+    let retained = conversation(exec, conversation_id)?
+        .policies
+        .get(&authorization.resulting_policy_id)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::PolicyRequired, conversation_id))?;
+    Ok(Some(retained.policy.clone()))
+}
+
+/// Whether the votes of `policy`'s own council members for `terminal` reach
+/// its quorum.
+fn council_reached(ledger: &QuorumLedger, policy: &VerifiedPolicy, terminal: &Terminal) -> bool {
+    let count = ledger
+        .votes()
+        .filter(|(_, stood)| *stood == terminal)
+        .filter(|(signer, _)| policy.council_member(&signer.0, &signer.1).is_some())
+        .count();
+    count >= usize::from(policy.quorum)
+}
+
 /// The `PENDING` answer of a terminal request below quorum: the request is
 /// retained and the counted votes are kept for the subject.
 fn pending(
@@ -687,15 +716,30 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         core.candidate_id,
         terminal,
     );
-    let quorum = count_votes(
+    let resulting = resulting_council(exec, &conversation_id, authorization)?;
+    let mut quorum = count_votes(
         exec,
         &conversation_id,
         &core.candidate_id,
         &policy,
         request.votes.as_slice(),
         terminal,
-        |ledger, vote| ledger.record(&policy, &rosters, &tbs, vote),
+        |ledger, vote| {
+            let council = resulting
+                .as_ref()
+                .filter(|council| {
+                    let signer = (&vote.signer_root_fingerprint, &vote.signer_device_id);
+                    policy.council_member(signer.0, signer.1).is_none()
+                        && council.council_member(signer.0, signer.1).is_some()
+                })
+                .unwrap_or(&policy);
+            ledger.record(council, &rosters, &tbs, vote)
+        },
     )?;
+    if let Some(council) = &resulting {
+        quorum.reached = council_reached(&quorum.ledger, &policy, &terminal)
+            && council_reached(&quorum.ledger, council, &terminal);
+    }
     if !quorum.reached {
         return pending(
             conversation_id,

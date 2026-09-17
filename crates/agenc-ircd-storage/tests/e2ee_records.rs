@@ -1372,3 +1372,156 @@ fn object_owner_rows_round_trip_and_refuse_inconsistent_accounts() -> Result<(),
     assert!(validate_state_body(OWNER_ROW_KIND, &[]).is_err());
     Ok(())
 }
+
+#[test]
+fn recovery_rows_round_trip_and_refuse_inconsistent_outcomes() -> Result<(), Box<dyn Error>> {
+    use agenc_ircd_storage::e2ee_records::{
+        RECOVERY_RECORD_ROW_KIND, RECOVERY_SUBMISSION_ROW_KIND, RecoveryOutcome, RecoveryRecordRow,
+        RecoverySubmissionRow,
+    };
+    let open = RecoverySubmissionRow {
+        account_id: [b'a'; 24],
+        device_id: [7; 16],
+        element_kind: 1,
+        element_object_kind: IrcWireObjectKind::SequencerRecord.value(),
+        element_object_id: [2; 32],
+        route_sequence: 3,
+        predecessor_record_id: [4; 32],
+        accepted_at: 1_700_000_000,
+        submission_object_id: [5; 32],
+        element_retained: false,
+        outcome: RecoveryOutcome::Open,
+    };
+    let extended = RecoverySubmissionRow {
+        element_retained: true,
+        outcome: RecoveryOutcome::Extended { record_id: [6; 32] },
+        ..open
+    };
+    let closed = RecoverySubmissionRow {
+        element_kind: 2,
+        element_object_kind: IrcWireObjectKind::CloseAuthorization.value(),
+        element_retained: true,
+        outcome: RecoveryOutcome::Closed { close_id: [8; 32] },
+        ..open
+    };
+    let conflict = RecoverySubmissionRow {
+        element_retained: true,
+        outcome: RecoveryOutcome::Conflict {
+            installed_record_id: [6; 32],
+            conflicting_record_id: [9; 32],
+        },
+        ..open
+    };
+    let referenced = RecoverySubmissionRow {
+        element_kind: 3,
+        element_object_kind: IrcWireObjectKind::Policy.value(),
+        element_retained: true,
+        outcome: RecoveryOutcome::Referenced,
+        ..open
+    };
+    for row in [&open, &extended, &closed, &conflict, &referenced] {
+        let encoded = row.encode().map_err(|e| format!("encode {row:?}: {e:?}"))?;
+        assert_eq!(
+            &RecoverySubmissionRow::decode(&encoded)
+                .map_err(|e| format!("decode {row:?}: {e:?}"))?,
+            row
+        );
+        assert!(validate_state_body(RECOVERY_SUBMISSION_ROW_KIND, &encoded).is_ok());
+    }
+    // A complete outcome without its retained element, a zero element or
+    // acceptance time, and an element kind outside the closed set are refused.
+    for broken in [
+        RecoverySubmissionRow {
+            element_retained: false,
+            ..extended
+        },
+        RecoverySubmissionRow {
+            element_object_id: [0; 32],
+            ..open
+        },
+        RecoverySubmissionRow {
+            accepted_at: 0,
+            ..open
+        },
+        RecoverySubmissionRow {
+            element_kind: 4,
+            ..open
+        },
+    ] {
+        assert!(broken.encode().is_err(), "{broken:?}");
+    }
+    let key = RecoverySubmissionRow::key(&[1; 32], &[2; 32]).map_err(|e| format!("key: {e:?}"))?;
+    assert_eq!(RecoverySubmissionRow::parse_key(&key)?, ([1; 32], [2; 32]));
+    assert!(key.as_bytes().starts_with(b"recovery-submission/v1/"));
+    assert!(RecoverySubmissionRow::range().is_ok());
+
+    let record = RecoveryRecordRow {
+        record_id: [1; 32],
+        record_object_id: [2; 32],
+        predecessor_record_id: [3; 32],
+        record_kind: 2,
+        submission_id: [4; 32],
+    };
+    let encoded = record.encode()?;
+    assert_eq!(RecoveryRecordRow::decode(&encoded)?, record);
+    assert!(validate_state_body(RECOVERY_RECORD_ROW_KIND, &encoded).is_ok());
+    assert!(
+        RecoveryRecordRow {
+            record_kind: 7,
+            ..record
+        }
+        .encode()
+        .is_err()
+    );
+    assert!(
+        RecoveryRecordRow {
+            record_id: [0; 32],
+            ..record
+        }
+        .encode()
+        .is_err()
+    );
+    let key = RecoveryRecordRow::key(&[1; 32], 9).map_err(|e| format!("key: {e:?}"))?;
+    assert_eq!(RecoveryRecordRow::parse_key(&key)?, ([1; 32], 9));
+    assert!(key.as_bytes().starts_with(b"recovery-record/v1/"));
+    // The submission body cannot be replayed as a record row or vice versa.
+    assert!(validate_state_body(RECOVERY_RECORD_ROW_KIND, &open.encode()?).is_err());
+    assert!(validate_state_body(RECOVERY_SUBMISSION_ROW_KIND, &record.encode()?).is_err());
+    Ok(())
+}
+
+#[test]
+fn recovery_rows_refuse_zero_kinds_and_identifiers() -> TestResult {
+    use agenc_ircd_storage::e2ee_records::{
+        RecoveryOutcome, RecoveryRecordRow, RecoverySubmissionRow,
+    };
+    let submission = RecoverySubmissionRow {
+        account_id: [b'a'; 24],
+        device_id: [1; 16],
+        element_kind: 1,
+        element_object_kind: 2,
+        element_object_id: [3; 32],
+        route_sequence: 4,
+        predecessor_record_id: [5; 32],
+        accepted_at: 6,
+        submission_object_id: [7; 32],
+        element_retained: true,
+        outcome: RecoveryOutcome::Open,
+    };
+    assert!(submission.encode().is_ok());
+    let mut zero_kind = submission;
+    zero_kind.element_object_kind = 0;
+    assert!(zero_kind.encode().is_err());
+    let mut zero_object = submission;
+    zero_object.submission_object_id = [0; 32];
+    assert!(zero_object.encode().is_err());
+    let record = RecoveryRecordRow {
+        record_id: [1; 32],
+        record_object_id: [0; 32],
+        predecessor_record_id: [2; 32],
+        record_kind: 1,
+        submission_id: [3; 32],
+    };
+    assert!(record.encode().is_err());
+    Ok(())
+}

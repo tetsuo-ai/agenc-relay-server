@@ -617,8 +617,12 @@ impl CompanionCoordinator {
     ) -> Result<Vec<Action>, CompanionFault> {
         self.require_self(coordinator_server_id)?;
         require_live(host, peer, incarnation)?;
+        // A staged batch owns the peer table until it commits.
+        self.pending
+            .as_ref()
+            .map_or(Ok(()), |_| Err(CompanionFault::Protocol))?;
         let sync = self.peers.entry(peer).or_default();
-        if sync.active || self.pending.is_some() {
+        if sync.active {
             return Err(CompanionFault::Protocol);
         }
         let same_scope =
@@ -639,8 +643,26 @@ impl CompanionCoordinator {
             };
             return self.begin_snapshot(peer, incarnation, generation, now_millis, host, entropy);
         }
-        if sync.snapshot.is_some() || sync.transfer_incomplete {
-            return Err(CompanionFault::Protocol);
+        if let Some(snapshot) = sync.snapshot.as_ref() {
+            // A second ERESUME on the link carrying the transfer is a
+            // violation. After link loss the edge discarded its staged pages
+            // with the link, and the pending cut is published again from its
+            // first page on the new link.
+            if snapshot.pages_sent != 0 {
+                return Err(CompanionFault::Protocol);
+            }
+            return self.restart_transfer(peer, now_millis, host);
+        }
+        if sync.transfer_incomplete {
+            // The pending cut expired or was retired: the scope resets to a
+            // fresh cut in its next delivery generation.
+            let generation = self
+                .state
+                .streams
+                .get(&peer)
+                .and_then(|stream| stream.generation.checked_add(1))
+                .ok_or(CompanionFault::Ceiling)?;
+            return self.begin_snapshot(peer, incarnation, generation, now_millis, host, entropy);
         }
         let stream = self
             .state
@@ -1033,6 +1055,9 @@ impl CompanionCoordinator {
         if let Some(sync) = self.peers.get_mut(&peer) {
             sync.active = false;
             sync.link = None;
+            if let Some(snapshot) = sync.snapshot.as_mut() {
+                snapshot.pages_sent = 0;
+            }
             sync.origins_reset = false;
             sync.origins_ready = false;
         }

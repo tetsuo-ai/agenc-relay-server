@@ -1114,3 +1114,107 @@ fn limits_budgets_and_truncated_evidence_leave_the_chain_unchanged() -> TestResu
     assert_eq!(chain.head().sequence, Some(1));
     Ok(())
 }
+
+fn resumed_from(
+    genesis: &Genesis,
+    chain: &HistoricalChain,
+) -> Result<agenc_ircd_e2ee::history::ResumedChain, E2eeError> {
+    Ok(agenc_ircd_e2ee::history::ResumedChain {
+        binding: chain.binding().clone(),
+        principals: chain.principals().clone(),
+        policy: chain.policy().clone(),
+        sequencer: *chain.sequencer(),
+        required_operational_policy_id: policy_id_of(&genesis.operational_policy)?,
+        bootstrap_pending: chain.bootstrap_pending(),
+        epoch: chain.epoch(),
+        accepted_state_id: *chain.accepted_state_id(),
+        head: *chain.head(),
+        candidate: chain.candidate().copied(),
+        next_candidate_sequence: chain.candidate().map_or(0, |candidate| {
+            candidate.candidate_sequence.saturating_add(1)
+        }),
+        lifecycle: *chain.lifecycle(),
+    })
+}
+
+#[test]
+fn a_chain_resumes_from_validated_heads_and_refuses_disagreeing_facts() -> TestResult {
+    let genesis = Genesis::new()?;
+    // The genesis anchor: no record yet, the head is the accepted state.
+    let fresh = genesis.chain()?;
+    let resumed = HistoricalChain::resume(
+        &NETWORK,
+        &genesis.conversation,
+        resumed_from(&genesis, &fresh)?,
+        ChainLimits::DEFAULT,
+    )?;
+    assert_eq!(resumed.head(), fresh.head());
+    assert_eq!(resumed.next_position()?.route_sequence, 0);
+    // A recorded head after the bootstrap activation.
+    let (activated, _) = activated(&genesis)?;
+    let resumed = HistoricalChain::resume(
+        &NETWORK,
+        &genesis.conversation,
+        resumed_from(&genesis, &activated)?,
+        ChainLimits::DEFAULT,
+    )?;
+    assert_eq!(resumed.epoch(), 1);
+    assert_eq!(resumed.next_position()?.route_sequence, 2);
+    // An open candidate agreeing with the head.
+    let mut open = genesis.chain()?;
+    let mut log = Log::new(&genesis)?;
+    let (candidate_record, _) = log.candidate([1; 32])?;
+    adopt(&mut open, &candidate_record)?;
+    let facts = resumed_from(&genesis, &open)?;
+    let resumed = HistoricalChain::resume(
+        &NETWORK,
+        &genesis.conversation,
+        facts.clone(),
+        ChainLimits::DEFAULT,
+    )?;
+    assert_eq!(resumed.candidate(), open.candidate());
+    // Facts that disagree with the head are refused.
+    let candidate = facts.candidate.ok_or("open candidate")?;
+    let disagreeing = [
+        agenc_ircd_e2ee::history::OpenCandidate {
+            route_sequence: candidate.route_sequence + 1,
+            ..candidate
+        },
+        agenc_ircd_e2ee::history::OpenCandidate {
+            candidate_id: [9; 32],
+            ..candidate
+        },
+        agenc_ircd_e2ee::history::OpenCandidate {
+            predecessor_record_id: [9; 32],
+            ..candidate
+        },
+    ];
+    for wrong in disagreeing {
+        let mut facts = resumed_from(&genesis, &open)?;
+        facts.candidate = Some(wrong);
+        assert_eq!(
+            HistoricalChain::resume(&NETWORK, &genesis.conversation, facts, ChainLimits::DEFAULT)
+                .err(),
+            Some(E2eeError::InvalidValue)
+        );
+    }
+    let mut other_conversation = resumed_from(&genesis, &fresh)?;
+    other_conversation.accepted_state_id = *fresh.accepted_state_id();
+    assert_eq!(
+        HistoricalChain::resume(&NETWORK, &[9; 32], other_conversation, ChainLimits::DEFAULT).err(),
+        Some(E2eeError::InvalidValue)
+    );
+    let mut wrong_anchor = resumed_from(&genesis, &fresh)?;
+    wrong_anchor.head.record_id = [9; 32];
+    assert_eq!(
+        HistoricalChain::resume(
+            &NETWORK,
+            &genesis.conversation,
+            wrong_anchor,
+            ChainLimits::DEFAULT
+        )
+        .err(),
+        Some(E2eeError::InvalidValue)
+    );
+    Ok(())
+}

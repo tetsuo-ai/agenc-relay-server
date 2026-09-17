@@ -81,6 +81,7 @@ pub(super) fn resume(
         .ok_or(Violation::Misaddressed)?;
     let same_generation = retained_resume_scope(state, generation)?;
     let retained = same_generation && cursor_retained(state, cursor);
+    adopt_reported_generation(state, same_generation, generation);
     if !retained {
         if same_generation && stage_barrier_resume(coordinator, context, peer, link, cursor)? {
             return Ok(());
@@ -115,6 +116,16 @@ pub(super) fn resume(
         start_resend(coordinator, context, peer, next);
     }
     Ok(())
+}
+
+/// A generation the edge holds above this coordinator's numbering (a
+/// coordinator restored to an older backup under a new recovery epoch,
+/// FED-10) is never reissued: the next snapshot counts on from it, so the
+/// edge's rows of the old generation never collide with the new ones.
+fn adopt_reported_generation(state: &mut super::PeerState, same_generation: bool, generation: u64) {
+    if !same_generation && generation > state.projection_generation {
+        state.projection_generation = generation;
+    }
 }
 
 fn retained_resume_scope(state: &super::PeerState, generation: u64) -> Result<bool, Violation> {

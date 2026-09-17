@@ -122,6 +122,7 @@ pub(super) struct Restore {
     origin_sequences: Vec<(StoredKey, OriginSequenceRow)>,
     pub(super) delivery: super::delivery_owner::restore::Restore,
     owners: super::owners::Rebuild,
+    recovery: super::recovery_lineage::Recoveries,
 }
 
 impl Restore {
@@ -187,6 +188,25 @@ impl Restore {
             DELIVERY_ROW_KIND => self.objects.poison(),
             agenc_ircd_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND => {
                 self.delivery.admit_owner(key, value);
+            }
+            agenc_ircd_storage::e2ee_records::RECOVERY_SUBMISSION_ROW_KIND => {
+                use agenc_ircd_storage::e2ee_records::RecoverySubmissionRow;
+                if let (Ok((conversation, submission)), Ok(row)) = (
+                    RecoverySubmissionRow::parse_key(key),
+                    RecoverySubmissionRow::decode(body),
+                ) {
+                    self.recovery
+                        .insert_submission(conversation, submission, row);
+                }
+            }
+            agenc_ircd_storage::e2ee_records::RECOVERY_RECORD_ROW_KIND => {
+                use agenc_ircd_storage::e2ee_records::RecoveryRecordRow;
+                if let (Ok((conversation, sequence)), Ok(row)) = (
+                    RecoveryRecordRow::parse_key(key),
+                    RecoveryRecordRow::decode(body),
+                ) {
+                    self.recovery.insert_record(conversation, sequence, row);
+                }
             }
             _ => {}
         }
@@ -502,6 +522,7 @@ pub(super) fn rebuild(
     restore_successors(state, &index)?;
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.finish(state);
+    state.recovery = restore.recovery;
     restore.delivery.apply(coordinator)
 }
 

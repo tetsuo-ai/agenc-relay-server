@@ -3340,6 +3340,59 @@ fn a_refused_cut_page_stays_queued_at_its_position() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_generation_the_edge_holds_above_the_coordinator_is_never_reissued() -> TestResult {
+    let a = peer_identity(ServerId::from_bytes([54; 16]), "edge-a.example");
+    run_coordinator(&[a], |inbox| async move {
+        let mut edge_a = Edge::new(inbox, 54);
+        let mut origin_a = Origin::new(74);
+        edge_a.establish().await?;
+        synchronize_ok(&mut edge_a, &mut [&mut origin_a]).await?;
+        // A coordinator restored to an older backup numbers its projection
+        // generations below the ones this edge already installed under the
+        // earlier epoch; the snapshot it opens counts on from the edge's.
+        edge_a.close().await?;
+        edge_a.establish().await?;
+        edge_a.projection_generation = 6;
+        edge_a.last_ack = None;
+        let FederationFrame::ResumeSnapshot { .. } =
+            synchronize(&mut edge_a, &mut [&mut origin_a]).await?
+        else {
+            return Err("expected FRESUME SNAPSHOT".into());
+        };
+        let FederationFrame::SnapshotBegin {
+            identity,
+            entry_count,
+            ..
+        } = edge_a.next_frame().await?
+        else {
+            return Err("expected FSNAPSHOT BEGIN".into());
+        };
+        assert_eq!(identity.projection_generation, 7);
+        for _ in 0..entry_count {
+            let _entry = edge_a.next_object().await?;
+        }
+        let FederationFrame::SnapshotEnd { .. } = edge_a.next_frame().await? else {
+            return Err("expected FSNAPSHOT END".into());
+        };
+        edge_a
+            .frame(FederationFrame::SnapshotReady {
+                coordinator_server_id: COORDINATOR,
+                identity,
+            })
+            .await?;
+        let FederationFrame::SnapshotActive {
+            identity: active, ..
+        } = edge_a.next_frame().await?
+        else {
+            return Err("expected FSNAPSHOT ACTIVE".into());
+        };
+        assert_eq!(active.projection_generation, 7);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn unknown_cursor_triggers_a_verified_snapshot_and_active_swap() -> TestResult {
     let a = peer_identity(ServerId::from_bytes([54; 16]), "edge-a.example");
     let b = peer_identity(ServerId::from_bytes([55; 16]), "edge-b.example");

@@ -98,6 +98,10 @@ tls_enum! {
         AcknowledgeMailbox = 40,
         /// Publish a conversation policy.
         SubmitPolicy = 41,
+        /// Accept a recovery submission (companion 13.7.4).
+        SubmitRecovery = 42,
+        /// Deliver the element an accepted recovery submission names.
+        SubmitRecoveryElement = 43,
         /// Store a leaf-membership proof (companion 13.7.3).
         SubmitMembership = 44,
     }
@@ -280,6 +284,14 @@ tls_enum! {
         ReinitAborted = 22,
         /// Mailbox ACK accepted.
         MailboxAcked = 23,
+        /// A recovery submission was accepted (companion 13.7.4).
+        RecoveryAccepted = 24,
+        /// A recovery element extended the restored head.
+        RecoveryExtended = 25,
+        /// A recovery element installed the permanent `closed` gate.
+        RecoveryClosed = 26,
+        /// A recovery element installed the permanent `conflict` gate.
+        RecoveryConflict = 27,
     }
 }
 

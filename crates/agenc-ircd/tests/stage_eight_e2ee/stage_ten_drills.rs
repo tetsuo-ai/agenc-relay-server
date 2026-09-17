@@ -467,7 +467,7 @@ fn node(network: &Network, index: usize) -> &NodeFixture {
 }
 
 /// The storage keys every fixture node derives from its seed.
-fn node_keys(fixture: &NodeFixture) -> ([u8; 32], [u8; 32], [u8; 32]) {
+pub(super) fn node_keys(fixture: &NodeFixture) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let seed = fixture.seed;
     (
         [seed.wrapping_add(7); 32],
@@ -476,7 +476,7 @@ fn node_keys(fixture: &NodeFixture) -> ([u8; 32], [u8; 32], [u8; 32]) {
     )
 }
 
-fn engine_limits() -> StorageEngineLimits {
+pub(super) fn engine_limits() -> StorageEngineLimits {
     StorageEngineLimits {
         redb_cache_bytes: DEFAULT_REDB_CACHE_BYTES,
         fixed_reserve_bytes: DISK_RESERVE_BYTES,
@@ -489,7 +489,7 @@ fn engine_limits() -> StorageEngineLimits {
 
 /// Writes a signed backup of a stopped node through the production storage
 /// owner and returns its path with the record count and stream length.
-fn write_backup(
+pub(super) fn write_backup(
     fixture: &NodeFixture,
     name: &str,
     sequence: u64,
@@ -532,35 +532,38 @@ fn write_backup(
     ))
 }
 
-fn read_key(path: &Path) -> Option<[u8; 32]> {
+pub(super) fn read_key(path: &Path) -> Option<[u8; 32]> {
     let bytes = fs::read(path).ok()?;
     bytes.try_into().ok()
 }
 
 /// What a restore is asked to change.
-struct RestorePlan<'a> {
-    backup: &'a Path,
-    new_master: bool,
+pub(super) struct RestorePlan<'a> {
+    pub(super) backup: &'a Path,
+    pub(super) new_master: bool,
     /// Remove the current state directory first: the disaster path with no
     /// current guard witness.
-    disaster: bool,
-    generation: u32,
+    pub(super) disaster: bool,
+    pub(super) generation: u32,
 }
 
 /// The receipt facts of one `storage restore` and the config rewrite it
 /// requires.
-struct RestoreOutcome {
-    receipt: String,
-    epoch: String,
-    incarnation_changed: bool,
-    current_generation: String,
-    output: PathBuf,
+pub(super) struct RestoreOutcome {
+    pub(super) receipt: String,
+    pub(super) epoch: String,
+    pub(super) incarnation_changed: bool,
+    pub(super) current_generation: String,
+    pub(super) output: PathBuf,
 }
 
 /// Runs the frozen binary's `storage restore` for `fixture`, rewrites its
 /// configuration to the restored directory and keys, and returns the new
 /// recovery epoch the peers must re-pin.
-fn restore_node(fixture: &NodeFixture, plan: &RestorePlan<'_>) -> TestResult<RestoreOutcome> {
+pub(super) fn restore_node(
+    fixture: &NodeFixture,
+    plan: &RestorePlan<'_>,
+) -> TestResult<RestoreOutcome> {
     let keys = fixture.data_dir.join("keys");
     let old_master = current_key_file(fixture, "master_key_file")?;
     let old_guard = current_key_file(fixture, "rollback_guard_key_file")?;
@@ -667,7 +670,7 @@ fn bounded_text(bytes: &[u8]) -> String {
 }
 
 /// Re-pins the coordinator's new recovery epoch in both edge configurations.
-fn repin_coordinator_epoch(network: &Network, epoch: &str) -> TestResult {
+pub(super) fn repin_coordinator_epoch(network: &Network, epoch: &str) -> TestResult {
     for edge in [&network.edge_a, &network.edge_b] {
         repin_peer_epoch(edge, network.coordinator.server_id, epoch)?;
     }
@@ -691,7 +694,11 @@ fn seed_state(network: &Network) -> TestResult<AccountId> {
 
 /// Authenticates the drill account on an edge; the OPAQUE record and the
 /// login index it needs live in the coordinator's restored state.
-fn account_login(fixture: &NodeFixture, account: AccountId, nick: &str) -> TestResult<IrcClient> {
+pub(super) fn account_login(
+    fixture: &NodeFixture,
+    account: AccountId,
+    nick: &str,
+) -> TestResult<IrcClient> {
     account_login_counting(fixture, account, nick).map(|(client, _)| client)
 }
 
@@ -705,7 +712,7 @@ fn account_login_counting(
     account_login_named(fixture, account, nick, DRILL_ACCOUNT_LOGIN)
 }
 
-fn account_login_named(
+pub(super) fn account_login_named(
     fixture: &NodeFixture,
     account: AccountId,
     nick: &str,

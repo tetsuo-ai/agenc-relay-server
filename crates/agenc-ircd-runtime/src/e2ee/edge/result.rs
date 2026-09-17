@@ -68,6 +68,14 @@ pub enum ResultValue {
     Claimed([u8; 16], Vec<u8>, [u8; 32]),
     /// `mailbox_acked`.
     MailboxAcked([u8; 32], [u8; 32]),
+    /// `recovery_accepted`: conversation and submission identifiers.
+    RecoveryAccepted([u8; 32], [u8; 32]),
+    /// `recovery_extended`: conversation, route sequence and record identifier.
+    RecoveryExtended([u8; 32], u64, [u8; 32]),
+    /// `recovery_closed`: conversation and close identifiers.
+    RecoveryClosed([u8; 32], [u8; 32]),
+    /// `recovery_conflict`: conversation, route sequence and both record identifiers.
+    RecoveryConflict([u8; 32], u64, [u8; 32], [u8; 32]),
 }
 
 /// One decoded result with its descriptors.
@@ -158,6 +166,17 @@ pub fn decode_value(kind: IrcFederationResultKind, bytes: &[u8]) -> Result<Resul
             ResultValue::Claimed(device, reader.opaque(1, 255)?, reader.fixed()?)
         }
         K::MailboxAcked => ResultValue::MailboxAcked(reader.fixed()?, reader.fixed()?),
+        K::RecoveryAccepted => ResultValue::RecoveryAccepted(reader.fixed()?, reader.fixed()?),
+        K::RecoveryExtended => {
+            ResultValue::RecoveryExtended(reader.fixed()?, reader.u64()?, reader.fixed()?)
+        }
+        K::RecoveryClosed => ResultValue::RecoveryClosed(reader.fixed()?, reader.fixed()?),
+        K::RecoveryConflict => ResultValue::RecoveryConflict(
+            reader.fixed()?,
+            reader.u64()?,
+            reader.fixed()?,
+            reader.fixed()?,
+        ),
     };
     reader.finish()?;
     Ok(value)
@@ -567,6 +586,14 @@ fn scalar_line(value: &ResultValue, pending: &PendingRequest) -> Option<SuccessL
         ResultValue::Finalized(a, epoch, c, d) => SuccessLine::Finalized(*a, *epoch, *c, *d),
         ResultValue::Quad(a, b, c, d) => SuccessLine::Aborted(*a, *b, *c, *d),
         ResultValue::MailboxAcked(token, object) => SuccessLine::MailboxAcked(*token, *object),
+        ResultValue::RecoveryAccepted(a, b) => SuccessLine::RecoveryAccepted(*a, *b),
+        ResultValue::RecoveryExtended(a, sequence, c) => {
+            SuccessLine::RecoveryExtended(*a, *sequence, *c)
+        }
+        ResultValue::RecoveryClosed(a, b) => SuccessLine::RecoveryClosed(*a, *b),
+        ResultValue::RecoveryConflict(a, sequence, c, d) => {
+            SuccessLine::RecoveryConflict(*a, *sequence, *c, *d)
+        }
         ResultValue::Empty
         | ResultValue::Failed { .. }
         | ResultValue::AttachChallenge(..)

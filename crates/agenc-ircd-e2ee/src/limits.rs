@@ -248,6 +248,12 @@ pub const SEQUENCER_RECORD_RETENTION_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const MAX_RECOVERY_SUBMISSION_OBJECT: usize = 4_096;
 /// `MAX_OPEN_RECOVERY_SUBMISSIONS` per conversation.
 pub const MAX_OPEN_RECOVERY_SUBMISSIONS: usize = 8;
+/// `MAX_RECOVERY_CHAIN_BYTES`: the complete accepted chain of one
+/// conversation, elements included.
+pub const MAX_RECOVERY_CHAIN_BYTES: u64 = 268_435_456;
+/// `MAX_RECOVERY_SUBMISSION_SECONDS`: an accepted submission whose element
+/// has not arrived after this long is discarded.
+pub const MAX_RECOVERY_SUBMISSION_SECONDS: u64 = 600;
 /// The stored bytes a conversation keeps free of proof-producing transitions
 /// so that an explicit finalized close, its route state, the open recovery
 /// submissions of Section 13.7.4 and the leaf proofs a close names always fit

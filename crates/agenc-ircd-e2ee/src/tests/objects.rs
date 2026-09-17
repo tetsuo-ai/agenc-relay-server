@@ -988,13 +988,16 @@ fn federation_objects_round_trip() -> TestResult {
         sequencer_record_head_id: [58; 32],
         state: IrcRouteStateKind::ActiveRoute,
     })?;
-    assert_eq!(IrcFederationOpcode::ALL.len(), 42);
+    assert_eq!(IrcFederationOpcode::ALL.len(), 44);
+    assert_eq!(IrcFederationOpcode::SubmitRecovery.value(), 42);
+    assert_eq!(IrcFederationOpcode::SubmitRecoveryElement.value(), 43);
     assert_eq!(IrcFederationOpcode::SubmitMembership.value(), 44);
     assert_eq!(
         crate::objects::federation::IrcFederationStoreKind::StoreMembership.value(),
         11
     );
-    assert_eq!(IrcFederationResultKind::ALL.len(), 23);
+    assert_eq!(IrcFederationResultKind::ALL.len(), 27);
+    assert_eq!(IrcFederationResultKind::RecoveryConflict.value(), 27);
     assert_eq!(IrcFederationEventKind::ALL.len(), 14);
     assert_eq!(IrcFederationEmptyKind::ALL.len(), 14);
     Ok(())

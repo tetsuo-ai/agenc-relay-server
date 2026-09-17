@@ -86,12 +86,38 @@ impl Fixture {
     }
 }
 
-fn finish(
+pub(in crate::e2ee::coordinator::tests) fn finish(
     source: &mut Harness,
     conversation: [u8; 32],
     epoch: u64,
     closing: Option<[u8; 32]>,
 ) -> TestResult<[u8; 32]> {
+    assert_single_device_councils(source, conversation)?;
+    let opened = open_finalization(source, conversation, epoch)?;
+    let (bytes, terminal) = finalization_bytes(source, &opened, closing, &[DEVICE])?;
+    let outcome = ok(source.run(Op::SubmitFinalization, &conversation, Some(&bytes))?)?;
+    assert!(matches!(outcome.result, ResultBody::Finalized(_, _, id, _) if id == terminal));
+    Ok(terminal)
+}
+
+/// A candidate submitted and acknowledged at `epoch`, ready for its
+/// finalization requests.
+pub(in crate::e2ee::coordinator::tests) struct Opened {
+    conversation: [u8; 32],
+    epoch: u64,
+    validation_time: u64,
+    policies: ([u8; 32], [u8; 32]),
+    receipt: IrcCandidateReceipt,
+    object: [u8; 32],
+    candidate: [u8; 32],
+    ack_bytes: Vec<u8>,
+}
+
+pub(in crate::e2ee::coordinator::tests) fn open_finalization(
+    source: &mut Harness,
+    conversation: [u8; 32],
+    epoch: u64,
+) -> TestResult<Opened> {
     let validation_time = if epoch == 0 { 20 } else { 30 };
     let state = source
         .coordinator
@@ -109,15 +135,36 @@ fn finish(
         submit_candidate(source, conversation, epoch, validation_time)?;
     let ack_bytes = ack(conversation, epoch, candidate, object)?;
     ok(source.run(Op::SubmitCommitAck, &conversation, Some(&ack_bytes))?)?;
-    let bytes = finalization_request_under(
-        source,
+    Ok(Opened {
         conversation,
-        &receipt,
+        epoch,
+        validation_time,
+        policies: (old_policy, resulting_policy),
+        receipt,
         object,
         candidate,
-        &ack_bytes,
+        ack_bytes,
+    })
+}
+
+/// The finalization request of `opened` with the finality votes of
+/// `voters`: a bootstrap activation at epoch zero, a controlled close
+/// transition for `closing`, and a routine self-update otherwise.
+pub(in crate::e2ee::coordinator::tests) fn finalization_bytes(
+    source: &Harness,
+    opened: &Opened,
+    closing: Option<[u8; 32]>,
+    voters: &[u8],
+) -> TestResult<(Vec<u8>, [u8; 32])> {
+    let bytes = finalization_request_under(
+        source,
+        opened.conversation,
+        &opened.receipt,
+        opened.object,
+        opened.candidate,
+        &opened.ack_bytes,
         &[DEVICE],
-        (old_policy, resulting_policy),
+        opened.policies,
     )?;
     let mut budget = DecodeBudget::new(1 << 20, 1 << 16);
     let object = agenc_ircd_e2ee::object::IrcWireObject::decode_kind(
@@ -132,10 +179,10 @@ fn finish(
     authorization.prior_state_id = core.prior_state_id;
     authorization.candidate_id = core.candidate_id;
     authorization.commit_object_id = core.commit_object_id;
-    authorization.canonical_validation_time = validation_time;
+    authorization.canonical_validation_time = opened.validation_time;
     authorization.resulting_group_context_digest = core.resulting_group_context_digest;
     authorization.resulting_ratchet_tree_digest = core.resulting_ratchet_tree_digest;
-    if epoch == 0 {
+    if opened.epoch == 0 {
         authorization.authorization_rule = IrcCommitAuthorizationRule::BootstrapActivation;
         authorization.action_bits = action_bits::POLICY | action_bits::BOOTSTRAP;
     } else if let Some(intent) = closing {
@@ -151,17 +198,22 @@ fn finish(
         &request.proof.authorization.tbs,
     )?;
     let terminal = semantic_id_of(SemanticHashDomain::FinalizationId, &request.proof.core)?;
-    request.votes = TlsVec::new(vec![vote(
-        source,
-        DEVICE,
-        &receipt,
-        candidate,
-        Terminal::finalize(terminal),
-    )?])?;
+    let mut votes = voters
+        .iter()
+        .map(|device| {
+            vote(
+                source,
+                *device,
+                &opened.receipt,
+                opened.candidate,
+                Terminal::finalize(terminal),
+            )
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    votes.sort_by_key(|vote| (vote.signer_root_fingerprint, vote.signer_device_id));
+    request.votes = TlsVec::new(votes)?;
     let bytes = wire(IrcWireObjectKind::FinalizationRequest, &request)?;
-    let outcome = ok(source.run(Op::SubmitFinalization, &conversation, Some(&bytes))?)?;
-    assert!(matches!(outcome.result, ResultBody::Finalized(_, _, id, _) if id == terminal));
-    Ok(terminal)
+    Ok((bytes, terminal))
 }
 
 fn validate_public_authorization(source: &Harness, request: &IrcFinalizationRequest) -> TestResult {
@@ -197,10 +249,26 @@ fn validate_public_authorization(source: &Harness, request: &IrcFinalizationRequ
         policy,
         &rosters,
     )?;
-    // Bootstrap uses the same one-device council under both published policies.
+    Ok(())
+}
+
+/// The close fixtures assume the same one-device council under both
+/// published policies of `conversation`.
+fn assert_single_device_councils(source: &Harness, conversation: [u8; 32]) -> TestResult {
+    let state = source
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .ok_or("conversation")?;
+    let policy = &state
+        .policies
+        .get(&state.current_policy_id)
+        .ok_or("current policy")?
+        .policy;
     let next = &state
         .policies
-        .get(&request.proof.authorization.tbs.resulting_policy_id)
+        .get(&state.required_operational_policy_id)
         .ok_or("resulting policy")?
         .policy;
     assert_eq!(policy.quorum, 1);

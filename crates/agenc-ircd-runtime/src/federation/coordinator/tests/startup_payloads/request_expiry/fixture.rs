@@ -13,7 +13,7 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) async fn new(retain_replay: bool) -> TestResult<Self> {
-        Self::many(1, retain_replay).await
+        Box::pin(Self::many(1, retain_replay)).await
     }
 
     pub(super) async fn many(count: u64, retain_replay: bool) -> TestResult<Self> {

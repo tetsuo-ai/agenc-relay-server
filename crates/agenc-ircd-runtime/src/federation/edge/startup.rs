@@ -255,11 +255,9 @@ impl Restore {
         {
             return Err(invalid());
         }
+        let entries = std::mem::take(&mut self.projection);
         edge.replica
-            .install(
-                peer.projection_generation,
-                std::mem::take(&mut self.projection),
-            )
+            .install(peer.projection_generation, entries)
             .map_err(|_| invalid())?;
         edge.cursor = peer.cursor.as_ref().map(|cursor| {
             (

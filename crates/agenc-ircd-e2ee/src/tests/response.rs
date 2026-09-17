@@ -75,6 +75,22 @@ fn scalar_success_lines_render_exactly() -> TestResult {
         )
     );
     assert_eq!(
+        SuccessLine::RecoveryAccepted([1; 32], [2; 32]).body()?,
+        format!("EGROUP RECOVERY-ACCEPTED {} {}", h(1), h(2))
+    );
+    assert_eq!(
+        SuccessLine::RecoveryExtended([1; 32], 7, [3; 32]).body()?,
+        format!("EGROUP RECOVERY-EXTENDED {} 7 {}", h(1), h(3))
+    );
+    assert_eq!(
+        SuccessLine::RecoveryClosed([1; 32], [4; 32]).body()?,
+        format!("EGROUP RECOVERY-CLOSED {} {}", h(1), h(4))
+    );
+    assert_eq!(
+        SuccessLine::RecoveryConflict([1; 32], 9, [5; 32], [6; 32]).body()?,
+        format!("EGROUP RECOVERY-CONFLICT {} 9 {} {}", h(1), h(5), h(6))
+    );
+    assert_eq!(
         render_labeled(
             "x",
             SERVER,

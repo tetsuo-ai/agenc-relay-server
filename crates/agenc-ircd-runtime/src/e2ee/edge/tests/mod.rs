@@ -34,6 +34,7 @@ fn origin(origin_id: [u8; 16], declared: u64, sequence: u64) -> LocalOrigin {
         origin_id,
         declared: Some(declared),
         acked: None,
+        predates_device: None,
         next_sequence: sequence,
         sequenced: Some(declared),
         state_id: [0; 32],

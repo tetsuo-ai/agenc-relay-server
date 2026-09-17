@@ -44,7 +44,8 @@ pub const fn expected_signer(domain: SignatureDomain) -> Option<SignerRole> {
         | SignatureDomain::DeviceAttachPossession
         | SignatureDomain::DispositionVote
         | SignatureDomain::ReinitDisposition
-        | SignatureDomain::LeafMembership => Some(SignerRole::Device),
+        | SignatureDomain::LeafMembership
+        | SignatureDomain::RecoverySubmission => Some(SignerRole::Device),
         SignatureDomain::SequencerContinuity
         | SignatureDomain::Reservation
         | SignatureDomain::DeviceAttachChallenge

@@ -515,7 +515,7 @@ pub(super) fn refresh_head(
     })
 }
 
-fn route_state_object(
+pub(super) fn route_state_object(
     exec: &Exec<'_>,
     state: &ConversationState,
     log: &SequencerLog,

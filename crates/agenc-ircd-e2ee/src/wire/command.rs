@@ -36,6 +36,8 @@ pub enum SubmitKind {
     Policy,
     /// `MEMBERSHIP`.
     Membership,
+    /// `RECOVERY`.
+    Recovery,
 }
 
 impl SubmitKind {
@@ -54,6 +56,7 @@ impl SubmitKind {
             Self::ReinitAbort => CarrierCommand::SubmitReinitAbort,
             Self::Policy => CarrierCommand::SubmitPolicy,
             Self::Membership => CarrierCommand::SubmitMembership,
+            Self::Recovery => CarrierCommand::SubmitRecovery,
         }
     }
 }
@@ -127,6 +130,13 @@ pub enum EgroupCommand {
         kind: SubmitKind,
         /// Conversation identifier.
         conversation_id: [u8; 32],
+    },
+    /// `SUBMIT RECOVERY-ELEMENT <conversation-id> <submission-id>`.
+    SubmitRecoveryElement {
+        /// Conversation identifier.
+        conversation_id: [u8; 32],
+        /// The accepted submission the element completes.
+        submission_id: [u8; 32],
     },
     /// `FETCH OBJECT <conversation-id> <object-id>`.
     FetchObject {
@@ -307,6 +317,7 @@ impl EgroupCommand {
     pub const fn carrier(&self) -> Option<CarrierCommand> {
         match self {
             Self::Submit { kind, .. } => Some(kind.carrier()),
+            Self::SubmitRecoveryElement { .. } => Some(CarrierCommand::SubmitRecoveryElement),
             Self::Bind { .. } => Some(CarrierCommand::Bind),
             Self::Close { .. } => Some(CarrierCommand::Close),
             _ => None,
@@ -389,6 +400,13 @@ fn parse_submit(params: &[&str]) -> Result<EgroupCommand, E2eeError> {
         ["REINIT", "ABORT", id] => (SubmitKind::ReinitAbort, id),
         ["POLICY", id] => (SubmitKind::Policy, id),
         ["MEMBERSHIP", id] => (SubmitKind::Membership, id),
+        ["RECOVERY", id] => (SubmitKind::Recovery, id),
+        ["RECOVERY-ELEMENT", id, submission] => {
+            return Ok(EgroupCommand::SubmitRecoveryElement {
+                conversation_id: parse_hash(id)?,
+                submission_id: parse_hash(submission)?,
+            });
+        }
         _ => return Err(E2eeError::InvalidValue),
     };
     Ok(EgroupCommand::Submit {
