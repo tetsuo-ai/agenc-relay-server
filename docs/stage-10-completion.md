@@ -87,6 +87,11 @@ regressions, the eighteen regions they bring to 100 percent, the five
 region-metric corrections they required and the three rows that cannot reach
 100 percent under their declared metric (COV-02, issue #72) are recorded in
 [the encrypted coverage record](stage-10-encrypted-coverage.md).
+The per-row decisions for the release-critical regions that reach 100 percent
+under neither metric, the audit that found nine more rows with the same
+declaration defect, and the refusal that now names an unscoreable declaration
+apart from an untested span (COV-05, issue #135) are recorded in
+[the region metric decisions record](stage-10-region-metric-decisions.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

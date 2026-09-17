@@ -509,10 +509,26 @@ def validate_report(
         else:
             covered, total = region_counts(file_record, start_line, end_line)
         if total == 0:
-            failures.append(
-                f"critical region {identifier} ({region['file']}:{start_line}-{end_line}) "
-                "matched no executable coverage data"
-            )
+            # A branches declaration over a span built from match arms, slice
+            # patterns or `?` propagation matches region records and no branch
+            # records at all, so no test can ever score it. Name that case
+            # apart from a span that holds no executable code.
+            branchless = 0
+            if region["metric"] == "branches":
+                branchless = region_counts(file_record, start_line, end_line)[1]
+            if branchless:
+                failures.append(
+                    f"critical region {identifier} ({region['file']}:{start_line}-{end_line}) "
+                    f"declares the branches metric over a span that emits {branchless} "
+                    "executable regions and no branch records, so it is unscoreable as "
+                    "declared rather than untested and must be re-scored to the regions "
+                    "metric or narrowed"
+                )
+            else:
+                failures.append(
+                    f"critical region {identifier} ({region['file']}:{start_line}-{end_line}) "
+                    "matched no executable coverage data"
+                )
         elif covered != total:
             percent = 100.0 * covered / total
             failures.append(
@@ -873,6 +889,22 @@ def self_test(root: Path, policy_path: Path) -> int:
         "matched no executable",
     )
     cases += 1
+    # The same empty branch count over a span that does emit executable
+    # regions is a declaration defect, not an untested span, and must not
+    # share the message above.
+    branchless_span = copy.deepcopy(report)
+    branchless_span["data"][0]["files"][0]["segments"].append(  # type: ignore[index]
+        [3, 1, 1, True, True, False]
+    )
+    expect_rejection(
+        "branches metric over a branch-free span",
+        lambda: validate_report(branchless_span, [empty_range]),
+        "unscoreable as declared",
+    )
+    cases += 1
+    branchless_region_metric = dict(empty_range)
+    branchless_region_metric["metric"] = "regions"
+    validate_report(branchless_span, [branchless_region_metric])
     missing_file = dict(synthetic_region)
     missing_file["file"] = "crates/missing/src/lib.rs"
     expect_rejection(
