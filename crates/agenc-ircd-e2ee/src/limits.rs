@@ -244,6 +244,21 @@ pub const MAX_STORED_BYTES_PER_CONVERSATION: u64 = 268_435_456;
 pub const WELCOME_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// `SEQUENCER_RECORD_RETENTION` in seconds.
 pub const SEQUENCER_RECORD_RETENTION_SECONDS: u64 = 30 * 24 * 60 * 60;
+/// `MAX_RECOVERY_SUBMISSION_OBJECT`.
+pub const MAX_RECOVERY_SUBMISSION_OBJECT: usize = 4_096;
+/// `MAX_OPEN_RECOVERY_SUBMISSIONS` per conversation.
+pub const MAX_OPEN_RECOVERY_SUBMISSIONS: usize = 8;
+/// The stored bytes a conversation keeps free of proof-producing transitions
+/// so that an explicit finalized close, its route state, the open recovery
+/// submissions of Section 13.7.4 and the leaf proofs a close names always fit
+/// under `MAX_STORED_BYTES_PER_CONVERSATION` (Section 15: the route stops
+/// accepting new proof-producing transitions and Adds before the quota is
+/// exhausted).
+pub const RECOVERY_HEADROOM_BYTES: u64 = (MAX_FINALIZATION_OBJECT
+    + MAX_CLOSE_OBJECT
+    + MAX_FEDERATION_CONTROL_OBJECT
+    + MAX_OPEN_RECOVERY_SUBMISSIONS * MAX_RECOVERY_SUBMISSION_OBJECT
+    + 2 * MAX_LEAF_MEMBERSHIP_OBJECT) as u64;
 /// `MAX_SEQUENCER_KEY_OVERLAP` in seconds.
 pub const MAX_SEQUENCER_KEY_OVERLAP_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// `REINIT_RESUMPTION_PSK_RETENTION` in seconds.

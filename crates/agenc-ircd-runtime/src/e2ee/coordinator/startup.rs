@@ -121,6 +121,7 @@ pub(super) struct Restore {
     replays: Vec<(StoredKey, ReplayRow)>,
     origin_sequences: Vec<(StoredKey, OriginSequenceRow)>,
     pub(super) delivery: super::delivery_owner::restore::Restore,
+    owners: super::owners::Rebuild,
 }
 
 impl Restore {
@@ -140,6 +141,7 @@ impl Restore {
 
     fn admit_object(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
         self.objects.admit(key, value);
+        self.owners.admit_object(key, value);
     }
 
     fn admit_state(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
@@ -147,6 +149,7 @@ impl Restore {
             self.objects.poison();
             return;
         }
+        self.owners.admit_row(key, value);
         let body = value.body();
         match value.record_kind() {
             agenc_ircd_storage::e2ee_records::RECOVERY_GATE_KIND => self.objects.poison(),
@@ -498,6 +501,7 @@ pub(super) fn rebuild(
     }
     restore_successors(state, &index)?;
     restore.gates.install(state)?;
+    coordinator.owner_reconstruction = restore.owners.finish(state);
     restore.delivery.apply(coordinator)
 }
 

@@ -81,6 +81,11 @@ async fn commit(
     let context = fixture.storage.context_mut()?;
     let plan = context.domain().plan_account_service_checkpoint()?;
     let revision = plan.resulting_revision().get();
+    let mut writes = writes;
+    let owners = fixture
+        .coordinator
+        .stage_owners(&mut writes, super::NOW_MILLIS / 1_000, false, revision)
+        .map_err(|code| format!("owner staging: {code:?}"))?;
     let writes = writes
         .into_iter()
         .map(|write| write.at_revision(revision))
@@ -94,7 +99,9 @@ async fn commit(
             writes,
         )
         .map_err(|error| format!("stage replay inventory: {error:?}"))?;
-    fixture.storage.commit_staged_batch().await
+    Box::pin(fixture.storage.commit_staged_batch()).await?;
+    owners.apply(&mut fixture.coordinator.state);
+    Ok(())
 }
 
 fn id(sequence: u64) -> [u8; 16] {

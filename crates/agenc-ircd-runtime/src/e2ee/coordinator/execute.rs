@@ -804,8 +804,15 @@ fn assemble(
         &barrier_inputs.backing,
         uncached_response,
     )?;
+    let owners = coordinator.stage_owners(
+        &mut writes,
+        now,
+        outcome.security_mutation,
+        state_generation,
+    )?;
     let mut effects = outcome.effects;
     effects.insert(0, Box::new(move |state| resident.apply(state)));
+    effects.insert(1, Box::new(move |state| owners.apply(state)));
     let request_object_id = decoded.request_object_id;
     let stored = super::results::Prepared::capture(
         &result,

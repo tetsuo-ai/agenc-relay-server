@@ -22,6 +22,7 @@ pub(in super::super) struct Receipt {
     pub(in super::super) staged_after: u64,
     revision: u64,
     candidate: RestoredRetirement,
+    owners: crate::e2ee::coordinator::owners::Staged,
     _backing: MemoryPermit,
 }
 
@@ -99,14 +100,10 @@ fn stage(
         .plan_account_service_checkpoint()
         .map_err(|_| Violation::Codec)?;
     let revision = plan.resulting_revision().get();
-    let write = candidate
-        .write()
-        .map_err(|_| Violation::Codec)?
-        .at_revision(revision)
-        .map_err(|_| Violation::Codec)?;
+    let (writes, owners) = retirement_writes(coordinator, context, candidate, revision)?;
     let fanout = FanoutRequest::new(Vec::new(), Vec::new()).map_err(|_| Violation::Codec)?;
     let accepted = context
-        .stage_durable_with_account_service(plan, fanout, None, 0, vec![write])
+        .stage_durable_with_account_service(plan, fanout, None, 0, writes)
         .map_err(|error| match error {
             StageRefused::Busy | StageRefused::Quiescing | StageRefused::Fanout(_) => {
                 Violation::Ceiling
@@ -126,8 +123,43 @@ fn stage(
         staged_after,
         revision,
         candidate,
+        owners,
         _backing: backing,
     })
+}
+
+/// The retirement row at the batch revision with its ownership accounts.
+fn retirement_writes(
+    coordinator: &FederationCoordinator,
+    context: &StateCoreContext,
+    candidate: &RestoredRetirement,
+    revision: u64,
+) -> Result<
+    (
+        Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+        crate::e2ee::coordinator::owners::Staged,
+    ),
+    Violation,
+> {
+    let mut writes = vec![
+        candidate
+            .write()
+            .map_err(|_| Violation::Codec)?
+            .at_revision(revision)
+            .map_err(|_| Violation::Codec)?,
+    ];
+    let owners = coordinator
+        .companion_exec
+        .as_ref()
+        .ok_or(Violation::Codec)?
+        .stage_owners(
+            &mut writes,
+            super::super::trusted_unix_now(context).unwrap_or(0),
+            false,
+            revision,
+        )
+        .map_err(|_| Violation::Ceiling)?;
+    Ok((writes, owners))
 }
 
 pub(in super::super) fn committed(
@@ -154,7 +186,9 @@ pub(in super::super) fn committed(
             receipt
                 .candidate
                 .apply(executor)
-                .map_err(|_| Violation::Codec)
+                .map_err(|_| Violation::Codec)?;
+            receipt.owners.apply(&mut executor.state);
+            Ok(())
         });
     if applied.is_err() {
         super::fail_restore(coordinator);

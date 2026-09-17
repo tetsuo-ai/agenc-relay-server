@@ -10,6 +10,7 @@ pub(in super::super) struct Receipt {
     pub(in super::super) staged_after: u64,
     revision: u64,
     prepared: task::Prepared,
+    owners: crate::e2ee::coordinator::owners::Staged,
     _backing: MemoryPermit,
 }
 
@@ -41,8 +42,19 @@ pub(super) fn stage(
         .plan_account_service_checkpoint()
         .map_err(|_| CompanionFault::Storage)?;
     let revision = plan.resulting_revision().get();
-    let writes = prepared
-        .writes()?
+    let mut writes = prepared.writes()?;
+    let owners = coordinator
+        .companion_exec
+        .as_ref()
+        .ok_or(CompanionFault::Storage)?
+        .stage_owners(
+            &mut writes,
+            super::super::trusted_unix_now(context).unwrap_or(0),
+            false,
+            revision,
+        )
+        .map_err(|_| CompanionFault::Storage)?;
+    let writes = writes
         .into_iter()
         .map(|write| {
             write
@@ -66,6 +78,7 @@ pub(super) fn stage(
         staged_after: commit,
         revision,
         prepared,
+        owners,
         _backing: backing,
     })
 }
@@ -86,7 +99,11 @@ pub(in super::super) fn committed(
         .companion_exec
         .as_mut()
         .ok_or(CompanionFault::Storage)
-        .and_then(|executor| receipt.prepared.apply(executor));
+        .and_then(|executor| {
+            receipt.prepared.apply(executor)?;
+            receipt.owners.apply(&mut executor.state);
+            Ok(())
+        });
     if applied.is_err() {
         super::super::startup::fail_restore(coordinator);
         return;

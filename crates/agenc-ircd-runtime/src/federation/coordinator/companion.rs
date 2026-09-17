@@ -418,12 +418,7 @@ fn stage(
         .plan_account_service_checkpoint()
         .map_err(|_| Violation::Ceiling)?;
     let revision = plan.resulting_revision().get();
-    let mut writes = staged
-        .writes
-        .into_iter()
-        .map(|write| write.at_revision(revision))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| Violation::Ceiling)?;
+    let (mut writes, owners) = revised_writes(coordinator, context, staged.writes, revision)?;
     if let Some(update) = &barrier {
         writes.push(update.write(revision)?);
     }
@@ -434,6 +429,9 @@ fn stage(
         .map_err(|_| Violation::Ceiling)?;
     if let Some(executor) = coordinator.companion_exec.as_mut() {
         executor.set_pending(staged.work);
+        if let Some(owners) = owners {
+            executor.set_pending_owners(owners);
+        }
     }
     coordinator.pending = Some(PendingCommit::Companion {
         peer,
@@ -442,6 +440,42 @@ fn stage(
         resume,
     });
     Ok(())
+}
+
+/// Stages the batch's ownership accounts and restamps every row at the
+/// batch revision.
+fn revised_writes(
+    coordinator: &FederationCoordinator,
+    context: &StateCoreContext,
+    writes: Vec<AccountServiceDurableWrite>,
+    revision: u64,
+) -> Result<
+    (
+        Vec<AccountServiceDurableWrite>,
+        Option<crate::e2ee::coordinator::owners::Staged>,
+    ),
+    Violation,
+> {
+    let mut writes = writes;
+    let owners = coordinator
+        .companion_exec
+        .as_ref()
+        .map(|executor| {
+            executor.stage_owners(
+                &mut writes,
+                super::trusted_unix_now(context).unwrap_or(0),
+                false,
+                revision,
+            )
+        })
+        .transpose()
+        .map_err(|_| Violation::Ceiling)?;
+    let writes = writes
+        .into_iter()
+        .map(|write| write.at_revision(revision))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| Violation::Ceiling)?;
+    Ok((writes, owners))
 }
 
 fn run(

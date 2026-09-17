@@ -1909,6 +1909,16 @@ impl From<SendRefusal> for SendFailure {
 
 /// Standing entry counts are accounted per edge by the projector; the peer
 /// row records the last known count for STATS and the snapshot ceiling.
+/// The trusted UTC second, when the wall clock agrees with the monotonic
+/// clock within the accepted drift.
+pub(super) fn trusted_unix_now(context: &StateCoreContext) -> Option<u64> {
+    context
+        .utc_now()
+        .ok()
+        .filter(|wall| context.drift().accepts_wall(context.now(), *wall))
+        .map(|wall| wall.get())
+}
+
 fn context_entry_count(state: &PeerState) -> u64 {
     let _ = state;
     0

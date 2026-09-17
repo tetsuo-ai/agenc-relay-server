@@ -3304,15 +3304,20 @@ fn transform_e2ee_recovery_pending(
     }
     let source = exact_source(entry, sources)?;
     let state = recovery::decode_e2ee_restore(entry.target_key(), source)?;
-    let body =
-        recovery::e2ee_recovery_body(&state, target_recovery_epoch, source_rollback_guard_hash)?;
+    let references = recovery::e2ee_restore_references(&state);
+    let body = recovery::e2ee_recovery_body(
+        &state,
+        target_recovery_epoch,
+        source_rollback_guard_hash,
+        &references,
+    )?;
     PersistentRecordValue::new(
         TableId::E2eeState,
         state.record_kind(),
         state.revision(),
         state.generation(),
         state.expires_at(),
-        state.references().to_vec(),
+        references,
         body,
     )?
     .encode()

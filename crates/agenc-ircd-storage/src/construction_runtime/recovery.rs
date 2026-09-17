@@ -11,11 +11,14 @@ use agenc_ircd_types::RecoveryEpoch;
 use crate::e2ee_records::barrier::{BarrierHead, BarrierPart};
 use crate::e2ee_records::origin::OriginSequenceRow;
 use crate::e2ee_records::{
-    BARRIER_ROW_KIND, DELIVERY_RECOVERY_ROW_KIND, DELIVERY_ROW_KIND, DeliveryRow,
-    RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayRow, RouteLifecycle, RouteRow,
-    check_state_key, prefix,
+    BARRIER_ROW_KIND, DELIVERY_RECOVERY_ROW_KIND, DELIVERY_ROW_KIND, DeliveryRow, OWNER_ROW_KIND,
+    ObjectOwnerRow, RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayRow, RouteLifecycle,
+    RouteRow, UNDATED_SECOND, check_state_key, prefix, record_kind_for_key,
 };
-use crate::{PersistentRecordValue, StorageConstructionAction, StorageError, StoredKey, TableId};
+use crate::{
+    PersistentRecordValue, RecordReference, StorageConstructionAction, StorageError, StoredKey,
+    TableId,
+};
 
 pub(super) fn select_e2ee_restore(
     key: &StoredKey,
@@ -118,12 +121,45 @@ fn validate_barrier_key(key: &StoredKey, body: &[u8]) -> Result<(), StorageError
     }
 }
 
+/// Whether a restore carries the row a reference names: replay, delivery,
+/// barrier and delivery-recovery state is not restored, so references to
+/// those rows are dropped with them.
+fn restored_reference(reference: &RecordReference) -> bool {
+    reference.table() != TableId::E2eeState
+        || !matches!(
+            record_kind_for_key(reference.key()),
+            Ok(REPLAY_ROW_KIND | DELIVERY_ROW_KIND | BARRIER_ROW_KIND | DELIVERY_RECOVERY_ROW_KIND)
+        )
+}
+
+/// The references of a restored state row: those naming rows the restore
+/// carries.
+pub(super) fn e2ee_restore_references(state: &PersistentRecordValue) -> Vec<RecordReference> {
+    state
+        .references()
+        .iter()
+        .filter(|reference| restored_reference(reference))
+        .cloned()
+        .collect()
+}
+
 pub(super) fn e2ee_recovery_body(
     state: &PersistentRecordValue,
     target_recovery_epoch: RecoveryEpoch,
     source_rollback_guard_hash: StorageDigest,
+    references: &[RecordReference],
 ) -> Result<Vec<u8>, StorageError> {
     match state.record_kind() {
+        // An ownership account whose every owner the restore dropped is
+        // retired at an undated second: the retirement is a fact of the
+        // restore, its time is not.
+        OWNER_ROW_KIND => {
+            let mut row = ObjectOwnerRow::decode(state.body())?;
+            if references.is_empty() && row.retired_at.is_none() {
+                row.retired_at = Some(UNDATED_SECOND);
+            }
+            row.encode()
+        }
         RECOVERY_GATE_KIND => crate::E2eeRecoveryGate::decode(state.body())?
             .recover(target_recovery_epoch, source_rollback_guard_hash)
             .encode(),
@@ -140,3 +176,7 @@ pub(super) fn e2ee_recovery_body(
         _ => Ok(state.body().to_vec()),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/owner_restore.rs"]
+mod owner_restore_tests;
