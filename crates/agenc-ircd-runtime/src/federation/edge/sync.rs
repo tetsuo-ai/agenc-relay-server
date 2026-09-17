@@ -615,6 +615,7 @@ pub(super) fn restore_pending(
     generation: u64,
     marker: agenc_ircd_storage::federation_records::ProjectionMarkerRecord,
     entries: Vec<ProjectionRecord>,
+    cause: &mut super::startup::EdgeRestoreCause,
 ) -> Result<(), crate::RuntimeError> {
     let invalid = super::startup::invalid;
     let token = marker.snapshot_token.ok_or_else(invalid)?;
@@ -623,11 +624,14 @@ pub(super) fn restore_pending(
     {
         return Err(invalid());
     }
-    verify_restored_cut(edge, generation, &marker, &entries)?;
+    verify_restored_cut(edge, generation, (&marker, &entries), cause)?;
     let mut verified = agenc_ircd_domain::federation::EdgeReplica::new(edge.config.server_id);
     verified
         .install(generation, entries.clone())
-        .map_err(|_| invalid())?;
+        .map_err(|error| {
+            *cause = super::startup::EdgeRestoreCause::PendingProjection(error);
+            invalid()
+        })?;
     edge.snapshot = Some(SnapshotInstall {
         identity: SnapshotIdentity {
             snapshot_token: FederationHash32::from_bytes(token),
@@ -714,13 +718,24 @@ pub(super) fn continue_install(edge: &mut EdgeFederation, context: &mut StateCor
 fn verify_restored_cut(
     edge: &EdgeFederation,
     generation: u64,
-    marker: &agenc_ircd_storage::federation_records::ProjectionMarkerRecord,
-    entries: &[ProjectionRecord],
+    restored: (
+        &agenc_ircd_storage::federation_records::ProjectionMarkerRecord,
+        &[ProjectionRecord],
+    ),
+    cause: &mut super::startup::EdgeRestoreCause,
 ) -> Result<(), crate::RuntimeError> {
     use agenc_ircd_federation_wire::CanonicalEncode;
     let invalid = super::startup::invalid;
+    let (marker, entries) = restored;
+    // A generation over a standing-projection ceiling is the same admission
+    // fact the live install reports as `Violation::Ceiling`; reporting it as
+    // stale durable state would send an operator to the storage layer.
+    let ceiling = super::startup::EdgeRestoreCause::PendingProjectionCeiling;
+    if marker.entry_count > MAX_SNAPSHOT_ENTRIES {
+        *cause = ceiling;
+        return Err(crate::RuntimeError::LimitExceeded);
+    }
     if generation <= edge.replica.projection_generation()
-        || marker.entry_count > MAX_SNAPSHOT_ENTRIES
         || entries
             .windows(2)
             .any(|pair| matches!(pair, [first, second] if first.key() >= second.key()))
@@ -745,7 +760,8 @@ fn verify_restored_cut(
             .checked_add(u64::try_from(encoded.as_slice().len()).map_err(|_| invalid())?)
             .ok_or_else(invalid)?;
         if bytes > MAX_SNAPSHOT_BYTES {
-            return Err(invalid());
+            *cause = ceiling;
+            return Err(crate::RuntimeError::LimitExceeded);
         }
         ids.push(agenc_ircd_federation_wire::federation_object_id(
             encoded.as_slice(),

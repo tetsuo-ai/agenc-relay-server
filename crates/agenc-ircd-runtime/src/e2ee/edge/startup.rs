@@ -220,7 +220,17 @@ impl E2eeEdge {
 
     /// After the scan: a generation that was still being received is
     /// abandoned, and a READY generation must be complete.
-    pub(crate) fn finish_snapshot_restore(&mut self) -> Result<(), RuntimeError> {
-        self.snapshot_finish_restore().map_err(|_| invalid())
+    ///
+    /// The only refusal is an incomplete READY generation, which is a fact
+    /// about the restored rows and not about the storage layer, so it is
+    /// recorded in `cause` instead of being discarded.
+    pub(crate) fn finish_snapshot_restore(
+        &mut self,
+        cause: &mut crate::federation::edge::EdgeRestoreCause,
+    ) -> Result<(), RuntimeError> {
+        self.snapshot_finish_restore().map_err(|_| {
+            *cause = crate::federation::edge::EdgeRestoreCause::CompanionSnapshotIncomplete;
+            invalid()
+        })
     }
 }

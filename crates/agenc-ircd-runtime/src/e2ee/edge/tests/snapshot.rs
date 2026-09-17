@@ -1177,11 +1177,18 @@ async fn an_incomplete_ready_generation_refuses_the_restore() -> TestResult {
     }
     let mut restarted = edge();
     let mut base = base_edge();
-    assert!(
-        fixture
-            .core
-            .commit_and_restore_edge(writes, &mut base, Some(&mut restarted))
-            .is_err()
+    // The refusal must name the companion snapshot it could not complete: the
+    // step alone once printed as a bare stale-state line, which is what sent
+    // the first report of this failure to the storage layer (#124).
+    let refusal = fixture
+        .core
+        .commit_and_restore_edge(writes, &mut base, Some(&mut restarted))
+        .err()
+        .ok_or("an incomplete READY generation was accepted")?;
+    assert_eq!(
+        refusal.to_string(),
+        "companion-snapshot-restore (companion snapshot generation is incomplete): storage owner \
+         failed: storage state is stale or inconsistent",
     );
     Ok(())
 }

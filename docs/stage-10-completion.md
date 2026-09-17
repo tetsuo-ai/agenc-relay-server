@@ -82,6 +82,11 @@ unreproduced CAP-01 startup refusal it narrows, and the reconstruction surface
 and record family the daemon now names in that refusal (RUN-08, issue #134) are
 recorded in
 [the edge startup reconstruction record](stage-10-edge-startup-reconstruction.md).
+The disproof of that record's remaining hypothesis, the per-generation
+reconstruction ceilings that let an edge restore rebuild every projection its
+admission side can admit, and the classified cause the daemon now prints beside
+the record family (RUN-08, issue #134) are recorded in
+[the edge restore refusal cause record](stage-10-reconstruction-cause.md).
 The encrypted lifecycle, authentication and crypto critical-branch
 regressions, the eighteen regions they bring to 100 percent, the five
 region-metric corrections they required and the three rows that cannot reach
