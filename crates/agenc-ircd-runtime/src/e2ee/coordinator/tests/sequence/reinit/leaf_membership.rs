@@ -19,6 +19,9 @@ mod maximum;
 
 const THIRD_DEVICE: u8 = 9;
 const THIRD_LEAF_SEED: u8 = 32;
+/// The leaf key and credential device 8 rotates old leaf 1 onto.
+const ROTATED_LEAF_SEED: u8 = 33;
+const ROTATED_CREDENTIAL: [u8; 32] = [77; 32];
 
 /// One planned member of the successor: its device, old leaf, leaf key,
 /// and reserved KeyPackageRef byte (none for the creator).
@@ -315,7 +318,7 @@ fn three_member_channel() -> Result<(Harness, [u8; 32])> {
 }
 
 #[test]
-fn activation_refuses_an_excluded_leaf_and_an_omitted_continuing_leaf() -> Result {
+fn activation_refuses_an_excluded_leaf_but_not_an_unplanned_claim() -> Result {
     let (mut harness, conversation) = three_member_channel()?;
     // The target plan carries devices 7 and 8 only.
     let (receipt, attempt) = stage(&mut harness, conversation, &[CREATOR, JOINER])?;
@@ -324,7 +327,8 @@ fn activation_refuses_an_excluded_leaf_and_an_omitted_continuing_leaf() -> Resul
         member_ack(conversation, &receipt, JOINER)?,
     ];
     let request = activation(&harness, &receipt, &attempt, acks, &[DEVICE, SECOND_DEVICE])?;
-    // Device 9 holds an old leaf the successor excludes.
+    // Device 9 holds an old leaf the successor excludes, so it cannot
+    // activate: an activation submitter is carried by the plan.
     harness.attach_as(THIRD_DEVICE)?;
     refused(
         &mut harness,
@@ -333,17 +337,78 @@ fn activation_refuses_an_excluded_leaf_and_an_omitted_continuing_leaf() -> Resul
         &request,
         E2eeReplyCode::BindingAuthInvalid,
     )?;
-    // Device 9's stored continuing leaf has no proof-backed ACK.
+    // Device 9's stored continuing claim is outside the approved plan, so
+    // it is outside the expected set and never blocks the activation: the
+    // controller threshold that signed key_package_plan_id already answered
+    // it, and device 9 stays roster-active throughout (companion 13.7.3).
     harness.attach_as(DEVICE)?;
+    let outcome = ok(harness.run(Op::SubmitReinitActivate, &conversation, Some(&request))?)?;
+    assert!(matches!(outcome.result, ResultBody::ReinitActivated(..)));
+    assert!(
+        harness
+            .coordinator
+            .state
+            .conversations
+            .get(&conversation)
+            .ok_or("state")?
+            .memberships
+            .iter()
+            .any(|entry| entry.proof.device_id == [THIRD_DEVICE; 16]),
+        "an unplanned claim stays stored and readable"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_planned_device_acknowledges_through_the_leaf_it_last_proved() -> Result {
+    // Device 8 rotates its leaf key: leaf 1 keeps a retained proof under
+    // each credential, and only the higher epoch is still claimed. Before
+    // the claim rule both counted and one ACK could never cover both.
+    let (mut harness, conversation) = two_member_channel()?;
+    finalize_both(&mut harness, conversation)?;
+    harness.attach_as(SECOND_DEVICE)?;
+    let mut rotated = MembershipSpec::continuing(
+        &harness.principal,
+        conversation,
+        SECOND_DEVICE,
+        ROTATED_LEAF_SEED,
+        1,
+    );
+    rotated.old_credential_hash = ROTATED_CREDENTIAL;
+    rotated.epoch = 1;
+    let rotated = membership_proof(&rotated)?;
+    harness.publish_membership(conversation, &rotated)?;
+    harness.attach_as(DEVICE)?;
+    let (receipt, attempt) = stage(&mut harness, conversation, &[CREATOR, JOINER])?;
+    let creator = member_ack(conversation, &receipt, CREATOR)?;
+    // The superseded credential still identifies its own epoch's signer,
+    // so this ACK is admitted but leaves the current claim uncovered.
+    let superseded = member_ack(conversation, &receipt, JOINER)?;
+    let stale = activation(
+        &harness,
+        &receipt,
+        &attempt,
+        vec![creator.clone(), superseded],
+        &[DEVICE, SECOND_DEVICE],
+    )?;
     refused(
         &mut harness,
         Op::SubmitReinitActivate,
         &conversation,
-        &request,
+        &stale,
         E2eeReplyCode::BindingAuthInvalid,
     )?;
-    // Once device 9 is revoked its proof no longer counts toward the set.
-    rotate_roster(&mut harness, &[DEVICE, SECOND_DEVICE])?;
+    // Acknowledging through the rotated leaf covers the claim exactly.
+    let mut current = member_ack(conversation, &receipt, JOINER)?;
+    current.tbs.old_credential_hash = ROTATED_CREDENTIAL;
+    let current = signed_reinit_ack(current, ROTATED_LEAF_SEED)?;
+    let request = activation(
+        &harness,
+        &receipt,
+        &attempt,
+        vec![creator, current],
+        &[DEVICE, SECOND_DEVICE],
+    )?;
     let outcome = ok(harness.run(Op::SubmitReinitActivate, &conversation, Some(&request))?)?;
     assert!(matches!(outcome.result, ResultBody::ReinitActivated(..)));
     Ok(())

@@ -7690,14 +7690,14 @@ These SHA-256 values identify the exact files read for this draft:
 | `rfcs/rfc9420-mls-protocol.txt` | `251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b` |
 | `rfcs/rfc9525-tls-service-identity.txt` | `ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5` |
 | `rfcs/rfc9750-mls-architecture.txt` | `6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd` |
-| `docs/irc-mls-e2ee-extension.md` | `0620b993c63529dca24cc7b2e54eba158ebdf5401ecf54dc081ded73501a76f6` |
+| `docs/irc-mls-e2ee-extension.md` | `b2716e8e7a5531ed0e6f23455d45e51e81c8f901a0ef9a2b5ad3d471f059bf23` |
 
 Changing a file without updating its hash, source decision, and affected
 vectors is a conformance-ledger failure.
 The companion's domain-separated version-1 profile hash is
-`618080b4c92aa6b92196ce823369e5c0dd36b4916049670fd82bdabb09f78f07`
+`3771bab2f09024644d0468d004af30fba3d00403e4dc6f0205aea20a75265e45`
 (unpadded base64url
-`YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc`).
+`N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU`).
 
 ## Appendix A. Client wire registries
 
@@ -9592,7 +9592,7 @@ base-profile-sha256=ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=IRC-MLS/1
-e2ee-profile-sha256=YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc
+e2ee-profile-sha256=N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU
 sequencer-key-set-generation=<uint64-decimal>
 sequencer-key-set-hash=<43-char-hash>
 ```

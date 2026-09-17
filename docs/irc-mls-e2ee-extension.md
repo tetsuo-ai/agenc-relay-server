@@ -3050,7 +3050,7 @@ disclosed identity material.
 | `E2EE_FINALITY_REQUIRED` | Operation named a candidate without a valid finalization |
 | `E2EE_POLICY_INVALID` | A published policy failed route, chain, or approval validation |
 | `E2EE_POLICY_REQUIRED` | A terminal request named a policy the server has not retained |
-| `E2EE_EPOCH_STALE` | A Commit references an epoch outside the bounded window |
+| `E2EE_EPOCH_STALE` | A Commit or proof references an epoch outside the bounded window |
 | `E2EE_OBJECT_NOT_FOUND` | Requested retained object or record is unavailable |
 | `E2EE_RATE_LIMITED` | Operation exceeded an authenticated quota |
 | `E2EE_KEY_UNAVAILABLE` | No acceptable KeyPackage is available |
@@ -5174,20 +5174,28 @@ struct {
 } IrcLeafMembershipProof;
 ```
 
-`epoch` is the MLS epoch in which the leaf at `leaf_index` holds the
-credential whose `old_credential_hash` and raw public `leaf_signature_key`
-the proof carries; the account, device, root, roster, and credential
-generation fields equal the leaf authorization of that credential. The device
-signs with label `IRC-MLS/1 leaf membership`. A `continuing` proof also
-carries a nonempty `possession_signature` by the old leaf key with label
-`IRC-MLS/1 leaf membership possession`, verifiable under the carried public
-key, and has an all-zero `removal_finalization_id`. A `removed` proof carries
-an empty possession field and names the retained finalized record after
-which the leaf is gone. `leaf_membership_id` is the Section 2.2 hash of the
-TBS. The wire kind is `leaf_membership_proof`, the object is at most
-`MAX_LEAF_MEMBERSHIP_OBJECT`, and it carries only a public leaf key and
-digests: no ratchet tree, epoch secret, private key, or decrypted
-GroupContext appears in it.
+`epoch` is read against the disposition. A `continuing` proof names the MLS
+epoch in which the leaf at `leaf_index` holds the credential whose
+`old_credential_hash` and raw public `leaf_signature_key` the proof carries.
+A `removed` proof names the first MLS epoch in which that leaf is gone: the
+epoch established by the finalized record its `removal_finalization_id`
+names, one later than the last epoch in which the leaf held that credential.
+A leaf removed by the finalization of epoch `e` therefore states `removed`
+at epoch `e+1`, above its own `continuing` proof at epoch `e`, so the
+replacement rule below always admits a member's own removal and no removal
+is lost because the leaf does not survive into the epoch it would otherwise
+have to name. In both dispositions the account, device, root, roster, and
+credential generation fields equal the leaf authorization of that
+credential. The device signs with label `IRC-MLS/1 leaf membership`. A
+`continuing` proof also carries a nonempty `possession_signature` by the old
+leaf key with label `IRC-MLS/1 leaf membership possession`, verifiable under
+the carried public key, and has an all-zero `removal_finalization_id`. A
+`removed` proof carries an empty possession field and names the retained
+finalized record after which the leaf is gone. `leaf_membership_id` is the
+Section 2.2 hash of the TBS. The wire kind is `leaf_membership_proof`, the
+object is at most `MAX_LEAF_MEMBERSHIP_OBJECT`, and it carries only a public
+leaf key and digests: no ratchet tree, epoch secret, private key, or
+decrypted GroupContext appears in it.
 
 The server applies these rules:
 
@@ -5200,7 +5208,17 @@ The server applies these rules:
   refused with `E2EE_BINDING_AUTH_INVALID` and consumes no state.
 - The proof's device must be active in the retained roster named by
   `roster_id` at the record's validation time, so a proof or ACK from a
-  revoked device is refused.
+  revoked device is refused. A stored proof whose device is no longer
+  roster-active identifies no ACK and states no expectation: it leaves the
+  expected continuing set when the device is revoked and returns to it only
+  if that device becomes roster-active again.
+- A proof whose `epoch` is later than the epoch the conversation has
+  accepted attests to an old state that does not exist yet and is refused
+  with `E2EE_EPOCH_STALE`. A `removed` proof whose `removal_finalization_id`
+  names no finalization this conversation retains is refused with
+  `E2EE_BINDING_AUTH_INVALID`; because that finalization is retained before
+  the removal is admitted, the epoch a `removed` proof names is one the
+  conversation has already accepted.
 - Two `continuing` proofs for one `(leaf_index, old_credential_hash)` from
   different devices, or one device holding `continuing` proofs for two leaf
   indexes at one epoch, are a duplicate continuing leaf and are refused with
@@ -5209,13 +5227,37 @@ The server applies these rules:
   the earlier one; a byte-identical resubmission returns the same
   `STORED MEMBERSHIP` reply without state change; a differing proof at the
   same epoch is refused with `E2EE_OPERATION_CONFLICT`.
-- A `reinit_activation_request` that lacks a proof-backed ACK for any stored
-  `continuing` proof not superseded by a `removed` proof from the same device
-  is refused as a missing continuing leaf with `E2EE_BINDING_AUTH_INVALID`.
+- One device states one claim: its stored proofs at the highest `epoch` it
+  has reached. Every earlier proof of that device stays retained and keeps
+  identifying the ACKs of its own epoch but states nothing about the
+  present, so a credential the device has rotated away from and a leaf it
+  has since stated `removed` both stop being expected. The claim continues,
+  naming that one `continuing` proof, only while the device is roster-active
+  and no proof it holds at that epoch is `removed`; a duplicate continuing
+  leaf is already refused, so at most one such proof exists.
+- The expected continuing set of one ReInit attempt is every continuing
+  claim whose device the attempt's `IrcKeyPackagePlan` carries into the
+  successor. A `reinit_activation_request` that lacks a proof-backed ACK for
+  a member of that set is refused as a missing continuing leaf with
+  `E2EE_BINDING_AUTH_INVALID`, so a planned device acknowledges through the
+  exact leaf it last proved and an attempt cannot quietly substitute another.
+- A continuing claim the plan does not carry is outside that set and never
+  blocks an activation. `key_package_plan_id` is committed by the
+  `IrcReInitAttemptAuthorization` the old controller threshold signs, so the
+  authority that decides membership has already answered that claim, and no
+  one device holds the conversation's migration open with a leaf key no
+  server can place in the ratchet tree. The claim stays stored and readable
+  as that device's public statement, and revocation is not the only way to
+  clear it.
+- A `reinit_attempt` or `reinit_abort_request` submitter is an old-group
+  device: one whose claim continues. No plan exists before an attempt, so
+  that is the whole check. An activation submitter is additionally a device
+  the attempt's plan carries into the successor.
 - The server relies on `continuing` proofs only to identify ACK signers and
-  on `removed` proofs only to shrink its expected ReInit continuing set. The
-  exact continuing set, copath coverage, and removal outcomes remain
-  endpoint-only MLS checks; the server check is a filter, never authority.
+  to bound the expected ReInit continuing set, and on `removed` proofs only
+  to shrink it. The exact continuing set, copath coverage, and removal
+  outcomes remain endpoint-only MLS checks; the server check is a filter,
+  never authority.
 
 Proofs are stored under the conversation and fetched only through
 `EGROUP FETCH OBJECT` by attached devices of binding-principal accounts. A
@@ -5232,6 +5274,8 @@ this revision never re-admits.
 | malformed object | `E2EE_INVALID_FRAGMENT` |
 | invalid device or possession signature | `E2EE_BINDING_AUTH_INVALID` |
 | roster or root mismatch | `E2EE_BINDING_AUTH_INVALID` |
+| epoch later than the accepted epoch | `E2EE_EPOCH_STALE` |
+| `removed` proof names no retained finalization | `E2EE_BINDING_AUTH_INVALID` |
 | duplicate or conflicting continuing leaf | `E2EE_OPERATION_CONFLICT` |
 | object exceeds `MAX_LEAF_MEMBERSHIP_OBJECT` | `E2EE_OBJECT_TOO_LARGE` |
 | authenticated quota exceeded | `E2EE_RATE_LIMITED` |
@@ -5400,7 +5444,12 @@ successor. The preparation order is security-critical:
    its locally constructed state. No staged endpoint sends new-group traffic.
 5. The creator issues a `creator_state` ACK; every other continuing leaf
    validates and consumes its one-use Welcome and issues a `welcome_join` ACK.
-   Version 1 requires exactly one ACK for every continuing old leaf.
+   Version 1 requires exactly one ACK for every continuing old leaf. The
+   server counts that set against the approved `IrcKeyPackagePlan` and
+   against the Section 13.7.3 expected continuing set the same plan bounds,
+   so a published continuing claim the approved plan does not carry is a
+   disagreement the controllers settled in step 1, never a reason to refuse
+   the activation.
 6. Old-policy finality principals verify the exact attempt and complete ACK
    set, then issue sign-once ReInit disposition votes. A quorum activation
    certificate atomically remaps the route and activates new epoch 1.

@@ -17,6 +17,7 @@ use agenc_ircd_e2ee::objects::sequencing::{
 };
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode};
 use agenc_ircd_e2ee::wire::reply::E2eeReplyCode;
+use std::collections::BTreeSet;
 
 /// The old leaf an ACK claims and the signature it carries.
 pub(super) struct AckSigner<'a> {
@@ -194,8 +195,9 @@ pub(super) fn admit_standalone(
 }
 
 /// The ReInit attempt and abort submitter is an old-group device: the
-/// attached device holds a proof in the expected continuing set
-/// (companion 11.4 and 13.7.3). Checked before any signer access.
+/// attached device states a continuing claim (companion 11.4 and 13.7.3).
+/// No plan exists before an attempt, so that is the whole check and the
+/// claim set stays unbounded here. Checked before any signer access.
 pub(super) fn old_group_device<'a>(
     exec: &Exec<'a>,
     conversation: &[u8; 32],
@@ -240,6 +242,13 @@ fn plan_device(entry: &IrcKeyPackagePlanEntry) -> ([u8; 24], [u8; 16]) {
 /// names that device's own plan entry for its role, exactly one ACK exists
 /// per plan entry, and no expected continuing leaf lacks a proof-backed
 /// ACK. A missing continuing leaf is `E2EE_BINDING_AUTH_INVALID`.
+///
+/// The expected continuing set is the conversation's continuing claims
+/// bounded by the attempt's approved `IrcKeyPackagePlan`: a claim the plan
+/// does not carry has already been answered by the old controller threshold
+/// that signed `key_package_plan_id`, so it never blocks an activation and
+/// no one device can hold the migration open with a leaf key no server can
+/// place in the ratchet tree.
 pub(super) fn activation_coverage(
     exec: &Exec<'_>,
     conversation: &[u8; 32],
@@ -258,6 +267,14 @@ pub(super) fn activation_coverage(
         .iter()
         .zip(&signers)
         .all(|(ack, signer)| reinit_role_device(&ack.tbs, &request.attempt, signer));
+    let planned: BTreeSet<([u8; 24], [u8; 16])> = request
+        .attempt
+        .key_package_plan
+        .entries
+        .as_slice()
+        .iter()
+        .map(plan_device)
+        .collect();
     if !roles || acks.len() != request.attempt.key_package_plan.entries.as_slice().len() {
         return Err(invalid());
     }
@@ -269,6 +286,7 @@ pub(super) fn activation_coverage(
     let missing = memberships(exec, conversation)?
         .expected_continuing(|account, device| device_active(exec, account, device))
         .into_iter()
+        .filter(|expected| planned.contains(&signer_key(expected)))
         .any(|expected| !covered(expected));
     if missing {
         return Err(invalid());

@@ -294,19 +294,45 @@ impl LeafMembershipSet {
             .filter(|entry| entry.proof.is_continuing() && entry.proof.epoch <= prior_epoch)
     }
 
-    /// The server's expected ReInit continuing set, in leaf order: every
-    /// stored `continuing` proof whose device `is_active` still admits
-    /// (companion 13.7.3). A `removed` proof supersedes a leaf by replacing
-    /// its proof, and a revoked device's proof no longer counts; the exact
-    /// continuing set remains an endpoint check.
+    /// The conversation's continuing claims, in leaf order (companion
+    /// 13.7.3). One device states one claim: its stored proofs at the
+    /// highest `epoch` it has reached. Every earlier proof stays retained
+    /// and keeps identifying the ACKs of its own epoch but states nothing
+    /// about the present, so a credential the device has rotated away from
+    /// and a leaf it has since stated `removed` both stop being expected.
+    /// The claim continues only while `is_active` still admits the device
+    /// and no proof it holds at that epoch is `removed`; a duplicate
+    /// continuing leaf is already refused, so at most one such proof
+    /// exists. The expected continuing set of one ReInit attempt is this
+    /// set bounded by the attempt's approved KeyPackage plan, which its
+    /// caller applies; the exact continuing set remains an endpoint check.
     pub fn expected_continuing(
         &self,
         is_active: impl Fn(&[u8; 24], &[u8; 16]) -> bool,
     ) -> Vec<&RetainedLeafMembership> {
+        let mut reached: BTreeMap<([u8; 24], [u8; 16]), u64> = BTreeMap::new();
+        for entry in self.entries.values() {
+            let epoch = entry.proof.epoch;
+            reached
+                .entry(signing_device(entry))
+                .and_modify(|highest| *highest = (*highest).max(epoch))
+                .or_insert(epoch);
+        }
+        let claimed = |entry: &RetainedLeafMembership| {
+            reached.get(&signing_device(entry)) == Some(&entry.proof.epoch)
+        };
+        let retired: BTreeSet<([u8; 24], [u8; 16])> = self
+            .entries
+            .values()
+            .filter(|entry| !entry.proof.is_continuing() && claimed(entry))
+            .map(signing_device)
+            .collect();
         self.entries
             .values()
             .filter(|entry| {
                 entry.proof.is_continuing()
+                    && claimed(entry)
+                    && !retired.contains(&signing_device(entry))
                     && is_active(&entry.proof.account_id, &entry.proof.device_id)
             })
             .collect()

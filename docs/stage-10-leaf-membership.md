@@ -73,22 +73,29 @@ are unchanged.
 ## ReInit submitter roles and coverage
 
 - An attempt or attempt abort comes only from an old-group device: the
-  attached device holds a proof in the expected continuing set.
+  attached device states a continuing claim. No plan exists yet, so the
+  claim set is unbounded here.
 - An activation comes only from a continuing old-group device: such a device
   that the attempt's KeyPackage plan carries into the successor.
 - An activation's embedded ACKs must cover the attempt exactly: every ACK is
   identified by a distinct device, names that device's own plan entry,
-  exactly one ACK exists per plan entry, and every stored continuing proof in
-  the expected set has a proof-backed ACK (otherwise the missing continuing
+  exactly one ACK exists per plan entry, and every member of the expected
+  continuing set has a proof-backed ACK (otherwise the missing continuing
   leaf is `E2EE_BINDING_AUTH_INVALID`).
 
-The expected continuing set is every stored `continuing` proof whose device
-is still roster-active. A leaf is removed from it by the same device's
-`removed` proof at a higher epoch, which replaces the continuing proof; a
-revoked device's proof no longer counts, following "a proof ... from a
-revoked device is refused". All role checks run before any sequencer signer
-access. The exact continuing set, copath coverage, and removal outcomes remain
-endpoint MLS checks; the server check is a filter.
+`LeafMembershipSet::expected_continuing` returns the conversation's
+continuing claims: one per device, its stored proofs at the highest epoch it
+has reached, and only while the device is roster-active and no proof it holds
+at that epoch is `removed`. Earlier proofs stay retained and keep identifying
+the ACKs of their own epoch, so a credential a device has rotated away from
+and a leaf it has since stated `removed` both leave the set. The expected
+continuing set of one attempt is that set intersected with the attempt's
+approved `IrcKeyPackagePlan` in `activation_coverage`: a claim the plan does
+not carry was already answered by the controller threshold that signed
+`key_package_plan_id`, so it never blocks an activation and revocation is not
+the only way to clear it. All role checks run before any sequencer signer
+access. The exact continuing set, copath coverage, and removal outcomes
+remain endpoint MLS checks; the server check is a filter.
 
 ## Reconstruction
 
@@ -110,14 +117,39 @@ activation at the old group's accepted epoch, no device signs twice, and each
 ReInit ACK names its signer's plan entry. When absent, ACK signatures remain
 the endpoint's check as before. No MLS processing is introduced.
 
-## Open specification questions
+## Resolved specification questions
 
-Issue #111 records four normative gaps this implementation had to take a
-position on: a leaf removed in the epoch its proof names cannot be marked
-removed under the replacement rule; any principal device can publish an
-unverifiable continuing proof that blocks ReInit activation until revoked;
-future-epoch proofs are refused with `E2EE_EPOCH_STALE`, which the failure
-table does not list; and revoked devices are excluded from the expected set.
+Issue #111 raised four normative gaps this implementation had taken a
+position on. Companion 13.7.3 settles all four, and the two that moved the
+implementation landed with the specification:
+
+- A `removed` proof's `epoch` is the first MLS epoch in which the leaf is
+  gone: the epoch the finalized record its `removal_finalization_id` names
+  establishes. A leaf removed by the finalization of epoch `e` states
+  `removed` at `e+1`, so the unchanged "same device at a higher epoch
+  replaces" rule always admits a member's own removal. The admission code is
+  already correct; only the meaning of the field was missing.
+- One device states one claim: its stored proofs at the highest epoch it has
+  reached, continuing only while the device is roster-active and no proof at
+  that epoch is `removed`. Earlier proofs stay retained and keep identifying
+  the ACKs of their own epoch but are no longer expected, so a rotated
+  credential and a superseded leaf both leave the expected set.
+  `LeafMembershipSet::expected_continuing` now returns the highest-epoch
+  claim per device instead of every continuing entry.
+- The expected continuing set of a ReInit attempt counts only claims whose
+  device the attempt's `IrcKeyPackagePlan` carries into the successor.
+  `key_package_plan_id` is committed by the `IrcReInitAttemptAuthorization`
+  the old controller threshold signs, so a claim the approved plan does not
+  carry has already been answered by the authority that decides membership
+  and never blocks activation; one device can no longer stall a migration
+  with a leaf key no server can place in the tree. `activation_coverage`
+  now intersects the expected set with the plan, while `old_group_device`
+  keeps using the unbounded set of continuing claims, since an attempt or
+  abort submitter is checked before any plan exists.
+- A future-epoch proof is `E2EE_EPOCH_STALE` and a `removed` proof naming no
+  retained finalization is `E2EE_BINDING_AUTH_INVALID`; both are now rows in
+  the 13.7.3 failure table, and the revoked-device exclusion is stated in the
+  expected-set text. These match the implementation exactly.
 
 ## Evidence
 
@@ -156,7 +188,10 @@ table does not list; and revoked devices are excluded from the expected set.
   and its `maximum` module: a nonmember device of an approved account cannot
   attempt, activate, or abort with the signer present or absent while the
   proven device succeeds; activation by the creator and by a continuing
-  joiner; an excluded leaf and an omitted continuing leaf; a plan entry
+  joiner; an excluded leaf, whose unplanned claim no longer blocks the
+  activation while its device stays roster-active; a planned device that
+  rotated its leaf key, refused while it acknowledges through the superseded
+  credential and admitted through the one it last proved; a plan entry
   without its ACK; an ACK naming another member's plan entry; the standalone and embedded ReInit ACK matrix (unsigned,
   incorrect label, another leaf, wrong index, creator disposition from a
   joiner, a joined disposition naming the creator's ref, duplicate leaf,
