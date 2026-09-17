@@ -2080,6 +2080,22 @@ fn exercise_client(fixture: &LiveFixture) -> TestResult<IrcClient> {
     )?;
     assert_contains(&client.send_until("TOPIC #live", " 333 ")?, " 332 ")?;
     assert_contains(&client.send_until("NAMES #live", " 366 ")?, " 353 ")?;
+    // RUN-06 (#60): a concealed or missing target answers no earlier than
+    // the configured floor, and the delayed answer keeps its place in the
+    // connection's order: the refusal precedes the next command's reply.
+    client.send("TOPIC #absent")?;
+    client.send("PING :floor-order")?;
+    let floored = read_until(&mut client.reader, |line| {
+        line.ends_with("PONG :floor-order")
+    })?;
+    let refusal = floored.iter().position(|line| line.contains("#absent"));
+    let pong = floored
+        .iter()
+        .position(|line| line.ends_with("PONG :floor-order"));
+    assert!(
+        refusal.is_some() && pong.is_some() && refusal < pong,
+        "the floored refusal must precede the next reply: {floored:?}"
+    );
     assert_contains(&client.send_until("LIST", " 323 ")?, " 322 ")?;
     assert_contains(&client.send_until("WHO #live", " 315 ")?, " 352 ")?;
     assert_contains(&client.send_until("WHOIS LiveUser", " 318 ")?, " 311 ")?;

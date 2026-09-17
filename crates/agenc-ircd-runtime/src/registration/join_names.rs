@@ -178,6 +178,16 @@ impl RegistrationRouter {
         Ok(ActionStep::Continue)
     }
 
+    /// Resumes the commands one connection deferred, whatever deferred
+    /// them: an open JOIN/NAMES continuation or a floored response.
+    pub(super) fn resume_deferred_commands(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+    ) {
+        self.resume_join_commands(context, generation);
+    }
+
     fn resume_join_commands(
         &mut self,
         context: &mut StateCoreContext,
@@ -199,7 +209,10 @@ impl RegistrationRouter {
         generation: ConnectionGeneration,
         state: &mut ConnectionState,
     ) -> Result<(), RuntimeError> {
-        while state.join_names.is_none() && !context.has_local_join_seed(generation) {
+        while state.join_names.is_none()
+            && !context.has_local_join_seed(generation)
+            && !context.secret_floor_pending(generation)
+        {
             let Some(deferred) = state.join_deferred.pop_front() else {
                 return Ok(());
             };
@@ -228,6 +241,7 @@ impl RegistrationRouter {
                 .find(|(generation, state)| {
                     state.join_names.is_none()
                         && !state.join_deferred.is_empty()
+                        && !context.secret_floor_pending(**generation)
                         && context
                             .sessions()
                             .sink_for_generation(**generation)

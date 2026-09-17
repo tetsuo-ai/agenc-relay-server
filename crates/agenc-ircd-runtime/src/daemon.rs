@@ -693,6 +693,7 @@ fn build_live_state(
             },
             motd: runtime_config.motd_arc(),
             public_info: runtime_config.public_info_arc(),
+            secret_lookup_floor_millis: config.privacy.secret_lookup_floor_milliseconds,
         },
         reconstruction,
         keys,

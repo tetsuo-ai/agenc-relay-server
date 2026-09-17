@@ -1007,8 +1007,11 @@ impl RegistrationRouter {
             }
             RegistrationAction::ForwardRegisteredCommand(handoff) => {
                 let observation = observation.take().ok_or(RuntimeError::InvalidValue)?;
-                if self.edge.is_none()
-                    && (state.join_names.is_some() || context.has_local_join_seed(generation))
+                // A floored response still owes its connection an answer;
+                // later commands wait so the order is preserved.
+                if context.secret_floor_pending(generation)
+                    || (self.edge.is_none()
+                        && (state.join_names.is_some() || context.has_local_join_seed(generation)))
                 {
                     return Self::defer_join_command(context, state, handoff, observation);
                 }
@@ -3304,20 +3307,7 @@ impl CommandRouter for RegistrationRouter {
     }
 
     fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) {
-        if self.join_names_timer(context, entry) {
-            return;
-        }
-        if let Some(federation) = self.federation.as_mut()
-            && federation.timer_fired(context, entry)
-        {
-            return;
-        }
-        if let Some(edge) = self.edge.as_mut()
-            && edge.timer_fired(context, entry)
-        {
-            return;
-        }
-        if self.companion_witness_timer(context, entry) {
+        if self.owned_timer_fired(context, entry) {
             return;
         }
         let Some(accounts) = self.accounts.as_mut() else {
@@ -3531,6 +3521,44 @@ fn schedule_connection_timer(
     }
 }
 
+impl RegistrationRouter {
+    /// The timers this router's own owners consume: the response floor,
+    /// the JOIN/NAMES continuation, federation, the edge, and the
+    /// companion witness retry.
+    fn owned_timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) -> bool {
+        if self.secret_floor_timer(context, entry) || self.join_names_timer(context, entry) {
+            return true;
+        }
+        if let Some(federation) = self.federation.as_mut()
+            && federation.timer_fired(context, entry)
+        {
+            return true;
+        }
+        if let Some(edge) = self.edge.as_mut()
+            && edge.timer_fired(context, entry)
+        {
+            return true;
+        }
+        self.companion_witness_timer(context, entry)
+    }
+
+    /// Publishes one floored concealment response and resumes the commands
+    /// its connection deferred behind it.
+    fn secret_floor_timer(&mut self, context: &mut StateCoreContext, entry: TimerEntry) -> bool {
+        if entry.kind != TimerKind::SecretChannelFloor {
+            return false;
+        }
+        let TimedId::Connection(generation) = entry.id else {
+            return false;
+        };
+        let released = context.release_secret_floor(generation);
+        if released {
+            self.resume_deferred_commands(context, generation);
+        }
+        true
+    }
+}
+
 fn cancel_connection_timers(context: &mut StateCoreContext, generation: ConnectionGeneration) {
     let id = TimedId::Connection(generation);
     for kind in [
@@ -3538,9 +3566,11 @@ fn cancel_connection_timers(context: &mut StateCoreContext, generation: Connecti
         TimerKind::Ping,
         TimerKind::Pong,
         TimerKind::Batch,
+        TimerKind::SecretChannelFloor,
     ] {
         context.timers_mut().cancel(kind, id);
     }
+    context.discard_secret_floor(generation);
 }
 
 fn close_transport(context: &mut StateCoreContext, generation: ConnectionGeneration) {

@@ -469,6 +469,9 @@ impl RegisteredCommandExecutor {
         handoff: RegisteredCommandHandoff,
         observation: CommandObservation,
     ) -> Result<RouteOutcome, RuntimeError> {
+        // The response floor of a concealed target is measured from here:
+        // the start of one parsed, admitted command's processing.
+        context.begin_secret_floor(generation);
         let Some(bound) = bound else {
             context.complete_command_observation(observation, ResultClass::Rejected);
             return Ok(RouteOutcome::Close(CloseReason::ProtocolError));

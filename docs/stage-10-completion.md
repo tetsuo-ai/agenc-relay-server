@@ -36,6 +36,8 @@ in [the sequencer signer record](stage-10-sequencer-signers.md).
 The edge's bounded durable snapshot generations with exact READY and ACTIVE
 recovery (ENC-14, issue #59) are recorded in
 [the edge snapshot generations record](stage-10-edge-snapshot-generations.md).
+The configured secret-lookup response floor (RUN-06, issue #60) is recorded
+in [the secret-lookup floor record](stage-10-secret-lookup-floor.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

@@ -44,13 +44,58 @@ pub(crate) fn render_domain_failure(
         error,
         target,
     )?;
-    send_logical(
+    publish_failure(
         context,
-        reply.generation,
+        reply,
+        vec![frame],
+        floored(reply.request, std::slice::from_ref(&error)),
+    )
+}
+
+/// Whether a failed request must not answer before the configured
+/// secret-lookup floor: a JOIN, NAMES, TOPIC, or MODE whose every failure
+/// is a missing or concealed target, which must not be told apart by the
+/// time the answer takes (architecture 13.5).
+fn floored(request: &ParsedMessage, errors: &[DomainError]) -> bool {
+    let command = request.command();
+    if !matches!(command, "JOIN" | "NAMES" | "TOPIC" | "MODE") {
+        return false;
+    }
+    !errors.is_empty()
+        && errors.iter().all(|error| {
+            matches!(
+                error,
+                DomainError::NotFound | DomainError::SecretUnavailable
+            )
+        })
+}
+
+/// Publishes one rendered failure, holding it for the floor when the
+/// outcome is a concealment and the floor has not passed.
+fn publish_failure(
+    context: &mut StateCoreContext,
+    reply: ReplyInput<'_>,
+    frames: Vec<WireMessage>,
+    floored: bool,
+) -> Result<(), RuntimeError> {
+    let logical = logical_frames(
+        context.server_prefix(),
         reply.capabilities,
         reply.request,
-        vec![frame],
-    )
+        frames,
+    )?;
+    let logical = if floored {
+        match context.hold_secret_floor(reply.generation, logical) {
+            Ok(()) => return Ok(()),
+            Err(logical) => logical,
+        }
+    } else {
+        logical
+    };
+    context
+        .send_to(reply.generation, logical)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    Ok(())
 }
 
 pub(crate) fn render_rejected(
@@ -76,13 +121,12 @@ pub(crate) fn render_rejected(
             Some(failure.target()),
         )?);
     }
-    send_logical(
-        context,
-        reply.generation,
-        reply.capabilities,
-        reply.request,
-        frames,
-    )
+    let errors: Vec<DomainError> = plan
+        .failures()
+        .iter()
+        .map(|failure| failure.error())
+        .collect();
+    publish_failure(context, reply, frames, floored(reply.request, &errors))
 }
 
 pub(crate) fn failure_frame(
@@ -445,6 +489,48 @@ mod tests {
                 encoded(reply)?,
                 b":server 734 requester 100 alice,bob :Monitor list is full\r\n"
             );
+        }
+        Ok(())
+    }
+
+    /// The floor covers exactly the concealment outcomes of the four
+    /// commands whose answer would otherwise distinguish a missing target
+    /// from a concealed one (architecture 13.5).
+    #[test]
+    fn only_concealment_outcomes_of_the_four_commands_are_floored() -> Result<(), Box<dyn Error>> {
+        for command in [
+            "JOIN #secret",
+            "NAMES #secret",
+            "TOPIC #secret",
+            "MODE #secret",
+        ] {
+            let request = parsed(command)?;
+            for error in [DomainError::NotFound, DomainError::SecretUnavailable] {
+                assert!(floored(&request, &[error]), "{command} {error:?}");
+            }
+            for error in [
+                DomainError::Forbidden,
+                DomainError::LimitExceeded,
+                DomainError::InvalidArgument,
+                DomainError::ServerBusy,
+            ] {
+                assert!(!floored(&request, &[error]), "{command} {error:?}");
+            }
+            // A multi-target request is floored only when every outcome is
+            // a concealment, so no other failure is delayed.
+            assert!(floored(
+                &request,
+                &[DomainError::NotFound, DomainError::SecretUnavailable]
+            ));
+            assert!(!floored(
+                &request,
+                &[DomainError::NotFound, DomainError::Forbidden]
+            ));
+            assert!(!floored(&request, &[]));
+        }
+        for command in ["PRIVMSG #secret :hi", "WHO #secret", "LIST", "PART #secret"] {
+            let request = parsed(command)?;
+            assert!(!floored(&request, &[DomainError::NotFound]), "{command}");
         }
         Ok(())
     }

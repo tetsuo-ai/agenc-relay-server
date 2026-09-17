@@ -190,6 +190,18 @@ pub struct FanoutCommitReport {
 }
 
 impl FanoutCommitReport {
+    /// The report of one group retained behind a response floor: nothing
+    /// reached a sink yet, and nothing was closed or excluded.
+    #[must_use]
+    pub(crate) fn retained() -> Self {
+        Self {
+            committed_sinks: 0,
+            slow_consumers_closed: 0,
+            excluded_closed: 0,
+            slow_consumers: Vec::new(),
+        }
+    }
+
     /// Iterates the generations whose policy close became visible during
     /// this commit.
     pub fn slow_consumer_generations(&self) -> impl Iterator<Item = ConnectionGeneration> + '_ {
