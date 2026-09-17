@@ -12,6 +12,8 @@
 
 #[path = "stage_ten_drills/index_transition.rs"]
 mod index_transition;
+#[path = "stage_ten_drills/sequencer_rotation.rs"]
+mod sequencer_rotation;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -1894,98 +1896,11 @@ fn e2ee_acknowledgements(fixture: &NodeFixture) -> usize {
         .count()
 }
 
+/// The sequencer rotation drill: the overlap, the finalized `SEQUENCER`
+/// transition, and the retirement with the predecessor retained
+/// (`sequencer_rotation`).
 fn run_sequencer_rotation(drill: &mut Drill) -> TestResult<bool> {
-    let network = drill_network()?;
-    let _logs = LogGuard {
-        network: &network,
-        directory: drill.stderr_logs.clone(),
-    };
-    let mut nodes = DrillNodes::start(&network, drill)?;
-    let account = seed_state(&network)?;
-    let before = [
-        e2ee_acknowledgements(&network.edge_a),
-        e2ee_acknowledgements(&network.edge_b),
-    ];
-    let mut fresh = [0_u8; 32];
-    OsEntropy::fill(&mut fresh)?;
-    let secret = Ed25519SecretKey::from_bytes(fresh);
-    let previous = Ed25519SecretKey::from_bytes([network.coordinator.seed.wrapping_add(15); 32]);
-    let credentials = builders::sequencer_rotation_document(
-        *NETWORK_ID.as_bytes(),
-        &previous,
-        &secret,
-        (0, 4_000_000_000),
-    )?;
-    for (index, fixture) in [&network.coordinator, &network.edge_a, &network.edge_b]
-        .into_iter()
-        .enumerate()
-    {
-        let keys = fixture.data_dir.join("keys");
-        let new_credentials = keys.join("sequencer-credentials-g2.bin");
-        write_private(&new_credentials, &credentials)?;
-        let mut config = fs::read_to_string(&fixture.config_path)?;
-        let old_credentials = current_key_file(fixture, "sequencer_credentials_file")?;
-        replace_once(
-            &mut config,
-            &format!(
-                "sequencer_credentials_file = \"{}\"",
-                protected_path_text(&old_credentials)?
-            ),
-            &format!(
-                "sequencer_credentials_file = \"{}\"",
-                protected_path_text(&new_credentials)?
-            ),
-        )?;
-        if index == 0 {
-            let new_key = keys.join("sequencer-g2.key");
-            write_private(&new_key, &fresh)?;
-            let old_key = current_key_file(fixture, "sequencer_private_key_file")?;
-            replace_once(
-                &mut config,
-                &format!(
-                    "sequencer_private_key_file = \"{}\"",
-                    protected_path_text(&old_key)?
-                ),
-                &format!(
-                    "sequencer_private_key_file = \"{}\"",
-                    protected_path_text(&new_key)?
-                ),
-            )?;
-        }
-        fs::write(&fixture.config_path, config)?;
-    }
-    drill.step(
-        "rotate",
-        "new sequencer key and credentials installed on every node",
-    );
-    let status = nodes.coordinator.stop()?;
-    if !status.success() {
-        return Err(failure(format!("coordinator exited with {status}")));
-    }
-    nodes.restart_all(&network)?;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut after = before;
-    while Instant::now() < deadline {
-        after = [
-            e2ee_acknowledgements(&network.edge_a),
-            e2ee_acknowledgements(&network.edge_b),
-        ];
-        if after[0] > before[0] && after[1] > before[1] {
-            break;
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    let acknowledged = after[0] > before[0] && after[1] > before[1];
-    drill.fact("profile_acknowledged_after_rotation", acknowledged);
-    drill.step(
-        "restart",
-        format!("E2EE profile acknowledgements {before:?} -> {after:?}"),
-    );
-    let mut client = account_login(&network.edge_b, account, "sequencer-check")?;
-    client.send("QUIT :checked")?;
-    let clean = nodes.stop_all();
-    drill.fact("daemons_stopped_cleanly", format!("{clean:?}"));
-    Ok(acknowledged && clean.iter().all(|c| *c))
+    sequencer_rotation::run(drill)
 }
 
 #[test]
