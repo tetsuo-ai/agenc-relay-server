@@ -1,7 +1,8 @@
 //! The companion federation frames (companion Section 12.5): `ECAP`,
 //! `EREQUEST`, `EPAYLOAD`, `ERESULT`, `ERESPONSE`, `EEVENT`, `EDATA`,
-//! `EACK`, `ERESUME`, `EORIGIN`, and `ESTATE`, each with exact arity, the
-//! Section 11.10 token productions, and the 512-byte non-tag bound.
+//! `EACK`, `ERESUME`, `EORIGIN`, `ESTATE`, and the Section 12.5.1
+//! `EWITNESS` resolution family, each with exact arity, the Section 11.10
+//! token productions, and the 512-byte non-tag bound.
 //!
 //! Parsing takes the already split command, parameters, and optional
 //! fragment tag value; the transport layer owns prefixes and framing.
@@ -266,6 +267,66 @@ pub enum CompanionFrame {
         /// Snapshot digest.
         snapshot_digest: [u8; 32],
     },
+    /// `EWITNESS REQUEST` (12.5.1): one durable `witness/v1` row asks the
+    /// coordinator how its retained chain continues.
+    WitnessRequest {
+        /// Coordinator server.
+        coordinator_server_id: [u8; 16],
+        /// Conversation identifier.
+        conversation_id: [u8; 32],
+        /// The route sequence the edge expects next.
+        expected_sequence: u64,
+        /// The head identifier the edge retained.
+        expected_head_id: [u8; 32],
+    },
+    /// `EWITNESS BEGIN` with its one `witness_resolution` object.
+    WitnessBegin {
+        /// Target edge server.
+        target_server_id: [u8; 16],
+        /// Conversation identifier.
+        conversation_id: [u8; 32],
+        /// The token of this one open resolution.
+        resolution_token: [u8; 16],
+        /// The resolution object identifier.
+        object_id: [u8; 32],
+        /// The fragment.
+        fragment: FragmentTag,
+    },
+    /// `EWITNESS ENTRY` with one `sequencer_record` object.
+    WitnessEntry {
+        /// Target edge server.
+        target_server_id: [u8; 16],
+        /// The token of the open resolution.
+        resolution_token: [u8; 16],
+        /// The record position inside the set, counted from zero.
+        entry_sequence: u32,
+        /// The record object identifier.
+        object_id: [u8; 32],
+        /// The fragment.
+        fragment: FragmentTag,
+    },
+    /// `EWITNESS END`.
+    WitnessEnd {
+        /// Target edge server.
+        target_server_id: [u8; 16],
+        /// The token of the open resolution.
+        resolution_token: [u8; 16],
+        /// The delivered record count.
+        record_count: u32,
+    },
+    /// `EWITNESS RESOLVED`: the durable installation stands.
+    WitnessResolved {
+        /// Coordinator server.
+        coordinator_server_id: [u8; 16],
+        /// Conversation identifier.
+        conversation_id: [u8; 32],
+        /// The token of the resolution installed.
+        resolution_token: [u8; 16],
+        /// The installed head's route sequence.
+        new_head_sequence: u64,
+        /// The installed head's semantic identifier.
+        new_head_id: [u8; 32],
+    },
 }
 
 /// Whether `command` is a companion frame command.
@@ -284,6 +345,7 @@ pub fn is_companion_command(command: &str) -> bool {
             | "ERESUME"
             | "EORIGIN"
             | "ESTATE"
+            | "EWITNESS"
     )
 }
 
@@ -340,6 +402,7 @@ pub fn parse_companion_frame(
         "ERESUME" => parse_resume(params)?,
         "EORIGIN" => parse_origin(params, tag)?,
         "ESTATE" => parse_state(params, tag)?,
+        "EWITNESS" => parse_witness(params, tag)?,
         _ => return Err(E2eeError::UnknownDiscriminant),
     };
     if !frame.carries_object() && tag.is_some() {
@@ -584,6 +647,65 @@ fn parse_state_control(params: &[&str]) -> Result<CompanionFrame, E2eeError> {
     })
 }
 
+fn parse_witness(params: &[&str], tag: Option<&str>) -> Result<CompanionFrame, E2eeError> {
+    match params.first().copied() {
+        Some("BEGIN" | "ENTRY") => parse_witness_delivery(params, tag),
+        _ => parse_witness_control(params),
+    }
+}
+
+fn parse_witness_delivery(params: &[&str], tag: Option<&str>) -> Result<CompanionFrame, E2eeError> {
+    Ok(match params {
+        ["BEGIN", target, conversation, token, object] => {
+            let object_id = parse_hash(object)?;
+            CompanionFrame::WitnessBegin {
+                target_server_id: parse_id16(target)?,
+                conversation_id: parse_hash(conversation)?,
+                resolution_token: parse_id16(token)?,
+                object_id,
+                fragment: fragment(tag, &object_id)?,
+            }
+        }
+        ["ENTRY", target, token, entry, object] => {
+            let object_id = parse_hash(object)?;
+            CompanionFrame::WitnessEntry {
+                target_server_id: parse_id16(target)?,
+                resolution_token: parse_id16(token)?,
+                entry_sequence: parse_u32(entry)?,
+                object_id,
+                fragment: fragment(tag, &object_id)?,
+            }
+        }
+        _ => return Err(E2eeError::InvalidValue),
+    })
+}
+
+fn parse_witness_control(params: &[&str]) -> Result<CompanionFrame, E2eeError> {
+    Ok(match params {
+        ["REQUEST", coordinator, conversation, sequence, head] => CompanionFrame::WitnessRequest {
+            coordinator_server_id: parse_id16(coordinator)?,
+            conversation_id: parse_hash(conversation)?,
+            expected_sequence: parse_u64(sequence)?,
+            expected_head_id: parse_hash(head)?,
+        },
+        ["END", target, token, count] => CompanionFrame::WitnessEnd {
+            target_server_id: parse_id16(target)?,
+            resolution_token: parse_id16(token)?,
+            record_count: parse_u32(count)?,
+        },
+        ["RESOLVED", coordinator, conversation, token, sequence, head] => {
+            CompanionFrame::WitnessResolved {
+                coordinator_server_id: parse_id16(coordinator)?,
+                conversation_id: parse_hash(conversation)?,
+                resolution_token: parse_id16(token)?,
+                new_head_sequence: parse_u64(sequence)?,
+                new_head_id: parse_hash(head)?,
+            }
+        }
+        _ => return Err(E2eeError::InvalidValue),
+    })
+}
+
 fn id(bytes: &[u8]) -> String {
     base64url_encode(bytes)
 }
@@ -604,7 +726,9 @@ impl CompanionFrame {
             | Self::Event { fragment, .. }
             | Self::Data { fragment, .. }
             | Self::OriginState { fragment, .. }
-            | Self::StateEntry { fragment, .. } => Some(fragment),
+            | Self::StateEntry { fragment, .. }
+            | Self::WitnessBegin { fragment, .. }
+            | Self::WitnessEntry { fragment, .. } => Some(fragment),
             _ => None,
         }
     }
@@ -631,6 +755,9 @@ impl CompanionFrame {
                 | Self::StateEntry { .. }
                 | Self::StateEnd { .. }
                 | Self::StateCut { active: true, .. }
+                | Self::WitnessBegin { .. }
+                | Self::WitnessEntry { .. }
+                | Self::WitnessEnd { .. }
         )
     }
 
@@ -657,6 +784,11 @@ impl CompanionFrame {
             | Self::StateEnd { .. }
             | Self::StateFetch { .. }
             | Self::StateCut { .. } => "ESTATE",
+            Self::WitnessRequest { .. }
+            | Self::WitnessBegin { .. }
+            | Self::WitnessEntry { .. }
+            | Self::WitnessEnd { .. }
+            | Self::WitnessResolved { .. } => "EWITNESS",
         }
     }
 
@@ -721,6 +853,86 @@ impl CompanionFrame {
             Self::StateEnd { .. } | Self::StateFetch { .. } | Self::StateCut { .. } => {
                 self.state_control_parameters()
             }
+            Self::WitnessBegin { .. } | Self::WitnessEntry { .. } => {
+                self.witness_delivery_parameters()
+            }
+            Self::WitnessRequest { .. }
+            | Self::WitnessEnd { .. }
+            | Self::WitnessResolved { .. } => self.witness_control_parameters(),
+        }
+    }
+
+    fn witness_delivery_parameters(&self) -> Vec<String> {
+        match self {
+            Self::WitnessBegin {
+                target_server_id,
+                conversation_id,
+                resolution_token,
+                object_id,
+                ..
+            } => vec![
+                "BEGIN".to_owned(),
+                id(target_server_id),
+                id(conversation_id),
+                id(resolution_token),
+                id(object_id),
+            ],
+            Self::WitnessEntry {
+                target_server_id,
+                resolution_token,
+                entry_sequence,
+                object_id,
+                ..
+            } => vec![
+                "ENTRY".to_owned(),
+                id(target_server_id),
+                id(resolution_token),
+                entry_sequence.to_string(),
+                id(object_id),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    fn witness_control_parameters(&self) -> Vec<String> {
+        match self {
+            Self::WitnessRequest {
+                coordinator_server_id,
+                conversation_id,
+                expected_sequence,
+                expected_head_id,
+            } => vec![
+                "REQUEST".to_owned(),
+                id(coordinator_server_id),
+                id(conversation_id),
+                expected_sequence.to_string(),
+                id(expected_head_id),
+            ],
+            Self::WitnessEnd {
+                target_server_id,
+                resolution_token,
+                record_count,
+            } => vec![
+                "END".to_owned(),
+                id(target_server_id),
+                id(resolution_token),
+                record_count.to_string(),
+            ],
+            Self::WitnessResolved {
+                coordinator_server_id,
+                conversation_id,
+                resolution_token,
+                new_head_sequence,
+                new_head_id,
+            } => vec![
+                "RESOLVED".to_owned(),
+                id(coordinator_server_id),
+                id(conversation_id),
+                id(resolution_token),
+                new_head_sequence.to_string(),
+                id(new_head_id),
+            ],
+            _ => Vec::new(),
         }
     }
 

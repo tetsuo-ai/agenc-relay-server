@@ -17,6 +17,13 @@ struct Signed<'a> {
     signature: &'a [u8; 64],
 }
 
+/// The exact position and credential the record itself claims, before any
+/// signature check. A caller compares it with the position trusted history
+/// established; it grants no authority on its own.
+pub(super) fn position(record: &IrcSequencerRecord) -> ExpectedRecord {
+    fields(record).position
+}
+
 pub(super) fn authenticate(
     record: &IrcSequencerRecord,
     expected: &ExpectedRecord,

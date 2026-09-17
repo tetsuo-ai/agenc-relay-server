@@ -47,6 +47,10 @@ findings ZDH-C3, C4, C5 and A1 (issue #13) are recorded in
 The advertised capacity workload, the per-node occupancy measurement and the
 advertised-limit profiling matrix (CAP-01, issue #56) are recorded in
 [the capacity workload record](stage-10-capacity-workload.md).
+The authenticated `EWITNESS` resolution that lets a durable edge witness
+install a proven head, or block its conversation for good (ENC-04, issue #62),
+is recorded in
+[the edge witness resolution record](stage-10-edge-witness-resolution.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

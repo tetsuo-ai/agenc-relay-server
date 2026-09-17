@@ -22,6 +22,7 @@ mod tests;
 mod witness_checkpoint;
 mod witness_failure;
 mod witness_recovery;
+mod witness_resolution;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -51,6 +52,11 @@ pub struct E2eeEdgeConfig {
     pub server_name: String,
     /// The coordinator's Server ID.
     pub coordinator_server_id: ServerId,
+    /// The sequencer key set this node negotiated on the companion link:
+    /// the active credential and at most its overlapping successor. A
+    /// witness resolution accepts a record only under one of them
+    /// (companion 12.5.1).
+    pub sequencer_key_set: Option<agenc_ircd_e2ee::sequencer::SequencerKeySet>,
     /// This edge's incarnation.
     pub incarnation: [u8; 16],
     /// The configured logical E2EE disk ceiling, reported by `STATS E2EE`.
@@ -85,6 +91,9 @@ pub enum Phase {
     Down,
     /// The profile is active; ERESUME went out.
     Resuming,
+    /// `ERESUME OK` arrived while a durable `witness/v1` row is unresolved:
+    /// only `EWITNESS` frames flow until every row resolves (12.5.1).
+    Witness,
     /// An ESTATE transfer is in progress.
     Transferring,
     /// READY went out; ACTIVE is awaited.
@@ -179,6 +188,15 @@ pub(crate) enum PendingCommit {
     },
     /// A witness violation row awaits its exact durable receipt.
     Witness,
+    /// An authenticated witness resolution installs its new head and
+    /// deletes its row; `EWITNESS RESOLVED` follows the receipt (12.5.1).
+    WitnessResolved {
+        conversation: [u8; 32],
+        token: [u8; 16],
+        head: events::ChainHead,
+    },
+    /// An unresolvable fork marks its row `conflict` (12.5.1).
+    WitnessConflict { conversation: [u8; 32] },
 }
 
 /// The companion parts of one open barrier by part index, each with its
@@ -213,6 +231,8 @@ pub struct E2eeEdge {
     witnessed: Option<([u8; 32], agenc_ircd_storage::e2ee_records::WitnessRow)>,
     witness_failure: witness_failure::WitnessFailure,
     witness_recovery: witness_recovery::WitnessRecovery,
+    witness_resolution: Option<witness_resolution::OpenResolution>,
+    witness_request_wake: Option<crate::state_core::timers::TimerEntry>,
     queued: VecDeque<(CompanionFrame, Vec<u8>)>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
     channel_names: BTreeMap<ChannelInstanceId, String>,
@@ -271,6 +291,8 @@ impl E2eeEdge {
             witnessed: None,
             witness_failure: witness_failure::WitnessFailure::default(),
             witness_recovery: witness_recovery::WitnessRecovery::default(),
+            witness_resolution: None,
+            witness_request_wake: None,
             queued: VecDeque::new(),
             events_in: BTreeMap::new(),
             channel_names: BTreeMap::new(),
@@ -310,6 +332,8 @@ impl E2eeEdge {
     pub fn link_down(&mut self) {
         self.barrier_completions.clear();
         self.phase = Phase::Down;
+        // A resolution token belongs to one link incarnation (12.5.1).
+        self.witness_resolution = None;
         self.snapshot_link_down();
         self.queued.clear();
         self.events_in.clear();

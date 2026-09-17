@@ -20,8 +20,52 @@ pub(super) struct WitnessRecovery {
 }
 
 impl WitnessRecovery {
+    /// Whether a retained row still blocks every conversation: a row an
+    /// authenticated resolution marked `conflict` blocks only its own.
     pub(super) fn pending(&self) -> bool {
-        !self.entries.is_empty()
+        self.entries.iter().any(|(_, row)| !row.conflict)
+    }
+
+    /// The admission port every retained row is charged against.
+    pub(super) fn backing(&self) -> Option<BackingReservationPort> {
+        self.backing.clone()
+    }
+
+    /// The retained rows in conversation order.
+    pub(super) fn entries(&self) -> &[RecoveryWitness] {
+        &self.entries
+    }
+
+    fn find(&self, conversation: &[u8; 32]) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by_key(conversation, |entry| entry.0)
+    }
+
+    /// The retained row of `conversation`.
+    pub(super) fn row(&self, conversation: &[u8; 32]) -> Option<&WitnessRow> {
+        let index = self.find(conversation).ok()?;
+        self.entries.get(index).map(|entry| &entry.1)
+    }
+
+    /// Drops the row of `conversation` after its durable deletion.
+    pub(super) fn forget(&mut self, conversation: &[u8; 32]) -> bool {
+        let Ok(index) = self.find(conversation) else {
+            return false;
+        };
+        self.entries.remove(index);
+        true
+    }
+
+    /// Marks the row of `conversation` a durable conflict.
+    pub(super) fn mark_conflict(&mut self, conversation: &[u8; 32]) -> bool {
+        let Ok(index) = self.find(conversation) else {
+            return false;
+        };
+        let Some(entry) = self.entries.get_mut(index) else {
+            return false;
+        };
+        entry.1.conflict = true;
+        true
     }
 
     pub(super) fn install_backing(
@@ -133,8 +177,67 @@ impl super::E2eeEdge {
 
     /// A persisted witness is not cleared by an ordinary resume or an
     /// unproven larger head. Its verified recovery carrier is still required.
+    /// A row an authenticated resolution marked `conflict` no longer blocks
+    /// the link; it blocks only its own conversation, permanently (12.5.1).
     pub(crate) fn witness_recovery_pending(&self) -> bool {
         self.witness_failure.durable() || self.witness_recovery.pending()
+    }
+
+    /// Whether `conversation` holds a durable `witness/v1` row of any kind,
+    /// so its route still reads `E2EE_SYNCING`.
+    pub(crate) fn witness_conversation_blocked(&self, conversation: &[u8; 32]) -> bool {
+        self.durable_witness_row(conversation).is_some()
+    }
+
+    /// The durable rows awaiting an `EWITNESS` resolution, in conversation
+    /// order: the just-recorded violation and every restored row.
+    pub(super) fn unresolved_witnesses(&self) -> Vec<([u8; 32], WitnessRow)> {
+        let mut rows: Vec<([u8; 32], WitnessRow)> = self
+            .witness_recovery
+            .entries()
+            .iter()
+            .filter(|(_, row)| !row.conflict)
+            .cloned()
+            .collect();
+        if let Some((conversation, row)) = self.witness_failure.durable_row()
+            && rows.iter().all(|(known, _)| *known != conversation)
+        {
+            rows.push((conversation, row));
+        }
+        rows.sort_unstable_by_key(|(conversation, _)| *conversation);
+        rows
+    }
+
+    /// The durable row of `conversation`, whichever owner holds it.
+    pub(super) fn durable_witness_row(&self, conversation: &[u8; 32]) -> Option<WitnessRow> {
+        self.witness_recovery
+            .row(conversation)
+            .cloned()
+            .or_else(|| {
+                self.witness_failure
+                    .durable_row()
+                    .filter(|(known, _)| known == conversation)
+                    .map(|(_, row)| row)
+            })
+    }
+
+    /// Forgets the durable row of `conversation` after its deletion committed.
+    pub(super) fn forget_durable_witness(&mut self, conversation: &[u8; 32]) {
+        let dropped = self.witness_recovery.forget(conversation);
+        let released = self.witness_failure.forget_durable(conversation);
+        let _both = dropped | released;
+    }
+
+    /// Marks the durable row of `conversation` a conflict after its receipt.
+    pub(super) fn mark_durable_conflict(&mut self, conversation: &[u8; 32]) {
+        let marked = self.witness_recovery.mark_conflict(conversation);
+        let failed = self.witness_failure.mark_conflict(conversation);
+        let _both = marked | failed;
+    }
+
+    /// The admission port retained resolution metadata is charged against.
+    pub(super) fn witness_backing(&self) -> Option<BackingReservationPort> {
+        self.witness_recovery.backing()
     }
 }
 
@@ -152,6 +255,7 @@ mod tests {
             observed_sequence: sequence.saturating_add(1),
             observed_id: [2; 32],
             observed_predecessor_id: None,
+            conflict: false,
         }
     }
 

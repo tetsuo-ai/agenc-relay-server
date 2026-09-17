@@ -18,6 +18,7 @@ fn companion() -> E2eeEdge {
         server_id: ServerId::from_bytes([2; 16]),
         server_name: "edge.example".to_owned(),
         coordinator_server_id: ServerId::from_bytes([3; 16]),
+        sequencer_key_set: super::super::tests::sequencer_key_set(),
         incarnation: [4; 16],
         global_disk_bytes: 1 << 20,
     })

@@ -40,6 +40,7 @@ fn edges() -> (EdgeFederation, E2eeEdge) {
         server_id: EDGE,
         server_name: EDGE_NAME.to_owned(),
         coordinator_server_id: COORDINATOR,
+        sequencer_key_set: None,
         incarnation: *EDGE_INCARNATION.as_bytes(),
         global_disk_bytes: 1 << 30,
     });

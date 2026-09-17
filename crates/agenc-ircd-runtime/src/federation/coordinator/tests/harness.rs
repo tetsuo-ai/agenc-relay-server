@@ -2395,7 +2395,9 @@ fn grace_deadline(
         .checked_add(ORIGIN_DISCONNECT_GRACE_SECONDS.saturating_mul(1_000))?)
 }
 
-/// Pops the grace timer of `peer` due exactly at `deadline`.
+/// Pops the grace timer of `peer`, which must be a fresh full interval:
+/// `deadline` is that interval measured from now, and the scheduled one was
+/// measured a moment earlier, so it lands in the last millisecond before it.
 fn pop_grace_timer(
     context: &mut crate::state_core::StateCoreContext,
     peer: ServerId,
@@ -2408,9 +2410,22 @@ fn pop_grace_timer(
         .ok_or("no grace timer was scheduled")?;
     assert_eq!(entry.kind, TimerKind::FederationGrace);
     assert_eq!(entry.id, TimedId::Peer(peer));
-    assert_eq!(entry.deadline, deadline);
+    let earliest = deadline
+        .get()
+        .checked_sub(GRACE_SCHEDULING_TOLERANCE_MILLIS)
+        .ok_or("grace deadline underflow")?;
+    assert!(
+        entry.deadline <= deadline && entry.deadline.get() >= earliest,
+        "the grace interval must be fresh: {:?} outside {earliest}..={:?}",
+        entry.deadline,
+        deadline
+    );
     Ok(entry)
 }
+
+/// The clock may advance between scheduling a grace timer and recomputing
+/// its deadline in a test; a fresh interval stays within this much of it.
+const GRACE_SCHEDULING_TOLERANCE_MILLIS: u64 = 250;
 
 #[tokio::test]
 async fn synchronous_grace_expiry_hides_every_hosted_session() -> TestResult {
