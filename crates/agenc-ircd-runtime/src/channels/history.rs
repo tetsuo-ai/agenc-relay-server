@@ -95,10 +95,17 @@ impl RegisteredCommandExecutor {
         reply: &ClientReply<'_>,
         command: CanonicalCommand,
     ) -> Result<Option<DomainError>, RuntimeError> {
+        let kind = command.kind();
         let admitted = admit_command(context, bound, command);
         let failure = match admitted {
             Err(super::SessionCommandError::Public { error, .. }) => Some(error),
             Err(super::SessionCommandError::Internal(error)) => return Err(error),
+            // A history query is in the expensive query class of spec 19.1, so
+            // the 80-percent class of spec 19.3 refuses it before any snapshot
+            // is selected or any storage read is submitted.
+            Ok(_) if super::expensive_query_is_stopped(context, kind) => {
+                Some(DomainError::ServerBusy)
+            }
             Ok(_)
                 if !reply.capabilities.enabled("draft/chathistory")
                     || !context.history_enabled() =>

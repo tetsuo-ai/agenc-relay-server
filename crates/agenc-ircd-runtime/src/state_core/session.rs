@@ -16,6 +16,7 @@ use agenc_ircd_client_wire::CapabilityState;
 use agenc_ircd_types::{MonotonicTick, SessionId, UserId};
 
 use crate::RuntimeError;
+use crate::admission::EvictionCandidate;
 use crate::connection::sink::{ClientQueueSnapshot, ClientSink, ConnectionGeneration};
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::{PhysicalCloseNotice, SourceAddressKey};
@@ -498,6 +499,24 @@ impl SessionTable {
             .values()
             .filter(|entry| !entry.sink_gone)
             .map(|entry| Arc::clone(&entry.sink))
+            .collect()
+    }
+
+    /// Lists every connection whose transport is still live together with the
+    /// bytes currently charged to its outbound queue (spec 19.3).
+    ///
+    /// A connection whose sink is already gone owns no reclaimable queue, so
+    /// it is never offered twice. The order is the ascending generation order
+    /// of the table, which gives the selector a deterministic tie-break.
+    #[must_use]
+    pub fn eviction_candidates(&self) -> Vec<EvictionCandidate> {
+        self.connections
+            .iter()
+            .filter(|(_, entry)| !entry.sink_gone)
+            .map(|(generation, entry)| EvictionCandidate {
+                generation: *generation,
+                charged_bytes: entry.sink.queue_snapshot().queued_bytes(),
+            })
             .collect()
     }
 

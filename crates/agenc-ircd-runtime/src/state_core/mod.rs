@@ -59,6 +59,7 @@ mod fixture;
 use crate::RuntimeError;
 use crate::admission::{
     BucketKey, BucketTable, OverloadClass, OverloadState, PrefixRegistry, RateLimits,
+    select_evictions,
 };
 use crate::bridge::crypto::{CryptoBridge, CryptoJobOutput};
 use crate::bridge::storage::{BridgeFailure, STORAGE_HANDOFF_CAPACITY, StorageBridge, SubmitError};
@@ -487,6 +488,8 @@ pub struct StateCoreCounters {
     pub connections_opened: u64,
     /// Connections removed.
     pub connections_closed: u64,
+    /// Connections the 95-percent overload class selected and marked closing.
+    pub connections_evicted: u64,
     /// Batches the storage owner committed.
     pub batches_committed: u64,
     /// Batches rejected before anything irreversible began.
@@ -1710,7 +1713,20 @@ impl StateCoreContext {
             self.erase_prefix_buckets(prefix);
         }
         self.counters.connections_opened = self.counters.connections_opened.saturating_add(1);
-        let previous = self.overload.class();
+        let _class = self.refresh_overload();
+        Ok(())
+    }
+
+    /// Reclassifies the memory-overload class from the live budget and
+    /// reports any transition (spec 19.3).
+    ///
+    /// Every owner of a Section-19.3 class consults this rather than a cached
+    /// value, so a class is always measured against the charge the budget
+    /// holds at the moment the decision is taken. The eviction hysteresis of
+    /// the class itself keeps a node in the 95-percent class until its usage
+    /// falls below the 85-percent recovery mark.
+    pub(crate) fn refresh_overload(&mut self) -> OverloadClass {
+        let previous = self.overload_class();
         let current = self
             .overload
             .classify(self.budget.charged(), self.budget.capacity());
@@ -1719,7 +1735,37 @@ impl StateCoreContext {
         {
             observer.overload_transition(current);
         }
-        Ok(())
+        current
+    }
+
+    /// Applies the 95-percent overload class of spec 19.3 and returns how many
+    /// connections it selected.
+    ///
+    /// Whole client connections are selected in descending charged-queue-byte
+    /// order until the projected usage is below the 85-percent recovery mark.
+    /// Each selected connection is marked closing, which destroys its entire
+    /// queue with the connection: no individual frame is ever evicted, and a
+    /// frame shared with another queue keeps its permit until that last queue
+    /// releases it. A connection already marked closing is never offered
+    /// again, so one slow consumer is never charged for twice.
+    pub(crate) fn shed_overloaded_connections(&mut self) -> usize {
+        if !self.refresh_overload().evicts_connections() {
+            return 0;
+        }
+        let mut candidates = self.sessions.eviction_candidates();
+        let selected = select_evictions(
+            &mut candidates,
+            self.budget.charged(),
+            self.budget.capacity(),
+        );
+        for generation in &selected {
+            if let Some(sink) = self.sessions.sink_for_generation(*generation) {
+                sink.begin_slow_consumer_close();
+            }
+            let _marked = self.sessions.mark_sink_gone(*generation);
+            self.counters.connections_evicted = self.counters.connections_evicted.saturating_add(1);
+        }
+        selected.len()
     }
 
     /// Removes one connection and every bucket keyed by it.
@@ -3621,7 +3667,14 @@ impl StateCore {
                 None
             }
         };
-        exit.or_else(|| self.step_batch())
+        let exit = exit.or_else(|| self.step_batch());
+        if exit.is_none() {
+            // Every accepted input can have grown an outbound queue, so the
+            // 95-percent class of spec 19.3 is applied once the work that
+            // could have crossed it is complete.
+            let _evicted = self.context.shed_overloaded_connections();
+        }
+        exit
     }
 
     fn open_connection(
@@ -3786,7 +3839,13 @@ impl StateCore {
                 self.context.counters.timers_fired.saturating_add(1);
             self.router.timer_fired(&mut self.context, entry);
         }
-        self.step_batch()
+        let exit = self.step_batch();
+        if exit.is_none() {
+            // A due timer can page a query or retry a fanout, so the same
+            // 95-percent class applies to time-driven output as to input.
+            let _evicted = self.context.shed_overloaded_connections();
+        }
+        exit
     }
 
     /// Consumes one storage receipt and starts bounded index readback.
@@ -4659,6 +4718,7 @@ mod tests {
     mod admin_revision;
     mod client_input;
     mod local_join;
+    mod overload_ladder;
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use tokio::sync::{mpsc, oneshot};
 

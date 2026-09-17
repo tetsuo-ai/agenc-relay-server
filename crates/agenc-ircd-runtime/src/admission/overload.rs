@@ -39,6 +39,36 @@ pub enum OverloadClass {
     Evict,
 }
 
+impl OverloadClass {
+    /// Returns whether this class stops new guest registrations and the
+    /// expensive query class of spec 19.1.
+    ///
+    /// Spec 19.3 stops both at 80 percent of the live memory budget, so every
+    /// class at or above [`OverloadClass::NoGuests`] refuses them while
+    /// authenticated ordinary traffic continues.
+    #[must_use]
+    pub const fn stops_guests_and_expensive_queries(self) -> bool {
+        matches!(self, Self::NoGuests | Self::NoNewConnections | Self::Evict)
+    }
+
+    /// Returns whether this class stops new connections and channel creation.
+    ///
+    /// Spec 19.3 stops both at 90 percent, so a join that would create a
+    /// channel is refused while a join of an existing channel continues.
+    #[must_use]
+    pub const fn stops_connections_and_channel_creation(self) -> bool {
+        matches!(self, Self::NoNewConnections | Self::Evict)
+    }
+
+    /// Returns whether this class selects whole client connections for
+    /// eviction, which spec 19.3 begins at 95 percent and continues until the
+    /// usage is below the 85-percent recovery mark.
+    #[must_use]
+    pub const fn evicts_connections(self) -> bool {
+        matches!(self, Self::Evict)
+    }
+}
+
 /// Overload class with the eviction hysteresis of spec line 2825.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OverloadState {
@@ -239,6 +269,24 @@ mod tests {
         assert!(!usage_reaches(0, 1, 1));
         assert!(OverloadClass::Normal < OverloadClass::Evict);
         assert_eq!(QUEUE_WARNING_PERCENT, 75);
+        for (class, guests, connections, evicts) in [
+            (OverloadClass::Normal, false, false, false),
+            (OverloadClass::NoGuests, true, false, false),
+            (OverloadClass::NoNewConnections, true, true, false),
+            (OverloadClass::Evict, true, true, true),
+        ] {
+            assert_eq!(
+                class.stops_guests_and_expensive_queries(),
+                guests,
+                "{class:?}"
+            );
+            assert_eq!(
+                class.stops_connections_and_channel_creation(),
+                connections,
+                "{class:?}"
+            );
+            assert_eq!(class.evicts_connections(), evicts, "{class:?}");
+        }
     }
 
     /// Ten client base charges, so one close returns a tenth of the pool.

@@ -27,7 +27,7 @@ pub use decision::{
     E2eeBindingProof, E2eeRemovalFinality, EntropyPurpose, ExternalInputRequest, ExternalInputs,
     FailedTarget, MAX_INVITE_EXPIRATIONS_PER_PLAN, MessageBatch, MessageRoute, MutationPlan,
     PlanDecision, PreparedMutation, QueryPlan, RateBucket, RateCharge, RecipientSet, RejectedPlan,
-    ResolvedMessageTarget, SanctionRequest, StorageClass, TargetFailure,
+    ResolvedMessageTarget, SanctionRequest, StorageClass, TargetFailure, is_expensive_query,
 };
 pub use error::DomainError;
 pub use history::{
