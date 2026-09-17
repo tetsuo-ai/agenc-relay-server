@@ -4,6 +4,7 @@
 use agenc_ircd_storage::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH;
 
 use crate::RuntimeError;
+use crate::budget::CLIENT_CONNECTION_BASE_BYTES;
 use crate::connection::sink::ConnectionGeneration;
 
 /// One outbound queue sends one slow-consumer warning at this fill (spec
@@ -100,11 +101,15 @@ pub struct EvictionCandidate {
 }
 
 /// Selects whole connections in descending charged-byte order until the
-/// projected usage is below [`RECOVERY_PERCENT`] (spec lines 2823-2826).
+/// projected usage is below [`RECOVERY_PERCENT`] (spec lines 2823-2829).
 ///
 /// Ties keep the earlier generation first so the choice is deterministic.
 /// Every selected connection is closed with its entire queue; no frame is
-/// evicted on its own.
+/// evicted on its own. The projection subtracts the whole charge each close
+/// returns, the connection's queue bytes together with its base charge, so a
+/// population holding empty queues is not selected without bound. Backing
+/// beyond those two is not projected, which can only select one connection
+/// too many, never one too few.
 #[must_use]
 pub fn select_evictions(
     candidates: &mut [EvictionCandidate],
@@ -123,7 +128,9 @@ pub fn select_evictions(
         if !usage_reaches(projected, capacity, RECOVERY_PERCENT) {
             break;
         }
-        projected = projected.saturating_sub(candidate.charged_bytes);
+        projected = projected
+            .saturating_sub(candidate.charged_bytes)
+            .saturating_sub(CLIENT_CONNECTION_BASE_BYTES);
         selected.push(candidate.generation);
     }
     selected
@@ -234,54 +241,65 @@ mod tests {
         assert_eq!(QUEUE_WARNING_PERCENT, 75);
     }
 
+    /// Ten client base charges, so one close returns a tenth of the pool.
+    const POOL: u64 = 10 * CLIENT_CONNECTION_BASE_BYTES;
+    /// Exactly [`EVICTION_PERCENT`] of [`POOL`].
+    const AT_EVICTION: u64 = POOL * EVICTION_PERCENT / 100;
+
+    /// Builds one candidate holding `queue_bytes` beyond its base charge.
+    fn candidate(generation: u64, queue_bytes: u64) -> EvictionCandidate {
+        EvictionCandidate {
+            generation: ConnectionGeneration::new(generation),
+            charged_bytes: queue_bytes,
+        }
+    }
+
     #[test]
     fn eviction_selects_whole_connections_by_descending_bytes_until_recovery() {
         let mut candidates = vec![
-            EvictionCandidate {
-                generation: ConnectionGeneration::new(3),
-                charged_bytes: 20,
-            },
-            EvictionCandidate {
-                generation: ConnectionGeneration::new(1),
-                charged_bytes: 60,
-            },
-            EvictionCandidate {
-                generation: ConnectionGeneration::new(2),
-                charged_bytes: 60,
-            },
-            EvictionCandidate {
-                generation: ConnectionGeneration::new(4),
-                charged_bytes: 10,
-            },
+            candidate(3, 20_000),
+            candidate(1, 60_000),
+            candidate(2, 60_000),
+            candidate(4, 10_000),
         ];
-        // 960 - 60 = 900 is still at 85 percent or above; 900 - 60 = 840 is below.
-        let selected = select_evictions(&mut candidates, 960, CAPACITY);
+        // The largest queue plus its base charge returns 125,536 bytes, which
+        // is already below the 85 percent recovery mark; projecting the queue
+        // alone would have taken a second connection that was never needed.
+        let selected = select_evictions(&mut candidates, AT_EVICTION, POOL);
+        assert_eq!(selected, vec![ConnectionGeneration::new(1)]);
+        let mut ties = vec![candidate(2, 60_000), candidate(1, 60_000)];
+        assert_eq!(
+            select_evictions(&mut ties, AT_EVICTION, POOL),
+            vec![ConnectionGeneration::new(1)],
+            "equal queues keep the earlier generation first"
+        );
+    }
+
+    #[test]
+    fn eviction_of_an_idle_population_stops_at_the_recovery_mark() {
+        // Every queue is empty, so only the base charges can restore the
+        // pool. Projecting the queue alone would have selected the whole
+        // population without ever reaching recovery.
+        let mut idle: Vec<EvictionCandidate> = (1..=10)
+            .map(|generation| candidate(generation, 0))
+            .collect();
+        let selected = select_evictions(&mut idle, AT_EVICTION, POOL);
+        assert_eq!(selected.len(), 2, "two base charges reach recovery");
         assert_eq!(
             selected,
             vec![ConnectionGeneration::new(1), ConnectionGeneration::new(2)]
         );
-        let mut single = vec![EvictionCandidate {
-            generation: ConnectionGeneration::new(5),
-            charged_bytes: 300,
-        }];
-        assert_eq!(
-            select_evictions(&mut single, 960, CAPACITY),
-            vec![ConnectionGeneration::new(5)],
-            "one large connection restores usage below 85 percent"
-        );
-        let mut nothing = vec![EvictionCandidate {
-            generation: ConnectionGeneration::new(9),
-            charged_bytes: 10,
-        }];
-        assert!(select_evictions(&mut nothing, 840, CAPACITY).is_empty());
-        let mut exhausted = vec![EvictionCandidate {
-            generation: ConnectionGeneration::new(9),
-            charged_bytes: 10,
-        }];
-        assert_eq!(
-            select_evictions(&mut exhausted, 990, CAPACITY),
-            vec![ConnectionGeneration::new(9)],
-            "every candidate is selected when recovery is unreachable"
+    }
+
+    #[test]
+    fn eviction_selects_nothing_below_the_recovery_mark() {
+        let below = POOL * RECOVERY_PERCENT / 100 - 1;
+        let mut nothing = vec![candidate(9, 10)];
+        assert!(select_evictions(&mut nothing, below, POOL).is_empty());
+        let mut empty: Vec<EvictionCandidate> = Vec::new();
+        assert!(
+            select_evictions(&mut empty, AT_EVICTION, POOL).is_empty(),
+            "an empty candidate set cannot recover the pool"
         );
     }
 

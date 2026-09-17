@@ -22,9 +22,9 @@ SOAK_CONNECTION_FLOOR = 256
 SOAK_PER_NODE_FLOOR = SOAK_CONNECTION_FLOOR // CLIENT_NODES
 MAX_CAMPAIGN_CONNECTIONS = 250_000
 # The Section 19.2 startup arithmetic of the unchanged Appendix C defaults.
-DEFAULT_NODE_BUDGET = {"budget_bytes": 4_294_967_296, "headroom_bytes": 536_870_912,
+DEFAULT_NODE_BUDGET = {"budget_bytes": 6_442_450_944, "headroom_bytes": 805_306_368,
                        "storage_handoff_bytes": 117_440_480, "crypto_pool_bytes": 301_989_888,
-                       "protocol_pool_bytes": 3_338_666_016}
+                       "protocol_pool_bytes": 5_217_714_208}
 # Only a production capacity population closes the capacity claim; the
 # seven-day soak runs the 256-client minimum and closes sustained operation.
 CAMPAIGN_WORKLOADS = {"capacity": ("production", True), "soak": ("below-default", False)}

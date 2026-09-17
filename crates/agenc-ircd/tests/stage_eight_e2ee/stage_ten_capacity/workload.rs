@@ -27,7 +27,7 @@ use agenc_ircd_runtime::purpose::ListenerPurpose;
 use super::*;
 
 /// Appendix C.2 default `server.memory_budget_bytes`.
-pub(super) const DEFAULT_BUDGET_BYTES: u64 = 4_294_967_296;
+pub(super) const DEFAULT_BUDGET_BYTES: u64 = 6_442_450_944;
 /// Appendix C.2 default `server.crypto_worker_threads`.
 const DEFAULT_CRYPTO_WORKERS: u64 = 4;
 /// Appendix C.6 default `parsed_arena_bytes`.
@@ -405,11 +405,11 @@ fn the_default_node_budget_is_the_published_arithmetic() -> TestResult {
     assert_eq!(
         budget.parts(),
         [
-            4_294_967_296,
-            536_870_912,
+            6_442_450_944,
+            805_306_368,
             117_440_480,
             301_989_888,
-            3_338_666_016
+            5_217_714_208
         ]
     );
     assert_eq!(

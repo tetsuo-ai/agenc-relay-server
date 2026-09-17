@@ -447,7 +447,7 @@ mod tests {
     use super::*;
 
     /// Appendix C.2 default `server.memory_budget_bytes` (spec line 8908).
-    const DEFAULT_BUDGET_BYTES: u64 = 4_294_967_296;
+    const DEFAULT_BUDGET_BYTES: u64 = 6_442_450_944;
     /// Appendix C.6 default `parsed_arena_bytes`, 32 KiB (spec line 2672).
     const DEFAULT_PARSED_ARENA_BYTES: u64 = 32_768;
 
@@ -581,10 +581,10 @@ mod tests {
             DEFAULT_PARSED_ARENA_BYTES,
         )?;
         assert_eq!(pool.budget_bytes(), DEFAULT_BUDGET_BYTES);
-        assert_eq!(pool.headroom_bytes(), 536_870_912);
+        assert_eq!(pool.headroom_bytes(), 805_306_368);
         assert_eq!(pool.storage_handoff_bytes(), 117_440_480);
         assert_eq!(pool.crypto_pool_bytes(), 301_989_888);
-        assert_eq!(pool.protocol_pool_bytes(), 3_338_666_016);
+        assert_eq!(pool.protocol_pool_bytes(), 5_217_714_208);
         assert_eq!(pool.working_set_floor_bytes(), 65_536 + 262_144);
         let small = startup_arithmetic(1_073_741_824, 1, &[], DEFAULT_PARSED_ARENA_BYTES)?;
         assert_eq!(small.headroom_bytes(), RUNTIME_HEADROOM_FLOOR_BYTES);

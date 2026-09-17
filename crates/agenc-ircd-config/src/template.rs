@@ -206,7 +206,7 @@ fn render_server(out: &mut String, values: &InitValues) {
         toml_basic(&values.runtime_dir.display().to_string())
     );
     let _ = writeln!(out, "# 536870912..1099511627776 bytes; restart-only.");
-    let _ = writeln!(out, "memory_budget_bytes = 4294967296");
+    let _ = writeln!(out, "memory_budget_bytes = 6442450944");
     let _ = writeln!(out, "# 2..128; restart-only.");
     let _ = writeln!(out, "tokio_worker_threads = 4");
     let _ = writeln!(

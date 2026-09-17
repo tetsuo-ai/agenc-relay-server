@@ -19,7 +19,7 @@ pub const ENDPOINT_PORT: Bound = Bound::new(1, 6_697, 65_535);
 /// `server.name` ceiling when federation is enabled (spec 8901, 2950).
 pub const MAX_FEDERATED_SERVER_NAME_BYTES: usize = 127;
 /// `server.memory_budget_bytes` (spec 8904).
-pub const MEMORY_BUDGET_BYTES: Bound = Bound::new(536_870_912, 4_294_967_296, 1_099_511_627_776);
+pub const MEMORY_BUDGET_BYTES: Bound = Bound::new(536_870_912, 6_442_450_944, 1_099_511_627_776);
 /// `server.tokio_worker_threads` (spec 8905).
 pub const TOKIO_WORKER_THREADS: Bound = Bound::new(2, 4, 128);
 /// `server.crypto_worker_threads` (spec 8906).

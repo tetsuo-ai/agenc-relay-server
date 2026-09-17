@@ -22,8 +22,9 @@ use crate::state_core::client_input::ClientInputs;
 use crate::state_core::session::MAX_TRACKED_CONNECTIONS;
 use crate::sync::Arc;
 
-/// Appendix C.2 default `server.memory_budget_bytes`.
-const DEFAULT_BUDGET_BYTES: u64 = 4_294_967_296;
+/// Appendix C.2 default `server.memory_budget_bytes`, funded so the default
+/// population stays in the normal overload class (spec 19.2, 19.3).
+const DEFAULT_BUDGET_BYTES: u64 = 6_442_450_944;
 /// Appendix C.2 default `server.crypto_worker_threads`.
 const DEFAULT_CRYPTO_WORKERS: u64 = 4;
 /// Appendix C.6 default `parsed_arena_bytes`.
@@ -96,7 +97,7 @@ fn an_idle_client_connection_charges_only_its_base() -> Result<(), RuntimeError>
 #[test]
 fn the_default_pool_admits_fifty_thousand_idle_clients() -> Result<(), RuntimeError> {
     let pool = default_pool()?;
-    assert_eq!(pool, 3_338_666_016);
+    assert_eq!(pool, 5_217_714_208);
     let budget = Arc::new(MemoryBudget::new(pool));
     // The one count-scaled fixed owner the client path installs at startup.
     let inputs = ClientInputs::new(
@@ -119,21 +120,50 @@ fn the_default_pool_admits_fifty_thousand_idle_clients() -> Result<(), RuntimeEr
             CLIENT_CONNECTION_BASE_BYTES + EAGER_QUEUE_BACKING_BYTES + EAGER_INPUT_BACKING_BYTES,
         )
         .ok_or(RuntimeError::Overflow)?;
-    assert!(eager > pool * 3, "the eager model needed {eager} bytes");
+    assert!(eager > pool * 2, "the eager model needed {eager} bytes");
     drop(inputs);
     Ok(())
 }
 
-/// The 4-GiB default admits every idle client's memory charge, but the
-/// Section 19.3 overload percentages are taken against the same live pool
-/// `P`, so a full default population sits above all three thresholds. The
-/// numbers below are the exact conflict recorded for a normative decision;
-/// they must be updated with whatever resolves it.
+/// The Section 19.3 classes are taken against the same live pool `P` that
+/// admission charges, so a configured population that reaches one of them is
+/// bounded by overload rather than by its own count ceiling. The funded
+/// six-GiB default holds its complete 50,000-client population in the normal
+/// class; the numbers below are the resolution of the conflict RUN-04 found
+/// and move only with a further normative decision.
 #[test]
-fn a_full_default_population_crosses_every_overload_threshold() -> Result<(), RuntimeError> {
+fn the_full_default_population_stays_in_the_normal_overload_class() -> Result<(), RuntimeError> {
     let pool = default_pool()?;
     let population = DEFAULT_CLIENT_CONNECTIONS * CLIENT_CONNECTION_BASE_BYTES;
     assert_eq!(population, 3_276_800_000);
+    assert_eq!(population * 100 / pool, 62);
+    let mut overload = OverloadState::new();
+    assert_eq!(overload.classify(population, pool), OverloadClass::Normal);
+    let admitted = |percent: u64| percent * pool / 100 / CLIENT_CONNECTION_BASE_BYTES;
+    assert_eq!(admitted(GUEST_STOP_PERCENT), 63_692);
+    assert_eq!(admitted(CONNECTION_STOP_PERCENT), 71_654);
+    assert_eq!(admitted(EVICTION_PERCENT), 75_635);
+    assert!(
+        DEFAULT_CLIENT_CONNECTIONS < admitted(GUEST_STOP_PERCENT),
+        "the default count must be funded below the lowest class"
+    );
+    Ok(())
+}
+
+/// The former four-GiB default admitted every base charge but left the
+/// population above all three classes: it refused its 45,850th client and
+/// then evicted. Pinning it keeps the rejected arithmetic legible.
+#[test]
+fn the_former_default_budget_left_the_population_above_every_class() -> Result<(), RuntimeError> {
+    let pool = startup_arithmetic(
+        4_294_967_296,
+        DEFAULT_CRYPTO_WORKERS,
+        &[ListenerPurpose::ClientTls, ListenerPurpose::AdminLocal],
+        DEFAULT_PARSED_ARENA_BYTES,
+    )?
+    .protocol_pool_bytes();
+    assert_eq!(pool, 3_338_666_016);
+    let population = DEFAULT_CLIENT_CONNECTIONS * CLIENT_CONNECTION_BASE_BYTES;
     assert_eq!(population * 100 / pool, 98);
     let mut overload = OverloadState::new();
     assert_eq!(overload.classify(population, pool), OverloadClass::Evict);

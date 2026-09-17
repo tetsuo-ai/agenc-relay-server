@@ -63,6 +63,10 @@ Real openmls and mls-rs endpoints driving the repaired encrypted recovery,
 sequencer rotation and ReInit paths through the daemon's client surface
 (ENC-10, issue #71) are recorded in
 [the encrypted client proof record](stage-10-encrypted-client-proof.md).
+The funded default memory budget that holds the advertised 50,000-client
+population in the normal overload class, and the eviction projection that
+returns each closed connection's whole charge (issue #113), are recorded in
+[the overload threshold record](stage-10-overload-threshold-defaults.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
