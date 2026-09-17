@@ -20,6 +20,18 @@ pub enum RecoveryDisposition {
 }
 
 /// Accepts only an exact pair or one authenticated direct successor.
+///
+/// The database record is the authority and the guard is never allowed to lead it. A durable
+/// operation writes the reserved record, publishes the reserved guard, commits the transaction
+/// that carries both the data and the committed record, and only then publishes the committed
+/// guard; each write is durable before the next begins. A kill therefore stops the sequence
+/// after one of four durable prefixes, and each one is named above: the two exact pairs, the
+/// reserved record whose guard was never published, and the committed record whose guard was
+/// never published. A guard two or more steps behind its record would need the database to have
+/// advanced twice across one unpublished guard, which the ordering makes unreachable, so it is
+/// refused here rather than reconciled. Each successor is admitted only when its predecessor's
+/// own guard hash, header hash, instance, sequences and StateMeta binding all repeat exactly, so
+/// a stale, gapped or foreign guard is refused even when its distance happens to be one.
 // agenc-review: focus owner=storage reviewed=2026-08-27 reason=four-state recovery classifier is reviewed as one closed crash-state matrix
 pub fn classify_recovery_state(
     header: &DatabaseHeader,

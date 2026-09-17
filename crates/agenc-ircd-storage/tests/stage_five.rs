@@ -6,6 +6,7 @@ mod domain_records;
 mod e2ee_records;
 mod federation_records;
 mod fuzz_seeds;
+mod guard_reopen;
 mod history_records;
 mod initialization_guard;
 mod qualification_workload;

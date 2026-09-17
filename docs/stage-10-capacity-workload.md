@@ -277,8 +277,8 @@ sampling impossible, and a warm-up paced per generator source address.
    not affected: it exercises the listener and the budget directly, without
    the Section 19.3 classifier that a daemon applies.
 2. **A killed edge cannot restart: the peer-loss scenario.** In the 300-second
-   pilot, `scenario_peer_loss` SIGKILLed edge B under load and the restart
-   refused to open its storage:
+   pilot, `scenario_peer_loss` SIGKILLed edge B under load and the restarted
+   daemon refused to start:
 
    ```text
    agenc-ircd: runtime startup failed: storage owner failed: storage state is
@@ -286,33 +286,39 @@ sampling impossible, and a warm-up paced per generator source address.
    ```
 
    The campaign then failed the cycle with "edge never established its
-   coordinator link" after the 60-second link wait. `StorageError::StaleState`
-   at open comes from `verify_guard_pair`
-   (`crates/agenc-ircd-storage/src/control.rs`), which requires exact
-   repetition between the in-database nonce reservation record and the on-disk
-   rollback guard across every counter, including
-   `storage_commit_sequence`, `manifest_sequence`, `state_generation` and
-   `nonce_draw_high_water`. A kill between the database commit and the guard
-   replacement therefore leaves a pair the next open refuses, and under the
-   campaign's continuous durable load that window is hit easily. This is a
-   blocker for every campaign, not only a production one, because the
-   peer-loss scenario is one of the eight Section 28.7 lifecycle scenarios and
-   the scenario immediately before it is the offline backup, which also opens
-   and replaces the guard.
+   coordinator link" after the 60-second link wait. This is a blocker for
+   every campaign, not only a production one, because the peer-loss scenario
+   is one of the eight Section 28.7 lifecycle scenarios.
+
+   **Correction (STO-10, issue #124).** This record originally attributed the
+   refusal to `verify_guard_pair`
+   (`crates/agenc-ircd-storage/src/control.rs`) refusing the database/guard
+   pair after a kill between the database commit and the guard replacement.
+   That attribution is withdrawn. The line above carries the
+   `runtime startup failed: ` prefix that only `DaemonError::Runtime` adds,
+   while a refusal from `StorageOwner::start` is `DaemonError::Storage` and
+   prints `storage owner failed: ...` on its own, so edge B's storage opened
+   and reconstructed and the daemon refused afterwards, during runtime
+   startup. An on-disk crash matrix over both guard publications of a commit
+   and of a checkpoint also shows that window already reopens at its exact
+   prior or successor state. The exact message and the two runs stand; the
+   refusing function named here did not. See
+   [the storage guard reopen record](stage-10-storage-guard-reopen.md), which
+   also names the surfaces the follow-up issue must cover.
 
    One control run of the same campaign with the fixture's one-GiB budget
    survived the kill (`peer loss: edge b back`), completed all eight scenarios
    and passed quiescence, so this failure was observed only with the default
-   budget. That is one run each and is not a proof of causation: the
-   guard/commit window is a race, and a live pool 8.7 times larger admits far
-   more concurrent durable work at the instant of the kill, which makes the
-   same window easier to hit. The control run then failed for its own,
+   budget. That is one run each and is not a proof of causation: a kill
+   under load is a race, and a live pool 8.7 times larger admits far more
+   concurrent durable work at the instant of the kill, which makes any such
+   window easier to hit. The control run then failed for its own,
    unrelated reason in the final settle, so no 300-second campaign completed
    on this host. Running the campaign
    at an eighth of the published pool is not an option — it is defect 4 above
-   — so this needs its own prerequisite issue against the storage open path.
-   This record claims no root cause beyond the exact message, the refusing
-   function, and the two runs that produced and avoided it.
+   — so this needs its own prerequisite issue against the edge's startup
+   reconstruction. This record claims no root cause beyond the exact message
+   and the two runs that produced and avoided it.
 3. **Host budget.** One production campaign needs three daemons, 100,000 TLS
    client sessions with their per-session state, 196 source addresses per edge
    and a delegated cgroup, for at least 300 seconds; the soak needs seven
