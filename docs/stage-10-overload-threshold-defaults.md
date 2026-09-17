@@ -89,6 +89,9 @@ leaves `client_connections` at its default, so those daemons remain bounded by
 Section 19.3 well below their configured count; no fixture opens enough
 connections to reach it. The stage-ten capacity campaign now pins the new
 default node budget, but no production population has been run against it: the
-campaign's own blocker is STO-10 (#124), where a SIGKILL at the published
-budget left an edge unable to reopen its storage. Re-running the peer-loss
-scenario at 6,442,450,944 is that issue's acceptance, not this one's.
+campaign's remaining blocker is #134, where a SIGKILL at the published budget
+left an edge unable to complete runtime startup. That failure was originally
+filed as #124 against the storage rollback guard; the guard was cleared by
+proof and the refusal was traced to the runtime reconstruction instead.
+Re-running the peer-loss scenario at 6,442,450,944 is #134's acceptance, not
+this one's.
