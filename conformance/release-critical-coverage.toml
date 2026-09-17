@@ -111,7 +111,7 @@ file = "crates/agenc-ircd-storage/src/platform.rs"
 source_sha256 = "a85f0f87f6e32ec1cf2e22b7de34c26edd739a5d7b1a40865b77d40151430eec"
 start_line = 645
 end_line = 653
-metric = "branches"
+metric = "regions"
 reason = "Every existing guard entry, including dangling symlinks, and every inspection error must refuse initialization before database creation."
 
 [[region]]
@@ -1228,10 +1228,10 @@ id = "runtime-join-echo-result-channels"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/federation/edge/join_echo.rs"
 source_sha256 = "db9a16b79a3f8f8d11193c3729d3befd0409c96dc78aee8581a4d79384dc563c"
-start_line = 361
+start_line = 373
 end_line = 380
-metric = "branches"
-reason = "Each held requester echo must correspond to exactly one accepted JOIN target in the result."
+metric = "regions"
+reason = "Each held requester echo must correspond to exactly one accepted JOIN target in the result. COV-05: narrowed from 361-380 to that correspondence, the consuming match and its Consistency refusal, all reached; the excluded lines are the bounded reservation ceiling and the channel accessor on the edge's own rendered echo frame, neither of which can fail."
 
 [[region]]
 id = "runtime-coordinator-result-receipt-ownership"
@@ -1369,7 +1369,7 @@ file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
 source_sha256 = "b273f69a009b51371aa91faf751e4bed3d1c651443a2ebb4e68d1ab6b1fc2a11"
 start_line = 20
 end_line = 35
-metric = "branches"
+metric = "regions"
 reason = "Declared recovery omits the obsolete companion replay, delivery, and barrier namespace after validating each closed record arm."
 
 [[region]]
@@ -1409,7 +1409,7 @@ file = "crates/agenc-ircd-storage/src/construction_runtime/recovery.rs"
 source_sha256 = "b273f69a009b51371aa91faf751e4bed3d1c651443a2ebb4e68d1ab6b1fc2a11"
 start_line = 101
 end_line = 105
-metric = "branches"
+metric = "regions"
 reason = "Cursor, outbox, and snapshot bodies must match their exact delivery key shape."
 
 [[region]]
@@ -1519,8 +1519,8 @@ file = "crates/agenc-ircd-admin/src/maintenance/tbs.rs"
 source_sha256 = "e3c354d85d3ff8ed32ca9303b4e0f68fc6ee7d201fe24cd11a8ac56fbf42a072"
 start_line = 187
 end_line = 205
-metric = "branches"
-reason = "Bind encoding 2/profile 1 and all identity, key, sequence, time, generation and transition fields to exact 358-byte TBS; reject truncation, trailing input and invalid fixed-field values."
+metric = "regions"
+reason = "Bind encoding 2/profile 1 and all identity, key, sequence, time, generation and transition fields to the exact 358-byte TBS. COV-05: re-scored from branches, which emits no record over this span; the fifteen uncovered entries are unreachable validate and writer propagations interleaved with the field writes, so no narrower span excludes them, and this row stays below 100 percent until the encoder is restructured."
 
 [[region]]
 id = "cap5-tbs-maintenanceauditeventtbs-take"
@@ -1548,9 +1548,9 @@ category = "authorization-decisions"
 file = "crates/agenc-ircd-admin/src/maintenance/mod.rs"
 source_sha256 = "2d221f52f9f542dbb7cc043fc4a8f88b8a333414ceee59643bdce2c6c266538a"
 start_line = 34
-end_line = 51
-metric = "branches"
-reason = "The selected audit key ID must derive from the actual signing or externally supplied verification public key; use the dedicated maintenance signature domain."
+end_line = 38
+metric = "regions"
+reason = "The selected audit key ID must derive from the actual signing or externally supplied verification public key. COV-05: narrowed from 34-51 to that selector fence, whose acceptance and whose refusal are both reached; the excluded TBS hash and signature error map cannot fail for a validated 358-byte TBS and a valid key, and the dedicated maintenance signature domain is a constant no metric can score."
 
 [[region]]
 id = "cap5-mod-require-key"
@@ -1737,10 +1737,10 @@ id = "cap5-maintenance-preparedmaintenanceaudit-audit-mutation"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/admin/audit/maintenance.rs"
 source_sha256 = "3c806ed50fa7444fdef30bbe008fd46dde4efb0831fb10807475de69e0c68ef6"
-start_line = 40
-end_line = 61
-metric = "branches"
-reason = "The single-use prepared event owns the transaction and exact head; its kind-2 audit row has sequence key, revision sequence+1, generation zero, no expiry/references, and shares the one resulting generation with the key-state mutation."
+start_line = 43
+end_line = 51
+metric = "regions"
+reason = "The kind-2 audit row has revision sequence+1, generation zero and no expiry or references over the prepared event's own encoding. COV-05: narrowed from 40-61 to that row; the excluded lines are the sequence overflow guard and five encode, stored-key and mutation propagations, none of which can fail for a prepared event, and the same fourteen executions still build the sequence key and the mutation."
 
 [[region]]
 id = "cap5-maintenance-session-binding"
@@ -1899,7 +1899,7 @@ file = "crates/agenc-ircd-runtime/src/daemon/login_index.rs"
 source_sha256 = "151e605ee5be8c6fc7d08e37a1984bc8b42074d52860b44c66c4f05111cbd1f8"
 start_line = 81
 end_line = 106
-metric = "branches"
+metric = "regions"
 reason = "Use host-validated configuration, existing secret and process checks, and exclusive authenticated LiveStorage; Start uses the purpose-separated new-key loader, Finish uses configured keys, and success requires joined owner shutdown."
 
 [[region]]
@@ -1909,7 +1909,7 @@ file = "crates/agenc-ircd-runtime/src/daemon/login_index.rs"
 source_sha256 = "151e605ee5be8c6fc7d08e37a1984bc8b42074d52860b44c66c4f05111cbd1f8"
 start_line = 108
 end_line = 118
-metric = "branches"
+metric = "regions"
 reason = "Use host-validated configuration, existing secret and process checks, and exclusive authenticated LiveStorage; Start uses the purpose-separated new-key loader, Finish uses configured keys, and success requires joined owner shutdown."
 
 [[region]]
@@ -1929,7 +1929,7 @@ file = "crates/agenc-ircd-runtime/src/daemon/login_index/transaction.rs"
 source_sha256 = "baf84ff65599d02180931ad389a01978b4c1209f0cc22a47ed9eea7e24331838"
 start_line = 11
 end_line = 53
-metric = "branches"
+metric = "regions"
 reason = "Derive scope from authenticated recovered storage facts; prepare one exact signed transition and atomically couple it with the key mapping under actual accounting and before-images before consuming its receipt."
 
 [[region]]
@@ -1939,7 +1939,7 @@ file = "crates/agenc-ircd-runtime/src/daemon/login_index/transaction.rs"
 source_sha256 = "baf84ff65599d02180931ad389a01978b4c1209f0cc22a47ed9eea7e24331838"
 start_line = 55
 end_line = 98
-metric = "branches"
+metric = "regions"
 reason = "Derive scope from authenticated recovered storage facts; prepare one exact signed transition and atomically couple it with the key mapping under actual accounting and before-images before consuming its receipt."
 
 [[region]]
@@ -1949,7 +1949,7 @@ file = "crates/agenc-ircd-runtime/src/daemon/login_index/transaction.rs"
 source_sha256 = "baf84ff65599d02180931ad389a01978b4c1209f0cc22a47ed9eea7e24331838"
 start_line = 100
 end_line = 113
-metric = "branches"
+metric = "regions"
 reason = "Only Committed returns a receipt; determinate rejection returns Refused, while indeterminate or lost completion returns Indeterminate and cannot publish success."
 
 [[region]]
@@ -1989,7 +1989,7 @@ file = "crates/agenc-ircd-runtime/src/daemon/login_index/cleanup.rs"
 source_sha256 = "1e1a23904833e1a7f6fd858fa55668d4d6650055e53024593287ec2a40a29155"
 start_line = 8
 end_line = 31
-metric = "branches"
+metric = "regions"
 reason = "Use reconstructed typed START owners to delete only their authority/reservations; every exact receipt advances head, index, sealed readback and domain before the next cleanup; final complete AuthTransaction scan must be empty."
 
 [[region]]
@@ -2039,7 +2039,7 @@ file = "crates/agenc-ircd-runtime/src/daemon/login_index/scan.rs"
 source_sha256 = "63a14d9f996cf804335cdb8a6a9af857fe19ed3ede91d53d427001ccdad9b304"
 start_line = 99
 end_line = 107
-metric = "branches"
+metric = "regions"
 reason = "Scan every ordered 256-row page at the exact current storage commit, strictly advance the key boundary, authenticate each sealed table/key-bound row, and reject malformed/truncated-no-progress results."
 
 [[region]]
@@ -6389,8 +6389,8 @@ file = "crates/agenc-ircd-runtime/src/state_core/projector/barrier.rs"
 source_sha256 = "fa597d606673d2dd4b56cc9195f6ac24da22c2d758de81c322883871a09efc46"
 start_line = 70
 end_line = 85
-metric = "branches"
-reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
+metric = "regions"
+reason = "Combined barrier construction, recovery, and receipt decisions require complete region evidence before release. COV-05: re-scored from branches, which emits no record over this span; three uncovered entries are unreachable encodings but the fourth is reachable, since PersistentRecordValue::new refuses revision zero for this non-tombstone row and no test passes zero, so it may not be narrowed away and this row stays below 100 percent."
 
 [[region]]
 id = "s10-cap70-projection-delete"
@@ -6398,9 +6398,9 @@ category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/state_core/projector/barrier.rs"
 source_sha256 = "fa597d606673d2dd4b56cc9195f6ac24da22c2d758de81c322883871a09efc46"
 start_line = 87
-end_line = 90
-metric = "branches"
-reason = "Combined barrier construction, recovery, and receipt decisions require complete branch evidence before release."
+end_line = 88
+metric = "regions"
+reason = "Combined barrier construction, recovery, and receipt decisions require complete region evidence before release. COV-05: narrowed from 87-90 to the delivery-recovery barrier row the deletion addresses; the excluded stored-key derivation concatenates a constant prefix with a sixteen-byte target identity and cannot exceed the key ceiling, and unlike the write row it leaves no reachable refusal inside the span."
 
 [[region]]
 id = "s10-cap70-project-project"
@@ -6689,8 +6689,8 @@ file = "crates/agenc-ircd-admin/src/audit/export.rs"
 source_sha256 = "b4416b2640aed49cd1cdb8a471b15b477c0ad2c79f135254638d270f58713e4c"
 start_line = 21
 end_line = 36
-metric = "branches"
-reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete branch evidence before release."
+metric = "regions"
+reason = "Audit export profile, coverage, record-label, and observed-receipt decisions require complete region evidence before release. COV-05: re-scored from branches, which emits no record over this span; both render arms and both labels are reached and the only uncovered entries are the two event encode propagations, one inside each arm, which cannot fail for an event that decoded. Every narrower span drops an arm, so this row stays below 100 percent."
 
 [[region]]
 id = "cap5-export-export-render-1"
@@ -10729,8 +10729,8 @@ file = "crates/agenc-ircd-runtime/src/runtime_config.rs"
 source_sha256 = "02358784c76dfebf4bd12d6d0eb082c0c95dc869544ccba61ec439a497a2f9d2"
 start_line = 806
 end_line = 830
-metric = "branches"
-reason = "Audit completion distinguishes refusal before submission from uncertainty after acceptance."
+metric = "regions"
+reason = "Audit completion distinguishes refusal before submission from uncertainty after acceptance. COV-05: re-scored from branches, which emits no record over this span; refusal before submission is proved on a full and on a closed queue, but the three uncovered entries are reachable, being the select cancellation arm and the determinate core rejection arm, so they may not be narrowed away and this row stays below 100 percent."
 
 [[region]]
 id = "remote-account-live-principal"
@@ -10849,8 +10849,8 @@ file = "crates/agenc-ircd-runtime/src/federation/coordinator/request.rs"
 source_sha256 = "c740eafebdbf92cd3c56f3a75d406e2e56514ecf2393747e11f435fedac7d059"
 start_line = 1193
 end_line = 1248
-metric = "branches"
-reason = "Replayed committed responses require a new atomic outer result and correlated completion at the checkpoint revision."
+metric = "regions"
+reason = "Replayed committed responses require a new atomic outer result and correlated completion at the checkpoint revision. COV-05: re-scored from branches, which emits no record over this span; the gate, its checkpoint plan and the staged result are all reached, and the two uncovered Ceiling maps on that plan and on an empty fanout cannot fail but sit inside the gate, so no narrower span keeps it and this row stays below 100 percent."
 
 [[region]]
 id = "revoked-remote-authentication-refusal"
