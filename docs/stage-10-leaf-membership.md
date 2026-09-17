@@ -82,12 +82,14 @@ are unchanged.
   the expected set has a proof-backed ACK (otherwise the missing continuing
   leaf is `E2EE_BINDING_AUTH_INVALID`).
 
-The expected continuing set is every stored `continuing` proof whose device
-is still roster-active. A leaf is removed from it by the same device's
-`removed` proof at a higher epoch, which replaces the continuing proof; a
-revoked device's proof no longer counts, following "a proof ... from a
-revoked device is refused". All role checks run before any sequencer signer
-access. The exact continuing set, copath coverage, and removal outcomes remain
+The expected continuing set as shipped is every stored `continuing` proof
+whose device is still roster-active. A leaf is removed from it by the same
+device's `removed` proof at a higher epoch, which replaces the continuing
+proof; a revoked device's proof no longer counts, following "a proof ... from
+a revoked device is refused". Companion 13.7.3 has since narrowed that set to
+one claim per device bounded by the attempt's KeyPackage plan, which this
+code does not yet do; the next section states the exact delta. All role
+checks run before any sequencer signer access. The exact continuing set, copath coverage, and removal outcomes remain
 endpoint MLS checks; the server check is a filter.
 
 ## Reconstruction
@@ -110,14 +112,39 @@ activation at the old group's accepted epoch, no device signs twice, and each
 ReInit ACK names its signer's plan entry. When absent, ACK signatures remain
 the endpoint's check as before. No MLS processing is introduced.
 
-## Open specification questions
+## Resolved specification questions
 
-Issue #111 records four normative gaps this implementation had to take a
-position on: a leaf removed in the epoch its proof names cannot be marked
-removed under the replacement rule; any principal device can publish an
-unverifiable continuing proof that blocks ReInit activation until revoked;
-future-epoch proofs are refused with `E2EE_EPOCH_STALE`, which the failure
-table does not list; and revoked devices are excluded from the expected set.
+Issue #111 raised four normative gaps this implementation had taken a
+position on. Companion 13.7.3 now settles all four, and two of them move the
+implementation:
+
+- A `removed` proof's `epoch` is the first MLS epoch in which the leaf is
+  gone: the epoch the finalized record its `removal_finalization_id` names
+  establishes. A leaf removed by the finalization of epoch `e` states
+  `removed` at `e+1`, so the unchanged "same device at a higher epoch
+  replaces" rule always admits a member's own removal. The admission code is
+  already correct; only the meaning of the field was missing.
+- One device states one claim: its stored proofs at the highest epoch it has
+  reached, continuing only while the device is roster-active and no proof at
+  that epoch is `removed`. Earlier proofs stay retained and keep identifying
+  the ACKs of their own epoch but are no longer expected, so a rotated
+  credential and a superseded leaf both leave the expected set.
+  `LeafMembershipSet::expected_continuing` still returns every continuing
+  entry and must take the highest-epoch claim per device instead.
+- The expected continuing set of a ReInit attempt counts only claims whose
+  device the attempt's `IrcKeyPackagePlan` carries into the successor.
+  `key_package_plan_id` is committed by the `IrcReInitAttemptAuthorization`
+  the old controller threshold signs, so a claim the approved plan does not
+  carry has already been answered by the authority that decides membership
+  and never blocks activation; one device can no longer stall a migration
+  with a leaf key no server can place in the tree. `activation_coverage`
+  must intersect the expected set with the plan, and `old_group_device`
+  must keep using the unbounded set of continuing claims, since an attempt
+  or abort submitter is checked before any plan exists.
+- A future-epoch proof is `E2EE_EPOCH_STALE` and a `removed` proof naming no
+  retained finalization is `E2EE_BINDING_AUTH_INVALID`; both are now rows in
+  the 13.7.3 failure table, and the revoked-device exclusion is stated in the
+  expected-set text. These match the implementation exactly.
 
 ## Evidence
 

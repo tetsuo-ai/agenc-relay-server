@@ -3581,8 +3581,10 @@ leaf-membership proof: attempt and abort now require an old-group device,
 activation a continuing planned device with exact ACK coverage, and every
 standalone or embedded Commit and ReInit ACK a proof-identified, roster-active
 signer. The record and its evidence are in
-`docs/stage-10-leaf-membership.md`; four specification questions it exposed
-are issue #111.
+`docs/stage-10-leaf-membership.md`; the four specification questions it
+exposed (issue #111) are now settled in companion 13.7.3, which bounds the
+expected continuing set by the approved KeyPackage plan and by one claim per
+device.
 
 ### CAP-87: reconnect drops a closed origin while its journal write is unsettled
 
