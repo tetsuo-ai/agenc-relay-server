@@ -49,6 +49,7 @@ mod durability;
 mod journal_retry;
 mod kill_reconstruction;
 mod ordinary_batch;
+mod reconstruction_cause;
 
 pub(crate) use ordinary_batch::committed_ordinary_acknowledgements;
 mod restart;
@@ -430,6 +431,7 @@ fn resync_restored_pending_snapshot_rejects_a_wrong_digest() -> TestResult {
         ProjectionGenerationState, ProjectionMarkerRecord,
     };
     let mut edge = resync_edge();
+    let mut cause = crate::federation::edge::EdgeRestoreCause::Unclassified;
     let result = sync::restore_pending(
         &mut edge,
         2,
@@ -444,6 +446,7 @@ fn resync_restored_pending_snapshot_rejects_a_wrong_digest() -> TestResult {
             recovery_epoch: *COORDINATOR_EPOCH.as_bytes(),
         },
         Vec::new(),
+        &mut cause,
     );
     assert!(
         result.is_err(),

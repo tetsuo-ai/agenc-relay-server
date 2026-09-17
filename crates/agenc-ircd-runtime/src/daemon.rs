@@ -194,8 +194,12 @@ pub enum ReconstructionSurface {
     DurableState,
     /// The startup reconciliation of every session recovered from storage.
     RecoveredSessions,
-    /// The authenticated edge federation restore, naming the step it reached.
-    EdgeFederation(crate::federation::edge::EdgeRestoreStep),
+    /// The authenticated edge federation restore, naming the step it reached
+    /// and the cause that step classified.
+    EdgeFederation(
+        crate::federation::edge::EdgeRestoreStep,
+        crate::federation::edge::EdgeRestoreCause,
+    ),
     /// The optional durable history index load.
     History,
 }
@@ -205,9 +209,16 @@ impl fmt::Display for ReconstructionSurface {
         match self {
             Self::DurableState => formatter.write_str("durable state reconstruction"),
             Self::RecoveredSessions => formatter.write_str("recovered session reconciliation"),
-            Self::EdgeFederation(step) => {
-                write!(formatter, "edge federation restore at {}", step.label())
-            }
+            Self::EdgeFederation(step, cause) => match cause {
+                crate::federation::edge::EdgeRestoreCause::Unclassified => {
+                    write!(formatter, "edge federation restore at {}", step.label())
+                }
+                cause => write!(
+                    formatter,
+                    "edge federation restore at {} ({cause})",
+                    step.label()
+                ),
+            },
             Self::History => formatter.write_str("history reconstruction"),
         }
     }
@@ -216,7 +227,7 @@ impl fmt::Display for ReconstructionSurface {
 impl From<crate::federation::edge::EdgeRestoreRefusal> for DaemonError {
     fn from(refusal: crate::federation::edge::EdgeRestoreRefusal) -> Self {
         Self::Reconstruction(
-            ReconstructionSurface::EdgeFederation(refusal.step),
+            ReconstructionSurface::EdgeFederation(refusal.step, refusal.cause),
             refusal.error,
         )
     }
@@ -4054,7 +4065,7 @@ async fn shutdown_blocking_owners(
 mod tests {
     use super::{DaemonError, ReconstructionSurface};
     use crate::RuntimeError;
-    use crate::federation::edge::EdgeRestoreStep;
+    use crate::federation::edge::{EdgeRestoreCause, EdgeRestoreStep};
     use agenc_ircd_storage::StorageError;
 
     /// A storage-open refusal, an unlabelled runtime refusal and each labelled
@@ -4092,12 +4103,28 @@ mod tests {
         );
         assert_eq!(
             DaemonError::Reconstruction(
-                ReconstructionSurface::EdgeFederation(EdgeRestoreStep::BarrierInstall),
+                ReconstructionSurface::EdgeFederation(
+                    EdgeRestoreStep::BarrierInstall,
+                    EdgeRestoreCause::Unclassified,
+                ),
                 RuntimeError::Storage(stale),
             )
             .to_string(),
             "runtime startup failed: edge federation restore at barrier-install refused the \
              recovered state: storage owner failed: storage state is stale or inconsistent",
+        );
+        assert_eq!(
+            DaemonError::Reconstruction(
+                ReconstructionSurface::EdgeFederation(
+                    EdgeRestoreStep::ProjectionEntries,
+                    EdgeRestoreCause::ActiveProjectionCeiling,
+                ),
+                RuntimeError::LimitExceeded,
+            )
+            .to_string(),
+            "runtime startup failed: edge federation restore at edge-projection-rows (active \
+             projection over the standing-projection ceiling) refused the recovered state: \
+             runtime ceiling exceeded",
         );
     }
 

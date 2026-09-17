@@ -24,6 +24,11 @@ use agenc_ircd_storage::{
 use agenc_ircd_types::{EventId, RecoveryEpoch, ServerIncarnation};
 
 use super::{EdgeFederation, barrier::OpenBarrier};
+
+#[cfg(test)]
+#[path = "tests/reconstruction_pools.rs"]
+mod reconstruction_pools;
+
 use crate::RuntimeError;
 use crate::bridge::storage::read_blocking;
 use crate::e2ee::barrier::{BarrierAssembly, replay_matches};
@@ -31,10 +36,55 @@ use crate::e2ee::edge::E2eeEdge;
 use crate::state_core::durable::{HeadCounters, KeyDeriver};
 use crate::state_core::reconstruct::scan_table;
 
-/// The standing projection ceiling also bounds retained startup material.
-const MAX_RESTORE_BYTES: usize = 536_870_912;
-const MAX_RESTORE_ROWS: usize = 1_000_000;
+/// The fixed standing-projection ceilings (spec 20.8). These are exactly what
+/// the live path admits for **one** projection generation: `snapshot_start`
+/// refuses an entry count above `MAX_SNAPSHOT_ENTRIES` and `snapshot_entry`
+/// refuses aggregate bytes above `MAX_SNAPSHOT_BYTES`
+/// (`crates/agenc-ircd-runtime/src/federation/edge/sync.rs`).
+///
+/// An edge holds the active generation and, from the moment a snapshot
+/// install begins until retention has swept the superseded rows, a pending
+/// one, so both generations' entry rows are durable at once. Each generation
+/// is therefore charged against its own pool: the restore must be able to
+/// rebuild every state the admission side can admit, and a single shared pool
+/// the size of one generation could not.
+const MAX_GENERATION_BYTES: usize = 536_870_912;
+const MAX_GENERATION_ROWS: usize = 1_000_000;
+/// The companion, barrier and delivery material retained beside the two
+/// projection generations, charged against its own pool for the same reason.
+const MAX_COMPANION_BYTES: usize = 536_870_912;
+const MAX_COMPANION_ROWS: usize = 1_000_000;
 type Mutation = [u8; 16];
+
+/// One charged reconstruction pool: the bytes and rows admitted so far.
+#[derive(Default)]
+struct Pool {
+    bytes: usize,
+    rows: usize,
+}
+
+impl Pool {
+    /// Charges one row against this pool, refusing at `ceiling` with `over` as
+    /// the recorded cause so the refusal does not read as stale durable state.
+    fn charge(
+        &mut self,
+        bytes: usize,
+        ceiling: (usize, usize),
+        over: EdgeRestoreCause,
+        cause: &mut EdgeRestoreCause,
+    ) -> Result<(), RuntimeError> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or(RuntimeError::Overflow)?;
+        self.rows = self.rows.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        if self.bytes > ceiling.0 || self.rows > ceiling.1 {
+            *cause = over;
+            return Err(RuntimeError::LimitExceeded);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct Restore {
@@ -45,8 +95,9 @@ struct Restore {
     active_cut: Option<(u64, u64)>,
     heads: BTreeMap<Mutation, BarrierHead>,
     parts: BTreeMap<Mutation, Vec<BarrierPart>>,
-    bytes: usize,
-    rows: usize,
+    active: Pool,
+    pending: Pool,
+    companion: Pool,
 }
 
 pub(super) fn invalid() -> RuntimeError {
@@ -96,21 +147,86 @@ impl EdgeRestoreStep {
     }
 }
 
-/// One refused edge restore: the step that refused and the error it raised.
+/// Names the refusal an edge restore step would otherwise have discarded.
 ///
-/// The error keeps its own meaning; the step is the identification the daemon
-/// adds when it reports the refusal.
+/// A step that calls into the replica, the barrier assembly or the companion
+/// snapshot gets back that owner's own classification, and mapping it to a
+/// bare `StorageError::StaleState` destroys the only fact an operator can act
+/// on. This carries that classification out beside the step so the daemon can
+/// print it, and it distinguishes a ceiling refusal from stale durable state:
+/// a ceiling refusal is an admission fact about how much this edge holds, not
+/// a claim that the storage layer is inconsistent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EdgeRestoreCause {
+    /// The step's own fence refused; the error carries the whole meaning.
+    Unclassified,
+    /// The edge replica refused the restored active standing projection.
+    ActiveProjection(agenc_ircd_domain::federation::ReplicaError),
+    /// The edge replica refused the restored pending projection generation.
+    PendingProjection(agenc_ircd_domain::federation::ReplicaError),
+    /// The restored active generation crosses the standing-projection ceiling.
+    ActiveProjectionCeiling,
+    /// The restored pending generation crosses the standing-projection ceiling.
+    PendingProjectionCeiling,
+    /// The restored companion and barrier rows cross their own ceiling.
+    CompanionCeiling,
+    /// The companion's READY snapshot generation is missing restored rows.
+    CompanionSnapshotIncomplete,
+    /// The barrier assembly refused the restored head and parts.
+    BarrierAssembly(crate::e2ee::barrier::BarrierFault),
+    /// The restore was handed no memory-admission port to reserve against.
+    MissingAdmissionPort,
+}
+
+impl core::fmt::Display for EdgeRestoreCause {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unclassified => formatter.write_str("unclassified"),
+            Self::ActiveProjection(error) => write!(formatter, "active projection: {error}"),
+            Self::PendingProjection(error) => write!(formatter, "pending projection: {error}"),
+            Self::ActiveProjectionCeiling => {
+                formatter.write_str("active projection over the standing-projection ceiling")
+            }
+            Self::PendingProjectionCeiling => {
+                formatter.write_str("pending projection over the standing-projection ceiling")
+            }
+            Self::CompanionCeiling => {
+                formatter.write_str("companion and barrier rows over the reconstruction ceiling")
+            }
+            Self::CompanionSnapshotIncomplete => {
+                formatter.write_str("companion snapshot generation is incomplete")
+            }
+            Self::BarrierAssembly(fault) => write!(formatter, "barrier assembly: {fault}"),
+            Self::MissingAdmissionPort => {
+                formatter.write_str("no memory-admission port for the restore")
+            }
+        }
+    }
+}
+
+/// One refused edge restore: the step that refused, the cause it carried and
+/// the error it raised.
+///
+/// The error keeps its own meaning; the step and the cause are the
+/// identification the daemon adds when it reports the refusal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EdgeRestoreRefusal {
     /// The reconstruction step that refused.
     pub step: EdgeRestoreStep,
+    /// The classified cause the step would otherwise have discarded.
+    pub cause: EdgeRestoreCause,
     /// The refusal the step raised, unchanged.
     pub error: RuntimeError,
 }
 
 impl core::fmt::Display for EdgeRestoreRefusal {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "{}: {}", self.step.label(), self.error)
+        match self.cause {
+            EdgeRestoreCause::Unclassified => {
+                write!(formatter, "{}: {}", self.step.label(), self.error)
+            }
+            cause => write!(formatter, "{} ({cause}): {}", self.step.label(), self.error),
+        }
     }
 }
 
@@ -130,8 +246,10 @@ impl EdgeFederation {
 
     /// Reloads authenticated committed rows on the blocking startup thread.
     ///
-    /// A refusal names the step that raised it so the daemon can report which
-    /// reconstruction refused and on which record family.
+    /// A refusal names the step that raised it and the cause the step would
+    /// otherwise have discarded, so the daemon can report which reconstruction
+    /// refused, on which record family, and whether the refusal was an
+    /// admission fact or a claim about stale durable state.
     pub(crate) fn restore(
         &mut self,
         port: &StoragePort,
@@ -141,11 +259,20 @@ impl EdgeFederation {
         backing: Option<crate::budget::BackingReservationPort>,
     ) -> Result<(), EdgeRestoreRefusal> {
         let mut step = EdgeRestoreStep::WitnessBacking;
-        self.restore_steps(port, keys, companion, head, backing, &mut step)
-            .map_err(|error| EdgeRestoreRefusal { step, error })
+        let mut cause = EdgeRestoreCause::Unclassified;
+        self.restore_steps(
+            port,
+            keys,
+            companion,
+            head,
+            backing,
+            (&mut step, &mut cause),
+        )
+        .map_err(|error| EdgeRestoreRefusal { step, cause, error })
     }
 
-    /// Runs the restore steps, recording each one in `step` before it begins.
+    /// Runs the restore steps, recording each one in `step` before it begins
+    /// and each classified refusal in `cause` before it propagates.
     fn restore_steps(
         &mut self,
         port: &StoragePort,
@@ -153,10 +280,14 @@ impl EdgeFederation {
         mut companion: Option<&mut E2eeEdge>,
         head: HeadCounters,
         backing: Option<crate::budget::BackingReservationPort>,
-        step: &mut EdgeRestoreStep,
+        report: (&mut EdgeRestoreStep, &mut EdgeRestoreCause),
     ) -> Result<(), RuntimeError> {
+        let (step, cause) = report;
         if let Some(companion) = companion.as_deref_mut() {
-            let backing = backing.ok_or_else(invalid)?;
+            let backing = backing.ok_or_else(|| {
+                *cause = EdgeRestoreCause::MissingAdmissionPort;
+                RuntimeError::InvalidValue
+            })?;
             companion.install_snapshot_backing(backing.clone());
             companion.restore_witness_backing(backing)?;
         }
@@ -173,10 +304,10 @@ impl EdgeFederation {
         })?;
         *step = EdgeRestoreStep::ProjectionEntries;
         scan_values(port, keys, TableId::EdgeProjection, |key, value| {
-            restored.projection(self, key, value)
+            restored.projection(self, key, value, cause)
         })?;
         *step = EdgeRestoreStep::ProjectionInstall;
-        restored.install_projection(self)?;
+        restored.install_projection(self, cause)?;
         *step = EdgeRestoreStep::OriginJournal;
         scan_values(port, keys, TableId::FederationOrigin, |key, value| {
             if value.record_kind() == agenc_ircd_storage::federation_records::ORIGIN_RECORD_KIND {
@@ -195,18 +326,18 @@ impl EdgeFederation {
         super::journal::finish_restore(self);
         *step = EdgeRestoreStep::CompanionState;
         scan_values(port, keys, TableId::E2eeState, |key, value| {
-            restored.admit_state(self, companion.as_deref_mut(), key, value)
+            restored.admit_state(self, companion.as_deref_mut(), (key, value), cause)
         })?;
         if let Some(companion) = companion.as_deref_mut() {
             *step = EdgeRestoreStep::CompanionSnapshot;
-            companion.finish_snapshot_restore()?;
+            companion.finish_snapshot_restore(cause)?;
             companion.restore_base_cursor(self);
             if companion.needs_witness_snapshot() {
                 self.installed_epoch = None;
             }
         }
         *step = EdgeRestoreStep::BarrierInstall;
-        restored.install_barriers(self, companion, port, keys, head)
+        restored.install_barriers(self, companion, (port, keys, head), cause)
     }
 }
 
@@ -225,13 +356,44 @@ fn scan_values(
 }
 
 impl Restore {
-    fn charge(&mut self, bytes: usize) -> Result<(), RuntimeError> {
-        self.bytes = self.bytes.checked_add(bytes).ok_or_else(invalid)?;
-        self.rows = self.rows.checked_add(1).ok_or_else(invalid)?;
-        if self.bytes > MAX_RESTORE_BYTES || self.rows > MAX_RESTORE_ROWS {
-            return Err(RuntimeError::MemoryExhausted);
+    /// Charges one entry row of the active or the pending generation against
+    /// that generation's own pool.
+    fn charge_generation(
+        &mut self,
+        pending: bool,
+        bytes: usize,
+        cause: &mut EdgeRestoreCause,
+    ) -> Result<(), RuntimeError> {
+        let ceiling = (MAX_GENERATION_BYTES, MAX_GENERATION_ROWS);
+        if pending {
+            self.pending.charge(
+                bytes,
+                ceiling,
+                EdgeRestoreCause::PendingProjectionCeiling,
+                cause,
+            )
+        } else {
+            self.active.charge(
+                bytes,
+                ceiling,
+                EdgeRestoreCause::ActiveProjectionCeiling,
+                cause,
+            )
         }
-        Ok(())
+    }
+
+    /// Charges one companion, barrier or delivery row against their pool.
+    fn charge_companion(
+        &mut self,
+        bytes: usize,
+        cause: &mut EdgeRestoreCause,
+    ) -> Result<(), RuntimeError> {
+        self.companion.charge(
+            bytes,
+            (MAX_COMPANION_BYTES, MAX_COMPANION_ROWS),
+            EdgeRestoreCause::CompanionCeiling,
+            cause,
+        )
     }
 
     fn marker(
@@ -282,6 +444,7 @@ impl Restore {
         edge: &EdgeFederation,
         key: StoredKey,
         value: PersistentRecordValue,
+        cause: &mut EdgeRestoreCause,
     ) -> Result<(), RuntimeError> {
         if value.record_kind() == agenc_ircd_storage::federation_records::PROJECTION_MARKER_KIND {
             return self.marker(edge, &key, &value);
@@ -319,20 +482,24 @@ impl Restore {
             return Err(invalid());
         }
         if self.active_projection(header.projection_generation) {
-            self.charge(row.entry_object.len())?;
+            self.charge_generation(false, row.entry_object.len(), cause)?;
             self.projection.push(record);
         } else if self
             .peer
             .as_ref()
             .is_some_and(|peer| peer.pending_generation == Some(header.projection_generation))
         {
-            self.charge(row.entry_object.len())?;
+            self.charge_generation(true, row.entry_object.len(), cause)?;
             self.pending_projection.push(record);
         }
         Ok(())
     }
 
-    fn install_projection(&mut self, edge: &mut EdgeFederation) -> Result<(), RuntimeError> {
+    fn install_projection(
+        &mut self,
+        edge: &mut EdgeFederation,
+        cause: &mut EdgeRestoreCause,
+    ) -> Result<(), RuntimeError> {
         let Some(peer) = self.peer.as_ref() else {
             return Ok(());
         };
@@ -350,7 +517,10 @@ impl Restore {
         let entries = std::mem::take(&mut self.projection);
         edge.replica
             .install(peer.projection_generation, entries)
-            .map_err(|_| invalid())?;
+            .map_err(|error| {
+                *cause = EdgeRestoreCause::ActiveProjection(error);
+                invalid()
+            })?;
         edge.cursor = peer.cursor.as_ref().map(|cursor| {
             (
                 cursor.delivery_sequence,
@@ -369,6 +539,7 @@ impl Restore {
                 generation,
                 self.pending_marker.take().ok_or_else(invalid)?,
                 std::mem::take(&mut self.pending_projection),
+                cause,
             )?;
         }
         Ok(())
@@ -378,21 +549,22 @@ impl Restore {
         &mut self,
         edge: &EdgeFederation,
         companion: Option<&mut E2eeEdge>,
-        key: StoredKey,
-        value: PersistentRecordValue,
+        row: (StoredKey, PersistentRecordValue),
+        cause: &mut EdgeRestoreCause,
     ) -> Result<(), RuntimeError> {
+        let (key, value) = row;
         match value.record_kind() {
             WITNESS_ROW_KIND => {
-                self.charge(value.body().len())?;
+                self.charge_companion(value.body().len(), cause)?;
                 companion
                     .ok_or_else(invalid)?
                     .restore_chain_witness(&key, WitnessRow::decode(value.body())?)?;
             }
             BARRIER_ROW_KIND => {
-                self.admit_barrier(edge, key, &value)?;
+                self.admit_barrier(edge, key, &value, cause)?;
             }
             ROUTE_ROW_KIND => {
-                self.charge(value.body().len())?;
+                self.charge_companion(value.body().len(), cause)?;
                 companion
                     .ok_or_else(invalid)?
                     .restore_route(&key, &RouteRow::decode(value.body())?)?;
@@ -405,7 +577,7 @@ impl Restore {
             }
             agenc_ircd_storage::e2ee_records::PENDING_ROUTE_ROW_KIND => {
                 use agenc_ircd_storage::e2ee_records::PendingRouteRow;
-                self.charge(value.body().len())?;
+                self.charge_companion(value.body().len(), cause)?;
                 companion
                     .ok_or_else(invalid)?
                     .restore_pending_route(&key, &PendingRouteRow::decode(value.body())?)?;
@@ -428,8 +600,9 @@ impl Restore {
         edge: &EdgeFederation,
         key: StoredKey,
         value: &PersistentRecordValue,
+        cause: &mut EdgeRestoreCause,
     ) -> Result<(), RuntimeError> {
-        self.charge(value.body().len())?;
+        self.charge_companion(value.body().len(), cause)?;
         let parsed = parse_key(&key)?;
         if parsed.part_index.is_some() {
             let part = BarrierPart::decode(value.body())?;
@@ -459,21 +632,20 @@ impl Restore {
         mut self,
         edge: &mut EdgeFederation,
         mut companion: Option<&mut E2eeEdge>,
-        port: &StoragePort,
-        keys: &KeyDeriver,
-        head: HeadCounters,
+        storage: (&StoragePort, &KeyDeriver, HeadCounters),
+        cause: &mut EdgeRestoreCause,
     ) -> Result<(), RuntimeError> {
-        for (mutation, barrier_head) in self.heads {
+        let (port, keys, head) = storage;
+        for (mutation, barrier_head) in std::mem::take(&mut self.heads) {
             let parts = self.parts.remove(&mutation).unwrap_or_default();
             match barrier_head {
                 BarrierHead::Stage(stage) => {
                     install_stage(
                         edge,
                         &mut companion,
-                        stage,
-                        parts,
-                        self.peer.as_ref().ok_or_else(invalid)?,
+                        (stage, parts, self.peer.as_ref().ok_or_else(invalid)?),
                         (port, keys),
+                        cause,
                     )?;
                 }
                 BarrierHead::Receipt(receipt) => {
@@ -492,11 +664,15 @@ impl Restore {
 fn install_stage(
     edge: &mut EdgeFederation,
     companion: &mut Option<&mut E2eeEdge>,
-    stage: agenc_ircd_storage::e2ee_records::barrier::BarrierStage,
-    parts: Vec<BarrierPart>,
-    peer: &FederationPeerRecord,
+    restored: (
+        agenc_ircd_storage::e2ee_records::barrier::BarrierStage,
+        Vec<BarrierPart>,
+        &FederationPeerRecord,
+    ),
     storage: (&StoragePort, &KeyDeriver),
+    cause: &mut EdgeRestoreCause,
 ) -> Result<(), RuntimeError> {
+    let (stage, parts, peer) = restored;
     if peer.server_incarnation != stage.identity.coordinator_server_incarnation
         || peer.recovery_epoch != stage.identity.coordinator_recovery_epoch
     {
@@ -523,7 +699,16 @@ fn install_stage(
         return Err(invalid());
     }
     let base_events = restore_stage_events(companion, &parts, storage)?;
-    let assembly = BarrierAssembly::restore(stage, parts).map_err(|_| invalid())?;
+    let assembly = BarrierAssembly::restore(stage, parts).map_err(|fault| {
+        *cause = EdgeRestoreCause::BarrierAssembly(fault);
+        // An aggregate over the ceiling is an admission fact about how much
+        // this barrier carries, not a claim that the rows disagree.
+        if fault == crate::e2ee::barrier::BarrierFault::Aggregate {
+            RuntimeError::LimitExceeded
+        } else {
+            invalid()
+        }
+    })?;
     edge.barrier.ready = assembly.is_complete();
     edge.barrier.open = Some(OpenBarrier {
         assembly,
