@@ -1091,6 +1091,34 @@ pub fn sequencer_rotation_document(
     document.encode()
 }
 
+/// The `e2ee.sequencer_credentials_file` document of set generation
+/// `generation` that opens above generation zero: it advertises only the
+/// successor `next` chained from `previous`, which the coordinator's durable
+/// history must already have accepted (companion 9.2.1). The generation-zero
+/// credential is gone from the set, so its signer may be retired.
+pub fn sequencer_retirement_document(
+    network_id: [u8; 32],
+    previous: &Ed25519SecretKey,
+    next: &Ed25519SecretKey,
+    interval: (u64, u64),
+    generation: u64,
+) -> Result<Vec<u8>, E2eeError> {
+    use agenc_ircd_e2ee::sequencer::SequencerCredentialsFile;
+    let previous_credential = sequencer_credential_in(network_id, previous, 0, interval, None)?;
+    let credential = sequencer_credential_in(
+        network_id,
+        next,
+        1,
+        interval,
+        Some((previous, &previous_credential)),
+    )?;
+    let document = SequencerCredentialsFile {
+        set_generation: generation,
+        credentials: TlsVec::new(vec![credential])?,
+    };
+    document.encode()
+}
+
 pub fn sequencer_credentials_document(
     network_id: [u8; 32],
     secret: &Ed25519SecretKey,
