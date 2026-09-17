@@ -213,5 +213,86 @@ creator = "openmls"
 joiner = "mls-rs"
 suite = 1
 outcome = "agree"
-claim = "the conversation closes under the finalization that added the joiner"
+claim = "the conversation closes under a separately finalized public closing intent, not under the finalization that added the joiner"
 test = "crates/agenc-ircd/tests/stage_eight_e2ee.rs"
+
+[[lifecycle]]
+id = "lifecycle-lost-state-rejoins-as-a-new-leaf"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "a member that lost its live MLS state is removed and rejoins under a fresh leaf through a second claimed KeyPackage and Welcome"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/recovery.rs"
+
+[[lifecycle]]
+id = "lifecycle-rejoined-leaf-reads-only-its-epoch"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the rejoined leaf decrypts the minutes of the epoch it joined and derives no plaintext from the retained ciphertext of before the loss"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/recovery.rs"
+
+[[lifecycle]]
+id = "lifecycle-declared-recovery-adopts-the-real-lineage"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "a coordinator restored under a new recovery epoch adopts the ten real MLS records of that lineage and its public close, and refuses a record that does not continue the chain without installing anything"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/recovery.rs"
+
+[[lifecycle]]
+id = "lifecycle-sequencer-pin-moves-to-the-successor"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "a finalized SEQUENCER transition is itself receipted under the old credential and every later candidate receipt is signed by the successor"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/rotation.rs"
+
+[[lifecycle]]
+id = "lifecycle-credentials-file-opens-above-generation-zero"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "after the retirement the coordinator opens a credentials file whose only credential is generation one, and a binding that still pins the retired credential is refused while the same reservation binds under the successor"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/rotation.rs"
+
+[[lifecycle]]
+id = "lifecycle-retired-leaf-reads-nothing-after-removal"
+creator = "openmls"
+joiner = "mls-rs"
+suite = 1
+outcome = "agree"
+claim = "the edge still forwards the ciphertext to a removed leaf, which derives no plaintext past its retirement, and a continuing proof of that leaf at its removal epoch is refused"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/rotation.rs"
+
+[[lifecycle]]
+id = "lifecycle-reinit-successor-activated-under-full-coverage"
+creator = "mls-rs"
+joiner = "openmls"
+suite = 1
+outcome = "agree"
+claim = "a real ReInit proposal closes the old group and the resumption successor, built between the two continuing mls-rs endpoints, is activated once every continuing leaf has acknowledged, with the continuing joiner reading the successor group's minutes"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/reinit.rs"
+
+[[lifecycle]]
+id = "lifecycle-reinit-refused-without-every-continuing-ack"
+creator = "mls-rs"
+joiner = "openmls"
+suite = 1
+outcome = "agree"
+claim = "an activation whose acknowledgements do not cover the expected continuing set of the mls-rs successor is refused and the staged attempt and its receipt are unchanged"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/reinit.rs"
+
+[[lifecycle]]
+id = "lifecycle-removed-leaf-leaves-the-expected-continuing-set"
+creator = "mls-rs"
+joiner = "openmls"
+suite = 1
+outcome = "agree"
+claim = "the openmls leaf removed from the mls-rs group in an earlier finalized epoch carries a removal proof for that epoch, is not required to acknowledge the attempt, and derives nothing from the successor"
+test = "crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/reinit.rs"

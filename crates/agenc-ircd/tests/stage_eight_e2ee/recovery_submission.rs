@@ -27,7 +27,10 @@ use std::collections::BTreeMap;
 
 /// The durable gate of `conversation` in the coordinator's current state
 /// directory, read while the daemon is stopped.
-fn read_gate(fixture: &NodeFixture, conversation: [u8; 32]) -> TestResult<E2eeRecoveryGate> {
+pub(super) fn read_gate(
+    fixture: &NodeFixture,
+    conversation: [u8; 32],
+) -> TestResult<E2eeRecoveryGate> {
     let (master, guard, login) = node_keys(fixture);
     let master = read_key(&current_key_file(fixture, "master_key_file")?).unwrap_or(master);
     let guard = read_key(&current_key_file(fixture, "rollback_guard_key_file")?).unwrap_or(guard);
@@ -72,7 +75,7 @@ fn read_gate(fixture: &NodeFixture, conversation: [u8; 32]) -> TestResult<E2eeRe
 }
 
 /// Every object of one paged reply, reassembled from its fragment tags.
-fn page_objects(lines: &[String]) -> TestResult<Vec<Vec<u8>>> {
+pub(super) fn page_objects(lines: &[String]) -> TestResult<Vec<Vec<u8>>> {
     let mut parts: BTreeMap<[u8; 32], Vec<FragmentTag>> = BTreeMap::new();
     for line in lines {
         let Some(value) = tag_value(line, SERVER_FRAGMENT_TAG) else {
@@ -112,7 +115,7 @@ fn record_sequence(bytes: &[u8]) -> TestResult<u64> {
 }
 
 /// The retained records of `bound`, in route order.
-fn fetch_records(
+pub(super) fn fetch_records(
     client: &mut IrcClient,
     user: &mut Principal,
     bound: &BoundConversation,
@@ -133,7 +136,7 @@ fn fetch_records(
 
 /// Re-attaches the user's device after the coordinator restored: the
 /// identity and roster are retained, the attachment session is new.
-fn attach_again(client: &mut IrcClient, user: &mut Principal) -> TestResult {
+pub(super) fn attach_again(client: &mut IrcClient, user: &mut Principal) -> TestResult {
     let label = user.label();
     client.send(&format!(
         "@label={label} EKEY ATTACH BEGIN {}",
@@ -187,7 +190,7 @@ fn transitional(error: &TestError) -> bool {
 }
 
 /// Retries `attempt` while it fails transitionally, within the network wait.
-fn settle<T>(what: &str, mut attempt: impl FnMut() -> TestResult<T>) -> TestResult<T> {
+pub(super) fn settle<T>(what: &str, mut attempt: impl FnMut() -> TestResult<T>) -> TestResult<T> {
     let deadline = Instant::now() + NETWORK_WAIT;
     loop {
         match attempt() {
@@ -205,21 +208,21 @@ fn settle<T>(what: &str, mut attempt: impl FnMut() -> TestResult<T>) -> TestResu
 
 /// Re-attaches once the edge's encrypted profile is active after a
 /// coordinator restart; transitional refusals are retried.
-fn attach_when_active(client: &mut IrcClient, user: &mut Principal) -> TestResult {
+pub(super) fn attach_when_active(client: &mut IrcClient, user: &mut Principal) -> TestResult {
     settle("the attach after the restart", || {
         attach_again(client, user)
     })
 }
 
-struct Submitter<'a> {
-    client: &'a mut IrcClient,
-    user: &'a mut Principal,
-    gate: E2eeRecoveryGate,
-    conversation: [u8; 32],
+pub(super) struct Submitter<'a> {
+    pub(super) client: &'a mut IrcClient,
+    pub(super) user: &'a mut Principal,
+    pub(super) gate: E2eeRecoveryGate,
+    pub(super) conversation: [u8; 32],
 }
 
 impl Submitter<'_> {
-    fn submission(
+    pub(super) fn submission(
         &self,
         position: (u64, [u8; 32]),
         kind: IrcRecoveryElementKind,
@@ -258,7 +261,7 @@ impl Submitter<'_> {
     }
 
     /// Submits and delivers one element; returns the element reply lines.
-    fn deliver(
+    pub(super) fn deliver(
         &mut self,
         position: (u64, [u8; 32]),
         kind: IrcRecoveryElementKind,
@@ -295,7 +298,11 @@ impl Submitter<'_> {
 
     /// Submits a record for `position` and expects `RECOVERY-EXTENDED`;
     /// returns the installed record identifier.
-    fn extend(&mut self, position: (u64, [u8; 32]), record: &[u8]) -> TestResult<[u8; 32]> {
+    pub(super) fn extend(
+        &mut self,
+        position: (u64, [u8; 32]),
+        record: &[u8],
+    ) -> TestResult<[u8; 32]> {
         let reply = self.deliver(
             position,
             IrcRecoveryElementKind::RecordElement,
@@ -316,7 +323,7 @@ impl Submitter<'_> {
     }
 }
 
-fn daemons_stopped(daemons: [(&str, TestResult<ExitStatus>); 3]) -> TestResult {
+pub(super) fn daemons_stopped(daemons: [(&str, TestResult<ExitStatus>); 3]) -> TestResult {
     for (label, status) in daemons {
         let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
         if !status.success() {

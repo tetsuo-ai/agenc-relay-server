@@ -59,6 +59,10 @@ The database/guard publication window a kill can interrupt, and the withdrawal
 of CAP-01's reading that a killed edge's restart was refused by
 `verify_guard_pair` (STO-10, issue #124), are recorded in
 [the storage guard reopen record](stage-10-storage-guard-reopen.md).
+Real openmls and mls-rs endpoints driving the repaired encrypted recovery,
+sequencer rotation and ReInit paths through the daemon's client surface
+(ENC-10, issue #71) are recorded in
+[the encrypted client proof record](stage-10-encrypted-client-proof.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

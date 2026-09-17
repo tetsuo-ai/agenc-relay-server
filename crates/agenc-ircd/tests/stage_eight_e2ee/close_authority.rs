@@ -6,6 +6,9 @@ use super::*;
 pub(super) enum CertificationTransition {
     Bootstrap,
     Add,
+    Remove,
+    Sequencer,
+    Reinit([u8; 32]),
     Close([u8; 32]),
 }
 
@@ -22,6 +25,21 @@ impl CertificationTransition {
                 action_bits::ADD_LEAF,
                 [0; 32],
             ),
+            Self::Remove => (
+                IrcCommitAuthorizationRule::ControlledTransition,
+                action_bits::REMOVE_LEAF,
+                [0; 32],
+            ),
+            Self::Sequencer => (
+                IrcCommitAuthorizationRule::ControlledTransition,
+                action_bits::SEQUENCER,
+                [0; 32],
+            ),
+            Self::Reinit(target) => (
+                IrcCommitAuthorizationRule::ControlledTransition,
+                action_bits::REINIT,
+                target,
+            ),
             Self::Close(id) => (
                 IrcCommitAuthorizationRule::ControlledTransition,
                 action_bits::CLOSE_INTENT,
@@ -31,10 +49,10 @@ impl CertificationTransition {
     }
 }
 
-fn intent() -> IrcCloseIntent {
+fn intent(validation_time: u64) -> IrcCloseIntent {
     IrcCloseIntent {
         reason_code: 1,
-        validation_time: VALIDATION_TIME + 1,
+        validation_time,
     }
 }
 
@@ -43,7 +61,19 @@ pub(super) fn authorization(
     bound: &BoundConversation,
     terminal: [u8; 32],
 ) -> TestResult<IrcCloseAuthorization> {
-    let intent = intent();
+    authorization_at(principal, bound, terminal, VALIDATION_TIME + 1)
+}
+
+/// The close authorization whose intent names `validation_time`, so a
+/// lineage the historical chain re-verifies at its own canonical times
+/// carries a close of the same era (companion 9.2 and 9.3).
+pub(super) fn authorization_at(
+    principal: &Principal,
+    bound: &BoundConversation,
+    terminal: [u8; 32],
+    validation_time: u64,
+) -> TestResult<IrcCloseAuthorization> {
+    let intent = intent(validation_time);
     let tbs = IrcCloseAuthorizationTbs {
         profile_version: 1,
         network_id: *NETWORK_ID.as_bytes(),
