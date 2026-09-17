@@ -17,8 +17,9 @@ use agenc_ircd_client_wire::{
 };
 use agenc_ircd_domain::{
     AdmissionSnapshot, AuthorizationFailure, AuthorizedCommand, CanonicalCommand,
-    CanonicalCommandView, CommandEnvelope, DomainError, DomainEvent, DomainState, EntropyPurpose,
-    ExternalInputRequest, ExternalInputs, MessageKind, MutationPlan, PlanDecision, StorageClass,
+    CanonicalCommandView, CommandEnvelope, DomainCommandKind, DomainError, DomainEvent,
+    DomainState, EntropyPurpose, ExternalInputRequest, ExternalInputs, MessageKind, MutationPlan,
+    PlanDecision, StorageClass, is_expensive_query,
 };
 use agenc_ircd_types::{
     AccountDeletionToken, AccountId, BoundedUtf8, ChannelInstanceId, ControlPolicy, EntryId,
@@ -1269,11 +1270,15 @@ fn plan_session_command(
     retry: Option<RetryCommand<'_>>,
     metered: bool,
 ) -> Result<PlannedCommand, SessionCommandError> {
+    let kind = command.kind();
     let (authorized, admission) = if metered {
         admit_command(context, bound, command)?
     } else {
         authorize_unmetered_command(context, bound, command)?
     };
+    if metered && expensive_query_is_stopped(context, kind) {
+        return Err(server_busy());
+    }
     let decision = context
         .domain()
         .plan_authorized(authorized, None)
@@ -1281,7 +1286,62 @@ fn plan_session_command(
     let PlanDecision::NeedsExternal(requests) = decision else {
         return Ok(PlannedCommand::Ready(decision));
     };
+    if metered && channel_creation_is_stopped(context, &requests) {
+        return Err(server_busy());
+    }
     complete_external_plan(context, bound, retry, &admission, &requests)
+}
+
+/// The refusal both Section-19.3 command classes owe: one bounded
+/// `SERVER_BUSY` rendered before any mutation is staged or any frame is
+/// fanned out, so the client state, the domain state and the outbound queues
+/// are exactly as they were.
+const fn server_busy() -> SessionCommandError {
+    SessionCommandError::Public {
+        error: DomainError::ServerBusy,
+        silent: false,
+    }
+}
+
+/// Returns whether the live overload class stops this command as an expensive
+/// query (spec 19.3, the 80-percent class).
+///
+/// The class is only measured for a command that is already in the expensive
+/// query class of spec 19.1, so ordinary authenticated traffic never consults
+/// it. The command has been charged before this point, exactly as spec 19.1
+/// requires of a refusal that must not become a cheaper error oracle than the
+/// work it replaces.
+fn expensive_query_is_stopped(context: &mut StateCoreContext, kind: DomainCommandKind) -> bool {
+    is_expensive_query(kind)
+        && context
+            .refresh_overload()
+            .stops_guests_and_expensive_queries()
+}
+
+/// Returns whether the live overload class stops this plan because it would
+/// create a channel (spec 19.3, the 90-percent class).
+///
+/// The domain asks for one channel-instance entropy draw for each join target
+/// whose name does not exist yet, so the request vector is the exact,
+/// already-computed statement of how many channels this command would create.
+/// A join of channels that all exist asks for none and is unaffected.
+fn channel_creation_is_stopped(
+    context: &mut StateCoreContext,
+    requests: &[ExternalInputRequest],
+) -> bool {
+    let creates = requests.iter().any(|request| {
+        matches!(
+            request,
+            ExternalInputRequest::Entropy {
+                purpose: EntropyPurpose::ChannelInstance(_),
+                ..
+            }
+        )
+    });
+    creates
+        && context
+            .refresh_overload()
+            .stops_connections_and_channel_creation()
 }
 
 fn authorize_unmetered_command(

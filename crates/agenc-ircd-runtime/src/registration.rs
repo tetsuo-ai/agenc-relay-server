@@ -1956,6 +1956,44 @@ impl RegistrationRouter {
         )
     }
 
+    /// Returns whether one unauthenticated registration must be refused now.
+    ///
+    /// Two independent rules stop a guest. `accounts.allow_guests` is the
+    /// operator's standing policy and refuses silently, exactly as before. The
+    /// 80-percent overload class of spec 19.3 additionally stops accepting
+    /// guests while the memory budget is loaded; that refusal is transient, so
+    /// it first sends the line spec 19.1 names for temporarily rejecting a new
+    /// guest and invites the client to authenticate instead. Neither path
+    /// seeds a session, so the domain state is unchanged either way.
+    fn guest_is_refused(
+        &self,
+        context: &mut StateCoreContext,
+        connection: ConnectionGeneration,
+        state: &ConnectionState,
+    ) -> Result<bool, RuntimeError> {
+        if !state.allow_guests {
+            return Ok(true);
+        }
+        if !context
+            .refresh_overload()
+            .stops_guests_and_expensive_queries()
+        {
+            return Ok(false);
+        }
+        self.send_one(
+            context,
+            connection,
+            WireMessage::new(
+                &self.config.server_prefix,
+                "FAIL",
+                &["*", "REGISTRATION_REQUIRED"],
+                Some("Registration required"),
+            )
+            .map_err(|_| RuntimeError::InvalidValue)?,
+        )?;
+        Ok(true)
+    }
+
     // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=registration commit binds one captured guest policy session seed capability set and welcome handoff at the existing atomic boundary
     fn commit_registration(
         &mut self,
@@ -1988,7 +2026,7 @@ impl RegistrationRouter {
             Some(accounts) => accounts.authenticated_binding(connection, context.now())?,
             None => None,
         };
-        if authenticated_account.is_none() && !state.allow_guests {
+        if authenticated_account.is_none() && self.guest_is_refused(context, connection, state)? {
             record_result(result, ResultClass::Rejected);
             return self.registration_event(
                 context,

@@ -4416,7 +4416,15 @@ fn rate_charge(bucket: RateBucket) -> RateCharge {
     RateCharge { bucket, tokens: 1 }
 }
 
-fn is_expensive_query(kind: DomainCommandKind) -> bool {
+/// Returns whether one command kind belongs to the expensive query class.
+///
+/// These are exactly the kinds that owe a token from the session-keyed
+/// expensive-query bucket of spec 19.1, and therefore exactly the queries the
+/// 80-percent overload class of spec 19.3 stops accepting. The predicate is
+/// public so an overload owner refuses the same closed set the rate limiter
+/// charges, rather than restating it.
+#[must_use]
+pub const fn is_expensive_query(kind: DomainCommandKind) -> bool {
     matches!(
         kind,
         DomainCommandKind::Names
