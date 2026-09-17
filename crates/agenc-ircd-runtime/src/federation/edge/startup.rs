@@ -75,7 +75,9 @@ impl EdgeFederation {
         backing: Option<crate::budget::BackingReservationPort>,
     ) -> Result<(), RuntimeError> {
         if let Some(companion) = companion.as_deref_mut() {
-            companion.restore_witness_backing(backing.ok_or_else(invalid)?)?;
+            let backing = backing.ok_or_else(invalid)?;
+            companion.install_snapshot_backing(backing.clone());
+            companion.restore_witness_backing(backing)?;
         }
         let mut restored = Restore::default();
         scan_values(port, keys, TableId::FederationPeer, |key, value| {
@@ -109,6 +111,7 @@ impl EdgeFederation {
             restored.admit_state(self, companion.as_deref_mut(), key, value)
         })?;
         if let Some(companion) = companion.as_deref_mut() {
+            companion.finish_snapshot_restore()?;
             companion.restore_base_cursor(self);
             if companion.needs_witness_snapshot() {
                 self.installed_epoch = None;
@@ -304,6 +307,19 @@ impl Restore {
                 companion
                     .ok_or_else(invalid)?
                     .restore_route(&key, &RouteRow::decode(value.body())?)?;
+            }
+            agenc_ircd_storage::e2ee_records::SNAPSHOT_MARKER_ROW_KIND => {
+                use agenc_ircd_storage::e2ee_records::SnapshotMarkerRow;
+                companion
+                    .ok_or_else(invalid)?
+                    .restore_snapshot_marker(&key, &SnapshotMarkerRow::decode(value.body())?)?;
+            }
+            agenc_ircd_storage::e2ee_records::PENDING_ROUTE_ROW_KIND => {
+                use agenc_ircd_storage::e2ee_records::PendingRouteRow;
+                self.charge(value.body().len())?;
+                companion
+                    .ok_or_else(invalid)?
+                    .restore_pending_route(&key, &PendingRouteRow::decode(value.body())?)?;
             }
             DELIVERY_ROW_KIND
                 if key

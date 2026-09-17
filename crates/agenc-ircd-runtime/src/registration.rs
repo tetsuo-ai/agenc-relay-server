@@ -2884,6 +2884,9 @@ impl CommandRouter for RegistrationRouter {
         if let Some(edge) = self.edge.as_mut() {
             edge.continue_request_journal(context);
         }
+        if let Some(e2ee) = self.e2ee.as_mut() {
+            e2ee.continue_snapshot(context);
+        }
         if let Some(coordinator) = self.federation.as_mut() {
             coordinator.continue_restore(context);
         }

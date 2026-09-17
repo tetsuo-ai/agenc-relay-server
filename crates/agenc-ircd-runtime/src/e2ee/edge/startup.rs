@@ -5,7 +5,7 @@ use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::{IrcFederationEvent, IrcFederationRouteState};
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_ircd_storage::e2ee_records::barrier::{BarrierPart, CrossProfileStream};
-use agenc_ircd_storage::e2ee_records::{DeliveryRow, RouteRow};
+use agenc_ircd_storage::e2ee_records::{DeliveryRow, RouteRow, SnapshotMarkerRow};
 use agenc_ircd_storage::{StorageError, StoredKey};
 
 use super::{E2eeEdge, events::OpenEvent};
@@ -82,6 +82,9 @@ impl E2eeEdge {
             || row.accepted_state_id != state.accepted_state_id
         {
             return Err(invalid());
+        }
+        if !self.restore_route_admitted(&state.conversation_id) {
+            return Ok(());
         }
         self.route_changed(&row.route_state)
             .map_err(|_| invalid())?;
@@ -165,4 +168,59 @@ fn valid_part_tuple(part: &BarrierPart, event: &IrcFederationEvent) -> bool {
         && event.cross_profile_mutation_id.as_slice() == part.identity.mutation_id
         && event.cross_profile_part_index == part.part_index
         && event.cross_profile_part_count == part.identity.part_count
+}
+
+impl E2eeEdge {
+    /// The durable snapshot marker of this edge's coordinator.
+    pub(crate) fn restore_snapshot_marker(
+        &mut self,
+        key: &StoredKey,
+        row: &SnapshotMarkerRow,
+    ) -> Result<(), RuntimeError> {
+        if SnapshotMarkerRow::parse_key(key)? != *self.config.coordinator_server_id.as_bytes()
+            || self.snapshot.is_some()
+        {
+            return Err(invalid());
+        }
+        self.snapshot = Some(super::snapshot::SnapshotInstall::restored(row));
+        Ok(())
+    }
+
+    /// One pending route row: part of the READY generation's projection,
+    /// still to migrate for an ACTIVE generation, or an abandoned row.
+    pub(crate) fn restore_pending_route(
+        &mut self,
+        key: &StoredKey,
+        row: &RouteRow,
+    ) -> Result<(), RuntimeError> {
+        let (generation, conversation) =
+            agenc_ircd_storage::e2ee_records::PendingRouteRow::parse_key(key)?;
+        let matches = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.delivery_generation == generation);
+        if !matches {
+            self.snapshot_stray_row(generation, conversation);
+            return Ok(());
+        }
+        let (state, entry, conversation_facts) =
+            super::events::decode_route_state(&row.route_state).map_err(|_| invalid())?;
+        if state.conversation_id != conversation || state.network_id != self.config.network_id {
+            return Err(invalid());
+        }
+        self.snapshot_restore_entry(conversation, entry, conversation_facts, &row.route_state)
+    }
+
+    /// Whether an active route row is authoritative beside the restored
+    /// snapshot generation: a migrating generation owns every conversation
+    /// beyond its migration cursor through its pending rows.
+    fn restore_route_admitted(&mut self, conversation: &[u8; 32]) -> bool {
+        self.snapshot_admits_active_row(conversation)
+    }
+
+    /// After the scan: a generation that was still being received is
+    /// abandoned, and a READY generation must be complete.
+    pub(crate) fn finish_snapshot_restore(&mut self) -> Result<(), RuntimeError> {
+        self.snapshot_finish_restore().map_err(|_| invalid())
+    }
 }

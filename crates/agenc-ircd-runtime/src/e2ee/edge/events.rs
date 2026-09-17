@@ -402,14 +402,12 @@ impl E2eeEdge {
             match event.event_kind {
                 IrcFederationEventKind::RouteStateChanged => {
                     let bytes = payload.as_deref().ok_or(E2eeReplyCode::InvalidFragment)?;
-                    writes.push(self.route_changed(bytes)?);
+                    writes.extend(self.route_changed(bytes)?);
                 }
                 IrcFederationEventKind::RouteStateHidden => {
                     let conversation = optional::<32>(event.conversation_id.as_slice())
                         .ok_or(E2eeReplyCode::InvalidFragment)?;
-                    if let Some(write) = self.route_hidden(context, conversation) {
-                        writes.push(write);
-                    }
+                    writes.extend(self.route_hidden(context, conversation)?);
                 }
                 IrcFederationEventKind::RequestCompleted => {}
                 _ => {
@@ -561,13 +559,11 @@ impl E2eeEdge {
         match event.event_kind {
             IrcFederationEventKind::RouteStateChanged => {
                 let bytes = payload.as_deref().ok_or(E2eeReplyCode::InvalidFragment)?;
-                writes.push(self.route_changed(bytes)?);
+                writes.extend(self.route_changed(bytes)?);
             }
             IrcFederationEventKind::RouteStateHidden => {
                 let conversation = conversation.ok_or(E2eeReplyCode::InvalidFragment)?;
-                if let Some(write) = self.route_hidden(context, conversation) {
-                    writes.push(write);
-                }
+                writes.extend(self.route_hidden(context, conversation)?);
             }
             IrcFederationEventKind::RequestCompleted => {}
             _ => {
@@ -596,25 +592,17 @@ impl E2eeEdge {
         Ok(Vec::new())
     }
 
-    /// Projects one `federation_state` object into the route table and its
-    /// durable row.
-    pub(super) fn route_changed(
+    /// Decodes one `federation_state` object for this network and checks
+    /// its cut against the live witness head of its conversation; a cut
+    /// behind that head is a witness violation.
+    pub(super) fn decode_route(
         &mut self,
         bytes: &[u8],
-    ) -> Result<crate::state_core::durable::AccountServiceDurableWrite, Refusal> {
-        let mut budget = DecodeBudget::new(1 << 16, 4_096);
-        let object = IrcWireObject::decode_kind(
-            bytes,
-            Some(IrcWireObjectKind::FederationState),
-            &mut budget,
-        )
-        .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        let state = IrcFederationRouteState::decode_exact(object.body(), &mut budget)
-            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    ) -> Result<(IrcFederationRouteState, RouteEntry, Conversation), Refusal> {
+        let (state, entry, conversation) = decode_route_state(bytes)?;
         if state.network_id != self.config.network_id {
             return Err(E2eeReplyCode::RouteInvalid.into());
         }
-        let (entry, conversation) = route_entry(&state)?;
         if let Some(known) = self.conversations.get(&state.conversation_id)
             && !known.head.accepts_cut(conversation.head)
         {
@@ -631,57 +619,61 @@ impl E2eeEdge {
             ));
             return Err(E2eeReplyCode::RouteInvalid.into());
         }
+        Ok((state, entry, conversation))
+    }
+
+    /// Projects one `federation_state` object into the route table and its
+    /// durable row, refreshing its pending row during a migration.
+    pub(super) fn route_changed(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<Vec<crate::state_core::durable::AccountServiceDurableWrite>, Refusal> {
+        let (state, entry, conversation) = self.decode_route(bytes)?;
         self.routes.restore_entry(entry);
         self.conversations
             .insert(state.conversation_id, conversation);
         self.route_objects
             .insert(state.conversation_id, bytes.to_vec());
-        let tombstone = state.state == IrcRouteStateKind::EncryptedTombstone;
-        let row = RouteRow {
-            route_state: bytes.to_vec(),
-            lifecycle: if tombstone {
-                RowLifecycle::Tombstone
-            } else {
-                RowLifecycle::Active
-            },
-            binding_id: state.binding_id,
-            lock_id: state.semantic_route_lock_id,
-            accepted_state_id: state.accepted_state_id,
-            sequencer_head_id: state.sequencer_record_head_id,
-            route_sequence: state.sequencer_record_head_sequence,
-            // A tombstone's head record is its close (companion 12.5).
-            close_id: tombstone.then_some(state.sequencer_record_head_id),
-            predecessor_close_id: None,
-            recovery_gate: false,
-            stored_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            sequencer_credential_id: None,
-            blocked_credential_id: None,
-        };
-        state_row(
+        let row = route_row(&state, bytes);
+        let mut writes = vec![state_row(
             RouteRow::key(&state.conversation_id).map_err(|_| E2eeReplyCode::InvalidFragment)?,
             ROUTE_ROW_KIND,
             row.encode().map_err(|_| E2eeReplyCode::InvalidFragment)?,
-        )
+        )?];
+        self.snapshot_live_change(state.conversation_id, Some(&row), &mut writes)?;
+        Ok(writes)
     }
 
-    /// Drops one projected route and its row.
+    /// Drops one projected route and its row, and its pending row during a
+    /// migration.
     pub(super) fn route_hidden(
         &mut self,
         context: &StateCoreContext,
         conversation: [u8; 32],
-    ) -> Option<crate::state_core::durable::AccountServiceDurableWrite> {
+    ) -> Result<Vec<crate::state_core::durable::AccountServiceDurableWrite>, Refusal> {
         self.routes.remove_projection(&ConversationId(conversation));
         self.route_objects.remove(&conversation);
         self.conversations.remove(&conversation);
-        let key = RouteRow::key(&conversation).ok()?;
+        let mut writes = Vec::new();
+        let key = RouteRow::key(&conversation).map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        // Only a durable row is deleted; a route that never reached its
+        // row (a refused or rolled-back projection) has nothing to delete.
         let exists = context
             .index()
             .existing(TableId::E2eeState, &key)
             .is_ok_and(|existing| existing.is_some());
-        if !exists {
-            return None;
-        }
-        crate::state_core::durable::AccountServiceDurableWrite::delete(TableId::E2eeState, key).ok()
+        let delete = exists
+            .then(|| {
+                crate::state_core::durable::AccountServiceDurableWrite::delete(
+                    TableId::E2eeState,
+                    key,
+                )
+            })
+            .transpose()
+            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        writes.extend(delete);
+        self.snapshot_live_change(conversation, None, &mut writes)?;
+        Ok(writes)
     }
 
     /// The client lines one semantic event produces for the local
@@ -943,17 +935,20 @@ impl E2eeEdge {
                 }
                 outputs.extend(rendered);
             }
-            Some(PendingCommit::Ready {
-                delivery_generation,
-            }) => {
-                self.commit_projection();
-                self.witness_snapshot_required = false;
-                self.ready_recorded(context, edge, delivery_generation);
+            Some(PendingCommit::SnapshotPage { cursor }) => {
+                self.snapshot_page_committed(context, edge, cursor);
             }
+            Some(PendingCommit::Ready) => self.ready_recorded(context, edge),
+            Some(PendingCommit::SnapshotActive) => self.snapshot_active_committed(context, edge),
+            Some(PendingCommit::SnapshotStep {
+                done,
+                switched_through,
+            }) => self.snapshot_step_committed(done, switched_through),
             Some(PendingCommit::Witness) | None => {}
         }
         self.commit_barrier_projection(edge);
         outputs.extend(self.drain_queued(context, edge));
+        self.continue_snapshot(context);
         outputs
     }
 
@@ -996,6 +991,46 @@ impl E2eeEdge {
 }
 
 /// The projected route entry of one route state object.
+/// Decodes one `federation_state` object into its route entry and
+/// conversation facts, without any network or witness check.
+pub(super) fn decode_route_state(
+    bytes: &[u8],
+) -> Result<(IrcFederationRouteState, RouteEntry, Conversation), Refusal> {
+    let mut budget = DecodeBudget::new(1 << 16, 4_096);
+    let object =
+        IrcWireObject::decode_kind(bytes, Some(IrcWireObjectKind::FederationState), &mut budget)
+            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    let state = IrcFederationRouteState::decode_exact(object.body(), &mut budget)
+        .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    let (entry, conversation) = route_entry(&state)?;
+    Ok((state, entry, conversation))
+}
+
+/// The durable route row of one projected `federation_state` object.
+pub(super) fn route_row(state: &IrcFederationRouteState, bytes: &[u8]) -> RouteRow {
+    let tombstone = state.state == IrcRouteStateKind::EncryptedTombstone;
+    RouteRow {
+        route_state: bytes.to_vec(),
+        lifecycle: if tombstone {
+            RowLifecycle::Tombstone
+        } else {
+            RowLifecycle::Active
+        },
+        binding_id: state.binding_id,
+        lock_id: state.semantic_route_lock_id,
+        accepted_state_id: state.accepted_state_id,
+        sequencer_head_id: state.sequencer_record_head_id,
+        route_sequence: state.sequencer_record_head_sequence,
+        // A tombstone's head record is its close (companion 12.5).
+        close_id: tombstone.then_some(state.sequencer_record_head_id),
+        predecessor_close_id: None,
+        recovery_gate: false,
+        stored_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        sequencer_credential_id: None,
+        blocked_credential_id: None,
+    }
+}
+
 fn route_entry(state: &IrcFederationRouteState) -> Result<(RouteEntry, Conversation), Refusal> {
     let lifecycle = match state.state {
         IrcRouteStateKind::ActiveRoute => RouteLifecycle::Active,

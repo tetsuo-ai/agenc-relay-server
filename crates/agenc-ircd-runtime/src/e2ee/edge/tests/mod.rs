@@ -10,13 +10,14 @@ use agenc_ircd_types::ServerId;
 
 use super::events::{ChainHead, Conversation};
 use super::router::Resolved;
-use super::{E2eeEdge, E2eeEdgeConfig, LocalOrigin, PendingRequest};
+use super::{E2eeEdge, E2eeEdgeConfig, LocalOrigin, PendingRequest, Phase};
 use crate::connection::ConnectionGeneration;
 
 mod projection;
 mod responses;
 mod retry;
 mod scope;
+mod snapshot;
 
 fn edge() -> E2eeEdge {
     E2eeEdge::new(E2eeEdgeConfig {

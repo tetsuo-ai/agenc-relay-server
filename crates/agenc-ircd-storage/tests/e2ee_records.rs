@@ -17,9 +17,10 @@ use agenc_ircd_storage::e2ee_records::{
     ATTACH_ROW_KIND, AttachChallenge, AttachRow, BARRIER_ROW_KIND, CLAIM_ROW_KIND, CandidateState,
     ClaimOutcome, ClaimRow, DELIVERY_ROW_KIND, DIRECTORY_ROW_KIND, DeliveryGrant, DeliveryRow,
     DirectoryRow, KEYSET_ROW_KIND, KeySetRow, MAILBOX_ROW_KIND, MailboxKind, MailboxRow,
-    OBJECT_RECORD_KIND, ObjectRow, PACKAGE_ROW_KIND, PackageRow, PackageState, ProofRole,
-    RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND, ReplayKey, ReplayRow, RouteLifecycle,
-    RouteRow, SEQUENCER_ROW_KIND, SequencerRow, check_state_key, object_key, prefix,
+    OBJECT_RECORD_KIND, ObjectRow, PACKAGE_ROW_KIND, PENDING_ROUTE_ROW_KIND, PackageRow,
+    PackageState, PendingRouteRow, ProofRole, RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND,
+    ReplayKey, ReplayRow, RouteLifecycle, RouteRow, SEQUENCER_ROW_KIND, SNAPSHOT_MARKER_ROW_KIND,
+    SequencerRow, SnapshotMarkerRow, SnapshotPhase, check_state_key, object_key, prefix,
     record_kind_for_key, recovery_gate_key, validate_object_body, validate_state_body,
 };
 use agenc_ircd_storage::{
@@ -1525,5 +1526,100 @@ fn recovery_rows_refuse_zero_kinds_and_identifiers() -> TestResult {
         submission_id: [3; 32],
     };
     assert!(record.encode().is_err());
+    Ok(())
+}
+
+fn marker(phase: SnapshotPhase, staged: u32) -> SnapshotMarkerRow {
+    SnapshotMarkerRow {
+        token: [7; 32],
+        state_generation: 9,
+        delivery_generation: 3,
+        total_entries: 65,
+        digest: [8; 32],
+        staged_entries: staged,
+        staged_bytes: 4_096,
+        phase,
+        opened_at: 120_000,
+        switched_through: None,
+    }
+}
+
+/// The edge's pending snapshot rows: a route body under the generation's
+/// key, and the marker with its exact cut and progress (companion 12.5).
+#[test]
+fn pending_snapshot_rows_round_trip_under_their_generation() -> TestResult {
+    let route = RouteRow {
+        route_state: vec![1, 2, 3],
+        lifecycle: RouteLifecycle::Active,
+        binding_id: [4; 32],
+        lock_id: [5; 32],
+        accepted_state_id: [6; 32],
+        sequencer_head_id: [7; 32],
+        route_sequence: 8,
+        close_id: None,
+        predecessor_close_id: None,
+        recovery_gate: false,
+        stored_bytes: 3,
+        sequencer_credential_id: Some([9; 32]),
+        blocked_credential_id: None,
+    };
+    let key = PendingRouteRow::key(3, &[11; 32])?;
+    assert!(key.as_bytes().starts_with(b"pending-route/v1/"));
+    assert_eq!(PendingRouteRow::parse_key(&key)?, (3, [11; 32]));
+    assert_eq!(record_kind_for_key(&key)?, PENDING_ROUTE_ROW_KIND);
+    let body = PendingRouteRow::encode_route(&route)?;
+    assert_eq!(validate_state_body(PENDING_ROUTE_ROW_KIND, &body), Ok(()));
+    assert!(validate_state_body(ROUTE_ROW_KIND, &body).is_err());
+    assert_eq!(PendingRouteRow::decode(&body)?, route);
+    assert!(PendingRouteRow::decode(&route.encode()?).is_err());
+    // Generations sort before conversations, so one generation's rows are
+    // one contiguous key range.
+    let later = PendingRouteRow::key(4, &[0; 32])?;
+    assert!(key.as_bytes() < later.as_bytes());
+    assert!(PendingRouteRow::range(3).is_ok());
+
+    let key = SnapshotMarkerRow::key(&[2; 16])?;
+    assert!(key.as_bytes().starts_with(b"edge-snapshot/v1/"));
+    assert_eq!(SnapshotMarkerRow::parse_key(&key)?, [2; 16]);
+    assert_eq!(record_kind_for_key(&key)?, SNAPSHOT_MARKER_ROW_KIND);
+    for row in [
+        marker(SnapshotPhase::Staging, 32),
+        marker(SnapshotPhase::Ready, 65),
+        SnapshotMarkerRow {
+            switched_through: Some([12; 32]),
+            ..marker(SnapshotPhase::Active, 65)
+        },
+    ] {
+        let body = row.encode()?;
+        assert_eq!(validate_state_body(SNAPSHOT_MARKER_ROW_KIND, &body), Ok(()));
+        assert_eq!(SnapshotMarkerRow::decode(&body)?, row);
+    }
+    // Staged entries never exceed the total; READY and ACTIVE need every
+    // entry; only ACTIVE carries a migration cursor.
+    assert!(marker(SnapshotPhase::Staging, 66).encode().is_err());
+    assert!(marker(SnapshotPhase::Ready, 64).encode().is_err());
+    assert!(
+        SnapshotMarkerRow {
+            switched_through: Some([12; 32]),
+            ..marker(SnapshotPhase::Ready, 65)
+        }
+        .encode()
+        .is_err()
+    );
+    // The phase is a u16 before the opened-at second, the switched flag
+    // and the switched conversation.
+    let mut forged = marker(SnapshotPhase::Ready, 65).encode()?;
+    let phase_low = forged.len() - 32 - 2 - 8 - 1;
+    *forged.get_mut(phase_low).ok_or("phase byte")? = 9;
+    assert!(SnapshotMarkerRow::decode(&forged).is_err());
+    // A cleared cursor flag with a nonzero cursor does not decode either.
+    let mut unflagged = SnapshotMarkerRow {
+        switched_through: Some([12; 32]),
+        ..marker(SnapshotPhase::Active, 65)
+    }
+    .encode()?;
+    let flag_low = unflagged.len() - 32 - 1;
+    *unflagged.get_mut(flag_low).ok_or("flag byte")? = 0;
+    assert!(SnapshotMarkerRow::decode(&unflagged).is_err());
     Ok(())
 }
