@@ -522,6 +522,7 @@ impl E2eeEdge {
                 observed_sequence: event.route_sequence,
                 observed_id: step.id,
                 observed_predecessor_id: step.predecessor,
+                conflict: false,
             },
         ));
         Err(E2eeReplyCode::RouteInvalid.into())
@@ -615,6 +616,7 @@ impl E2eeEdge {
                     observed_sequence: conversation.head.sequence,
                     observed_id: conversation.head.record_id,
                     observed_predecessor_id: None,
+                    conflict: false,
                 },
             ));
             return Err(E2eeReplyCode::RouteInvalid.into());
@@ -944,6 +946,14 @@ impl E2eeEdge {
                 done,
                 switched_through,
             }) => self.snapshot_step_committed(done, switched_through),
+            Some(PendingCommit::WitnessResolved {
+                conversation,
+                token,
+                head,
+            }) => self.witness_resolved(context, edge, conversation, token, head),
+            Some(PendingCommit::WitnessConflict { conversation }) => {
+                self.witness_conflicted(context, edge, conversation);
+            }
             Some(PendingCommit::Witness) | None => {}
         }
         self.commit_barrier_projection(edge);

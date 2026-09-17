@@ -12,6 +12,18 @@ use super::{ClientOutput, E2eeEdge, Phase};
 use crate::federation::edge::EdgeFederation;
 use crate::state_core::StateCoreContext;
 
+/// Whether a frame is one the blocked witness phase reads: the resume the
+/// requests follow, and the resolution family itself (companion 12.5.1).
+fn witness_admitted(frame: &CompanionFrame) -> bool {
+    matches!(
+        frame,
+        CompanionFrame::ResumeOk { .. }
+            | CompanionFrame::WitnessBegin { .. }
+            | CompanionFrame::WitnessEntry { .. }
+            | CompanionFrame::WitnessEnd { .. }
+    )
+}
+
 /// The edge's companion delivery position.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DeliveryState {
@@ -43,10 +55,14 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
     ) -> bool {
-        if self.witness_recovery_pending() {
+        // A durable witness row no longer refuses the resume itself: the
+        // coordinator can only prove the chain over a resumed link, and the
+        // blocked phase below admits nothing but EWITNESS (12.5.1).
+        let blocked = self.witness_recovery_pending();
+        if !blocked && !self.prepare_witness_retry(context, edge) {
             return false;
         }
-        if !self.prepare_witness_retry(context, edge) || self.witness_pending() {
+        if self.witness_pending() {
             return false;
         }
         if self.phase != Phase::Down {
@@ -84,6 +100,9 @@ impl E2eeEdge {
             || next_delivery_sequence != self.delivery.next_sequence()
         {
             return Err(E2eeReplyCode::Syncing.into());
+        }
+        if self.witness_recovery_pending() {
+            return self.begin_witness_resolution(context, edge);
         }
         self.begin_origins(context, edge)
     }
@@ -180,12 +199,19 @@ impl E2eeEdge {
         edge: &mut EdgeFederation,
         frames: Vec<CompanionFrame>,
     ) -> Vec<ClientOutput> {
+        let blocked = self.witness_recovery_pending();
         if self.witness_pending()
-            || self.witness_recovery_pending()
-            || (!frames.is_empty() && !self.prepare_witness_retry(context, edge))
+            || (!blocked && !frames.is_empty() && !self.prepare_witness_retry(context, edge))
         {
             return Vec::new();
         }
+        // While a row is unresolved only the resolution family is read; every
+        // other companion frame is dropped exactly as before (12.5.1).
+        let frames: Vec<CompanionFrame> = if blocked {
+            frames.into_iter().filter(witness_admitted).collect()
+        } else {
+            frames
+        };
         let mut outputs = Vec::new();
         self.adopt_barrier_cursor(edge);
         self.barrier_parts.retain(|mutation, _| {
@@ -313,6 +339,45 @@ impl E2eeEdge {
                     origin_generation,
                     object_id.is_some(),
                 )
+                .map(|()| Vec::new()),
+            CompanionFrame::WitnessBegin {
+                target_server_id,
+                conversation_id,
+                resolution_token,
+                object_id,
+                ref fragment,
+            } => self
+                .witness_begin(
+                    context,
+                    target_server_id,
+                    conversation_id,
+                    resolution_token,
+                    object_id,
+                    fragment,
+                )
+                .map(|()| Vec::new()),
+            CompanionFrame::WitnessEntry {
+                target_server_id,
+                resolution_token,
+                entry_sequence,
+                object_id,
+                ref fragment,
+            } => self
+                .witness_entry(
+                    context,
+                    target_server_id,
+                    resolution_token,
+                    entry_sequence,
+                    object_id,
+                    fragment,
+                )
+                .map(|()| Vec::new()),
+            CompanionFrame::WitnessEnd {
+                target_server_id,
+                resolution_token,
+                record_count,
+            } => self
+                .witness_end(context, target_server_id, resolution_token, record_count)
                 .map(|()| Vec::new()),
             CompanionFrame::Result { .. } | CompanionFrame::Response { .. } => {
                 self.on_result_frame(context, frame)

@@ -31,8 +31,44 @@ struct Record {
 }
 
 impl WitnessFailure {
+    /// Whether the recorded row is durable and still blocks the link; a row
+    /// marked `conflict` blocks only its own conversation (12.5.1).
     pub(super) fn durable(&self) -> bool {
-        self.record.as_ref().is_some_and(|record| record.durable)
+        self.record
+            .as_ref()
+            .is_some_and(|record| record.durable && !record.row.conflict)
+    }
+
+    /// The durable row this owner holds, with its conversation.
+    pub(super) fn durable_row(&self) -> Option<([u8; 32], WitnessRow)> {
+        let record = self.record.as_ref().filter(|record| record.durable)?;
+        Some((record.conversation, record.row.clone()))
+    }
+
+    /// Releases the durable row of `conversation` after its deletion
+    /// committed, so a later violation may take the owner again.
+    pub(super) fn forget_durable(&mut self, conversation: &[u8; 32]) -> bool {
+        let owns = self
+            .record
+            .as_ref()
+            .is_some_and(|record| record.durable && record.conversation == *conversation);
+        if owns {
+            self.record = None;
+        }
+        owns
+    }
+
+    /// Marks the durable row of `conversation` a conflict.
+    pub(super) fn mark_conflict(&mut self, conversation: &[u8; 32]) -> bool {
+        let Some(record) = self
+            .record
+            .as_mut()
+            .filter(|record| record.durable && record.conversation == *conversation)
+        else {
+            return false;
+        };
+        record.row.conflict = true;
+        true
     }
 }
 
@@ -94,8 +130,13 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &EdgeFederation,
     ) -> bool {
-        if self.witness_failure.record.is_some() {
-            return true;
+        if let Some(record) = self.witness_failure.record.as_ref() {
+            // The retained record owns the close until its receipt stands,
+            // and a second observation is dropped with it. Once the receipt
+            // stands the owner is settled, so a failure that observed no new
+            // violation is an ordinary profile violation: a refused witness
+            // resolution closes the link and retains the row (12.5.1).
+            return !record.durable || self.witnessed.take().is_some();
         }
         let Some((conversation, row)) = self.witnessed.take() else {
             return false;
@@ -155,6 +196,10 @@ impl E2eeEdge {
         edge: &mut EdgeFederation,
         entry: TimerEntry,
     ) -> bool {
+        if entry.kind == TimerKind::CompanionWitnessResolution {
+            self.witness_request_wake_fired(context, edge, entry);
+            return true;
+        }
         if entry.kind != TimerKind::CompanionWitnessRetry {
             return false;
         }
@@ -185,7 +230,9 @@ impl E2eeEdge {
             return false;
         };
         if record.durable {
-            return true;
+            // The receipt already stood; this batch belongs to another
+            // owner, such as the resolution that deletes the row (12.5.1).
+            return false;
         }
         let committed = record
             .staged

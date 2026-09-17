@@ -4,6 +4,7 @@ mod capacity;
 mod expiry;
 mod helpers;
 mod io;
+mod object_expiry;
 mod recovery_gates;
 mod request_expiry;
 mod selection;

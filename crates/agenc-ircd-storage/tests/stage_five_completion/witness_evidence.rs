@@ -13,6 +13,16 @@ fn expected_witness() -> WitnessRow {
         observed_sequence: 6,
         observed_id: [22; 32],
         observed_predecessor_id: Some([23; 32]),
+        conflict: false,
+    }
+}
+
+/// The same row after an authenticated resolution proved an unresolvable
+/// fork at the expected position (companion 12.5.1).
+fn conflicted_witness() -> WitnessRow {
+    WitnessRow {
+        conflict: true,
+        ..expected_witness()
     }
 }
 
@@ -95,5 +105,20 @@ fn a_chain_witness_is_admitted_sealed_and_recovered_after_restart() -> Result<()
         assert_eq!(read_witness(&owner.port(), &key)?, expected);
         owner.shutdown()?;
     }
+    Ok(())
+}
+
+#[test]
+fn a_conflict_mark_is_carried_by_the_witness_body() -> Result<(), Box<dyn Error>> {
+    let conflicted = conflicted_witness();
+    let body = conflicted.encode()?;
+    assert_eq!(WitnessRow::decode(&body)?, conflicted);
+    assert_ne!(body, expected_witness().encode()?);
+    // The mark is the only difference, and nothing else in the row moved.
+    let cleared = WitnessRow {
+        conflict: false,
+        ..conflicted
+    };
+    assert_eq!(cleared, expected_witness());
     Ok(())
 }

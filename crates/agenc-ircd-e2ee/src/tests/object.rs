@@ -69,7 +69,7 @@ fn envelope_bounds_are_checked_before_the_body_is_copied() -> TestResult {
 
 #[test]
 fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
-    assert_eq!(IrcWireObjectKind::ALL.len(), 36);
+    assert_eq!(IrcWireObjectKind::ALL.len(), 37);
     assert_eq!(IrcWireObjectKind::RecoverySubmission.value(), 35);
     assert_eq!(
         IrcWireObjectKind::RecoverySubmission.token(),
@@ -79,6 +79,16 @@ fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
         IrcWireObjectKind::RecoverySubmission.maximum_object_bytes(),
         4_096
     );
+    assert_eq!(IrcWireObjectKind::WitnessResolution.value(), 36);
+    assert_eq!(
+        IrcWireObjectKind::WitnessResolution.token(),
+        "WITNESS-RESOLUTION"
+    );
+    assert_eq!(
+        IrcWireObjectKind::WitnessResolution.maximum_object_bytes(),
+        65_536
+    );
+    assert!(IrcWireObjectKind::WitnessResolution.is_server_only());
     assert_eq!(IrcWireObjectKind::LeafMembershipProof.value(), 37);
     assert_eq!(
         IrcWireObjectKind::LeafMembershipProof.token(),
@@ -88,15 +98,18 @@ fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
         IrcWireObjectKind::LeafMembershipProof.maximum_object_bytes(),
         8_192
     );
-    // The witness-resolution kind 36 is not registered by this implementation.
+    // Kind 38 is not registered by this implementation.
     assert_eq!(
-        IrcWireObject::peek(&[0, 1, 36, 0, 0, 1, 0]),
+        IrcWireObject::peek(&[0, 1, 38, 0, 0, 1, 0]),
         Err(E2eeError::UnknownDiscriminant)
     );
     for kind in IrcWireObjectKind::ALL {
         assert_eq!(IrcWireObjectKind::from_token(kind.token())?, *kind);
         assert!(kind.maximum_object_bytes() >= 4_096);
-        assert_eq!(kind.is_server_only(), (29..=33).contains(&kind.value()));
+        assert_eq!(
+            kind.is_server_only(),
+            (29..=33).contains(&kind.value()) || kind.value() == 36
+        );
     }
     assert_eq!(
         IrcWireObjectKind::from_token("PLAINTEXT"),

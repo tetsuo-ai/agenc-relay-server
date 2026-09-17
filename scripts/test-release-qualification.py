@@ -137,12 +137,17 @@ class RecordTests(unittest.TestCase):
             verify_report(self.root, report, job, "a" * 64, report["target"])
 
     def test_capacity_report_requires_resource_source_and_refusal_count(self) -> None:
+        from release_qualification.verify import DEFAULT_NODE_BUDGET
+
         path = self.root / "campaign.json"
         path.write_bytes(b"{}\n")
         job = {"id": "capacity"}
         facts = {"elapsed_ns": 300 * 10**9, "samples": 2, "missed_events": 0, "envelope_violations": 0,
                  "returned_to_envelope": True, "workload_demonstrated": True, "hardware": "test host",
-                 "connections": 50_000, "peak_live_connections": 50_000,
+                 "connections": 100_000, "peak_live_connections": 100_000,
+                 "per_node_connections": 50_000, "peak_node_live_connections": 50_000,
+                 "workload_profile": "production", "capacity_qualifying": True,
+                 "node_budget": dict(DEFAULT_NODE_BUDGET),
                  "scenario_counts": {name: 1 for name in ("reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss")},
                  "latency_classes": ["admission", "durable_mutation", "fanout", "message", "opaque", "snapshot"],
                  "resource_source": "cgroup", "messages_refused": 0}
@@ -157,9 +162,23 @@ class RecordTests(unittest.TestCase):
             lambda facts: facts.__setitem__("missed_events", 1),
             lambda facts: facts.pop("connections"),
             lambda facts: facts.pop("peak_live_connections"),
-            lambda facts: facts.__setitem__("connections", 49_999),
+            lambda facts: facts.__setitem__("connections", 99_999),
             lambda facts: facts.__setitem__("connections", True),
-            lambda facts: facts.__setitem__("peak_live_connections", 49_999),
+            lambda facts: facts.__setitem__("peak_live_connections", 99_999),
+            lambda facts: facts.pop("per_node_connections"),
+            lambda facts: facts.pop("peak_node_live_connections"),
+            lambda facts: facts.pop("node_budget"),
+            lambda facts: facts.pop("workload_profile"),
+            lambda facts: facts.pop("capacity_qualifying"),
+            # An aggregate spread across the nodes, none of them holding the
+            # advertised per-node population.
+            lambda facts: facts.__setitem__("per_node_connections", 33_334),
+            lambda facts: facts.__setitem__("peak_node_live_connections", 33_334),
+            lambda facts: facts.__setitem__("workload_profile", "below-default"),
+            lambda facts: facts.__setitem__("capacity_qualifying", False),
+            # A raised budget or reserve cannot support a default claim.
+            lambda facts: facts["node_budget"].__setitem__("budget_bytes", 8_589_934_592),
+            lambda facts: facts["node_budget"].__setitem__("headroom_bytes", 1),
         ):
             changed = copy.deepcopy(report)
             mutate(changed["facts"])
@@ -168,8 +187,10 @@ class RecordTests(unittest.TestCase):
 
     def test_small_campaign_cannot_close_production_capacity(self) -> None:
         driver = CapacityDriverTests.driver()
-        raw = CapacityDriverTests.record(driver, connections=64)
-        facts = driver.validate_campaign(raw, 300, 64)
+        raw = CapacityDriverTests.record(driver, per_node=32, profile="below-default", qualifying=False,
+                                         blockers=["population_below_default"])
+        facts = driver.validate_campaign(raw, 300, {"connections": 64, "per_node": 32, "profile": "below-default",
+                                                    "qualifying": False, "blockers": ["population_below_default"]})
         path = self.root / "small-campaign.json"
         path.write_bytes(canonical(raw))
         report = {"schema_version": 1, "job_id": "capacity", "candidate_sha256": "a" * 64,
@@ -301,9 +322,16 @@ class SyntheticCandidate:
             return {"fuzz_target": name.removeprefix("fuzz."), "cpu_ns": 86400 * 10**9, "sanitizer": "address",
                     "corpus_before": "6" * 64, "corpus_after": "7" * 64, "crashes": 0}
         if name in ("capacity", "soak"):
+            from release_qualification.verify import CAMPAIGN_WORKLOADS, DEFAULT_NODE_BUDGET
+
+            connections = 256 if name == "soak" else 100_000
+            profile, qualifying = CAMPAIGN_WORKLOADS[name]
             return {"elapsed_ns": (604800 if name == "soak" else 300) * 10**9, "samples": 2, "missed_events": 0,
                     "envelope_violations": 0, "returned_to_envelope": True, "workload_demonstrated": True,
-                    "connections": 256 if name == "soak" else 50_000, "peak_live_connections": 256 if name == "soak" else 50_000,
+                    "connections": connections, "peak_live_connections": connections,
+                    "per_node_connections": connections // 2, "peak_node_live_connections": connections // 2,
+                    "workload_profile": profile, "capacity_qualifying": qualifying,
+                    "node_budget": dict(DEFAULT_NODE_BUDGET),
                     "scenario_counts": {scenario: 1 for scenario in ("reconnect", "churn", "rekey", "index_transition", "snapshot", "backup", "disk_pressure", "peer_loss")},
                     "latency_classes": ["admission", "durable_mutation", "fanout", "message", "opaque", "snapshot"], "hardware": "synthetic", "resource_source": "cgroup", "messages_refused": 0}
         if name == "reproducibility":
@@ -775,37 +803,52 @@ class CapacityDriverTests(unittest.TestCase):
         return module
 
     @staticmethod
-    def sample(live: int) -> dict:
+    def sample(per_node: int, pool: int = 3_338_666_016) -> dict:
+        """One sample whose node 0 is the coordinator and 1 and 2 the edges."""
         return {"at_ns": 10, "anonymous_bytes": [3_000_000, 2_000_000, 2_000_000], "sockets": [2, 40, 40], "close_wait": [0, 0, 0],
-                "tasks": [12, 12, 12], "federation_links": 2, "live_client_connections": live}
+                "tasks": [12, 12, 12], "federation_links": 2, "live_client_connections": [0, per_node, per_node],
+                "memory_charged_bytes": [1_000_000, 2_000_000, 2_000_000], "memory_budget_bytes": [pool, pool, pool]}
 
     @classmethod
-    def record(cls, driver, seconds: int = 300, connections: int = 64) -> dict:
-        later = cls.sample(connections - 1)
+    def record(cls, driver, seconds: int = 300, per_node: int = 50_000, profile: str = "production",
+               qualifying: bool = True, blockers: list | None = None) -> dict:
+        connections = per_node * driver.CLIENT_NODES
+        later = cls.sample(per_node - 1)
         later["at_ns"] = 20
+        workload = {"profile": profile, "qualifying": qualifying, "per_node_connections": per_node,
+                    "total_connections": connections, "load_channels": max(1, -(-connections // 4096)),
+                    "connections_per_address": 256, "generator_addresses_per_node": max(1, -(-per_node // 256)),
+                    "generator_subnets_per_node": 25, "blockers": [] if blockers is None else blockers}
         return {"schema_version": 1, "elapsed_ns": seconds * 10**9, "connections": connections, "resource_source": "cgroup",
-                "samples": [cls.sample(connections), later],
+                "samples": [cls.sample(per_node), later],
                 "latency_classes": {name: {"count": 5, "p50_ns": 1, "p95_ns": 2, "p99_ns": 3} for name in driver.LATENCY_CLASSES},
                 "scenario_counts": {name: 1 for name in driver.SCENARIOS}, "missed_events": 0, "envelope_violations": 0,
                 "population_shortfalls": 0, "sample_failures": 0,
                 "messages_sent": 100, "messages_received": 700, "messages_refused": 0,
-                "returned_to_envelope": True, "daemons_stopped_cleanly": [True, True, True], "hardware": "test host"}
+                "returned_to_envelope": True, "daemons_stopped_cleanly": [True, True, True], "hardware": "test host",
+                "workload": workload, "node_budget": dict(driver.DEFAULT_NODE_BUDGET)}
 
     def test_complete_record_passes_and_each_shortfall_is_refused(self) -> None:
         driver = self.driver()
-        facts = driver.validate_campaign(self.record(driver), 300, 64)
+        mode = driver.MODES["capacity"]
+        facts = driver.validate_campaign(self.record(driver), 300, mode)
         self.assertEqual(facts["scenario_counts"]["rekey"], 1)
         self.assertEqual(facts["latency_classes"], driver.LATENCY_CLASSES)
         self.assertEqual(facts["resource_source"], "cgroup")
-        self.assertEqual(facts["connections"], 64)
-        self.assertEqual(facts["peak_live_connections"], 64)
+        self.assertEqual(facts["connections"], 100_000)
+        self.assertEqual(facts["peak_live_connections"], 100_000)
+        self.assertEqual(facts["per_node_connections"], 50_000)
+        self.assertEqual(facts["peak_node_live_connections"], 50_000)
+        self.assertEqual(facts["workload_profile"], "production")
+        self.assertIs(facts["capacity_qualifying"], True)
+        self.assertEqual(facts["node_budget"], driver.DEFAULT_NODE_BUDGET)
         self.assertIs(facts["workload_demonstrated"], True)
         procfs = self.record(driver)
         procfs["resource_source"] = "procfs"
-        self.assertEqual(driver.validate_campaign(procfs, 300, 64)["resource_source"], "procfs")
+        self.assertEqual(driver.validate_campaign(procfs, 300, mode)["resource_source"], "procfs")
         short = self.record(driver, seconds=299)
         with self.assertRaises(QualificationError):
-            driver.validate_campaign(short, 300, 64)
+            driver.validate_campaign(short, 300, mode)
         for mutate in (
             lambda record: record["scenario_counts"].__setitem__("disk_pressure", 0),
             lambda record: record.__setitem__("missed_events", 1),
@@ -832,13 +875,115 @@ class CapacityDriverTests(unittest.TestCase):
             changed = self.record(driver)
             mutate(changed)
             with self.subTest(record=changed), self.assertRaises(QualificationError):
-                driver.validate_campaign(changed, 300, 64)
+                driver.validate_campaign(changed, 300, mode)
         with self.assertRaises(QualificationError):
-            driver.validate_campaign(self.record(driver), 300, 65)
+            driver.validate_campaign(self.record(driver), 300, driver.MODES["soak"])
 
+    def test_an_aggregate_population_cannot_substitute_for_the_per_node_limit(self) -> None:
+        """The whole point of CAP-01: clients spread across nodes prove nothing."""
+        driver = self.driver()
+        mode = driver.MODES["capacity"]
+        spread = self.record(driver)
+        # The same 100,000 aggregate clients, no node holding the default.
+        for sample in spread["samples"]:
+            sample["live_client_connections"] = [34_000, 33_000, 33_000]
+        with self.assertRaises(QualificationError):
+            driver.validate_campaign(spread, 300, mode)
+        # One edge at the default population and the other short is also not
+        # simultaneous per-node occupancy.
+        lopsided = self.record(driver)
+        for sample in lopsided["samples"]:
+            sample["live_client_connections"] = [0, 100_000, 0]
+        with self.assertRaises(QualificationError):
+            driver.validate_campaign(lopsided, 300, mode)
+
+    def test_workload_matrix_and_node_budget_are_required(self) -> None:
+        driver = self.driver()
+        mode = driver.MODES["capacity"]
+        for mutate in (
+            lambda record: record.pop("workload"),
+            lambda record: record.pop("node_budget"),
+            lambda record: record["workload"].pop("blockers"),
+            lambda record: record["workload"].__setitem__("extra", 1),
+            lambda record: record["workload"].__setitem__("profile", "below-default"),
+            lambda record: record["workload"].__setitem__("qualifying", False),
+            lambda record: record["workload"].__setitem__("qualifying", "true"),
+            lambda record: record["workload"].__setitem__("blockers", ["overload_stops_admission"]),
+            lambda record: record["workload"].__setitem__("blockers", ["invented_blocker"]),
+            lambda record: record["workload"].__setitem__("per_node_connections", 49_999),
+            lambda record: record["workload"].__setitem__("total_connections", 99_999),
+            # A raised per-address ceiling is a changed configuration.
+            lambda record: record["workload"].__setitem__("connections_per_address", 257),
+            # One channel cannot hold a 100,000-member population.
+            lambda record: record["workload"].__setitem__("load_channels", 1),
+            # Fewer source addresses than the per-address ceiling allows.
+            lambda record: record["workload"].__setitem__("generator_addresses_per_node", 195),
+            lambda record: record["node_budget"].__setitem__("headroom_bytes", 268_435_456),
+            lambda record: record["node_budget"].__setitem__("budget_bytes", 8_589_934_592),
+            lambda record: record["node_budget"].pop("crypto_pool_bytes"),
+        ):
+            changed = self.record(driver)
+            mutate(changed)
+            with self.subTest(record=changed.get("workload")), self.assertRaises(QualificationError):
+                driver.validate_campaign(changed, 300, mode)
+
+    def test_a_node_may_not_report_a_raised_or_overdrawn_pool(self) -> None:
+        driver = self.driver()
+        mode = driver.MODES["capacity"]
+        for mutate in (
+            lambda record: record["samples"][0].__setitem__("memory_budget_bytes", [8 * 10**9, 8 * 10**9, 8 * 10**9]),
+            lambda record: record["samples"][1].__setitem__("memory_budget_bytes", [3_338_666_016, 3_338_666_016, 0]),
+            lambda record: record["samples"][0].__setitem__("memory_charged_bytes", [1, 1, 3_338_666_017]),
+            lambda record: record["samples"][0].pop("memory_charged_bytes"),
+            lambda record: record["samples"][1].pop("memory_budget_bytes"),
+            lambda record: record["samples"][0].__setitem__("live_client_connections", 100_000),
+        ):
+            changed = self.record(driver)
+            mutate(changed)
+            with self.subTest(record=changed), self.assertRaises(QualificationError):
+                driver.validate_campaign(changed, 300, mode)
+
+    def test_the_soak_runs_the_minimum_population_and_never_closes_capacity(self) -> None:
+        driver = self.driver()
+        soak = self.record(driver, per_node=driver.SOAK_PER_NODE_CONNECTIONS, profile="below-default",
+                           qualifying=False, blockers=["population_below_default"])
+        facts = driver.validate_campaign(soak, 300, driver.MODES["soak"])
+        self.assertEqual(facts["connections"], 256)
+        self.assertEqual(facts["per_node_connections"], 128)
+        self.assertIs(facts["capacity_qualifying"], False)
+        with self.assertRaises(QualificationError):
+            driver.validate_campaign(soak, 300, driver.MODES["capacity"])
+
+    def test_a_development_pilot_reports_blockers_and_cannot_qualify(self) -> None:
+        driver = self.driver()
+        pilot = self.record(driver, per_node=32, profile="below-default", qualifying=False,
+                            blockers=["population_below_default"])
+        verdict = driver.pilot_verdict(pilot)
+        self.assertEqual(verdict["per_node_connections"], 32)
+        self.assertEqual(verdict["peak_node_live_connections"], 32)
+        self.assertEqual(verdict["production_per_node_connections"], 50_000)
+        self.assertEqual(verdict["blockers"], ["population_below_default"])
+        self.assertIs(verdict["qualifying"], False)
+        # A pilot record can never be attested as the capacity job.
+        with self.assertRaises(QualificationError):
+            driver.validate_campaign(pilot, 300, driver.MODES["capacity"])
+        for mutate in (
+            lambda record: record["workload"].__setitem__("qualifying", True),
+            lambda record: record["workload"].__setitem__("profile", "production"),
+            lambda record: record["workload"].__setitem__("blockers", []),
+            lambda record: record["workload"].__setitem__("blockers", ["invented_blocker"]),
+            lambda record: record.pop("workload"),
+            lambda record: record.__setitem__("samples", []),
+        ):
+            changed = self.record(driver, per_node=32, profile="below-default", qualifying=False,
+                                  blockers=["population_below_default"])
+            mutate(changed)
+            with self.subTest(record=changed), self.assertRaises(QualificationError):
+                driver.pilot_verdict(changed)
 
     def test_campaign_rejects_lost_samples_and_invalid_measurements(self) -> None:
         driver = self.driver()
+        mode = driver.MODES["capacity"]
         for mutate in (
             lambda record: record.__setitem__("sample_failures", 1),
             lambda record: record.pop("sample_failures"),
@@ -855,7 +1000,7 @@ class CapacityDriverTests(unittest.TestCase):
             raw = self.record(driver)
             mutate(raw)
             with self.subTest(raw=raw), self.assertRaises(QualificationError):
-                driver.validate_campaign(raw, 300, 64)
+                driver.validate_campaign(raw, 300, mode)
 
 
 class DrillsDriverTests(unittest.TestCase):

@@ -143,6 +143,8 @@ pub enum TypedBody {
     LeafMembershipProof(Box<membership::IrcLeafMembershipProof>),
     /// `IrcRecoverySubmission`.
     RecoverySubmission(Box<recovery::IrcRecoverySubmission>),
+    /// `IrcFederationWitnessResolution`.
+    WitnessResolution(Box<federation::IrcFederationWitnessResolution>),
 }
 
 fn typed<T: TlsDecode>(body: &[u8], budget: &mut DecodeBudget) -> Result<Box<T>, E2eeError> {
@@ -235,6 +237,7 @@ pub fn decode_body(
         IrcWireObjectKind::LeafMembershipProof => {
             TypedBody::LeafMembershipProof(typed(body, budget)?)
         }
+        IrcWireObjectKind::WitnessResolution => TypedBody::WitnessResolution(typed(body, budget)?),
     })
 }
 
@@ -279,6 +282,7 @@ impl TypedBody {
             Self::Policy(_) => IrcWireObjectKind::Policy,
             Self::LeafMembershipProof(_) => IrcWireObjectKind::LeafMembershipProof,
             Self::RecoverySubmission(_) => IrcWireObjectKind::RecoverySubmission,
+            Self::WitnessResolution(_) => IrcWireObjectKind::WitnessResolution,
         }
     }
 }

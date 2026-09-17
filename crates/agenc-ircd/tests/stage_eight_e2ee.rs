@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -409,9 +409,15 @@ struct CapacityPlan {
     /// Client listener ceiling.
     max_connections: u64,
     /// Direct connections admitted from one address. Every campaign client
-    /// arrives from loopback, so the per-address abuse ceiling must clear the
-    /// per-edge share of the campaign or half the clients are refused.
+    /// arrives from one of the generator's loopback source addresses, so this
+    /// stays at the Section 19.2 hard maximum and the generator spreads its
+    /// population over enough addresses to stay under it.
     connections_per_address: u64,
+    /// `server.memory_budget_bytes`. The Stage 08 fixture lowers the budget to
+    /// one GiB, which no advertised capacity claim can rest on; a campaign
+    /// restores the Appendix C.2 default so `B`, `H`, `D` and `C` are the
+    /// published values.
+    memory_budget_bytes: u64,
 }
 
 impl NodeFixture {
@@ -612,6 +618,10 @@ impl NodeFixture {
     }
 }
 
+/// The lowered `server.memory_budget_bytes` every Stage 08 fixture node runs.
+/// Only a capacity campaign restores the Appendix C.2 default.
+const STAGE_EIGHT_MEMORY_BUDGET_BYTES: u64 = 1_073_741_824;
+
 fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> TestResult {
     replace_once(
         config,
@@ -668,6 +678,11 @@ fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> 
 /// Enables the local admin socket and raises the client ceiling for the
 /// Stage 10 campaign; nothing else differs from the Stage 08 node.
 fn apply_capacity_overrides(config: &mut String, capacity: CapacityPlan) -> TestResult {
+    replace_once(
+        config,
+        "memory_budget_bytes = 1073741824",
+        &format!("memory_budget_bytes = {}", capacity.memory_budget_bytes),
+    )?;
     replace_once(
         config,
         "enabled = false\npurpose = \"admin_local\"",
@@ -980,11 +995,41 @@ struct IrcClient {
     reader: BufReader<TlsClient>,
 }
 
+/// Connects to `target` from an explicit loopback source address.
+///
+/// `std::net` cannot bind a source address before connecting, and the
+/// workspace pins `rustix` without its network feature, so the campaign
+/// generator borrows tokio's socket builder for exactly this one step and
+/// hands the connected descriptor back as a blocking `std` stream. The
+/// reactor lives only for the connect.
+fn connect_from_source(source: Ipv4Addr, target: SocketAddr) -> TestResult<TcpStream> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+    let stream = runtime.block_on(async move {
+        let socket = tokio::net::TcpSocket::new_v4()?;
+        socket.bind(SocketAddr::new(IpAddr::V4(source), 0))?;
+        socket.connect(target).await?.into_std()
+    })?;
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
 impl IrcClient {
     fn connect(fixture: &NodeFixture) -> TestResult<Self> {
+        Self::connect_from(fixture, None)
+    }
+
+    /// Connects, optionally from one generator source address.
+    fn connect_from(fixture: &NodeFixture, source: Option<Ipv4Addr>) -> TestResult<Self> {
         let deadline = Instant::now() + START_TIMEOUT;
         let socket = loop {
-            match TcpStream::connect(fixture.public_address) {
+            let attempt = match source {
+                Some(address) => connect_from_source(address, fixture.public_address)
+                    .map_err(|error| io::Error::other(error.to_string())),
+                None => TcpStream::connect(fixture.public_address),
+            };
+            match attempt {
                 Ok(socket) => break socket,
                 Err(error) if Instant::now() < deadline => {
                     let _transient = error;

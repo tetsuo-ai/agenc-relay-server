@@ -533,6 +533,7 @@ fn edge_router(
         server_id: identity.server_id,
         server_name: prefix.to_owned(),
         coordinator_server_id,
+        sequencer_key_set: None,
         incarnation: *identity.server_incarnation.as_bytes(),
         global_disk_bytes: 1 << 30,
     });

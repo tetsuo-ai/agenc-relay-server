@@ -1377,6 +1377,85 @@ fn object_owner_rows_round_trip_and_refuse_inconsistent_accounts() -> Result<(),
 }
 
 #[test]
+fn object_expiry_progress_rows_round_trip_and_refuse_inconsistent_totals() -> TestResult {
+    use agenc_ircd_storage::e2ee_records::{EXPIRY_PROGRESS_ROW_KIND, ObjectExpiryProgressRow};
+    let fresh = ObjectExpiryProgressRow::default();
+    let resumed = ObjectExpiryProgressRow {
+        cursor: Some([9; 32]),
+        passes: 12,
+        deleted_objects: 40,
+        deleted_bytes: 1_048_576,
+    };
+    let wrapped = ObjectExpiryProgressRow {
+        cursor: None,
+        ..resumed
+    };
+    for row in [&fresh, &resumed, &wrapped] {
+        let encoded = row.encode().map_err(|e| format!("encode {row:?}: {e:?}"))?;
+        assert_eq!(
+            &ObjectExpiryProgressRow::decode(&encoded)
+                .map_err(|e| format!("decode {row:?}: {e:?}"))?,
+            row
+        );
+        assert!(validate_state_body(EXPIRY_PROGRESS_ROW_KIND, &encoded).is_ok());
+    }
+    let key = ObjectExpiryProgressRow::key()?;
+    assert_eq!(key.as_bytes(), prefix::OBJECT_EXPIRY);
+    assert!(ObjectExpiryProgressRow::matches_key(&key));
+    assert!(!ObjectExpiryProgressRow::matches_key(&object_key(
+        &[9; 32]
+    )?));
+    assert_eq!(record_kind_for_key(&key)?, EXPIRY_PROGRESS_ROW_KIND);
+    check_state_key(&key, EXPIRY_PROGRESS_ROW_KIND)?;
+    // A deletion always charges at least one byte, so a count without
+    // bytes, bytes without a count, or fewer bytes than objects is forged.
+    for bad in [
+        ObjectExpiryProgressRow {
+            deleted_bytes: 0,
+            ..resumed
+        },
+        ObjectExpiryProgressRow {
+            deleted_objects: 0,
+            ..resumed
+        },
+        ObjectExpiryProgressRow {
+            deleted_objects: 40,
+            deleted_bytes: 39,
+            ..resumed
+        },
+    ] {
+        assert!(bad.encode().is_err(), "{bad:?}");
+    }
+    let mut encoded = resumed.encode()?;
+    encoded.push(0);
+    assert!(
+        ObjectExpiryProgressRow::decode(&encoded).is_err(),
+        "trailing bytes"
+    );
+    assert!(validate_state_body(EXPIRY_PROGRESS_ROW_KIND, &[]).is_err());
+    // The progress row never decodes as an ownership account, nor the
+    // reverse: the kind wrapper binds each body to its own arm.
+    let owner = agenc_ircd_storage::e2ee_records::ObjectOwnerRow {
+        kind: IrcWireObjectKind::SequencerRecord.value(),
+        size: 32,
+        retention: agenc_ircd_storage::e2ee_records::RetentionClass::Ordinary,
+        accepted_at: 1,
+        reconstructed: false,
+        retired_at: None,
+    }
+    .encode()?;
+    assert!(ObjectExpiryProgressRow::decode(&owner).is_err());
+    assert!(
+        validate_state_body(
+            agenc_ircd_storage::e2ee_records::OWNER_ROW_KIND,
+            &resumed.encode()?
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn recovery_rows_round_trip_and_refuse_inconsistent_outcomes() -> Result<(), Box<dyn Error>> {
     use agenc_ircd_storage::e2ee_records::{
         RECOVERY_RECORD_ROW_KIND, RECOVERY_SUBMISSION_ROW_KIND, RecoveryOutcome, RecoveryRecordRow,

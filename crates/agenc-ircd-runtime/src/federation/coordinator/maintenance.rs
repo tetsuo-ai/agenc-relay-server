@@ -1,7 +1,8 @@
 //! Shared dispatch preserves each maintenance job's exact receipt and rejection owner.
 #![forbid(unsafe_code)]
 use super::{
-    FederationCoordinator, PendingCommit, mailbox_expiry, replay_maintenance, request_expiry,
+    FederationCoordinator, PendingCommit, mailbox_expiry, object_expiry, replay_maintenance,
+    request_expiry,
 };
 use crate::state_core::StateCoreContext;
 
@@ -14,6 +15,7 @@ impl PendingCommit {
             Self::CompanionReplayMaintenance(receipt) => Some(receipt.staged_after),
             Self::CompanionMailboxExpiry(receipt) => Some(receipt.staged_after),
             Self::CompanionRequestExpiry(receipt) => Some(receipt.staged_after),
+            Self::CompanionObjectExpiry(receipt) => Some(receipt.staged_after),
             _ => None,
         }
     }
@@ -30,6 +32,9 @@ pub(super) fn committed(
         }
         PendingCommit::CompanionRequestExpiry(receipt) => {
             request_expiry::committed(coordinator, context, *receipt)
+        }
+        PendingCommit::CompanionObjectExpiry(receipt) => {
+            object_expiry::committed(coordinator, context, *receipt)
         }
         PendingCommit::CompanionReplayMaintenance(receipt) => {
             replay_maintenance::committed(coordinator, context, *receipt)
@@ -48,6 +53,9 @@ pub(super) fn rejected(
         }
         PendingCommit::CompanionRequestExpiry(receipt) => {
             request_expiry::rejected(coordinator, context, *receipt)
+        }
+        PendingCommit::CompanionObjectExpiry(receipt) => {
+            object_expiry::rejected(coordinator, context, *receipt)
         }
         PendingCommit::CompanionReplayMaintenance(receipt) => {
             replay_maintenance::rejected(coordinator, context, *receipt)

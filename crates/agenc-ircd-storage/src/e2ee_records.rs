@@ -46,6 +46,8 @@ use crate::{MAX_PROTOCOL_BODY_BYTES, ReadPlan, StorageError};
 
 pub mod barrier;
 pub mod delivery_recovery;
+pub mod expiry;
+pub use expiry::{EXPIRY_PROGRESS_ROW_KIND, ObjectExpiryProgressRow};
 pub mod mailbox_sequence;
 pub use mailbox_sequence::{MAILBOX_SEQUENCE_ROW_KIND, MailboxSequenceRow};
 pub mod origin;
@@ -135,6 +137,8 @@ pub mod prefix {
     pub const MEMBERSHIP: &[u8] = b"membership/v1/";
     /// Object ownership accounts.
     pub const OWNER: &[u8] = b"owner/v1/";
+    /// The single object-expiry progress row.
+    pub const OBJECT_EXPIRY: &[u8] = b"object-expiry/v1";
     /// Accepted recovery submissions.
     pub const RECOVERY_SUBMISSION: &[u8] = b"recovery-submission/v1/";
     /// Records a recovery installed.
@@ -182,7 +186,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 41] = [
+const PREFIX_KINDS: [(&[u8], u16); 42] = [
     (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
     (prefix::RECOVERY_RECORD, RECOVERY_RECORD_ROW_KIND),
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
@@ -197,6 +201,7 @@ const PREFIX_KINDS: [(&[u8], u16); 41] = [
     (prefix::POLICY, SEQUENCER_ROW_KIND),
     (prefix::MEMBERSHIP, SEQUENCER_ROW_KIND),
     (prefix::OWNER, OWNER_ROW_KIND),
+    (prefix::OBJECT_EXPIRY, EXPIRY_PROGRESS_ROW_KIND),
     (prefix::IDENTITY, DIRECTORY_ROW_KIND),
     (prefix::ROSTER, DIRECTORY_ROW_KIND),
     (prefix::CAPABILITY, DIRECTORY_ROW_KIND),
@@ -2797,6 +2802,10 @@ pub struct WitnessRow {
     pub observed_id: [u8; HASH_BYTES],
     /// The predecessor a candidate receipt named, when the event carried one.
     pub observed_predecessor_id: Option<[u8; HASH_BYTES]>,
+    /// Whether an authenticated resolution proved an unresolvable fork at
+    /// the expected position (companion 12.5.1). A conflict row keeps its
+    /// conversation blocked permanently and is never cleared.
+    pub conflict: bool,
 }
 
 /// The accepted key set and credential history bodies.
@@ -2842,6 +2851,7 @@ impl WitnessRow {
         encoder.put_u64(self.observed_sequence)?;
         encoder.put_fixed(&self.observed_id)?;
         put_optional_hash(&mut encoder, self.observed_predecessor_id.as_ref())?;
+        put_bool(&mut encoder, self.conflict)?;
         wrap(WITNESS_ROW_KIND, encoder.finish())
     }
 
@@ -2857,6 +2867,7 @@ impl WitnessRow {
             observed_sequence: decoder.u64()?,
             observed_id: decoder.array()?,
             observed_predecessor_id: take_optional_hash(&mut decoder)?,
+            conflict: take_bool(&mut decoder)?,
         };
         decoder.finish()?;
         Ok(row)
@@ -2890,6 +2901,7 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         DELIVERY_RECOVERY_ROW_KIND => delivery_recovery::validate_body(body),
         MAILBOX_SEQUENCE_ROW_KIND => MailboxSequenceRow::decode(body).map(|_| ()),
         OWNER_ROW_KIND => ObjectOwnerRow::decode(body).map(|_| ()),
+        EXPIRY_PROGRESS_ROW_KIND => ObjectExpiryProgressRow::decode(body).map(|_| ()),
         RECOVERY_SUBMISSION_ROW_KIND => RecoverySubmissionRow::decode(body).map(|_| ()),
         RECOVERY_RECORD_ROW_KIND => RecoveryRecordRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),
@@ -2983,6 +2995,7 @@ pub mod fixtures {
             observed_sequence: u64::from(seed).saturating_add(2),
             observed_id: [seed; HASH_BYTES],
             observed_predecessor_id: None,
+            conflict: false,
         }
         .encode()
     }
@@ -3066,6 +3079,13 @@ pub mod fixtures {
             }))
             .encode(),
             WITNESS_ROW_KIND => witness_body(seed),
+            EXPIRY_PROGRESS_ROW_KIND => ObjectExpiryProgressRow {
+                cursor: Some([seed; HASH_BYTES]),
+                passes: u64::from(seed),
+                deleted_objects: 1,
+                deleted_bytes: u64::from(seed).saturating_add(1),
+            }
+            .encode(),
             _ => Err(StorageError::InvalidEncoding),
         }
     }

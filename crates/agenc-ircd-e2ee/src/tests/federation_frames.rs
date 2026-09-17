@@ -188,7 +188,7 @@ fn every_frame() -> Result<Vec<CompanionFrame>, Box<dyn Error>> {
             page_sequence: 0,
             conversation_id: [6; 32],
             object_id,
-            fragment,
+            fragment: fragment.clone(),
         },
         CompanionFrame::StateEnd {
             target_server_id: [1; 16],
@@ -223,6 +223,38 @@ fn every_frame() -> Result<Vec<CompanionFrame>, Box<dyn Error>> {
             state_generation: 3,
             delivery_generation: 4,
             snapshot_digest: [5; 32],
+        },
+        CompanionFrame::WitnessRequest {
+            coordinator_server_id: [1; 16],
+            conversation_id: [2; 32],
+            expected_sequence: u64::MAX,
+            expected_head_id: [3; 32],
+        },
+        CompanionFrame::WitnessBegin {
+            target_server_id: [1; 16],
+            conversation_id: [2; 32],
+            resolution_token: [3; 16],
+            object_id,
+            fragment: fragment.clone(),
+        },
+        CompanionFrame::WitnessEntry {
+            target_server_id: [1; 16],
+            resolution_token: [3; 16],
+            entry_sequence: u32::MAX,
+            object_id,
+            fragment,
+        },
+        CompanionFrame::WitnessEnd {
+            target_server_id: [1; 16],
+            resolution_token: [3; 16],
+            record_count: 0,
+        },
+        CompanionFrame::WitnessResolved {
+            coordinator_server_id: [1; 16],
+            conversation_id: [2; 32],
+            resolution_token: [3; 16],
+            new_head_sequence: u64::MAX,
+            new_head_id: [4; 32],
         },
     ])
 }
@@ -265,6 +297,9 @@ fn coordinator_and_home_frames_are_classified() -> TestResult {
                 | CompanionFrame::StateEntry { .. }
                 | CompanionFrame::StateEnd { .. }
                 | CompanionFrame::StateCut { active: true, .. }
+                | CompanionFrame::WitnessBegin { .. }
+                | CompanionFrame::WitnessEntry { .. }
+                | CompanionFrame::WitnessEnd { .. }
         );
         assert_eq!(frame.from_coordinator(), expected, "{}", frame.command());
     }
@@ -340,6 +375,30 @@ fn grammar_violations_are_refused() -> TestResult {
     assert!(
         parse_companion_frame("ESTATE", &["FETCH", &sid, &id, "1", "*"], None).is_err(),
         "FETCH needs a concrete cursor"
+    );
+    assert!(parse_companion_frame("EWITNESS", &["CLEAR", &sid, &id], None).is_err());
+    assert!(
+        parse_companion_frame("EWITNESS", &["REQUEST", &sid, &id, "0", &id], None).is_ok(),
+        "the request names its expected position and head"
+    );
+    assert!(
+        parse_companion_frame("EWITNESS", &["REQUEST", &sid, &id, "00", &id], None).is_err(),
+        "an expected sequence is canonical"
+    );
+    assert!(
+        parse_companion_frame("EWITNESS", &["END", &sid, &sid, "0", "x"], None).is_err(),
+        "END has exactly its three parameters"
+    );
+    assert!(
+        parse_companion_frame("EWITNESS", &["ENTRY", &sid, &sid, "0", &id], None).is_err(),
+        "an ENTRY needs its object fragment"
+    );
+    assert!(
+        parse_companion_frame("EWITNESS", &["ENTRY", &sid, &sid, "0", &id], Some(&raw)).is_ok()
+    );
+    assert!(
+        parse_companion_frame("EWITNESS", &["END", &sid, &sid, "1"], Some(&raw)).is_err(),
+        "a tag on an untagged witness frame"
     );
     assert!(!PROFILE_MISMATCH_LINE.is_empty());
     Ok(())

@@ -151,6 +151,7 @@ fn finish(coordinator: &mut FederationCoordinator, context: &mut StateCoreContex
     super::replay_maintenance::restored(coordinator, context);
     super::mailbox_expiry::restored(coordinator, context);
     super::request_expiry::restored(coordinator, context);
+    super::object_expiry::restored(coordinator, context);
     coordinator.drain_backlog(context);
 }
 

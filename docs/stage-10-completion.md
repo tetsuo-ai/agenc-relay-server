@@ -27,6 +27,9 @@ recorded in [the historical chain record](stage-10-historical-chain.md).
 Durable object ownership, retention classes, trusted acceptance ages and the
 conversation and global disk quotas (ENC-08, issue #53) are recorded in
 [the object ownership record](stage-10-object-owners.md).
+Bounded, race-safe physical deletion of expired unowned objects (ENC-09,
+issue #67) is recorded in
+[the object expiry record](stage-10-object-expiry.md).
 The recovery submission carrier that lets a restored pending route become
 permanently closed or conflict (ENC-03, issue #57) is recorded in
 [the recovery submission record](stage-10-recovery-submission.md).
@@ -41,6 +44,17 @@ in [the secret-lookup floor record](stage-10-secret-lookup-floor.md).
 The re-verification and disposition of the four secondary 2026-09-01 audit
 findings ZDH-C3, C4, C5 and A1 (issue #13) are recorded in
 [the secondary audit findings record](stage-10-audit-secondary-findings.md).
+The advertised capacity workload, the per-node occupancy measurement and the
+advertised-limit profiling matrix (CAP-01, issue #56) are recorded in
+[the capacity workload record](stage-10-capacity-workload.md).
+The authenticated `EWITNESS` resolution that lets a durable edge witness
+install a proven head, or block its conversation for good (ENC-04, issue #62),
+is recorded in
+[the edge witness resolution record](stage-10-edge-witness-resolution.md).
+The bounded four-phase stop of a coordinator and an edge while federation
+recovery is live and acknowledgement work is still outstanding (RUN-05, issue
+#64) is recorded in
+[the shutdown-during-recovery record](stage-10-shutdown-during-recovery.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
@@ -74,12 +88,12 @@ unsupported. The current-format backup and restore contract remains required.
 | CAP-74 | Resolve retained edge witnesses with authenticated ancestry | Open |
 | CAP-86 | Bind ReInit admission and ACK signatures to the required old and continuing leaves | Open |
 | CAP-101 | Select per-conversation credentials and retain exact old signers for unfinished records | Open |
-| CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Open |
+| CAP-79 | Persist complete accepted-owner references, trusted ages and race-safe physical object cleanup | Owner accounts implemented (ENC-08); bounded race-safe collection of expired unowned objects implemented (ENC-09), with native ext4 growth and reuse qualification still owned by STO-03 and REL-08 |
 | Edge credentials | Forward registered credential replacement with durable coordinator authority and replay | Implemented; real daemon replacement, registered reauthentication, session revocation, restart and receipt-order tests pass |
 | Runtime follow-ups | Revalidate and close the Stage 06 command, privacy, revision, queue, reload and shutdown findings | Deferred channel-key authorization, account administration revisions, reload admission, durable refusal audit, idle session-close retry and startup audit indexing repaired. Capability refusals, channel privacy, per-connection accounting, maintenance isolation and independent round-robin input scheduling repaired; other items open |
 | Storage follow-ups | Revalidate and close backup slicing, publication, temporary cleanup, canonical decoding and accounting findings | Canonical decoding, temporary cleanup, borrowed ciphertext decoding/opening and reverse-manifest arithmetic repaired; checkpoint/backup capacity and publication remain open |
 | Configuration follow-ups | Reconcile OCSP, disabled listeners, key sharing, service-user checks and generated admin access | Disabled material, same-class key sharing, generated administrator UID and OCSP schema/WSS admission repaired, preserving edge outbound TLS; service-user checks remain open |
-| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Report validation repaired; idle connections hold only the base charge and the default model admits 50,000 within the pool (Section 19.3 thresholds conflict recorded in #113); full workload open |
+| Capacity evidence | Distinguish development load from production capacity and exercise the advertised limits | Workload matrix, per-node occupancy accounting, generator and default node budget implemented, and one node's 50,000 idle connections measured (CAP-01); the production campaign and the seven-day soak remain unrun, blocked on the Section 19.3 conflict in #113 |
 
 Earlier findings remain in `TODO.md` and `stage-10-qualification.md`. A finding
 is closed here only with a current regression or a recorded current-source

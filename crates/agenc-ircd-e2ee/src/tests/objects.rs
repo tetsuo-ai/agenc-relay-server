@@ -988,6 +988,27 @@ fn federation_objects_round_trip() -> TestResult {
         sequencer_record_head_id: [58; 32],
         state: IrcRouteStateKind::ActiveRoute,
     })?;
+    round_trip(
+        &crate::objects::federation::IrcFederationWitnessResolution {
+            profile_version: 1,
+            network_id: [1; 32],
+            coordinator_server_id: [102; 16],
+            target_server_id: [111; 16],
+            conversation_id: [20; 32],
+            resolution_token: [117; 16],
+            expected_sequence: 5,
+            expected_head_id: [58; 32],
+            record_count: 2,
+            new_head_sequence: 6,
+            new_head_id: [59; 32],
+            record_object_ids: Opaque::new([[60_u8; 32], [61; 32]].concat())?,
+        },
+    )?;
+    // The vector holds exactly `MAX_WITNESS_RESOLUTION_RECORDS` identifiers.
+    assert_eq!(
+        usize::try_from(crate::limits::MAX_WITNESS_RESOLUTION_RECORDS)? * 32,
+        32_768
+    );
     assert_eq!(IrcFederationOpcode::ALL.len(), 44);
     assert_eq!(IrcFederationOpcode::SubmitRecovery.value(), 42);
     assert_eq!(IrcFederationOpcode::SubmitRecoveryElement.value(), 43);

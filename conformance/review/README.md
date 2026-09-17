@@ -16,7 +16,7 @@ the working tree. It is separate from the external review required above.
 
 Exact profile: `docs/irc-mls-e2ee-extension.md` at the document hash
 recorded in `conformance/spec-baseline.toml`, negotiated as profile version
-1 with token `N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU`, suites 0x0001 and
+1 with token `YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc`, suites 0x0001 and
 0x0003, context extension 0xF1C1, roster update proposal 0xF1C2, and join
 authorization bundle extension 0xF1C3.
 
