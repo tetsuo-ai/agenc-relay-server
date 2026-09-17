@@ -37,9 +37,11 @@ REGION_FIELDS = {
     "id",
     "category",
     "file",
+    "item",
     "source_sha256",
     "start_line",
     "end_line",
+    "span_sha256",
     "metric",
     "reason",
 }
@@ -64,6 +66,17 @@ UNCOVERED_METRICS = {"branches", "mcdc", "regions"}
 REGION_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{2,63}")
 SOURCE_PATH_RE = re.compile(r"crates/[a-z0-9_-]+/src/[A-Za-z0-9_./-]+\.rs")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+SOURCE_LINE_RE = re.compile(r"\r\n|\r|\n")
+ITEM_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+# One named Rust item a reviewed span can be anchored to. `impl` and `mod`
+# blocks are excluded on purpose: they enclose most of a file, so a span
+# inside one would bind to it no matter how far it had drifted.
+SOURCE_ITEM_RE = re.compile(
+    r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:default\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"(?:extern\s+\"[^\"]*\"\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"(?:extern\s+\"[^\"]*\"\s+)?(?:fn|struct|enum|union|trait|type|const|static)"
+    r"(?:\s+mut)?\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
 TASK_ID_RE = re.compile(r"S\d{2}-(?:\d{3}|900)")
 TODO_TASK_RE = re.compile(
     r"^- \[([ x])\] `(S\d{2}-(?:\d{3}|900))`",
@@ -136,6 +149,147 @@ def validate_source_inventory(root: Path, file_count: object, source_hash: objec
         )
 
 
+def blanked_source(text: str) -> str:
+    """Return one Rust source with comments and literals blanked in place.
+
+    Line structure is preserved exactly, so the result can be scanned for the
+    braces that delimit an item without a comment or a string standing in for
+    one.
+    """
+    result = list(text)
+    cursor = 0
+    length = len(text)
+    while cursor < length:
+        character = text[cursor]
+        if character == "/" and text.startswith("//", cursor):
+            while cursor < length and text[cursor] != "\n":
+                result[cursor] = " "
+                cursor += 1
+        elif character == "/" and text.startswith("/*", cursor):
+            depth = 1
+            result[cursor] = result[cursor + 1] = " "
+            cursor += 2
+            while cursor < length and depth:
+                if text.startswith("/*", cursor):
+                    depth += 1
+                    result[cursor] = result[cursor + 1] = " "
+                    cursor += 2
+                elif text.startswith("*/", cursor):
+                    depth -= 1
+                    result[cursor] = result[cursor + 1] = " "
+                    cursor += 2
+                else:
+                    if text[cursor] != "\n":
+                        result[cursor] = " "
+                    cursor += 1
+        elif character == "r" and cursor + 1 < length and text[cursor + 1] in "#\"":
+            end = cursor + 1
+            hashes = 0
+            while end < length and text[end] == "#":
+                hashes += 1
+                end += 1
+            if end < length and text[end] == "\"":
+                closing = "\"" + "#" * hashes
+                stop = text.find(closing, end + 1)
+                stop = length if stop < 0 else stop + len(closing)
+                for index in range(cursor, stop):
+                    if text[index] != "\n":
+                        result[index] = " "
+                cursor = stop
+            else:
+                cursor += 1
+        elif character == "\"":
+            end = cursor + 1
+            while end < length:
+                if text[end] == "\\":
+                    end += 2
+                    continue
+                if text[end] == "\"":
+                    end += 1
+                    break
+                end += 1
+            for index in range(cursor, min(end, length)):
+                if text[index] != "\n":
+                    result[index] = " "
+            cursor = end
+        elif character == "'":
+            literal = re.match(r"'(?:\\.|[^'\\\n])'", text[cursor:])
+            if literal is None:
+                cursor += 1
+            else:
+                for index in range(cursor, cursor + literal.end()):
+                    result[index] = " "
+                cursor += literal.end()
+        else:
+            cursor += 1
+    return "".join(result)
+
+
+def source_lines(text: str) -> list[str]:
+    """Split one source exactly as its bytes split, so line numbers agree.
+
+    `str.splitlines` also breaks on form feeds and Unicode separators, which
+    would number the lines differently from the byte slice the span hash is
+    taken over.
+    """
+    return SOURCE_LINE_RE.split(text)
+
+
+def source_items(text: str) -> dict[str, list[tuple[int, int]]]:
+    """Return every named Rust item in one source with its first and last line."""
+    code = source_lines(blanked_source(text))
+    items: dict[str, list[tuple[int, int]]] = {}
+    for index, line in enumerate(source_lines(text)):
+        declaration = SOURCE_ITEM_RE.match(line)
+        if declaration is None:
+            continue
+        depth = 0
+        nesting = 0
+        opened = False
+        end: int | None = None
+        for cursor in range(index, len(code)):
+            for character in code[cursor]:
+                if character in "([":
+                    nesting += 1
+                elif character in ")]":
+                    nesting -= 1
+                elif character == "{":
+                    depth += 1
+                    opened = True
+                elif character == "}":
+                    depth -= 1
+                    if opened and depth == 0:
+                        end = cursor + 1
+                        break
+                elif character == ";" and not opened and nesting <= 0:
+                    end = cursor + 1
+                    break
+            if end is not None:
+                break
+        if end is not None:
+            items.setdefault(declaration.group(1), []).append((index + 1, end))
+    return items
+
+
+def span_binds_item(
+    items: dict[str, list[tuple[int, int]]],
+    item: str,
+    start_line: int,
+    end_line: int,
+) -> bool:
+    """Whether one reviewed span still holds the item it names.
+
+    A span binds its item when it covers that item's declaration, or when it
+    lies inside the item and reviews part of it. Text inserted above the span
+    moves the item out of both relations, which is the drift this rejects.
+    """
+    return any(
+        start_line <= item_start <= end_line
+        or (item_start <= start_line and end_line <= item_end)
+        for item_start, item_end in items.get(item, ())
+    )
+
+
 def validate_policy_data(
     root: Path,
     policy: dict[str, object],
@@ -185,6 +339,7 @@ def validate_policy_data(
         raise CoverageError("coverage policy has no reviewed regions")
     regions: list[dict[str, object]] = []
     region_ids: set[str] = set()
+    item_cache: dict[str, dict[str, list[tuple[int, int]]]] = {}
     active_categories: set[str] = set()
     for index, raw_region in enumerate(raw_regions):
         if not isinstance(raw_region, dict) or set(raw_region) != REGION_FIELDS:
@@ -237,6 +392,32 @@ def validate_policy_data(
             or not 1 <= start_line <= end_line <= line_count
         ):
             raise CoverageError(f"coverage region {identifier} has invalid line bounds")
+        item = raw_region.get("item")
+        if not isinstance(item, str) or ITEM_NAME_RE.fullmatch(item) is None:
+            raise CoverageError(f"coverage region {identifier} has an invalid item name")
+        span_hash = raw_region.get("span_sha256")
+        if not isinstance(span_hash, str) or SHA256_RE.fullmatch(span_hash) is None:
+            raise CoverageError(f"coverage region {identifier} has an invalid span hash")
+        span = b"".join(source.splitlines(keepends=True)[start_line - 1 : end_line])
+        if hashlib.sha256(span).hexdigest() != span_hash:
+            # The file hash alone cannot see this: refreshing it after an
+            # insertion above the span leaves the span on whatever now
+            # occupies those line numbers.
+            raise CoverageError(
+                f"coverage region {identifier} has a stale span hash, so lines "
+                f"{start_line}-{end_line} of {source_path} are no longer the reviewed text; "
+                "the span was displaced by an edit above it and must be re-anchored onto "
+                "the item it names and re-reviewed"
+            )
+        if source_path not in item_cache:
+            item_cache[source_path] = source_items(source.decode("utf-8"))
+        if not span_binds_item(item_cache[source_path], item, start_line, end_line):
+            raise CoverageError(
+                f"coverage region {identifier} names the item {item} but its span "
+                f"{source_path}:{start_line}-{end_line} neither declares it nor lies inside "
+                "it, so the row scores against code it never declared and must be "
+                "re-anchored onto that item and re-reviewed"
+            )
         if raw_region.get("metric") not in {"branches", "regions"}:
             raise CoverageError(f"coverage region {identifier} has an invalid metric")
         reason = raw_region.get("reason")
@@ -596,6 +777,49 @@ def validate(root: Path, report_path: Path, policy_path: Path) -> tuple[float, f
     )
 
 
+def audit_anchors(root: Path, policy_path: Path) -> tuple[int, list[str]]:
+    """Audit every reviewed span against the item it names, without a report.
+
+    This is the independent check: it reads only the policy and the sources,
+    so it decides a row that scores perfectly against code the row never
+    declared, which no coverage number can.
+    """
+    policy = load_policy(policy_path)
+    raw_regions = policy.get("region")
+    if not isinstance(raw_regions, list) or not raw_regions:
+        raise CoverageError("coverage policy has no reviewed regions")
+    item_cache: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    drifted: list[str] = []
+    for raw_region in raw_regions:
+        if not isinstance(raw_region, dict):
+            raise CoverageError("coverage policy has an invalid reviewed region")
+        identifier = str(raw_region.get("id"))
+        source_path = str(raw_region.get("file"))
+        if SOURCE_PATH_RE.fullmatch(source_path) is None:
+            raise CoverageError(f"coverage region {identifier} has an invalid source path")
+        item = str(raw_region.get("item"))
+        start_line = raw_region.get("start_line")
+        end_line = raw_region.get("end_line")
+        if type(start_line) is not int or type(end_line) is not int:
+            raise CoverageError(f"coverage region {identifier} has invalid line bounds")
+        text = (root / source_path).read_text(encoding="utf-8")
+        if source_path not in item_cache:
+            item_cache[source_path] = source_items(text)
+        data = (root / source_path).read_bytes()
+        span = b"".join(data.splitlines(keepends=True)[start_line - 1 : end_line])
+        if hashlib.sha256(span).hexdigest() != str(raw_region.get("span_sha256")):
+            drifted.append(
+                f"{identifier} ({source_path}:{start_line}-{end_line}) no longer holds the "
+                "text that was reviewed"
+            )
+        elif not span_binds_item(item_cache[source_path], item, start_line, end_line):
+            drifted.append(
+                f"{identifier} ({source_path}:{start_line}-{end_line}) does not hold "
+                f"{item}, the item it names"
+            )
+    return len(raw_regions), drifted
+
+
 def expect_rejection(label: str, action: object, fragment: str) -> None:
     """Require one seeded mutation to reach its intended rejection branch."""
     if not callable(action):
@@ -651,6 +875,45 @@ def self_test(root: Path, policy_path: Path) -> int:
         "stale policy source",
         lambda: validate_policy_data(root, stale_hash),
         "stale source hash",
+    )
+    cases += 1
+    # A span whose own text no longer hashes to what was reviewed: the exact
+    # residue of refreshing a file hash after an insertion above the span.
+    stale_span = copy.deepcopy(policy)
+    stale_span["region"][0]["span_sha256"] = "0" * 64  # type: ignore[index]
+    expect_rejection(
+        "stale reviewed span",
+        lambda: validate_policy_data(root, stale_span),
+        "stale span hash",
+    )
+    cases += 1
+    # The same displacement seen from the item's side: the row still names its
+    # item, but the span it holds is some other part of the file.
+    displaced = copy.deepcopy(policy)
+    first_region = displaced["region"][0]  # type: ignore[index]
+    first_items = source_items(
+        (root / str(first_region["file"])).read_text(encoding="utf-8")
+    )
+    elsewhere = next(
+        (
+            name
+            for name in sorted(first_items)
+            if not span_binds_item(
+                first_items,
+                name,
+                int(first_region["start_line"]),
+                int(first_region["end_line"]),
+            )
+        ),
+        None,
+    )
+    if elsewhere is None:
+        raise CoverageError("self-test 'displaced reviewed span' found no item outside the span")
+    first_region["item"] = elsewhere
+    expect_rejection(
+        "reviewed span displaced from its item",
+        lambda: validate_policy_data(root, displaced),
+        "neither declares it nor lies inside it",
     )
     cases += 1
     stale_inventory = copy.deepcopy(policy)
@@ -990,13 +1253,23 @@ def fail(message: str) -> NoReturn:
 def main() -> None:
     """Dispatch coverage validation and negative self-tests."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "self-test"))
+    parser.add_argument("command", choices=("check", "self-test", "audit"))
     parser.add_argument("report_or_policy", type=Path)
     parser.add_argument("policy", nargs="?", type=Path)
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     try:
-        if arguments.command == "check":
+        if arguments.command == "audit":
+            if arguments.policy is not None:
+                raise CoverageError("audit accepts only the policy path")
+            total, drifted = audit_anchors(root, arguments.report_or_policy)
+            if drifted:
+                raise CoverageError(
+                    f"{len(drifted)} reviewed spans have drifted off the item they name: "
+                    + "; ".join(drifted)
+                )
+            print(f"region anchors: ok ({total} reviewed spans hold the item they name)")
+        elif arguments.command == "check":
             if arguments.policy is None:
                 raise CoverageError("check requires a detailed report and a policy")
             branch_percent, line_percent, region_count = validate(
