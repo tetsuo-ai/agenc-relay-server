@@ -803,7 +803,7 @@ class CapacityDriverTests(unittest.TestCase):
         return module
 
     @staticmethod
-    def sample(per_node: int, pool: int = 3_338_666_016) -> dict:
+    def sample(per_node: int, pool: int = 5_217_714_208) -> dict:
         """One sample whose node 0 is the coordinator and 1 and 2 the edges."""
         return {"at_ns": 10, "anonymous_bytes": [3_000_000, 2_000_000, 2_000_000], "sockets": [2, 40, 40], "close_wait": [0, 0, 0],
                 "tasks": [12, 12, 12], "federation_links": 2, "live_client_connections": [0, per_node, per_node],
@@ -932,8 +932,8 @@ class CapacityDriverTests(unittest.TestCase):
         mode = driver.MODES["capacity"]
         for mutate in (
             lambda record: record["samples"][0].__setitem__("memory_budget_bytes", [8 * 10**9, 8 * 10**9, 8 * 10**9]),
-            lambda record: record["samples"][1].__setitem__("memory_budget_bytes", [3_338_666_016, 3_338_666_016, 0]),
-            lambda record: record["samples"][0].__setitem__("memory_charged_bytes", [1, 1, 3_338_666_017]),
+            lambda record: record["samples"][1].__setitem__("memory_budget_bytes", [5_217_714_208, 5_217_714_208, 0]),
+            lambda record: record["samples"][0].__setitem__("memory_charged_bytes", [1, 1, 5_217_714_209]),
             lambda record: record["samples"][0].pop("memory_charged_bytes"),
             lambda record: record["samples"][1].pop("memory_budget_bytes"),
             lambda record: record["samples"][0].__setitem__("live_client_connections", 100_000),

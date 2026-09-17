@@ -27,7 +27,7 @@ use agenc_ircd_runtime::purpose::ListenerPurpose;
 use super::*;
 
 /// Appendix C.2 default `server.memory_budget_bytes`.
-pub(super) const DEFAULT_BUDGET_BYTES: u64 = 4_294_967_296;
+pub(super) const DEFAULT_BUDGET_BYTES: u64 = 6_442_450_944;
 /// Appendix C.2 default `server.crypto_worker_threads`.
 const DEFAULT_CRYPTO_WORKERS: u64 = 4;
 /// Appendix C.6 default `parsed_arena_bytes`.
@@ -84,8 +84,10 @@ pub(super) enum Blocker {
     PopulationBelowDefault,
     /// The per-node idle base charges exceed the default live pool `P`.
     IdleChargesExceedPool,
-    /// Section 19.3 stops new connections before the population is admitted
-    /// although every charge fits `P` (issue #113).
+    /// Section 19.3 degrades the node before the population is admitted
+    /// although every charge fits `P`. A measurement taken above the first
+    /// class is taken on a node that is already refusing work, so it cannot
+    /// support a capacity claim. The record label is unchanged (issue #113).
     OverloadStopsAdmission,
     /// One edge would need more loopback source addresses than the generator
     /// layout provides.
@@ -341,7 +343,7 @@ fn blockers_for(
     if budget.idle_charge_bytes(per_node_connections)? > budget.protocol_pool_bytes() {
         blockers.push(Blocker::IdleChargesExceedPool);
     }
-    if per_node_connections > budget.clients_at_percent(CONNECTION_STOP_PERCENT) {
+    if per_node_connections > budget.clients_at_percent(GUEST_STOP_PERCENT) {
         blockers.push(Blocker::OverloadStopsAdmission);
     }
     if generator.subnets_per_node() > MAX_SUBNETS {
@@ -405,11 +407,11 @@ fn the_default_node_budget_is_the_published_arithmetic() -> TestResult {
     assert_eq!(
         budget.parts(),
         [
-            4_294_967_296,
-            536_870_912,
+            6_442_450_944,
+            805_306_368,
             117_440_480,
             301_989_888,
-            3_338_666_016
+            5_217_714_208
         ]
     );
     assert_eq!(
@@ -419,40 +421,48 @@ fn the_default_node_budget_is_the_published_arithmetic() -> TestResult {
     Ok(())
 }
 
-/// Section 28.7 admits the default population's charges, and Section 19.3
-/// stops new connections first. The pilot must report that blocker with the
-/// population that provokes it (issue #113).
+/// Section 28.7 admits the default population's charges and now also holds
+/// them in the normal Section-19.3 class: issue #113 funded the default
+/// budget so the campaign measures a node that is not already degraded.
 #[test]
-fn the_default_population_is_charged_within_the_pool_but_stopped_by_overload() -> TestResult {
+fn the_default_population_is_admitted_in_the_normal_overload_class() -> TestResult {
     let workload = Workload::select(2 * DEFAULT_CLIENT_CONNECTIONS)?;
     let budget = workload.budget();
     assert!(
         budget.idle_charge_bytes(DEFAULT_CLIENT_CONNECTIONS)? <= budget.protocol_pool_bytes(),
         "the default population's charges fit the live pool"
     );
-    assert_eq!(budget.clients_at_percent(GUEST_STOP_PERCENT), 40_755);
-    assert_eq!(budget.clients_at_percent(CONNECTION_STOP_PERCENT), 45_849);
-    assert_eq!(budget.clients_at_percent(EVICTION_PERCENT), 48_396);
-    assert_eq!(
-        workload.blockers(),
-        [Blocker::OverloadStopsAdmission].as_slice()
+    assert_eq!(budget.clients_at_percent(GUEST_STOP_PERCENT), 63_692);
+    assert_eq!(budget.clients_at_percent(CONNECTION_STOP_PERCENT), 71_654);
+    assert_eq!(budget.clients_at_percent(EVICTION_PERCENT), 75_635);
+    assert!(
+        DEFAULT_CLIENT_CONNECTIONS < budget.clients_at_percent(GUEST_STOP_PERCENT),
+        "the default population is below the first class"
     );
-    assert!(!workload.qualifying(), "the blocker is open");
+    assert_eq!(workload.blockers(), [].as_slice(), "no blocker is open");
+    assert!(
+        workload.qualifying(),
+        "a production population can now close"
+    );
     Ok(())
 }
 
-/// The largest population Section 19.3 admits today has no admission blocker
-/// and is still not production: it is below the per-node default.
+/// One client above the first overload class is one client too many: the node
+/// would be refusing guests and expensive queries while it is measured.
 #[test]
-fn the_largest_admissible_population_is_still_below_the_default() -> TestResult {
+fn a_population_above_the_first_overload_class_reports_the_blocker() -> TestResult {
     let budget = NodeBudget::default_node()?;
-    let admissible = budget.clients_at_percent(CONNECTION_STOP_PERCENT);
-    let workload = Workload::select(2 * admissible)?;
-    assert_eq!(workload.per_node_connections(), admissible);
-    assert_eq!(
-        workload.blockers(),
-        [Blocker::PopulationBelowDefault].as_slice()
+    let degraded = budget.clients_at_percent(GUEST_STOP_PERCENT) + 1;
+    let workload = Workload::select(2 * degraded)?;
+    assert_eq!(workload.per_node_connections(), degraded);
+    assert!(
+        workload
+            .blockers()
+            .contains(&Blocker::OverloadStopsAdmission),
+        "blockers were {:?}",
+        workload.blockers()
     );
+    assert!(!workload.qualifying(), "the blocker is open");
     Ok(())
 }
 

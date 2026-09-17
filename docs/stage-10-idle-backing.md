@@ -1,5 +1,12 @@
 # Stage 10 idle connection backing
 
+Superseded in one respect: the default `server.memory_budget_bytes` this
+record measures against, and with it the live pool `P = 3,338,666,016`, moved
+to 6,442,450,944 and `P = 5,217,714,208` when issue #113 funded the default
+population below the Section 19.3 classes. The backing behaviour recorded
+below is unchanged; see
+[the overload threshold record](stage-10-overload-threshold-defaults.md).
+
 This record closes RUN-04 (issue #46). Before it, every admitted client
 charged 167,936 bytes of output queue backing at admission and every opened
 input port charged 16,384 bytes of input backing, beside the 65,536-byte

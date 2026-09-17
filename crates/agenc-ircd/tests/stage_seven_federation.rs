@@ -396,7 +396,7 @@ impl NodeFixture {
 fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> TestResult {
     replace_once(
         config,
-        "memory_budget_bytes = 4294967296",
+        "memory_budget_bytes = 6442450944",
         "memory_budget_bytes = 1073741824",
     )?;
     replace_once(

@@ -43,12 +43,12 @@ DELEGATED_SCOPE = ["systemd-run", "--user", "--scope", "--quiet", "-p", "Delegat
 WORKLOAD_FIELDS = {"profile", "qualifying", "per_node_connections", "total_connections", "load_channels",
                    "connections_per_address", "generator_addresses_per_node", "generator_subnets_per_node", "blockers"}
 # The Section 19.2 startup arithmetic of the unchanged Appendix C defaults
-# (B = 4 GiB, four crypto workers). A record that names any other value raised
+# (B = 6 GiB, four crypto workers). A record that names any other value raised
 # a ceiling or a reserve to pass and cannot support a default-configuration
 # capacity claim.
-DEFAULT_NODE_BUDGET = {"budget_bytes": 4_294_967_296, "headroom_bytes": 536_870_912,
+DEFAULT_NODE_BUDGET = {"budget_bytes": 6_442_450_944, "headroom_bytes": 805_306_368,
                        "storage_handoff_bytes": 117_440_480, "crypto_pool_bytes": 301_989_888,
-                       "protocol_pool_bytes": 3_338_666_016}
+                       "protocol_pool_bytes": 5_217_714_208}
 # Section 19.2 default members per channel and hard maximum connections per /32.
 MEMBERS_PER_CHANNEL = 4_096
 MAX_CONNECTIONS_PER_ADDRESS = 256

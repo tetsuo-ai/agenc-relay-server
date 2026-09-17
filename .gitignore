@@ -1,5 +1,5 @@
-/target/
-/fuzz/target/
+/target
+/fuzz/target
 /.gitnexus/
 /coverage/
 __pycache__/

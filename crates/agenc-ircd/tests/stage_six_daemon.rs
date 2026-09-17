@@ -477,7 +477,7 @@ impl LiveFixture {
         let mut config = render_template(&values)?;
         replace_once(
             &mut config,
-            "memory_budget_bytes = 4294967296",
+            "memory_budget_bytes = 6442450944",
             "memory_budget_bytes = 1073741824",
         )?;
         replace_once(

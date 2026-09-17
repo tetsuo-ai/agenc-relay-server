@@ -6,6 +6,16 @@ measurement record, not a qualification result. The production campaign named
 in Section 28.7 is **not** run here, and this document says exactly which
 parts were measured, on what host, and which were not.
 
+Superseded in one respect: every "Appendix C.2 default" and every live pool
+named below is the four-GiB arithmetic of the day. Issue #113 moved the default
+`server.memory_budget_bytes` to 6,442,450,944 and the live pool to
+`P = 5,217,714,208`, because the four-GiB pool held the default 50,000-client
+population above all three Section 19.3 overload classes. The campaign's node
+budget moved with it; the measurements recorded here were taken at the former
+default and are not reproducible against the current one. The overload blocker
+this record names is resolved there; see
+[the overload threshold record](stage-10-overload-threshold-defaults.md).
+
 ## The defect this replaces
 
 The production capacity launcher set `CAPACITY_CONNECTIONS = 64` while the

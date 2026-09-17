@@ -1,6 +1,7 @@
 //! RUN-04: idle clients on the production binary hold only the fixed client
 //! base charge, and the default composed admission model fits 50,000 of them
-//! inside the unchanged four-GiB budget (spec 19.2 and 28.7).
+//! inside the funded six-GiB budget, in the normal Section-19.3 overload
+//! class rather than merely below the memory ceiling (spec 19.2 and 28.7).
 //!
 //! The daemon runs with the default memory budget, crypto pool, and
 //! connection limits; only the listener ceiling, the per-address ceiling,
@@ -22,7 +23,7 @@
 use super::*;
 
 /// Default `server.memory_budget_bytes` (Appendix C.2).
-const DEFAULT_BUDGET_BYTES: u64 = 4_294_967_296;
+const DEFAULT_BUDGET_BYTES: u64 = 6_442_450_944;
 /// Fixed charge of one admitted client connection (spec 19.2).
 const CLIENT_BASE_BYTES: u64 = 65_536;
 /// The default client population the model must admit (spec 28.7).

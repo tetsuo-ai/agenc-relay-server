@@ -446,7 +446,7 @@ fn resource_cases() -> Vec<Case> {
             "memory budget underflow",
             mutate(
                 PUBLIC,
-                "memory_budget_bytes = 4294967296",
+                "memory_budget_bytes = 6442450944",
                 "memory_budget_bytes = 536870912",
             ),
             stage,
@@ -457,7 +457,7 @@ fn resource_cases() -> Vec<Case> {
             mutate(
                 &mutate(
                     PUBLIC,
-                    "memory_budget_bytes = 4294967296",
+                    "memory_budget_bytes = 6442450944",
                     "memory_budget_bytes = 1073741824",
                 ),
                 "query_snapshot_bytes_global = 67108864",

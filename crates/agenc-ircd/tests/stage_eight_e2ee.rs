@@ -627,7 +627,7 @@ const STAGE_EIGHT_MEMORY_BUDGET_BYTES: u64 = 1_073_741_824;
 fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> TestResult {
     replace_once(
         config,
-        "memory_budget_bytes = 4294967296",
+        "memory_budget_bytes = 6442450944",
         "memory_budget_bytes = 1073741824",
     )?;
     replace_once(

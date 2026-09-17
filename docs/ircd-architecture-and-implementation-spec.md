@@ -2987,6 +2987,25 @@ connection count is therefore a strict upper bound, not a promise that every
 connection can simultaneously consume every other configured maximum.
 Capacity claims are valid only for a named workload that passes Section 28.7.
 
+The Section 19.3 overload percentages are taken against this same `P`, so
+every overload class is entered strictly before the pool is exhausted and a
+graceful class always precedes a hard admission refusal. Classifying against a
+larger quantity such as `B` or `B - H` places the highest classes above the
+admission ceiling and retires them, because a charge beyond `P` is refused
+before any percentage of a larger quantity is reached: at the defaults below,
+the 95% class taken against `B - H`, and the 90% and 95% classes taken against
+`B`, exceed `P` and could never be entered. A configured client population is therefore bounded by
+Section 19.3 rather than by `client_connections` whenever
+`client_connections * 65,536` reaches 90% of `P`, and it is already degraded
+at the 80% class below that. The default configuration is funded so the
+complete default population stays in the normal class: with
+`B = 6,442,450,944` and four crypto workers, `H = 805,306,368`,
+`D = 117,440,480`, `C = 301,989,888` and `P = 5,217,714,208`, so the default
+50,000 client base charges hold 3,276,800,000 bytes, 62.8% of `P`, while the
+80%, 90% and 95% classes admit 63,692, 71,654 and 75,635 base charges. A
+budget that does not fund its configured count remains legal; its population
+simply stops at an overload class, which startup neither hides nor refuses.
+
 Each admitted durable batch reserves 58,720,240 bytes: two copies of the
 16,777,216-byte encoded-write ceiling, one 16,777,200-byte manifest plaintext,
 and 8,388,608 bytes of codec/index overhead. The two-slot storage handoff is
@@ -3016,11 +3035,13 @@ the next control message. Crossing 75% sends one
 negotiated; crossing the hard limit closes immediately. No message is evicted
 to make room for a newer one.
 
-At 80% global memory budget, the server stops accepting guests and expensive
-queries. At 90%, it stops all new connections and channel creation. At 95%, it
+At 80% of the Section-19.2 live protocol permit pool `P`, the server stops
+accepting guests and expensive queries. At 90%, it stops all new connections and channel creation. At 95%, it
 selects whole client connections in descending charged-queue-byte order,
 marks each one closing, and destroys its entire queue with the connection
-until usage is below 85%. It never evicts an individual frame or reuses its
+until usage is below 85%. Selection projects the whole charge each close
+returns, the connection's queue bytes together with its base charge, so a
+population whose queues are empty is not selected without bound. It never evicts an individual frame or reuses its
 permit while the frame remains reachable. Existing authenticated messages
 continue only if their complete Section-15.3 fanout reservation fits. The
 process never relies on allocator failure as flow control.
@@ -7426,8 +7447,10 @@ Boundary scenarios exhaust each logical ceiling before memory, memory before
 each logical ceiling, and both on the same operation. They require a
 side-effect-free `SERVER_BUSY` or specified connection close, never partial
 fanout or partial durable admission. The default configuration must admit
-50,000 idle client base charges within its four-GiB budget, while attempts to
-fill every client's one-MiB queue are rejected without exceeding the budget.
+50,000 idle client base charges within its six-GiB budget and hold them in the
+normal Section-19.3 class, not merely below the memory ceiling, while attempts
+to fill every client's one-MiB queue are rejected without exceeding the
+budget.
 Listener-global/client-global count interactions, setup-charge release, the
 one reserved fatal frame, and REHASH increases and decreases are covered by
 deterministic model tests.
@@ -9145,7 +9168,7 @@ emits the value and startup rejects its absence.
 | `server.name` | string, required | Section-7.4 name, at most 127 bytes when federation is enabled; restart-only |
 | `server.data_dir` | path, required | dedicated existing directory; restart-only |
 | `server.runtime_dir` | path, required | dedicated existing directory; restart-only |
-| `server.memory_budget_bytes` | integer, 4,294,967,296 | 536,870,912..1,099,511,627,776; restart-only |
+| `server.memory_budget_bytes` | integer, 6,442,450,944 | 536,870,912..1,099,511,627,776; restart-only |
 | `server.tokio_worker_threads` | integer, 4 | 2..128; restart-only |
 | `server.crypto_worker_threads` | integer, 4 | 1..128, no greater than `channel_key_jobs + opaque_jobs`, and passes Section-19 memory arithmetic; restart-only |
 | `server.quiesce_seconds` | integer, 5 | 1..30; reloadable downward only |
