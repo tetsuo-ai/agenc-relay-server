@@ -82,6 +82,11 @@ unreproduced CAP-01 startup refusal it narrows, and the reconstruction surface
 and record family the daemon now names in that refusal (RUN-08, issue #134) are
 recorded in
 [the edge startup reconstruction record](stage-10-edge-startup-reconstruction.md).
+The encrypted lifecycle, authentication and crypto critical-branch
+regressions, the eighteen regions they bring to 100 percent, the five
+region-metric corrections they required and the three rows that cannot reach
+100 percent under their declared metric (COV-02, issue #72) are recorded in
+[the encrypted coverage record](stage-10-encrypted-coverage.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

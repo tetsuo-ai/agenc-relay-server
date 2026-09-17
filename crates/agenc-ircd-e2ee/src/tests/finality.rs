@@ -5,6 +5,9 @@
 #[path = "finality/reinit_domain.rs"]
 mod reinit_domain;
 
+#[path = "finality/roster_fences.rs"]
+mod roster_fences;
+
 use std::error::Error;
 
 use super::*;

@@ -354,3 +354,6 @@ fn a_fixed_direct_policy_needs_both_roots() -> TestResult {
     );
     Ok(())
 }
+
+#[path = "policy/fences.rs"]
+mod fences;

@@ -96,3 +96,6 @@ fn an_unacknowledged_gate_still_requires_every_resident_part() -> TestResult {
     assert!(validate_complete(&stream, &gate).is_err());
     Ok(())
 }
+
+#[path = "fences.rs"]
+mod fences;
