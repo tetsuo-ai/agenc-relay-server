@@ -3,7 +3,7 @@
   "upstream_repository": "https://github.com/cberner/redb",
   "upstream_commit": "23b6ba05473b13e69ed4db82f4b5bc07f0c33be9",
   "upstream_tag": "v4.2.0",
-  "patch_sha256": "75c9965d40500606b5fd0b0227e90fca33e9f938ac9b141709b77aa7770c026e",
+  "patch_sha256": "2ed3dd284be03a3d815c6448d4937b75a2322a0c5b7d63862381b5e949d64a1c",
   "apply": "git apply bounded-transaction.patch",
   "files": {
     "CHANGELOG.md": {
@@ -24,7 +24,7 @@
     },
     "src/db.rs": {
       "before_sha256": "ae0e73b1fd57f9c40ff00568dfc3869f6037d6863233868b1b3978744bc26dbc",
-      "after_sha256": "7421ca597e325fee2f2add22eb0cf80c1ddf2be54760c8489e2c68aa51da169f"
+      "after_sha256": "0d96c2ce48579f87db77be007c9612c6c6c7efe4a97e6e2b72bf9da5a1bd33da"
     },
     "src/error.rs": {
       "before_sha256": "0b394a9fa15e2ccc59a836f5a280bb19d62a382ea98123bc238531cbb11eaee7",

@@ -1572,7 +1572,16 @@ impl Builder {
         self
     }
 
-    #[cfg(any(test, fuzzing))]
+    /// Set the region size (in bytes) a newly created database is laid out with.
+    ///
+    /// The value must be a power of two and is fixed at creation; an existing database keeps
+    /// the region size in its header. Upstream exposes this only to its own tests. The bounded
+    /// write transaction charges every file extension at its full length before it happens, and
+    /// the file grows by up to two regions at a time once the first region is full, so a bounded
+    /// database must be created with a region size of at most half its allowance or no
+    /// transaction can ever extend it: with the default 4 GiB region and a 256 MiB allowance the
+    /// very first doubling past 256 MiB is refused. A caller that bounds transactions should
+    /// create with `set_region_size(64 * 1024 * 1024)` or smaller.
     pub fn set_region_size(&mut self, size: u64) -> &mut Self {
         assert!(size.is_power_of_two());
         self.region_size = Some(size);

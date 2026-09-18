@@ -273,7 +273,7 @@ VENDORED_PATCHES = (
         "path": "vendor/redb-4.2.0",
         "upstream_registry": "https://github.com/rust-lang/crates.io-index",
         "upstream_checksum": DIRECT_CHECKSUMS["redb"],
-        "tree_sha256": "7c4d7bf3833244148f18a47fe22b3dddd129ab02c75a6cfe65c8c2e23da6b72b",
+        "tree_sha256": "24cef8edd9b1129769fbbd2964bb0a3c0cdd48bc09ede035bdb481e2d77389d3",
         "modified_files": ["src/bounded.rs", "src/db.rs", "src/error.rs", "src/lib.rs", "src/transactions.rs", "src/tree_store/mod.rs", "src/tree_store/page_store/mod.rs", "src/tree_store/page_store/page_manager.rs"],
         "reason": "STO-01 bounded write transaction: begin_write_bounded charges every page extent and file extension to a typed allowance before allocating; prepare, publish, reclaim_bounded and persist_allocator_state_bounded keep each phase bounded; ordinary transactions, the on-disk format and the crate version are unchanged; the fork is owned by the project and not submitted upstream",
     },
