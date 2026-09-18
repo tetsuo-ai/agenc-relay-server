@@ -42,7 +42,8 @@ const MAX_LOG_BYTES: u64 = 64 * 1_024 * 1_024;
 const MAX_COMMAND_OUTPUT: usize = 1_024 * 1_024;
 /// A node with live peers may take longer than a lone node to drain.
 const DRILL_STOP_BUDGET: Duration = Duration::from_secs(60);
-/// Let the freshly linked network settle before the first operation.
+/// Pause the sequencer-rotation drill keeps after a full restart. It is a
+/// courtesy only: readiness itself is `wait_for_account_authority`.
 const STARTUP_SETTLE: Duration = Duration::from_secs(2);
 
 fn stop_command(reason: &str) -> TestResult<String> {
@@ -319,7 +320,13 @@ impl DrillNodes {
         };
         wait_for_link(&network.edge_a, 0)?;
         wait_for_link(&network.edge_b, 0)?;
-        thread::sleep(STARTUP_SETTLE);
+        // A link is established before an edge can serve an account. A fixed
+        // settle used to stand in for that second condition and lost the
+        // race on a loaded host, where the first account creation was then
+        // answered `FAIL ACCTCREATE UNAVAILABLE` (QA-04, issue #175). Wait
+        // for the state itself, as `restart_all` already does.
+        wait_for_account_authority(&network.edge_a)?;
+        wait_for_account_authority(&network.edge_b)?;
         Ok(nodes)
     }
 

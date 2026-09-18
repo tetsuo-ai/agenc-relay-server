@@ -58,6 +58,18 @@ pub enum ListenerError {
     SourceMismatch,
     /// The socket could not be bound.
     Bind,
+    /// The operating system refused to bind one configured TCP address. The
+    /// address is the operator's own listener configuration and the kind is
+    /// the closed `std::io::ErrorKind`, so the failure names which listener
+    /// collided and why without carrying any peer data.
+    TcpBind {
+        /// The configured listener address the bind was attempted on.
+        address: SocketAddr,
+        /// The portable class of the operating-system refusal.
+        kind: std::io::ErrorKind,
+        /// The raw `errno`, when the platform reported one.
+        os_error: Option<i32>,
+    },
     /// The Unix socket directory is absent or not mode 0750.
     SocketDirectory,
     /// The socket mode could not be set to 0660.
@@ -73,6 +85,21 @@ pub enum ListenerError {
 impl fmt::Display for ListenerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::TcpBind {
+                address,
+                kind,
+                os_error,
+            } => {
+                write!(
+                    formatter,
+                    "listener socket could not be bound: address={address} error={}",
+                    bind_error_name(*kind)
+                )?;
+                return match os_error {
+                    Some(code) => write!(formatter, " os_error={code}"),
+                    None => Ok(()),
+                };
+            }
             Self::UnsupportedPurpose => "listener purpose is not implemented in this stage",
             Self::MissingTls => "listener purpose requires a TLS configuration",
             Self::UnexpectedTls => "listener purpose does not use TLS",
@@ -89,6 +116,17 @@ impl fmt::Display for ListenerError {
 }
 
 impl Error for ListenerError {}
+
+/// Names a bind refusal by its POSIX symbol where the class has one, so an
+/// operator reads `EADDRINUSE` rather than a locale-dependent sentence.
+const fn bind_error_name(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::AddrInUse => "EADDRINUSE",
+        std::io::ErrorKind::AddrNotAvailable => "EADDRNOTAVAIL",
+        std::io::ErrorKind::PermissionDenied => "EACCES",
+        _ => "bind_refused",
+    }
+}
 
 impl From<ListenerError> for RuntimeError {
     fn from(_: ListenerError) -> Self {
@@ -184,7 +222,12 @@ impl Drop for OwnedUnixSocketPath {
 pub(crate) fn bind(source: ListenerSource) -> Result<(BoundListener, BoundAddress), ListenerError> {
     match source {
         ListenerSource::Tcp(address) => {
-            let listener = std::net::TcpListener::bind(address).map_err(|_| ListenerError::Bind)?;
+            let listener =
+                std::net::TcpListener::bind(address).map_err(|error| ListenerError::TcpBind {
+                    address,
+                    kind: error.kind(),
+                    os_error: error.raw_os_error(),
+                })?;
             adopt_tcp(listener)
         }
         ListenerSource::InheritedTcp(listener) => adopt_tcp(listener),
@@ -286,13 +329,61 @@ mod tests {
         let expected = inherited.local_addr().map_err(|_| ListenerError::Bind)?;
         let (adopted, address) = bind(ListenerSource::InheritedTcp(inherited))?;
         assert_eq!(address, BoundAddress::Tcp(expected));
-        assert_eq!(
-            bind(ListenerSource::Tcp(expected)).err(),
-            Some(ListenerError::Bind),
-            "the port is still held by the adopted listener"
+        let refused = bind(ListenerSource::Tcp(expected)).err();
+        assert!(
+            matches!(
+                refused,
+                Some(ListenerError::TcpBind {
+                    address,
+                    kind: std::io::ErrorKind::AddrInUse,
+                    os_error: Some(_),
+                }) if address == expected
+            ),
+            "the port is still held by the adopted listener: {refused:?}"
         );
+        let text = refused.map(|error| error.to_string()).unwrap_or_default();
+        assert!(text.contains(&expected.to_string()), "{text}");
+        assert!(text.contains("EADDRINUSE"), "{text}");
         drop(adopted);
         Ok(())
+    }
+
+    #[test]
+    fn a_refused_tcp_bind_names_its_address_and_every_refusal_class() {
+        let address = SocketAddr::from(([127, 0, 0, 1], 6_697));
+        for (kind, os_error, expected) in [
+            (
+                std::io::ErrorKind::AddrInUse,
+                Some(98),
+                "address=127.0.0.1:6697 error=EADDRINUSE os_error=98",
+            ),
+            (
+                std::io::ErrorKind::AddrNotAvailable,
+                Some(99),
+                "address=127.0.0.1:6697 error=EADDRNOTAVAIL os_error=99",
+            ),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                Some(13),
+                "address=127.0.0.1:6697 error=EACCES os_error=13",
+            ),
+            (
+                std::io::ErrorKind::Other,
+                None,
+                "address=127.0.0.1:6697 error=bind_refused",
+            ),
+        ] {
+            let text = ListenerError::TcpBind {
+                address,
+                kind,
+                os_error,
+            }
+            .to_string();
+            assert_eq!(
+                text,
+                format!("listener socket could not be bound: {expected}")
+            );
+        }
     }
 
     #[tokio::test]

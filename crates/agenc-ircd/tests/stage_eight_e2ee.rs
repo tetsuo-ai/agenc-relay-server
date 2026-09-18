@@ -8,12 +8,12 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -106,6 +106,8 @@ mod credential_bounds;
 mod credential_replacement;
 #[path = "stage_eight_e2ee/encrypted_clients.rs"]
 mod encrypted_clients;
+#[path = "support/loopback_ports.rs"]
+mod loopback_ports;
 #[path = "stage_eight_e2ee/recovery_submission.rs"]
 mod recovery_submission;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
@@ -123,10 +125,6 @@ const REPLY_DEADLINE: Duration = Duration::from_secs(60);
 const NETWORK_ID: NetworkId = NetworkId::from_bytes([1; 32]);
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-// Claims outlive the probe sockets and every fixture restart. Parallel fixture
-// builders cannot choose an address already assigned elsewhere in this process.
-static LOOPBACK_ADDRESS_CLAIMS: Mutex<BTreeSet<SocketAddr>> = Mutex::new(BTreeSet::new());
-const LOOPBACK_ADDRESS_ATTEMPTS: usize = 128;
 
 fn failure(message: impl Into<String>) -> TestError {
     message.into().into()
@@ -189,91 +187,7 @@ fn write_trust_manifest(
 }
 
 fn reserve_loopback_address() -> TestResult<SocketAddr> {
-    let mut claims = LOOPBACK_ADDRESS_CLAIMS
-        .lock()
-        .map_err(|_| failure("loopback address claims are poisoned"))?;
-    reserve_loopback_address_with(&mut claims, || {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let address = listener.local_addr()?;
-        drop(listener);
-        Ok(address)
-    })
-}
-
-fn reserve_loopback_address_with(
-    claims: &mut BTreeSet<SocketAddr>,
-    mut select: impl FnMut() -> TestResult<SocketAddr>,
-) -> TestResult<SocketAddr> {
-    for _ in 0..LOOPBACK_ADDRESS_ATTEMPTS {
-        let address = select()?;
-        if claims.insert(address) {
-            return Ok(address);
-        }
-    }
-    Err(failure(
-        "loopback address selection exhausted its distinct candidates",
-    ))
-}
-
-#[test]
-fn loopback_address_selection_skips_every_prior_fixture_claim() -> TestResult {
-    let first: SocketAddr = "127.0.0.1:32000".parse()?;
-    let second: SocketAddr = "127.0.0.1:32001".parse()?;
-    let mut candidates = [first, first, second].into_iter();
-    let mut select = || {
-        candidates
-            .next()
-            .ok_or_else(|| failure("selector exhausted"))
-    };
-    let mut claims = BTreeSet::new();
-    assert_eq!(
-        reserve_loopback_address_with(&mut claims, &mut select)?,
-        first
-    );
-    assert_eq!(
-        reserve_loopback_address_with(&mut claims, &mut select)?,
-        second
-    );
-    assert_eq!(claims.len(), 2);
-    Ok(())
-}
-
-#[test]
-fn loopback_address_selection_bounds_repeated_candidates() -> TestResult {
-    let address: SocketAddr = "127.0.0.1:32000".parse()?;
-    let mut claims = BTreeSet::from([address]);
-    let mut attempts = 0;
-    let result = reserve_loopback_address_with(&mut claims, || {
-        attempts += 1;
-        Ok(address)
-    });
-    assert!(
-        result.is_err(),
-        "an already claimed endpoint must never be returned"
-    );
-    assert_eq!(attempts, LOOPBACK_ADDRESS_ATTEMPTS);
-    assert_eq!(claims, BTreeSet::from([address]));
-    Ok(())
-}
-
-#[test]
-fn loopback_address_selection_preserves_binding_errors_and_claims() -> TestResult {
-    let address: SocketAddr = "127.0.0.1:32000".parse()?;
-    let mut claims = BTreeSet::from([address]);
-    let mut attempts = 0;
-    let error = reserve_loopback_address_with(&mut claims, || {
-        attempts += 1;
-        Err(io::Error::from(io::ErrorKind::PermissionDenied).into())
-    })
-    .err()
-    .ok_or_else(|| failure("binding error was discarded"))?;
-    assert_eq!(
-        error.downcast_ref::<io::Error>().map(io::Error::kind),
-        Some(io::ErrorKind::PermissionDenied)
-    );
-    assert_eq!(attempts, 1);
-    assert_eq!(claims, BTreeSet::from([address]));
-    Ok(())
+    Ok(loopback_ports::reserve()?)
 }
 
 #[test]
