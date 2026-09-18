@@ -5,6 +5,7 @@
 
 mod delivery_restart;
 mod origin_admission;
+mod review_witness;
 
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_e2ee::federation::frames::{CompanionFrame, DeliveryPosition};
