@@ -313,10 +313,10 @@ index 0000000..6451a79
 +});
 diff --git a/src/bounded.rs b/src/bounded.rs
 new file mode 100644
-index 0000000..b084d23
+index 0000000..7491753
 --- /dev/null
 +++ b/src/bounded.rs
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,213 @@
 +//! Write transactions with a typed physical allocation allowance and explicit phases.
 +//!
 +//! An ordinary [`WriteTransaction`](crate::WriteTransaction) allocates pages and extends the
@@ -447,6 +447,18 @@ index 0000000..b084d23
 +            .field("charged", &self.allowance_charged().ok())
 +            .field("remaining", &self.allowance_remaining().ok())
 +            .finish_non_exhaustive()
++    }
++}
++
++impl BoundedWriteTransaction {
++    /// Enable or disable two-phase commit for the bounded publication (defaults to disabled).
++    ///
++    /// The bounded handle exposes only an immutable view of the inner transaction, so the
++    /// durability setting is passed through explicitly: `publish` commits with exactly the
++    /// two-phase setting recorded here, and the allowance is unaffected because the second
++    /// phase writes only the header slots.
++    pub fn set_two_phase_commit(&mut self, enabled: bool) {
++        self.inner.set_two_phase_commit(enabled);
 +    }
 +}
 +

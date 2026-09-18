@@ -15,7 +15,8 @@ whose digest and per-file before-and-after digests are recorded in
 before the allocation happens, the frozen `PreparedTransaction` whose
 `publish` cannot allocate, `Database::reclaim_bounded` for resumable
 deferred cleanup, and `Database::persist_allocator_state_bounded` for a
-bounded close. Ordinary transactions, their commit path, their close, the
+bounded close, and `BoundedWriteTransaction::set_two_phase_commit`, a passthrough
+that lets a bounded publication keep the two-phase commit Section 21.5 requires. Ordinary transactions, their commit path, their close, the
 on-disk format and the crate version are unchanged; the eight modified source
 files are listed in the vendored-dependency manifest.
 

@@ -131,6 +131,18 @@ impl Debug for BoundedWriteTransaction {
     }
 }
 
+impl BoundedWriteTransaction {
+    /// Enable or disable two-phase commit for the bounded publication (defaults to disabled).
+    ///
+    /// The bounded handle exposes only an immutable view of the inner transaction, so the
+    /// durability setting is passed through explicitly: `publish` commits with exactly the
+    /// two-phase setting recorded here, and the allowance is unaffected because the second
+    /// phase writes only the header slots.
+    pub fn set_two_phase_commit(&mut self, enabled: bool) {
+        self.inner.set_two_phase_commit(enabled);
+    }
+}
+
 impl Deref for BoundedWriteTransaction {
     type Target = WriteTransaction;
 
