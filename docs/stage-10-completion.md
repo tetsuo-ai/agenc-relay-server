@@ -171,6 +171,13 @@ to a state which negotiates the snapshot again, and the audit retention scan
 that `flush` waits on, reported and not patched (RUN-11, issue #178), are
 recorded in
 [the edge drain record](stage-10-edge-drain-pending-install.md).
+The shutdown flush that no longer runs an audit retention sweep, the state
+owner's flush that no longer queues behind the administrative one, the
+maintenance sweep bounded by its checkpoint ceiling and resumed from the
+checkpoint chain, the verification that still precedes every trust, deletion
+and export, and the `rr` replay showing no signature verification inside
+flush (RUN-12, issue #180) are recorded in
+[the bounded shutdown flush record](stage-10-bounded-shutdown-flush.md).
 Leaf-membership proofs verified against the retained roster snapshot they
 name instead of the account's current heads, so live admission decides as
 startup reconstruction does after a roster or root rotation, the explicit
