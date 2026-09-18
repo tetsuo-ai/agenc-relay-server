@@ -965,6 +965,10 @@ impl RegistrationRouter {
                     );
                 }
                 let target = self.target(state).to_owned();
+                let standard_replies = state
+                    .registration
+                    .capability_state()
+                    .enabled("standard-replies");
                 let Some(accounts) = self.accounts.as_mut() else {
                     return Err(RuntimeError::InvalidValue);
                 };
@@ -974,6 +978,7 @@ impl RegistrationRouter {
                         generation,
                         carrier_generation,
                         &target,
+                        standard_replies,
                         message,
                     ),
                     RegistrationAuthCarrier::AccountCreate => accounts.route_account(
@@ -1446,6 +1451,10 @@ impl RegistrationRouter {
         let now = context.now().get();
         let target = self.target(state).to_owned();
         let prefix = self.config.server_prefix.clone();
+        let standard_replies = state
+            .registration
+            .capability_state()
+            .enabled("standard-replies");
         if let std::collections::btree_map::Entry::Vacant(slot) =
             self.edge_carriers.entry(generation)
         {
@@ -1462,7 +1471,7 @@ impl RegistrationRouter {
                         generation,
                         carrier_generation,
                         (&prefix, &target),
-                        &parameter,
+                        (&parameter, standard_replies),
                         now,
                     ),
                     None => CarrierRoute::Close,
@@ -1509,11 +1518,12 @@ impl RegistrationRouter {
         generation: ConnectionGeneration,
         carrier_generation: u64,
         names: (&str, &str),
-        parameter: &str,
+        line: (&str, bool),
         now: u64,
     ) -> CarrierRoute {
         use agenc_ircd_client_wire::SaslAction;
         let (prefix, target) = names;
+        let (parameter, standard_replies) = line;
         let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
@@ -1547,7 +1557,10 @@ impl RegistrationRouter {
                         return CarrierRoute::Close;
                     };
                     return match crate::account_service::render_sasl_actions(
-                        prefix, target, actions,
+                        prefix,
+                        target,
+                        standard_replies,
+                        actions,
                     ) {
                         Ok(frames) => CarrierRoute::Finished {
                             frames,
@@ -1572,7 +1585,12 @@ impl RegistrationRouter {
                 }
             }
         }
-        match crate::account_service::render_sasl_actions(prefix, target, rendered) {
+        match crate::account_service::render_sasl_actions(
+            prefix,
+            target,
+            standard_replies,
+            rendered,
+        ) {
             Ok(frames) => CarrierRoute::Finished { frames, result },
             Err(_) => CarrierRoute::Close,
         }
@@ -1670,13 +1688,23 @@ impl RegistrationRouter {
             .connections
             .get(&generation)
             .map_or_else(|| "*".to_owned(), |state| self.target(state).to_owned());
+        let standard_replies = self.connections.get(&generation).is_some_and(|state| {
+            state
+                .registration
+                .capability_state()
+                .enabled("standard-replies")
+        });
         let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
             return;
         };
         let answered = match kind {
-            RegistrationAuthCarrier::Sasl => {
-                edge_sasl_answer(carrier, (&prefix, &target), finish, outcome, now)
-            }
+            RegistrationAuthCarrier::Sasl => edge_sasl_answer(
+                carrier,
+                (&prefix, &target),
+                (finish, standard_replies),
+                outcome,
+                now,
+            ),
             RegistrationAuthCarrier::AccountCreate => edge_account_answer(
                 carrier,
                 &prefix,
@@ -3667,12 +3695,13 @@ fn account_unavailable(prefix: &str, kind: AccountCarrierKind) -> CarrierRoute {
 fn edge_sasl_answer(
     carrier: &mut EdgeCarrier,
     names: (&str, &str),
-    finish: bool,
+    phase: (bool, bool),
     outcome: crate::federation::edge::RemoteCarrierOutcome,
     now: u64,
 ) -> Option<(Vec<WireMessage>, ResultClass)> {
     use crate::federation::edge::RemoteCarrierOutcome;
     let (prefix, target) = names;
+    let (finish, standard_replies) = phase;
     let (mut actions, accepted) = match outcome {
         RemoteCarrierOutcome::Challenge(bytes) if !finish => {
             (carrier.sasl.server_response(&bytes, now).ok()?, None)
@@ -3706,7 +3735,9 @@ fn edge_sasl_answer(
         None if actions.is_empty() => ResultClass::Rejected,
         None => ResultClass::Ok,
     };
-    let frames = crate::account_service::render_sasl_actions(prefix, target, actions).ok()?;
+    let frames =
+        crate::account_service::render_sasl_actions(prefix, target, standard_replies, actions)
+            .ok()?;
     Some((frames, result))
 }
 

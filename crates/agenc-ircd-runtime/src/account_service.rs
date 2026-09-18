@@ -588,6 +588,10 @@ struct AccountConnection {
     sasl: SaslTransport,
     creation: AccountTransfer,
     credentials: AccountTransfer,
+    /// Whether the client this connection serves negotiated
+    /// `standard-replies`, recorded on every routed SASL line so a refusal
+    /// answered from a later continuation renders what that client accepted.
+    standard_replies: bool,
     route: ConnectionRoute,
     opaque_attempts: u8,
     transaction: Option<LiveAuthentication>,
@@ -1085,6 +1089,7 @@ impl AccountServiceCoordinator {
                 .map_err(|_| RuntimeError::MemoryExhausted)?,
             credentials: AccountTransfer::new(AccountCarrierKind::Credentials)
                 .map_err(|_| RuntimeError::MemoryExhausted)?,
+            standard_replies: false,
             route: ConnectionRoute {
                 origin_id: self.config.origin_id,
                 origin_generation: self.config.origin_generation,
@@ -2041,7 +2046,10 @@ impl AccountServiceCoordinator {
         self.schedule_next_login_tombstone(context)
     }
 
-    /// Routes one grammar-validated AUTHENTICATE command.
+    /// Routes one grammar-validated AUTHENTICATE command. `standard_replies`
+    /// is the negotiated state of that capability on this connection; it is
+    /// recorded so a refusal answered from a later continuation renders what
+    /// this client accepted.
     // agenc-review: focus owner=runtime reviewed=2026-08-29 reason=closed SASL action dispatcher keeps one carrier generation and returns immediately for every authority-moving action
     pub(crate) fn route_sasl(
         &mut self,
@@ -2049,6 +2057,7 @@ impl AccountServiceCoordinator {
         generation: ConnectionGeneration,
         carrier_generation: u64,
         target: &str,
+        standard_replies: bool,
         mut message: ParsedMessage,
     ) -> CarrierRoute {
         if message.parameter_count() != 1 {
@@ -2061,6 +2070,7 @@ impl AccountServiceCoordinator {
         let Some(connection) = self.connections.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
+        connection.standard_replies = standard_replies;
         let Ok(actions) = connection.sasl.client(&parameter, now) else {
             return CarrierRoute::Close;
         };
@@ -2086,7 +2096,12 @@ impl AccountServiceCoordinator {
                 SaslAction::Logout => {
                     return self.route_logout(context, generation, carrier_generation, target);
                 }
-                action => match render_sasl_action(context.server_prefix(), target, action) {
+                action => match render_sasl_action(
+                    context.server_prefix(),
+                    target,
+                    standard_replies,
+                    action,
+                ) {
                     Ok(Some(frame)) => frames.push(frame),
                     Ok(None) => {}
                     Err(_) => return CarrierRoute::Close,
@@ -2343,10 +2358,11 @@ impl AccountServiceCoordinator {
         let Some(connection) = self.connections.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
+        let standard_replies = connection.standard_replies;
         let Ok(actions) = connection.sasl.reject_logout() else {
             return CarrierRoute::Close;
         };
-        match render_sasl_actions(context.server_prefix(), target, actions) {
+        match render_sasl_actions(context.server_prefix(), target, standard_replies, actions) {
             Ok(frames) => CarrierRoute::Finished {
                 frames,
                 result: ResultClass::Rejected,
@@ -2364,10 +2380,11 @@ impl AccountServiceCoordinator {
         let Some(connection) = self.connections.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
+        let standard_replies = connection.standard_replies;
         let Ok(actions) = connection.sasl.unavailable(context.now().get()) else {
             return CarrierRoute::Close;
         };
-        match render_sasl_actions(context.server_prefix(), target, actions) {
+        match render_sasl_actions(context.server_prefix(), target, standard_replies, actions) {
             Ok(frames) => CarrierRoute::Finished {
                 frames,
                 result: ResultClass::Rejected,
@@ -5155,6 +5172,7 @@ impl AccountServiceCoordinator {
             .connections
             .get_mut(&request.generation)
             .ok_or(RuntimeError::InvalidValue)?;
+        let standard_replies = connection.standard_replies;
         let mut actions = connection
             .sasl
             .server_response(response, context.now().get())
@@ -5167,7 +5185,12 @@ impl AccountServiceCoordinator {
                     .map_err(|_| RuntimeError::InvalidValue)?,
             );
         }
-        render_sasl_actions(context.server_prefix(), &request.target, actions)
+        render_sasl_actions(
+            context.server_prefix(),
+            &request.target,
+            standard_replies,
+            actions,
+        )
     }
 
     fn account_response_frames(
@@ -6797,6 +6820,7 @@ fn duplicate_credential_id(
 pub(crate) fn render_sasl_actions(
     prefix: &str,
     target: &str,
+    standard_replies: bool,
     actions: Vec<SaslAction>,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
     let mut frames = Vec::new();
@@ -6804,7 +6828,7 @@ pub(crate) fn render_sasl_actions(
         .try_reserve_exact(actions.len())
         .map_err(|_| RuntimeError::MemoryExhausted)?;
     for action in actions {
-        if let Some(frame) = render_sasl_action(prefix, target, action)? {
+        if let Some(frame) = render_sasl_action(prefix, target, standard_replies, action)? {
             frames.push(frame);
         }
     }
@@ -6881,12 +6905,26 @@ pub(crate) fn account_failure(
     .map_err(|_| RuntimeError::InvalidValue)
 }
 
+/// Renders one SASL transport action. `standard_replies` is the negotiated
+/// state of that capability on the connection the action answers: a client
+/// that did not negotiate it reads exactly the numerics it reads today.
 fn render_sasl_action(
     prefix: &str,
     target: &str,
+    standard_replies: bool,
     action: SaslAction,
 ) -> Result<Option<WireMessage>, RuntimeError> {
     let frame = match action {
+        SaslAction::AuthorityUnavailable if !standard_replies => return Ok(None),
+        // The public context stays empty, exactly as the two sibling carriers
+        // keep theirs, so the line reports only that the authority is
+        // unavailable and never whether the account exists.
+        SaslAction::AuthorityUnavailable => WireMessage::new(
+            prefix,
+            "FAIL",
+            &["AUTHENTICATE", "UNAVAILABLE"],
+            Some("Account authority unavailable"),
+        ),
         SaslAction::SendPlus => WireMessage::new(prefix, "AUTHENTICATE", &["+"], None),
         SaslAction::SendChunk(chunk) => {
             let text =
@@ -6920,6 +6958,7 @@ pub(crate) const fn sasl_action_result(action: &SaslAction) -> ResultClass {
             | SaslNumeric::AlreadyAuthenticated
             | SaslNumeric::Mechanisms,
         ) => ResultClass::Rejected,
+        SaslAction::AuthorityUnavailable => ResultClass::Rejected,
         SaslAction::SendPlus
         | SaslAction::SendChunk(_)
         | SaslAction::RequestEnvelope { .. }
@@ -6967,6 +7006,7 @@ fn opaque_version_precedes_account(
 #[cfg(test)]
 mod tests {
     mod invitation_window;
+    mod sasl_unavailable;
     mod shutdown;
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
@@ -7737,7 +7777,9 @@ mod tests {
             );
         }
 
-        assert!(render_sasl_action("server.example", "tester", SaslAction::SendPlus)?.is_some());
+        assert!(
+            render_sasl_action("server.example", "tester", false, SaslAction::SendPlus)?.is_some()
+        );
         for numeric in [
             SaslNumeric::Success,
             SaslNumeric::Failed,
@@ -7747,15 +7789,41 @@ mod tests {
             SaslNumeric::Mechanisms,
         ] {
             assert!(
-                render_sasl_action("server.example", "tester", SaslAction::Numeric(numeric),)?
-                    .is_some()
+                render_sasl_action(
+                    "server.example",
+                    "tester",
+                    false,
+                    SaslAction::Numeric(numeric),
+                )?
+                .is_some()
             );
         }
-        assert!(render_sasl_action("server.example", "tester", SaslAction::Logout)?.is_none());
+        assert!(
+            render_sasl_action("server.example", "tester", false, SaslAction::Logout)?.is_none()
+        );
         assert!(
             render_sasl_action(
                 "server.example",
                 "tester",
+                false,
+                SaslAction::AuthorityUnavailable,
+            )?
+            .is_none()
+        );
+        assert!(
+            render_sasl_action(
+                "server.example",
+                "tester",
+                true,
+                SaslAction::AuthorityUnavailable,
+            )?
+            .is_some()
+        );
+        assert!(
+            render_sasl_action(
+                "server.example",
+                "tester",
+                false,
                 SaslAction::RequestEnvelope {
                     finish: false,
                     bytes: SecretBytes::new(&[])?,
@@ -7764,7 +7832,8 @@ mod tests {
             .is_none()
         );
         assert!(
-            render_sasl_actions("server.example", "tester", vec![SaslAction::Logout])?.is_empty()
+            render_sasl_actions("server.example", "tester", false, vec![SaslAction::Logout])?
+                .is_empty()
         );
         Ok(())
     }
@@ -7859,6 +7928,7 @@ mod tests {
                     unknown,
                     1,
                     "tester",
+                    false,
                     parsed("AUTHENTICATE AGENC-OPAQUE")?
                 ),
                 CarrierRoute::Close
@@ -7893,6 +7963,7 @@ mod tests {
                     ConnectionGeneration::new(1),
                     1,
                     "tester",
+                    false,
                     parsed("AUTHENTICATE one two")?,
                 ),
                 CarrierRoute::Close
@@ -7903,6 +7974,7 @@ mod tests {
                     ConnectionGeneration::new(2),
                     2,
                     "tester",
+                    false,
                     parsed("AUTHENTICATE SCRAM-SHA-256")?,
                 ),
                 CarrierRoute::Finished {
@@ -7916,6 +7988,7 @@ mod tests {
                     ConnectionGeneration::new(2),
                     2,
                     "tester",
+                    false,
                     parsed("AUTHENTICATE AGENC-OPAQUE")?,
                 ),
                 CarrierRoute::Finished {
@@ -7929,6 +8002,7 @@ mod tests {
                     ConnectionGeneration::new(2),
                     2,
                     "tester",
+                    false,
                     parsed("AUTHENTICATE !")?,
                 ),
                 CarrierRoute::Close
@@ -8001,6 +8075,7 @@ mod tests {
                     ConnectionGeneration::new(8),
                     8,
                     "tester",
+                    false,
                     parsed("AUTHENTICATE AGENC-OPAQUE")?,
                 ),
                 CarrierRoute::Finished { .. }

@@ -681,7 +681,11 @@ fn failed_standard_reply_is_applicable(
                 [SafeReplyContext::Channel(_)],
             )
             | (_, PublicErrorCode::SERVERBUSY, [])
-            | ("ACCTCREATE" | "ACCTCRED", PublicErrorCode::UNAVAILABLE, [],)
+            | (
+                "ACCTCREATE" | "ACCTCRED" | "AUTHENTICATE",
+                PublicErrorCode::UNAVAILABLE,
+                [],
+            )
             | ("PRIVMSG", PublicErrorCode::UNSAFECTCP, [])
     )
 }

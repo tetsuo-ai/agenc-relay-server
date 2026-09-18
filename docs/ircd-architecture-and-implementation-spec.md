@@ -742,7 +742,7 @@ bracketed context is optional; every other listed context is required:
 | Kind and operation | Code | Public context |
 | --- | --- | --- |
 | `FAIL *` | `REGISTRATION_REQUIRED` | none |
-| `FAIL ACCTCREATE`, `FAIL ACCTCRED` | `UNAVAILABLE` | none |
+| `FAIL ACCTCREATE`, `FAIL ACCTCRED`, `FAIL AUTHENTICATE` | `UNAVAILABLE` | none |
 | `FAIL ACCT`, `FAIL ACCTCREATE`, `FAIL ACCTCRED`, `FAIL AUTHENTICATE` | `BAD_STATE` | none |
 | `FAIL JOIN` | `E2EE_REQUIRED`, `NETWORK_UNAVAILABLE` | optional channel |
 | `FAIL PRIVMSG` | `E2EE_REQUIRED` | channel |
@@ -1512,6 +1512,19 @@ committed completion and accepts neither a bare 903 nor values that disagree
 with the later 900/session state. Receipt suppression or any mismatch is a
 fatal authentication failure, never a reason to fall back to another SASL
 mechanism.
+
+An authentication that produces no completion at all, because the edge's
+account authority cannot be reached, is a third outcome. With
+`standard-replies` negotiated it is answered
+`FAIL AUTHENTICATE UNAVAILABLE :Account authority unavailable` before that
+same 904, which is the state the Section 9.5 reply registry already gives the
+other two carriers of this surface as `FAIL ACCTCREATE UNAVAILABLE` and
+`FAIL ACCTCRED UNAVAILABLE`. That row's public context is empty, so the line
+separates a momentarily unreachable authority from a refused credential
+without revealing whether the account exists, and it never accompanies a
+committed completion or a 903. A rejected completion is carried by the 904
+alone, and a client that did not negotiate `standard-replies` reads the 904
+alone in either case.
 
 The grant also carries the coordinator's current monotonic authentication
 instant inside private memory. Consuming it in `session_open` initializes that

@@ -133,6 +133,13 @@ owner-retirement protocol — the regressions that drive each one through its
 owning boundary rather than by calling the function, and the one entry that no
 input can reach (COV-08, issue #150) are recorded in
 [the companion coverage record](stage-10-companion-coverage.md).
+The SASL carrier given the `UNAVAILABLE` report its two sibling carriers
+already carry, the emission point that keeps a transient authority apart from a
+refused credential where the cause is still known, the unchanged transcript a
+client without `standard-replies` reads, and the drill retry and capacity
+predicate that now read the line instead of guessing (RUN-09, issue #152) are
+recorded in
+[the SASL unavailable authority record](stage-10-sasl-unavailable.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

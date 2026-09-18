@@ -134,6 +134,9 @@ pub enum SaslAction {
     SendChunk(SecretText),
     /// Send one fixed terminal numeric.
     Numeric(SaslNumeric),
+    /// Report an account authority that could not answer, before the
+    /// terminal numeric the same refusal still carries.
+    AuthorityUnavailable,
     /// Request logout of the current account binding.
     Logout,
 }
@@ -145,6 +148,7 @@ impl fmt::Debug for SaslAction {
             Self::RequestEnvelope { .. } => "RequestEnvelope",
             Self::SendChunk(_) => "SendChunk",
             Self::Numeric(_) => "Numeric",
+            Self::AuthorityUnavailable => "AuthorityUnavailable",
             Self::Logout => "Logout",
         };
         formatter.debug_tuple("SaslAction").field(&name).finish()
@@ -319,9 +323,14 @@ impl SaslTransport {
     /// Ends an in-flight exchange whose account-service request could not
     /// produce an authenticated response. This preserves the connection-wide
     /// attempt count while returning the carrier to its idle state.
+    ///
+    /// The refusal is reported here, where the cause is still known, as the
+    /// unavailable-authority action ahead of the same terminal numeric a
+    /// refused credential carries. A rejected completion never reaches this
+    /// path: it ends in `complete(false, _)`.
     pub fn unavailable(&mut self, now: u64) -> Result<Vec<SaslAction>, AuthTransportError> {
         if matches!(self.check_deadline(now), Err(AuthTransportError::TimedOut)) {
-            return one_action(SaslAction::Numeric(SaslNumeric::Failed));
+            return unavailable_actions();
         }
         if !matches!(
             self.phase,
@@ -332,7 +341,7 @@ impl SaslTransport {
             return Err(AuthTransportError::BadState);
         }
         self.reset_attempt();
-        one_action(SaslAction::Numeric(SaslNumeric::Failed))
+        unavailable_actions()
     }
 
     /// Restores the authenticated idle state when the domain refuses logout.
@@ -854,6 +863,15 @@ fn action_buffer<T>(capacity: usize) -> Result<Vec<T>, AuthTransportError> {
     Ok(actions)
 }
 
+/// The exact pair an unavailable account authority produces: the failure the
+/// carrier names first, then the terminal numeric every client still reads.
+fn unavailable_actions() -> Result<Vec<SaslAction>, AuthTransportError> {
+    let mut actions = action_buffer(2)?;
+    actions.push(SaslAction::AuthorityUnavailable);
+    actions.push(SaslAction::Numeric(SaslNumeric::Failed));
+    Ok(actions)
+}
+
 fn one_action<T>(action: T) -> Result<Vec<T>, AuthTransportError> {
     let mut actions = action_buffer(1)?;
     actions.push(action);
@@ -982,7 +1000,10 @@ mod tests {
 
         assert!(matches!(
             transport.unavailable(11)?.as_slice(),
-            [SaslAction::Numeric(super::SaslNumeric::Failed)]
+            [
+                SaslAction::AuthorityUnavailable,
+                SaslAction::Numeric(super::SaslNumeric::Failed),
+            ]
         ));
         assert_eq!(transport.phase, SaslPhase::Idle);
         assert_eq!(transport.attempts, 1);

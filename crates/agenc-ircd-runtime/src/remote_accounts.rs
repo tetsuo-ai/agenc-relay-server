@@ -287,7 +287,10 @@ fn carrier(
         };
         let route = match opcode {
             FederationOpcode::OpaqueAuthStart | FederationOpcode::OpaqueAuthFinish => {
-                accounts.route_sasl(context, generation, carrier_generation, "*", message)
+                // The virtual connection speaks the carrier grammar alone and
+                // negotiates no capability: the edge holds the client's own
+                // negotiated state and renders any failure line itself.
+                accounts.route_sasl(context, generation, carrier_generation, "*", false, message)
             }
             _ => accounts.route_account(
                 context,
