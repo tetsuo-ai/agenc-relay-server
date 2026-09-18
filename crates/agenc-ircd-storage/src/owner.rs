@@ -494,7 +494,7 @@ fn run_owner(engine: &mut StorageEngine, requests: &Receiver<StorageRequest>) {
     // An owner that stops without a clean shutdown still takes the close duty within an
     // allowance; whatever its outcome, the next open repairs exactly as after a crash.
     if !engine.close_handled() {
-        engine.close_bounded();
+        engine.close_bounded(false);
     }
 }
 
@@ -712,7 +712,7 @@ fn finish_for_shutdown(engine: &mut StorageEngine) -> Result<(), StorageError> {
         }
         engine.checkpoint_for_shutdown().map_err(checkpoint_error)?;
     }
-    engine.close_bounded();
+    engine.close_bounded(true);
     Ok(())
 }
 

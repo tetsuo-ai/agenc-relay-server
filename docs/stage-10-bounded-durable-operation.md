@@ -96,19 +96,79 @@ and monotonic, so a backlog left by a stopped owner is drained by the first
 operation after the restart. Records a live reader still needs are not
 eligible and are reclaimed by the first cleanup after the reader releases.
 `StorageStatistics::deferred_cleanup_pending` and
-`reclaimed_pages_since_open` report this. A close never reclaims.
+`reclaimed_pages_since_open` report this.
 
 `StorageEngine::close_bounded` persists the allocator state through
 `persist_allocator_state_bounded` under its own admission and its own
 allowance of `G`, and takes that duty from redb's drop path, which would
 otherwise run an unmetered transaction. It runs at the end of a clean
-shutdown and, once, when the owner loop exits any other way. A refused
-admission still hands the close an empty allowance so the drop path stays
-disarmed. A close never fails a shutdown: refused or unable to persist, it
+shutdown and, once, when the owner loop exits any other way. A clean stop
+reclaims first and gives the reclamation and the persistence half of the
+close's one allowance each, because the fork does not report what a
+reclamation charged; an owner stopped by an uncertain outcome only persists.
+A refused admission still hands the close an empty allowance so the drop path
+stays disarmed. A close never fails a shutdown: refused or unable to persist, it
 leaves the repair to the next open exactly as a crash does, and
 `RecoveredStorageState::database_repaired` reports that the open repaired.
 Initialization is bounded the same way: one allowance spans the initializing
 transaction, the first guard and the close of the freshly created store.
+
+## The maximum legal transaction, measured
+
+The first gate over this change failed in
+`qualification_workload::production_workload_measures_every_required_case_and_phase`:
+`insert-max-records`, 65,535 rows of 134 bytes, was refused with
+`AllowanceRefused(Mutation)`. The charge was measured, not estimated, with
+per-phase probes on the bounded handle, an instrumented scratch copy of the
+fork, and gdb breakpoints on the fork's debit and on the leaf build.
+
+At the refusal: 81,920 bytes of guard headroom, 16,384 for the reservation,
+and the whole remaining 268,337,152 consumed in the mutation phase while the
+file grew by only 67,108,864. With the allowance lifted the transaction
+charged 825,901,056 bytes: 268,435,456 of file extensions (four 64 MiB
+regions), 282,955,776 of distinct page extents, and 274,509,824 of extents the
+transaction had already been charged for and was charged for again. The file
+grew by 257,761,280 allocated bytes, the same figure `main` records for this
+case and 1.92 times the 134,217,728 qualified ceiling.
+
+gdb showed where the bytes go. Every one of the 65,535 inserts reached
+`LeafBuilder::build` for a 164-byte leaf holding one row, from the
+single-large-value fast path at `btree_mutator.rs:759`, and then
+`BranchBuilder::build` for a branch 46 bytes larger than the last. The leaf the
+insert landed in had one pair of 8,380,124 bytes: the workload's live
+`replace-max-value` row, whose key (`0x13...`) sorts directly above the
+`0x12...` run. redb 4.2.0 never rebuilds a leaf holding one value of at least a
+page; an insert that lands there becomes a new sibling leaf, and with
+ascending keys the sibling's separator is the key just inserted, so the next
+key is routed to the large leaf again. Every row received a page of its own.
+This is upstream behaviour, not the fork's patch, and not the allowance
+derivation: the same 65,535 rows through the engine on a database without the
+large neighbour charge 63,090,688 bytes.
+
+The fix is one place, `redb_store::apply_writes`: each same-table run is
+applied in descending key order, so the first sibling's separator bounds every
+later key and the rows share ordinary leaves. Keys are distinct within a batch,
+so the order inside the transaction is unobservable. Under the real `G` the
+case now charges 71,286,784 bytes and grows the file by 16,625,664;
+`delete-max-records` went from 510,951,424 charged to 50,962,432; the greatest
+growth of any case is `insert-max-value` at 16,789,504, inside the qualified
+ceiling. Nothing legal was lowered and no case was skipped.
+
+The same run exposed a second defect, in the close. The workload's boundary
+cases need two idle open-and-close samples to agree, and each clean close grew
+the database by 24,576 bytes: the persisting transaction frees the pages of the
+state it replaces and, being bounded, never reclaims them. redb's own close
+held a fixed length over the same cycles. A bounded reclamation before the
+persistence holds the length too, which is why a clean close now reclaims
+first.
+
+Two properties of the fork's charge model were measured and are reported, not
+changed: a file extension and the page extents later allocated inside it are
+both charged for the same bytes, and an extent the transaction frees and
+allocates again is charged again. With the tree no longer degenerate the
+maximum case is charged 4.3 times its real growth and still uses 27 percent of
+`G`. `ReclaimProgress` does not report what a reclamation charged, which is
+why the close splits its allowance in halves.
 
 ## Region size
 
@@ -167,7 +227,8 @@ Unit, `bounded.rs` (4): guard headroom at 512, 4,096 and 65,536-byte blocks;
 the ledger exact at `G`, one byte over refused as an overflow; a cap only
 lowers; every refusal phase determinate and every uncertainty indeterminate.
 
-Unit, `redb_store.rs` (3): one fixed transaction replayed on fresh stores
+Unit, `redb_store.rs` (4): 8,192 ascending rows inserted directly below an
+8 MiB value charging under 2,048 bytes a row; one fixed transaction replayed on fresh stores
 against its measured charge (fits to the byte), one byte less (refused in
 preparation, row absent, reservation record untouched, the next writer on the
 same store commits) and zero (refused in mutation); a reclamation refused
@@ -175,7 +236,8 @@ without allowance, then draining, then finding nothing; a refused close
 followed by a repairing open and a persisted close followed by a clean one; a
 database created with the upstream region refused with `UnboundedRegion`.
 
-Unit, `engine.rs` (6): an operation and a checkpoint charged and cleaned up;
+Unit, `engine.rs` (7): six idle open-and-clean-close cycles keeping the
+database length fixed; an operation and a checkpoint charged and cleaned up;
 the exact boundary with the cleanup refused, and one byte less refused in
 preparation with the block burned, nothing charged, and the reopened writer
 starting after the burned block; an allowance too small for the reservation
@@ -208,6 +270,7 @@ Commands, on the workspace-pinned toolchain in the lane's own target:
 
 ```text
 cargo test -p agenc-ircd-storage --all-features --locked -- --skip qualification_workload
+cargo test -p agenc-ircd-storage --all-features --locked qualification_workload
 cargo test -p agenc-ircd-runtime --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
@@ -218,8 +281,10 @@ python3 scripts/requirements.py check
 
 ## Limitations
 
-- The native ext4 qualification workload was not run here: it fallocates a
-  multi-terabyte ballast on a shared filesystem. Acceptance items 1, 2 and 5,
+- The production qualification workload was run once on the development host,
+  with the machine held quiet for its multi-terabyte ballast, and completes
+  under the real `G`. It is not the native ext4 release qualification.
+  Acceptance items 1, 2 and 5,
   the archived STO-1 shapes replayed with allocated-block measurement at every
   sync and rename boundary, the 134,217,728-byte phase ceiling, and the rebuilt
   source-bound qualification metadata, stay open for the storage qualification
@@ -227,6 +292,10 @@ python3 scripts/requirements.py check
   cleanup inside the enclosing `Manifest` and `CheckpointInstall` pairs and the
   close inside a `CapacityAdmission` pair.
 - The guard headroom is a fixed upper bound, not a measurement.
+- redb's single-large-value fast path still gives a row a page of its own when
+  one transaction at a time inserts ascending keys directly below a large
+  value; each such transaction is small, so this costs space, not an
+  allowance, and belongs to the fork.
 - `reclaim_bounded` publishes single-phase inside the fork. It carries no
   application data and its flushes are labeled `DatabaseSync` only.
 - The growth test writes about 270 MiB and takes over a minute in a debug

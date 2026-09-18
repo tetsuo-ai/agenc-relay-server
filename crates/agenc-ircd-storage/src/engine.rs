@@ -2472,17 +2472,28 @@ impl StorageEngine {
     /// an empty allowance so the drop path cannot run its own unmetered transaction. A database
     /// already latched by an earlier uncertain failure cannot persist either, and that failure
     /// was reported when it happened, so the close itself never fails a shutdown.
-    pub(crate) fn close_bounded(&mut self) {
+    ///
+    /// A clean stop reclaims first. The persisting transaction frees the pages of the state it
+    /// replaces and, being bounded, never reclaims them itself, so a close that only persisted
+    /// grew an idle database by six pages at every open and close. The reclamation and the
+    /// persistence each receive half of the close's one allowance, because the fork does not
+    /// report what a reclamation charged. An owner stopped by an uncertain outcome only
+    /// persists; its freed pages wait for the first operation after the restart.
+    pub(crate) fn close_bounded(&mut self, reclaim: bool) {
         self.close_handled = true;
         let admitted = self
             .state_directory
             .admit_transaction(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)
             .is_ok();
-        let allowance = match self.operation_allowance(0) {
-            Ok(allowance) if admitted => allowance.allowance(),
-            _ => redb::AllocationAllowance::new(0),
+        let bytes = match self.operation_allowance(0) {
+            Ok(allowance) if admitted => allowance.allowance().bytes(),
+            _ => 0,
         };
-        let _persisted = self.store.persist_for_close(allowance);
+        let half = redb::AllocationAllowance::new(bytes / 2);
+        if reclaim {
+            let _reclaimed = self.store.reclaim_deferred(half);
+        }
+        let _persisted = self.store.persist_for_close(half);
     }
 
     fn install_reserved_guard(
@@ -6500,8 +6511,9 @@ pub(crate) mod tests {
         assert_eq!(pinned.reclaimed_pages_since_open(), reclaimed_before);
         drop(reader);
 
-        // The reopen finds the backlog and the first reclamation drains it.
-        engine.close_bounded();
+        // An owner that stops without a clean shutdown only persists, so the reopen finds the
+        // backlog and the first reclamation drains it.
+        engine.close_bounded(false);
         drop(fixture.engine.take());
         let engine = reopen(&path)?;
         assert!(engine.statistics()?.deferred_cleanup_pending());
@@ -6523,7 +6535,7 @@ pub(crate) mod tests {
         let path = fixture.path().to_path_buf();
         let engine = fixture.engine_mut()?;
         commit_advancing(engine, 1)?;
-        engine.close_bounded();
+        engine.close_bounded(true);
         drop(fixture.engine.take());
 
         // A close within its allowance leaves the next open clean.
@@ -6538,13 +6550,43 @@ pub(crate) mod tests {
         commit_advancing(&mut engine, 2)?;
         engine.limits.fixed_reserve_bytes =
             u64::MAX - crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH;
-        engine.close_bounded();
+        engine.close_bounded(true);
         drop(engine);
         let engine = reopen(&path)?;
         let recovered = engine.startup_scan()?;
         assert!(recovered.database_repaired());
         assert_eq!(recovered.storage_commit_sequence(), 2);
         assert_eq!(engine.state_meta.tbs().storage_commit_sequence, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn idle_open_and_clean_close_cycles_do_not_grow_the_database() -> Result<(), StorageError> {
+        let mut fixture = EngineFixture::create()?;
+        let path = fixture.path().to_path_buf();
+        commit_advancing(fixture.engine_mut()?, 1)?;
+        fixture.engine_mut()?.close_bounded(true);
+        drop(fixture.engine.take());
+
+        // Every clean close reclaims what the previous close freed before it persists, so a
+        // database nobody writes to keeps its length however often it is opened and closed.
+        let mut lengths = Vec::new();
+        for _ in 0..6 {
+            let mut engine = reopen(&path)?;
+            assert!(!engine.startup_scan()?.database_repaired());
+            engine.close_bounded(true);
+            drop(engine);
+            lengths.push(
+                std::fs::metadata(path.join("database.redb"))
+                    .map_err(crate::filesystem_rejected)?
+                    .len(),
+            );
+        }
+        let settled = lengths.get(1).copied().ok_or(StorageError::StaleState)?;
+        assert!(
+            lengths.iter().skip(1).all(|length| *length == settled),
+            "idle cycles changed the database length: {lengths:?}"
+        );
         Ok(())
     }
 }

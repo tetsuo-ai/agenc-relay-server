@@ -1309,36 +1309,41 @@ fn require_bounded_region(file: &File) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Applies writes with one open table handle per run of same-table writes.
+/// Applies writes with one open table handle per run of same-table writes, each run in
+/// descending key order.
 ///
-/// Reopening a redb table for every row copies the table tree and the row's
-/// leaf path again on each open, which multiplied the physical growth of a
-/// maximum-count transaction by more than ten times the row bytes. Batches
-/// arrive sorted by table and key, so one handle usually covers a whole table.
-type OpenTable<'txn> = (TableId, redb::Table<'txn, &'static [u8], &'static [u8]>);
-
+/// Reopening a redb table for every row copies the table tree and the row's leaf path again on
+/// each open, which multiplied the physical growth of a maximum-count transaction by more than
+/// ten times the row bytes. Batches arrive sorted by table and key, so one handle covers a whole
+/// table.
+///
+/// The order inside a run is load-bearing. redb 4.2.0 never rebuilds a leaf that holds a single
+/// value of at least one page: an insert that lands in such a leaf becomes a new sibling leaf
+/// holding that one row. With ascending keys the sibling's separator is the key just inserted, so
+/// the next greater key is routed to the large leaf again, and every row of the run receives a
+/// page of its own and a rewritten branch. Measured through the production workload, 65,535
+/// rows of 134 bytes inserted below one 8 MiB row charged 825,901,056 bytes and grew the file by
+/// 257,761,280, which no allowance of `G` can admit. With descending keys the first sibling's
+/// separator bounds every later key of the run, the rows share ordinary leaves, and the same
+/// transaction charges 71,286,784 bytes and grows the file by 16,625,664. Keys are distinct
+/// within one batch, so the order inside the transaction changes nothing a reader can observe.
 fn apply_writes(
     transaction: &WriteTransaction,
     writes: &[RedbWrite<'_>],
 ) -> Result<(), RedbCommitFailure> {
-    let mut open: Option<OpenTable<'_>> = None;
-    for write in writes {
-        let reopen = open.as_ref().is_none_or(|(table, _)| *table != write.table);
-        if reopen {
-            open = Some((
-                write.table,
-                transaction
-                    .open_table(table_definition(write.table))
-                    .map_err(rejected_table)?,
-            ));
-        }
-        let Some((_, table)) = open.as_mut() else {
-            return Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected));
+    for run in writes.chunk_by(|left, right| left.table == right.table) {
+        let Some(first) = run.first() else {
+            continue;
         };
-        if let Some(value) = write.value {
-            table.insert(write.key, value).map_err(rejected_storage)?;
-        } else {
-            table.remove(write.key).map_err(rejected_storage)?;
+        let mut table = transaction
+            .open_table(table_definition(first.table))
+            .map_err(rejected_table)?;
+        for write in run.iter().rev() {
+            if let Some(value) = write.value {
+                table.insert(write.key, value).map_err(rejected_storage)?;
+            } else {
+                table.remove(write.key).map_err(rejected_storage)?;
+            }
         }
     }
     Ok(())
@@ -2150,6 +2155,58 @@ mod tests {
         drop(bounded);
         let reopened = reopen_store(&bounded_directory, "state.redb")?;
         reopened.validate_inventory()?;
+        Ok(())
+    }
+
+    #[test]
+    fn ascending_rows_below_a_large_value_share_leaves_instead_of_taking_a_page_each()
+    -> Result<(), StorageError> {
+        let (_directory, store) = open_store("large-neighbor")?;
+        initialize(&store, &[])?;
+        // One value of many pages whose key sorts directly above the rows that follow.
+        let large_key = [0x13_u8; 18];
+        let large = vec![1_u8; 8 * 1_048_576];
+        store
+            .commit_records(
+                &[RedbWrite {
+                    table: TableId::Sanction,
+                    key: &large_key,
+                    value: Some(&large),
+                }],
+                b"reservation-2",
+                full_allowance(),
+            )
+            .map_err(certain)?;
+
+        const ROWS: u64 = 8_192;
+        let value = [7_u8; 134];
+        let keys = (0..ROWS)
+            .map(|index| {
+                let mut key = [0x12_u8; 18];
+                for (slot, byte) in key.iter_mut().skip(10).zip(index.to_be_bytes()) {
+                    *slot = byte;
+                }
+                key
+            })
+            .collect::<Vec<_>>();
+        let writes = keys
+            .iter()
+            .map(|key| RedbWrite {
+                table: TableId::Sanction,
+                key,
+                value: Some(&value),
+            })
+            .collect::<Vec<_>>();
+        let charged = store
+            .commit_records(&writes, b"reservation-3", full_allowance())
+            .map_err(certain)?;
+        // A page and a rewritten branch for every row would charge more than 6 KiB a row; rows
+        // that share leaves charge well under one page a row.
+        assert!(
+            charged < ROWS * 2_048,
+            "{ROWS} rows below a large value charged {charged} bytes"
+        );
+        assert_eq!(store.table_usage(TableId::Sanction, u64::MAX)?.0, ROWS + 1);
         Ok(())
     }
 }
