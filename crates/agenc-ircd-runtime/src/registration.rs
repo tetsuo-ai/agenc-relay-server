@@ -386,26 +386,14 @@ impl RegistrationRouter {
             .map(|(account, _)| account);
         let account = account_id.and_then(|account| account.to_text().as_bytes().try_into().ok());
         // Admission runs before parsing, crypto, and storage (companion
-        // 16): one E2EE command per session, and one signature-verification
-        // charge per account when the line carries object bytes.
-        let mut demands = Vec::new();
-        demands.push(BucketDemand::new(
-            BucketKind::E2eeCommand,
-            BucketKey::Session(bound.user_id),
-            1,
-        ));
-        let carries_object = message
-            .tags()
-            .iter()
-            .any(|tag| tag.key() == "+agenc.ag/e2ee");
-        if let (true, Some(account_id)) = (carries_object, account_id) {
-            demands.push(BucketDemand::new(
-                BucketKind::E2eeSignature,
-                BucketKey::Account(account_id),
-                1,
-            ));
-        }
-        let demands: Result<Vec<BucketDemand>, _> = demands.into_iter().collect();
+        // 16): a command line or a fragment zero costs one E2EE command per
+        // session and, when it carries object bytes, one signature
+        // verification per account, so one object is one verification. The
+        // continuation fragments behind an accepted fragment zero are charged
+        // by decoded bytes through the account and device's dedicated bucket.
+        let demands = e2ee
+            .ingress_charge(generation, message)
+            .demands(bound.user_id, account_id);
         let now = context.now();
         let admitted = demands.is_ok_and(|demands| {
             context

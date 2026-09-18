@@ -36,6 +36,8 @@ impl WitnessFixture {
         while let Ok(line) = tokio::time::timeout(Duration::from_millis(5), queue.recv()).await {
             drop(line.ok_or("base link closed during setup")?);
         }
+        // The base profile entitles this edge to the channel of the route.
+        crate::federation::edge::host_channels(&mut base, &[CHANNEL])?;
         let mut companion = edge();
         install_route(&mut companion)?;
         companion.phase = crate::e2ee::edge::Phase::Active;

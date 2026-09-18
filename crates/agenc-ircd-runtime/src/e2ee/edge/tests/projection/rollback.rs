@@ -86,7 +86,17 @@ async fn refused_snapshot_admission_restores_the_removed_route() -> TestResult {
     companion.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
     companion
-        .state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
+        .state_begin(
+            fixture.context_mut()?,
+            &base,
+            [6; 32],
+            5,
+            2,
+            0,
+            0,
+            0,
+            digest,
+        )
         .map_err(|e| e.code.to_string())?;
     quiesce(&mut fixture)?;
     assert!(
@@ -140,7 +150,17 @@ async fn ready_commit_after_link_loss_keeps_the_generation_pending_until_active(
     companion.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
     companion
-        .state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
+        .state_begin(
+            fixture.context_mut()?,
+            &base,
+            [6; 32],
+            5,
+            2,
+            0,
+            0,
+            0,
+            digest,
+        )
         .map_err(|e| e.code.to_string())?;
     companion
         .state_end(fixture.context_mut()?, [6; 32], 0, None)

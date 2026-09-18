@@ -9,7 +9,7 @@ mod support;
 use agenc_ircd_crypto::{Ed25519SecretKey, SignatureDomain};
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind, ObjectId};
 use agenc_ircd_e2ee::objects::sequencing::IrcSequencerRecord;
-use agenc_ircd_e2ee::record_authentication::authenticate_record;
+use agenc_ircd_e2ee::record_authentication::{authenticate_record, declared_sequenced_at};
 use agenc_ircd_e2ee::{DecodeBudget, E2eeError, TlsEncode};
 use support::{Case, KINDS, TestResult};
 
@@ -23,6 +23,26 @@ fn every_record_arm_authenticates_its_registered_signature_and_semantic_id() -> 
             authenticated.object_id(),
             &ObjectId::compute(&case.bytes()?)
         );
+    }
+    Ok(())
+}
+
+/// A receipt states its own sequencing second; a terminal certificate
+/// states the second of the receipt it embeds, the only signed time it
+/// carries (companion 12.5.1 reads it for the successor overlap window).
+#[test]
+fn every_record_arm_states_the_sequencing_second_it_signed() -> TestResult {
+    for kind in KINDS {
+        let case = Case::new(kind)?;
+        let expected = match kind {
+            support::Kind::CandidateRecord
+            | support::Kind::FinalizationRecord
+            | support::Kind::AbortRecord => 7,
+            support::Kind::ReinitAttemptRecord
+            | support::Kind::ReinitActivationRecord
+            | support::Kind::ReinitAbortRecord => 8,
+        };
+        assert_eq!(declared_sequenced_at(&case.record), expected, "{kind:?}");
     }
     Ok(())
 }

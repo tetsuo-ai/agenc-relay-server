@@ -7,7 +7,9 @@
 //! command fails with `E2EE_SYNCING`.
 
 mod completion;
+mod entitlement;
 mod events;
+mod ingress;
 mod origins;
 mod projection;
 mod response_validation;
@@ -38,6 +40,7 @@ use crate::connection::ConnectionGeneration;
 use crate::federation::edge::EdgeFederation;
 use crate::state_core::StateCoreContext;
 
+pub use ingress::IngressCharge;
 pub use result::{DecodedResult, ResultValue, decode_result, decode_value};
 pub use router::{E2EE_CAPABILITY, is_e2ee_line};
 
@@ -222,6 +225,10 @@ pub struct E2eeEdge {
     covered: BTreeSet<[u8; 16]>,
     assembler: E2eeAssembler,
     ingress: BTreeMap<ConnectionGeneration, Ingress>,
+    /// The object each connection last retried: its fragment zero was
+    /// answered from the retry cache, so its duplicate continuation
+    /// fragments are ignored without work and charged by bytes (16).
+    retried: BTreeMap<ConnectionGeneration, [u8; 32]>,
     routes: RouteTable,
     route_objects: BTreeMap<[u8; 32], Vec<u8>>,
     conversations: BTreeMap<[u8; 32], events::Conversation>,
@@ -284,6 +291,7 @@ impl E2eeEdge {
             covered: BTreeSet::new(),
             assembler: E2eeAssembler::new(QuotaLimits::default()),
             ingress: BTreeMap::new(),
+            retried: BTreeMap::new(),
             routes: RouteTable::new(),
             route_objects: BTreeMap::new(),
             conversations: BTreeMap::new(),
@@ -348,6 +356,7 @@ impl E2eeEdge {
     /// requests are gone; a result that still arrives is dropped.
     pub fn connection_closed(&mut self, generation: ConnectionGeneration) {
         self.replies.disconnect(generation);
+        self.retried.remove(&generation);
         self.origins.remove(&generation);
         if let Some(ingress) = self.ingress.remove(&generation) {
             self.assembler.discard(&ingress.key);

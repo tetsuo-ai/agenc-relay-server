@@ -13,6 +13,7 @@ use super::router::Resolved;
 use super::{E2eeEdge, E2eeEdgeConfig, LocalOrigin, PendingRequest, Phase};
 use crate::connection::ConnectionGeneration;
 
+mod ingress;
 mod projection;
 mod responses;
 mod retry;
@@ -48,6 +49,57 @@ pub(super) fn sequencer_key_set() -> Option<agenc_ircd_e2ee::sequencer::Sequence
         None,
     )
     .ok()
+}
+
+/// The private key behind the overlapping successor of the rotating set.
+pub(super) const SUCCESSOR_SEED: [u8; 32] = [61; 32];
+/// The second the successor's overlap window opens.
+pub(super) const SUCCESSOR_OPENS: u64 = 500_000;
+
+/// The test key set during a rotation: the same active credential and its
+/// direct successor, whose overlap window opens at [`SUCCESSOR_OPENS`]
+/// (companion 9.2, 12.5.1).
+pub(super) fn rotating_key_set() -> Option<agenc_ircd_e2ee::sequencer::SequencerKeySet> {
+    use agenc_ircd_e2ee::objects::conversation::{
+        IrcSequencerCredential, IrcSequencerCredentialTbs,
+    };
+    use agenc_ircd_e2ee::tls::{Opaque, TlsEncode};
+    let active_secret = agenc_ircd_crypto::Ed25519SecretKey::from_bytes(SEQUENCER_SEED);
+    let active = IrcSequencerCredential {
+        tbs: IrcSequencerCredentialTbs {
+            profile_version: 1,
+            network_id: [1; 32],
+            key_generation: 0,
+            sequencer_public_key: *active_secret.public_key().as_bytes(),
+            not_before: 0,
+            not_after: u64::MAX,
+            previous_key_id: [0; 32],
+        },
+        continuity_signature: Opaque::new(Vec::new()).ok()?,
+    };
+    let previous_key_id = sequencer_key_set()?.current()?.credential_id;
+    let successor_secret = agenc_ircd_crypto::Ed25519SecretKey::from_bytes(SUCCESSOR_SEED);
+    let tbs = IrcSequencerCredentialTbs {
+        profile_version: 1,
+        network_id: [1; 32],
+        key_generation: 1,
+        sequencer_public_key: *successor_secret.public_key().as_bytes(),
+        not_before: SUCCESSOR_OPENS,
+        not_after: u64::MAX,
+        previous_key_id,
+    };
+    let continuity = agenc_ircd_crypto::sign_canonical(
+        &active_secret,
+        agenc_ircd_crypto::SignatureDomain::SequencerContinuity,
+        &tbs.encode().ok()?,
+    )
+    .ok()?;
+    let successor = IrcSequencerCredential {
+        tbs,
+        continuity_signature: Opaque::new(continuity.as_bytes().to_vec()).ok()?,
+    };
+    agenc_ircd_e2ee::sequencer::SequencerKeySet::verify(&[1; 32], &[active, successor], 1, None)
+        .ok()
 }
 
 fn edge() -> E2eeEdge {

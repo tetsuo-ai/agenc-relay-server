@@ -66,6 +66,15 @@ pub fn declared_position(record: &IrcSequencerRecord) -> ExpectedRecord {
     fields::position(record)
 }
 
+/// The signed sequencing second of one decoded record: its own
+/// `sequenced_at`, or for a terminal certificate the `sequenced_at` of the
+/// receipt it embeds. It verifies nothing; a caller reads it only after, or
+/// together with, [`authenticate_decoded`].
+#[must_use]
+pub const fn declared_sequenced_at(record: &IrcSequencerRecord) -> u64 {
+    fields::sequenced_at(record)
+}
+
 /// Decodes one complete `sequencer_record` object and returns it with the
 /// position it claims, so a caller can choose the credential that position
 /// names before any signature is checked.

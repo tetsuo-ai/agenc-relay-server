@@ -241,3 +241,52 @@ fn a_file_opening_above_generation_zero_verifies_structurally() -> TestResult {
     );
     Ok(())
 }
+
+/// Companion 12.5.1: a record verifies under the current credential at any
+/// time, and under the overlapping successor only from its `not_before`
+/// through `MAX_SEQUENCER_KEY_OVERLAP`; outside that window the successor
+/// is any other key.
+#[test]
+fn a_successor_credential_is_admitted_only_inside_its_overlap_window() -> TestResult {
+    const OPENS: u64 = 500_000;
+    let closes = OPENS + crate::limits::MAX_SEQUENCER_KEY_OVERLAP_SECONDS;
+    let first_secret = key(60);
+    let first = sequencer_credential(&first_secret, 0, (0, 1_000_000), None)?;
+    let second = sequencer_credential(
+        &key(61),
+        1,
+        (OPENS, 2_000_000),
+        Some((&first_secret, &first)),
+    )?;
+    let pair = SequencerKeySet::verify(&NETWORK, &[first, second], 1, None)?;
+    let (current, successor) = match pair.credentials.as_slice() {
+        [current, successor] => (current.credential_id, successor.credential_id),
+        _ => return Err("the set holds the current key and its successor".into()),
+    };
+    // The current credential has no window.
+    for time in [0, OPENS - 1, OPENS, closes, closes + 1, u64::MAX] {
+        assert_eq!(
+            pair.credential_at(&current, ValidationTime(time))
+                .map(|credential| credential.credential_id),
+            Some(current),
+            "current credential at {time}"
+        );
+    }
+    // The successor: before, at the opening, inside, at the close, and past.
+    let admitted = |time: u64| {
+        pair.credential_at(&successor, ValidationTime(time))
+            .map(|credential| credential.credential_id)
+    };
+    assert_eq!(admitted(OPENS - 1), None, "before the window opens");
+    assert_eq!(admitted(OPENS), Some(successor), "at the opening");
+    assert_eq!(admitted(OPENS + 1), Some(successor), "inside the window");
+    assert_eq!(admitted(closes), Some(successor), "at the close");
+    assert_eq!(admitted(closes + 1), None, "past the window");
+    assert_eq!(admitted(u64::MAX), None, "far past the window");
+    // A credential the set does not hold is never admitted.
+    assert!(
+        pair.credential_at(&[9; 32], ValidationTime(OPENS))
+            .is_none()
+    );
+    Ok(())
+}

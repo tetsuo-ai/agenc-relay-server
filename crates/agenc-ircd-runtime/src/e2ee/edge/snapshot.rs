@@ -50,6 +50,30 @@ pub(crate) struct PendingProjection {
     pub(crate) route_objects: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
+/// The accounts this edge hosted when a transfer opened, in sorted wire
+/// form with the charge that retains them (see [`super::entitlement`]).
+#[derive(Default)]
+pub(crate) struct HostedAccounts {
+    accounts: Vec<[u8; 24]>,
+    // Released with the generation that retained the accounts.
+    _permit: Option<MemoryPermit>,
+}
+
+impl HostedAccounts {
+    /// Retains sorted, deduplicated `accounts` under `permit`.
+    pub(super) const fn new(accounts: Vec<[u8; 24]>, permit: MemoryPermit) -> Self {
+        Self {
+            accounts,
+            _permit: Some(permit),
+        }
+    }
+
+    /// Whether `account` was hosted when the transfer opened.
+    pub(super) fn contains(&self, account: &[u8; 24]) -> bool {
+        self.accounts.binary_search(account).is_ok()
+    }
+}
+
 /// Where the durable generation stands.
 pub(crate) enum Stage {
     /// Pages are being received; the pending rows of accepted pages are
@@ -89,6 +113,7 @@ pub(crate) struct SnapshotInstall {
     last_conversation: Option<[u8; 32]>,
     pub(crate) pending: PendingProjection,
     permits: Vec<MemoryPermit>,
+    hosted_at_open: HostedAccounts,
     pub(crate) stage: Stage,
 }
 
@@ -162,6 +187,7 @@ impl SnapshotInstall {
             last_conversation: None,
             pending: PendingProjection::default(),
             permits: Vec::new(),
+            hosted_at_open: HostedAccounts::default(),
             stage,
         }
     }
@@ -239,6 +265,7 @@ impl E2eeEdge {
     pub(super) fn state_begin(
         &mut self,
         context: &StateCoreContext,
+        edge: &EdgeFederation,
         token: [u8; 32],
         state_generation: u64,
         delivery_generation: u64,
@@ -260,6 +287,13 @@ impl E2eeEdge {
                     total as usize,
                 )
                 .map_err(|_| E2eeReplyCode::Syncing)?;
+                // An empty cut names no route to verify; every entry of a
+                // nonempty one is charged against the same port.
+                let hosted_at_open = if total == 0 {
+                    HostedAccounts::default()
+                } else {
+                    self.hosted_accounts_now(edge)?
+                };
                 self.snapshot = Some(SnapshotInstall {
                     token,
                     state_generation,
@@ -277,6 +311,7 @@ impl E2eeEdge {
                     last_conversation: None,
                     pending: PendingProjection::default(),
                     permits: Vec::new(),
+                    hosted_at_open,
                     stage: Stage::Staging,
                 });
                 self.phase = Phase::Transferring;
@@ -305,9 +340,12 @@ impl E2eeEdge {
 
     /// `ESTATE ENTRY`: fragments of one object at a time assemble one route
     /// state object, which is verified and charged before it is retained.
+    // agenc-review: allow owner=runtime reviewed=2026-09-18 reason=an entry line carries the token page conversation object and fragment the spec repeats, beside the base edge its entitlement is verified against
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn state_entry(
         &mut self,
         context: &StateCoreContext,
+        edge: &EdgeFederation,
         token: [u8; 32],
         page_sequence: u32,
         conversation_id: [u8; 32],
@@ -345,18 +383,34 @@ impl E2eeEdge {
             .assembler
             .ingest(key, scopes, command.limit(), &fragment, now / 1_000)
         {
-            Ok(Ingest::Complete(bytes)) => self.retain_entry(conversation_id, bytes),
+            Ok(Ingest::Complete(bytes)) => self.retain_entry(edge, conversation_id, bytes),
             Ok(Ingest::Incomplete | Ingest::Duplicate | Ingest::Recent) => Ok(()),
             Err(error) => Err(error.reply_code().into()),
         }
     }
 
-    /// Verifies one complete entry against the cut and the live witness
-    /// heads, charges it, and adds it to the pending projection and page.
-    fn retain_entry(&mut self, conversation_id: [u8; 32], bytes: Vec<u8>) -> Result<(), Refusal> {
+    /// Verifies one complete entry against the cut, the live witness heads,
+    /// and this edge's base entitlement, charges it, and adds it to the
+    /// pending projection and page. An entry the base profile does not
+    /// entitle this edge to refuses the whole snapshot before anything of
+    /// it is retained (companion 12.5).
+    fn retain_entry(
+        &mut self,
+        edge: &EdgeFederation,
+        conversation_id: [u8; 32],
+        bytes: Vec<u8>,
+    ) -> Result<(), Refusal> {
         let object_id = *agenc_ircd_e2ee::ObjectId::compute(&bytes).as_bytes();
         let (state, entry, conversation) = self.decode_route(&bytes)?;
-        if state.conversation_id != conversation_id {
+        let entitled = self.snapshot.as_ref().is_some_and(|snapshot| {
+            self.cut_route_entitled(
+                edge,
+                &conversation_id,
+                &conversation,
+                &snapshot.hosted_at_open,
+            )
+        });
+        if state.conversation_id != conversation_id || !entitled {
             return Err(E2eeReplyCode::Syncing.into());
         }
         let port = self
@@ -715,6 +769,7 @@ impl E2eeEdge {
             .collect();
         snapshot.pending = PendingProjection::default();
         snapshot.permits.clear();
+        snapshot.hosted_at_open = HostedAccounts::default();
         snapshot.page_writes.clear();
         snapshot.running = None;
         // A page is durable (or committing) once END staged it.

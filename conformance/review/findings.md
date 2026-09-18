@@ -10,6 +10,22 @@ Each external finding gets one entry:
 | Id | Reported | Severity | Surface | Summary | Disposition | Re-review evidence |
 | --- | --- | --- | --- | --- | --- | --- |
 
+## Internal review findings
+
+The rows below come from an internal review of the encrypted profile (issue
+#76), not from the external review this gate requires. The reviewer took no
+part in the implementation and worked without its context, from the
+specification, this package and the source; it was not a third-party audit,
+and these rows neither open nor close `S08-039`. The re-review column names
+the focused regressions; the gate run that re-verifies each surface is
+recorded with the pull request that merges the remediation.
+
+| Id | Reported | Severity | Surface | Summary | Disposition | Re-review evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| ENC-EDGE-01 (ENC-15, #160) | 2026-09-18 | Medium | Edge ESTATE receiver, `e2ee/edge/snapshot.rs` | The edge staged every route a coordinator cut named without the base channel and account entitlement check companion 12.5 requires before READY, so a compromised or buggy coordinator could install direct-conversation state for account pairs the edge hosts nothing for. Not client-reachable. | Remediated: an unentitled entry refuses the whole snapshot with `E2EE_SYNCING` before READY with nothing retained; the witness resolution installer requires the hosted channel; the coordinator re-derives direct standing from hosting at every full cut. See [the edge review remediation record](../../docs/stage-10-review-remediation-edge.md). | `e2ee::edge::tests::snapshot` entitlement cases, `federation::edge::sync::pending_generation`, `e2ee::coordinator::tests::sync::a_full_cut_drops_direct_standing_the_edge_no_longer_hosts`, and the Stage 08 daemon suite |
+| ENC-EDGE-02 (ENC-16, #161) | 2026-09-18 | Medium | Client E2EE admission, `registration.rs` `route_e2ee_line` | Every fragment line was charged a command token and a signature token, and the dedicated decoded-byte bucket of companion 16 did not exist: a maximum control object moved at about 18 percent of `MIN_ADMITTED_E2EE_INGRESS_RATE` and cost 1,427 verifications. Throttling, not a hard denial. | Remediated: command and signature tokens are charged on a command line or a fragment zero only; continuation fragments behind an accepted fragment zero pay decoded bytes to the fixed `E2eeIngress` bucket keyed by account and device; a fragment behind no accepted fragment zero pays for a command line and is refused. Same record. | `e2ee::edge::tests::ingress`, and the Stage 08 daemon suite under the relaxed pacer |
+| ENC-EDGE-03 (ENC-17, #162) | 2026-09-18 | Low | Edge witness resolution, `e2ee/edge/witness_resolution.rs` | A resolution record verified under either credential of the negotiated key set at any time, although companion 12.5.1 admits the successor only during `MAX_SEQUENCER_KEY_OVERLAP`. Hardening; the signer is the coordinator. | Remediated: `SequencerKeySet::credential_at` admits the successor only from its `not_before` through the overlap at the second the record signed; outside it the link closes and the row is retained. Same record. | `e2ee::edge::tests` successor window cases, `agenc-ircd-e2ee` `a_successor_credential_is_admitted_only_inside_its_overlap_window` and `every_record_arm_states_the_sequencing_second_it_signed` |
+
 A finding is closed only when the disposition names the commit that
 remediated it and the gate run that re-verified the surface.
 

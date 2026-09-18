@@ -772,9 +772,14 @@ impl CompanionCoordinator {
     /// cut: channel routes follow the channel-detail entitlement, and a
     /// direct route is held by every edge with an attached device of one
     /// of its accounts. A reloaded coordinator has no standing until here.
+    /// Every full cut follows a reset that fenced the origins and events an
+    /// earlier direct reference stood for, so those references are dropped
+    /// first: the cut names a direct route only for an account the edge
+    /// hosts now, which is exactly what the edge verifies (ENC-15).
     fn refresh_entitlements(&mut self, peer: ServerId, host: &dyn CompanionHost) {
         use agenc_ircd_domain::e2ee::RouteTarget;
         use agenc_ircd_domain::e2ee::projection::EntitlementReason;
+        self.state.entitlements.fence_direct(peer);
         let routes: Vec<([u8; 32], RouteTarget)> = self
             .state
             .routes

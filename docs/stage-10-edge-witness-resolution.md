@@ -61,9 +61,10 @@ position read, and then:
    verified prefix reached (the row's expected position for the first record,
    one more than the previous record afterwards);
 2. its credential must be one the negotiated sequencer key set holds — the
-   active credential or its overlapping successor — and its signature must
-   verify under exactly that credential at exactly that position, through the
-   ENC-02 record authenticator;
+   active credential, or its overlapping successor only inside the overlap
+   window at the second the record itself signed (ENC-17 below) — and its
+   signature must verify under exactly that credential at exactly that
+   position, through the ENC-02 record authenticator;
 3. its predecessor must be the head the verified prefix reached (the row's
    retained head for the first record, the previous record's recomputed
    semantic ID afterwards).
@@ -94,6 +95,21 @@ or lost batch leaves the old head and the row exactly as they were.
   companion link as a profile violation and retains the row untouched, so the
   next link asks again.
 
+## The successor's overlap window (ENC-17)
+
+The internal review of the encrypted profile found that `verify_record`
+accepted either credential of the negotiated set at any time (issue #162).
+`SequencerKeySet::credential_at` now decides: the active credential signs at
+any second, and the successor only from its own `not_before` through
+`MAX_SEQUENCER_KEY_OVERLAP` afterwards. The second is the one the record
+signed: a receipt's own `sequenced_at`, and for a terminal certificate the
+`sequenced_at` of the receipt it embeds, which is the only signed time a
+terminal carries and a lower bound on its own
+(`record_authentication::declared_sequenced_at`). The edge consults no clock.
+A successor record outside the window is a record under any other key: the
+link closes as a profile violation and the row is retained. The remediation
+record is [the edge review remediation](stage-10-review-remediation-edge.md).
+
 ## Defects this exposed
 
 Two owner rules in `witness_failure.rs` were written when a blocked edge read
@@ -111,10 +127,6 @@ no frames at all, and both were wrong once it reads `EWITNESS`:
 
 - The edge side only. No coordinator answers an `EWITNESS REQUEST` yet; the
   publication side of the resolution set is not part of this change.
-- The overlap window is not re-derived from a clock on the edge. The rule
-  enforced is the operative one — a record under any credential outside the
-  negotiated key set is a violation — and that set carries the active
-  credential and at most its overlapping successor.
 - A `reinit_attempt` record cannot be proven through this carrier: its
   semantic ID needs the referenced `reinit_attempt` object and `EWITNESS
   ENTRY` delivers only `sequencer_record` objects. Such a set closes the link.

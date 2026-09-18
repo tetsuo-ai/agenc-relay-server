@@ -148,6 +148,12 @@ startup reconstruction does after a roster or root rotation, the explicit
 `removed`-proof reading, and the internal-review finding it remediates
 (ENC-18, issue #164) are recorded in
 [the named-roster membership record](stage-10-membership-named-roster.md).
+The remediation of the internal encrypted-profile review's three edge
+findings — the base entitlement an ESTATE snapshot entry now needs, the
+fragment-zero charge with the dedicated decoded-byte ingress bucket, and the
+successor credential's overlap window in witness resolution (ENC-15, ENC-16
+and ENC-17, issues #160, #161 and #162) — is recorded in
+[the edge review remediation record](stage-10-review-remediation-edge.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

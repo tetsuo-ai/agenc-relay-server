@@ -711,6 +711,14 @@ impl RouteEntitlements {
         Ok(hidden && !self.entitled(edge, &conversation))
     }
 
+    /// Drops every direct reference `edge` holds. A full ESTATE cut follows
+    /// a reset that fenced the origins, operations, and events those
+    /// references stood for (companion 12.5), so the cut re-derives direct
+    /// standing from what the edge hosts and never restates a stale pair.
+    pub fn fence_direct(&mut self, edge: ServerId) {
+        self.direct.retain(|(server, _), _| *server != edge);
+    }
+
     /// Every conversation `edge` is entitled to, in canonical order: the
     /// ESTATE entry set.
     #[must_use]

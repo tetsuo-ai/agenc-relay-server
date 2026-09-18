@@ -273,6 +273,7 @@ impl E2eeEdge {
             } => self
                 .state_begin(
                     context,
+                    edge,
                     snapshot_token,
                     state_generation,
                     delivery_generation,
@@ -292,6 +293,7 @@ impl E2eeEdge {
             } => self
                 .state_entry(
                     context,
+                    edge,
                     snapshot_token,
                     page_sequence,
                     conversation_id,
@@ -377,7 +379,13 @@ impl E2eeEdge {
                 resolution_token,
                 record_count,
             } => self
-                .witness_end(context, target_server_id, resolution_token, record_count)
+                .witness_end(
+                    context,
+                    edge,
+                    target_server_id,
+                    resolution_token,
+                    record_count,
+                )
                 .map(|()| Vec::new()),
             CompanionFrame::Result { .. } | CompanionFrame::Response { .. } => {
                 self.on_result_frame(context, frame)

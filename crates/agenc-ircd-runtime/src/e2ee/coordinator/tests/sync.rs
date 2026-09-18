@@ -768,6 +768,44 @@ fn fetch(
     frames(&actions).map_err(|_| CompanionFault::Protocol)
 }
 
+/// ENC-15 (#160): a full cut re-derives direct standing from what the edge
+/// hosts. A direct reference left by an earlier event, for accounts the
+/// edge hosts nothing for, is fenced with the reset and leaves the cut, so
+/// an honest cut is exactly what the edge verifies.
+#[test]
+fn a_full_cut_drops_direct_standing_the_edge_no_longer_hosts() -> TestResult {
+    use agenc_ircd_domain::e2ee::projection::EntitlementReason;
+    let mut sync = Sync::new()?;
+    let channels = entitle(&mut sync, 1)?;
+    let stale = [0xd1; 32];
+    let bytes = snapshot_route(NETWORK, stale, 40)?;
+    let object = object_id(&bytes);
+    let state = &mut sync.harness.coordinator.state;
+    state
+        .conversations
+        .entry(stale)
+        .or_default()
+        .route_object_id = object;
+    state.objects.insert(object, bytes);
+    state
+        .entitlements
+        .require_direct(home(), stale, EntitlementReason::Event)?;
+    assert!(state.entitlements.entitled(home(), &stale));
+    let actions = sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?;
+    let (cut, page_count, _) = begin_cut(&frames(&actions)?)?;
+    assert_eq!((cut.entry_count, page_count), (1, 1));
+    assert_eq!(cut.digest, federation_snapshot_digest(40, 0, &channels)?);
+    assert!(
+        !sync
+            .harness
+            .coordinator
+            .state
+            .entitlements
+            .entitled(home(), &stale)
+    );
+    Ok(())
+}
+
 #[test]
 fn state_pages_partition_entries_by_batch_size() -> TestResult {
     for (count, pages) in [(1, 1), (31, 1), (32, 1), (33, 2), (65, 3)] {

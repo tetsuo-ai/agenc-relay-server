@@ -220,9 +220,14 @@ impl E2eeEdge {
                     *tag.object_id.as_bytes(),
                     request_scope(&command)?,
                 );
+                if tag.part == 0 {
+                    // A new fragment zero ends the retry the connection held.
+                    self.retried.remove(&generation);
+                }
                 if tag.part == 0
                     && let Some(output) = self.replies.replay(key, &command, label.as_deref())?
                 {
+                    self.retried.insert(generation, *tag.object_id.as_bytes());
                     return Ok(vec![output]);
                 }
                 if tag.part == 0
@@ -232,6 +237,7 @@ impl E2eeEdge {
                         .find(|pending| pending.reply_key == Some(key))
                 {
                     pending.retry_label = Some(label.clone());
+                    self.retried.insert(generation, *tag.object_id.as_bytes());
                 }
                 if tag.part == 0
                     && !self.ingress.contains_key(&generation)

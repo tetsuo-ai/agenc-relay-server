@@ -4,7 +4,8 @@
 //! REQUEST` per unresolved row and accepts only `EWITNESS` frames; each
 //! delivered `sequencer_record` must occupy the next contiguous position,
 //! name its predecessor, and verify under a credential of the negotiated
-//! key set. The complete set installs its proven head and deletes the row
+//! key set: the active credential, or its successor only inside the overlap
+//! window at the second the record signed. The complete set installs its proven head and deletes the row
 //! in one durable transaction, and only that receipt sends `EWITNESS
 //! RESOLVED`. An empty answer retains the row and repeats the request; a
 //! record that verifies at the expected position under another predecessor
@@ -13,13 +14,16 @@
 #![forbid(unsafe_code)]
 
 use agenc_ircd_e2ee::federation::frames::CompanionFrame;
+use agenc_ircd_e2ee::identity::ValidationTime;
 use agenc_ircd_e2ee::limits::{
     MAX_WITNESS_RESOLUTION_BYTES, MAX_WITNESS_RESOLUTION_RECORDS, MAX_WITNESS_RESOLUTION_SECONDS,
     PROFILE_VERSION,
 };
 use agenc_ircd_e2ee::object::{IrcWireObject, IrcWireObjectKind};
 use agenc_ircd_e2ee::objects::federation::IrcFederationWitnessResolution;
-use agenc_ircd_e2ee::record_authentication::{authenticate_decoded, decode_record};
+use agenc_ircd_e2ee::record_authentication::{
+    authenticate_decoded, declared_sequenced_at, decode_record,
+};
 use agenc_ircd_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_ircd_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScopes, Sender};
 use agenc_ircd_e2ee::wire::carrier::CarrierCommand;
@@ -337,11 +341,15 @@ impl E2eeEdge {
             && declared.conversation_id == conversation
             && declared.route_sequence == sequence;
         placed.then_some(()).ok_or(E2eeReplyCode::RouteInvalid)?;
+        // The active credential signs at any time; its successor only
+        // inside the overlap window at the second the record itself signed.
+        // A successor outside that window is any other key (12.5.1).
+        let sequenced_at = ValidationTime(declared_sequenced_at(&record));
         let credential = self
             .config
             .sequencer_key_set
             .as_ref()
-            .and_then(|set| set.credential(&declared.sequencer_credential_id))
+            .and_then(|set| set.credential_at(&declared.sequencer_credential_id, sequenced_at))
             .ok_or(E2eeReplyCode::RouteInvalid)?;
         let authenticated =
             authenticate_decoded(&record, bytes, None, &declared, credential, &mut budget)
@@ -368,6 +376,7 @@ impl E2eeEdge {
     pub(super) fn witness_end(
         &mut self,
         context: &mut StateCoreContext,
+        edge: &EdgeFederation,
         target_server_id: [u8; 16],
         token: [u8; 16],
         record_count: u32,
@@ -395,13 +404,16 @@ impl E2eeEdge {
         (verified == open.new_head)
             .then_some(())
             .ok_or(E2eeReplyCode::Syncing)?;
-        self.stage_witness_resolved(context, verified)
+        self.stage_witness_resolved(context, edge, verified)
     }
 
     /// One durable transaction installs the proven head and deletes the row.
+    /// The head is installed only on a route the base profile still entitles
+    /// this edge to; otherwise the link closes and the row stands (12.5).
     fn stage_witness_resolved(
         &mut self,
         context: &mut StateCoreContext,
+        edge: &EdgeFederation,
         verified: (u64, [u8; 32]),
     ) -> Result<(), Refusal> {
         let open = self
@@ -409,6 +421,11 @@ impl E2eeEdge {
             .as_ref()
             .ok_or(E2eeReplyCode::Syncing)?;
         let (conversation, token) = (open.conversation, open.token);
+        let entitled = self
+            .conversations
+            .get(&conversation)
+            .is_none_or(|known| self.projected_route_entitled(edge, known));
+        entitled.then_some(()).ok_or(E2eeReplyCode::Syncing)?;
         let head = ChainHead {
             sequence: verified.0,
             record_id: verified.1,

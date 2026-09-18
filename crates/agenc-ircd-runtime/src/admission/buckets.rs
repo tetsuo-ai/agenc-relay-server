@@ -405,11 +405,25 @@ pub enum BucketKind {
     /// `MAX_SIGNATURE_VERIFICATIONS_PER_ACCOUNT_PER_MINUTE`); not operator
     /// configurable.
     E2eeSignature,
+    /// Decoded E2EE ingress bytes per authenticated account and device
+    /// (companion 16): the dedicated bucket that carries the continuation
+    /// fragments of an object whose fragment zero was admitted, at
+    /// `MIN_ADMITTED_E2EE_INGRESS_RATE` with a burst of one complete live
+    /// object; not operator configurable.
+    E2eeIngress,
 }
+
+/// The refill of the dedicated E2EE ingress bucket in decoded bytes per
+/// second: exactly the companion floor, never less (companion 16).
+pub const E2EE_INGRESS_BYTES_PER_SECOND: u64 =
+    agenc_ircd_e2ee::limits::MIN_ADMITTED_E2EE_INGRESS_RATE;
+/// The burst of the dedicated E2EE ingress bucket: one complete live object
+/// (`MAX_LIVE_OBJECT`), so a live submission is never paced by its own size.
+pub const E2EE_INGRESS_BURST_BYTES: u64 = 262_144;
 
 impl BucketKind {
     /// Every row in spec order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::NewDirectTcp,
         Self::NewOnionConnection,
         Self::TlsHandshake,
@@ -425,6 +439,7 @@ impl BucketKind {
         Self::CredentialChange,
         Self::E2eeCommand,
         Self::E2eeSignature,
+        Self::E2eeIngress,
     ];
 
     /// Returns the Appendix C.6 table name, or `None` for the fixed
@@ -444,7 +459,10 @@ impl BucketKind {
             Self::ChannelKeyAttempt => Some("channel_key_attempt"),
             Self::AccountCreation => Some("account_creation"),
             Self::OpaqueAttempt => Some("opaque_attempt"),
-            Self::CredentialChange | Self::E2eeCommand | Self::E2eeSignature => None,
+            Self::CredentialChange
+            | Self::E2eeCommand
+            | Self::E2eeSignature
+            | Self::E2eeIngress => None,
         }
     }
 
@@ -467,6 +485,7 @@ impl BucketKind {
             Self::CredentialChange => (1, 600, 2),
             Self::E2eeCommand => (4, 1, 20),
             Self::E2eeSignature => (1_024, 60, 1_024),
+            Self::E2eeIngress => (E2EE_INGRESS_BYTES_PER_SECOND, 1, E2EE_INGRESS_BURST_BYTES),
         };
         BucketRate::fixed(tokens, seconds, burst)
     }
@@ -491,6 +510,7 @@ impl BucketKind {
             Self::CredentialChange => (1, 600, 2),
             Self::E2eeCommand => (4, 1, 20),
             Self::E2eeSignature => (1_024, 60, 1_024),
+            Self::E2eeIngress => (E2EE_INGRESS_BYTES_PER_SECOND, 1, E2EE_INGRESS_BURST_BYTES),
         };
         BucketRate::fixed(tokens, seconds, burst)
     }
@@ -569,7 +589,7 @@ impl BucketRate {
 /// The complete configured rate table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RateLimits {
-    rates: [BucketRate; 15],
+    rates: [BucketRate; 16],
 }
 
 impl RateLimits {
@@ -593,6 +613,7 @@ impl RateLimits {
                 BucketKind::CredentialChange.default_rate(),
                 BucketKind::E2eeCommand.default_rate(),
                 BucketKind::E2eeSignature.default_rate(),
+                BucketKind::E2eeIngress.default_rate(),
             ],
         }
     }
@@ -655,6 +676,9 @@ pub enum BucketKey {
     LoginHash(LoginHashKey),
     /// One verified invitation.
     Invite(InviteId),
+    /// One authenticated account and its attached E2EE device, all zero
+    /// while no device is attached (companion 16).
+    AccountDevice(AccountId, [u8; 16]),
 }
 
 /// One bucket's current credit and refill position.
