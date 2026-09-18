@@ -529,3 +529,5 @@ async fn a_replacement_coordinator_fences_the_old_stage_before_resuming() -> Tes
     assert_eq!(restarted.cursor, None);
     Ok(())
 }
+
+mod part_binding;

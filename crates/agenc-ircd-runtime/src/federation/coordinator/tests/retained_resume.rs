@@ -735,3 +735,6 @@ async fn a_partial_resume_commit_reloads_and_finishes_its_remaining_prefix() -> 
     assert!(fixture.stored_row_exists(TableId::EdgeOutbox, outbox_key(PEER, 0, 259)?)?);
     Ok(())
 }
+
+#[path = "retained_resume/page_faults.rs"]
+mod page_faults;

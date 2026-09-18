@@ -489,3 +489,15 @@ async fn disabled_or_unnegotiated_history_never_allocates_a_federation_request()
     }
     Ok(())
 }
+
+#[path = "refusals.rs"]
+mod refusals;
+
+#[path = "lifecycle.rs"]
+mod lifecycle;
+
+#[path = "restored.rs"]
+mod restored;
+
+#[path = "retention.rs"]
+mod retention;

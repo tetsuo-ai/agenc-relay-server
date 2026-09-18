@@ -4118,3 +4118,9 @@ async fn resync_snapshot_cannot_replace_an_incomplete_cross_profile_completion()
     );
     Ok(())
 }
+
+mod restored_journal;
+
+mod snapshot_refusals;
+
+mod result_refusals;
