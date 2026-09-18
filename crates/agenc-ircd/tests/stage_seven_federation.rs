@@ -4,10 +4,13 @@
 //! fail-closed partition behaviour of an edge.
 #![forbid(unsafe_code)]
 
+#[path = "support/loopback_ports.rs"]
+mod loopback_ports;
+
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as _};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -120,10 +123,7 @@ fn write_trust_manifest(
 }
 
 fn reserve_loopback_address() -> TestResult<SocketAddr> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let address = listener.local_addr()?;
-    drop(listener);
-    Ok(address)
+    Ok(loopback_ports::reserve()?)
 }
 
 fn replace_once(document: &mut String, old: &str, new: &str) -> TestResult {

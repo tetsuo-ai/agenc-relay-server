@@ -304,6 +304,17 @@ fn tls_client(
 
 /// Joins a client thread off the test runtime; the listeners run on this
 /// same current-thread runtime, so a blocking join would stall them.
+/// Whether a client write failed only because the listener had already
+/// closed the refused connection.
+fn refused_before_the_write(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
 async fn joined<T: Send + 'static>(
     handle: JoinHandle<T>,
 ) -> Result<T, Box<dyn Error + Send + Sync>> {
@@ -825,14 +836,22 @@ async fn local_admin_lines_never_enter_the_public_client_inbox() -> TestResult {
     let admin_client = thread::spawn(move || -> ClientOutcome {
         let mut socket =
             UnixStream::connect(admin_client_path).map_err(|error| error.to_string())?;
-        socket
-            .write_all(b"PING :x\r\n")
-            .map_err(|error| error.to_string())?;
+        // The listener refuses this peer as `AdminOwner` and closes the
+        // socket without reading it. That close races this write: on a
+        // loaded host it lands first and the write fails with `EPIPE` or
+        // `ECONNRESET`. Both orders are the refusal under test, so only a
+        // different failure is an error (QA-04, issue #175).
+        match socket.write_all(b"PING :x\r\n") {
+            Ok(()) => {}
+            Err(error) if refused_before_the_write(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error.to_string()),
+        }
         let mut buffer = [0_u8; 64];
         let _ = socket.read(&mut buffer);
         Ok(Vec::new())
     });
-    assert!(joined(admin_client).await?.is_ok());
+    let admin_outcome = joined(admin_client).await?;
+    assert!(admin_outcome.is_ok(), "{admin_outcome:?}");
     assert!(
         tokio::time::timeout(SETTLE, harness.inbox.recv())
             .await

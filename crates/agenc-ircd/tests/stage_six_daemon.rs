@@ -2,8 +2,8 @@
 //! and TLS transports, and an authenticated on-disk database.
 #![forbid(unsafe_code)]
 
-#[path = "stage_six_daemon/address_pool.rs"]
-mod address_pool;
+#[path = "support/loopback_ports.rs"]
+mod loopback_ports;
 
 #[path = "stage_six_daemon/idle_capacity.rs"]
 mod idle_capacity;
@@ -1002,7 +1002,7 @@ fn initialize_database(
 }
 
 fn reserve_loopback_address() -> TestResult<SocketAddr> {
-    address_pool::reserve()
+    Ok(loopback_ports::reserve()?)
 }
 
 fn replace_once(document: &mut String, old: &str, new: &str) -> TestResult {
@@ -2386,6 +2386,33 @@ fn production_serve_rejects_structural_config_before_binding() -> TestResult {
     assert!(!fixture.admin_socket.exists());
     let listener = TcpListener::bind(fixture.public_address)?;
     drop(listener);
+    Ok(())
+}
+
+/// QA-04: a listener the operating system refuses to bind must name the
+/// configured address and the refusal, not a generic runtime invariant.
+#[test]
+fn production_serve_names_the_address_and_the_os_error_of_a_refused_bind() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let holder = TcpListener::bind(fixture.public_address)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
+        .arg("serve")
+        .arg("--config")
+        .arg(&fixture.config_path)
+        .output()?;
+    drop(holder);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("listener startup failed: listener socket could not be bound"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("address={}", fixture.public_address)),
+        "{stderr}"
+    );
+    assert!(stderr.contains("error=EADDRINUSE"), "{stderr}");
+    assert!(!stderr.contains("violates its invariant"), "{stderr}");
     Ok(())
 }
 

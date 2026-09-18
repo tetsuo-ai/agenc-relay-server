@@ -158,6 +158,12 @@ client without `standard-replies` reads, and the drill retry and capacity
 predicate that now read the line instead of guessing (RUN-09, issue #152) are
 recorded in
 [the SASL unavailable authority record](stage-10-sasl-unavailable.md).
+The flake causes a dynamic-analysis sweep traced under adverse scheduling, the
+fixture port allocator that removes the probe-and-release window, the fixture
+commit awaited without a wall-clock deadline, the bind refusal and the
+shutdown phase a daemon now names, and the two shutdown behaviours left open
+with their `rr` evidence (QA-04, issue #175) are recorded in
+[the flake causes record](stage-10-flake-causes.md).
 Leaf-membership proofs verified against the retained roster snapshot they
 name instead of the account's current heads, so live admission decides as
 startup reconstruction does after a roster or root rotation, the explicit

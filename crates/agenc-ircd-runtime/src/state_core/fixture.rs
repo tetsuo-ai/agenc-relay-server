@@ -21,6 +21,14 @@ impl StateCore {
     }
 
     /// Closes the gather window and settles exactly one staged batch.
+    ///
+    /// The receipts are awaited without a wall-clock deadline. The storage
+    /// owner is a real thread doing real `fsync`, so how long a large batch
+    /// takes depends on the host: a five-second bound here failed six
+    /// `delivery_restart` tests on every round of a CPU-saturated machine
+    /// while the commit was still making progress (QA-04, issue #175). A
+    /// storage owner that stops instead closes its channel, which ends the
+    /// wait with an error, so no deadline is needed to observe a failure.
     pub(crate) async fn commit_fixture_batch(
         &mut self,
         storage: &mut Receiver<StorageCompletionMessage>,
@@ -33,9 +41,7 @@ impl StateCore {
         if !matches!(step, BatchStep::Submitted) {
             return Err("fixture batch was not submitted".into());
         }
-        let completion = tokio::time::timeout(std::time::Duration::from_secs(5), storage.recv())
-            .await?
-            .ok_or("storage completion closed")?;
+        let completion = storage.recv().await.ok_or("storage completion closed")?;
         let mut refresh = match self.step_completion(completion) {
             CompletionStep::Ready(None) => return Ok(()),
             CompletionStep::Ready(Some(exit)) => return Err(format!("commit: {exit:?}").into()),
@@ -44,9 +50,7 @@ impl StateCore {
                 .map_err(|e| format!("refresh: {e:?}"))?,
         };
         while let Some(pending) = refresh {
-            let message = tokio::time::timeout(std::time::Duration::from_secs(5), reads.recv())
-                .await?
-                .ok_or("storage reads closed")?;
+            let message = reads.recv().await.ok_or("storage reads closed")?;
             if pending.owns(message.read_id) {
                 refresh = self
                     .advance_index_refresh(pending, message)

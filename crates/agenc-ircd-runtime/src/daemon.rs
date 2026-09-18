@@ -164,6 +164,10 @@ pub enum DaemonError {
     Storage(StorageError),
     /// A bounded runtime invariant failed.
     Runtime(RuntimeError),
+    /// A configured listener could not be opened. The error names the
+    /// address and the operating-system refusal, which a generic runtime
+    /// invariant failure would hide from the operator.
+    Listener(ListenerError),
     /// Tokio could not start the configured worker set.
     RuntimeStart,
     /// A supervised owner ended unexpectedly.
@@ -172,6 +176,11 @@ pub enum DaemonError {
     StateCore(StateCoreExit),
     /// One or more owners did not join within the configured shutdown budget.
     ShutdownTimeout,
+    /// One shutdown phase outlived its configured budget. The phase is kept
+    /// because `quiesce`, `drain`, `flush` and `stop` wait on different
+    /// owners, and the bare deadline message could not say which one an
+    /// operator has to look at (QA-04, issue #175).
+    ShutdownPhaseTimeout(ShutdownPhase),
     /// A shutdown phase returned a closed owner failure.
     ShutdownFailed(ShutdownPhase, ShutdownFailure),
     /// The sequencer credentials file did not parse, did not verify for
@@ -248,10 +257,16 @@ impl fmt::Display for DaemonError {
             Self::Tls(error) => write!(formatter, "TLS startup failed: {error}"),
             Self::Storage(error) => write!(formatter, "storage owner failed: {error}"),
             Self::Runtime(error) => write!(formatter, "runtime startup failed: {error}"),
+            Self::Listener(error) => write!(formatter, "listener startup failed: {error}"),
             Self::RuntimeStart => formatter.write_str("Tokio runtime startup failed"),
             Self::TaskFailed => formatter.write_str("a supervised daemon owner failed"),
             Self::StateCore(exit) => write!(formatter, "the state owner stopped: {exit}"),
             Self::ShutdownTimeout => formatter.write_str("daemon shutdown exceeded its deadline"),
+            Self::ShutdownPhaseTimeout(phase) => write!(
+                formatter,
+                "daemon shutdown exceeded its deadline: phase={}",
+                phase.label(),
+            ),
             Self::ShutdownFailed(phase, failure) => write!(
                 formatter,
                 "daemon shutdown failed: phase={} owner={}",
@@ -320,8 +335,8 @@ impl From<RuntimeError> for DaemonError {
 }
 
 impl From<ListenerError> for DaemonError {
-    fn from(_error: ListenerError) -> Self {
-        Self::Runtime(RuntimeError::InvalidValue)
+    fn from(error: ListenerError) -> Self {
+        Self::Listener(error)
     }
 }
 
@@ -3765,7 +3780,7 @@ fn validate_shutdown_report(report: ShutdownReport) -> Result<(), DaemonError> {
     match report.first_problem() {
         None => Ok(()),
         Some(problem) => match problem.kind {
-            ShutdownProblemKind::TimedOut => Err(DaemonError::ShutdownTimeout),
+            ShutdownProblemKind::TimedOut => Err(DaemonError::ShutdownPhaseTimeout(problem.phase)),
             ShutdownProblemKind::Failed(failure) => {
                 Err(DaemonError::ShutdownFailed(problem.phase, failure))
             }
@@ -4256,6 +4271,47 @@ mod tests {
                 assert_eq!(
                     error.to_string(),
                     format!("daemon shutdown failed: phase=flush owner={label}")
+                );
+            }
+        }
+    }
+
+    /// A hook whose one chosen phase never finishes.
+    struct StalledShutdown(ShutdownPhase);
+
+    impl ShutdownHooks for StalledShutdown {
+        async fn run(
+            &mut self,
+            phase: ShutdownPhase,
+            _budget: Duration,
+        ) -> Result<(), ShutdownFailure> {
+            if phase == self.0 {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
+
+        fn stop_deadline_expired(&mut self) {}
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_shutdown_names_the_first_phase_that_outlived_its_budget() {
+        for (phase, label) in [
+            (ShutdownPhase::Quiesce, "quiesce"),
+            (ShutdownPhase::Drain, "drain"),
+            (ShutdownPhase::Flush, "flush"),
+        ] {
+            let (_signals, mut inbox) = tokio::sync::mpsc::channel(1);
+            let mut hooks = StalledShutdown(phase);
+            let report = run_shutdown(ShutdownPlan::DEFAULT, &mut hooks, &mut inbox).await;
+            let result = validate_shutdown_report(report);
+            assert!(
+                matches!(result, Err(DaemonError::ShutdownPhaseTimeout(actual)) if actual == phase)
+            );
+            if let Err(error) = result {
+                assert_eq!(
+                    error.to_string(),
+                    format!("daemon shutdown exceeded its deadline: phase={label}")
                 );
             }
         }
