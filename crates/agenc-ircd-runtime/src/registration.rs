@@ -3164,6 +3164,7 @@ impl CommandRouter for RegistrationRouter {
     fn begin_shutdown(&mut self, context: &mut StateCoreContext) -> bool {
         if let Some(edge) = self.edge.as_mut() {
             edge.cancel_journal_retry(context);
+            edge.begin_shutdown();
         }
         let Some(accounts) = self.accounts.as_mut() else {
             return true;

@@ -65,6 +65,42 @@ impl SnapshotInstall {
     }
 }
 
+/// Whether the snapshot install keeps the state owner off its safe point.
+///
+/// Before shutdown every install stage does, so a reload never activates
+/// across a generation change. After shutdown has begun only a staged
+/// install batch does: it is a local durable commit that must settle. The
+/// receiving stage and the ready-sent stage wait on the coordinator alone.
+pub(super) fn holds_safe_point(edge: &EdgeFederation) -> bool {
+    edge.snapshot
+        .as_ref()
+        .is_some_and(|snapshot| !edge.stopping || snapshot.staged_end.is_some())
+}
+
+/// Abandons the install stages a stopping edge must not wait for.
+///
+/// | Stage | Durable state | At shutdown |
+/// | --- | --- | --- |
+/// | receiving (unverified) | none | abandoned |
+/// | installing, batch staged | the batch | the batch settles (held by `staged_end`), the rest is abandoned in `installed` |
+/// | installing, between batches | rows of an unmarked generation | abandoned |
+/// | ready-sent | pending marker, peer `pending_generation`, every row | the wait is abandoned |
+/// | switching (`SnapshotActivated` staged) | the swap | finishes; held by `commit` |
+///
+/// Each abandonment leaves exactly what a crash at the same point leaves.
+/// Startup ignores the rows of a generation the peer record does not name,
+/// and restores a marked pending generation through `restore_pending`, after
+/// which `begin` sends READY again or drops it for a changed coordinator.
+pub(super) fn abandon_for_shutdown(edge: &mut EdgeFederation) {
+    if edge
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.staged_end.is_none())
+    {
+        edge.snapshot = None;
+    }
+}
+
 /// Starts the origin exchange on a fresh link.
 pub(super) fn begin(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
     if let Some(snapshot) = edge
@@ -470,6 +506,15 @@ pub(super) fn installed(
         snapshot.written = end;
     }
     if snapshot.written < snapshot.entries.len() {
+        if edge.stopping || context.is_quiescing() {
+            // Shutdown was requested: the settled batch was the last local
+            // obligation. An install is up to a million rows in batches of
+            // 256, so chaining the rest would spend the drain budget on
+            // work the next start repeats anyway. The rows of the unmarked
+            // generation are ignored by that start.
+            edge.snapshot = None;
+            return Vec::new();
+        }
         if let Err(violation) = write_install_rows(edge, context) {
             edge.fail_link(context, violation);
         }

@@ -246,6 +246,9 @@ pub struct EdgeFederation {
     queued_events: VecDeque<events::QueuedEvent>,
     snapshot: Option<sync::SnapshotInstall>,
     snapshot_cut: Option<(u64, u64)>,
+    /// Shutdown has begun: a snapshot install no longer holds the drain
+    /// safe point unless one of its own commits is in flight (RUN-11).
+    stopping: bool,
     next_origin: u64,
     client_resync_epoch: u64,
     counters: EdgeCounters,
@@ -319,6 +322,7 @@ impl EdgeFederation {
             queued_events: VecDeque::new(),
             snapshot: None,
             snapshot_cut: None,
+            stopping: false,
             next_origin: 1,
             client_resync_epoch: 0,
             counters: EdgeCounters::default(),
@@ -680,9 +684,14 @@ impl EdgeFederation {
     }
 
     /// Reports whether no federated operation straddles a reload.
+    ///
+    /// Once shutdown has begun, a snapshot install holds this only while one
+    /// of its own commits is in flight. Every other install stage waits on a
+    /// frame that only the coordinator can send, and drain must never wait
+    /// on a remote peer (RUN-11, issue #178).
     #[must_use]
     pub fn reload_ready(&self) -> bool {
-        self.commit.is_none() && self.snapshot.is_none()
+        self.commit.is_none() && !sync::holds_safe_point(self)
     }
 
     /// Borrows the replica.
@@ -1533,6 +1542,14 @@ impl EdgeFederation {
     /// Cancels ordinary retry work when StateCore starts shutdown.
     pub(crate) fn cancel_journal_retry(&mut self, context: &mut StateCoreContext) {
         journal_retry::cancel(self, context);
+    }
+
+    /// Marks the edge as stopping and abandons the snapshot install stages
+    /// that wait on the coordinator. StateCore calls this only with no
+    /// storage work in flight, so nothing staged is cut short.
+    pub(crate) fn begin_shutdown(&mut self) {
+        self.stopping = true;
+        sync::abandon_for_shutdown(self);
     }
 }
 
