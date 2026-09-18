@@ -93,3 +93,4 @@ unwrap_used = "deny"
 
 [patch.crates-io]
 opaque-ke = { path = "vendor/opaque-ke-4.0.1" }
+redb = { path = "vendor/redb-4.2.0" }

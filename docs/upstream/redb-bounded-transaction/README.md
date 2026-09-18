@@ -1,11 +1,13 @@
 # redb bounded write transactions
 
-This directory records the upstream work for STO-1 (issue #47, STO-01). It
-is not linked into agenc-ircd: the application still pins the published
-redb 4.2.0 dependency and its unchanged physical limits. Upstream
-acceptance and publication are STO-02; application integration with one
-allowance across nonce reservation, guard replacement, the main transaction
-and maintenance is STO-03.
+This directory records the STO-1 work (issue #47, STO-01) and is the
+provenance of the project-owned redb fork. The patch is applied to the
+published redb 4.2.0 source vendored at `vendor/redb-4.2.0`, which the
+workspace's `[patch.crates-io]` selects and `scripts/check-workspace.py`
+verifies by complete tree digest. Upstream submission was STO-02 and is
+withdrawn: the fork is owned here and owes nothing to upstream acceptance.
+Application integration with one allowance across nonce reservation, guard
+replacement, the main transaction and maintenance is STO-03.
 
 Apply [bounded-transaction.patch](bounded-transaction.patch) with `git apply`
 to upstream redb commit `23b6ba05473b13e69ed4db82f4b5bc07f0c33be9`

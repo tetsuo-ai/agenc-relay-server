@@ -172,6 +172,21 @@ the upstream provenance value. `conformance/vendored-dependencies.toml` records
 the complete patched-tree digest, and the workspace checker rejects any other
 source override or tree content.
 
+The workspace also uses a reviewed local source patch for redb 4.2.0: the
+STO-1 bounded write transaction, applied from
+`docs/upstream/redb-bounded-transaction/bounded-transaction.patch`, whose
+digest and per-file before-and-after digests `source.json` records. It adds
+`begin_write_bounded` and the typed allocation allowance that charges every
+page extent and file extension before the allocation happens, the frozen
+prepared transaction whose publication cannot allocate, resumable bounded
+reclamation, and a bounded close. Ordinary transactions, their commit path,
+the on-disk format and the crate version are unchanged. The fork is owned by
+the project: it is not submitted upstream and no upstream acceptance is
+assumed or awaited. The published crates.io checksum above remains the
+upstream provenance value, `conformance/vendored-dependencies.toml` records
+the complete patched-tree digest, and the workspace checker rejects any other
+source override or tree content, exactly as for `opaque-ke`.
+
 redb 4.2.0 documents commit outcomes that can be indeterminate and exposes an
 in-place compaction operation implemented through its own write transactions.
 The architecture therefore defines explicit reconciliation for indeterminate

@@ -6838,7 +6838,7 @@ not protocol revisions, when all canonical vectors remain byte-identical.
 | async runtime | Tokio 1.53.1 with `default-features = false` and exactly `rt-multi-thread,net,io-util,time,signal,sync,macros`; `test-util` is dev-only |
 | TLS | rustls 0.23.45 with `default-features = false` and exactly `std,aws_lc_rs,prefer-post-quantum`; explicit `aws-lc-rs` provider, TLS-1.3-only version list, and `[X25519MLKEM768, X25519]` key-exchange list |
 | operating-system CSPRNG | `getrandom` 0.4.3 with `default-features = false` and `std`; no deterministic or userspace fallback in production |
-| persistence | redb 4.2.0 with `default-features = false` and exactly `std`; no experimental, logging, cache-metrics, or compaction surface |
+| persistence | redb 4.2.0 with `default-features = false` and exactly `std`, as the project-owned reviewed source patch carrying the bounded write transaction (Section 24.5); no experimental, logging, cache-metrics, or compaction surface |
 | OPAQUE | `opaque-ke` 4.0.1 with `default-features = false` and exactly `ristretto255,argon2,std`; no Serde; plus the fixed custom Argon2id KSF |
 | account-service HPKE | `hpke` 0.14.0, no default features; `alloc,chacha,x25519,hkdfsha2` only; Base mode and the fixed project suite only |
 | binary/presentation encoding | `tls_codec` 0.5.0 with `default-features = false` and exactly `std,mls`, plus `base64` 0.23.1 with `default-features = false` and exactly `alloc`; production protocol codecs use no derive or Serde |
@@ -6885,7 +6885,11 @@ remove dependencies already compiled into a feature-enabled binary.
 
 Release builds use `--locked`, a checked-in lockfile, no Git dependencies, no
 wildcard requirements, and crates.io as the only default registry. Cargo
-source replacement, patches, and vendoring manifests are reviewed files.
+source replacement, patches, and vendoring manifests are reviewed files. A
+reviewed local source patch is a project-owned fork of a published crate:
+it starts from the published archive whose checksum stays the provenance
+value, records its complete patched-tree digest, and owes nothing to
+upstream acceptance.
 Network access is disabled during the reproducible build after dependencies
 are fetched and hash-verified.
 

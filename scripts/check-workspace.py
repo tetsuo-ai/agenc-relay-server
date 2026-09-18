@@ -253,8 +253,31 @@ CRATES_IO_SOURCES = {
     "sparse+https://index.crates.io/",
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-VENDORED_PATCH_PATH = "vendor/opaque-ke-4.0.1"
-VENDORED_PATCH_TREE_SHA256 = "3365ac7382b2ed771d71c933c7bd1cf772e024042ed8db0899045ea1497a9678"
+# Every reviewed local source patch, in manifest order. Each entry is the
+# closed form the manifest must repeat exactly, and each tree digest binds
+# every path and byte under the vendored directory.
+VENDORED_PATCHES = (
+    {
+        "package": "opaque-ke",
+        "version": "4.0.1",
+        "path": "vendor/opaque-ke-4.0.1",
+        "upstream_registry": "https://github.com/rust-lang/crates.io-index",
+        "upstream_checksum": DIRECT_CHECKSUMS["opaque-ke"],
+        "tree_sha256": "3365ac7382b2ed771d71c933c7bd1cf772e024042ed8db0899045ea1497a9678",
+        "modified_files": ["src/key_exchange/sigma_i/mod.rs", "src/opaque.rs"],
+        "reason": "zeroize password-derived intermediates and the server-finish session key; gate the shared pre-hash helper on its consuming features",
+    },
+    {
+        "package": "redb",
+        "version": "4.2.0",
+        "path": "vendor/redb-4.2.0",
+        "upstream_registry": "https://github.com/rust-lang/crates.io-index",
+        "upstream_checksum": DIRECT_CHECKSUMS["redb"],
+        "tree_sha256": "5e61f6ded5791fac67267a03ed774d96c1057e5f2a3ad2aa8e12b5a321bdbbba",
+        "modified_files": ["src/bounded.rs", "src/db.rs", "src/error.rs", "src/lib.rs", "src/transactions.rs", "src/tree_store/mod.rs", "src/tree_store/page_store/mod.rs", "src/tree_store/page_store/page_manager.rs"],
+        "reason": "STO-01 bounded write transaction: begin_write_bounded charges every page extent and file extension to a typed allowance before allocating; prepare, publish, reclaim_bounded and persist_allocator_state_bounded keep each phase bounded; ordinary transactions, the on-disk format and the crate version are unchanged; the fork is owned by the project and not submitted upstream",
+    },
+)
 
 
 class WorkspaceError(ValueError):
@@ -296,29 +319,17 @@ def vendored_tree_sha256(path: Path) -> str:
 def validate_vendored_patches(
     root: Path, evidence: dict[str, object] | None = None
 ) -> None:
-    """Validate the sole reviewed source patch and its complete tree digest."""
+    """Validate every reviewed source patch and its complete tree digest."""
     if evidence is None:
         evidence = load_toml(root / "conformance/vendored-dependencies.toml")
-    expected = {
-        "schema_version": 1,
-        "patch": [
-            {
-                "package": "opaque-ke",
-                "version": "4.0.1",
-                "path": VENDORED_PATCH_PATH,
-                "upstream_registry": "https://github.com/rust-lang/crates.io-index",
-                "upstream_checksum": DIRECT_CHECKSUMS["opaque-ke"],
-                "tree_sha256": VENDORED_PATCH_TREE_SHA256,
-                "modified_files": ["src/key_exchange/sigma_i/mod.rs", "src/opaque.rs"],
-                "reason": "zeroize password-derived intermediates and the server-finish session key; gate the shared pre-hash helper on its consuming features",
-            }
-        ],
-    }
+    expected = {"schema_version": 1, "patch": [dict(patch) for patch in VENDORED_PATCHES]}
     if evidence != expected:
         raise WorkspaceError("vendored dependency evidence differs from its reviewed closed form")
-    patch_root = root / VENDORED_PATCH_PATH
-    if vendored_tree_sha256(patch_root) != VENDORED_PATCH_TREE_SHA256:
-        raise WorkspaceError("vendored opaque-ke tree digest differs from reviewed source")
+    for patch in VENDORED_PATCHES:
+        if vendored_tree_sha256(root / patch["path"]) != patch["tree_sha256"]:
+            raise WorkspaceError(
+                f"vendored {patch['package']} tree digest differs from reviewed source"
+            )
 
 
 def validate_toolchain_policy(policy_bytes: bytes) -> None:
@@ -369,9 +380,11 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
     manifest = load_toml(root / "Cargo.toml")
     if "package" in manifest or "replace" in manifest:
         raise WorkspaceError("root must be virtual and may not replace sources")
-    expected_patch = {"crates-io": {"opaque-ke": {"path": VENDORED_PATCH_PATH}}}
+    expected_patch = {
+        "crates-io": {patch["package"]: {"path": patch["path"]} for patch in VENDORED_PATCHES}
+    }
     if manifest.get("patch") != expected_patch:
-        raise WorkspaceError("root source patch differs from the reviewed opaque-ke patch")
+        raise WorkspaceError("root source patches differ from the reviewed vendored patches")
     workspace = manifest.get("workspace")
     if not isinstance(workspace, dict):
         raise WorkspaceError("root Cargo.toml has no workspace table")
