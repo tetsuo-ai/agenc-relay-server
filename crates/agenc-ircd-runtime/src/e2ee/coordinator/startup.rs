@@ -83,7 +83,11 @@ const REINIT_ABORT_RECORD: u16 = 6;
 /// One sequencer record position.
 struct RecordRow {
     record_object_id: [u8; 32],
+    /// The record's semantic identifier.
+    record_id: [u8; 32],
     record_kind: u16,
+    /// Whether the record certifies a terminal.
+    terminal: bool,
     predecessor_record_id: [u8; 32],
 }
 
@@ -269,14 +273,18 @@ impl Restore {
         match SequencerRow::decode(body) {
             Ok(SequencerRow::Record {
                 record_object_id,
+                record_id,
                 record_kind,
+                terminal,
                 predecessor_record_id,
                 ..
             }) => self.admit_record(
                 key,
                 RecordRow {
                     record_object_id,
+                    record_id,
                     record_kind,
+                    terminal,
                     predecessor_record_id,
                 },
             ),
@@ -381,7 +389,8 @@ struct ObjectIndex {
     policies: BTreeMap<[u8; 32], (IrcPolicy, usize)>,
     /// Retained roster snapshots by signing root fingerprint.
     rosters: BTreeMap<[u8; 32], Vec<IrcDeviceRoster>>,
-    /// Finality request objects by conversation and finalization identifier.
+    /// Retained terminal request objects by conversation and terminal
+    /// identifier, certified or not; a route keeps only the certified ones.
     proofs: BTreeMap<[u8; 32], BTreeMap<[u8; 32], [u8; 32]>>,
     /// Retained terminal requests by object identifier.
     terminal_requests: BTreeMap<[u8; 32], TerminalRequest>,
@@ -471,6 +480,31 @@ impl ObjectIndex {
 }
 
 impl ObjectIndex {
+    fn index_proof(&mut self, conversation: [u8; 32], terminal_id: [u8; 32], object_id: [u8; 32]) {
+        self.proofs
+            .entry(conversation)
+            .or_default()
+            .insert(terminal_id, object_id);
+    }
+
+    /// The retained request of every terminal `records` certified. A request
+    /// the sequencer never certified, such as one still below quorum, names
+    /// no terminal of the conversation (companion 12.4).
+    fn certified_proofs(
+        &self,
+        conversation: &[u8; 32],
+        records: &BTreeMap<u64, &RecordRow>,
+    ) -> BTreeMap<[u8; 32], [u8; 32]> {
+        let Some(retained) = self.proofs.get(conversation) else {
+            return BTreeMap::new();
+        };
+        records
+            .values()
+            .filter(|record| record.terminal)
+            .filter_map(|record| Some((record.record_id, *retained.get(&record.record_id)?)))
+            .collect()
+    }
+
     fn index_abort(&mut self, object_id: [u8; 32], bytes: &[u8]) {
         let kind = IrcWireObjectKind::AbortRequest;
         let Some(request) = decode_body::<IrcAbortRequest>(bytes, kind, MAX_ABORT_OBJECT) else {
@@ -480,6 +514,7 @@ impl ObjectIndex {
         else {
             return;
         };
+        self.index_proof(request.core.conversation_id, abort_id, object_id);
         self.terminal_requests.insert(
             object_id,
             TerminalRequest::Abort(
@@ -502,6 +537,7 @@ impl ObjectIndex {
         else {
             return;
         };
+        self.index_proof(request.core.old_conversation_id, activation_id, object_id);
         self.terminal_requests.insert(
             object_id,
             TerminalRequest::Activate(activation_id, request.votes.as_slice().to_vec()),
@@ -519,6 +555,7 @@ impl ObjectIndex {
         else {
             return;
         };
+        self.index_proof(request.core.old_conversation_id, abort_id, object_id);
         self.terminal_requests.insert(
             object_id,
             TerminalRequest::AbortAttempt(
@@ -2047,11 +2084,7 @@ fn restore_route(
             .iter()
             .map(|(sequence, record)| (*sequence, record.record_object_id))
             .collect(),
-        proofs: index
-            .proofs
-            .get(&conversation_id)
-            .cloned()
-            .unwrap_or_default(),
+        proofs: index.certified_proofs(&conversation_id, &records),
         route_object_id: *agenc_ircd_e2ee::ObjectId::compute(&row.route_state).as_bytes(),
         stored_bytes: row.stored_bytes,
         principal_accounts: principal_accounts(package),

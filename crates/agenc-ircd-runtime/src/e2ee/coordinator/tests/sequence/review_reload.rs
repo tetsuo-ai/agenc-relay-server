@@ -161,3 +161,63 @@ fn a_pending_terminal_request_without_a_counted_vote_is_charged_to_its_conversat
     );
     Ok(())
 }
+
+/// The reload restores exactly the certified terminals the live coordinator
+/// recorded: the abort and the finalization, each with its retained request.
+#[test]
+fn a_reload_restores_every_certified_terminal_proof() -> TestResult {
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, _, candidate_id) = submit_candidate(&mut harness, conversation, 0, 20)?;
+    let core = IrcAbortCoreTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: conversation,
+        prior_state_id: receipt.tbs.prior_state_id,
+        candidate_id,
+        prior_epoch: 0,
+        reason: IrcCommitAbortReason::SenderWithdrawn,
+        evidence_digest: [0; 32],
+    };
+    let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+    let abort = wire(
+        IrcWireObjectKind::AbortRequest,
+        &IrcAbortRequest {
+            core,
+            receipt: receipt.clone(),
+            votes: TlsVec::new(vec![vote(
+                &harness,
+                DEVICE,
+                &receipt,
+                candidate_id,
+                Terminal::abort(abort_id, 1)?,
+            )?])?,
+        },
+    )?;
+    ok(harness.run(Op::SubmitAbort, &conversation, Some(&abort))?)?;
+    let (receipt, commit_id, candidate_id) = submit_candidate(&mut harness, conversation, 0, 21)?;
+    let ack = acknowledge(&mut harness, conversation, candidate_id, commit_id)?;
+    let request = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_id,
+        candidate_id,
+        &ack,
+        &[DEVICE],
+    )?;
+    ok(harness.run(Op::SubmitFinalization, &conversation, Some(&request))?)?;
+    let proofs = |harness: &Harness| {
+        harness
+            .coordinator
+            .state
+            .conversations
+            .get(&conversation)
+            .map(|state| state.proofs.clone())
+    };
+    let live = proofs(&harness).ok_or("the conversation")?;
+    assert_eq!(live.len(), 2);
+    assert!(live.contains_key(&abort_id));
+    assert_eq!(proofs(&harness.reloaded()?), Some(live));
+    Ok(())
+}
