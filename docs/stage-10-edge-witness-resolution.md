@@ -125,8 +125,13 @@ no frames at all, and both were wrong once it reads `EWITNESS`:
 
 ## Limitations
 
-- The edge side only. No coordinator answers an `EWITNESS REQUEST` yet; the
-  publication side of the resolution set is not part of this change.
+- The coordinator publication side landed with ENC-19 (issue #166, see
+  [the review remediation record](stage-10-review-remediation-coordinator.md)).
+  Until then the coordinator refused every `EWITNESS REQUEST` as a protocol
+  violation, which closed the link on every reconnect of a blocked edge; this
+  record originally described that gap as an unanswered request only.
+- The successor credential is gated on its overlap window at the record's
+  `sequenced_at` (ENC-17, issue #162).
 - A `reinit_attempt` record cannot be proven through this carrier: its
   semantic ID needs the referenced `reinit_attempt` object and `EWITNESS
   ENTRY` delivers only `sequencer_record` objects. Such a set closes the link.

@@ -22,10 +22,20 @@ fn a_witness_request_from_an_active_edge_is_answered_not_refused() -> TestResult
         expected_sequence: 1,
         expected_head_id: [8; 32],
     });
-    assert!(
-        answer.is_ok(),
-        "the coordinator refused EWITNESS REQUEST as {:?}",
-        answer.err(),
-    );
+    let answer =
+        answer.map_err(|fault| format!("the coordinator refused EWITNESS REQUEST: {fault:?}"))?;
+    // It retains nothing for that conversation: one empty resolution set.
+    let sent = frames(&answer)?;
+    assert!(matches!(
+        sent.first(),
+        Some(CompanionFrame::WitnessBegin { .. })
+    ));
+    assert!(matches!(
+        sent.last(),
+        Some(CompanionFrame::WitnessEnd {
+            record_count: 0,
+            ..
+        })
+    ));
     Ok(())
 }

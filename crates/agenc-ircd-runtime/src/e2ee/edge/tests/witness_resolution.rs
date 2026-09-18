@@ -16,6 +16,9 @@ use crate::budget::{BackingReservationPort, MemoryBudget};
 use crate::e2ee::edge::router::Resolved;
 use crate::sync::Arc;
 
+#[path = "witness_bridged.rs"]
+mod bridged;
+
 const TOKEN: [u8; 16] = [77; 16];
 const EDGE: [u8; 16] = [2; 16];
 const COORDINATOR: [u8; 16] = [3; 16];
@@ -177,6 +180,12 @@ fn delivery(records: &[Record], object: &[u8]) -> TestResult<Vec<CompanionFrame>
 /// A fixture whose durable row is already sealed and whose replacement link
 /// reached the blocked witness phase with its request sent.
 async fn requesting() -> TestResult<(WitnessFixture, LinkQueue)> {
+    let (fixture, queue, _) = Box::pin(requesting_line()).await?;
+    Ok((fixture, queue))
+}
+
+/// [`requesting`] with the exact `EWITNESS REQUEST` line the edge sent.
+async fn requesting_line() -> TestResult<(WitnessFixture, LinkQueue, String)> {
     let mut fixture = durable_fault().await?;
     fixture
         .companion
@@ -209,9 +218,10 @@ async fn requesting() -> TestResult<(WitnessFixture, LinkQueue)> {
             )
             .is_empty()
     );
-    assert!(next_line(&mut queue).await?.contains(" EWITNESS REQUEST "));
+    let request = next_line(&mut queue).await?;
+    assert!(request.contains(" EWITNESS REQUEST "));
     assert_eq!(fixture.companion.phase, Phase::Witness);
-    Ok((fixture, queue))
+    Ok((fixture, queue, request))
 }
 
 fn feed(fixture: &mut WitnessFixture, frames: Vec<CompanionFrame>) -> TestResult {

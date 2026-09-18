@@ -40,7 +40,7 @@ mod barrier;
 mod live_payloads;
 mod sequence;
 pub(crate) mod support;
-mod sync;
+pub(crate) mod sync;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 

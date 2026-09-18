@@ -32,7 +32,7 @@ const SERVER_NAME: &str = "coordinator.example";
 const NOW_MILLIS: u64 = 5_000_000;
 
 /// A fake base: every configured fact is set directly by the test.
-struct FakeHost {
+pub(crate) struct FakeHost {
     incarnation: Option<[u8; 16]>,
     origin: Option<BaseOriginView>,
     ready: bool,
