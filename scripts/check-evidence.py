@@ -26,7 +26,7 @@ SCHEMA_PATH = "conformance/evidence-manifest.schema.json"
 EXAMPLE_PATH = "conformance/evidence-manifest.example.json"
 SCHEMA_SHA256 = "b0e137647d8ce7d999f13a1e5cae1008476d3fc850ad006d77bf6627c8540470"
 TOOLCHAIN_POLICY_PATH = "conformance/toolchain-policy.toml"
-TOOLCHAIN_POLICY_SHA256 = "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095"
+TOOLCHAIN_POLICY_SHA256 = "975452dacaa7c7be41e7fe2d712240b69668dd556f71bf6de5430b58b35a3d0e"
 REGULAR_INDEX_MODE = "100644"
 EXECUTABLE_INDEX_MODE = "100755"
 
@@ -511,6 +511,7 @@ TOOLCHAIN_POLICY_TOP_FIELDS = {
     "cargo_deny",
     "cargo_audit",
     "cargo_llvm_cov",
+    "cargo_nextest",
     "checkout_action_commit",
     "targets",
     "branch_coverage_instrumentation",
@@ -1043,6 +1044,11 @@ def parse_toolchain_policy(
     require_string(
         policy.get("cargo_llvm_cov"),
         f"{label} cargo-llvm-cov version",
+        maximum=64,
+    )
+    require_string(
+        policy.get("cargo_nextest"),
+        f"{label} cargo-nextest version",
         maximum=64,
     )
     require_string(
@@ -2131,8 +2137,8 @@ kind = "normative-requirement"
     if (
         stage_zero_policy[0] != TOOLCHAIN_POLICY_SHA256
         or stage_four_policy[0] != TOOLCHAIN_POLICY_SHA256
-        or len(stage_zero_policy[1]) != 12
-        or len(stage_four_policy[1]) != 17
+        or len(stage_zero_policy[1]) != 13
+        or len(stage_four_policy[1]) != 18
         or stage_zero_policy[2] != stage_four_policy[2]
     ):
         raise EvidenceError("self-test toolchain profiles differ from reviewed policy")
@@ -2640,7 +2646,7 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
         _stage_two_hash, stage_two_toolchain, _stage_two_limitations = (
             source_toolchain_policy(temporary_root, 2, closure_commit)
         )
-        if len(toolchain) != 12 or len(stage_two_toolchain) != 17:
+        if len(toolchain) != 13 or len(stage_two_toolchain) != 18:
             raise EvidenceError("self-test toolchain stage profiles are not cumulative")
         run_artifact: dict[str, object] = {
             "schema_version": 2,

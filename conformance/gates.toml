@@ -60,7 +60,7 @@ argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--l
 argv = ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"]
 
 [[gate.stage-zero-implementation.command]]
-argv = ["cargo", "test", "--workspace", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "--workspace", "--all-features", "--locked"]
 
 [[gate.stage-zero-implementation.command]]
 argv = ["cargo", "test", "--workspace", "--doc", "--all-features", "--locked"]
@@ -78,7 +78,7 @@ argv = ["cargo", "audit", "--deny", "warnings"]
 argv = ["python3", "scripts/check-coverage.py", "self-test", "conformance/critical-coverage.toml"]
 
 [[gate.stage-zero-implementation.command]]
-argv = ["cargo", "llvm-cov", "--workspace", "--all-features", "--branch", "--locked", "--json", "--output-path", "target/stage-zero-coverage.json"]
+argv = ["cargo", "llvm-cov", "nextest", "--workspace", "--all-features", "--branch", "--locked", "--json", "--output-path", "target/stage-zero-coverage.json"]
 environment = { RUSTC_BOOTSTRAP = "1" }
 
 [[gate.stage-zero-implementation.command]]
@@ -139,7 +139,7 @@ argv = ["python3", "scripts/check-stage-three.py", "check"]
 argv = ["python3", "scripts/check-stage-three.py", "self-test"]
 
 [[gate.stage-three-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "domain_channels", "--test", "domain_commands", "--test", "domain_lifecycle", "--test", "domain_reference_model", "--test", "domain_stage_three_matrix", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-testkit", "--test", "domain_channels", "--test", "domain_commands", "--test", "domain_lifecycle", "--test", "domain_reference_model", "--test", "domain_stage_three_matrix", "--locked"]
 
 [gate.stage-four-implementation]
 includes = ["stage-three-implementation"]
@@ -154,13 +154,13 @@ argv = ["python3", "scripts/check-stage-four.py", "check"]
 argv = ["python3", "scripts/check-stage-four.py", "self-test"]
 
 [[gate.stage-four-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-auth", "--test", "stage_four", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-auth", "--test", "stage_four", "--locked"]
 
 [[gate.stage-four-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-crypto", "--test", "stage_four", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-crypto", "--test", "stage_four", "--locked"]
 
 [[gate.stage-four-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "stage_four_domain_auth", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-testkit", "--test", "stage_four_domain_auth", "--locked"]
 
 [[gate.stage-four-implementation.command]]
 argv = ["bash", "scripts/run-stage-four-fuzz.sh"]
@@ -178,7 +178,7 @@ argv = ["python3", "scripts/check-stage-five.py", "check"]
 argv = ["python3", "scripts/check-stage-five.py", "self-test"]
 
 [[gate.stage-five-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--all-features", "--locked"]
 
 [[gate.stage-five-implementation.command]]
 argv = ["cargo", "+nightly-2026-08-24", "fmt", "--manifest-path", "fuzz/Cargo.toml", "--", "--check"]
@@ -205,16 +205,16 @@ argv = ["python3", "scripts/check-stage-six.py", "check"]
 argv = ["python3", "scripts/check-stage-six.py", "self-test"]
 
 [[gate.stage-six-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-config", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-config", "--all-features", "--locked"]
 
 [[gate.stage-six-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-admin", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-admin", "--all-features", "--locked"]
 
 [[gate.stage-six-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-runtime", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-runtime", "--all-features", "--locked"]
 
 [[gate.stage-six-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "stage_six_persistence", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-testkit", "--test", "stage_six_persistence", "--locked"]
 
 [[gate.stage-six-implementation.command]]
 argv = ["bash", "scripts/run-stage-six-loom.sh"]
@@ -259,16 +259,16 @@ argv = ["python3", "scripts/check-stage-seven.py", "check"]
 argv = ["python3", "scripts/check-stage-seven.py", "self-test"]
 
 [[gate.stage-seven-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-federation-wire", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-federation-wire", "--all-features", "--locked"]
 
 [[gate.stage-seven-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-domain", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-domain", "--all-features", "--locked"]
 
 [[gate.stage-seven-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--test", "stage_five", "--locked", "federation_records"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--test", "stage_five", "--locked", "federation_records"]
 
 [[gate.stage-seven-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-crypto", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-crypto", "--all-features", "--locked"]
 
 [[gate.stage-seven-implementation.command]]
 argv = ["bash", "scripts/run-stage-seven-model.sh"]
@@ -301,10 +301,10 @@ argv = ["python3", "scripts/generate-e2ee-vectors.py", "--check"]
 argv = ["python3", "scripts/generate-e2ee-fuzz-seeds.py", "--check"]
 
 [[gate.stage-eight-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-e2ee", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-e2ee", "--all-features", "--locked"]
 
 [[gate.stage-eight-implementation.command]]
-argv = ["cargo", "test", "-p", "agenc-ircd-storage", "--test", "stage_five", "--locked", "e2ee_records"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--test", "stage_five", "--locked", "e2ee_records"]
 
 [[gate.stage-eight-implementation.command]]
 argv = ["bash", "scripts/run-stage-eight-model.sh"]

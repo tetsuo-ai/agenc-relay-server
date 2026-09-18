@@ -1,0 +1,6 @@
+# The storage qualification workload measures its filesystem's free space to the byte and
+# fails when anything else writes to that filesystem between its samples. Requiring every
+# test thread makes nextest run it alone; every other test shares all available cores.
+[[profile.default.overrides]]
+filter = 'test(production_workload_measures_every_required_case_and_phase)'
+threads-required = "num-test-threads"

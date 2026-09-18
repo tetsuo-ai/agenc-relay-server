@@ -168,6 +168,7 @@ def host_identity(root: Path) -> dict[str, Any]:
                        "docker": ["docker", "--version"], "openssl": ["openssl", "version"],
                        "cargo-fuzz": ["cargo-fuzz", "--version"],
                        "cargo-llvm-cov": ["cargo-llvm-cov", "llvm-cov", "--version"],
+                       "cargo-nextest": ["cargo-nextest", "nextest", "-V"],
                        "cargo-audit": ["cargo-audit", "--version"],
                        "cargo-deny": ["cargo-deny", "--version"]}.items():
         executable = shutil.which(argv[0])

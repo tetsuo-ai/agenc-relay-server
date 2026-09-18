@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -274,8 +275,10 @@ def execute(root: Path, name: str) -> list[CommandResult]:
         environment = command_environment(os.environ, reviewed_environment)
         print("+ " + " ".join(argv), flush=True)
         started_at = utc_timestamp()
+        started = time.monotonic()
         completed = subprocess.run(argv, cwd=root, env=environment, check=False)
         ended_at = utc_timestamp()
+        print(f"= {time.monotonic() - started:.1f}s " + " ".join(argv), flush=True)
         if completed.returncode != 0:
             raise GateError(f"command failed with status {completed.returncode}: {argv!r}")
         results.append(

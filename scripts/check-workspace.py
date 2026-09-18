@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import NoReturn
 
 TOOLCHAIN = "1.98.0"
-TOOLCHAIN_POLICY_SHA256 = "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095"
+TOOLCHAIN_POLICY_SHA256 = "975452dacaa7c7be41e7fe2d712240b69668dd556f71bf6de5430b58b35a3d0e"
 EDITION = "2024"
 RUST_VERSION = "1.98"
 TARGETS = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
@@ -346,6 +346,7 @@ def validate_toolchain_policy(policy_bytes: bytes) -> None:
         "cargo_deny": "0.20.2",
         "cargo_audit": "0.22.2",
         "cargo_llvm_cov": "0.9.0",
+        "cargo_nextest": "0.9.145",
         "checkout_action_commit": "df4cb1c069e1874edd31b4311f1884172cec0e10",
         "targets": TARGETS,
         "branch_coverage_instrumentation": "coverage-only RUSTC_BOOTSTRAP=1 on pinned rustc; forbidden for build, test, and release compilation",

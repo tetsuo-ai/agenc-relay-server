@@ -3,6 +3,7 @@ rust = "1.98.0"
 cargo_deny = "0.20.2"
 cargo_audit = "0.22.2"
 cargo_llvm_cov = "0.9.0"
+cargo_nextest = "0.9.145"
 checkout_action_commit = "df4cb1c069e1874edd31b4311f1884172cec0e10"
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 branch_coverage_instrumentation = "coverage-only RUSTC_BOOTSTRAP=1 on pinned rustc; forbidden for build, test, and release compilation"
@@ -73,6 +74,12 @@ name = "cargo-llvm-cov"
 first_stage = 0
 argv = ["cargo", "llvm-cov", "--version"]
 version = "cargo-llvm-cov 0.9.0"
+
+[[tool]]
+name = "cargo-nextest"
+first_stage = 0
+argv = ["cargo", "nextest", "-V"]
+version = "cargo-nextest 0.9.145 (00af4550e 2026-09-16)"
 
 [[tool]]
 name = "rust-llvm-cov"

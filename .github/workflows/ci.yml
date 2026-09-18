@@ -50,6 +50,7 @@ jobs:
           cargo +1.98.0 install --locked cargo-deny --version 0.20.2
           cargo +1.98.0 install --locked cargo-audit --version 0.22.2
           cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0
+          cargo +1.98.0 install --locked cargo-nextest --version 0.9.145
           cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2
 
       - name: Install host qualification tools
