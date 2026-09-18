@@ -38,6 +38,21 @@ fn credential_id() -> TestResult<[u8; 32]> {
 
 /// A real candidate receipt signed by the key set's only credential.
 fn record(sequence: u64, predecessor: [u8; 32], key_id: [u8; 32]) -> TestResult<Record> {
+    signed_record(
+        sequence,
+        predecessor,
+        key_id,
+        (super::SEQUENCER_SEED, 1_000),
+    )
+}
+
+/// A real candidate receipt signed by `seed` at the second `sequenced_at`.
+fn signed_record(
+    sequence: u64,
+    predecessor: [u8; 32],
+    key_id: [u8; 32],
+    (seed, sequenced_at): ([u8; 32], u64),
+) -> TestResult<Record> {
     let tbs = IrcCandidateReceiptTbs {
         profile_version: 1,
         network_id: [1; 32],
@@ -49,12 +64,12 @@ fn record(sequence: u64, predecessor: [u8; 32], key_id: [u8; 32]) -> TestResult<
         commit_object_id: [31; 32],
         prior_state_id: [58; 32],
         predecessor_record_id: predecessor,
-        sequenced_at: 1_000,
+        sequenced_at,
         sequencer_key_id: key_id,
     };
     let semantic_id = semantic_id_of(SemanticHashDomain::CandidateId, &tbs)?;
     let signature = sign_canonical(
-        &Ed25519SecretKey::from_bytes(super::SEQUENCER_SEED),
+        &Ed25519SecretKey::from_bytes(seed),
         SignatureDomain::CandidateReceipt,
         &tbs.encode()?,
     )?;
@@ -383,7 +398,19 @@ async fn a_forked_first_record_marks_the_row_conflict_and_resumes_the_others() -
 /// Every refusal below leaves the row exactly where it was and closes the
 /// companion phase without moving the head (companion 12.5.1).
 async fn assert_refused(frames: Vec<CompanionFrame>) -> TestResult {
+    Box::pin(assert_refused_under(None, frames)).await
+}
+
+/// The same refusal on a link that negotiated `key_set` instead of the
+/// single-credential set.
+async fn assert_refused_under(
+    key_set: Option<agenc_ircd_e2ee::sequencer::SequencerKeySet>,
+    frames: Vec<CompanionFrame>,
+) -> TestResult {
     let (mut fixture, _queue) = Box::pin(requesting()).await?;
+    if key_set.is_some() {
+        fixture.companion.config.sequencer_key_set = key_set;
+    }
     feed(&mut fixture, frames)?;
     assert_eq!(fixture.companion.phase, Phase::Down);
     assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
@@ -496,4 +523,92 @@ async fn a_wrong_count_anchor_or_declared_head_is_refused() -> TestResult {
     // The resolution names another conversation than the line it opened.
     let object = resolution_object([10; 32], &records, (EXPECTED + 1, head))?;
     Box::pin(assert_refused(begin_frames(CONVERSATION, &object)?)).await
+}
+
+/// The successor credential of the rotating key set.
+fn successor_id() -> TestResult<[u8; 32]> {
+    let set = super::rotating_key_set().ok_or("the rotating key set verifies")?;
+    match set.credentials.as_slice() {
+        [_, successor] => Ok(successor.credential_id),
+        _ => Err("the rotating set holds the active key and its successor".into()),
+    }
+}
+
+/// One successor-signed record at the expected position and its delivery.
+fn successor_delivery(sequenced_at: u64) -> TestResult<Vec<CompanionFrame>> {
+    let signed = signed_record(
+        EXPECTED,
+        HEAD,
+        successor_id()?,
+        (super::SUCCESSOR_SEED, sequenced_at),
+    )?;
+    let object = resolution_object(
+        CONVERSATION,
+        std::slice::from_ref(&signed),
+        (EXPECTED, signed.semantic_id),
+    )?;
+    delivery(std::slice::from_ref(&signed), &object)
+}
+
+/// Whether a successor-signed record sequenced at `sequenced_at` stages its
+/// installation on a link that negotiated the rotating key set.
+async fn successor_stages(sequenced_at: u64) -> TestResult<bool> {
+    let (mut fixture, _queue) = Box::pin(requesting()).await?;
+    fixture.companion.config.sequencer_key_set = super::rotating_key_set();
+    feed(&mut fixture, successor_delivery(sequenced_at)?)?;
+    Ok(fixture.core.context_mut()?.pending_len() != 0)
+}
+
+/// ENC-17 (#162): the overlapping successor signs only inside its window,
+/// from its `not_before` through `MAX_SEQUENCER_KEY_OVERLAP` (12.5.1).
+#[tokio::test]
+async fn a_successor_record_inside_or_at_the_edges_of_its_window_resolves() -> TestResult {
+    let closes =
+        super::SUCCESSOR_OPENS + agenc_ircd_e2ee::limits::MAX_SEQUENCER_KEY_OVERLAP_SECONDS;
+    for sequenced_at in [super::SUCCESSOR_OPENS, super::SUCCESSOR_OPENS + 1, closes] {
+        assert!(
+            Box::pin(successor_stages(sequenced_at)).await?,
+            "a successor record sequenced at {sequenced_at} is inside the window"
+        );
+    }
+    // The active credential of the same set has no window.
+    let (mut fixture, _queue) = Box::pin(requesting()).await?;
+    fixture.companion.config.sequencer_key_set = super::rotating_key_set();
+    let active = signed_record(
+        EXPECTED,
+        HEAD,
+        credential_id()?,
+        (super::SEQUENCER_SEED, closes + 1),
+    )?;
+    let object = resolution_object(
+        CONVERSATION,
+        std::slice::from_ref(&active),
+        (EXPECTED, active.semantic_id),
+    )?;
+    feed(
+        &mut fixture,
+        delivery(std::slice::from_ref(&active), &object)?,
+    )?;
+    assert_ne!(fixture.core.context_mut()?.pending_len(), 0);
+    Ok(())
+}
+
+/// A successor record before its window opens, or past its close, is a
+/// record under any other key: the link closes and the row is retained.
+#[tokio::test]
+async fn a_successor_record_outside_its_window_is_refused() -> TestResult {
+    let closes =
+        super::SUCCESSOR_OPENS + agenc_ircd_e2ee::limits::MAX_SEQUENCER_KEY_OVERLAP_SECONDS;
+    for sequenced_at in [super::SUCCESSOR_OPENS - 1, closes + 1, u64::MAX] {
+        Box::pin(assert_refused_under(
+            super::rotating_key_set(),
+            successor_delivery(sequenced_at)?,
+        ))
+        .await?;
+    }
+    // A link that never negotiated the successor refuses it at any time.
+    Box::pin(assert_refused(successor_delivery(
+        super::SUCCESSOR_OPENS + 1,
+    )?))
+    .await
 }

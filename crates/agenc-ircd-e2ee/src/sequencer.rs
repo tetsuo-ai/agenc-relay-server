@@ -204,6 +204,24 @@ impl SequencerKeySet {
         self.credentials.first()
     }
 
+    /// The credential a record sequenced at `time` may verify under
+    /// (companion 12.5.1): the current credential at any time, and its
+    /// direct successor only inside the overlap window, which opens at the
+    /// successor's `not_before` and closes `MAX_SEQUENCER_KEY_OVERLAP`
+    /// later. A successor outside that window is any other key.
+    #[must_use]
+    pub fn credential_at(
+        &self,
+        credential_id: &SemanticId,
+        time: ValidationTime,
+    ) -> Option<&VerifiedSequencerCredential> {
+        let credential = self.credential(credential_id)?;
+        let current = self
+            .current()
+            .is_some_and(|current| current.credential_id == *credential_id);
+        (current || (credential.covers(time) && self.overlap_open(time))).then_some(credential)
+    }
+
     /// Whether an overlapping successor is still inside its overlap window
     /// at `time`.
     #[must_use]

@@ -149,3 +149,20 @@ fn reinit_abort(value: &crate::objects::reinit::IrcReInitAbortCertificate) -> Si
         signature: &value.sequencer_signature,
     }
 }
+
+/// The sequencing second the record itself carries: a receipt states its
+/// own `sequenced_at`, and a terminal certificate embeds the receipt it
+/// terminates, whose `sequenced_at` is the only signed time it carries and
+/// a lower bound on its own. Informational for historical authority; a
+/// witness resolution reads it to place a successor credential inside its
+/// overlap window (companion 12.5.1).
+pub(super) const fn sequenced_at(record: &IrcSequencerRecord) -> u64 {
+    match record {
+        IrcSequencerRecord::Candidate(value) => value.tbs.sequenced_at,
+        IrcSequencerRecord::Finalization(value) => value.tbs.request.proof.receipt.tbs.sequenced_at,
+        IrcSequencerRecord::Abort(value) => value.tbs.request.receipt.tbs.sequenced_at,
+        IrcSequencerRecord::ReinitAttempt(value) => value.tbs.sequenced_at,
+        IrcSequencerRecord::ReinitActivation(value) => value.tbs.request.receipt.tbs.sequenced_at,
+        IrcSequencerRecord::ReinitAbort(value) => value.tbs.request.receipt.tbs.sequenced_at,
+    }
+}
