@@ -488,11 +488,23 @@ fn register_worker(
     }
 }
 
+/// The SASL carrier's own report that an edge's account authority could not
+/// answer. RUN-09 (#152) added it ahead of the `904` that a refused credential
+/// and an unreachable authority used to share, and every session this module
+/// authenticates negotiates `standard-replies`, so it is the first line a
+/// failed exchange here reports.
+pub(super) const AUTHORITY_UNAVAILABLE: &str = "FAIL AUTHENTICATE UNAVAILABLE";
+
 /// Whether an error is a transient transport failure a node restart can
-/// cause: a refused connection, a handshake or read cut short, or a broken
-/// pipe. Authentication and protocol failures are not transient.
+/// cause: a refused connection, a handshake or read cut short, a broken pipe,
+/// or an account authority that named itself unavailable. A `904` the carrier
+/// did not precede with that line is a refused credential, and authentication
+/// and protocol failures are still not transient.
 pub(super) fn transient_transport(error: &TestError) -> bool {
     let text = error.to_string();
+    if text.contains(AUTHORITY_UNAVAILABLE) {
+        return true;
+    }
     if text.contains(" 904 ") {
         return false;
     }
@@ -531,6 +543,12 @@ fn an_authentication_refusal_is_not_a_transient_transport_failure() {
     assert!(transient_transport(&failure(
         "SASL response ended: transport closed"
     )));
+    // RUN-09 (#152): the carrier now names the transient authority itself, so
+    // the pair it sends is transient while a bare 904 stays a refusal.
+    assert!(transient_transport(&failure(concat!(
+        "SASL response framing was invalid: :edge-a.test ",
+        "FAIL AUTHENTICATE UNAVAILABLE :Account authority unavailable"
+    ))));
 }
 
 fn own_channel(index: usize) -> String {

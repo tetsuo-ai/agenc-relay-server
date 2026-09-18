@@ -956,12 +956,13 @@ const UNISSUED_DELETION_TOKEN: [u8; 16] = [0x5a; 16];
 /// Opens one authenticated session carrying `caps` beyond the account
 /// carriers `negotiate_sasl` requests.
 ///
-/// An authentication that reaches an edge while the account's own creation
-/// is still settling is refused outright with `904` rather than delayed, so
-/// the attempt is repeated inside the ordinary network wait. No refusal this
-/// module proves is read from this carrier: the capability refusal is read
-/// from the `ACCT` reply and the deleted-login refusal from
-/// `deleted_account_login_refused`, which uses the strict helper.
+/// An authentication that reaches an edge while the account's own creation is
+/// still settling is refused rather than delayed. RUN-09 (#152) gave that
+/// refusal its own line, `FAIL AUTHENTICATE UNAVAILABLE`, ahead of the `904`
+/// it used to share with a wrong password, so the attempt is repeated only
+/// when the carrier reports that state: every caller here negotiates
+/// `standard-replies`, and `transient_transport` reads the line. A refused
+/// credential is returned on its first attempt, as it always was.
 fn deletion_session(
     fixture: &NodeFixture,
     account: AccountId,
@@ -973,8 +974,10 @@ fn deletion_session(
         wait_for_account_authority(fixture)?;
         match open_deletion_session(fixture, account, nick, caps) {
             Ok(client) => return Ok(client),
-            Err(error) if Instant::now() < deadline => {
-                let _retried = error;
+            Err(error)
+                if Instant::now() < deadline
+                    && super::stage_ten_capacity::transient_transport(&error) =>
+            {
                 thread::sleep(Duration::from_secs(1));
             }
             Err(error) => return Err(error),
@@ -1851,10 +1854,26 @@ fn deletion_drill_preconditions_are_the_ones_the_daemon_requires() -> TestResult
         accepted.contains(" NOTE ACCT UPDATED "),
         "ACCT under the capabilities the drill negotiates is accepted: {accepted}"
     );
+    // With the account authority stopped, an authentication that reaches an
+    // edge is answered `FAIL AUTHENTICATE UNAVAILABLE` before the `904` it
+    // used to be reported with alone, which is what lets a client and this
+    // harness separate it from a refused credential (RUN-09, #152).
+    nodes.stop(&network, 0, "deletion precondition")?;
+    let unreachable = open_deletion_session(&network.edge_a, account, "acct-down", DELETION_CAPS)
+        .err()
+        .ok_or_else(|| failure("authentication succeeded with its authority stopped"))?;
+    let reported = unreachable.to_string();
+    assert!(
+        reported.contains(super::stage_ten_capacity::AUTHORITY_UNAVAILABLE),
+        "an unreachable account authority names itself: {reported}"
+    );
+    assert!(
+        super::stage_ten_capacity::transient_transport(&unreachable),
+        "the named authority is a transient failure: {reported}"
+    );
     // A node the drill restarts is serving accounts when `restart` returns:
     // both edges already report the peer their account authority needs, read
     // with no wait of its own, and the surface answers on the far edge.
-    nodes.stop(&network, 0, "deletion precondition")?;
     nodes.restart(&network, 0)?;
     assert_eq!(active_peers(&network.edge_a)?, 1);
     assert_eq!(active_peers(&network.edge_b)?, 1);
