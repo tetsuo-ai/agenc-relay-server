@@ -169,7 +169,7 @@ fn capture(
 
 /// Captures one pass at `now`, stages it as the worker does, and publishes
 /// its receipt. Returns the objects the pass deleted.
-fn sweep(coordinator: &mut CompanionCoordinator, now: u64) -> TestResult<usize> {
+pub(super) fn sweep(coordinator: &mut CompanionCoordinator, now: u64) -> TestResult<usize> {
     let progress = coordinator.expiry_progress();
     let prepared = capture(coordinator, progress, now).map_err(|fault| format!("{fault}"))?;
     let mut writes = prepared.writes(STATE_GENERATION)?;

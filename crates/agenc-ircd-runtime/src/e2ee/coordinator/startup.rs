@@ -1958,6 +1958,7 @@ fn vote_rows_of(
 ) -> impl Iterator<Item = (&ProofKeyParts, [u8; 32])> {
     rows.proofs.iter().filter_map(move |(parts, object_id)| {
         (parts.role == ProofRole::Vote
+            && parts.root_fingerprint != super::ops::sequence::REQUEST_ROW_ROOT
             && parts.conversation_id == conversation_id
             && parts.subject_id == subject)
             .then_some((parts, *object_id))
@@ -2050,6 +2051,14 @@ fn fill_proofs(conversation: &mut ConversationState, proofs: &[(ProofKeyParts, [
                         .or_default()
                         .insert(leaf, *object_id);
                 }
+            }
+            // A retained-request row owns a request below quorum.
+            ProofRole::Vote if parts.root_fingerprint == super::ops::sequence::REQUEST_ROW_ROOT => {
+                conversation
+                    .pending_requests
+                    .entry(parts.subject_id)
+                    .or_default()
+                    .insert(*object_id);
             }
             ProofRole::Vote => {}
         }

@@ -241,3 +241,150 @@ fn a_reload_reports_a_vote_row_it_cannot_count_again() -> TestResult {
     assert_eq!(harness.reloaded()?.coordinator.unreplayed_votes(), 1);
     Ok(())
 }
+
+/// A below-quorum abort request of `candidate_id` without any vote, made
+/// distinct by `tag`.
+fn voteless_abort(
+    conversation: [u8; 32],
+    receipt: &IrcCandidateReceipt,
+    candidate_id: [u8; 32],
+    tag: u8,
+) -> TestResult<Vec<u8>> {
+    wire(
+        IrcWireObjectKind::AbortRequest,
+        &IrcAbortRequest {
+            core: IrcAbortCoreTbs {
+                profile_version: 1,
+                network_id: NETWORK,
+                conversation_id: conversation,
+                prior_state_id: receipt.tbs.prior_state_id,
+                candidate_id,
+                prior_epoch: 0,
+                reason: IrcCommitAbortReason::SenderWithdrawn,
+                evidence_digest: [tag; 32],
+            },
+            receipt: receipt.clone(),
+            votes: TlsVec::new(Vec::new())?,
+        },
+    )
+}
+
+/// A request that would push its conversation past
+/// `MAX_STORED_BYTES_PER_CONVERSATION` is refused with `E2EE_RATE_LIMITED`
+/// and leaves no object, row, or charge behind.
+#[test]
+fn a_pending_terminal_request_over_the_conversation_quota_is_refused_whole() -> TestResult {
+    use crate::e2ee::coordinator::owners::Account;
+    use agenc_ircd_e2ee::limits::MAX_STORED_BYTES_PER_CONVERSATION;
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, _, candidate_id) = submit_candidate(&mut harness, conversation, 0, 10)?;
+    let request = voteless_abort(conversation, &receipt, candidate_id, 1)?;
+    let charged = harness
+        .coordinator
+        .state
+        .owners
+        .conversation_bytes(&conversation);
+    // Fill the conversation to one byte short of room for the request.
+    let filler = MAX_STORED_BYTES_PER_CONVERSATION - charged - u64::try_from(request.len())? + 1;
+    harness.coordinator.state.owners.install(
+        [200; 32],
+        Account {
+            kind: 1,
+            size: filler,
+            retention: agenc_ircd_storage::e2ee_records::RetentionClass::Ordinary,
+            accepted_at: super::super::NOW,
+            reconstructed: false,
+            retired_at: None,
+            owners: std::iter::once((b"filler".to_vec(), Some(conversation))).collect(),
+        },
+    );
+    let rows = harness.writes.len();
+    assert_eq!(
+        code(harness.run(Op::SubmitAbort, &conversation, Some(&request))?),
+        Some(E2eeReplyCode::RateLimited),
+    );
+    let state = &harness.coordinator.state;
+    assert!(!state.objects.contains_key(&object_id(&request)));
+    assert!(state.owners.account(&object_id(&request)).is_none());
+    assert_eq!(harness.writes.len(), rows);
+    assert!(
+        state
+            .conversations
+            .get(&conversation)
+            .is_some_and(|state| state.pending_requests.is_empty())
+    );
+    Ok(())
+}
+
+/// Once the slot reaches its terminal the retained-request row retires, and
+/// a request no vote row names is collected at the ordinary retention
+/// boundary and not a second before (ENC-09).
+#[test]
+fn an_unowned_pending_request_ages_out_through_the_expiry_collector() -> TestResult {
+    use agenc_ircd_e2ee::limits::SEQUENCER_RECORD_RETENTION_SECONDS;
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, _, candidate_id) = submit_candidate(&mut harness, conversation, 0, 10)?;
+    let voteless = voteless_abort(conversation, &receipt, candidate_id, 1)?;
+    ok(harness.run(Op::SubmitAbort, &conversation, Some(&voteless))?)?;
+    let id = object_id(&voteless);
+    let owned = |harness: &Harness| {
+        harness
+            .coordinator
+            .state
+            .owners
+            .account(&id)
+            .map(|account| (account.owners.len(), account.retired_at))
+    };
+    assert_eq!(owned(&harness), Some((1, None)));
+    // Both council devices certify another abort of the same candidate.
+    let core = IrcAbortCoreTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: conversation,
+        prior_state_id: receipt.tbs.prior_state_id,
+        candidate_id,
+        prior_epoch: 0,
+        reason: IrcCommitAbortReason::SenderWithdrawn,
+        evidence_digest: [0; 32],
+    };
+    let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+    let mut votes = [DEVICE, SECOND_DEVICE]
+        .iter()
+        .map(|device| {
+            vote(
+                &harness,
+                *device,
+                &receipt,
+                candidate_id,
+                Terminal::abort(abort_id, 1)?,
+            )
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    votes.sort_by_key(|vote| (vote.signer_root_fingerprint, vote.signer_device_id));
+    let certified = wire(
+        IrcWireObjectKind::AbortRequest,
+        &IrcAbortRequest {
+            core,
+            receipt: receipt.clone(),
+            votes: TlsVec::new(votes)?,
+        },
+    )?;
+    let outcome = ok(harness.run(Op::SubmitAbort, &conversation, Some(&certified))?)?;
+    assert!(matches!(outcome.result, ResultBody::Aborted(..)));
+    let retired = super::super::NOW;
+    assert_eq!(owned(&harness), Some((0, Some(retired))));
+    let due = retired + SEQUENCER_RECORD_RETENTION_SECONDS;
+    for (now, present) in [(due - 1, true), (due, false)] {
+        for _ in 0..8 {
+            super::object_expiry::sweep(&mut harness.coordinator, now)?;
+        }
+        assert_eq!(
+            harness.coordinator.state.objects.contains_key(&id),
+            present,
+            "at {now}"
+        );
+    }
+    Ok(())
+}
