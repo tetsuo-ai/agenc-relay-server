@@ -74,6 +74,12 @@ bootstrap-activation votes that reload as the live coordinator admitted them,
 and conversation-charged retained terminal requests (ENC-19 to ENC-22, issues
 #166 to #169, from the internal independent review) are recorded in
 [the coordinator review remediation record](stage-10-review-remediation-coordinator.md).
+The one physical growth allowance that now spans the nonce reservation, both
+guard replacements, the main or checkpoint transaction, the deferred cleanup
+and the close of every durable operation on the core write path, its
+determinate refusal, and the bounded region size a live database is created
+with (STO-03, issue #61) are recorded in
+[the bounded durable operation record](stage-10-bounded-durable-operation.md).
 The owners of all three Section-19.3 overload classes — the refused guest and
 expensive query at 80 percent, the refused channel creation at 90 percent, and
 whole-connection eviction down to the 85-percent recovery mark at 95 percent
@@ -159,6 +165,25 @@ fragment-zero charge with the dedicated decoded-byte ingress bucket, and the
 successor credential's overlap window in witness resolution (ENC-15, ENC-16
 and ENC-17, issues #160, #161 and #162) — is recorded in
 [the edge review remediation record](stage-10-review-remediation-edge.md).
+The recovery and reference scratch admitted against the exact filesystem and
+bounded by the fork's allowance before every one of its transactions, the
+checkpoint that reads its cut back before it publishes and allocates no
+scratch afterwards, the refusal mapping that never reports a refused scratch
+as stale state or as an uncertain commit, and the metered scratch startup and
+checkpoints now report (STO-04, issue #65) are recorded in
+[the bounded recovery scratch record](stage-10-bounded-recovery-scratch.md).
+The online backup that yields between bounded slices of every phase while
+reading one authenticated snapshot cut, the exact final length fixed before
+its temporary exists, and the bounded scratch written through the
+project-owned fork (STO-05, issue #68) are recorded in
+[the incremental backup record](stage-10-incremental-backup.md).
+The descriptor-bound `R(F) + G` admission of every restore and rekey
+scratch-plan and target-construction transaction, the scratch plan rebuilt as
+bounded two-phase slices with bounded reclamation and close, the region rule
+that lets a bounded database grow, the resume of a construction stopped before
+its target existed, and the exact resume at a refused target batch (STO-07,
+issue #69) are recorded in
+[the restore and rekey admission record](stage-10-restore-rekey-admission.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
@@ -186,7 +211,7 @@ unsupported. The current-format backup and restore contract remains required.
 | Repository history | Push the existing committed branch and open its review | Repair branches pushed in PRs #29–#34; PRs #29–#33 merged, with the final queue repair and completed gate results in #34 |
 | Conformance maintenance | Bind the accepted current-format specification and preserve historical evidence | Baseline and requirement bindings repaired |
 | Storage initialization | Preserve every existing rollback guard and reject reused initialization directories | Implemented; 316 storage tests pass |
-| STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Upstream mechanism implemented and tested in the isolated checkout (STO-01); upstream publication (STO-02) and application integration (STO-03) open |
+| STO-1 | Upstream bounded preparation, allocation-free publication, bounded cleanup and close; integrate a published release | Mechanism implemented and tested in the isolated checkout (STO-01); upstream publication withdrawn for the project-owned fork (STO-02); core write path integrated under one allowance (STO-03), with the scratch, backup and construction paths and the native growth qualification still open |
 | CAP-73 authority | Authenticate public state and its complete historical transitions without exposing private MLS context | Open |
 | CAP-73 recovery | Ingest signed terminal evidence and atomically install Closed or Conflict | Open |
 | CAP-74 | Resolve retained edge witnesses with authenticated ancestry | Open |
@@ -381,9 +406,10 @@ reclamation, and bounded allocator-state persistence at close. It passes the
 433 upstream host tests, clippy, the `panic=abort` no-std check, a fifteen-test
 phase, boundary and crash matrix, and an API-aware fuzz state machine. Its
 required upstream container gates still stop because Podman is unavailable.
-Upstream acceptance and a published dependency remain open under STO-02, and
-application integration with the full nonce/guard/main-commit allowance under
-STO-03.
+Upstream submission is withdrawn for the project-owned fork (STO-02), and the
+core write path is integrated under one nonce, guard, main-commit, cleanup and
+close allowance (STO-03); the scratch, backup and construction paths follow
+under STO-04, #68 and STO-07.
 The x86_64 qualification host, its immutable release and client-tools
 images, the ext4 tuple, the campaign isolation runbook and the AArch64
 external blocker (REL-01, issue #43) are recorded in

@@ -9,38 +9,36 @@ fn restore_provenance_resets_pending_sources_when_reusing_a_scratch_database()
     let result = (|| {
         let route = route_row(CONVERSATION, RouteLifecycle::Active)?;
         let gate = gate_source(&route, E2eeRecoveryKind::Normal)?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         crate::construction_runtime::recovery_plan::push(
             &mut builder,
             &backup_source(TableId::E2eeState, &gate.key, 1)?,
             &recovery_record(&gate)?,
         )?;
-        // Preserve an unfinished scratch index as if an earlier process stopped.
-        let ConstructionPlanBuilder {
-            transaction,
-            database,
-            ..
-        } = builder;
-        transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        drop(database);
+        // Preserve a published but unfinished scratch index as if an earlier process
+        // stopped after its slice was published.
+        builder.publish_slice()?;
+        drop(builder);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&path)
             .map_err(crate::filesystem_rejected)?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         assert_eq!(
-            crate::construction_runtime::recovery_plan::pending_bytes(&builder.transaction)?,
+            crate::construction_runtime::recovery_plan::pending_bytes(builder.slice()?)?,
             0
         );
         builder.push(restore_entry(
@@ -153,6 +151,7 @@ fn restore_provenance_charges_pending_sources_and_output_entries_together()
     let limit = u64::try_from(entry.encode()?.len()).map_err(|_| StorageError::Overflow)? + 127;
     let (file, path) = scratch_file("cap73-provenance-budget")?;
     let result = (|| {
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
@@ -160,6 +159,7 @@ fn restore_provenance_charges_pending_sources_and_output_entries_together()
                 plan_bytes: limit,
                 ..maximum_limits()
             },
+            admission,
         )?;
         assert!(crate::construction_runtime::recovery_plan::push(
             &mut builder,

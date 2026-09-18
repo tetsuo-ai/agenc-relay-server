@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bounded_operation;
 mod domain_records;
 mod e2ee_records;
 mod federation_records;
@@ -26,17 +27,18 @@ use agenc_ircd_crypto::{
 };
 use agenc_ircd_storage::{
     BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupTrustKey, CommitOutcome,
-    ConstructionDirectory, ConstructionExecutor, ConstructionLimits, ConstructionTarget,
-    DatabaseHeaderTbs, ExistingRecord, InitialStorageRecord, LoginIndexKeyState,
-    PersistentRecordValue, QualificationTarget, ReadPlan, RecordMutation, RecoveryTransformV1,
-    RestoreBackupSource, SCHEMA_GENERATION, SealedRecord, StateDirectory, StorageAccountingLimits,
-    StorageConstruction, StorageConstructionAction, StorageConstructionCursor,
-    StorageConstructionKind, StorageConstructionPlanEntry, StorageConstructionSource,
-    StorageConstructionSourceKind, StorageEngineLimits, StorageError, StorageGrowthCase,
-    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
-    StorageMutationBatch, StorageMutationHead, StorageOpenConfig, StorageOperationIdentity,
-    StorageOwner, StorageQualificationReport, StorageQualificationReportTbs, StorageSealContext,
-    StoredKey, TableId, construction_plan_hash, initialize_storage, verify_backup,
+    ConstructionAdmissionPolicy, ConstructionDirectory, ConstructionExecutor, ConstructionLimits,
+    ConstructionTarget, DatabaseHeaderTbs, ExistingRecord, InitialStorageRecord,
+    LoginIndexKeyState, PersistentRecordValue, QualificationTarget, ReadPlan, RecordMutation,
+    RecoveryTransformV1, RestoreBackupSource, SCHEMA_GENERATION, SealedRecord, StateDirectory,
+    StorageAccountingLimits, StorageConstruction, StorageConstructionAction,
+    StorageConstructionCursor, StorageConstructionKind, StorageConstructionPlanEntry,
+    StorageConstructionSource, StorageConstructionSourceKind, StorageEngineLimits, StorageError,
+    StorageGrowthCase, StorageInitializationConfig, StorageInitializationMode,
+    StorageInitializationOutcome, StorageMutationBatch, StorageMutationHead, StorageOpenConfig,
+    StorageOperationIdentity, StorageOwner, StorageQualificationReport,
+    StorageQualificationReportTbs, StorageSealContext, StoredKey, TableId, construction_plan_hash,
+    initialize_storage, verify_backup,
 };
 use agenc_ircd_types::{
     AccountRandomId, DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation,
@@ -765,12 +767,14 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
         &[trusted],
         limits.backup_max_bytes,
     )?;
+    let admission_policy = ConstructionAdmissionPolicy::new(limits)?;
     let restore_plan = restore_source.rebuild_restore_plan(
         plan_file,
         &StorageMasterKey::from_bytes([19; 32]),
         target_binding,
         2,
         construction_limits,
+        construction_directory.scratch_admission(&admission_policy)?,
     )?;
     assert_eq!(restore_plan.entry_count(), 1);
     let source_facts = restore_source.facts()?;
@@ -849,7 +853,10 @@ fn initialized_owner_commits_and_reads_one_manifested_mutation() -> Result<(), B
             limits,
         })
     };
-    let mut target = ConstructionTarget::open(target_config()?)?;
+    let mut target = ConstructionTarget::open(
+        target_config()?,
+        construction_directory.target_admission(&admission_policy)?,
+    )?;
     let final_marker = target.marker()?;
     let expected_identity = final_marker.identity;
     let mut transformer =

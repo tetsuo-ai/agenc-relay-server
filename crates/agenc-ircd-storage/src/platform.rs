@@ -309,6 +309,7 @@ impl BackupOutput {
         &self.file
     }
 
+    #[cfg(test)]
     pub(crate) fn file_mut(&mut self) -> &mut File {
         &mut self.file
     }

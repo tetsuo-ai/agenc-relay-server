@@ -1,4 +1,9 @@
 //! Narrow redb adapter with fixed tables and mandatory durable commit settings.
+//!
+//! Every durable write of the live database is one bounded, immediate, two-phase transaction
+//! charged to the allowance its caller derived from Section 19.3's `G`; the adapter reports the
+//! bytes each transaction charged so the caller can debit one ledger across the operation. The
+//! scratch databases keep redb's ordinary transactions until their own allowances arrive.
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -10,12 +15,20 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use agenc_ircd_crypto::{StorageDigest, TrackedStateHasher, tracked_record_commitment};
 use redb::{
-    CommitError, Database, Durability, ReadOnlyDatabase, ReadTransaction, ReadableDatabase as _,
-    ReadableTable as _, ReadableTableMetadata as _, StorageBackend, TableDefinition,
-    TableHandle as _, WriteTransaction,
+    AllocationAllowance, BoundedWriteTransaction, Database, ReadOnlyDatabase, ReadTransaction,
+    ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _, ReclaimProgress,
+    StorageBackend, TableDefinition, TableHandle as _, WriteTransaction,
 };
-use rustix::fs::{AtFlags, unlinkat};
 
+use crate::bounded::{
+    LIVE_DATABASE_REGION_BYTES, MAX_DEFERRED_RECLAIM_RECORDS, MaintenanceOutcome,
+    live_database_builder, map_maintenance, map_preparation_error, map_publication_error,
+    map_table_error, map_write_error,
+};
+use crate::scratch::{
+    SCRATCH_SLICE_BYTES, SCRATCH_SLICE_ROWS, SCRATCH_TRANSACTION_ALLOWANCE, ScratchAdmission,
+    ScratchDatabase, ScratchLocation, ScratchUsage,
+};
 use crate::{
     IntegrityRecordMutation, IntegrityRecordVersion, MAX_SEALED_RECORD_BYTES, MAX_STORED_KEY_BYTES,
     RecordReference, StorageError, StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
@@ -38,6 +51,7 @@ pub(crate) struct RedbStore {
     database: RedbDatabase,
     faults: StorageFaultInjector,
     commit_flushes: Arc<CommitFlushCounter>,
+    repaired: Arc<AtomicBool>,
 }
 
 enum RedbDatabase {
@@ -54,11 +68,17 @@ impl RedbDatabase {
         .map_err(|_| StorageError::DatabaseRejected)
     }
 
+    fn writable(&self) -> Result<&Database, StorageError> {
+        match self {
+            Self::Writable(database) => Ok(database),
+            Self::ReadOnly(_) => Err(StorageError::DatabaseRejected),
+        }
+    }
+
+    /// An unbounded transaction, kept for the tests that shape a database the adapter refuses.
+    #[cfg(test)]
     fn begin_write(&self) -> Result<WriteTransaction, StorageError> {
-        let Self::Writable(database) = self else {
-            return Err(StorageError::DatabaseRejected);
-        };
-        database
+        self.writable()?
             .begin_write()
             .map_err(|_| StorageError::DatabaseRejected)
     }
@@ -353,85 +373,65 @@ impl StorageSnapshot {
     }
 }
 
-pub(crate) struct RecoveryScratch {
-    database: Database,
-    cleanup: Option<ScratchCleanup>,
+/// The tracked-record index one verification rebuilds from the current records and reverses
+/// through the manifests since the checkpoint cut, in admitted, bounded slices.
+pub(crate) struct RecoveryScratch<'a> {
+    inner: ScratchDatabase<'a>,
 }
 
-pub(crate) struct RecoveryScratchWriter {
-    transaction: WriteTransaction,
+/// Buffers current tracked rows and publishes them one bounded slice at a time.
+pub(crate) struct RecoveryScratchWriter<'s, 'a> {
+    scratch: &'s mut RecoveryScratch<'a>,
+    pending: Vec<OwnedRow>,
+    pending_bytes: usize,
 }
 
-pub(crate) struct ReferenceScratch {
-    database: Database,
-    cleanup: Option<ScratchCleanup>,
+/// The record-and-reference index startup validates every cross-reference against, in
+/// admitted, bounded slices.
+pub(crate) struct ReferenceScratch<'a> {
+    inner: ScratchDatabase<'a>,
 }
 
-struct ScratchCleanup {
-    directory: File,
-    temporary_name: String,
+/// Buffers records and their references and publishes them one bounded slice at a time. A
+/// record's references may span slices: validation reads the complete published index, so no
+/// slice boundary changes what it proves.
+pub(crate) struct ReferenceScratchWriter<'s, 'a> {
+    scratch: &'s mut ReferenceScratch<'a>,
+    records: Vec<Vec<u8>>,
+    references: Vec<OwnedRow>,
+    pending_bytes: usize,
 }
 
-pub(crate) struct ReferenceScratchWriter {
-    transaction: WriteTransaction,
+/// Whether a buffered slice has reached its row or byte budget.
+fn slice_is_full(rows: usize, bytes: usize) -> bool {
+    rows >= SCRATCH_SLICE_ROWS || bytes >= SCRATCH_SLICE_BYTES
 }
 
-impl ReferenceScratch {
+impl<'a> ReferenceScratch<'a> {
     pub(crate) fn create(
-        file: File,
-        directory: File,
-        temporary_name: String,
+        location: ScratchLocation,
+        admission: &'a dyn ScratchAdmission,
     ) -> Result<Self, StorageError> {
-        Self::create_inner(
-            file,
-            Some(ScratchCleanup {
-                directory,
-                temporary_name,
-            }),
-        )
-    }
-
-    pub(crate) fn create_anonymous(file: File) -> Result<Self, StorageError> {
-        Self::create_inner(file, None)
-    }
-
-    fn create_inner(file: File, cleanup: Option<ScratchCleanup>) -> Result<Self, StorageError> {
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(8 * 1_024 * 1_024);
-        let database = builder
-            .create_file(file)
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        let transaction = database
-            .begin_write()
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        {
-            let _records = transaction
-                .open_table(REFERENCE_RECORDS_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            let _references = transaction
-                .open_table(REFERENCES_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-        }
-        transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        Ok(Self { database, cleanup })
-    }
-
-    pub(crate) fn begin(&self) -> Result<ReferenceScratchWriter, StorageError> {
-        Ok(ReferenceScratchWriter {
-            transaction: self
-                .database
-                .begin_write()
-                .map_err(|_| StorageError::DatabaseRejected)?,
+        Ok(Self {
+            inner: ScratchDatabase::create(
+                location,
+                admission,
+                &[REFERENCE_RECORDS_TABLE, REFERENCES_TABLE],
+            )?,
         })
     }
 
+    pub(crate) fn begin(&mut self) -> ReferenceScratchWriter<'_, 'a> {
+        ReferenceScratchWriter {
+            scratch: self,
+            records: Vec::new(),
+            references: Vec::new(),
+            pending_bytes: 0,
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), StorageError> {
-        let transaction = self
-            .database
-            .begin_read()
-            .map_err(|_| StorageError::DatabaseRejected)?;
+        let transaction = self.inner.read()?;
         let records = transaction
             .open_table(REFERENCE_RECORDS_TABLE)
             .map_err(|_| StorageError::DatabaseRejected)?;
@@ -453,21 +453,14 @@ impl ReferenceScratch {
         }
         Ok(())
     }
-}
 
-impl Drop for ReferenceScratch {
-    fn drop(&mut self) {
-        if let Some(cleanup) = &self.cleanup {
-            let _ = unlinkat(
-                &cleanup.directory,
-                cleanup.temporary_name.as_str(),
-                AtFlags::empty(),
-            );
-        }
+    /// Closes the scratch, removes its entry, and reports its complete metered usage.
+    pub(crate) fn close(self) -> ScratchUsage {
+        self.inner.close()
     }
 }
 
-impl ReferenceScratchWriter {
+impl ReferenceScratchWriter<'_, '_> {
     pub(crate) fn insert(
         &mut self,
         table: TableId,
@@ -475,24 +468,15 @@ impl ReferenceScratchWriter {
         references: &[RecordReference],
     ) -> Result<(), StorageError> {
         let identity = scratch_key(table, stored_key)?;
-        {
-            let empty: &[u8] = &[];
-            let mut records = self
-                .transaction
-                .open_table(REFERENCE_RECORDS_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            if records
-                .insert(identity.as_slice(), empty)
-                .map_err(|_| StorageError::DatabaseRejected)?
-                .is_some()
-            {
-                return Err(StorageError::StaleState);
-            }
-        }
-        let mut table = self
-            .transaction
-            .open_table(REFERENCES_TABLE)
-            .map_err(|_| StorageError::DatabaseRejected)?;
+        self.records
+            .try_reserve(1)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(identity.len())
+            .ok_or(StorageError::Overflow)?;
+        self.records.push(identity.clone());
+        self.flush_if_full()?;
         for (index, reference) in references.iter().enumerate() {
             let mut reference_key = identity.clone();
             reference_key.extend_from_slice(
@@ -501,116 +485,152 @@ impl ReferenceScratchWriter {
                     .to_be_bytes(),
             );
             let target = scratch_key(reference.table(), reference.key())?;
-            table
-                .insert(reference_key.as_slice(), target.as_slice())
-                .map_err(|_| StorageError::DatabaseRejected)?;
+            self.references
+                .try_reserve(1)
+                .map_err(|_| StorageError::AllocationFailed)?;
+            self.pending_bytes = self
+                .pending_bytes
+                .checked_add(reference_key.len())
+                .and_then(|bytes| bytes.checked_add(target.len()))
+                .ok_or(StorageError::Overflow)?;
+            self.references.push((reference_key, target));
+            self.flush_if_full()?;
         }
         Ok(())
     }
 
-    pub(crate) fn commit(self) -> Result<(), StorageError> {
-        self.transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)
+    fn flush_if_full(&mut self) -> Result<(), StorageError> {
+        let rows = self
+            .records
+            .len()
+            .checked_add(self.references.len())
+            .ok_or(StorageError::Overflow)?;
+        if slice_is_full(rows, self.pending_bytes) {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Publishes the buffered slice: one bounded transaction, each table opened once.
+    fn flush(&mut self) -> Result<(), StorageError> {
+        if self.records.is_empty() && self.references.is_empty() {
+            return Ok(());
+        }
+        self.scratch
+            .inner
+            .observe_buffer(u64::try_from(self.pending_bytes).map_err(|_| StorageError::Overflow)?);
+        let transaction = self.scratch.inner.begin()?;
+        {
+            let empty: &[u8] = &[];
+            let mut records = transaction
+                .open_table(REFERENCE_RECORDS_TABLE)
+                .map_err(map_table_error)?;
+            for identity in self.records.drain(..) {
+                if records
+                    .insert(identity.as_slice(), empty)
+                    .map_err(map_write_error)?
+                    .is_some()
+                {
+                    return Err(StorageError::StaleState);
+                }
+            }
+            let mut table = transaction
+                .open_table(REFERENCES_TABLE)
+                .map_err(map_table_error)?;
+            for (reference_key, target) in self.references.drain(..) {
+                table
+                    .insert(reference_key.as_slice(), target.as_slice())
+                    .map_err(map_write_error)?;
+            }
+        }
+        self.pending_bytes = 0;
+        self.scratch.inner.publish(transaction)
+    }
+
+    /// Publishes whatever remains buffered.
+    pub(crate) fn finish(mut self) -> Result<(), StorageError> {
+        self.flush()
     }
 }
 
-impl RecoveryScratch {
+impl<'a> RecoveryScratch<'a> {
     pub(crate) fn create(
-        file: File,
-        directory: File,
-        temporary_name: String,
+        location: ScratchLocation,
+        admission: &'a dyn ScratchAdmission,
     ) -> Result<Self, StorageError> {
-        Self::create_inner(
-            file,
-            Some(ScratchCleanup {
-                directory,
-                temporary_name,
-            }),
-        )
+        Self::create_with_allowance(location, admission, SCRATCH_TRANSACTION_ALLOWANCE)
     }
 
-    pub(crate) fn create_anonymous(file: File) -> Result<Self, StorageError> {
-        Self::create_inner(file, None)
-    }
-
-    fn create_inner(file: File, cleanup: Option<ScratchCleanup>) -> Result<Self, StorageError> {
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(8 * 1_024 * 1_024);
-        let database = builder
-            .create_file(file)
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        let transaction = database
-            .begin_write()
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        {
-            let _table = transaction
-                .open_table(RECOVERY_SCRATCH_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-        }
-        transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        Ok(Self { database, cleanup })
-    }
-
-    pub(crate) fn begin_current(&self) -> Result<RecoveryScratchWriter, StorageError> {
-        Ok(RecoveryScratchWriter {
-            transaction: self
-                .database
-                .begin_write()
-                .map_err(|_| StorageError::DatabaseRejected)?,
+    /// Creates the index bounding every transaction by `allowance` instead of the fixed one.
+    pub(crate) fn create_with_allowance(
+        location: ScratchLocation,
+        admission: &'a dyn ScratchAdmission,
+        allowance: AllocationAllowance,
+    ) -> Result<Self, StorageError> {
+        Ok(Self {
+            inner: ScratchDatabase::create_with_allowance(
+                location,
+                admission,
+                &[RECOVERY_SCRATCH_TABLE],
+                allowance,
+            )?,
         })
     }
 
-    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=reverse manifest application keeps exact after-before scratch transitions in one transaction
+    pub(crate) fn begin_current(&mut self) -> RecoveryScratchWriter<'_, 'a> {
+        RecoveryScratchWriter {
+            scratch: self,
+            pending: Vec::new(),
+            pending_bytes: 0,
+        }
+    }
+
+    /// Reverses one manifest: every mutation's `after` must be the scratch's current version,
+    /// which then becomes its `before`. Mutations are applied in exact reverse manifest order,
+    /// at most [`SCRATCH_SLICE_ROWS`] or [`SCRATCH_SLICE_BYTES`] of keys per admitted, bounded
+    /// transaction.
     pub(crate) fn apply_reverse(
-        &self,
+        &mut self,
         mutations: &[IntegrityRecordMutation],
     ) -> Result<(), StorageError> {
-        let transaction = self
-            .database
-            .begin_write()
-            .map_err(|_| StorageError::DatabaseRejected)?;
+        let mut chunk: Vec<&IntegrityRecordMutation> = Vec::new();
+        let mut chunk_bytes = 0_usize;
+        for mutation in mutations.iter().rev() {
+            chunk
+                .try_reserve(1)
+                .map_err(|_| StorageError::AllocationFailed)?;
+            chunk.push(mutation);
+            chunk_bytes = chunk_bytes
+                .checked_add(mutation.stored_key().as_bytes().len())
+                .and_then(|bytes| bytes.checked_add(38))
+                .ok_or(StorageError::Overflow)?;
+            if slice_is_full(chunk.len(), chunk_bytes) {
+                self.reverse_chunk(&chunk)?;
+                chunk.clear();
+                chunk_bytes = 0;
+            }
+        }
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        self.reverse_chunk(&chunk)
+    }
+
+    fn reverse_chunk(&mut self, chunk: &[&IntegrityRecordMutation]) -> Result<(), StorageError> {
+        let transaction = self.inner.begin()?;
         {
             let mut table = transaction
                 .open_table(RECOVERY_SCRATCH_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            for mutation in mutations.iter().rev() {
-                let key = scratch_key(mutation.table(), mutation.stored_key())?;
-                let current = table
-                    .get(key.as_slice())
-                    .map_err(|_| StorageError::DatabaseRejected)?
-                    .map(|value| decode_present_version(value.value()))
-                    .transpose()?;
-                let current = current.unwrap_or(IntegrityRecordVersion::Absent);
-                if current != mutation.after() {
-                    return Err(StorageError::StaleState);
-                }
-                match encode_present_version(mutation.before())? {
-                    Some(value) => {
-                        table
-                            .insert(key.as_slice(), value.as_slice())
-                            .map_err(|_| StorageError::DatabaseRejected)?;
-                    }
-                    None => {
-                        table
-                            .remove(key.as_slice())
-                            .map_err(|_| StorageError::DatabaseRejected)?;
-                    }
-                }
+                .map_err(map_table_error)?;
+            for mutation in chunk {
+                reverse_mutation(&mut table, mutation)?;
             }
         }
-        transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)
+        self.inner.publish(transaction)
     }
 
     pub(crate) fn digest(&self) -> Result<(u64, StorageDigest), StorageError> {
-        let transaction = self
-            .database
-            .begin_read()
-            .map_err(|_| StorageError::DatabaseRejected)?;
+        let transaction = self.inner.read()?;
         let table = transaction
             .open_table(RECOVERY_SCRATCH_TABLE)
             .map_err(|_| StorageError::DatabaseRejected)?;
@@ -632,21 +652,41 @@ impl RecoveryScratch {
         }
         Ok((record_count, hasher.finalize()?))
     }
-}
 
-impl Drop for RecoveryScratch {
-    fn drop(&mut self) {
-        if let Some(cleanup) = &self.cleanup {
-            let _ = unlinkat(
-                &cleanup.directory,
-                cleanup.temporary_name.as_str(),
-                AtFlags::empty(),
-            );
-        }
+    /// Closes the scratch, removes its entry, and reports its complete metered usage.
+    pub(crate) fn close(self) -> ScratchUsage {
+        self.inner.close()
     }
 }
 
-impl RecoveryScratchWriter {
+fn reverse_mutation(
+    table: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    mutation: &IntegrityRecordMutation,
+) -> Result<(), StorageError> {
+    let key = scratch_key(mutation.table(), mutation.stored_key())?;
+    let current = table
+        .get(key.as_slice())
+        .map_err(|_| StorageError::DatabaseRejected)?
+        .map(|value| decode_present_version(value.value()))
+        .transpose()?;
+    let current = current.unwrap_or(IntegrityRecordVersion::Absent);
+    if current != mutation.after() {
+        return Err(StorageError::StaleState);
+    }
+    match encode_present_version(mutation.before())? {
+        Some(value) => {
+            table
+                .insert(key.as_slice(), value.as_slice())
+                .map_err(map_write_error)?;
+        }
+        None => {
+            table.remove(key.as_slice()).map_err(map_write_error)?;
+        }
+    }
+    Ok(())
+}
+
+impl RecoveryScratchWriter<'_, '_> {
     pub(crate) fn insert_current(
         &mut self,
         table_id: TableId,
@@ -660,24 +700,51 @@ impl RecoveryScratchWriter {
             sealed_record_id,
         })?
         .ok_or(StorageError::InvalidEncoding)?;
-        let mut table = self
-            .transaction
-            .open_table(RECOVERY_SCRATCH_TABLE)
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        if table
-            .insert(key.as_slice(), value.as_slice())
-            .map_err(|_| StorageError::DatabaseRejected)?
-            .is_some()
-        {
-            return Err(StorageError::StaleState);
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(key.len())
+            .and_then(|bytes| bytes.checked_add(value.len()))
+            .ok_or(StorageError::Overflow)?;
+        self.pending
+            .try_reserve(1)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        self.pending.push((key, value.to_vec()));
+        if slice_is_full(self.pending.len(), self.pending_bytes) {
+            self.flush()?;
         }
         Ok(())
     }
 
-    pub(crate) fn commit(self) -> Result<(), StorageError> {
-        self.transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)
+    /// Publishes the buffered slice: one bounded transaction, the table opened once.
+    fn flush(&mut self) -> Result<(), StorageError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        self.scratch
+            .inner
+            .observe_buffer(u64::try_from(self.pending_bytes).map_err(|_| StorageError::Overflow)?);
+        let transaction = self.scratch.inner.begin()?;
+        {
+            let mut table = transaction
+                .open_table(RECOVERY_SCRATCH_TABLE)
+                .map_err(map_table_error)?;
+            for (key, value) in self.pending.drain(..) {
+                if table
+                    .insert(key.as_slice(), value.as_slice())
+                    .map_err(map_write_error)?
+                    .is_some()
+                {
+                    return Err(StorageError::StaleState);
+                }
+            }
+        }
+        self.pending_bytes = 0;
+        self.scratch.inner.publish(transaction)
+    }
+
+    /// Publishes whatever remains buffered.
+    pub(crate) fn finish(mut self) -> Result<(), StorageError> {
+        self.flush()
     }
 }
 
@@ -798,8 +865,11 @@ impl RedbStore {
         if cache_bytes == 0 {
             return Err(StorageError::LimitExceeded);
         }
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(cache_bytes);
+        require_bounded_region(&file)?;
+        let mut builder = live_database_builder(cache_bytes);
+        let repaired = Arc::new(AtomicBool::new(false));
+        let observed_repair = Arc::clone(&repaired);
+        builder.set_repair_callback(move |_session| observed_repair.store(true, Ordering::Release));
         let commit_flushes = Arc::new(CommitFlushCounter::default());
         let database = if faults.is_enabled() {
             builder
@@ -818,7 +888,14 @@ impl RedbStore {
             database: RedbDatabase::Writable(database),
             faults,
             commit_flushes,
+            repaired,
         })
+    }
+
+    /// Reports whether this open had to repair the database, which a close that persisted
+    /// its allocator state within its allowance makes unnecessary.
+    pub(crate) fn opened_after_repair(&self) -> bool {
+        self.repaired.load(Ordering::Acquire)
     }
 
     pub(crate) fn open_read_only(
@@ -837,6 +914,7 @@ impl RedbStore {
             database: RedbDatabase::ReadOnly(database),
             faults: StorageFaultInjector::disabled(),
             commit_flushes: Arc::new(CommitFlushCounter::default()),
+            repaired: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1060,8 +1138,14 @@ impl RedbStore {
         Ok(())
     }
 
-    pub(crate) fn write_meta(&self, key: &[u8], value: &[u8]) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+    /// Writes one control record within `allowance` and returns the bytes charged.
+    pub(crate) fn write_meta(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         {
             let mut table = transaction.open_table(META_TABLE).map_err(rejected_table)?;
             table.insert(key, value).map_err(rejected_storage)?;
@@ -1069,13 +1153,16 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
+    /// Creates every table and the first control records within `allowance` and returns the
+    /// bytes charged.
     pub(crate) fn initialize_database(
         &self,
         header: &[u8],
         reservation: &[u8],
         writes: &[RedbWrite<'_>],
-    ) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         {
             let mut meta = transaction.open_table(META_TABLE).map_err(rejected_table)?;
             meta.insert(HEADER_META_KEY, header)
@@ -1098,12 +1185,15 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
+    /// Commits application rows and the committed reservation record within `allowance` and
+    /// returns the bytes charged.
     pub(crate) fn commit_records(
         &self,
         writes: &[RedbWrite<'_>],
         reservation: &[u8],
-    ) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         apply_writes(&transaction, writes)?;
         {
             let mut meta = transaction.open_table(META_TABLE).map_err(rejected_table)?;
@@ -1113,6 +1203,8 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
+    /// Installs one checkpoint, prunes its ancestors and writes the committed reservation
+    /// record within `allowance`, and returns the bytes charged.
     pub(crate) fn commit_checkpoint(
         &self,
         checkpoint_key: &[u8; 8],
@@ -1120,8 +1212,9 @@ impl RedbStore {
         previous_checkpoint_key: &[u8; 8],
         state_meta_record: &[u8],
         reservation: &[u8],
-    ) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         {
             let mut checkpoints = transaction
                 .open_table(table_definition(TableId::IntegrityCheckpoint))
@@ -1159,7 +1252,16 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
-    fn begin_durable_write(&self) -> Result<WriteTransaction, RedbCommitFailure> {
+    /// Begins one bounded write transaction charged to `allowance`.
+    ///
+    /// A bounded transaction is always immediately durable; two-phase commit is enabled
+    /// explicitly so its publication flushes the secondary header slot before the primary slot
+    /// swap, the two flushes the `TransactionPhaseOne` and `TransactionPhaseTwo` fault sites
+    /// label.
+    fn begin_bounded_write(
+        &self,
+        allowance: AllocationAllowance,
+    ) -> Result<BoundedWriteTransaction, RedbCommitFailure> {
         self.faults
             .check(
                 StorageFaultSite::TransactionBegin,
@@ -1168,7 +1270,9 @@ impl RedbStore {
             .map_err(RedbCommitFailure::Rejected)?;
         let mut transaction = self
             .database
-            .begin_write()
+            .writable()
+            .map_err(RedbCommitFailure::Rejected)?
+            .begin_write_bounded(allowance)
             .map_err(|_| RedbCommitFailure::Rejected(StorageError::DatabaseRejected))?;
         self.faults
             .check(
@@ -1176,11 +1280,40 @@ impl RedbStore {
                 StorageFaultBoundary::After,
             )
             .map_err(RedbCommitFailure::Rejected)?;
-        transaction
-            .set_durability(Durability::Immediate)
-            .map_err(|_| RedbCommitFailure::Rejected(StorageError::DatabaseRejected))?;
         transaction.set_two_phase_commit(true);
         Ok(transaction)
+    }
+
+    /// Reclaims freed-page records of earlier transactions in one bounded publication of at
+    /// most [`MAX_DEFERRED_RECLAIM_RECORDS`] records.
+    ///
+    /// Bounded transactions never reclaim in their own commit, so this is the deferred cleanup
+    /// of the operation that owns `allowance`. Progress is durable and monotonic: a refusal
+    /// reclaims nothing and leaves the database usable, and a later call resumes where the
+    /// last publication stopped, including after a restart.
+    pub(crate) fn reclaim_deferred(
+        &self,
+        allowance: AllocationAllowance,
+    ) -> Result<MaintenanceOutcome<ReclaimProgress>, RedbCommitFailure> {
+        let database = self
+            .database
+            .writable()
+            .map_err(RedbCommitFailure::Rejected)?;
+        map_maintenance(database.reclaim_bounded(allowance, MAX_DEFERRED_RECLAIM_RECORDS))
+    }
+
+    /// Persists the allocator state within `allowance` so that the next open needs no repair,
+    /// and takes that duty from the close path whatever the outcome: after a refusal the drop
+    /// only flushes and closes the file, and the next open repairs it exactly as after a crash.
+    pub(crate) fn persist_for_close(
+        &self,
+        allowance: AllocationAllowance,
+    ) -> Result<MaintenanceOutcome<()>, RedbCommitFailure> {
+        let database = self
+            .database
+            .writable()
+            .map_err(RedbCommitFailure::Rejected)?;
+        map_maintenance(database.persist_allocator_state_bounded(allowance))
     }
 }
 
@@ -1188,64 +1321,121 @@ fn table_definition(table: TableId) -> TableDefinition<'static, &'static [u8], &
     TableDefinition::new(table.name())
 }
 
-/// Applies writes with one open table handle per run of same-table writes.
-///
-/// Reopening a redb table for every row copies the table tree and the row's
-/// leaf path again on each open, which multiplied the physical growth of a
-/// maximum-count transaction by more than ten times the row bytes. Batches
-/// arrive sorted by table and key, so one handle usually covers a whole table.
-type OpenTable<'txn> = (TableId, redb::Table<'txn, &'static [u8], &'static [u8]>);
+/// The redb 4.2.0 file header fields that fix a database's region layout: the magic number,
+/// then at fixed little-endian offsets the page size and the data pages per region.
+const REDB_MAGIC: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+const REDB_PAGE_SIZE_OFFSET: u64 = 12;
+const REDB_REGION_MAX_DATA_PAGES_OFFSET: u64 = 20;
 
+/// Refuses an existing database whose header lays it out with regions larger than
+/// [`LIVE_DATABASE_REGION_BYTES`], which the bounded allowance could never extend.
+///
+/// An empty file is a creation, which the builder lays out bounded; a file too short or
+/// without the magic number is left for redb to reject. The region size is read exactly as
+/// the vendored header parser reads it, so the check cannot disagree with the open.
+fn require_bounded_region(file: &File) -> Result<(), StorageError> {
+    let length = file.metadata().map_err(crate::filesystem_rejected)?.len();
+    if length < REDB_REGION_MAX_DATA_PAGES_OFFSET + 4 {
+        return Ok(());
+    }
+    let mut magic = [0_u8; 9];
+    file.read_exact_at(&mut magic, 0)
+        .map_err(crate::filesystem_rejected)?;
+    if magic != REDB_MAGIC {
+        return Ok(());
+    }
+    let mut field = [0_u8; 4];
+    file.read_exact_at(&mut field, REDB_PAGE_SIZE_OFFSET)
+        .map_err(crate::filesystem_rejected)?;
+    let page_size = u64::from(u32::from_le_bytes(field));
+    file.read_exact_at(&mut field, REDB_REGION_MAX_DATA_PAGES_OFFSET)
+        .map_err(crate::filesystem_rejected)?;
+    let region_bytes = u64::from(u32::from_le_bytes(field))
+        .checked_mul(page_size)
+        .ok_or(StorageError::Overflow)?;
+    if region_bytes > LIVE_DATABASE_REGION_BYTES {
+        return Err(StorageError::UnboundedRegion(region_bytes));
+    }
+    Ok(())
+}
+
+/// Applies writes with one open table handle per run of same-table writes, each run in
+/// descending key order.
+///
+/// Reopening a redb table for every row copies the table tree and the row's leaf path again on
+/// each open, which multiplied the physical growth of a maximum-count transaction by more than
+/// ten times the row bytes. Batches arrive sorted by table and key, so one handle covers a whole
+/// table.
+///
+/// The order inside a run is load-bearing. redb 4.2.0 never rebuilds a leaf that holds a single
+/// value of at least one page: an insert that lands in such a leaf becomes a new sibling leaf
+/// holding that one row. With ascending keys the sibling's separator is the key just inserted, so
+/// the next greater key is routed to the large leaf again, and every row of the run receives a
+/// page of its own and a rewritten branch. Measured through the production workload, 65,535
+/// rows of 134 bytes inserted below one 8 MiB row charged 825,901,056 bytes and grew the file by
+/// 257,761,280, which no allowance of `G` can admit. With descending keys the first sibling's
+/// separator bounds every later key of the run, the rows share ordinary leaves, and the same
+/// transaction charges 71,286,784 bytes and grows the file by 16,625,664. Keys are distinct
+/// within one batch, so the order inside the transaction changes nothing a reader can observe.
 fn apply_writes(
     transaction: &WriteTransaction,
     writes: &[RedbWrite<'_>],
 ) -> Result<(), RedbCommitFailure> {
-    let mut open: Option<OpenTable<'_>> = None;
-    for write in writes {
-        let reopen = open.as_ref().is_none_or(|(table, _)| *table != write.table);
-        if reopen {
-            open = Some((
-                write.table,
-                transaction
-                    .open_table(table_definition(write.table))
-                    .map_err(rejected_table)?,
-            ));
-        }
-        let Some((_, table)) = open.as_mut() else {
-            return Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected));
+    for run in writes.chunk_by(|left, right| left.table == right.table) {
+        let Some(first) = run.first() else {
+            continue;
         };
-        if let Some(value) = write.value {
-            table.insert(write.key, value).map_err(rejected_storage)?;
-        } else {
-            table.remove(write.key).map_err(rejected_storage)?;
+        let mut table = transaction
+            .open_table(table_definition(first.table))
+            .map_err(rejected_table)?;
+        for write in run.iter().rev() {
+            if let Some(value) = write.value {
+                table.insert(write.key, value).map_err(rejected_storage)?;
+            } else {
+                table.remove(write.key).map_err(rejected_storage)?;
+            }
         }
     }
     Ok(())
 }
 
-fn rejected_table(_error: redb::TableError) -> RedbCommitFailure {
-    RedbCommitFailure::Rejected(StorageError::DatabaseRejected)
+/// A table could not be opened for writing; an allowance refusal keeps its own determinate
+/// outcome and everything else is the determinate rejection before commit.
+fn rejected_table(error: redb::TableError) -> RedbCommitFailure {
+    RedbCommitFailure::Rejected(map_table_error(error))
 }
 
-fn rejected_storage(_error: redb::StorageError) -> RedbCommitFailure {
-    RedbCommitFailure::Rejected(StorageError::DatabaseRejected)
+/// A row could not be written; an allowance refusal keeps its own determinate outcome and
+/// everything else is the determinate rejection before commit.
+fn rejected_storage(error: redb::StorageError) -> RedbCommitFailure {
+    RedbCommitFailure::Rejected(map_write_error(error))
 }
 
 impl RedbStore {
-    /// Runs the durable two-phase completion with its flushes labeled as transaction phases.
-    fn finish_transaction(&self, transaction: WriteTransaction) -> Result<(), RedbCommitFailure> {
+    /// Prepares and publishes one bounded transaction, with the two durable flushes of its
+    /// publication labeled as the transaction phases, and returns the bytes it charged.
+    ///
+    /// A refusal during preparation aborted the transaction cleanly: no root changed, every page
+    /// it freed is allocated again, and the next writer is unaffected. Any other preparation or
+    /// publication failure is uncertain and keeps Section 21.5's indeterminate outcome.
+    fn finish_transaction(
+        &self,
+        transaction: BoundedWriteTransaction,
+    ) -> Result<u64, RedbCommitFailure> {
         self.commit_flushes.begin();
-        let result = transaction.commit();
+        let result = prepare_and_publish(transaction);
         self.commit_flushes.end();
-        match result {
-            Ok(()) => Ok(()),
-            Err(CommitError::TransactionPoisoned) => {
-                Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected))
-            }
-            Err(CommitError::Storage(_)) => Err(RedbCommitFailure::Indeterminate),
-            Err(_) => Err(RedbCommitFailure::Indeterminate),
-        }
+        result
     }
+}
+
+fn prepare_and_publish(transaction: BoundedWriteTransaction) -> Result<u64, RedbCommitFailure> {
+    let prepared = transaction.prepare().map_err(map_preparation_error)?;
+    let charged = prepared
+        .allowance_charged()
+        .map_err(|_| RedbCommitFailure::Rejected(StorageError::DatabaseRejected))?;
+    prepared.publish().map_err(map_publication_error)?;
+    Ok(charged)
 }
 
 /// Rejects a stored row whose key or value exceeds the schema ceilings before it is copied.
@@ -1272,6 +1462,7 @@ mod tests {
     use redb::MultimapTableDefinition;
 
     use super::*;
+    use crate::AllowancePhase;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -1321,24 +1512,40 @@ mod tests {
         Ok((directory, store))
     }
 
-    fn initialize(store: &RedbStore, writes: &[RedbWrite<'_>]) -> Result<(), StorageError> {
-        store
-            .initialize_database(b"header", b"reservation", writes)
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })
+    /// The whole Section 19.3 allowance, which every ordinary test transaction fits.
+    fn full_allowance() -> AllocationAllowance {
+        AllocationAllowance::new(crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH)
     }
 
-    fn scratch(
-        directory: &TestDirectory,
-        name: &str,
-    ) -> Result<(File, File, String), StorageError> {
-        Ok((
-            directory.create_file(name)?,
-            directory.open_directory()?,
-            name.to_owned(),
-        ))
+    fn certain(failure: RedbCommitFailure) -> StorageError {
+        match failure {
+            RedbCommitFailure::Rejected(error) => error,
+            RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
+        }
+    }
+
+    fn initialize(store: &RedbStore, writes: &[RedbWrite<'_>]) -> Result<(), StorageError> {
+        store
+            .initialize_database(b"header", b"reservation", writes, full_allowance())
+            .map(|_| ())
+            .map_err(certain)
+    }
+
+    /// Admits every scratch transaction: these tests exercise the scratch itself, not the gate.
+    struct AlwaysAdmit;
+
+    impl ScratchAdmission for AlwaysAdmit {
+        fn admit_scratch(&self, _allowance: AllocationAllowance) -> Result<(), StorageError> {
+            Ok(())
+        }
+    }
+
+    fn scratch(directory: &TestDirectory, name: &str) -> Result<ScratchLocation, StorageError> {
+        Ok(ScratchLocation::Exclusive {
+            file: directory.create_file(name)?,
+            directory: directory.open_directory()?,
+            name: name.to_owned(),
+        })
     }
 
     #[test]
@@ -1392,30 +1599,39 @@ mod tests {
     #[test]
     fn reference_scratch_detects_duplicates_and_missing_targets() -> Result<(), StorageError> {
         let directory = TestDirectory::create("references")?;
-        let (file, parent, name) = scratch(&directory, "references.redb")?;
-        let scratch = ReferenceScratch::create(file, parent, name)?;
+        let mut scratch =
+            ReferenceScratch::create(scratch(&directory, "references.redb")?, &AlwaysAdmit)?;
         let source_key = StoredKey::new(vec![1_u8; 32])?;
         let target_key = StoredKey::new(vec![2_u8; 32])?;
         let target = RecordReference::new(TableId::E2eeObject, target_key.clone())?;
 
-        let mut writer = scratch.begin()?;
+        let mut writer = scratch.begin();
         writer.insert(
             TableId::E2eeObject,
             &source_key,
             std::slice::from_ref(&target),
         )?;
-        assert_eq!(
-            writer.insert(TableId::E2eeObject, &source_key, &[]),
-            Err(StorageError::StaleState)
-        );
-        writer.commit()?;
+        writer.finish()?;
         assert_eq!(scratch.validate(), Err(StorageError::StaleState));
 
-        let mut writer = scratch.begin()?;
+        // A duplicate record is refused when its slice is published, whether the first copy
+        // is in an earlier slice or in the same buffer.
+        let mut writer = scratch.begin();
+        writer.insert(TableId::E2eeObject, &source_key, &[])?;
+        assert_eq!(writer.finish(), Err(StorageError::StaleState));
+        let mut writer = scratch.begin();
         writer.insert(TableId::E2eeObject, &target_key, &[])?;
-        writer.commit()?;
+        writer.insert(TableId::E2eeObject, &target_key, &[])?;
+        assert_eq!(writer.finish(), Err(StorageError::StaleState));
+
+        let mut writer = scratch.begin();
+        writer.insert(TableId::E2eeObject, &target_key, &[])?;
+        writer.finish()?;
         scratch.validate()?;
-        drop(scratch);
+        let usage = scratch.close();
+        assert_eq!(usage.transactions, 3);
+        assert!(usage.charged_bytes > 0);
+        assert!(usage.peak_file_bytes >= usage.creation_bytes);
         assert!(!directory.path().join("references.redb").exists());
         Ok(())
     }
@@ -1423,8 +1639,8 @@ mod tests {
     #[test]
     fn recovery_scratch_validates_versions_and_reverse_transitions() -> Result<(), StorageError> {
         let directory = TestDirectory::create("recovery")?;
-        let (file, parent, name) = scratch(&directory, "recovery.redb")?;
-        let scratch = RecoveryScratch::create(file, parent, name)?;
+        let mut scratch =
+            RecoveryScratch::create(scratch(&directory, "recovery.redb")?, &AlwaysAdmit)?;
         let stored_key = StoredKey::new(vec![3_u8; 32])?;
         let digest = StorageDigest::from_bytes([4_u8; 32]);
         let present = IntegrityRecordVersion::Present {
@@ -1432,13 +1648,12 @@ mod tests {
             sealed_record_id: digest,
         };
 
-        let mut writer = scratch.begin_current()?;
+        let mut writer = scratch.begin_current();
         writer.insert_current(TableId::E2eeObject, &stored_key, 1, digest)?;
-        assert_eq!(
-            writer.insert_current(TableId::E2eeObject, &stored_key, 1, digest),
-            Err(StorageError::StaleState)
-        );
-        writer.commit()?;
+        writer.finish()?;
+        let mut writer = scratch.begin_current();
+        writer.insert_current(TableId::E2eeObject, &stored_key, 1, digest)?;
+        assert_eq!(writer.finish(), Err(StorageError::StaleState));
         assert_eq!(scratch.digest()?.0, 1);
 
         let mismatch = IntegrityRecordMutation::new(
@@ -1463,18 +1678,18 @@ mod tests {
         )?;
         scratch.apply_reverse(&[mutation])?;
         assert_eq!(scratch.digest()?.0, 0);
+        let usage = scratch.close();
+        assert_eq!(usage.transactions, 3);
+        assert!(!directory.path().join("recovery.redb").exists());
         Ok(())
     }
 
     #[test]
     fn recovery_digest_rejects_malformed_scratch_rows() -> Result<(), StorageError> {
         let directory = TestDirectory::create("malformed-recovery")?;
-        let (file, parent, name) = scratch(&directory, "recovery.redb")?;
-        let scratch = RecoveryScratch::create(file, parent, name)?;
-        let transaction = scratch
-            .database
-            .begin_write()
-            .map_err(|_| StorageError::DatabaseRejected)?;
+        let mut scratch =
+            RecoveryScratch::create(scratch(&directory, "recovery.redb")?, &AlwaysAdmit)?;
+        let transaction = scratch.inner.begin()?;
         {
             let mut table = transaction
                 .open_table(RECOVERY_SCRATCH_TABLE)
@@ -1483,9 +1698,7 @@ mod tests {
                 .insert(&[0_u8, 0, 1][..], &[0_u8; 36][..])
                 .map_err(|_| StorageError::DatabaseRejected)?;
         }
-        transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)?;
+        scratch.inner.publish(transaction)?;
         assert_eq!(scratch.digest(), Err(StorageError::InvalidEncoding));
         Ok(())
     }
@@ -1616,6 +1829,7 @@ mod tests {
                 key: b"key",
                 value: None,
             }],
+            full_allowance(),
         );
         assert!(matches!(
             rejected,
@@ -1625,11 +1839,8 @@ mod tests {
         store.validate_inventory()?;
         store.validate_meta_membership()?;
         store
-            .write_meta(b"unexpected", b"value")
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })?;
+            .write_meta(b"unexpected", b"value", full_allowance())
+            .map_err(certain)?;
         assert_eq!(
             store.validate_meta_membership(),
             Err(StorageError::InvalidEncoding)
@@ -1694,11 +1905,9 @@ mod tests {
                     value: Some(b"first"),
                 }],
                 b"reservation-2",
+                full_allowance(),
             )
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })?;
+            .map_err(certain)?;
         assert_eq!(
             store.read_record(TableId::E2eeObject, &key)?,
             Some(b"first".to_vec())
@@ -1711,11 +1920,9 @@ mod tests {
                     value: None,
                 }],
                 b"reservation-3",
+                full_allowance(),
             )
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })?;
+            .map_err(certain)?;
         assert_eq!(store.read_record(TableId::E2eeObject, &key)?, None);
         assert_eq!(
             store.read_meta(RESERVATION_META_KEY)?,
@@ -1835,9 +2042,233 @@ mod tests {
         )?;
         let store = RedbStore::open_with_faults(file, 1_048_576, injector)?;
         assert!(matches!(
-            store.write_meta(b"key", b"value"),
+            store.write_meta(b"key", b"value", full_allowance()),
             Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected))
         ));
+        Ok(())
+    }
+
+    fn reopen_store(directory: &TestDirectory, name: &str) -> Result<RedbStore, StorageError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.path().join(name))
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        RedbStore::open_with_faults(file, 1_048_576, StorageFaultInjector::disabled())
+    }
+
+    const CHARGED_KEY: [u8; 32] = [8_u8; 32];
+
+    fn charged_write() -> RedbWrite<'static> {
+        RedbWrite {
+            table: TableId::E2eeObject,
+            key: &CHARGED_KEY,
+            value: Some(b"first"),
+        }
+    }
+
+    /// Initializes a fresh store and commits one fixed row under `allowance`, so that the same
+    /// deterministic transaction can be replayed against different allowances.
+    fn first_commit(
+        label: &str,
+        allowance: AllocationAllowance,
+    ) -> Result<(TestDirectory, RedbStore, Result<u64, RedbCommitFailure>), StorageError> {
+        let (directory, store) = open_store(label)?;
+        initialize(&store, &[])?;
+        let outcome = store.commit_records(&[charged_write()], b"reservation-2", allowance);
+        Ok((directory, store, outcome))
+    }
+
+    #[test]
+    fn bounded_commits_are_charged_exactly_and_refused_without_side_effects()
+    -> Result<(), StorageError> {
+        let (_reference_directory, _reference, measured) =
+            first_commit("charge-reference", full_allowance())?;
+        let charged = measured.map_err(certain)?;
+        assert!(charged > 0 && charged <= crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH);
+
+        // Exactly the measured charge fits, to the byte.
+        let (_exact_directory, exact, outcome) =
+            first_commit("charge-exact", AllocationAllowance::new(charged))?;
+        assert_eq!(outcome.map_err(certain)?, charged);
+        assert_eq!(
+            exact.read_record(TableId::E2eeObject, &CHARGED_KEY)?,
+            Some(b"first".to_vec())
+        );
+
+        // One byte less refuses during preparation: nothing is written, the reservation record
+        // is untouched, and the next writer on the same store is usable.
+        let (_short_directory, short, outcome) =
+            first_commit("charge-short", AllocationAllowance::new(charged - 1))?;
+        assert!(matches!(
+            outcome,
+            Err(RedbCommitFailure::Rejected(StorageError::AllowanceRefused(
+                AllowancePhase::Preparation
+            )))
+        ));
+        assert_eq!(short.read_record(TableId::E2eeObject, &CHARGED_KEY)?, None);
+        assert_eq!(
+            short.read_meta(RESERVATION_META_KEY)?,
+            Some(b"reservation".to_vec())
+        );
+        short
+            .commit_records(&[charged_write()], b"reservation-2", full_allowance())
+            .map_err(certain)?;
+        assert_eq!(
+            short.read_record(TableId::E2eeObject, &CHARGED_KEY)?,
+            Some(b"first".to_vec())
+        );
+        assert_eq!(
+            short.read_meta(RESERVATION_META_KEY)?,
+            Some(b"reservation-2".to_vec())
+        );
+
+        // No allowance at all refuses the first mutation, before anything is prepared.
+        let (_none_directory, none, outcome) =
+            first_commit("charge-none", AllocationAllowance::new(0))?;
+        assert!(matches!(
+            outcome,
+            Err(RedbCommitFailure::Rejected(StorageError::AllowanceRefused(
+                AllowancePhase::Mutation
+            )))
+        ));
+        assert_eq!(
+            none.read_meta(RESERVATION_META_KEY)?,
+            Some(b"reservation".to_vec())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_cleanup_and_close_stay_inside_their_allowances() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("cleanup")?;
+        let store = RedbStore::open_with_faults(
+            directory.create_file("state.redb")?,
+            1_048_576,
+            StorageFaultInjector::disabled(),
+        )?;
+        initialize(&store, &[])?;
+        store
+            .commit_records(&[charged_write()], b"reservation-2", full_allowance())
+            .map_err(certain)?;
+
+        // A reclamation without allowance reclaims nothing and leaves the database usable; a
+        // reclamation with allowance returns the pages the commit freed, then finds nothing.
+        assert!(matches!(
+            store.reclaim_deferred(AllocationAllowance::new(0)),
+            Ok(MaintenanceOutcome::Refused(AllowancePhase::Cleanup))
+        ));
+        let progress = store
+            .reclaim_deferred(full_allowance())
+            .ok()
+            .and_then(MaintenanceOutcome::completed)
+            .ok_or(StorageError::StaleState)?;
+        assert!(progress.records >= 1 && progress.pages >= 1);
+        assert!(!progress.remaining);
+        let drained = store
+            .reclaim_deferred(full_allowance())
+            .ok()
+            .and_then(MaintenanceOutcome::completed)
+            .ok_or(StorageError::StaleState)?;
+        assert_eq!((drained.records, drained.remaining), (0, false));
+
+        // A refused close persists nothing, so the next open repairs exactly as after a crash;
+        // a close within its allowance leaves the next open clean.
+        assert!(matches!(
+            store.persist_for_close(AllocationAllowance::new(0)),
+            Ok(MaintenanceOutcome::Refused(AllowancePhase::Close))
+        ));
+        drop(store);
+        let repaired = reopen_store(&directory, "state.redb")?;
+        assert!(repaired.opened_after_repair());
+        assert_eq!(
+            repaired.read_record(TableId::E2eeObject, &CHARGED_KEY)?,
+            Some(b"first".to_vec())
+        );
+        assert!(matches!(
+            repaired.persist_for_close(full_allowance()),
+            Ok(MaintenanceOutcome::Completed(()))
+        ));
+        drop(repaired);
+        let clean = reopen_store(&directory, "state.redb")?;
+        assert!(!clean.opened_after_repair());
+        Ok(())
+    }
+
+    #[test]
+    fn a_database_laid_out_with_unbounded_regions_is_refused_at_open() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("regions")?;
+        let file = directory.create_file("unbounded.redb")?;
+        // The upstream default region, which the bounded allowance could never extend.
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(1_048_576);
+        let database = builder
+            .create_file(file)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        drop(database);
+        assert_eq!(
+            reopen_store(&directory, "unbounded.redb").err(),
+            Some(StorageError::UnboundedRegion(4_294_967_296))
+        );
+
+        // A database the adapter created opens again, and an empty file is a creation.
+        let (bounded_directory, bounded) = open_store("regions-bounded")?;
+        initialize(&bounded, &[])?;
+        drop(bounded);
+        let reopened = reopen_store(&bounded_directory, "state.redb")?;
+        reopened.validate_inventory()?;
+        Ok(())
+    }
+
+    #[test]
+    fn ascending_rows_below_a_large_value_share_leaves_instead_of_taking_a_page_each()
+    -> Result<(), StorageError> {
+        let (_directory, store) = open_store("large-neighbor")?;
+        initialize(&store, &[])?;
+        // One value of many pages whose key sorts directly above the rows that follow.
+        let large_key = [0x13_u8; 18];
+        let large = vec![1_u8; 8 * 1_048_576];
+        store
+            .commit_records(
+                &[RedbWrite {
+                    table: TableId::Sanction,
+                    key: &large_key,
+                    value: Some(&large),
+                }],
+                b"reservation-2",
+                full_allowance(),
+            )
+            .map_err(certain)?;
+
+        const ROWS: u64 = 8_192;
+        let value = [7_u8; 134];
+        let keys = (0..ROWS)
+            .map(|index| {
+                let mut key = [0x12_u8; 18];
+                for (slot, byte) in key.iter_mut().skip(10).zip(index.to_be_bytes()) {
+                    *slot = byte;
+                }
+                key
+            })
+            .collect::<Vec<_>>();
+        let writes = keys
+            .iter()
+            .map(|key| RedbWrite {
+                table: TableId::Sanction,
+                key,
+                value: Some(&value),
+            })
+            .collect::<Vec<_>>();
+        let charged = store
+            .commit_records(&writes, b"reservation-3", full_allowance())
+            .map_err(certain)?;
+        // A page and a rewritten branch for every row would charge more than 6 KiB a row; rows
+        // that share leaves charge well under one page a row.
+        assert!(
+            charged < ROWS * 2_048,
+            "{ROWS} rows below a large value charged {charged} bytes"
+        );
+        assert_eq!(store.table_usage(TableId::Sanction, u64::MAX)?.0, ROWS + 1);
         Ok(())
     }
 }

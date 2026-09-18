@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agenc_ircd_crypto::{
     DatabaseBinding, Ed25519PublicKey, LoginIndexKey, OsEntropy, RollbackGuardRootKey,
@@ -14,9 +15,10 @@ use zeroize::Zeroizing;
 
 use crate::construction_schema::ConstructionSchema;
 use crate::{
-    BackupTrustKey, ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor,
-    ConstructionLimits, ConstructionPlan, ConstructionSourceDatabase, ConstructionSourceFacts,
-    ConstructionTarget, DatabaseHeader, DatabaseHeaderTbs, InitialStorageRecord,
+    BackupTrustKey, ConstructionAdmissionPolicy, ConstructionCapacityObserver,
+    ConstructionDirectory, ConstructionDirectoryPhase, ConstructionExecutor, ConstructionLimits,
+    ConstructionPlan, ConstructionSourceDatabase, ConstructionSourceFacts, ConstructionTarget,
+    ConstructionTransaction, DatabaseHeader, DatabaseHeaderTbs, InitialStorageRecord,
     RecoveryTransformV1, RestoreBackupSourceConfig, StateDirectory, StorageConstruction,
     StorageConstructionCursor, StorageConstructionKind, StorageEngineLimits, StorageError,
     StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
@@ -128,16 +130,34 @@ pub struct RestoreCommandReceipt {
 }
 
 /// Runs the complete resumable restore protocol and installs only a verified output.
+///
+/// Every scratch-plan and target-construction transaction is admitted against the live
+/// `R(F) + G` gate of its own filesystem immediately before it runs. A refusal is
+/// determinate and writes nothing; the staging directory stays exactly resumable with
+/// `--resume`, which rebuilds the plan and continues at the target batch that was refused.
 pub fn execute_restore_command(
     request: RestoreCommandRequest,
     qualifications: &[StorageQualification],
 ) -> Result<RestoreCommandReceipt, StorageError> {
-    execute_restore_admitted(request, qualifications)
+    let policy = ConstructionAdmissionPolicy::new(request.limits)?;
+    execute_restore_admitted(request, qualifications, policy)
+}
+
+/// Runs the restore protocol with every capacity sample routed through `observer`, so a
+/// test can stand in for an external writer at one named transaction; test suites only.
+pub fn execute_restore_command_with_observer(
+    request: RestoreCommandRequest,
+    qualifications: &[StorageQualification],
+    observer: Arc<dyn ConstructionCapacityObserver>,
+) -> Result<RestoreCommandReceipt, StorageError> {
+    let policy = ConstructionAdmissionPolicy::observed(request.limits, observer)?;
+    execute_restore_admitted(request, qualifications, policy)
 }
 
 fn execute_restore_admitted(
     request: RestoreCommandRequest,
     qualifications: &[StorageQualification],
+    policy: ConstructionAdmissionPolicy,
 ) -> Result<RestoreCommandReceipt, StorageError> {
     validate_restore_request(&request)?;
     let limits = request.limits.validate()?;
@@ -188,6 +208,7 @@ fn execute_restore_admitted(
         target,
         source_facts,
         current_facts,
+        policy,
     }
     .run(&mut source)
 }
@@ -290,6 +311,7 @@ struct RestoreExecution<'a> {
     target: TargetIdentity,
     source_facts: ConstructionSourceFacts,
     current_facts: Option<ConstructionSourceFacts>,
+    policy: ConstructionAdmissionPolicy,
 }
 
 impl RestoreExecution<'_> {
@@ -319,12 +341,14 @@ impl RestoreExecution<'_> {
             ConstructionDirectoryPhase::Staging => self.directory.rebuild_plan_file()?,
             ConstructionDirectoryPhase::Installed => self.directory.anonymous_plan_file()?,
         };
+        let admission = self.directory.scratch_admission(&self.policy)?;
         let plan = source.rebuild_restore_plan(
             plan_file,
             &StorageMasterKey::from_bytes(*self.secrets.target_master),
             target_binding,
             self.target.header.tbs().storage_key_generation,
             self.construction_limits,
+            admission,
         )?;
         let mut identity = restore_identity(
             source,
@@ -372,7 +396,9 @@ impl RestoreExecution<'_> {
             next_target: StorageConstructionCursor::BeforeFirst,
             target_records_committed: 0,
         };
+        let admission = self.directory.target_admission(&self.policy)?;
         if self.target.fresh {
+            admission.recheck_observed(ConstructionTransaction::TargetInitialize)?;
             initialize_restore_target(
                 &self.directory,
                 self.qualifications,
@@ -387,6 +413,7 @@ impl RestoreExecution<'_> {
         let mut target_writer = match ConstructionTarget::open_stopped(
             self.target_config()?,
             ConstructionSchema::from_generation(self.target.header.tbs().schema_generation)?,
+            admission,
         ) {
             Ok(target_writer) => target_writer,
             // A construction that was finalized but never renamed into place
@@ -597,7 +624,13 @@ fn select_target_identity(
     limits: StorageEngineLimits,
 ) -> Result<TargetIdentity, StorageError> {
     let schema = ConstructionSchema::from_generation(source_header.tbs().schema_generation)?;
-    if request.resume {
+    // A construction stopped before its target was initialized (a scratch refusal) has a
+    // staging directory and no database; it resumes by building a fresh target.
+    let target_exists = match directory.phase() {
+        ConstructionDirectoryPhase::Staging => directory.target_database_exists()?,
+        ConstructionDirectoryPhase::Installed => true,
+    };
+    if request.resume && target_exists {
         let header = match directory.phase() {
             ConstructionDirectoryPhase::Staging => {
                 let config = || {
@@ -612,8 +645,8 @@ fn select_target_identity(
                         limits,
                     )
                 };
-                match ConstructionTarget::open_stopped(config()?, schema) {
-                    Ok(target) => target.header(),
+                match ConstructionTarget::marker_header_stopped(config()?, schema) {
+                    Ok(header) => header,
                     // A finalized construction that was never renamed has no
                     // marker row; its completed header is the target identity.
                     Err(open_error) => {

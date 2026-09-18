@@ -35,6 +35,18 @@ pub enum StorageError {
     DatabaseRejected,
     /// A maintenance operation could not safely resume the named construction.
     ResumeMismatch,
+    /// One durable operation's Section 19.3 physical growth allowance could not admit an
+    /// allocation. The refusal is determinate: nothing of the refused transaction was written,
+    /// an already burned nonce reservation stays durable and is never reused, and the next
+    /// operation starts unaffected. It is never an I/O failure, never stale state, and never
+    /// the indeterminate outcome; the closed phase says where the allowance ran out, for
+    /// operator diagnosis only.
+    AllowanceRefused(AllowancePhase),
+    /// The database was laid out with regions of the named size in bytes, larger than the
+    /// bounded allowance can ever extend the file by, so no bounded transaction could grow it.
+    /// The daemon refuses to open it rather than run it unbounded or let it fill up silently;
+    /// it must be recreated (initialized or restored) with bounded regions.
+    UnboundedRegion(u64),
 }
 
 impl fmt::Display for StorageError {
@@ -55,11 +67,70 @@ impl fmt::Display for StorageError {
             Self::WriterLocked => "storage writer is already locked",
             Self::DatabaseRejected => "database rejected the operation",
             Self::ResumeMismatch => "storage construction cannot be resumed",
+            Self::AllowanceRefused(phase) => {
+                return write!(
+                    formatter,
+                    "storage growth allowance refused the operation during {phase}"
+                );
+            }
+            Self::UnboundedRegion(bytes) => {
+                return write!(
+                    formatter,
+                    "database region size {bytes} bytes cannot grow under the bounded allowance; recreate the database with {}-byte regions",
+                    crate::bounded::LIVE_DATABASE_REGION_BYTES
+                );
+            }
         })
     }
 }
 
 impl Error for StorageError {}
+
+/// Closed phase of one durable operation in which its physical growth allowance refused.
+///
+/// The phase is diagnostic only: every refusal is the same determinate, side-effect-free
+/// `AllowanceRefused` outcome whatever the phase, and no phase makes a refusal retryable in
+/// place. `Mutation` and `Preparation` name the two abortable halves of one bounded redb
+/// transaction, `Cleanup` names the deferred freed-page reclamation that follows a committed
+/// operation, and `Close` names the allocator-state persistence that precedes a database close.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllowancePhase {
+    /// A table write of the transaction requested a page or a file extension.
+    Mutation,
+    /// The abortable commit preparation requested a page or a file extension.
+    Preparation,
+    /// The deferred reclamation of pages earlier transactions freed requested an allocation.
+    Cleanup,
+    /// The allocator-state persistence before a database close requested an allocation.
+    Close,
+}
+
+impl AllowancePhase {
+    /// Every phase, in operation order.
+    pub const ALL: [Self; 4] = [
+        Self::Mutation,
+        Self::Preparation,
+        Self::Cleanup,
+        Self::Close,
+    ];
+
+    /// Fixed lowercase label for logs and metrics.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mutation => "mutation",
+            Self::Preparation => "preparation",
+            Self::Cleanup => "cleanup",
+            Self::Close => "close",
+        }
+    }
+}
+
+impl fmt::Display for AllowancePhase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
 
 /// Closed, bounded cause of a filesystem rejection (spec 25.2: fixed labels,
 /// never a path, an errno string, or content). It is diagnostic only: the

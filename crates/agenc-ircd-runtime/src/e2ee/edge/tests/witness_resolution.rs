@@ -186,7 +186,7 @@ async fn requesting() -> TestResult<(WitnessFixture, LinkQueue)> {
 
 /// [`requesting`] with the exact `EWITNESS REQUEST` line the edge sent.
 async fn requesting_line() -> TestResult<(WitnessFixture, LinkQueue, String)> {
-    let mut fixture = durable_fault().await?;
+    let mut fixture = Box::pin(durable_fault()).await?;
     fixture
         .companion
         .restore_witness_backing(BackingReservationPort::new(Arc::new(MemoryBudget::new(

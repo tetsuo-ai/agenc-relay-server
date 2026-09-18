@@ -455,10 +455,12 @@ impl StorageOwner {
 impl Drop for StorageOwner {
     /// Performs the same joined shutdown as [`StorageOwner::shutdown`] and discards its result.
     ///
-    /// The owner thread finishes any active checkpoint, then runs one complete checkpoint scan
-    /// when manifests are retained. An audited reload reservation skips that final scan so
-    /// startup reconciliation can resolve the reservation. Dropping waits behind any deferred
-    /// backup; callers that need the outcome must call `shutdown` instead.
+    /// The owner thread cancels any backup still in its phases (its holder receives
+    /// `Unavailable` and no artifact is published), finishes any active checkpoint, then runs
+    /// one complete checkpoint scan when manifests are retained. An audited reload reservation
+    /// skips that final scan so startup reconciliation can resolve the reservation. The close
+    /// then persists the allocator state within its own bounded allowance. Callers that need
+    /// the outcome must call `shutdown` instead.
     fn drop(&mut self) {
         let _ = self.join_owner();
     }
@@ -490,6 +492,11 @@ enum OwnerStep {
 fn run_owner(engine: &mut StorageEngine, requests: &Receiver<StorageRequest>) {
     let mut state = OwnerState::new();
     while owner_step(engine, requests, &mut state) == OwnerStep::Continue {}
+    // An owner that stops without a clean shutdown still takes the close duty within an
+    // allowance; whatever its outcome, the next open repairs exactly as after a crash.
+    if !engine.close_handled() {
+        engine.close_bounded(false);
+    }
 }
 
 /// Runs one owner iteration in priority order: a backup slice, a checkpoint slice, a deferred
@@ -553,7 +560,6 @@ const fn defers_beside(job: ActiveJob, request: &StorageRequest) -> bool {
         (job, request),
         (_, StorageRequest::Backup { .. })
             | (ActiveJob::Backup, StorageRequest::Checkpoint { .. })
-            | (ActiveJob::Backup, StorageRequest::Shutdown { .. })
             | (ActiveJob::Checkpoint, StorageRequest::Commit { .. })
             | (ActiveJob::Checkpoint, StorageRequest::Checkpoint { .. })
             | (ActiveJob::Checkpoint, StorageRequest::LimitsChanged)
@@ -689,6 +695,13 @@ fn dispatch_request(
         }
         StorageRequest::LimitsChanged => OwnerStep::Continue,
         StorageRequest::Shutdown { completion } => {
+            // A backup still in its phases is cancelled, not waited for: the
+            // job drops its temporary and scratch, its holder learns the
+            // owner is closing, and the bounded shutdown checkpoint starts.
+            if engine.backup_is_active() {
+                engine.abandon_backup();
+                finish_backup(state, Err(StorageError::Unavailable));
+            }
             let result = finish_for_shutdown(engine);
             let _ = completion.send(result);
             OwnerStep::Stop
@@ -696,14 +709,18 @@ fn dispatch_request(
     }
 }
 
+/// Finishes the owner's durable work for a clean stop: any active checkpoint, the final
+/// checkpoint scan unless an audited reload reservation defers it, and the bounded close that
+/// persists the allocator state within Section 19.3's `G`.
 fn finish_for_shutdown(engine: &mut StorageEngine) -> Result<(), StorageError> {
-    if engine.runtime_limit_reservation_active() {
-        return Ok(());
+    if !engine.runtime_limit_reservation_active() {
+        while engine.checkpoint_is_active() {
+            engine.service_checkpoint().map_err(checkpoint_error)?;
+        }
+        engine.checkpoint_for_shutdown().map_err(checkpoint_error)?;
     }
-    while engine.checkpoint_is_active() {
-        engine.service_checkpoint().map_err(checkpoint_error)?;
-    }
-    engine.checkpoint_for_shutdown().map_err(checkpoint_error)
+    engine.close_bounded(true);
+    Ok(())
 }
 
 fn checkpoint_error(error: EngineCommitFailure) -> StorageError {
@@ -1183,3 +1200,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "owner/tests/backup_phases.rs"]
+mod backup_phase_tests;

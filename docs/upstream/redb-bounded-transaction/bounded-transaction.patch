@@ -313,10 +313,10 @@ index 0000000..6451a79
 +});
 diff --git a/src/bounded.rs b/src/bounded.rs
 new file mode 100644
-index 0000000..b084d23
+index 0000000..7491753
 --- /dev/null
 +++ b/src/bounded.rs
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,213 @@
 +//! Write transactions with a typed physical allocation allowance and explicit phases.
 +//!
 +//! An ordinary [`WriteTransaction`](crate::WriteTransaction) allocates pages and extends the
@@ -450,6 +450,18 @@ index 0000000..b084d23
 +    }
 +}
 +
++impl BoundedWriteTransaction {
++    /// Enable or disable two-phase commit for the bounded publication (defaults to disabled).
++    ///
++    /// The bounded handle exposes only an immutable view of the inner transaction, so the
++    /// durability setting is passed through explicitly: `publish` commits with exactly the
++    /// two-phase setting recorded here, and the allowance is unaffected because the second
++    /// phase writes only the header slots.
++    pub fn set_two_phase_commit(&mut self, enabled: bool) {
++        self.inner.set_two_phase_commit(enabled);
++    }
++}
++
 +impl Deref for BoundedWriteTransaction {
 +    type Target = WriteTransaction;
 +
@@ -519,7 +531,7 @@ index 0000000..b084d23
 +    }
 +}
 diff --git a/src/db.rs b/src/db.rs
-index 7d7dee1..65bdff2 100644
+index 7d7dee1..8032320 100644
 --- a/src/db.rs
 +++ b/src/db.rs
 @@ -2,10 +2,13 @@ use crate::io;
@@ -680,6 +692,24 @@ index 7d7dee1..65bdff2 100644
          && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
      {
          #[cfg(feature = "logging")]
+@@ -1472,7 +1572,16 @@ impl Builder {
+         self
+     }
+ 
+-    #[cfg(any(test, fuzzing))]
++    /// Set the region size (in bytes) a newly created database is laid out with.
++    ///
++    /// The value must be a power of two and is fixed at creation; an existing database keeps
++    /// the region size in its header. Upstream exposes this only to its own tests. The bounded
++    /// write transaction charges every file extension at its full length before it happens, and
++    /// the file grows by up to two regions at a time once the first region is full, so a bounded
++    /// database must be created with a region size of at most half its allowance or no
++    /// transaction can ever extend it: with the default 4 GiB region and a 256 MiB allowance the
++    /// very first doubling past 256 MiB is refused. A caller that bounds transactions should
++    /// create with `set_region_size(64 * 1024 * 1024)` or smaller.
+     pub fn set_region_size(&mut self, size: u64) -> &mut Self {
+         assert!(size.is_power_of_two());
+         self.region_size = Some(size);
 diff --git a/src/error.rs b/src/error.rs
 index 27ebbce..963d046 100644
 --- a/src/error.rs

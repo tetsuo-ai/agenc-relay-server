@@ -1,5 +1,5 @@
 schema_version = 1
-frozen_at_commit = "806ab3edf593ceb65c32fd9832071beea4f852ea"
+frozen_at_commit = "f36a2b6f9c60e9e35789ba9d29892f4bdd465aec"
 
 [profiles.base_federation_v1]
 sha256 = "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
@@ -12,7 +12,7 @@ base64url = "N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU"
 [[artifacts]]
 path = "docs/ircd-architecture-and-implementation-spec.md"
 role = "architecture"
-sha256 = "f916f550b7dc56066dcb43cb9b6804128b4e2aae7458eccf9eeceae52944536f"
+sha256 = "870f353f032f95e1d50c213d050977af653bb414ec32f5a05bd8feeb3d731a8b"
 
 [[artifacts]]
 path = "docs/irc-mls-e2ee-extension.md"
@@ -32,7 +32,7 @@ sha256 = "40e5c1c256f6103eea35751135c2c4eee0c869f22318167ad16fd1bbe2439013"
 [[artifacts]]
 path = "docs/specification-manifest.txt"
 role = "specification-manifest"
-sha256 = "bc3a136128b2aa110a4293cda94dfda70ae841900337a90cde376b22194b3d20"
+sha256 = "a90b9662bd22b62c4c1dd90309bdc6a5d6970ef645b27f0aebaf15dd1d280b46"
 
 [[artifacts]]
 path = "scripts/check-spec.sh"

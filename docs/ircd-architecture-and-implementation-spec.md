@@ -3072,6 +3072,27 @@ metadata. A live write starts only when `database.redb`, `rollback.guard`, and
 their temporary replacements resolve to the same filesystem and current
 available bytes are at least `R(F) + G`.
 
+The allowance is enforced, not only reserved. Each admitted durable operation
+derives one allowance of exactly `G` and charges against it, before the
+allocation happens, every redb page extent and file extension of its
+nonce-reservation transaction, its main or checkpoint transaction, and the
+deferred reclamation of pages that earlier transactions freed, together with a
+fixed headroom for each guard replacement: the guard temporary rounded up to
+the filesystem block size, one directory block, and 32,768 bytes of inode
+allocation rounded up to the block size. Nothing is refunded. A charge the
+allowance cannot admit refuses the operation before its irreversible commit
+begins, with nothing of the refused transaction written; that refusal is
+Section 21.5's `Rejected`, never `Indeterminate` and never a stale-state
+result, and an already durable nonce reservation stays burned. A refused
+deferred reclamation leaves the committed operation committed and resumes in a
+later operation, including after a restart. A database close persists the
+allocator state under its own admitted allowance of `G`; a close that is
+refused or cannot persist leaves that repair to the next open, exactly as a
+crash does, and never allocates outside an allowance. The live database is
+created with 67,108,864-byte redb regions, so one file extension is at most
+half of `G`, and a database whose header records larger regions is refused at
+open rather than run without a bound.
+
 The release artifact contains a signed storage-characterization report for
 each supported `(target triple, redb version, filesystem type, filesystem block
 size, mount-option class)` tuple. Using the maximum Section-23.4 transaction

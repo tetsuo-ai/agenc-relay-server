@@ -3,6 +3,7 @@
 //! Durable record codecs, bounded transaction ownership, backup, and recovery.
 
 mod backup;
+mod bounded;
 mod codec;
 mod construction;
 mod construction_directory;
@@ -29,6 +30,7 @@ mod recovery;
 mod redb_store;
 mod restore_command;
 mod schema;
+mod scratch;
 mod sealed;
 mod source_validation;
 
@@ -39,6 +41,7 @@ pub use backup::{
     BackupTrailer, BackupTrustKey, MAX_BACKUP_TRUST_KEYS, VerifiedBackup, backup_stream_bytes,
     verify_backup,
 };
+pub use bounded::{LIVE_DATABASE_REGION_BYTES, guard_replacement_charge};
 pub use construction::{
     MAX_CONSTRUCTION_PLAN_BYTES, STORAGE_CONSTRUCTION_KEY, StorageConstruction,
     StorageConstructionAction, StorageConstructionCursor, StorageConstructionKind,
@@ -47,16 +50,17 @@ pub use construction::{
 };
 pub use construction_directory::{ConstructionDirectory, ConstructionDirectoryPhase};
 pub use construction_runtime::{
-    BackupConstructionSourceReader, ConstructionCommitReceipt, ConstructionExecutor,
+    BackupConstructionSourceReader, ConstructionAdmission, ConstructionAdmissionPolicy,
+    ConstructionCapacityObserver, ConstructionCommitReceipt, ConstructionExecutor,
     ConstructionFinalizationCounters, ConstructionLimits, ConstructionPlan,
     ConstructionPlanBuilder, ConstructionPreflight, ConstructionSourceDatabase,
     ConstructionSourceFacts, ConstructionSourceReader, ConstructionSourceRecord,
     ConstructionTarget, ConstructionTargetBatch, ConstructionTargetRecord,
-    ConstructionTargetWriter, ConstructionTransformer, DatabaseConstructionSourceReader,
-    ExactCopyTransformer, MAX_CONSTRUCTION_BATCH_BYTES, MAX_CONSTRUCTION_BATCH_RECORDS,
-    MAX_CONSTRUCTION_SOURCE_BYTES, MAX_CONSTRUCTION_TARGET_BYTES, RecoveryTransformV1,
-    RestoreBackupSource, RestoreBackupSourceConfig, VerifiedConstructionOutput,
-    recovery_transform_prefix,
+    ConstructionTargetWriter, ConstructionTransaction, ConstructionTransformer,
+    DatabaseConstructionSourceReader, ExactCopyTransformer, MAX_CONSTRUCTION_BATCH_BYTES,
+    MAX_CONSTRUCTION_BATCH_RECORDS, MAX_CONSTRUCTION_SOURCE_BYTES, MAX_CONSTRUCTION_TARGET_BYTES,
+    RecoveryTransformV1, RestoreBackupSource, RestoreBackupSourceConfig,
+    VerifiedConstructionOutput, recovery_transform_prefix,
 };
 pub use control::{
     DATABASE_HEADER_BYTES, DatabaseHeader, DatabaseHeaderTbs, NONCE_RESERVATION_BYTES,
@@ -75,7 +79,9 @@ pub use engine::{
     StorageInspectionConfig, StorageOpenConfig, StorageRuntimeLimits, StorageStatistics,
     inspect_storage,
 };
-pub use error::{FilesystemCause, FilesystemFailure, StorageError, filesystem_rejected};
+pub use error::{
+    AllowancePhase, FilesystemCause, FilesystemFailure, StorageError, filesystem_rejected,
+};
 pub use fault::{
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSchedule,
     StorageFaultSite,
@@ -140,12 +146,14 @@ pub use records::{
 pub use recovery::{RecoveryDisposition, classify_recovery_state};
 pub use restore_command::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, execute_restore_command,
+    execute_restore_command_with_observer,
 };
 pub use schema::{
     DATABASE_FORMAT, MAX_NONCE_DRAWS, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH,
     MAX_STORED_KEY_BYTES, MAX_TRACKED_MUTATIONS, MAX_TRANSACTION_PLANS, SCHEMA_GENERATION,
     STORAGE_HANDOFF_SLOT_BYTES, StoredKey, TableId,
 };
+pub use scratch::{SCRATCH_SLICE_BYTES, SCRATCH_SLICE_ROWS, ScratchUsage};
 pub use sealed::{
     MAX_SEALED_RECORD_BYTES, MIN_SEALED_RECORD_BYTES, SealedRecord, StorageSealContext,
 };
