@@ -1003,3 +1003,7 @@ fn continue_fetch(
         coordinator.fail_link(context, link, peer, error);
     }
 }
+
+#[cfg(test)]
+#[path = "companion/tests/transfer.rs"]
+mod transfer_tests;

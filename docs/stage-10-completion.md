@@ -119,6 +119,13 @@ now proves writes nothing, the rows it reads for what a deletion removes and
 retains, and the ordinary test that guards both preconditions outside the
 native campaign (QA-03, issue #147) are recorded in
 [the deletion drill repair record](stage-10-deletion-drill-repair.md).
+The six release-critical regions that measured zero once COV-07 anchored them
+to their own items — the companion coordinator's mailbox and ESTATE expiry
+timers, its fetch continuation and three quarters of the startup
+owner-retirement protocol — the regressions that drive each one through its
+owning boundary rather than by calling the function, and the one entry that no
+input can reach (COV-08, issue #150) are recorded in
+[the companion coverage record](stage-10-companion-coverage.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
