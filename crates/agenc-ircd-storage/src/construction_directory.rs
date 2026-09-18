@@ -12,8 +12,8 @@ use rustix::fs::{
 use rustix::io::Errno;
 
 use crate::{
-    StorageError, StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
-    VerifiedConstructionOutput,
+    ConstructionAdmission, ConstructionAdmissionPolicy, StorageError, StorageFaultBoundary,
+    StorageFaultInjector, StorageFaultSite, VerifiedConstructionOutput,
 };
 
 pub(crate) const STAGING_SUFFIX: &str = ".agenc-construction-v1";
@@ -143,6 +143,72 @@ impl ConstructionDirectory {
     #[must_use]
     pub const fn phase(&self) -> ConstructionDirectoryPhase {
         self.phase
+    }
+
+    /// Binds the reserve policy to the directory that holds the scratch plan: the staging
+    /// directory while constructing, or the validated parent that holds the anonymous plan
+    /// of an installed-output verification.
+    pub fn scratch_admission(
+        &self,
+        policy: &ConstructionAdmissionPolicy,
+    ) -> Result<ConstructionAdmission, StorageError> {
+        let descriptor = match self.phase {
+            ConstructionDirectoryPhase::Staging => File::from(self.staging_directory()?),
+            ConstructionDirectoryPhase::Installed => self
+                .parent
+                .try_clone()
+                .map_err(crate::filesystem_rejected)?,
+        };
+        Ok(policy.bind(descriptor))
+    }
+
+    /// Reports whether the staging directory already holds a target database, which is
+    /// what a stopped construction resumes; a stop before the target was initialized
+    /// resumes by building a fresh target under a rebuilt plan.
+    pub fn target_database_exists(&self) -> Result<bool, StorageError> {
+        if self.phase != ConstructionDirectoryPhase::Staging {
+            return Err(StorageError::StaleState);
+        }
+        match openat(
+            &self.staging_directory()?,
+            DATABASE_FILE,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(database) => {
+                require_kind_and_mode(
+                    &database,
+                    FileType::RegularFile,
+                    Some(Mode::RUSR | Mode::WUSR),
+                )?;
+                Ok(true)
+            }
+            Err(Errno::NOENT) => Ok(false),
+            Err(error) => Err(crate::filesystem_rejected(error)),
+        }
+    }
+
+    /// Binds the reserve policy to the staging directory that holds the target database.
+    pub fn target_admission(
+        &self,
+        policy: &ConstructionAdmissionPolicy,
+    ) -> Result<ConstructionAdmission, StorageError> {
+        if self.phase != ConstructionDirectoryPhase::Staging {
+            return Err(StorageError::StaleState);
+        }
+        Ok(policy.bind(File::from(self.staging_directory()?)))
+    }
+
+    fn staging_directory(&self) -> Result<OwnedFd, StorageError> {
+        let staging = openat(
+            &self.parent,
+            self.staging_name.as_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(crate::filesystem_rejected)?;
+        require_kind_and_mode(&staging, FileType::Directory, Some(Mode::RWXU))?;
+        Ok(staging)
     }
 
     /// Replaces the non-authoritative scratch plan with a fresh mode-0600 file.
@@ -514,6 +580,67 @@ mod tests {
                     .starts_with(ANONYMOUS_PLAN_PREFIX)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn admissions_follow_the_directory_that_holds_the_plan_and_the_target()
+    -> Result<(), StorageError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let parent = TestDirectory::create("admissions")?;
+        let output = parent.path().join("output");
+        let policy = ConstructionAdmissionPolicy::new(crate::StorageEngineLimits {
+            redb_cache_bytes: 8 * 1_024 * 1_024,
+            fixed_reserve_bytes: 64 * 1_024 * 1_024,
+            reserve_percent: 1,
+            database_max_bytes: 1_073_741_824,
+            backup_max_bytes: 1_073_741_824,
+            integrity_checkpoint_manifests: 10_000,
+        })?;
+        let staging = ConstructionDirectory::open(&output, false)?;
+        assert!(!staging.target_database_exists()?);
+        private_file(&staging.selected_path().join(DATABASE_FILE))?;
+        assert!(staging.target_database_exists()?);
+        let staging_inode = fs::metadata(staging.selected_path())
+            .map_err(crate::filesystem_rejected)?
+            .ino();
+        let parent_inode = fs::metadata(parent.path())
+            .map_err(crate::filesystem_rejected)?
+            .ino();
+        for admission in [
+            staging.scratch_admission(&policy)?,
+            staging.target_admission(&policy)?,
+        ] {
+            assert_eq!(
+                admission
+                    .descriptor_metadata()
+                    .map_err(crate::filesystem_rejected)?
+                    .ino(),
+                staging_inode
+            );
+            admission.admit(crate::ConstructionTransaction::ScratchCreate)?;
+        }
+        drop(staging);
+        fs::rename(parent.path().join(".output.agenc-construction-v1"), &output)
+            .map_err(crate::filesystem_rejected)?;
+        let installed = ConstructionDirectory::open(&output, true)?;
+        assert_eq!(
+            installed
+                .scratch_admission(&policy)?
+                .descriptor_metadata()
+                .map_err(crate::filesystem_rejected)?
+                .ino(),
+            parent_inode
+        );
+        assert!(matches!(
+            installed.target_admission(&policy),
+            Err(StorageError::StaleState)
+        ));
+        assert_eq!(
+            installed.target_database_exists(),
+            Err(StorageError::StaleState)
+        );
         Ok(())
     }
 

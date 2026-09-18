@@ -4,6 +4,8 @@
 
 #[path = "stage_five_completion/bounded_scratch.rs"]
 mod bounded_scratch;
+#[path = "stage_five_completion/construction_admission.rs"]
+mod construction_admission;
 #[path = "stage_five_completion/recovery_provenance.rs"]
 mod recovery_provenance;
 #[path = "stage_five_completion/source_validation.rs"]
@@ -34,6 +36,7 @@ use agenc_ircd_crypto::{
 };
 use agenc_ircd_storage::{
     BackupConstructionSourceReader, BackupDestination, BackupTrustKey, CommitOutcome,
+    ConstructionAdmission, ConstructionAdmissionPolicy, ConstructionCapacityObserver,
     ConstructionCommitReceipt, ConstructionDirectory, ConstructionDirectoryPhase,
     ConstructionExecutor, ConstructionFinalizationCounters, ConstructionLimits, ConstructionPlan,
     ConstructionPlanBuilder, ConstructionSourceDatabase, ConstructionSourceReader,
@@ -779,6 +782,7 @@ fn startup_reconstructs_every_domain_table_and_reference_kind() -> Result<(), Bo
         .write(true)
         .create_new(true)
         .open(plan_directory.path().join("complete-rekey-plan.redb"))?;
+    let admission = scratch_admission(&plan_file)?;
     let plan = source
         .rebuild_rekey_plan(
             plan_file,
@@ -791,6 +795,7 @@ fn startup_reconstructs_every_domain_table_and_reference_kind() -> Result<(), Bo
             ),
             1,
             construction_limits(),
+            admission,
         )
         .map_err(|error| format!("complete-domain rekey plan failed: {error}"))?;
     assert_eq!(plan.entry_count(), 21);
@@ -2836,10 +2841,12 @@ fn disk_plan_orders_variable_keys_by_raw_bytes() -> Result<(), Box<dyn Error>> {
         &expected,
         agenc_ircd_storage::MAX_CONSTRUCTION_PLAN_BYTES,
     )?;
+    let admission = scratch_admission(&file)?;
     let mut builder = ConstructionPlanBuilder::start_streaming(
         StorageConstructionKind::Rekey,
         file,
         construction_limits(),
+        admission,
     )?;
     builder.push(rekey_entry(TableId::Sanction, &length_first, digest(2))?)?;
     builder.push(rekey_login_state_entry(&login_state_key, digest(3))?)?;
@@ -3028,6 +3035,7 @@ fn reconstructed_source_rebuilds_rekey_plan_and_enforces_key_generation()
         .write(true)
         .create_new(true)
         .open(root.path().join("invalid-plan.redb"))?;
+    let admission = scratch_admission(&invalid_file)?;
     assert!(matches!(
         source.rebuild_rekey_plan(
             invalid_file,
@@ -3035,6 +3043,7 @@ fn reconstructed_source_rebuilds_rekey_plan_and_enforces_key_generation()
             target_binding,
             2,
             construction_limits(),
+            admission,
         ),
         Err(StorageError::InvalidEncoding)
     ));
@@ -3043,12 +3052,14 @@ fn reconstructed_source_rebuilds_rekey_plan_and_enforces_key_generation()
         .write(true)
         .create_new(true)
         .open(root.path().join("new-key-plan.redb"))?;
+    let admission = scratch_admission(&new_key_file)?;
     let new_key_plan = source.rebuild_rekey_plan(
         new_key_file,
         &StorageMasterKey::from_bytes([79; 32]),
         target_binding,
         1,
         construction_limits(),
+        admission,
     )?;
     assert_eq!(new_key_plan.entry_count(), 3);
     let same_key_file = OpenOptions::new()
@@ -3056,12 +3067,14 @@ fn reconstructed_source_rebuilds_rekey_plan_and_enforces_key_generation()
         .write(true)
         .create_new(true)
         .open(root.path().join("same-key-plan.redb"))?;
+    let admission = scratch_admission(&same_key_file)?;
     let same_key_plan = source.rebuild_rekey_plan(
         same_key_file,
         &StorageMasterKey::from_bytes(source_master_bytes),
         target_binding,
         2,
         construction_limits(),
+        admission,
     )?;
     assert_eq!(same_key_plan.entry_count(), 3);
     Ok(())
@@ -3202,20 +3215,25 @@ fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box
     if !matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
         return Err("construction initialization did not complete".into());
     }
-    let mut target = ConstructionTarget::open(StorageOpenConfig {
-        expected_network_id: network,
-        expected_server_id: server,
-        state_directory: StateDirectory::open(&directory.selected_path(), &[qualification])?,
-        storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
-        rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
-        login_index_key: LoginIndexKey::from_bytes([24; 32]),
-        previous_login_index_key: None,
-        limits,
-    })?;
+    let policy = ConstructionAdmissionPolicy::new(limits)?;
+    let mut target = ConstructionTarget::open(
+        StorageOpenConfig {
+            expected_network_id: network,
+            expected_server_id: server,
+            state_directory: StateDirectory::open(&directory.selected_path(), &[qualification])?,
+            storage_master_key: StorageMasterKey::from_bytes(target_master_bytes),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(target_guard_bytes),
+            login_index_key: LoginIndexKey::from_bytes([24; 32]),
+            previous_login_index_key: None,
+            limits,
+        },
+        directory.target_admission(&policy)?,
+    )?;
     let final_marker = target.marker()?;
     let expected_identity = final_marker.identity;
     assert_ne!(final_marker.identity.target_database_header_hash, digest(0));
     let plan_file = directory.rebuild_plan_file()?;
+    let admission = scratch_admission(&plan_file)?;
     let plan = ConstructionPlan::rebuild_disk(
         &final_marker.identity,
         plan_file,
@@ -3228,6 +3246,7 @@ fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box
             Ok(rekey_login_state_entry(&stored_key, source_record_id)?),
         ],
         construction_limits(),
+        admission,
     )?;
     let mut source = TestConstructionSource {
         records: vec![
@@ -3783,6 +3802,36 @@ impl RekeyConstructionFixture {
         })
     }
 
+    fn target_admission(&self) -> Result<ConstructionAdmission, StorageError> {
+        target_admission(&self.staging)
+    }
+
+    /// Opens the staging target with every admission sample routed through `observer`.
+    fn execution_observed(
+        &self,
+        observer: std::sync::Arc<dyn ConstructionCapacityObserver>,
+        limits: ConstructionLimits,
+    ) -> Result<
+        (
+            ConstructionTarget,
+            ConstructionExecutor,
+            TestConstructionSource,
+        ),
+        StorageError,
+    > {
+        let admission = ConstructionAdmissionPolicy::observed(test_limits(), observer)?
+            .bind(fs::File::open(&self.staging).map_err(agenc_ircd_storage::filesystem_rejected)?);
+        let target = ConstructionTarget::open(
+            self.open_config_at(&self.staging, StorageFaultInjector::disabled())?,
+            admission,
+        )?;
+        let marker = target.marker()?;
+        let plan = self.plan(&marker.identity)?;
+        let source = self.source()?;
+        let executor = ConstructionExecutor::resume(marker, plan, limits)?;
+        Ok((target, executor, source))
+    }
+
     fn source(&self) -> Result<TestConstructionSource, StorageError> {
         Ok(TestConstructionSource {
             records: vec![
@@ -3827,7 +3876,10 @@ impl RekeyConstructionFixture {
         ),
         StorageError,
     > {
-        let target = ConstructionTarget::open(self.open_config_at(&self.staging, faults)?)?;
+        let target = ConstructionTarget::open(
+            self.open_config_at(&self.staging, faults)?,
+            self.target_admission()?,
+        )?;
         let marker = target.marker()?;
         let plan = self.plan(&marker.identity)?;
         let source = self.source()?;
@@ -4069,11 +4121,13 @@ fn disk_plan_builder_rejects_count_size_duplicate_and_missing_key_state()
         .read(true)
         .write(true)
         .open(directory.path().join("count.redb"))?;
+    let admission = scratch_admission(&count_file)?;
     let mut count_builder = ConstructionPlanBuilder::start(
         StorageConstructionKind::Rekey,
         1,
         count_file,
         construction_limits(),
+        admission,
     )?;
     count_builder.push(rekey_login_state_entry(&login_key, digest(1))?)?;
     assert_eq!(
@@ -4090,6 +4144,7 @@ fn disk_plan_builder_rejects_count_size_duplicate_and_missing_key_state()
         .read(true)
         .write(true)
         .open(directory.path().join("size.redb"))?;
+    let admission = scratch_admission(&size_file)?;
     let mut size_builder = ConstructionPlanBuilder::start_streaming(
         StorageConstructionKind::Rekey,
         size_file,
@@ -4097,6 +4152,7 @@ fn disk_plan_builder_rejects_count_size_duplicate_and_missing_key_state()
             plan_bytes: 1,
             ..construction_limits()
         },
+        admission,
     )?;
     assert_eq!(
         size_builder.push(rekey_login_state_entry(&login_key, digest(1))?),
@@ -4108,10 +4164,12 @@ fn disk_plan_builder_rejects_count_size_duplicate_and_missing_key_state()
         .read(true)
         .write(true)
         .open(directory.path().join("duplicate.redb"))?;
+    let admission = scratch_admission(&duplicate_file)?;
     let mut duplicate_builder = ConstructionPlanBuilder::start_streaming(
         StorageConstructionKind::Rekey,
         duplicate_file,
         construction_limits(),
+        admission,
     )?;
     duplicate_builder.push(rekey_login_state_entry(&login_key, digest(1))?)?;
     assert_eq!(
@@ -4124,11 +4182,13 @@ fn disk_plan_builder_rejects_count_size_duplicate_and_missing_key_state()
         .read(true)
         .write(true)
         .open(directory.path().join("short.redb"))?;
+    let admission = scratch_admission(&short_file)?;
     let short_builder = ConstructionPlanBuilder::start(
         StorageConstructionKind::Rekey,
         1,
         short_file,
         construction_limits(),
+        admission,
     )?;
     assert!(matches!(
         short_builder.finish(),
@@ -4140,10 +4200,12 @@ fn disk_plan_builder_rejects_count_size_duplicate_and_missing_key_state()
         .read(true)
         .write(true)
         .open(directory.path().join("missing.redb"))?;
+    let admission = scratch_admission(&missing_file)?;
     let mut missing_builder = ConstructionPlanBuilder::start_streaming(
         StorageConstructionKind::Rekey,
         missing_file,
         construction_limits(),
+        admission,
     )?;
     missing_builder.push(rekey_entry(
         TableId::Account,
@@ -4605,6 +4667,7 @@ fn construction_executor_enforces_first_and_accumulated_plaintext_limits()
     ] {
         let target = ConstructionTarget::open(
             fixture.open_config_at(&fixture.staging, StorageFaultInjector::disabled())?,
+            fixture.target_admission()?,
         )?;
         let marker = target.marker()?;
         let plan = fixture.plan(&marker.identity)?;
@@ -4633,6 +4696,7 @@ fn construction_preflight_rejects_an_oversized_first_record() -> Result<(), Box<
     let fixture = RekeyConstructionFixture::create()?;
     let target = ConstructionTarget::open(
         fixture.open_config_at(&fixture.staging, StorageFaultInjector::disabled())?,
+        fixture.target_admission()?,
     )?;
     let marker = target.marker()?;
     let plan = fixture.plan(&marker.identity)?;
@@ -4673,6 +4737,7 @@ fn construction_target_validates_an_at_target_successor_between_batches()
     let fixture = RekeyConstructionFixture::create()?;
     let mut target = ConstructionTarget::open(
         fixture.open_config_at(&fixture.staging, StorageFaultInjector::disabled())?,
+        fixture.target_admission()?,
     )?;
     let marker = target.marker()?;
     let plan = fixture.plan(&marker.identity)?;
@@ -4742,6 +4807,20 @@ fn rekey_entry(
         StorageConstructionAction::RekeyCopy,
         0,
     )
+}
+
+/// Samples the scratch file's own filesystem under the test reserve.
+pub(crate) fn scratch_admission(file: &fs::File) -> Result<ConstructionAdmission, StorageError> {
+    Ok(ConstructionAdmissionPolicy::new(test_limits())?.bind(
+        file.try_clone()
+            .map_err(agenc_ircd_storage::filesystem_rejected)?,
+    ))
+}
+
+/// Samples the staging directory's filesystem under the test reserve.
+pub(crate) fn target_admission(staging: &Path) -> Result<ConstructionAdmission, StorageError> {
+    Ok(ConstructionAdmissionPolicy::new(test_limits())?
+        .bind(fs::File::open(staging).map_err(agenc_ircd_storage::filesystem_rejected)?))
 }
 
 pub(crate) fn test_limits() -> StorageEngineLimits {

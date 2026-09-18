@@ -160,6 +160,13 @@ reading one authenticated snapshot cut, the exact final length fixed before
 its temporary exists, and the bounded scratch written through the
 project-owned fork (STO-05, issue #68) are recorded in
 [the incremental backup record](stage-10-incremental-backup.md).
+The descriptor-bound `R(F) + G` admission of every restore and rekey
+scratch-plan and target-construction transaction, the scratch plan rebuilt as
+bounded two-phase slices with bounded reclamation and close, the region rule
+that lets a bounded database grow, the resume of a construction stopped before
+its target existed, and the exact resume at a refused target batch (STO-07,
+issue #69) are recorded in
+[the restore and rekey admission record](stage-10-restore-rekey-admission.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

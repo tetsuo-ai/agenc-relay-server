@@ -1,15 +1,21 @@
 //! Bounded, resumable execution of authenticated construction plans.
 
+mod admission;
 mod recovery;
 mod recovery_plan;
 mod recovery_provenance;
 mod restore_source;
 mod stopped;
 
+pub use admission::{
+    ConstructionAdmission, ConstructionAdmissionPolicy, ConstructionCapacityObserver,
+    ConstructionTransaction,
+};
 pub use restore_source::RestoreBackupSourceConfig;
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::ops::Bound;
 
 use agenc_ircd_crypto::{
     ConstructionPlanHasher, DatabaseBinding, LoginIndexKey, LoginIndexKeyId, OsEntropy,
@@ -18,12 +24,15 @@ use agenc_ircd_crypto::{
 };
 use agenc_ircd_types::{Generation, Nickname, RecoveryEpoch, Revision, TransactionId};
 use redb::{
-    Database, Durability, ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _,
-    TableDefinition,
+    AllocationAllowance, BoundedWriteTransaction, Database, ReadTransaction, ReadableDatabase as _,
+    ReadableTable as _, ReadableTableMetadata as _, TableDefinition,
 };
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
+use crate::bounded::{
+    map_table_error as scratch_table_rejected, map_write_error as scratch_storage_rejected,
+};
 use crate::engine::{StorageEngine, StorageOpenConfig};
 use crate::{
     AccountRecordBody, BACKUP_FIXED_STREAM_BYTES, BackupRecord, BackupTrustKey,
@@ -50,6 +59,8 @@ pub const MAX_CONSTRUCTION_BATCH_BYTES: usize = 16_777_216;
 
 /// redb page cache used by the scratch plan database.
 const CONSTRUCTION_PLAN_CACHE_BYTES: usize = 8 * 1_024 * 1_024;
+/// Freed-page records one bounded scratch reclamation removes.
+const SCRATCH_RECLAIM_RECORDS: usize = 64;
 /// Sequence-zero initialization seals the key check, construction marker, genesis
 /// checkpoint, and StateMeta, so a fresh target starts at this nonce high-water mark.
 /// Mirrors `initialize_storage`.
@@ -158,14 +169,67 @@ enum ConstructionPlanStorage {
 }
 
 /// Incremental secret-free writer for one scratch construction plan.
+///
+/// Every scratch transaction is admitted against the live `R(F) + G` gate of the scratch
+/// filesystem immediately before it begins and runs under the fixed allowance `G` through
+/// the bounded write transaction: the table reset, each slice of source observation and
+/// auxiliary indexing, each slice of restore reverse replay, each slice of the
+/// unsorted-to-ordered copy, every deferred reclamation, and the bounded close. A refusal
+/// aborts only the refused slice; every earlier slice is already published, and the plan is
+/// rederived in full by the next `--resume` because a scratch plan is never authority.
 pub struct ConstructionPlanBuilder {
     kind: StorageConstructionKind,
-    database: Database,
-    transaction: redb::WriteTransaction,
+    database: Option<Database>,
+    admission: ConstructionAdmission,
+    slice: Option<BoundedWriteTransaction>,
+    phase: ScratchPhase,
+    slice_ordinal: u64,
+    slice_writes: u64,
+    slice_bytes: u64,
+    slice_record_limit: u64,
+    slice_byte_limit: u64,
     expected_entries: Option<u64>,
     entry_count: u64,
     encoded_bytes: u64,
     maximum_bytes: u64,
+}
+
+/// The scratch phase whose slices the builder is admitting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScratchPhase {
+    Observe,
+    Verify,
+    Order,
+}
+
+impl ScratchPhase {
+    const fn transaction(self, ordinal: u64) -> ConstructionTransaction {
+        match self {
+            Self::Observe => ConstructionTransaction::ScratchObserve(ordinal),
+            Self::Verify => ConstructionTransaction::ScratchVerify(ordinal),
+            Self::Order => ConstructionTransaction::ScratchOrder(ordinal),
+        }
+    }
+}
+
+/// In-process cursor of the sliced unsorted-to-ordered copy.
+struct OrderedCopy {
+    key_state_records: u8,
+    previous_target: Option<(TableId, Vec<u8>)>,
+    cursor: Option<Vec<u8>>,
+    index: u64,
+}
+
+impl Drop for ConstructionPlanBuilder {
+    fn drop(&mut self) {
+        // An abandoned builder aborts its open slice and takes the allocator-state duty away
+        // from the database close under a zero allowance, so closing a refused or failed
+        // construction allocates nothing; the next resume rebuilds the plan file anyway.
+        self.slice = None;
+        if let Some(database) = &self.database {
+            let _ = database.persist_allocator_state_bounded(AllocationAllowance::new(0));
+        }
+    }
 }
 
 impl ConstructionPlanBuilder {
@@ -175,8 +239,9 @@ impl ConstructionPlanBuilder {
         expected_entries: u64,
         file: File,
         limits: ConstructionLimits,
+        admission: ConstructionAdmission,
     ) -> Result<Self, StorageError> {
-        Self::start_inner(kind, Some(expected_entries), file, limits)
+        Self::start_inner(kind, Some(expected_entries), file, limits, admission)
     }
 
     /// Creates a plan whose exact entry count is established by one streamed preflight.
@@ -184,8 +249,9 @@ impl ConstructionPlanBuilder {
         kind: StorageConstructionKind,
         file: File,
         limits: ConstructionLimits,
+        admission: ConstructionAdmission,
     ) -> Result<Self, StorageError> {
-        Self::start_inner(kind, None, file, limits)
+        Self::start_inner(kind, None, file, limits, admission)
     }
 
     fn start_inner(
@@ -193,69 +259,160 @@ impl ConstructionPlanBuilder {
         expected_entries: Option<u64>,
         file: File,
         limits: ConstructionLimits,
+        admission: ConstructionAdmission,
     ) -> Result<Self, StorageError> {
         let limits = limits.validate()?;
         let maximum_bytes = limits.plan_bytes.min(MAX_CONSTRUCTION_PLAN_BYTES);
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(CONSTRUCTION_PLAN_CACHE_BYTES);
+        admission.admit(ConstructionTransaction::ScratchCreate)?;
+        // A bounded database is created with regions of at most half its allowance, which
+        // the shared live builder applies: redb extends a file by at most the trailing region
+        // plus one full region, so one slice's extension stays inside `G` with its pages.
+        let builder = crate::bounded::live_database_builder(CONSTRUCTION_PLAN_CACHE_BYTES);
         let database = builder
             .create_file(file)
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        let mut transaction = database
-            .begin_write()
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        transaction
-            .set_durability(Durability::Immediate)
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        transaction.set_two_phase_commit(true);
-        recovery_plan::reset(&transaction)?;
-        {
-            let mut ordered = transaction
-                .open_table(CONSTRUCTION_PLAN_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            ordered
-                .retain(|_, _| false)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            let mut unsorted = transaction
-                .open_table(CONSTRUCTION_PLAN_UNSORTED_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            unsorted
-                .retain(|_, _| false)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            let mut channels = transaction
-                .open_table(RESTORE_CHANNEL_SOURCE_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            channels
-                .retain(|_, _| false)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            let mut current = transaction
-                .open_table(RESTORE_CURRENT_RECORD_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            current
-                .retain(|_, _| false)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            let mut references = transaction
-                .open_table(RESTORE_REFERENCE_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            references
-                .retain(|_, _| false)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            let mut manifests = transaction
-                .open_table(RESTORE_MANIFEST_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            manifests
-                .retain(|_, _| false)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-        }
-        Ok(Self {
+            .map_err(scratch_database_rejected)?;
+        let mut builder = Self {
             kind,
-            database,
-            transaction,
+            database: Some(database),
+            admission,
+            slice: None,
+            phase: ScratchPhase::Observe,
+            slice_ordinal: 0,
+            slice_writes: 0,
+            slice_bytes: 0,
+            slice_record_limit: u64::try_from(limits.batch_records)
+                .map_err(|_| StorageError::Overflow)?,
+            slice_byte_limit: u64::try_from(limits.batch_bytes)
+                .map_err(|_| StorageError::Overflow)?,
             expected_entries,
             entry_count: 0,
             encoded_bytes: 0,
             maximum_bytes,
-        })
+        };
+        builder.reset_tables()?;
+        builder.begin_slice()?;
+        Ok(builder)
+    }
+
+    /// The first bounded scratch transaction: creates every plan table and empties it.
+    fn reset_tables(&mut self) -> Result<(), StorageError> {
+        self.admission
+            .admit(ConstructionTransaction::ScratchReset)?;
+        let mut transaction = self
+            .database()?
+            .begin_write_bounded(ConstructionAdmission::allowance())
+            .map_err(scratch_transaction_rejected)?;
+        transaction.set_two_phase_commit(true);
+        recovery_plan::reset(&transaction)?;
+        for table in [
+            CONSTRUCTION_PLAN_TABLE,
+            CONSTRUCTION_PLAN_UNSORTED_TABLE,
+            RESTORE_CHANNEL_SOURCE_TABLE,
+            RESTORE_DISCARDED_CHANNEL_TABLE,
+            RESTORE_CURRENT_RECORD_TABLE,
+            RESTORE_REFERENCE_TABLE,
+        ] {
+            transaction
+                .open_table(table)
+                .map_err(scratch_table_rejected)?
+                .retain(|_, _| false)
+                .map_err(scratch_storage_rejected)?;
+        }
+        transaction
+            .open_table(RESTORE_MANIFEST_TABLE)
+            .map_err(scratch_table_rejected)?
+            .retain(|_, _| false)
+            .map_err(scratch_storage_rejected)?;
+        publish_scratch(transaction)
+    }
+
+    fn database(&self) -> Result<&Database, StorageError> {
+        self.database.as_ref().ok_or(StorageError::StaleState)
+    }
+
+    /// The open bounded slice every scratch write and every observation read goes to.
+    fn slice(&self) -> Result<&BoundedWriteTransaction, StorageError> {
+        self.slice.as_ref().ok_or(StorageError::StaleState)
+    }
+
+    fn read_transaction(&self) -> Result<ReadTransaction, StorageError> {
+        self.database()?
+            .begin_read()
+            .map_err(scratch_transaction_rejected)
+    }
+
+    /// Admits and begins the next slice of the current phase.
+    fn begin_slice(&mut self) -> Result<(), StorageError> {
+        if self.slice.is_some() {
+            return Err(StorageError::StaleState);
+        }
+        let ordinal = self
+            .slice_ordinal
+            .checked_add(1)
+            .ok_or(StorageError::Overflow)?;
+        self.admission.admit(self.phase.transaction(ordinal))?;
+        let mut slice = self
+            .database()?
+            .begin_write_bounded(ConstructionAdmission::allowance())
+            .map_err(scratch_transaction_rejected)?;
+        slice.set_two_phase_commit(true);
+        self.slice = Some(slice);
+        self.slice_ordinal = ordinal;
+        self.slice_writes = 0;
+        self.slice_bytes = 0;
+        Ok(())
+    }
+
+    /// Publishes the open slice, or aborts it when it wrote nothing.
+    fn publish_slice(&mut self) -> Result<(), StorageError> {
+        match self.slice.take() {
+            None => Ok(()),
+            Some(slice) if self.slice_writes == 0 => {
+                slice.abort().map_err(scratch_storage_rejected)
+            }
+            Some(slice) => publish_scratch(slice),
+        }
+    }
+
+    /// Starts a fresh slice when none is open or the open one reached its record or byte
+    /// bound, so one record's writes land in one slice and no slice outgrows the allowance.
+    fn rotate_if_full(&mut self) -> Result<(), StorageError> {
+        if self.slice.is_some()
+            && self.slice_writes < self.slice_record_limit
+            && self.slice_bytes < self.slice_byte_limit
+        {
+            return Ok(());
+        }
+        self.publish_slice()?;
+        self.begin_slice()
+    }
+
+    fn charge_writes(&mut self, writes: u64, bytes: usize) -> Result<(), StorageError> {
+        let bytes = u64::try_from(bytes).map_err(|_| StorageError::Overflow)?;
+        self.slice_writes = self
+            .slice_writes
+            .checked_add(writes)
+            .ok_or(StorageError::Overflow)?;
+        self.slice_bytes = self
+            .slice_bytes
+            .checked_add(bytes)
+            .ok_or(StorageError::Overflow)?;
+        Ok(())
+    }
+
+    fn charge_write(&mut self, key_bytes: usize, value_bytes: usize) -> Result<(), StorageError> {
+        let bytes = key_bytes
+            .checked_add(value_bytes)
+            .ok_or(StorageError::Overflow)?;
+        self.charge_writes(1, bytes)
+    }
+
+    /// Publishes the open slice and numbers the next phase's slices from one.
+    fn switch_phase(&mut self, phase: ScratchPhase) -> Result<(), StorageError> {
+        self.publish_slice()?;
+        self.phase = phase;
+        self.slice_ordinal = 0;
+        Ok(())
     }
 
     /// Indexes one unique target entry while retaining no prior entry body.
@@ -268,13 +425,13 @@ impl ConstructionPlanBuilder {
         }
         let encoded = entry.encode()?;
         StorageConstructionPlanEntry::decode(self.kind, &encoded)?;
-        self.encoded_bytes = self
+        self.rotate_if_full()?;
+        let encoded_bytes = self
             .encoded_bytes
             .checked_add(u64::try_from(encoded.len()).map_err(|_| StorageError::Overflow)?)
             .ok_or(StorageError::Overflow)?;
-        let combined_bytes = self
-            .encoded_bytes
-            .checked_add(recovery_plan::pending_bytes(&self.transaction)?)
+        let combined_bytes = encoded_bytes
+            .checked_add(recovery_plan::pending_bytes(self.slice()?)?)
             .ok_or(StorageError::Overflow)?;
         if combined_bytes > self.maximum_bytes {
             return Err(StorageError::LimitExceeded);
@@ -282,17 +439,19 @@ impl ConstructionPlanBuilder {
         let target = construction_plan_target_key(&entry)?;
         {
             let mut table = self
-                .transaction
+                .slice()?
                 .open_table(CONSTRUCTION_PLAN_UNSORTED_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
+                .map_err(scratch_table_rejected)?;
             if table
                 .insert(target.as_slice(), encoded.as_slice())
-                .map_err(|_| StorageError::DatabaseRejected)?
+                .map_err(scratch_storage_rejected)?
                 .is_some()
             {
                 return Err(StorageError::InvalidEncoding);
             }
         }
+        self.charge_write(target.len(), encoded.len())?;
+        self.encoded_bytes = encoded_bytes;
         self.entry_count = self
             .entry_count
             .checked_add(1)
@@ -317,18 +476,21 @@ impl ConstructionPlanBuilder {
         encoded.extend_from_slice(&source.record_schema().to_be_bytes());
         encoded.extend_from_slice(source.sealed_record_id().as_bytes());
         encoded.extend_from_slice(&source.backup_byte_offset().to_be_bytes());
-        let mut table = self
-            .transaction
-            .open_table(RESTORE_CHANNEL_SOURCE_TABLE)
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        if table
-            .insert(source.key().as_bytes(), encoded.as_slice())
-            .map_err(|_| StorageError::DatabaseRejected)?
-            .is_some()
+        self.rotate_if_full()?;
         {
-            return Err(StorageError::StaleState);
+            let mut table = self
+                .slice()?
+                .open_table(RESTORE_CHANNEL_SOURCE_TABLE)
+                .map_err(scratch_table_rejected)?;
+            if table
+                .insert(source.key().as_bytes(), encoded.as_slice())
+                .map_err(scratch_storage_rejected)?
+                .is_some()
+            {
+                return Err(StorageError::StaleState);
+            }
         }
-        Ok(())
+        self.charge_write(source.key().as_bytes().len(), encoded.len())
     }
 
     fn discard_restore_channel(
@@ -336,18 +498,21 @@ impl ConstructionPlanBuilder {
         key: &StoredKey,
         name: &agenc_ircd_domain::ChannelNameValue,
     ) -> Result<(), StorageError> {
-        let mut table = self
-            .transaction
-            .open_table(RESTORE_DISCARDED_CHANNEL_TABLE)
-            .map_err(|_| StorageError::DatabaseRejected)?;
-        if table
-            .insert(key.as_bytes(), name.canonical().as_bytes())
-            .map_err(|_| StorageError::DatabaseRejected)?
-            .is_some()
+        self.rotate_if_full()?;
         {
-            return Err(StorageError::StaleState);
+            let mut table = self
+                .slice()?
+                .open_table(RESTORE_DISCARDED_CHANNEL_TABLE)
+                .map_err(scratch_table_rejected)?;
+            if table
+                .insert(key.as_bytes(), name.canonical().as_bytes())
+                .map_err(scratch_storage_rejected)?
+                .is_some()
+            {
+                return Err(StorageError::StaleState);
+            }
         }
-        Ok(())
+        self.charge_write(key.as_bytes().len(), name.canonical().len())
     }
 
     fn discarded_restore_channel_name(
@@ -355,7 +520,7 @@ impl ConstructionPlanBuilder {
         key: &StoredKey,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let table = self
-            .transaction
+            .slice()?
             .open_table(RESTORE_DISCARDED_CHANNEL_TABLE)
             .map_err(|_| StorageError::DatabaseRejected)?;
         let Some(name) = table
@@ -377,7 +542,7 @@ impl ConstructionPlanBuilder {
         key: &StoredKey,
     ) -> Result<StorageConstructionSource, StorageError> {
         let table = self
-            .transaction
+            .slice()?
             .open_table(RESTORE_CHANNEL_SOURCE_TABLE)
             .map_err(|_| StorageError::DatabaseRejected)?;
         let encoded = table
@@ -412,35 +577,62 @@ impl ConstructionPlanBuilder {
         if self.kind != StorageConstructionKind::Restore {
             return Err(StorageError::InvalidEncoding);
         }
+        self.rotate_if_full()?;
         if source.table().is_integrity_tracked() {
-            let identity = restore_scratch_key(source.table(), source.key())?;
-            let mut version = Vec::new();
-            version
-                .try_reserve_exact(36)
-                .map_err(|_| StorageError::AllocationFailed)?;
-            version.extend_from_slice(&source.record_schema().to_be_bytes());
-            version.extend_from_slice(source.sealed_record_id().as_bytes());
+            let identity = self.index_restore_current_record(source)?;
+            self.index_restore_references(&identity, source, record)?;
+        }
+        if source.table() == TableId::IntegrityManifest {
+            self.index_restore_manifest(record)?;
+        }
+        Ok(())
+    }
+
+    fn index_restore_current_record(
+        &mut self,
+        source: &StorageConstructionSource,
+    ) -> Result<Vec<u8>, StorageError> {
+        let identity = restore_scratch_key(source.table(), source.key())?;
+        let mut version = Vec::new();
+        version
+            .try_reserve_exact(36)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        version.extend_from_slice(&source.record_schema().to_be_bytes());
+        version.extend_from_slice(source.sealed_record_id().as_bytes());
+        {
+            let mut current = self
+                .slice()?
+                .open_table(RESTORE_CURRENT_RECORD_TABLE)
+                .map_err(scratch_table_rejected)?;
+            if current
+                .insert(identity.as_slice(), version.as_slice())
+                .map_err(scratch_storage_rejected)?
+                .is_some()
             {
-                let mut current = self
-                    .transaction
-                    .open_table(RESTORE_CURRENT_RECORD_TABLE)
-                    .map_err(|_| StorageError::DatabaseRejected)?;
-                if current
-                    .insert(identity.as_slice(), version.as_slice())
-                    .map_err(|_| StorageError::DatabaseRejected)?
-                    .is_some()
-                {
-                    return Err(StorageError::StaleState);
-                }
+                return Err(StorageError::StaleState);
             }
-            let references =
-                construction_record_references(source.table(), source.key(), record.plaintext())?;
+        }
+        self.charge_write(identity.len(), version.len())?;
+        Ok(identity)
+    }
+
+    fn index_restore_references(
+        &mut self,
+        identity: &[u8],
+        source: &StorageConstructionSource,
+        record: &ConstructionSourceRecord,
+    ) -> Result<(), StorageError> {
+        let references =
+            construction_record_references(source.table(), source.key(), record.plaintext())?;
+        let (writes, bytes) = {
             let mut table = self
-                .transaction
+                .slice()?
                 .open_table(RESTORE_REFERENCE_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
+                .map_err(scratch_table_rejected)?;
+            let mut writes = 0_u64;
+            let mut bytes = 0_usize;
             for (index, reference) in references.iter().enumerate() {
-                let mut reference_key = identity.clone();
+                let mut reference_key = identity.to_vec();
                 reference_key.extend_from_slice(
                     &u32::try_from(index)
                         .map_err(|_| StorageError::Overflow)?
@@ -449,28 +641,43 @@ impl ConstructionPlanBuilder {
                 let target = restore_scratch_key(reference.table(), reference.key())?;
                 table
                     .insert(reference_key.as_slice(), target.as_slice())
-                    .map_err(|_| StorageError::DatabaseRejected)?;
+                    .map_err(scratch_storage_rejected)?;
+                writes = writes.checked_add(1).ok_or(StorageError::Overflow)?;
+                bytes = bytes
+                    .checked_add(reference_key.len())
+                    .and_then(|bytes| bytes.checked_add(target.len()))
+                    .ok_or(StorageError::Overflow)?;
             }
-        }
-        if source.table() == TableId::IntegrityManifest {
-            let manifest = IntegrityManifest::decode(record.plaintext())?;
+            (writes, bytes)
+        };
+        self.charge_writes(writes, bytes)
+    }
+
+    fn index_restore_manifest(
+        &mut self,
+        record: &ConstructionSourceRecord,
+    ) -> Result<(), StorageError> {
+        let manifest = IntegrityManifest::decode(record.plaintext())?;
+        {
             let mut manifests = self
-                .transaction
+                .slice()?
                 .open_table(RESTORE_MANIFEST_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
+                .map_err(scratch_table_rejected)?;
             if manifests
                 .insert(manifest.tbs().manifest_sequence, record.plaintext())
-                .map_err(|_| StorageError::DatabaseRejected)?
+                .map_err(scratch_storage_rejected)?
                 .is_some()
             {
                 return Err(StorageError::StaleState);
             }
         }
-        Ok(())
+        self.charge_write(SEQUENCE_STORED_KEY_BYTES, record.plaintext().len())
     }
 
+    /// Publishes the observation slices, then validates every reference, reverses the
+    /// manifests after the checkpoint cut in bounded slices, and re-derives the checkpoint.
     fn verify_restore_source(
-        &self,
+        &mut self,
         state: StateMetaTbs,
         checkpoint: &IntegrityCheckpoint,
     ) -> Result<(), StorageError> {
@@ -481,18 +688,19 @@ impl ConstructionPlanBuilder {
         {
             return Err(StorageError::StaleState);
         }
+        self.switch_phase(ScratchPhase::Verify)?;
         self.verify_restore_references()?;
         self.reverse_restore_manifests(state)?;
+        self.publish_slice()?;
         self.verify_restore_checkpoint(checkpoint)
     }
 
     fn verify_restore_references(&self) -> Result<(), StorageError> {
-        let current = self
-            .transaction
+        let read = self.read_transaction()?;
+        let current = read
             .open_table(RESTORE_CURRENT_RECORD_TABLE)
             .map_err(|_| StorageError::DatabaseRejected)?;
-        let references = self
-            .transaction
+        let references = read
             .open_table(RESTORE_REFERENCE_TABLE)
             .map_err(|_| StorageError::DatabaseRejected)?;
         for row in references
@@ -511,7 +719,7 @@ impl ConstructionPlanBuilder {
         Ok(())
     }
 
-    fn reverse_restore_manifests(&self, state: StateMetaTbs) -> Result<(), StorageError> {
+    fn reverse_restore_manifests(&mut self, state: StateMetaTbs) -> Result<(), StorageError> {
         if state.manifest_sequence > state.checkpoint_manifest_sequence {
             let first = state
                 .checkpoint_manifest_sequence
@@ -524,10 +732,10 @@ impl ConstructionPlanBuilder {
         Ok(())
     }
 
-    fn reverse_restore_manifest(&self, sequence: u64) -> Result<(), StorageError> {
+    fn reverse_restore_manifest(&mut self, sequence: u64) -> Result<(), StorageError> {
         let encoded = {
-            let manifests = self
-                .transaction
+            let read = self.read_transaction()?;
+            let manifests = read
                 .open_table(RESTORE_MANIFEST_TABLE)
                 .map_err(|_| StorageError::DatabaseRejected)?;
             manifests
@@ -538,12 +746,24 @@ impl ConstructionPlanBuilder {
                 .to_vec()
         };
         let manifest = IntegrityManifest::decode(&encoded)?;
-        let mut current = self
-            .transaction
-            .open_table(RESTORE_CURRENT_RECORD_TABLE)
-            .map_err(|_| StorageError::DatabaseRejected)?;
         for mutation in manifest.tbs().mutations().iter().rev() {
-            let key = restore_scratch_key(mutation.table(), mutation.stored_key())?;
+            self.reverse_restore_mutation(mutation)?;
+        }
+        Ok(())
+    }
+
+    fn reverse_restore_mutation(
+        &mut self,
+        mutation: &crate::IntegrityRecordMutation,
+    ) -> Result<(), StorageError> {
+        self.rotate_if_full()?;
+        let key = restore_scratch_key(mutation.table(), mutation.stored_key())?;
+        let replacement = encode_restore_version(mutation.before())?;
+        let value_bytes = {
+            let mut current = self
+                .slice()?
+                .open_table(RESTORE_CURRENT_RECORD_TABLE)
+                .map_err(scratch_table_rejected)?;
             let actual = current
                 .get(key.as_slice())
                 .map_err(|_| StorageError::DatabaseRejected)?
@@ -553,24 +773,30 @@ impl ConstructionPlanBuilder {
             if actual != mutation.after() {
                 return Err(StorageError::StaleState);
             }
-            match encode_restore_version(mutation.before())? {
-                Some(value) => current
-                    .insert(key.as_slice(), value.as_slice())
-                    .map_err(|_| StorageError::DatabaseRejected)?,
-                None => current
-                    .remove(key.as_slice())
-                    .map_err(|_| StorageError::DatabaseRejected)?,
-            };
-        }
-        Ok(())
+            match replacement {
+                Some(value) => {
+                    current
+                        .insert(key.as_slice(), value.as_slice())
+                        .map_err(scratch_storage_rejected)?;
+                    value.len()
+                }
+                None => {
+                    current
+                        .remove(key.as_slice())
+                        .map_err(scratch_storage_rejected)?;
+                    0
+                }
+            }
+        };
+        self.charge_write(key.len(), value_bytes)
     }
 
     fn verify_restore_checkpoint(
         &self,
         checkpoint: &IntegrityCheckpoint,
     ) -> Result<(), StorageError> {
-        let current = self
-            .transaction
+        let read = self.read_transaction()?;
+        let current = read
             .open_table(RESTORE_CURRENT_RECORD_TABLE)
             .map_err(|_| StorageError::DatabaseRejected)?;
         let count = current.len().map_err(|_| StorageError::DatabaseRejected)?;
@@ -593,74 +819,201 @@ impl ConstructionPlanBuilder {
         Ok(())
     }
 
-    /// Durably commits and independently re-reads the complete scratch plan.
-    pub fn finish(self) -> Result<ConstructionPlan, StorageError> {
-        recovery_plan::require_consumed(&self.transaction)?;
+    /// Publishes the last observation slice, copies the plan into target order in bounded
+    /// slices, reclaims and closes the scratch database within the allowance, and
+    /// independently re-reads the complete plan.
+    pub fn finish(mut self) -> Result<ConstructionPlan, StorageError> {
+        self.switch_phase(ScratchPhase::Order)?;
+        recovery_plan::require_consumed(&self.read_transaction()?)?;
         if self
             .expected_entries
             .is_some_and(|expected| self.entry_count != expected)
         {
             return Err(StorageError::StaleState);
         }
-        let mut hasher = ConstructionPlanHasher::new(self.entry_count, self.maximum_bytes)?;
-        let mut key_state_records = 0_u8;
-        let mut previous_target: Option<(TableId, Vec<u8>)> = None;
-        {
-            let unsorted = self
-                .transaction
-                .open_table(CONSTRUCTION_PLAN_UNSORTED_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            let mut ordered = self
-                .transaction
-                .open_table(CONSTRUCTION_PLAN_TABLE)
-                .map_err(|_| StorageError::DatabaseRejected)?;
-            for (index, row) in unsorted
-                .iter()
-                .map_err(|_| StorageError::DatabaseRejected)?
-                .enumerate()
-            {
-                let (_, encoded) = row.map_err(|_| StorageError::DatabaseRejected)?;
-                let entry = StorageConstructionPlanEntry::decode(self.kind, encoded.value())?;
-                let target = (entry.target_table(), entry.target_key().as_bytes().to_vec());
-                if previous_target.as_ref().is_some_and(|previous| {
-                    (previous.0, previous.1.as_slice()) >= (target.0, target.1.as_slice())
-                }) {
-                    return Err(StorageError::InvalidEncoding);
-                }
-                if entry.target_table() == TableId::LoginIndexKeyState {
-                    key_state_records = key_state_records
-                        .checked_add(1)
-                        .ok_or(StorageError::Overflow)?;
-                }
-                hasher.update_entry(encoded.value())?;
-                ordered
-                    .insert(
-                        u64::try_from(index)
-                            .map_err(|_| StorageError::Overflow)?
-                            .to_be_bytes()
-                            .as_slice(),
-                        encoded.value(),
-                    )
-                    .map_err(|_| StorageError::DatabaseRejected)?;
-                previous_target = Some(target);
-            }
-        }
-        if key_state_records != 1 {
-            return Err(StorageError::StaleState);
-        }
-        let hash = hasher.finalize()?;
-        self.transaction
-            .commit()
-            .map_err(|_| StorageError::DatabaseRejected)?;
+        let hash = self.copy_ordered()?;
+        self.reclaim()?;
+        self.close()?;
+        let database = self.database.take().ok_or(StorageError::StaleState)?;
         let plan = ConstructionPlan {
             kind: self.kind,
-            storage: ConstructionPlanStorage::Disk(self.database),
+            storage: ConstructionPlanStorage::Disk(database),
             entry_count: self.entry_count,
             encoded_bytes: self.encoded_bytes,
             hash,
         };
         plan.reverify_disk()?;
         Ok(plan)
+    }
+
+    fn copy_ordered(&mut self) -> Result<StorageDigest, StorageError> {
+        let mut hasher = ConstructionPlanHasher::new(self.entry_count, self.maximum_bytes)?;
+        let mut order = OrderedCopy {
+            key_state_records: 0,
+            previous_target: None,
+            cursor: None,
+            index: 0,
+        };
+        while order.index < self.entry_count {
+            self.begin_slice()?;
+            if self.copy_ordered_slice(&mut hasher, &mut order)? == 0 {
+                return Err(StorageError::StaleState);
+            }
+            self.publish_slice()?;
+        }
+        self.require_no_unsorted_remainder(order.cursor.as_deref())?;
+        if order.key_state_records != 1 {
+            return Err(StorageError::StaleState);
+        }
+        Ok(hasher.finalize()?)
+    }
+
+    fn copy_ordered_slice(
+        &mut self,
+        hasher: &mut ConstructionPlanHasher,
+        order: &mut OrderedCopy,
+    ) -> Result<u64, StorageError> {
+        let start = order.cursor.clone();
+        let (copied, bytes) = {
+            let slice = self.slice()?;
+            let unsorted = slice
+                .open_table(CONSTRUCTION_PLAN_UNSORTED_TABLE)
+                .map_err(scratch_table_rejected)?;
+            let mut ordered = slice
+                .open_table(CONSTRUCTION_PLAN_TABLE)
+                .map_err(scratch_table_rejected)?;
+            let first = start.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+            let mut copied = 0_u64;
+            let mut bytes = 0_usize;
+            for row in unsorted
+                .range::<&[u8]>((first, Bound::Unbounded))
+                .map_err(scratch_storage_rejected)?
+            {
+                if copied >= self.slice_record_limit
+                    || u64::try_from(bytes).map_err(|_| StorageError::Overflow)?
+                        >= self.slice_byte_limit
+                {
+                    break;
+                }
+                let (key, encoded) = row.map_err(scratch_storage_rejected)?;
+                let entry = StorageConstructionPlanEntry::decode(self.kind, encoded.value())?;
+                let target = (entry.target_table(), entry.target_key().as_bytes().to_vec());
+                if order.previous_target.as_ref().is_some_and(|previous| {
+                    (previous.0, previous.1.as_slice()) >= (target.0, target.1.as_slice())
+                }) {
+                    return Err(StorageError::InvalidEncoding);
+                }
+                if entry.target_table() == TableId::LoginIndexKeyState {
+                    order.key_state_records = order
+                        .key_state_records
+                        .checked_add(1)
+                        .ok_or(StorageError::Overflow)?;
+                }
+                hasher.update_entry(encoded.value())?;
+                ordered
+                    .insert(order.index.to_be_bytes().as_slice(), encoded.value())
+                    .map_err(scratch_storage_rejected)?;
+                bytes = bytes
+                    .checked_add(SEQUENCE_STORED_KEY_BYTES)
+                    .and_then(|bytes| bytes.checked_add(encoded.value().len()))
+                    .ok_or(StorageError::Overflow)?;
+                copied = copied.checked_add(1).ok_or(StorageError::Overflow)?;
+                order.index = order.index.checked_add(1).ok_or(StorageError::Overflow)?;
+                order.previous_target = Some(target);
+                order.cursor = Some(key.value().to_vec());
+            }
+            (copied, bytes)
+        };
+        self.charge_writes(copied, bytes)?;
+        Ok(copied)
+    }
+
+    /// The ordered copy stops at the counted entries; any unsorted row past them is a
+    /// plan the builder never counted.
+    fn require_no_unsorted_remainder(&self, cursor: Option<&[u8]>) -> Result<(), StorageError> {
+        let read = self.read_transaction()?;
+        let unsorted = read
+            .open_table(CONSTRUCTION_PLAN_UNSORTED_TABLE)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        let first = cursor.map_or(Bound::Unbounded, Bound::Excluded);
+        if unsorted
+            .range::<&[u8]>((first, Bound::Unbounded))
+            .map_err(|_| StorageError::DatabaseRejected)?
+            .next()
+            .is_some()
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Ok(())
+    }
+
+    /// Bounded deferred cleanup: returns the pages the scratch slices freed, one admitted
+    /// publication at a time, until none that a reader could need remains.
+    fn reclaim(&mut self) -> Result<(), StorageError> {
+        let mut round = 0_u64;
+        loop {
+            round = round.checked_add(1).ok_or(StorageError::Overflow)?;
+            self.admission
+                .admit(ConstructionTransaction::ScratchReclaim(round))?;
+            let progress = self
+                .database()?
+                .reclaim_bounded(ConstructionAdmission::allowance(), SCRATCH_RECLAIM_RECORDS)
+                .map_err(scratch_rejected)?;
+            if !progress.remaining || progress.records == 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Persists the allocator state within the allowance so the database close allocates
+    /// nothing.
+    fn close(&mut self) -> Result<(), StorageError> {
+        self.admission
+            .admit(ConstructionTransaction::ScratchClose)?;
+        self.database()?
+            .persist_allocator_state_bounded(ConstructionAdmission::allowance())
+            .map_err(scratch_rejected)
+    }
+}
+
+/// Prepares and publishes one bounded scratch slice under two-phase commit.
+fn publish_scratch(transaction: BoundedWriteTransaction) -> Result<(), StorageError> {
+    let prepared = transaction.prepare().map_err(scratch_commit_rejected)?;
+    prepared.publish().map_err(scratch_commit_rejected)
+}
+
+/// A refused bounded preparation or publication is the shared determinate allowance refusal
+/// with its phase; every other commit failure keeps the closed database rejection.
+fn scratch_commit_rejected(error: redb::CommitError) -> StorageError {
+    match error {
+        redb::CommitError::Allowance(refusal) => {
+            StorageError::AllowanceRefused(crate::bounded::refusal_phase(refusal))
+        }
+        redb::CommitError::Storage(error) => scratch_storage_rejected(error),
+        _ => StorageError::DatabaseRejected,
+    }
+}
+
+fn scratch_transaction_rejected(error: redb::TransactionError) -> StorageError {
+    match error {
+        redb::TransactionError::Storage(error) => scratch_storage_rejected(error),
+        _ => StorageError::DatabaseRejected,
+    }
+}
+
+fn scratch_database_rejected(error: redb::DatabaseError) -> StorageError {
+    match error {
+        redb::DatabaseError::Storage(error) => scratch_storage_rejected(error),
+        _ => StorageError::DatabaseRejected,
+    }
+}
+
+fn scratch_rejected(error: redb::Error) -> StorageError {
+    match error {
+        redb::Error::Allowance(refusal) => {
+            StorageError::AllowanceRefused(crate::bounded::refusal_phase(refusal))
+        }
+        _ => StorageError::DatabaseRejected,
     }
 }
 
@@ -864,6 +1217,7 @@ impl ConstructionPlan {
         file: File,
         entries: I,
         limits: ConstructionLimits,
+        admission: ConstructionAdmission,
     ) -> Result<Self, StorageError>
     where
         I: IntoIterator<Item = Result<StorageConstructionPlanEntry, StorageError>>,
@@ -874,6 +1228,7 @@ impl ConstructionPlan {
             identity.planned_entry_count,
             file,
             limits,
+            admission,
         )?;
         for entry in entries {
             builder.push(entry?)?;
@@ -1631,6 +1986,9 @@ impl ConstructionSourceDatabase {
     }
 
     /// Rebuilds a canonical rekey plan while retaining only one plaintext record.
+    ///
+    /// Every scratch transaction is admitted through `admission` immediately before it
+    /// begins and runs under the fixed allowance; see [`ConstructionPlanBuilder`].
     pub fn rebuild_rekey_plan(
         &self,
         file: File,
@@ -1638,6 +1996,7 @@ impl ConstructionSourceDatabase {
         target_binding: DatabaseBinding,
         target_storage_key_generation: u32,
         limits: ConstructionLimits,
+        admission: ConstructionAdmission,
     ) -> Result<ConstructionPlan, StorageError> {
         let limits = limits.validate()?;
         let facts = self.facts()?;
@@ -1655,6 +2014,7 @@ impl ConstructionSourceDatabase {
             entry_count,
             file,
             limits,
+            admission,
         )?;
         self.engine
             .visit_construction_source_records(|source, record| {
@@ -2070,6 +2430,9 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
     }
 
     /// Streams the fixed recovery transform into one target-sorted disk plan.
+    ///
+    /// Every scratch transaction is admitted through `admission` immediately before it
+    /// begins and runs under the fixed allowance; see [`ConstructionPlanBuilder`].
     pub fn rebuild_restore_plan(
         &mut self,
         file: File,
@@ -2077,6 +2440,7 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
         target_binding: DatabaseBinding,
         target_storage_key_generation: u32,
         limits: ConstructionLimits,
+        admission: ConstructionAdmission,
     ) -> Result<ConstructionPlan, StorageError> {
         let limits = limits.validate()?;
         let facts = self.facts()?;
@@ -2098,6 +2462,7 @@ impl<R: Read + Seek> RestoreBackupSource<R> {
             StorageConstructionKind::Restore,
             file,
             limits,
+            admission,
         )?;
         let context = RekeyContext {
             source_master_key: &self.source_master_key,
@@ -2569,8 +2934,14 @@ pub trait ConstructionTargetWriter {
 }
 
 /// Authenticated staging-database adapter used by restore and rekey commands.
+///
+/// Every target transaction it runs (each batch, the finalization and the checkpoint that
+/// follows it) has exactly one admission: the engine's own `R(F) + G` gate and bounded
+/// allowance inside the transaction. The adapter names each transaction to an installed
+/// test observer immediately before the engine begins it and samples nothing otherwise.
 pub struct ConstructionTarget {
     engine: StorageEngine,
+    admission: ConstructionAdmission,
 }
 
 /// Proof that a completed construction passed a clean second open and full startup scan.
@@ -2613,11 +2984,15 @@ impl ConstructionTarget {
         Ok(engine.construction_source_header())
     }
 
-    /// Opens and completely verifies one resumable staging database.
-    pub fn open(config: StorageOpenConfig) -> Result<Self, StorageError> {
+    /// Opens and completely verifies one resumable staging database whose target
+    /// transactions `admission` gates.
+    pub fn open(
+        config: StorageOpenConfig,
+        admission: ConstructionAdmission,
+    ) -> Result<Self, StorageError> {
         let engine = StorageEngine::open(config)?;
         let _marker = engine.construction_scan()?;
-        Ok(Self { engine })
+        Ok(Self { engine, admission })
     }
 
     /// Reads the sole authenticated construction marker.
@@ -2738,6 +3113,13 @@ impl ConstructionTargetWriter for ConstructionTarget {
             StorageFaultSite::ConstructionBatch,
             StorageFaultBoundary::Before,
         )?;
+        let committed_before = batch
+            .successor
+            .target_records_committed
+            .checked_sub(u64::try_from(batch.records.len()).map_err(|_| StorageError::Overflow)?)
+            .ok_or(StorageError::ResumeMismatch)?;
+        self.admission
+            .recheck_observed(ConstructionTransaction::TargetBatch(committed_before))?;
         let storage_batch = self.prepare_batch_mutations(&batch)?;
         let receipt = self.commit_prepared_batch(storage_batch, batch.successor)?;
         self.engine.check_construction_fault(
@@ -2764,6 +3146,8 @@ impl ConstructionTargetWriter for ConstructionTarget {
             StorageFaultSite::ConstructionCompletion,
             StorageFaultBoundary::Before,
         )?;
+        self.admission
+            .recheck_observed(ConstructionTransaction::TargetFinalize)?;
         require_current_marker(&self.engine, marker)?;
         completion.validate()?;
         if (completion.identity, completion.target_records_committed)
@@ -2817,6 +3201,8 @@ impl ConstructionTargetWriter for ConstructionTarget {
         {
             return Err(StorageError::StaleState);
         }
+        self.admission
+            .recheck_observed(ConstructionTransaction::TargetCheckpoint)?;
         self.engine.finish_construction()
     }
 }
@@ -3424,6 +3810,7 @@ fn recovery_domain_body(
 #[cfg(test)]
 mod tests {
     mod recovery_classification;
+    mod scratch_growth;
 
     use std::fs::{File, OpenOptions};
     use std::io::Cursor;
@@ -3442,12 +3829,25 @@ mod tests {
     const ZERO: StorageDigest = StorageDigest::from_bytes([0; 32]);
     static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    fn scratch_file(label: &str) -> Result<(File, PathBuf), StorageError> {
+    /// A scratch database path in the system temporary directory, removed when dropped
+    /// so a failed assertion leaves nothing behind and nothing lands in the worktree.
+    struct ScratchPath(PathBuf);
+
+    impl AsRef<std::path::Path> for ScratchPath {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn scratch_file(label: &str) -> Result<(File, ScratchPath), StorageError> {
         let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::current_dir()
-            .map_err(crate::filesystem_rejected)?
-            .join("target");
-        std::fs::create_dir_all(&directory).map_err(crate::filesystem_rejected)?;
+        let directory = std::env::temp_dir();
         let path = directory.join(format!(
             "construction-{label}-{}-{sequence}.redb",
             std::process::id()
@@ -3458,7 +3858,23 @@ mod tests {
             .create_new(true)
             .open(&path)
             .map_err(crate::filesystem_rejected)?;
-        Ok((file, path))
+        Ok((file, ScratchPath(path)))
+    }
+
+    /// Samples the scratch file's own filesystem under the smallest valid reserve.
+    fn scratch_admission(file: &File) -> Result<ConstructionAdmission, StorageError> {
+        let policy = crate::ConstructionAdmissionPolicy::new(crate::StorageEngineLimits {
+            redb_cache_bytes: 8 * 1_024 * 1_024,
+            fixed_reserve_bytes: 64 * 1_024 * 1_024,
+            reserve_percent: 1,
+            database_max_bytes: 1_073_741_824,
+            backup_max_bytes: 1_073_741_824,
+            integrity_checkpoint_manifests: 10_000,
+        })?;
+        Ok(ConstructionAdmission::new(
+            file.try_clone().map_err(crate::filesystem_rejected)?,
+            policy,
+        ))
     }
 
     fn state(logical: u64, backup: u64) -> StateMetaTbs {
@@ -4272,11 +4688,13 @@ mod tests {
         let entries = rekey_entries()?;
         let identity = rekey_identity(&entries)?;
         let (file, path) = scratch_file("complete")?;
+        let admission = scratch_admission(&file)?;
         let plan = ConstructionPlan::rebuild_disk(
             &identity,
             file,
             rekey_entries()?.into_iter().rev().map(Ok),
             maximum_limits(),
+            admission,
         )?;
         assert_eq!(plan.entry_count(), 2);
         assert!(plan.encoded_bytes() > 0);
@@ -4289,10 +4707,12 @@ mod tests {
         std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("streaming")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Rekey,
             file,
             maximum_limits(),
+            admission,
         )?;
         for entry in rekey_entries()?.into_iter().rev() {
             builder.push(entry)?;
@@ -4303,11 +4723,13 @@ mod tests {
         std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("duplicate")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start(
             StorageConstructionKind::Rekey,
             2,
             file,
             maximum_limits(),
+            admission,
         )?;
         builder.push(rekey_entry(TableId::Account, account_key(1)?)?)?;
         assert_eq!(
@@ -4318,11 +4740,13 @@ mod tests {
         std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("count")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start(
             StorageConstructionKind::Rekey,
             1,
             file,
             maximum_limits(),
+            admission,
         )?;
         builder.push(rekey_entry(TableId::Account, account_key(1)?)?)?;
         assert_eq!(
@@ -4336,6 +4760,7 @@ mod tests {
         std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("bytes")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start(
             StorageConstructionKind::Rekey,
             2,
@@ -4344,6 +4769,7 @@ mod tests {
                 plan_bytes: 1,
                 ..maximum_limits()
             },
+            admission,
         )?;
         assert_eq!(
             builder.push(rekey_entry(TableId::Account, account_key(1)?)?),
@@ -4367,10 +4793,12 @@ mod tests {
             91,
         )?;
         let (file, path) = scratch_file("wrong-kind")?;
+        let admission = scratch_admission(&file)?;
         let mut rekey = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Rekey,
             file,
             maximum_limits(),
+            admission,
         )?;
         assert_eq!(
             rekey.index_restore_channel_source(&backup_channel),
@@ -4379,10 +4807,12 @@ mod tests {
         drop(rekey);
         std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
         let (file, path) = scratch_file("restore-index")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         assert_eq!(
             builder.index_restore_channel_source(&source(TableId::Channel, &channel_key)?),
@@ -4454,6 +4884,8 @@ mod tests {
             builder.observe_restore_source_record(&account_source, &account_record),
             Err(StorageError::StaleState)
         );
+        // Reference validation reads published slices, as the verify phase does.
+        builder.publish_slice()?;
         assert_eq!(
             builder.verify_restore_references(),
             Err(StorageError::StaleState)
@@ -4480,6 +4912,7 @@ mod tests {
             &opaque_source,
             &record(TableId::OpaqueRecord, opaque_key, opaque_plaintext),
         )?;
+        builder.publish_slice()?;
         assert_eq!(builder.verify_restore_references(), Ok(()));
 
         let mut state = state(1, 1);
@@ -4540,10 +4973,12 @@ mod tests {
     fn restore_selection_covers_every_preserve_transform_and_omission_arm()
     -> Result<(), StorageError> {
         let (file, path) = scratch_file("selection")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
 
         for table in [
@@ -4731,10 +5166,12 @@ mod tests {
     fn restore_omits_ephemeral_channels_and_their_validated_name_rows() -> Result<(), StorageError>
     {
         let (file, path) = scratch_file("omit-ephemeral-channel")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         let mut channel = ChannelRecordBody::decode(&crate::domain_records::fixtures::live_body(
             TableId::Channel,
@@ -5403,11 +5840,13 @@ mod tests {
             let entries = rekey_entries()?;
             let identity = rekey_identity(&entries)?;
             let (file, path) = scratch_file("reverify-fields")?;
+            let admission = scratch_admission(&file)?;
             let mut plan = ConstructionPlan::rebuild_disk(
                 &identity,
                 file,
                 entries.into_iter().map(Ok),
                 maximum_limits(),
+                admission,
             )?;
             match changed {
                 0 => plan.entry_count += 1,
@@ -5982,10 +6421,12 @@ mod tests {
             domain_plaintext(TableId::Account, 1)?,
         );
         let (file, path) = scratch_file("rekey-restore-source")?;
+        let admission = scratch_admission(&file)?;
         let mut rekey_builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Rekey,
             file,
             maximum_limits(),
+            admission,
         )?;
         assert_eq!(
             rekey_builder.observe_restore_source_record(&account_source, &account_record),
@@ -6020,10 +6461,12 @@ mod tests {
         )?)?
         .encode()?;
         let (file, path) = scratch_file("duplicate-restore-manifest")?;
+        let admission = scratch_admission(&file)?;
         let mut restore_builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         for (key_sequence, offset) in [(1_u64, 2_u64), (2, 3)] {
             let key = StoredKey::new(key_sequence.to_be_bytes().to_vec())?;
@@ -6153,10 +6596,12 @@ mod tests {
             manifest.encode()?,
         );
         let (file, path) = scratch_file("restore-corruption")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         builder.observe_restore_source_record(&manifest_source, &manifest_record)?;
         let checkpoint = IntegrityCheckpoint::new(IntegrityCheckpointTbs {
@@ -6175,6 +6620,9 @@ mod tests {
             installation_nonce_reservation_start: 0,
             installation_nonce_draw_high_water: 2,
         })?;
+        // The observed manifest becomes visible to the verify phase only once the
+        // observation slice is published, exactly as `verify_restore_source` orders it.
+        builder.switch_phase(ScratchPhase::Verify)?;
         assert_eq!(
             builder.verify_restore_checkpoint(&checkpoint),
             Err(StorageError::StaleState),
@@ -6189,11 +6637,13 @@ mod tests {
         let entries = rekey_entries()?;
         let identity = rekey_identity(&entries)?;
         let (file, path) = scratch_file("disk-sequence-corruption")?;
+        let admission = scratch_admission(&file)?;
         let plan = ConstructionPlan::rebuild_disk(
             &identity,
             file,
             entries.into_iter().map(Ok),
             maximum_limits(),
+            admission,
         )?;
         let ConstructionPlanStorage::Disk(database) = &plan.storage else {
             return Err(StorageError::StaleState);
@@ -6225,11 +6675,13 @@ mod tests {
         let entries = rekey_entries()?;
         let identity = rekey_identity(&entries)?;
         let (file, path) = scratch_file("disk-order-corruption")?;
+        let admission = scratch_admission(&file)?;
         let plan = ConstructionPlan::rebuild_disk(
             &identity,
             file,
             entries.into_iter().map(Ok),
             maximum_limits(),
+            admission,
         )?;
         let ConstructionPlanStorage::Disk(database) = &plan.storage else {
             return Err(StorageError::StaleState);
@@ -6268,10 +6720,12 @@ mod tests {
         std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
 
         let (file, path) = scratch_file("builder-order-corruption")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Rekey,
             file,
             maximum_limits(),
+            admission,
         )?;
         let key_state = rekey_entry(
             TableId::LoginIndexKeyState,
@@ -6281,7 +6735,7 @@ mod tests {
         let account = rekey_entry(TableId::Account, account_key(114)?)?.encode()?;
         {
             let mut table = builder
-                .transaction
+                .slice()?
                 .open_table(CONSTRUCTION_PLAN_UNSORTED_TABLE)
                 .map_err(|_| StorageError::DatabaseRejected)?;
             table
@@ -6291,6 +6745,7 @@ mod tests {
                 .insert(&[1_u8][..], account.as_slice())
                 .map_err(|_| StorageError::DatabaseRejected)?;
         }
+        builder.charge_writes(2, key_state.len() + account.len())?;
         builder.entry_count = 2;
         builder.encoded_bytes = u64::try_from(
             key_state
@@ -6417,10 +6872,12 @@ mod tests {
             channel_name_plaintext,
         );
         let (file, path) = scratch_file("duplicate-channel-references")?;
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         let source_master = StorageMasterKey::from_bytes([124; 32]);
         let target_master = StorageMasterKey::from_bytes([125; 32]);

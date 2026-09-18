@@ -27,7 +27,7 @@ pub(super) fn reset(transaction: &redb::WriteTransaction) -> Result<(), StorageE
         .map_err(|_| StorageError::DatabaseRejected)
 }
 
-pub(super) fn require_consumed(transaction: &redb::WriteTransaction) -> Result<(), StorageError> {
+pub(super) fn require_consumed(transaction: &redb::ReadTransaction) -> Result<(), StorageError> {
     let table = transaction
         .open_table(GATES)
         .map_err(|_| StorageError::DatabaseRejected)?;
@@ -67,69 +67,77 @@ pub(super) fn push(
 }
 
 fn index_gate(
-    builder: &ConstructionPlanBuilder,
+    builder: &mut ConstructionPlanBuilder,
     source: &StorageConstructionSource,
 ) -> Result<(), StorageError> {
-    let mut table = builder
-        .transaction
-        .open_table(GATES)
-        .map_err(|_| StorageError::DatabaseRejected)?;
-    let charge = table
-        .len()
-        .map_err(|_| StorageError::DatabaseRejected)?
-        .checked_add(1)
-        .and_then(|count| count.checked_mul(INDEX_ENTRY_BYTES))
-        .and_then(|bytes| bytes.checked_add(builder.encoded_bytes))
-        .ok_or(StorageError::Overflow)?;
-    if charge > builder.maximum_bytes {
-        return Err(StorageError::LimitExceeded);
-    }
-    let mut encoded = [0; 44];
-    let (schema, rest) = encoded.split_at_mut(4);
-    let (id, offset) = rest.split_at_mut(32);
-    schema.copy_from_slice(&source.record_schema().to_be_bytes());
-    id.copy_from_slice(source.sealed_record_id().as_bytes());
-    offset.copy_from_slice(&source.backup_byte_offset().to_be_bytes());
-    if table
-        .insert(source.key().as_bytes(), encoded.as_slice())
-        .map_err(|_| StorageError::DatabaseRejected)?
-        .is_some()
+    builder.rotate_if_full()?;
     {
-        return Err(StorageError::StaleState);
+        let mut table = builder
+            .slice()?
+            .open_table(GATES)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        let charge = table
+            .len()
+            .map_err(|_| StorageError::DatabaseRejected)?
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(INDEX_ENTRY_BYTES))
+            .and_then(|bytes| bytes.checked_add(builder.encoded_bytes))
+            .ok_or(StorageError::Overflow)?;
+        if charge > builder.maximum_bytes {
+            return Err(StorageError::LimitExceeded);
+        }
+        let mut encoded = [0; 44];
+        let (schema, rest) = encoded.split_at_mut(4);
+        let (id, offset) = rest.split_at_mut(32);
+        schema.copy_from_slice(&source.record_schema().to_be_bytes());
+        id.copy_from_slice(source.sealed_record_id().as_bytes());
+        offset.copy_from_slice(&source.backup_byte_offset().to_be_bytes());
+        if table
+            .insert(source.key().as_bytes(), encoded.as_slice())
+            .map_err(|_| StorageError::DatabaseRejected)?
+            .is_some()
+        {
+            return Err(StorageError::StaleState);
+        }
     }
-    Ok(())
+    builder.charge_write(source.key().as_bytes().len(), 44)
 }
 
 fn take_gate(
-    builder: &ConstructionPlanBuilder,
+    builder: &mut ConstructionPlanBuilder,
     key: &StoredKey,
 ) -> Result<StorageConstructionSource, StorageError> {
-    let mut table = builder
-        .transaction
-        .open_table(GATES)
-        .map_err(|_| StorageError::DatabaseRejected)?;
-    let encoded = table
-        .remove(key.as_bytes())
-        .map_err(|_| StorageError::DatabaseRejected)?
-        .ok_or(StorageError::StaleState)?;
-    let (schema, rest) = encoded
-        .value()
-        .split_first_chunk::<4>()
-        .ok_or(StorageError::InvalidEncoding)?;
-    let (id, offset) = rest
-        .split_first_chunk::<32>()
-        .ok_or(StorageError::InvalidEncoding)?;
-    let offset: [u8; 8] = offset
-        .try_into()
-        .map_err(|_| StorageError::InvalidEncoding)?;
-    StorageConstructionSource::new(
-        StorageConstructionSourceKind::BackupRecord,
-        TableId::E2eeState,
-        StoredKey::new(key.as_bytes().to_vec())?,
-        u32::from_be_bytes(*schema),
-        StorageDigest::from_bytes(*id),
-        u64::from_be_bytes(offset),
-    )
+    builder.rotate_if_full()?;
+    let source = {
+        let mut table = builder
+            .slice()?
+            .open_table(GATES)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        let encoded = table
+            .remove(key.as_bytes())
+            .map_err(|_| StorageError::DatabaseRejected)?
+            .ok_or(StorageError::StaleState)?;
+        let (schema, rest) = encoded
+            .value()
+            .split_first_chunk::<4>()
+            .ok_or(StorageError::InvalidEncoding)?;
+        let (id, offset) = rest
+            .split_first_chunk::<32>()
+            .ok_or(StorageError::InvalidEncoding)?;
+        let offset: [u8; 8] = offset
+            .try_into()
+            .map_err(|_| StorageError::InvalidEncoding)?;
+        StorageConstructionSource::new(
+            StorageConstructionSourceKind::BackupRecord,
+            TableId::E2eeState,
+            StoredKey::new(key.as_bytes().to_vec())?,
+            u32::from_be_bytes(*schema),
+            StorageDigest::from_bytes(*id),
+            u64::from_be_bytes(offset),
+        )?
+    };
+    builder.charge_write(key.as_bytes().len(), 0)?;
+    Ok(source)
 }
 
 fn push_route(

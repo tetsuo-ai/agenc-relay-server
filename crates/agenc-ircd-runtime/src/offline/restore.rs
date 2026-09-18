@@ -3,12 +3,16 @@
 
 use agenc_ircd_config::MaintenanceStorageConfig;
 use agenc_ircd_storage::{
-    RestoreCommandReceipt, RestoreCommandRequest, StorageQualification, execute_restore_command,
+    FilesystemCause, RestoreCommandReceipt, RestoreCommandRequest, StorageError,
+    StorageQualification, execute_restore_command,
 };
 
 use super::OfflineError;
 
 /// Restores only a fully admitted source under its unchanged schema generation.
+///
+/// A free-space refusal is reported apart from every other storage failure: it wrote
+/// nothing, and the same command with `--resume` continues once space is available.
 pub fn execute_stopped_restore(
     request: RestoreCommandRequest,
     config: &MaintenanceStorageConfig,
@@ -17,5 +21,10 @@ pub fn execute_stopped_restore(
     if request.network_id != config.network_id || request.server_id != config.server_id {
         return Err(OfflineError::InvalidRequest);
     }
-    execute_restore_command(request, qualifications).map_err(|_| OfflineError::Storage)
+    execute_restore_command(request, qualifications).map_err(|error| match error {
+        StorageError::FilesystemRejected(FilesystemCause::InsufficientCapacity) => {
+            OfflineError::InsufficientCapacity
+        }
+        _ => OfflineError::Storage,
+    })
 }

@@ -50,16 +50,17 @@ pub use construction::{
 };
 pub use construction_directory::{ConstructionDirectory, ConstructionDirectoryPhase};
 pub use construction_runtime::{
-    BackupConstructionSourceReader, ConstructionCommitReceipt, ConstructionExecutor,
+    BackupConstructionSourceReader, ConstructionAdmission, ConstructionAdmissionPolicy,
+    ConstructionCapacityObserver, ConstructionCommitReceipt, ConstructionExecutor,
     ConstructionFinalizationCounters, ConstructionLimits, ConstructionPlan,
     ConstructionPlanBuilder, ConstructionPreflight, ConstructionSourceDatabase,
     ConstructionSourceFacts, ConstructionSourceReader, ConstructionSourceRecord,
     ConstructionTarget, ConstructionTargetBatch, ConstructionTargetRecord,
-    ConstructionTargetWriter, ConstructionTransformer, DatabaseConstructionSourceReader,
-    ExactCopyTransformer, MAX_CONSTRUCTION_BATCH_BYTES, MAX_CONSTRUCTION_BATCH_RECORDS,
-    MAX_CONSTRUCTION_SOURCE_BYTES, MAX_CONSTRUCTION_TARGET_BYTES, RecoveryTransformV1,
-    RestoreBackupSource, RestoreBackupSourceConfig, VerifiedConstructionOutput,
-    recovery_transform_prefix,
+    ConstructionTargetWriter, ConstructionTransaction, ConstructionTransformer,
+    DatabaseConstructionSourceReader, ExactCopyTransformer, MAX_CONSTRUCTION_BATCH_BYTES,
+    MAX_CONSTRUCTION_BATCH_RECORDS, MAX_CONSTRUCTION_SOURCE_BYTES, MAX_CONSTRUCTION_TARGET_BYTES,
+    RecoveryTransformV1, RestoreBackupSource, RestoreBackupSourceConfig,
+    VerifiedConstructionOutput, recovery_transform_prefix,
 };
 pub use control::{
     DATABASE_HEADER_BYTES, DatabaseHeader, DatabaseHeaderTbs, NONCE_RESERVATION_BYTES,
@@ -145,6 +146,7 @@ pub use records::{
 pub use recovery::{RecoveryDisposition, classify_recovery_state};
 pub use restore_command::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, execute_restore_command,
+    execute_restore_command_with_observer,
 };
 pub use schema::{
     DATABASE_FORMAT, MAX_NONCE_DRAWS, MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH,

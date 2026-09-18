@@ -39,10 +39,12 @@ fn gate_source(route: &RouteRow, state: E2eeRecoveryKind) -> Result<RecoveryRow,
 fn plan_rows(rows: &[RecoveryRow]) -> Result<Vec<StorageConstructionPlanEntry>, StorageError> {
     let (file, path) = scratch_file("cap73-provenance")?;
     let result = (|| {
+        let admission = scratch_admission(&file)?;
         let mut builder = ConstructionPlanBuilder::start_streaming(
             StorageConstructionKind::Restore,
             file,
             maximum_limits(),
+            admission,
         )?;
         builder.push(restore_entry(
             TableId::LoginIndexKeyState,

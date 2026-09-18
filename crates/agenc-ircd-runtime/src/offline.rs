@@ -151,6 +151,9 @@ pub enum OfflineError {
     Authentication,
     /// Authenticated storage refused the operation.
     Storage,
+    /// Storage refused the free-space reserve before a transaction began; nothing was
+    /// written and a stopped construction resumes exactly where it stopped.
+    InsufficientCapacity,
     /// Initialization crossed an unknowable durable boundary.
     Indeterminate,
     /// At least one final initialization artifact was already installed.
@@ -175,6 +178,9 @@ impl fmt::Display for OfflineError {
             Self::Cryptography => "cryptographic setup failed",
             Self::Authentication => "account setup failed",
             Self::Storage => "authenticated storage operation failed",
+            Self::InsufficientCapacity => {
+                "storage free space is below the reserve; nothing was written, rerun with --resume when space is available"
+            }
             Self::Indeterminate => "storage initialization outcome is indeterminate",
             Self::PartialInitialization => "initialization is partially installed",
         };
@@ -1994,6 +2000,10 @@ mod tests {
             (
                 OfflineError::Storage,
                 "authenticated storage operation failed",
+            ),
+            (
+                OfflineError::InsufficientCapacity,
+                "storage free space is below the reserve; nothing was written, rerun with --resume when space is available",
             ),
             (
                 OfflineError::Indeterminate,

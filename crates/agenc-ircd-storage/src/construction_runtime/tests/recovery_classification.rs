@@ -132,10 +132,12 @@ fn declared_recovery_refuses_a_mailbox_owner_under_another_scope() -> Result<(),
 // red assertion so an assertion failure leaves no in-worktree test artifact.
 fn recovery_selection(row: &RecoveryRow) -> Result<RestoreSelection, StorageError> {
     let (file, path) = scratch_file(row.label)?;
+    let admission = scratch_admission(&file)?;
     let mut builder = ConstructionPlanBuilder::start_streaming(
         StorageConstructionKind::Restore,
         file,
         maximum_limits(),
+        admission,
     )?;
     let source = backup_source(TableId::E2eeState, &row.key, 1)?;
     let result = select_restore_record(&mut builder, &source, &recovery_record(row)?);
