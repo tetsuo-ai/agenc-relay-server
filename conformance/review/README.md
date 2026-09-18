@@ -1,16 +1,25 @@
-# Stage 08 external review package
+# Stage 08 review package
 
-This directory is the package handed to the external cryptographic and
-protocol review that companion gate 13 (`S08-039`) requires. The task stays
-open until a reviewer outside the implementing team has worked through it
-and every finding has a disposition in `findings.md`. The Stage 08 gate
-records this state in `conformance/stage-eight-e2ee-profile.toml` under
-`[review]`; no release may advertise encrypted-v1 as reviewed before the
-task closes.
+Companion gate 13 (`S08-039`) asks for a cryptographic and protocol review by
+someone other than the implementer. **No third-party review was commissioned,
+and nothing in this repository may be read as an external audit.** The owner
+decided on 2026-09-18 that the review is performed internally: three reviewers
+with no context from the implementation, each given only the specifications and
+the tree, were tasked to break one third of the profile (hostile coordinator,
+finality and retention; hostile edge and client, recovery and witness gates;
+membership authority, key ownership and the coupled authentication and
+federation boundaries). They reviewed main at `46840bd` and reported nine
+findings: one high, seven medium and one low, none a confidentiality or
+authority break. Every finding is fixed, carries a regression that fails
+without the fix, and is dispositioned in `findings.md` under "Internal
+independent review, 2026-09-18". The Stage 08 gate records this state in
+`conformance/stage-eight-e2ee-profile.toml` under `[review]` as
+`internal-review-complete`. A release may describe encrypted-v1 as internally
+reviewed; it may not describe it as externally audited.
 
 The [2026-09-04 adversarial implementation review](adversarial-review-2026-09-04.md)
 records reproduced defects, fixes, regression tests, and remaining limits in
-the working tree. It is separate from the external review required above.
+the working tree. It predates and is separate from the internal independent review above.
 
 ## What is under review
 
@@ -183,8 +192,8 @@ refuses the event. The
 exercise both storage refusal and a result arriving during completion staging.
 The [retry tests](../../crates/agenc-ircd-runtime/src/e2ee/edge/tests/retry.rs)
 check requester, attachment session, command, label, retention, and reply
-capacity boundaries. These checks are implementation review evidence; they
-do not close the external review task.
+capacity boundaries. These checks are implementation review evidence; the
+review task was closed by the internal independent review of 2026-09-18.
 
 The edge previously retained response objects without a count or aggregate
 byte bound. It now admits at most 32 objects and 4,194,304 decoded bytes per
@@ -200,5 +209,6 @@ object mismatches, duplicate conflicts, and the link failure path.
 The final working tree passed all 97 commands in the Stage 08 implementation
 gate. The [adversarial review record](adversarial-review-2026-09-04.md#validation-record)
 records its source inventory and results. A new checkpoint still requires a
-committed source revision and its recorded gate artifact. The external review
-task `S08-039` remains open.
+committed source revision and its recorded gate artifact. The review task
+`S08-039` was closed on 2026-09-18 by the internal independent review recorded
+at the top of this file; no external audit exists.

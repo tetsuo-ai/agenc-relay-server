@@ -102,9 +102,9 @@ stats_selector = "E2EE"
 
 [review]
 task = "S08-039"
-state = "blocked-external"
+state = "internal-review-complete"
 package = "conformance/review"
-reason = "external cryptographic and protocol review has not been performed; the review package is complete and the gate records the task as open"
+reason = "no third-party review was commissioned; an internal independent review by three reviewers with no context from the implementation ran on 2026-09-18 against main at 46840bd, reported nine findings (one high, seven medium, one low; none a confidentiality or authority break), and every finding is fixed, regression-tested and dispositioned in conformance/review/findings.md"
 
 [fuzz]
 targets = ["e2ee_object", "e2ee_mls_outer", "e2ee_fragment", "e2ee_identity_chain", "e2ee_tags"]

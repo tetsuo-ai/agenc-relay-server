@@ -106,7 +106,10 @@ EXPECTED_COORDINATOR = {
     "bootstrap_activation_rule": "BootstrapActivation",
     "reload_tables": [22, 23],
 }
-EXPECTED_REVIEW_STATE = "blocked-external"
+# The owner decided on 2026-09-18 that the review is performed internally, by reviewers with no
+# context from the implementation, and not by a paid third party. The state says exactly that:
+# it must never read as an external audit.
+EXPECTED_REVIEW_STATE = "internal-review-complete"
 FUZZ_TARGETS = (
     "e2ee_object",
     "e2ee_mls_outer",
@@ -213,7 +216,7 @@ def validate_profile(profile: dict[str, object]) -> None:
     if not isinstance(review, dict) or review.get("task") != "S08-039":
         raise StageEightError("review record does not name S08-039")
     if review.get("state") != EXPECTED_REVIEW_STATE:
-        raise StageEightError("review state is not recorded as blocked-external")
+        raise StageEightError("review state is not recorded as internal-review-complete")
     if review.get("package") != REVIEW_PACKAGE or not str(review.get("reason", "")):
         raise StageEightError("review record lacks its package or reason")
     fuzz = profile.get("fuzz")

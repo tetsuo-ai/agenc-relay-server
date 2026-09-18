@@ -57,7 +57,7 @@ Ed25519, and authenticated storage.
 | 05 | complete; checkpoint closed | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, full startup reconstruction, signed backup/restore, rekey construction, login-index transition, and native filesystem qualification |
 | 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
 | 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
-| 08 | implementation checkpoint closed; external review open | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
+| 08 | implementation checkpoint closed; internally reviewed 2026-09-18, no external audit | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
 | 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, and purge |
 | 10 | in progress; no release decision | Production qualification and release evidence |
 
@@ -86,7 +86,8 @@ KeyPackage and mailbox delivery, route projection to edges with a
 record-chain witness at every edge, the cross-profile durable barrier, a
 coordinator reload from durable rows, the encrypted profile composed in the
 daemon, and a lifecycle driven by two independent MLS libraries; the
-external review task stays open. Stage 09 adds optional WSS transport,
+review task was closed on 2026-09-18 by an internal independent review; no
+external audit was commissioned. Stage 09 adds optional WSS transport,
 plaintext history, bounded purge and expiry, and authenticated history replay. See the
 [Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
