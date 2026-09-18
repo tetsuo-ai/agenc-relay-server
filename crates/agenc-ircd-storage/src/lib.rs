@@ -30,6 +30,7 @@ mod recovery;
 mod redb_store;
 mod restore_command;
 mod schema;
+mod scratch;
 mod sealed;
 mod source_validation;
 
@@ -150,6 +151,7 @@ pub use schema::{
     MAX_STORED_KEY_BYTES, MAX_TRACKED_MUTATIONS, MAX_TRANSACTION_PLANS, SCHEMA_GENERATION,
     STORAGE_HANDOFF_SLOT_BYTES, StoredKey, TableId,
 };
+pub use scratch::{SCRATCH_SLICE_BYTES, SCRATCH_SLICE_ROWS, ScratchUsage};
 pub use sealed::{
     MAX_SEALED_RECORD_BYTES, MIN_SEALED_RECORD_BYTES, SealedRecord, StorageSealContext,
 };

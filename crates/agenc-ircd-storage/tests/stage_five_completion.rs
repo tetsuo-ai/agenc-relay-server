@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "stage_five_completion/bounded_scratch.rs"]
+mod bounded_scratch;
 #[path = "stage_five_completion/recovery_provenance.rs"]
 mod recovery_provenance;
 #[path = "stage_five_completion/source_validation.rs"]

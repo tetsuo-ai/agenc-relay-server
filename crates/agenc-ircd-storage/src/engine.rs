@@ -15,6 +15,7 @@ use agenc_ircd_crypto::{
 #[cfg(test)]
 use agenc_ircd_types::ChannelName;
 use agenc_ircd_types::{NetworkId, Nickname, RecoveryEpoch, ServerId, TransactionId};
+use redb::AllocationAllowance;
 use subtle::ConstantTimeEq as _;
 
 use crate::bounded::{MaintenanceOutcome, OperationAllowance};
@@ -23,6 +24,7 @@ use crate::redb_store::{
     HEADER_META_KEY, RESERVATION_META_KEY, RecoveryScratch, RedbCommitFailure, RedbStore,
     RedbWrite, ReferenceScratch, SnapshotScan, StorageSnapshot,
 };
+use crate::scratch::{ScratchAdmission, ScratchLocation, ScratchUsage};
 use crate::{
     BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupHeader, BackupOutput, BackupReceipt,
     BackupRecord, BackupStreamWriter, BackupTrustKey, ChannelNameRecordBody, CommitOutcome,
@@ -69,6 +71,8 @@ pub struct RecoveredStorageState {
     recovery_epoch: RecoveryEpoch,
     capacity: FilesystemCapacity,
     database_repaired: bool,
+    verification_scratch: ScratchUsage,
+    reference_scratch: ScratchUsage,
 }
 
 /// One coherent, input-free storage-owner sample for authenticated
@@ -182,6 +186,8 @@ pub struct CheckpointReceipt {
     pub backup_stream_bytes: u64,
     /// Complete committed rollback-guard hash.
     pub rollback_guard_hash: StorageDigest,
+    /// Metered scratch of the readback that proved the cut before the checkpoint was published.
+    pub readback_scratch: ScratchUsage,
 }
 
 /// Closed result of one explicit integrity-checkpoint request.
@@ -285,6 +291,18 @@ impl RecoveredStorageState {
     #[must_use]
     pub const fn capacity(&self) -> FilesystemCapacity {
         self.capacity
+    }
+
+    /// Returns the metered scratch of the startup integrity reconstruction.
+    #[must_use]
+    pub const fn verification_scratch(&self) -> ScratchUsage {
+        self.verification_scratch
+    }
+
+    /// Returns the metered scratch of the startup reference validation.
+    #[must_use]
+    pub const fn reference_scratch(&self) -> ScratchUsage {
+        self.reference_scratch
     }
 }
 
@@ -819,27 +837,22 @@ impl EngineStateDirectory {
         }
     }
 
-    fn reference_scratch(&self) -> Result<ReferenceScratch, StorageError> {
+    /// Creates the private scratch entry a verification writes: a create-exclusive mode-0600
+    /// file of the state directory removed through its retained descriptor, or, without
+    /// writer authority, an anonymous inode on the same qualified filesystem.
+    fn scratch_location(&self) -> Result<ScratchLocation, StorageError> {
         match self {
             Self::Writable(directory) => {
                 let (file, scratch_directory, name) = directory.create_recovery_scratch()?;
-                ReferenceScratch::create(file, scratch_directory, name)
+                Ok(ScratchLocation::Exclusive {
+                    file,
+                    directory: scratch_directory,
+                    name,
+                })
             }
-            Self::Inspection(directory) => {
-                ReferenceScratch::create_anonymous(directory.create_anonymous_scratch()?)
-            }
-        }
-    }
-
-    fn recovery_scratch(&self) -> Result<RecoveryScratch, StorageError> {
-        match self {
-            Self::Writable(directory) => {
-                let (file, scratch_directory, name) = directory.create_recovery_scratch()?;
-                RecoveryScratch::create(file, scratch_directory, name)
-            }
-            Self::Inspection(directory) => {
-                RecoveryScratch::create_anonymous(directory.create_anonymous_scratch()?)
-            }
+            Self::Inspection(directory) => Ok(ScratchLocation::Anonymous {
+                file: directory.create_anonymous_scratch()?,
+            }),
         }
     }
 
@@ -856,6 +869,53 @@ struct DeferredCleanup {
     pending: bool,
     /// Pages returned to the allocator since the open.
     reclaimed_pages: u64,
+}
+
+/// The exact-filesystem gate every scratch transaction passes immediately before it begins:
+/// a fresh sample of the state filesystem must hold `R(F)` plus the transaction's allowance.
+///
+/// This repeats the arithmetic of [`StateDirectory::admit_transaction`] for an explicit
+/// allowance and for both directory authorities, because inspection samples capacity without
+/// holding the writer lock.
+struct ScratchGate<'a> {
+    directory: &'a EngineStateDirectory,
+    fixed_reserve_bytes: u64,
+    reserve_percent: u8,
+}
+
+impl ScratchAdmission for ScratchGate<'_> {
+    fn admit_scratch(&self, allowance: AllocationAllowance) -> Result<(), StorageError> {
+        let capacity = self
+            .directory
+            .capacity(self.fixed_reserve_bytes, self.reserve_percent)?;
+        let required = capacity
+            .reserve_bytes
+            .checked_add(allowance.bytes())
+            .ok_or(StorageError::Overflow)?;
+        if capacity.available_bytes < required {
+            return Err(StorageError::FilesystemRejected(
+                crate::FilesystemCause::InsufficientCapacity,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The read-only half of the ledger verification: what the control chain proves without any
+/// scratch, and which manifests the record-set reconstruction has to reverse.
+struct LedgerChain {
+    tracked_record_count: u64,
+    tracked_state_digest: StorageDigest,
+    replay: Option<std::ops::RangeInclusive<u64>>,
+}
+
+/// One tracked-state reconstruction from the current records back to a cut, with the metered
+/// scratch that produced it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TrackedStateReconstruction {
+    record_count: u64,
+    digest: StorageDigest,
+    scratch: ScratchUsage,
 }
 
 pub(crate) struct StorageEngine {
@@ -1843,6 +1903,13 @@ impl StorageEngine {
             .map_err(rejected)?;
         self.verify_checkpoint_cut(&completed.cut)
             .map_err(rejected)?;
+        // Every fallible resource the checkpoint's readback needs is spent here, before the
+        // reservation guard, the transaction or the committed guard exist: the scratch that
+        // reverses the current records to the cut is admitted slice by slice against the same
+        // reserve the transaction is admitted against, and a refusal leaves nothing written.
+        let readback = self
+            .readback_checkpoint_cut(&completed)
+            .map_err(readback_failure)?;
         let _capacity = self
             .state_directory
             .admit_transaction(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)
@@ -1869,7 +1936,7 @@ impl StorageEngine {
         let prepared = self
             .prepare_checkpoint(&completed, installation, retired_charges, nonces)
             .map_err(rejected)?;
-        self.commit_prepared_checkpoint(prepared, previous_checkpoint_key, allowance)?;
+        self.commit_prepared_checkpoint(prepared, previous_checkpoint_key, allowance, readback)?;
         self.state_directory
             .faults()
             .check(
@@ -1886,7 +1953,40 @@ impl StorageEngine {
             logical_database_bytes: self.state_meta.tbs().logical_database_bytes,
             backup_stream_bytes: self.state_meta.tbs().backup_stream_bytes,
             rollback_guard_hash: self.guard.complete_hash().map_err(indeterminate)?,
+            readback_scratch: readback.scratch,
         })
+    }
+
+    /// Reads the cut back before anything is published: the current tracked records, reversed
+    /// through every manifest after the cut, must reproduce the count and digest the scan
+    /// recorded at the cut. The scratch is admitted and bounded slice by slice and is gone
+    /// before this returns; only its metered usage is kept for the receipt.
+    fn readback_checkpoint_cut(
+        &self,
+        completed: &CompletedCheckpointScan,
+    ) -> Result<TrackedStateReconstruction, StorageError> {
+        let head = self.state_meta.tbs().manifest_sequence;
+        let replay = if completed.cut.manifest_sequence < head {
+            Some(
+                completed
+                    .cut
+                    .manifest_sequence
+                    .checked_add(1)
+                    .ok_or(StorageError::Overflow)?..=head,
+            )
+        } else {
+            None
+        };
+        let reconstruction = self.reconstruct_tracked_state(replay)?;
+        if (reconstruction.record_count, reconstruction.digest)
+            != (
+                completed.tracked_record_count,
+                completed.tracked_state_digest,
+            )
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(reconstruction)
     }
 
     fn verify_checkpoint_cut(&self, cut: &StateMetaTbs) -> Result<(), StorageError> {
@@ -2123,6 +2223,7 @@ impl StorageEngine {
         prepared: PreparedCheckpoint,
         previous_checkpoint_key: [u8; 8],
         mut allowance: OperationAllowance,
+        readback: TrackedStateReconstruction,
     ) -> Result<(), EngineCommitFailure> {
         self.state_directory
             .faults()
@@ -2169,7 +2270,17 @@ impl StorageEngine {
         self.retained_manifest_bytes = retained_manifest_bytes;
         allowance.charge(charged).map_err(indeterminate)?;
         self.finish_operation(allowance)?;
-        self.verify_integrity_ledger().map_err(indeterminate)
+        // The published control chain is read back without any scratch: the record set was
+        // proven against the cut before publication and no tracked table changed since. A
+        // chain that does not reproduce that proof is a durable state this owner cannot vouch
+        // for, exactly as before.
+        let chain = self.verify_integrity_chain().map_err(indeterminate)?;
+        if (chain.tracked_record_count, chain.tracked_state_digest)
+            != (readback.record_count, readback.digest)
+        {
+            return Err(EngineCommitFailure::Indeterminate);
+        }
+        Ok(())
     }
 
     fn checkpoint_retired_charges(
@@ -2707,9 +2818,11 @@ impl StorageEngine {
     pub(crate) fn startup_scan(&self) -> Result<RecoveredStorageState, StorageError> {
         self.store.validate_inventory()?;
         self.store.validate_meta_membership()?;
-        self.verify_integrity_ledger()?;
-        let reference_scratch = self.state_directory.reference_scratch()?;
-        let mut reference_writer = reference_scratch.begin()?;
+        let verification_scratch = self.verify_integrity_ledger_metered()?;
+        let gate = self.scratch_gate();
+        let mut reference_scratch =
+            ReferenceScratch::create(self.state_directory.scratch_location()?, &gate)?;
+        let mut reference_writer = reference_scratch.begin();
         let mut logical_bytes =
             logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
                 .checked_add(logical_meta_charge(
@@ -2854,8 +2967,9 @@ impl StorageEngine {
                 })?;
         }
         history_inventory.finish()?;
-        reference_writer.commit()?;
+        reference_writer.finish()?;
         reference_scratch.validate()?;
+        let reference_scratch = reference_scratch.close();
         let expected_previous_login_entries =
             previous_login_generation.map_or(0, |(_, count)| count);
         if (
@@ -2895,6 +3009,8 @@ impl StorageEngine {
             recovery_epoch: self.header.tbs().recovery_epoch,
             capacity,
             database_repaired: self.store.opened_after_repair(),
+            verification_scratch,
+            reference_scratch,
         })
     }
 
@@ -3066,8 +3182,88 @@ impl StorageEngine {
         LoginIndexKeyState::decode(plaintext.expose_for_storage_codec())
     }
 
-    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=checkpoint-to-head replay keeps chain accumulators in one auditable scope
+    /// Verifies the complete ledger: the control chain, then the tracked record set
+    /// reconstructed in bounded scratch back to the checkpoint cut.
     fn verify_integrity_ledger(&self) -> Result<(), StorageError> {
+        self.verify_integrity_ledger_metered().map(|_usage| ())
+    }
+
+    /// Verifies the complete ledger and reports the metered scratch its reconstruction used.
+    fn verify_integrity_ledger_metered(&self) -> Result<ScratchUsage, StorageError> {
+        let chain = self.verify_integrity_chain()?;
+        let reconstruction = self.reconstruct_tracked_state(chain.replay)?;
+        if (reconstruction.record_count, reconstruction.digest)
+            != (chain.tracked_record_count, chain.tracked_state_digest)
+        {
+            return Err(StorageError::StaleState);
+        }
+        Ok(reconstruction.scratch)
+    }
+
+    /// The gate every scratch transaction of this engine passes: the state filesystem sampled
+    /// afresh against the configured reserve plus the transaction's allowance.
+    fn scratch_gate(&self) -> ScratchGate<'_> {
+        ScratchGate {
+            directory: &self.state_directory,
+            fixed_reserve_bytes: self.limits.fixed_reserve_bytes,
+            reserve_percent: self.limits.reserve_percent,
+        }
+    }
+
+    /// Rebuilds the tracked record set in bounded scratch: every current tracked row in
+    /// admitted slices, then every manifest of `replay` reversed newest first, then the
+    /// canonical count and digest. The scratch is removed before this returns; nothing of it
+    /// is trusted afterwards except the count, the digest and the metered usage.
+    fn reconstruct_tracked_state(
+        &self,
+        replay: Option<std::ops::RangeInclusive<u64>>,
+    ) -> Result<TrackedStateReconstruction, StorageError> {
+        let gate = self.scratch_gate();
+        let mut scratch = RecoveryScratch::create(self.state_directory.scratch_location()?, &gate)?;
+        self.index_current_tracked_records(&mut scratch)?;
+        if let Some(replay) = replay {
+            for sequence in replay.rev() {
+                let manifest = self.read_manifest(sequence)?;
+                scratch.apply_reverse(manifest.tbs().mutations())?;
+            }
+        }
+        let (record_count, digest) = scratch.digest()?;
+        Ok(TrackedStateReconstruction {
+            record_count,
+            digest,
+            scratch: scratch.close(),
+        })
+    }
+
+    /// Indexes every current tracked row: table by table in canonical order, published in
+    /// bounded slices as the writer fills.
+    fn index_current_tracked_records(
+        &self,
+        scratch: &mut RecoveryScratch<'_>,
+    ) -> Result<(), StorageError> {
+        let mut writer = scratch.begin_current();
+        for number in 0_u16..=26 {
+            let table = TableId::from_u16(number)?;
+            if !table.is_integrity_tracked() {
+                continue;
+            }
+            self.store
+                .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                    let stored_key = StoredKey::new(key.to_vec())?;
+                    let sealed = SealedRecord::decode(encoded)?;
+                    writer.insert_current(
+                        table,
+                        &stored_key,
+                        sealed.record_schema(),
+                        sealed.record_id()?,
+                    )
+                })?;
+        }
+        writer.finish()
+    }
+
+    // agenc-review: focus owner=storage reviewed=2026-09-18 reason=checkpoint-to-head control chain keeps its accumulators in one auditable scope; the record set is reconstructed separately in bounded scratch
+    fn verify_integrity_chain(&self) -> Result<LedgerChain, StorageError> {
         let state = self.state_meta.tbs();
         let checkpoint_key =
             StoredKey::new(state.checkpoint_manifest_sequence.to_be_bytes().to_vec())?;
@@ -3129,26 +3325,6 @@ impl StorageEngine {
         {
             return Err(StorageError::StaleState);
         }
-        let scratch = self.state_directory.recovery_scratch()?;
-        let mut scratch_writer = scratch.begin_current()?;
-        for number in 0_u16..=26 {
-            let table = TableId::from_u16(number)?;
-            if !table.is_integrity_tracked() {
-                continue;
-            }
-            self.store
-                .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
-                    let stored_key = StoredKey::new(key.to_vec())?;
-                    let sealed = SealedRecord::decode(encoded)?;
-                    scratch_writer.insert_current(
-                        table,
-                        &stored_key,
-                        sealed.record_schema(),
-                        sealed.record_id()?,
-                    )
-                })?;
-        }
-        scratch_writer.commit()?;
         let mut checkpoint_count = 0_u64;
         self.store.visit_table(
             TableId::IntegrityCheckpoint,
@@ -3256,10 +3432,6 @@ impl StorageEngine {
                     checkpoint_installation_applied = true;
                 }
             }
-            for sequence in (first_manifest..=state.manifest_sequence).rev() {
-                let manifest = self.read_manifest(sequence)?;
-                scratch.apply_reverse(manifest.tbs().mutations())?;
-            }
         }
         if (
             previous_hash,
@@ -3278,13 +3450,11 @@ impl StorageEngine {
         ) {
             return Err(StorageError::StaleState);
         }
-        let (tracked_record_count, tracked_state_digest) = scratch.digest()?;
-        if tracked_record_count != checkpoint.tbs().tracked_record_count
-            || tracked_state_digest != checkpoint.tbs().tracked_state_digest
-        {
-            return Err(StorageError::StaleState);
-        }
-        Ok(())
+        Ok(LedgerChain {
+            tracked_record_count: checkpoint.tbs().tracked_record_count,
+            tracked_state_digest: checkpoint.tbs().tracked_state_digest,
+            replay: first_manifest.map(|first| first..=state.manifest_sequence),
+        })
     }
 
     fn read_manifest(&self, sequence: u64) -> Result<IntegrityManifest, StorageError> {
@@ -3856,6 +4026,31 @@ fn indeterminate(_error: StorageError) -> EngineCommitFailure {
     EngineCommitFailure::Indeterminate
 }
 
+/// Classifies a readback failure raised before anything was published. A resource refusal is a
+/// determinate rejection: the scratch was refused its admission or its allowance, or the scratch
+/// or a store read failed, and the caller may retry once the resource is back. Anything else
+/// means the durable ledger does not reproduce the scan, a state this owner cannot vouch for,
+/// and closes it through the same exit the post-publication verification always used.
+fn readback_failure(error: StorageError) -> EngineCommitFailure {
+    match error {
+        StorageError::AllocationFailed
+        | StorageError::AllowanceRefused(_)
+        | StorageError::UnboundedRegion(_)
+        | StorageError::FilesystemRejected(_)
+        | StorageError::DatabaseRejected
+        | StorageError::QueueFull
+        | StorageError::Unavailable => EngineCommitFailure::Rejected(error),
+        StorageError::InvalidEncoding
+        | StorageError::UnsupportedVersion
+        | StorageError::LimitExceeded
+        | StorageError::Overflow
+        | StorageError::AuthenticationFailed
+        | StorageError::StaleState
+        | StorageError::WriterLocked
+        | StorageError::ResumeMismatch => EngineCommitFailure::Indeterminate,
+    }
+}
+
 fn require_meta(store: &RedbStore, key: &[u8]) -> Result<Vec<u8>, StorageError> {
     store.read_meta(key)?.ok_or(StorageError::InvalidEncoding)
 }
@@ -3992,6 +4187,7 @@ pub(crate) fn draw_nonces_with_faults(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod bounded_scratch;
     mod history_reads;
     use std::fs::OpenOptions;
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};

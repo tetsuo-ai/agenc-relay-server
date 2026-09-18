@@ -162,7 +162,7 @@ fn delivery(records: &[Record], object: &[u8]) -> TestResult<Vec<CompanionFrame>
 /// A fixture whose durable row is already sealed and whose replacement link
 /// reached the blocked witness phase with its request sent.
 async fn requesting() -> TestResult<(WitnessFixture, LinkQueue)> {
-    let mut fixture = durable_fault().await?;
+    let mut fixture = Box::pin(durable_fault()).await?;
     fixture
         .companion
         .restore_witness_backing(BackingReservationPort::new(Arc::new(MemoryBudget::new(

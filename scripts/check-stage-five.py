@@ -18,7 +18,8 @@ EXPECTED_MODULES = {
     "federation_records.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",
     "mutation.rs", "owner.rs", "platform.rs", "qualification.rs", "qualification_workload.rs",
     "records.rs",
-    "recovery.rs", "redb_store.rs", "restore_command.rs", "schema.rs", "sealed.rs", "source_validation.rs",
+    "recovery.rs", "redb_store.rs", "restore_command.rs", "schema.rs", "scratch.rs", "sealed.rs",
+    "source_validation.rs",
 }
 EXPECTED_TASKS = [f"S05-{number:03d}" for number in range(1, 16)]
 QUALIFICATION_TARGETS = (

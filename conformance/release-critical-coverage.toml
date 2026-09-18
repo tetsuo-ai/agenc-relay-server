@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 852
-reviewed_source_sha256 = "f2f05584fa0c03bad89506092c3da988fce6f9071fb61506bdf0af530e44f4c1"
+reviewed_source_files = 854
+reviewed_source_sha256 = "0282d5e9ee52c7e780f9a9286f1cb01a790bb396e7f769394a5fc0cc18ecd3dd"
 deferred = []
 
 [[region]]
@@ -3751,9 +3751,9 @@ id = "storage-admission-engine-validate-recovered-domain-record"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/engine.rs"
 item = "validate_recovered_domain_record"
-source_sha256 = "8efc3b00bf504f78af2ab93d343f2b135bfad3df45a9d26c63d64b6145dc30bd"
-start_line = 3350
-end_line = 3391
+source_sha256 = "c6d38bba118a9d22f2996b7b6c042fc3ecd632a3e823d232d53d8e3994ce16e2"
+start_line = 3520
+end_line = 3561
 span_sha256 = "46a3960182682b0ab3e4ba137a90ce2d2e3c8f1c90b83d5ff7a674c02faf6d6a"
 metric = "regions"
 reason = "Recovered rows require canonical ownership and target existence, including exactly one Account reference for a redeemed invitation and empty Account and Session tombstones."

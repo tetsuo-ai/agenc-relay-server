@@ -149,7 +149,7 @@ async fn assert_reconnect_gated(
 
 #[tokio::test]
 async fn a_durable_witness_blocks_ordinary_delivery_on_a_replacement_link() -> TestResult {
-    let mut fixture = durable_fault().await?;
+    let mut fixture = Box::pin(durable_fault()).await?;
     assert_reconnect_gated(&mut fixture, 2, &[CONVERSATION]).await?;
     fixture.companion.link_down();
     assert_reconnect_gated(&mut fixture, 3, &[CONVERSATION]).await
@@ -157,7 +157,7 @@ async fn a_durable_witness_blocks_ordinary_delivery_on_a_replacement_link() -> T
 
 #[tokio::test]
 async fn sealed_reconstruction_preserves_all_unresolved_historical_witnesses() -> TestResult {
-    let mut fixture = durable_fault().await?;
+    let mut fixture = Box::pin(durable_fault()).await?;
     let historical = WitnessRow {
         event_kind: IrcFederationEventKind::ClosedEvent.value(),
         expected_sequence: 5,
@@ -220,7 +220,7 @@ pub(super) fn negotiated_capabilities() -> TestResult<CapabilityState> {
 
 #[tokio::test]
 async fn a_durable_witness_refuses_client_work_even_if_the_phase_is_active() -> TestResult {
-    let mut fixture = durable_fault().await?;
+    let mut fixture = Box::pin(durable_fault()).await?;
     fixture.companion.phase = Phase::Active;
     let capabilities = negotiated_capabilities()?;
     let facts = SessionFacts {

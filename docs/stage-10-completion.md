@@ -148,6 +148,13 @@ client without `standard-replies` reads, and the drill retry and capacity
 predicate that now read the line instead of guessing (RUN-09, issue #152) are
 recorded in
 [the SASL unavailable authority record](stage-10-sasl-unavailable.md).
+The recovery and reference scratch admitted against the exact filesystem and
+bounded by the fork's allowance before every one of its transactions, the
+checkpoint that reads its cut back before it publishes and allocates no
+scratch afterwards, the refusal mapping that never reports a refused scratch
+as stale state or as an uncertain commit, and the metered scratch startup and
+checkpoints now report (STO-04, issue #65) are recorded in
+[the bounded recovery scratch record](stage-10-bounded-recovery-scratch.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
