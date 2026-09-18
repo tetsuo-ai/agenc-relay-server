@@ -53,6 +53,7 @@ mod reconstruction_cause;
 
 pub(crate) use ordinary_batch::committed_ordinary_acknowledgements;
 mod restart;
+mod shutdown_pending_install;
 mod shutdown_recovery;
 
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);

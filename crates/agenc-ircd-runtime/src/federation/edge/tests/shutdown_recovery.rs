@@ -20,7 +20,7 @@ type RetainedRow = (StoredKey, Vec<u8>);
 
 /// Tightened budgets: every phase below is a fraction of the spec defaults,
 /// so a run that completes here also completes inside the configured plan.
-fn tightened_plan() -> TestResult<ShutdownPlan> {
+pub(super) fn tightened_plan() -> TestResult<ShutdownPlan> {
     Ok(ShutdownPlan::new(
         Duration::from_secs(2),
         Duration::from_secs(5),
@@ -31,7 +31,7 @@ fn tightened_plan() -> TestResult<ShutdownPlan> {
 
 /// The physical close the connection task reports once drain has enqueued
 /// the connection's final line.
-struct PendingClose {
+pub(super) struct PendingClose {
     closes: ConnectionClosePort,
     generation: ConnectionGeneration,
     final_line_sequence: u64,
@@ -63,10 +63,10 @@ impl PendingClose {
 
 /// Drives the edge's state owner through the four phases and reports the
 /// connection's physical close from the drain phase, as the daemon does.
-struct EdgeHooks {
-    lifecycle: LifecycleControl,
-    close: Option<PendingClose>,
-    stop_deadline_expired: Arc<AtomicBool>,
+pub(super) struct EdgeHooks {
+    pub(super) lifecycle: LifecycleControl,
+    pub(super) close: Option<PendingClose>,
+    pub(super) stop_deadline_expired: Arc<AtomicBool>,
 }
 
 impl ShutdownHooks for EdgeHooks {

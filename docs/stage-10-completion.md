@@ -164,6 +164,13 @@ commit awaited without a wall-clock deadline, the bind refusal and the
 shutdown phase a daemon now names, and the two shutdown behaviours left open
 with their `rr` evidence (QA-04, issue #175) are recorded in
 [the flake causes record](stage-10-flake-causes.md).
+The edge that drains with a base snapshot install outstanding, the decision
+for each install stage between abandoning a wait only the coordinator can end
+and finishing a local durable commit, the four-phase regressions that reopen
+to a state which negotiates the snapshot again, and the audit retention scan
+that `flush` waits on, reported and not patched (RUN-11, issue #178), are
+recorded in
+[the edge drain record](stage-10-edge-drain-pending-install.md).
 Leaf-membership proofs verified against the retained roster snapshot they
 name instead of the account's current heads, so live admission decides as
 startup reconstruction does after a roster or root rotation, the explicit
