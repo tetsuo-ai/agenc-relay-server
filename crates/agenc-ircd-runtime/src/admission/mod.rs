@@ -6,8 +6,9 @@ pub mod prefix;
 mod transport;
 
 pub use buckets::{
-    AdmissionRefused, BucketDemand, BucketKey, BucketKind, BucketRate, BucketTable, LoginHashKey,
-    RateLimits, TokenBucket, domain_bucket,
+    AdmissionRefused, BucketDemand, BucketKey, BucketKind, BucketRate, BucketTable,
+    E2EE_INGRESS_BURST_BYTES, E2EE_INGRESS_BYTES_PER_SECOND, LoginHashKey, RateLimits, TokenBucket,
+    domain_bucket,
 };
 pub use overload::{
     EvictionCandidate, OverloadClass, OverloadState, admit_backup, admit_write, required_reserve,

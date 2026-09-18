@@ -999,30 +999,63 @@ struct IrcClient {
     e2ee_tokens: f64,
     /// When the bucket was last refilled.
     e2ee_refilled: Instant,
+    /// Decoded bytes the dedicated ingress bucket still holds.
+    e2ee_bytes: f64,
 }
 
 /// Companion Section 16 admits four E2EE command lines a second per session
-/// with a burst of twenty, charged before any parsing. These suites submit
-/// far more objects than a person would, so each E2EE line waits for its
-/// token before it is written and a refusal in a scenario is never the
-/// admission bucket.
+/// with a burst of twenty, charged before any parsing. A command line and
+/// the fragment zero of an object cost one such token; the continuation
+/// fragments behind an admitted fragment zero are charged by decoded bytes
+/// instead (ENC-16). These suites submit far more objects than a person
+/// would, so each charged line waits for its credit before it is written and
+/// a refusal in a scenario is never the admission bucket.
 const E2EE_LINE_TOKENS_PER_SECOND: f64 = 4.0;
 /// The burst these suites allow themselves. The server refills in whole
 /// periods while this pacer refills continuously, so it keeps well inside
 /// the published burst of twenty rather than tracking it exactly.
 const E2EE_LINE_BURST: f64 = 8.0;
+/// The dedicated ingress bucket refills `MIN_ADMITTED_E2EE_INGRESS_RATE`
+/// decoded bytes a second per account and device.
+const E2EE_INGRESS_BYTES_PER_SECOND: f64 = 65_536.0;
+/// Half the published burst of one live object, for the same reason the
+/// line burst stays inside twenty: the server credits whole seconds.
+const E2EE_INGRESS_BURST: f64 = 131_072.0;
 
-/// Whether a client line is charged against the E2EE command bucket: any
-/// `EKEY` or `EGROUP` line, and any line that carries object fragments.
-fn charges_e2ee_bucket(line: &str) -> bool {
-    if line.contains(CLIENT_FRAGMENT_TAG) {
-        return true;
+/// What one client line is charged before the server parses it.
+enum E2eeCharge {
+    /// Not an E2EE line.
+    Free,
+    /// One E2EE command token: a command line or a fragment zero.
+    Line,
+    /// The decoded bytes of a continuation fragment.
+    Bytes(f64),
+}
+
+/// How the server charges `line`: any `EKEY`, `EGROUP` or `EDIRECT` line and
+/// any fragment zero is one command line; a later fragment of the object
+/// this client is sending pays its decoded bytes.
+fn e2ee_charge(line: &str) -> E2eeCharge {
+    let fragment =
+        tag_value(line, CLIENT_FRAGMENT_TAG).and_then(|value| FragmentTag::parse(&value).ok());
+    if let Some(fragment) = fragment {
+        return match fragment.part {
+            0 => E2eeCharge::Line,
+            // A segment is at most 2,940 bytes, exact in an `f64`.
+            _ => E2eeCharge::Bytes(f64::from(
+                u16::try_from(fragment.segment.len()).unwrap_or(u16::MAX),
+            )),
+        };
     }
     let body = line.strip_prefix('@').map_or(line, |rest| {
         rest.split_once(' ').map_or("", |(_, body)| body)
     });
     let verb = body.split(' ').next().unwrap_or_default();
-    matches!(verb, "EKEY" | "EGROUP" | "EDIRECT")
+    if line.contains(CLIENT_FRAGMENT_TAG) || matches!(verb, "EKEY" | "EGROUP" | "EDIRECT") {
+        E2eeCharge::Line
+    } else {
+        E2eeCharge::Free
+    }
 }
 
 /// Connects to `target` from an explicit loopback source address.
@@ -1082,13 +1115,17 @@ impl IrcClient {
             reader: BufReader::new(stream),
             e2ee_tokens: E2EE_LINE_BURST,
             e2ee_refilled: Instant::now(),
+            e2ee_bytes: E2EE_INGRESS_BURST,
         })
     }
 
-    /// Waits until the session's E2EE command bucket holds a token, so the
-    /// suite measures the encrypted lifecycle rather than the admission rate.
+    /// Waits until the bucket the server charges this line against holds its
+    /// credit, so the suite measures the encrypted lifecycle rather than the
+    /// admission rate: one command token for a command line or a fragment
+    /// zero, decoded bytes for a continuation fragment.
     fn pace_e2ee(&mut self, command: &str) {
-        if !charges_e2ee_bucket(command) {
+        let charge = e2ee_charge(command);
+        if matches!(charge, E2eeCharge::Free) {
             return;
         }
         loop {
@@ -1097,11 +1134,19 @@ impl IrcClient {
             self.e2ee_refilled = now;
             self.e2ee_tokens =
                 (self.e2ee_tokens + elapsed * E2EE_LINE_TOKENS_PER_SECOND).min(E2EE_LINE_BURST);
-            if self.e2ee_tokens >= 1.0 {
-                self.e2ee_tokens -= 1.0;
-                return;
+            self.e2ee_bytes =
+                (self.e2ee_bytes + elapsed * E2EE_INGRESS_BYTES_PER_SECOND).min(E2EE_INGRESS_BURST);
+            match charge {
+                E2eeCharge::Bytes(bytes) if self.e2ee_bytes >= bytes => {
+                    self.e2ee_bytes -= bytes;
+                    return;
+                }
+                E2eeCharge::Line if self.e2ee_tokens >= 1.0 => {
+                    self.e2ee_tokens -= 1.0;
+                    return;
+                }
+                _ => thread::sleep(Duration::from_millis(50)),
             }
-            thread::sleep(Duration::from_millis(50));
         }
     }
 
