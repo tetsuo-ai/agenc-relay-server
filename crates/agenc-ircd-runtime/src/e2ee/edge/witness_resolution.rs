@@ -376,6 +376,7 @@ impl E2eeEdge {
     pub(super) fn witness_end(
         &mut self,
         context: &mut StateCoreContext,
+        edge: &EdgeFederation,
         target_server_id: [u8; 16],
         token: [u8; 16],
         record_count: u32,
@@ -403,13 +404,16 @@ impl E2eeEdge {
         (verified == open.new_head)
             .then_some(())
             .ok_or(E2eeReplyCode::Syncing)?;
-        self.stage_witness_resolved(context, verified)
+        self.stage_witness_resolved(context, edge, verified)
     }
 
     /// One durable transaction installs the proven head and deletes the row.
+    /// The head is installed only on a route the base profile still entitles
+    /// this edge to; otherwise the link closes and the row stands (12.5).
     fn stage_witness_resolved(
         &mut self,
         context: &mut StateCoreContext,
+        edge: &EdgeFederation,
         verified: (u64, [u8; 32]),
     ) -> Result<(), Refusal> {
         let open = self
@@ -417,6 +421,11 @@ impl E2eeEdge {
             .as_ref()
             .ok_or(E2eeReplyCode::Syncing)?;
         let (conversation, token) = (open.conversation, open.token);
+        let entitled = self
+            .conversations
+            .get(&conversation)
+            .is_none_or(|known| self.projected_route_entitled(edge, known));
+        entitled.then_some(()).ok_or(E2eeReplyCode::Syncing)?;
         let head = ChainHead {
             sequence: verified.0,
             record_id: verified.1,

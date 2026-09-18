@@ -364,6 +364,13 @@ fn direct_entitlement_is_reference_counted_and_channel_entitlement_follows_base(
     assert!(entitlements.set_channel(EDGE_A, channel, false));
     assert!(!entitlements.set_channel(EDGE_A, channel, false));
     entitlements.require_direct(EDGE_B, direct, EntitlementReason::Event)?;
+    // A full cut fences one edge's direct references and nothing else.
+    assert!(entitlements.set_channel(EDGE_A, channel, true));
+    entitlements.fence_direct(EDGE_A);
+    assert!(!entitlements.entitled(EDGE_A, &direct));
+    assert!(entitlements.entitled(EDGE_A, &channel));
+    assert!(entitlements.entitled(EDGE_B, &direct));
+    assert!(entitlements.require_direct(EDGE_A, direct, EntitlementReason::Operation)?);
     entitlements.fence(EDGE_A);
     assert!(!entitlements.entitled(EDGE_A, &direct));
     assert!(entitlements.entitled(EDGE_B, &direct));

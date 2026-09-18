@@ -28,6 +28,8 @@ mod sync;
 mod tests;
 
 #[cfg(test)]
+pub(crate) use sync::pending_generation::{host_channels, host_nothing};
+#[cfg(test)]
 pub(crate) use tests::committed_ordinary_acknowledgements;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -463,6 +465,56 @@ impl EdgeFederation {
         generation: ConnectionGeneration,
     ) {
         self.session_bound(context, generation);
+    }
+
+    /// Whether this edge holds the base channel-detail entitlement of
+    /// `channel`: in the active projection, or in a snapshot generation
+    /// still being installed, whose cut pairs with a companion ESTATE
+    /// transfer in flight (companion 12.5).
+    #[must_use]
+    pub fn holds_channel(&self, channel: agenc_ircd_types::ChannelInstanceId) -> bool {
+        use agenc_ircd_domain::federation::ProjectionKey;
+        self.replica.channel(channel).is_some()
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.holds(&ProjectionKey::channel_detail(channel)))
+    }
+
+    /// Whether this edge hosts `account`: its account projection stands in
+    /// the active or the installing generation, or a base origin this edge
+    /// declared, live or awaiting its deletion, is authenticated as it.
+    #[must_use]
+    pub fn hosts_account(&self, account: agenc_ircd_types::AccountId) -> bool {
+        use agenc_ircd_domain::federation::ProjectionKey;
+        self.replica.account(account).is_some()
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.holds(&ProjectionKey::account(account)))
+            || self
+                .origins
+                .values()
+                .any(|origin| origin.account.is_some_and(|(held, _)| held == account))
+    }
+
+    /// Every account [`Self::hosts_account`] answers for now, unordered and
+    /// with repeats: the accounts of the active and installing sessions and
+    /// of every declared origin.
+    pub fn hosted_accounts(&self) -> impl Iterator<Item = agenc_ircd_types::AccountId> + '_ {
+        self.replica
+            .sessions()
+            .filter_map(|session| session.account.map(|(account, _)| account))
+            .chain(
+                self.snapshot
+                    .iter()
+                    .flat_map(sync::SnapshotInstall::session_accounts),
+            )
+            .chain(
+                self.origins
+                    .values()
+                    .filter_map(|origin| origin.account.map(|(account, _)| account)),
+            )
     }
 
     /// Exact transport identity for companion receipt publication ownership.

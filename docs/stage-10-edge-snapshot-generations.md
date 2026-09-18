@@ -55,6 +55,41 @@ next `link_active` announces the identical READY instead of ERESUME, and the
 coordinator answers with the identical ACTIVE. The delivery position does not
 move at READY.
 
+## Base entitlement (ENC-15)
+
+The internal review of the encrypted profile found that the receiver staged
+whatever route a cut named (issue #160), although companion 12.5 has the edge
+verify base channel and account entitlement before READY. `retain_entry` now
+asks `cut_route_entitled` (`crates/agenc-ircd-runtime/src/e2ee/edge/entitlement.rs`)
+before anything of an entry is charged or retained:
+
+- a channel route needs the base channel-detail entitlement,
+  `EdgeFederation::holds_channel`: the hosted channel detail in the active
+  projection, or in the base snapshot generation still being installed, whose
+  cut pairs with the transfer;
+- a direct route needs one of its two accounts hosted here: the base account
+  projection in either generation or a declared base origin
+  (`EdgeFederation::hosts_account`), or a local companion origin with an
+  attached device. Hosting is read when the entry arrives and as it stood when
+  page zero opened the transfer, because a paired base resynchronization
+  closes the sessions the cut counted while later pages are still being
+  fetched; the accounts retained for that are charged against the backing
+  port and released with the generation;
+- a cut may restate a direct route this edge already projects for the same
+  pair, which discloses nothing.
+
+An unentitled entry answers `E2EE_SYNCING`: the frame failure closes the link,
+the staging generation is abandoned, and no READY is sent. The witness
+resolution installer rewrites a head only on a channel route whose channel the
+base projection still hosts; it never creates a projection, so a direct route
+it touches is one the edge already holds. The coordinator side was made exact
+to match: `refresh_entitlements` drops an edge's direct references before every
+full cut and re-derives them from what the edge hosts, so an honest cut never
+restates a pair the edge cannot verify. A cut the edge hosted at the time but
+no longer does, republished after a link loss, is refused until its 15-minute
+token retires it and the next cut is taken. The remediation record is
+[the edge review remediation](stage-10-review-remediation-edge.md).
+
 ## Activation and migration
 
 ACTIVE must name the exact cut of the durable READY generation. It stages the
@@ -88,9 +123,6 @@ so a restart never infers activation from it.
 
 ## Limitations
 
-- Base channel and account entitlement of a snapshot entry is not checked by
-  the edge; it was not before this change either, and the ENC-04 witness
-  resolution reuses this installer.
 - The per-page and cumulative byte ceilings are structural guards, not
   branch outcomes: a route state object is far below a page's share.
 - The unit fixtures commit one batch through sealed storage per test; the

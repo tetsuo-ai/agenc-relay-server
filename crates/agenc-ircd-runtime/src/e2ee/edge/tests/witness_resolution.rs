@@ -612,3 +612,30 @@ async fn a_successor_record_outside_its_window_is_refused() -> TestResult {
     )?))
     .await
 }
+
+/// ENC-15 (#160): the installer rewrites a head only on a route the base
+/// profile still entitles this edge to; an authentic continuation for a
+/// channel the base projection no longer hosts closes the link and retains
+/// the row.
+#[tokio::test]
+async fn a_head_is_not_installed_on_a_channel_route_the_base_no_longer_hosts() -> TestResult {
+    let records = continuation()?;
+    let head = records.last().ok_or("records")?.semantic_id;
+    let object = resolution_object(CONVERSATION, &records, (EXPECTED + 1, head))?;
+    let (mut fixture, _queue) = Box::pin(requesting()).await?;
+    crate::federation::edge::host_nothing(&mut fixture.base)?;
+    feed(&mut fixture, delivery(&records, &object)?)?;
+    assert_eq!(fixture.companion.phase, Phase::Down);
+    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
+    assert!(stored_witness(&mut fixture)?);
+    assert!(fixture.companion.witness_recovery_pending());
+    assert_eq!(
+        fixture
+            .companion
+            .conversations
+            .get(&CONVERSATION)
+            .map(|route| route.head.sequence),
+        Some(4)
+    );
+    Ok(())
+}

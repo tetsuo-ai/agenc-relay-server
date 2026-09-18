@@ -309,8 +309,18 @@ async fn an_empty_snapshot_removes_every_prior_route_only_once_active() -> TestR
     let mut base = base_edge();
     edge.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
-    edge.state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
-        .map_err(|refusal| refusal.code.to_string())?;
+    edge.state_begin(
+        fixture.context_mut()?,
+        &base,
+        [6; 32],
+        5,
+        2,
+        0,
+        0,
+        0,
+        digest,
+    )
+    .map_err(|refusal| refusal.code.to_string())?;
     edge.state_end(fixture.context_mut()?, [6; 32], 0, None)
         .map_err(|refusal| refusal.code.to_string())?;
     // The prior projection stays live through READY.
@@ -382,8 +392,18 @@ async fn refused_snapshot_storage_keeps_the_previous_delivery_generation() -> Te
     base.note_companion_delivery(before.0, before.1);
     edge.link_active(fixture.context_mut()?, &mut base);
     let digest = agenc_ircd_e2ee::ids::federation_snapshot_digest(5, 2, &[])?;
-    edge.state_begin(fixture.context_mut()?, [6; 32], 5, 2, 0, 0, 0, digest)
-        .map_err(|refusal| refusal.code.to_string())?;
+    edge.state_begin(
+        fixture.context_mut()?,
+        &base,
+        [6; 32],
+        5,
+        2,
+        0,
+        0,
+        0,
+        digest,
+    )
+    .map_err(|refusal| refusal.code.to_string())?;
     fixture
         .state_mut()?
         .step_message(crate::state_core::inbox::StateCoreMessage::Signal(

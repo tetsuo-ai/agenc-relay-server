@@ -84,6 +84,9 @@ struct Fixture {
     core: StateCoreFixture,
     edge: E2eeEdge,
     base: EdgeFederation,
+    /// Whether the base edge is left without the entitlement an entry
+    /// needs; the receiver's own tests host every channel they feed.
+    unentitled: bool,
 }
 
 impl Fixture {
@@ -99,6 +102,7 @@ impl Fixture {
             core,
             edge,
             base: base_edge(),
+            unentitled: false,
         };
         fixture
             .edge
@@ -112,6 +116,7 @@ impl Fixture {
         self.edge
             .state_begin(
                 context,
+                &self.base,
                 TOKEN,
                 STATE_GENERATION,
                 DELIVERY_GENERATION,
@@ -134,13 +139,29 @@ impl Fixture {
         id: [u8; 32],
         bytes: &[u8],
     ) -> Result<(), String> {
+        self.host_entry(bytes)?;
         for fragment in fragment_object(bytes).map_err(|error| error.to_string())? {
             let context = self.core.context_mut().map_err(|error| error.to_string())?;
             self.edge
-                .state_entry(context, TOKEN, page, conversation, id, fragment)
+                .state_entry(context, &self.base, TOKEN, page, conversation, id, fragment)
                 .map_err(|refusal| refusal.code.to_string())?;
         }
         Ok(())
+    }
+
+    /// Gives the base edge the channel-detail entitlement of the channel
+    /// route `bytes` carries, as a coordinator cut presumes (companion 12.5).
+    fn host_entry(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let channel = crate::e2ee::edge::events::decode_route_state(bytes)
+            .ok()
+            .and_then(|(_, _, facts)| facts.channel);
+        match channel {
+            Some(channel) if !self.unentitled => {
+                crate::federation::edge::host_channels(&mut self.base, &[channel])
+                    .map_err(|error| error.to_string())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn end(&mut self, page: u32, cursor: Option<[u8; 32]>) -> Result<(), String> {
@@ -861,6 +882,7 @@ async fn a_generation_opens_only_at_page_zero_while_resuming() -> TestResult {
         core,
         edge,
         base: base_edge(),
+        unentitled: false,
     };
     assert_eq!(down.edge.phase(), Phase::Down);
     assert_eq!(
@@ -911,7 +933,15 @@ async fn entries_and_ends_are_refused_for_another_token_page_or_conversation() -
             assert_eq!(
                 fixture
                     .edge
-                    .state_entry(context, token, page, first.0, object_id(&first.1), fragment)
+                    .state_entry(
+                        context,
+                        &fixture.base,
+                        token,
+                        page,
+                        first.0,
+                        object_id(&first.1),
+                        fragment
+                    )
                     .map_err(|refusal| refusal.code.to_string()),
                 Err(E2eeReplyCode::Syncing.to_string())
             );
@@ -1218,5 +1248,208 @@ async fn route_projection_refuses_another_network_and_accepts_a_cut_ahead() -> T
         .map_err(|refusal| refusal.code.to_string())?;
     assert!(hidden.is_empty());
     assert!(!fixture.edge.route_objects.contains_key(&CONVERSATION));
+    Ok(())
+}
+
+/// ENC-15 (#160): the wire form of one Account ID.
+fn account(seed: u8) -> TestResult<[u8; 24]> {
+    let id = agenc_ircd_types::AccountId::from_random(
+        agenc_ircd_types::AccountRandomId::from_bytes([seed; 16]),
+    );
+    Ok(id.to_text().as_bytes().try_into()?)
+}
+
+/// A direct route between `pair`, in canonical account order.
+fn direct_route_state(conversation: [u8; 32], pair: ([u8; 24], [u8; 24])) -> TestResult<Vec<u8>> {
+    let (first, second) = if pair.0 <= pair.1 {
+        pair
+    } else {
+        (pair.1, pair.0)
+    };
+    let state = IrcFederationRouteState {
+        profile_version: 1,
+        network_id: [1; 32],
+        state_generation: 4,
+        conversation_id: conversation,
+        conversation_kind: IrcConversationKind::Direct,
+        route_binding: [26; 32],
+        semantic_route_lock_id: [23; 32],
+        channel_instance_id: Opaque::new(Vec::new())?,
+        canonical_channel_name_hash: [0; 32],
+        direct_account_a: Opaque::new(first.to_vec())?,
+        direct_account_b: Opaque::new(second.to_vec())?,
+        binding_id: [34; 32],
+        finalized_epoch: 1,
+        accepted_state_id: [58; 32],
+        sequencer_record_head_sequence: 4,
+        sequencer_record_head_id: [59; 32],
+        state: IrcRouteStateKind::ActiveRoute,
+    };
+    Ok(IrcWireObject::new(IrcWireObjectKind::FederationState, state.encode()?)?.encode()?)
+}
+
+/// A local companion origin authenticated as `held`, attached or not.
+fn hosting_origin(held: [u8; 24], attached: bool) -> LocalOrigin {
+    LocalOrigin {
+        origin_id: [5; 16],
+        declared: Some(1),
+        acked: Some(1),
+        predates_device: None,
+        next_sequence: 0,
+        sequenced: Some(1),
+        state_id: [0; 32],
+        declaration: None,
+        user_id: None,
+        account: Some(held),
+        device: attached.then_some(([7; 16], 1)),
+    }
+}
+
+/// A one-entry transfer of the direct route between accounts 40 and 41.
+fn direct_transfer() -> TestResult<([u8; 32], Vec<u8>, [u8; 32])> {
+    let conversation = [77; 32];
+    let bytes = direct_route_state(conversation, (account(40)?, account(41)?))?;
+    let digest = digest_of(&[(conversation, bytes.clone())])?;
+    Ok((conversation, bytes, digest))
+}
+
+#[tokio::test]
+async fn an_unentitled_channel_entry_refuses_the_whole_snapshot_with_nothing_staged() -> TestResult
+{
+    let entries = entries(2)?;
+    let digest = digest_of(&entries)?;
+    let mut fixture = Fixture::resuming(false)?;
+    let [first, second] = entries.as_slice() else {
+        return Err("two entries".into());
+    };
+    // The base profile hosts the first channel and not the second.
+    fixture.host_entry(&first.1)?;
+    fixture.unentitled = true;
+    fixture.begin(0, 2, 2, digest)?;
+    fixture.entry(0, first.0, &first.1)?;
+    assert_eq!(
+        fixture.entry(0, second.0, &second.1),
+        Err(E2eeReplyCode::Syncing.to_string())
+    );
+    // Nothing of the refused entry is retained and nothing was staged.
+    let snapshot = fixture.edge.snapshot.as_ref().ok_or("open generation")?;
+    assert_eq!(snapshot.pending.route_objects.len(), 1);
+    assert!(!snapshot.pending.route_objects.contains_key(&second.0));
+    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
+    // The frame failure closes the link and abandons the whole generation
+    // before any READY: no page, no marker, no projection.
+    fixture
+        .edge
+        .fail_frame(fixture.core.context_mut()?, &mut fixture.base);
+    assert_eq!(fixture.edge.phase(), Phase::Down);
+    assert!(fixture.edge.snapshot.is_none());
+    assert!(!fixture.edge.snapshot_ready_pending());
+    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
+    assert!(fixture.edge.conversations.is_empty());
+    // The same cut installs once the base profile hosts both channels.
+    let mut entitled = Fixture::resuming(false)?;
+    entitled.begin(0, 2, 2, digest)?;
+    for (conversation, bytes) in &entries {
+        entitled.entry(0, *conversation, bytes)?;
+    }
+    entitled.end(0, None)?;
+    assert_ne!(entitled.core.context_mut()?.pending_len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unentitled_direct_entry_refuses_the_whole_snapshot_with_nothing_staged() -> TestResult {
+    let (conversation, bytes, digest) = direct_transfer()?;
+    let mut fixture = Fixture::resuming(false)?;
+    // A session for a third account, and an unattached origin of a named
+    // one, entitle this edge to nothing.
+    fixture.edge.origins.insert(
+        ConnectionGeneration::new(1),
+        hosting_origin(account(42)?, true),
+    );
+    fixture.edge.origins.insert(
+        ConnectionGeneration::new(2),
+        hosting_origin(account(40)?, false),
+    );
+    fixture.begin(0, 1, 1, digest)?;
+    assert_eq!(
+        fixture.entry(0, conversation, &bytes),
+        Err(E2eeReplyCode::Syncing.to_string())
+    );
+    let snapshot = fixture.edge.snapshot.as_ref().ok_or("open generation")?;
+    assert!(snapshot.pending.route_objects.is_empty());
+    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
+    fixture
+        .edge
+        .fail_frame(fixture.core.context_mut()?, &mut fixture.base);
+    assert!(fixture.edge.snapshot.is_none());
+    assert!(fixture.edge.routes.routes().next().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_direct_entry_installs_for_an_attached_device_of_either_account() -> TestResult {
+    let (conversation, bytes, digest) = direct_transfer()?;
+    for seed in [40, 41] {
+        let mut fixture = Fixture::resuming(false)?;
+        fixture.edge.origins.insert(
+            ConnectionGeneration::new(1),
+            hosting_origin(account(seed)?, true),
+        );
+        fixture.begin(0, 1, 1, digest)?;
+        fixture.entry(0, conversation, &bytes)?;
+        fixture.end(0, None)?;
+        assert_ne!(fixture.core.context_mut()?.pending_len(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn hosting_is_read_as_it_stood_when_the_transfer_opened() -> TestResult {
+    let (conversation, bytes, digest) = direct_transfer()?;
+    let mut fixture = Fixture::resuming(false)?;
+    let generation = ConnectionGeneration::new(1);
+    fixture
+        .edge
+        .origins
+        .insert(generation, hosting_origin(account(41)?, true));
+    fixture.begin(0, 1, 1, digest)?;
+    // A paired base resynchronization closes the session the cut counted
+    // while the pages are still arriving.
+    fixture.edge.connection_closed(generation);
+    assert!(fixture.edge.origins.is_empty());
+    fixture.entry(0, conversation, &bytes)?;
+    // An origin that closed before the transfer opened entitles nothing.
+    let mut late = Fixture::resuming(false)?;
+    late.begin(0, 1, 1, digest)?;
+    assert_eq!(
+        late.entry(0, conversation, &bytes),
+        Err(E2eeReplyCode::Syncing.to_string())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cut_may_restate_a_direct_route_this_edge_already_projects() -> TestResult {
+    let (conversation, bytes, digest) = direct_transfer()?;
+    let mut fixture = Fixture::resuming(false)?;
+    fixture
+        .edge
+        .route_changed(&bytes)
+        .map_err(|refusal| refusal.code.to_string())?;
+    fixture.begin(0, 1, 1, digest)?;
+    fixture.entry(0, conversation, &bytes)?;
+    // The same conversation under another pair is a new disclosure.
+    let other = direct_route_state(conversation, (account(40)?, account(43)?))?;
+    let mut changed = Fixture::resuming(false)?;
+    changed
+        .edge
+        .route_changed(&bytes)
+        .map_err(|refusal| refusal.code.to_string())?;
+    changed.begin(0, 1, 1, digest_of(&[(conversation, other.clone())])?)?;
+    assert_eq!(
+        changed.entry(0, conversation, &other),
+        Err(E2eeReplyCode::Syncing.to_string())
+    );
     Ok(())
 }

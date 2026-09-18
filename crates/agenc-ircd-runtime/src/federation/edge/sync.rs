@@ -17,6 +17,10 @@ use crate::state_core::StateCoreContext;
 /// The fixed standing-projection ceilings (spec 20.8).
 const MAX_SNAPSHOT_ENTRIES: u64 = 1_000_000;
 const MAX_SNAPSHOT_BYTES: u64 = 536_870_912;
+#[cfg(test)]
+#[path = "tests/pending_generation.rs"]
+pub(crate) mod pending_generation;
+
 /// Cut rows written per checkpoint batch while installing.
 const INSTALL_BATCH_ROWS: usize = 256;
 
@@ -34,6 +38,31 @@ pub(super) struct SnapshotInstall {
     cursor: Option<(u64, agenc_ircd_types::EventId)>,
     staged_end: Option<usize>,
     resync: Vec<crate::connection::ConnectionGeneration>,
+}
+
+impl SnapshotInstall {
+    /// Whether the generation being installed already holds the entry
+    /// `key`; entries are admitted in strict key order.
+    pub(super) fn holds(&self, key: &agenc_ircd_domain::federation::ProjectionKey) -> bool {
+        self.entries
+            .binary_search_by_key(key, ProjectionRecord::key)
+            .is_ok()
+    }
+
+    /// The accounts of the sessions the generation being installed holds;
+    /// sessions sort first, so they are a prefix of the entries.
+    pub(super) fn session_accounts(
+        &self,
+    ) -> impl Iterator<Item = agenc_ircd_types::AccountId> + '_ {
+        self.entries
+            .iter()
+            .map_while(|entry| match entry {
+                ProjectionRecord::Session(session) => Some(session.account),
+                _ => None,
+            })
+            .flatten()
+            .map(|(account, _)| account)
+    }
 }
 
 /// Starts the origin exchange on a fresh link.

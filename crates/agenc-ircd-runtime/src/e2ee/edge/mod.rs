@@ -7,6 +7,7 @@
 //! command fails with `E2EE_SYNCING`.
 
 mod completion;
+mod entitlement;
 mod events;
 mod origins;
 mod projection;
