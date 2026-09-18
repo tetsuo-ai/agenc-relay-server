@@ -437,8 +437,12 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
         "version": "=1.18.0", "default-features": False, "features": ["non-fips"]
     }:
         raise StageFourError("WebSocket handshake provider differs from the reviewed pin")
-    expected_patch = {"crates-io": {"opaque-ke": {"path": EXPECTED_SOURCE_PATCH["path"]}}}
-    if workspace.get("patch") != expected_patch:
+    # Stage 04 owns the OPAQUE override alone; the complete reviewed patch
+    # table, including every other vendored crate, is the workspace checker's.
+    patches = workspace.get("patch")
+    crates_io = patches.get("crates-io") if isinstance(patches, dict) else None
+    opaque_patch = crates_io.get("opaque-ke") if isinstance(crates_io, dict) else None
+    if opaque_patch != {"path": EXPECTED_SOURCE_PATCH["path"]}:
         raise StageFourError("root source patch differs from the reviewed OPAQUE override")
     patch_root = root / str(EXPECTED_SOURCE_PATCH["path"])
     if vendored_tree_sha256(patch_root) != EXPECTED_SOURCE_PATCH["tree_sha256"]:
