@@ -371,6 +371,32 @@ fn direct_entitlement_is_reference_counted_and_channel_entitlement_follows_base(
     assert!(entitlements.entitled(EDGE_A, &channel));
     assert!(entitlements.entitled(EDGE_B, &direct));
     assert!(entitlements.require_direct(EDGE_A, direct, EntitlementReason::Operation)?);
+    // A departure queues the edge's direct standings; a plan that finds one
+    // hosted spends a look, and the last look settles it with its reference.
+    entitlements.mark_departure(EDGE_A);
+    assert_eq!(entitlements.departing(16), vec![(EDGE_A, direct)]);
+    assert!(entitlements.departing(0).is_empty());
+    for _ in 0..DEPARTING_DIRECT_LOOKS {
+        assert_eq!(entitlements.departing(16).len(), 1);
+        entitlements.still_hosted(EDGE_A, direct);
+    }
+    assert!(entitlements.departing(16).is_empty());
+    assert!(entitlements.entitled(EDGE_A, &direct));
+    entitlements.still_hosted(EDGE_A, direct);
+    // An unhosted one is released with every reference it held.
+    entitlements.mark_departure(EDGE_A);
+    assert!(entitlements.release_departed(EDGE_A, direct));
+    assert!(!entitlements.release_departed(EDGE_A, direct));
+    assert!(!entitlements.entitled(EDGE_A, &direct));
+    assert!(entitlements.departing(16).is_empty());
+    assert!(entitlements.entitled(EDGE_B, &direct));
+    // Every fence clears the queue with the standings.
+    entitlements.require_direct(EDGE_A, direct, EntitlementReason::Event)?;
+    entitlements.mark_departure(EDGE_A);
+    entitlements.fence_direct(EDGE_A);
+    assert!(entitlements.departing(16).is_empty());
+    entitlements.require_direct(EDGE_A, direct, EntitlementReason::Event)?;
+    entitlements.mark_departure(EDGE_A);
     entitlements.fence(EDGE_A);
     assert!(!entitlements.entitled(EDGE_A, &direct));
     assert!(entitlements.entitled(EDGE_B, &direct));

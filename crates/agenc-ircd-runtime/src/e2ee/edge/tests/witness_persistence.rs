@@ -488,6 +488,9 @@ async fn a_witness_rejection_is_not_hidden_by_a_newly_staged_unrelated_batch() -
     Ok(())
 }
 
+#[path = "direct_release_bridged.rs"]
+mod direct_release;
+
 #[path = "witness_gating.rs"]
 mod gating;
 

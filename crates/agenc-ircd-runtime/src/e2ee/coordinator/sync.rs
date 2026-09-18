@@ -310,6 +310,8 @@ impl CompanionCoordinator {
             return Ok(None);
         }
         sync.origins_ready = true;
+        // An origin the edge did not declare again is gone with its link.
+        self.state.entitlements.mark_departure(peer);
         line(
             &self.server_name,
             &CompanionFrame::OriginReady {
@@ -380,6 +382,7 @@ impl CompanionCoordinator {
         }
         let mirrored = self.mirror_origin(&origin, &bytes, &base)?;
         self.accept_origin(origin_key, mirrored, update)?;
+        self.note_redeclared(peer, update);
         let ack = line(
             &self.server_name,
             &CompanionFrame::OriginAck {
@@ -598,6 +601,9 @@ impl CompanionCoordinator {
                 return Err(CompanionFault::Protocol);
             }
             origin.fenced = true;
+            // The connection ended: the edge's direct standings await a
+            // hosting check by the next mutation plan (12.5).
+            self.state.entitlements.mark_departure(peer);
         }
         self.state
             .mailbox_snapshots
@@ -662,12 +668,19 @@ impl CompanionCoordinator {
             // A second ERESUME on the link carrying the transfer is a
             // violation. After link loss the edge discarded its staged pages
             // with the link, and the pending cut is published again from its
-            // first page on the new link.
+            // first page on the new link, unless the edge stopped hosting a
+            // direct pair it names: that cut is retired here.
             if snapshot.pages_sent != 0 {
                 return Err(CompanionFault::Protocol);
             }
-            return self.restart_transfer(peer, now_millis, host);
+            if self.pending_cut_current(peer, host) {
+                return self.restart_transfer(peer, now_millis, host);
+            }
+            if let Some(sync) = self.peers.get_mut(&peer) {
+                sync.snapshot = None;
+            }
         }
+        let sync = self.peers.entry(peer).or_default();
         if sync.transfer_incomplete {
             // The pending cut expired or was retired: the scope resets to a
             // fresh cut in its next delivery generation.
@@ -844,19 +857,46 @@ impl CompanionCoordinator {
         if host.hosts_account(&first) || host.hosts_account(&second) {
             return true;
         }
-        let digests: Vec<[u8; 32]> = [first, second]
-            .iter()
-            .filter_map(|account| {
-                agenc_ircd_e2ee::ids::account_id_digest(&self.network_id, account).ok()
+        super::direct_release::attached_at(
+            &self.state,
+            &self.network_id,
+            (peer, self.origins_replayed(peer)),
+            &[first, second],
+        )
+    }
+
+    /// An `EORIGIN UPDATE` may be a logout, an account switch or a detach
+    /// that ended hosting: the edge's direct standings await a hosting
+    /// check. A first declaration ends nothing.
+    fn note_redeclared(&mut self, peer: ServerId, update: bool) {
+        if update {
+            self.state.entitlements.mark_departure(peer);
+        }
+    }
+
+    /// Whether `peer` replayed its origin set on the current link, so an
+    /// origin still suspended was not declared again.
+    pub(super) fn origins_replayed(&self, peer: ServerId) -> bool {
+        self.peers.get(&peer).is_some_and(|sync| sync.origins_ready)
+    }
+
+    /// Whether the pending cut of `peer` still names only direct routes the
+    /// edge hosts. A cut republished unchanged after its edge stopped
+    /// hosting a named pair would be refused by that edge until the token
+    /// expired (ENC-15), so such a cut is retired like an expired one and
+    /// the scope takes a fresh cut in its next delivery generation.
+    fn pending_cut_current(&self, peer: ServerId, host: &dyn CompanionHost) -> bool {
+        use agenc_ircd_domain::e2ee::RouteTarget;
+        self.state
+            .entitlements
+            .snapshot_iter(peer)
+            .filter(|conversation| {
+                self.state
+                    .routes
+                    .route(&agenc_ircd_domain::e2ee::ConversationId(*conversation))
+                    .is_some_and(|route| matches!(route.target, RouteTarget::Direct(_)))
             })
-            .collect();
-        self.state.origins.values().any(|origin| {
-            origin.home_server_id == *peer.as_bytes()
-                && origin.device.is_some()
-                && origin
-                    .account_digest
-                    .is_some_and(|digest| digests.contains(&digest))
-        })
+            .all(|conversation| self.hosts_direct_account(peer, &conversation, host))
     }
 
     /// ESTATE FETCH: the next page, or the byte-identical last page again.

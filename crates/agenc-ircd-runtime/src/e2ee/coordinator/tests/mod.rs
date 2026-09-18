@@ -37,6 +37,7 @@ use super::request::{self, Classified, Outcome, ResultBody};
 use super::{CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteRequest};
 
 mod barrier;
+pub(crate) mod direct_release;
 mod live_payloads;
 mod sequence;
 pub(crate) mod support;
@@ -378,7 +379,14 @@ impl Harness {
             source_view: Vec::new(),
         };
         exec.now = self.now;
-        let outcome = ops::execute(&mut exec).and_then(ops::Prepared::complete);
+        // The base profile of this harness hosts no account: a direct
+        // standing is hosted by a declared, attached companion origin only.
+        let outcome = ops::execute(&mut exec)
+            .and_then(ops::Prepared::complete)
+            .map(|mut outcome| {
+                super::direct_release::plan_releases(&exec, &|_, _| false, &mut outcome);
+                outcome
+            });
         self.sequence += 1;
         if let Some(origin) = self.coordinator.state.origins.get_mut(&origin_key()) {
             origin.next_sequence = self.sequence;
