@@ -175,3 +175,8 @@ bench = false
 
 [workspace]
 members = ["."]
+
+# The fuzz workspace resolves its own dependencies, so it must select the same
+# project-owned redb fork the main workspace does (vendor/redb-4.2.0).
+[patch.crates-io]
+redb = { path = "../vendor/redb-4.2.0" }
