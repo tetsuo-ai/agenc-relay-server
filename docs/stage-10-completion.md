@@ -87,6 +87,13 @@ reconstruction ceilings that let an edge restore rebuild every projection its
 admission side can admit, and the classified cause the daemon now prints beside
 the record family (RUN-08, issue #134) are recorded in
 [the edge restore refusal cause record](stage-10-reconstruction-cause.md).
+The reproduction of that refusal at the published `server.memory_budget_bytes`,
+three times in 209 SIGKILLs of an edge under load, the channel a running edge
+legitimately holds between the two projected events that bracket it, the
+restore install that now rebuilds it while the snapshot install stays closed,
+and the recovered session reconciliation that now names itself in every refusal
+it raises (RUN-08, issue #134) are recorded in
+[the peer-loss reproduction record](stage-10-peer-loss-reproduction.md).
 The encrypted lifecycle, authentication and crypto critical-branch
 regressions, the eighteen regions they bring to 100 percent, the five
 region-metric corrections they required and the three rows that cannot reach

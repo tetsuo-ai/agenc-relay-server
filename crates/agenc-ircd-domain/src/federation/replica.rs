@@ -85,6 +85,17 @@ pub struct EdgeReplica {
     accounts: BTreeMap<AccountId, AccountRecord>,
 }
 
+/// Whether a validated entry set must also be closed under channel
+/// entitlement: a coordinator snapshot is, an edge rebuilt from its own
+/// durable rows is not (see `install_recovered`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Entitlement {
+    /// Every channel must have a local member or an invite.
+    Closed,
+    /// A channel may stand between the two events that bracket it.
+    Transient,
+}
+
 impl EdgeReplica {
     /// Creates an empty replica for the given local edge identity.
     #[must_use]
@@ -234,11 +245,47 @@ impl EdgeReplica {
     ///
     /// Entries must be unique and sorted by key; every reference must
     /// resolve within the set; no membership or session may belong to another
-    /// home; no account may be unreferenced.
+    /// home; no account may be unreferenced; and every channel must be one
+    /// this edge is entitled to, which is what a coordinator snapshot always
+    /// is.
     pub fn install(
         &mut self,
         projection_generation: u64,
         entries: Vec<ProjectionRecord>,
+    ) -> Result<(), ReplicaError> {
+        self.install_checked(projection_generation, entries, Entitlement::Closed)
+    }
+
+    /// Installs the generation this edge already holds, rebuilt from its own
+    /// durable rows.
+    ///
+    /// This is the restore's install and it differs from a snapshot's in
+    /// exactly one invariant: a channel with no local member and no invite is
+    /// admitted. `apply` reaches that state and does not leave it — a channel
+    /// becomes visible before the join that entitles the edge to it
+    /// (`ChannelVisible` then `MemberJoined`), and it stays after the last
+    /// local member goes (`SessionHidden` removes the memberships, and only
+    /// the coordinator's later `ChannelHidden` removes the channel). Each of
+    /// those events is its own durable batch, so between two of them a
+    /// correctly running edge is durably holding a channel the closure check
+    /// refuses. Refusing it here would brick an edge that crossed no rule, and
+    /// only a restart would reveal it (RUN-08, issue #134). Every other
+    /// invariant still refuses: a membership, invite or child whose parent is
+    /// absent, a foreign home, a revision fault, an unsorted or duplicated
+    /// set, an unreferenced account, and every per-record rule.
+    pub fn install_recovered(
+        &mut self,
+        projection_generation: u64,
+        entries: Vec<ProjectionRecord>,
+    ) -> Result<(), ReplicaError> {
+        self.install_checked(projection_generation, entries, Entitlement::Transient)
+    }
+
+    fn install_checked(
+        &mut self,
+        projection_generation: u64,
+        entries: Vec<ProjectionRecord>,
+        entitlement: Entitlement,
     ) -> Result<(), ReplicaError> {
         let mut candidate = Self::new(self.local_server_id);
         candidate.projection_generation = projection_generation;
@@ -251,18 +298,24 @@ impl EdgeReplica {
             previous = Some(key);
             candidate.insert_unchecked(entry)?;
         }
-        candidate.validate()?;
+        candidate.validate_with(entitlement)?;
         *self = candidate;
         Ok(())
     }
 
     /// Checks every B.4 and B.7 structural invariant.
     pub fn validate(&self) -> Result<(), ReplicaError> {
+        self.validate_with(Entitlement::Closed)
+    }
+
+    fn validate_with(&self, entitlement: Entitlement) -> Result<(), ReplicaError> {
         self.validate_sessions()?;
         self.validate_children()?;
-        for channel_id in self.channels.keys() {
-            if !self.has_entitlement(*channel_id) {
-                return Err(ReplicaError::DanglingReference);
+        if entitlement == Entitlement::Closed {
+            for channel_id in self.channels.keys() {
+                if !self.has_entitlement(*channel_id) {
+                    return Err(ReplicaError::DanglingReference);
+                }
             }
         }
         for account_id in self.accounts.keys() {

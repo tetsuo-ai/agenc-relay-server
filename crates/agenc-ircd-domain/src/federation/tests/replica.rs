@@ -938,3 +938,76 @@ fn mode_changes_validate_prefix_and_list_entries() -> TestResult {
     assert!(replica.membership(channel, bob.user_id).is_none());
     Ok(())
 }
+
+/// RUN-08 (issue #134): the two events that bracket a channel are separate,
+/// so a correctly running edge holds a channel with no local member between
+/// them, and the restore must be able to rebuild that.
+///
+/// `ChannelVisible` arrives before the `MemberJoined` that entitles the edge
+/// to the channel, and `SessionHidden` removes the last local membership
+/// while only the coordinator's later `ChannelHidden` removes the channel. A
+/// SIGKILL in either window leaves that state durable, and `install` — the
+/// snapshot's install, which requires the closure — refused it, which is what
+/// refused a killed edge's whole startup. `install_recovered` admits exactly
+/// that one relaxation and nothing else.
+#[test]
+fn a_channel_between_its_bracketing_events_is_admitted_only_by_the_recovered_install() -> TestResult
+{
+    let alice = session(1, LOCAL, None)?;
+    // Sorted by key: sessions, then channel details, then memberships.
+    let mut entries = vec![ProjectionRecord::Session(alice.clone())];
+    entries.push(ProjectionRecord::ChannelDetail(detail(2, 1)?));
+    // Channel 3 is visible with no local member and no invite, which is the
+    // state `apply` reaches between `ChannelVisible` and `MemberJoined`.
+    entries.push(ProjectionRecord::ChannelDetail(detail(3, 1)?));
+    entries.push(ProjectionRecord::Membership(membership(2, 1, 1)));
+    entries.sort_by_key(ProjectionRecord::key);
+
+    let mut snapshot = EdgeReplica::new(LOCAL);
+    assert_eq!(
+        snapshot.install(7, entries.clone()),
+        Err(ReplicaError::DanglingReference),
+        "a coordinator snapshot must still be closed under entitlement",
+    );
+    let mut recovered = EdgeReplica::new(LOCAL);
+    recovered.install_recovered(7, entries.clone())?;
+    assert_eq!(recovered.projection_generation(), 7);
+    assert_eq!(recovered.entry_count(), entries.len());
+
+    // The relaxation is exactly one invariant: a child whose parent is absent
+    // still refuses both installs.
+    let mut dangling = entries.clone();
+    dangling.push(ProjectionRecord::Membership(membership(9, 1, 1)));
+    dangling.sort_by_key(ProjectionRecord::key);
+    assert_eq!(
+        EdgeReplica::new(LOCAL).install(7, dangling.clone()),
+        Err(ReplicaError::DanglingReference)
+    );
+    assert_eq!(
+        EdgeReplica::new(LOCAL).install_recovered(7, dangling),
+        Err(ReplicaError::DanglingReference),
+        "a membership whose channel was never projected must still refuse",
+    );
+
+    // A membership naming a session the set does not hold refuses as well.
+    let mut orphan_member = entries.clone();
+    orphan_member.push(ProjectionRecord::Membership(membership(2, 8, 1)));
+    orphan_member.sort_by_key(ProjectionRecord::key);
+    assert_eq!(
+        EdgeReplica::new(LOCAL).install_recovered(7, orphan_member),
+        Err(ReplicaError::DanglingReference),
+        "a membership whose session is absent must still refuse",
+    );
+
+    // An account no session references still refuses, because `apply` drops
+    // it with the last session that held it.
+    let mut orphan_account = entries;
+    orphan_account.push(ProjectionRecord::Account(account_record(1)?));
+    orphan_account.sort_by_key(ProjectionRecord::key);
+    assert_eq!(
+        EdgeReplica::new(LOCAL).install_recovered(7, orphan_account),
+        Err(ReplicaError::DanglingReference),
+        "an unreferenced account must still refuse",
+    );
+    Ok(())
+}
