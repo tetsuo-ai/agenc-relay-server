@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #![cfg(test)]
 
+mod bounded_retention;
 mod chain;
 mod export_profile;
 mod export_refusal;

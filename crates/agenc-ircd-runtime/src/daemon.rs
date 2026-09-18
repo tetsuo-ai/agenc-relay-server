@@ -3474,7 +3474,11 @@ const OWNER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 type LogFlushFuture = Pin<Box<dyn Future<Output = Result<(), ShutdownFailure>> + Send + 'static>>;
 
-async fn flush_admin_and_state<D, A, S>(
+/// Runs the flush phase's administrative and state halves.
+///
+/// Crate-visible so the RUN-12 regression drives the same function the
+/// daemon's flush hook does.
+pub(crate) async fn flush_admin_and_state<D, A, S>(
     acknowledgements: &mut Vec<FlushAcknowledgement>,
     drain: D,
     admin_flush: A,
@@ -3486,8 +3490,11 @@ where
     S: Future<Output = Result<(), ShutdownFailure>>,
 {
     *acknowledgements = drain.await.map_err(map_admin_lifecycle)?;
-    admin_flush.await.map_err(map_admin_lifecycle)?;
-    state_flush.await?;
+    // The state owner's flush is the durable one, so it never queues behind
+    // the administrative flush: both run together and both must succeed.
+    let (state, admin) = tokio::join!(state_flush, admin_flush);
+    state?;
+    admin.map_err(map_admin_lifecycle)?;
     for acknowledgement in acknowledgements {
         acknowledgement.wait().await;
     }

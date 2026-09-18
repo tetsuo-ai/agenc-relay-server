@@ -74,8 +74,33 @@ const ADMIN_NOTICE_BUDGET: Duration = Duration::from_secs(30);
 const MAX_ORDINARY_BATCH_LINES: usize = 266;
 /// Process actions waiting for the root shutdown driver.
 const ADMIN_PROCESS_CAPACITY: usize = 1;
+/// What one retention sweep left behind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetentionProgress {
+    /// Nothing expired remains that this sweep could take.
+    Settled,
+    /// The sweep filled its bounded checkpoint, so more may be expired.
+    Backlog,
+}
+
+impl RetentionProgress {
+    /// A full checkpoint means the selector stopped at its ceiling.
+    fn after(deleted_count: u64) -> Self {
+        let ceiling = u64::try_from(crate::state_core::durable::MAX_AUDIT_RETENTION_EVENTS)
+            .unwrap_or(u64::MAX);
+        if deleted_count >= ceiling {
+            Self::Backlog
+        } else {
+            Self::Settled
+        }
+    }
+}
+
 /// Periodic opportunity to replace one expired audit prefix.
 const AUDIT_RETENTION_SWEEP: Duration = Duration::from_secs(60 * 60);
+/// Cadence while an expired backlog remains: a sweep that filled its one
+/// bounded checkpoint is followed after this pause instead of after an hour.
+const AUDIT_RETENTION_BACKLOG: Duration = Duration::from_secs(60);
 /// Cooperative cadence for polling an admitted storage-owner completion.
 const ADMIN_STORAGE_COMPLETION_POLL: Duration = Duration::from_millis(1);
 /// Checked conversion unit for configured retention days.
@@ -811,8 +836,12 @@ impl AdminOwner {
                     }
                 },
                 _ = retention.tick(), if !self.quiescing => {
-                    if self.retention_sweep(&token).await == Err(AdminLifecycleFailure::Audit) {
-                        self.signal_fatal();
+                    match self.retention_sweep(&token).await {
+                        Ok(RetentionProgress::Backlog) => {
+                            retention.reset_after(AUDIT_RETENTION_BACKLOG);
+                        }
+                        Err(AdminLifecycleFailure::Audit) => self.signal_fatal(),
+                        Ok(RetentionProgress::Settled) | Err(_) => {}
                     }
                     continue;
                 }
@@ -901,12 +930,18 @@ impl AdminOwner {
             .map_err(|_| AdminLifecycleFailure::Audit)
     }
 
+    /// Replaces at most one bounded expired prefix with a signed checkpoint.
+    ///
+    /// This runs only from the maintenance tick, never from shutdown. Its
+    /// scan verifies at most `MAX_AUDIT_RETENTION_EVENTS` events, and the
+    /// committed checkpoint is the continuation: the next sweep, in this
+    /// process or the next, starts at the sequence it names.
     async fn retention_sweep(
         &mut self,
         token: &CancellationToken,
-    ) -> Result<(), AdminLifecycleFailure> {
+    ) -> Result<RetentionProgress, AdminLifecycleFailure> {
         let Some(snapshot) = self.config.as_ref().map(RuntimeConfigHandle::load) else {
-            return Ok(());
+            return Ok(RetentionProgress::Settled);
         };
         let Some(retention_seconds) = snapshot
             .config()
@@ -928,9 +963,10 @@ impl AdminOwner {
         }
         let tbs = match scan {
             Ok(Ok(Some(tbs))) => tbs,
-            Ok(Ok(None)) => return Ok(()),
+            Ok(Ok(None)) => return Ok(RetentionProgress::Settled),
             Ok(Err(_)) | Err(_) => return Err(AdminLifecycleFailure::Audit),
         };
+        let progress = RetentionProgress::after(tbs.deleted_count);
         let checkpoint = self
             .audit
             .sign_retention(tbs)
@@ -939,6 +975,7 @@ impl AdminOwner {
             Ok(()) => self
                 .audit
                 .commit_retention(&checkpoint)
+                .map(|()| progress)
                 .map_err(|_| AdminLifecycleFailure::Audit),
             Err(AdminCoreFailure::Busy | AdminCoreFailure::Quiescing) => {
                 Err(AdminLifecycleFailure::Busy)
@@ -1040,14 +1077,15 @@ impl AdminOwner {
             return self.begin_shutdown().map(AdminLifecycleOutcome::Draining);
         }
 
-        let flush = match self.flush_outcome {
-            Some(outcome) => outcome,
-            None => {
-                let outcome = self.retention_sweep(token).await;
-                self.flush_outcome = Some(outcome);
-                outcome
-            }
-        };
+        // Flush runs no retention sweep (RUN-12, issue #180). A sweep is
+        // administrative work whose only durable effect, a signed checkpoint
+        // with its deletion, is one immediate transaction that the state
+        // owner's own flush settles; an expired prefix left behind is taken
+        // by the next hourly sweep or by the first one after a restart, from
+        // the checkpoint chain. Running it here put signature verification
+        // inside the flush budget and ahead of the state owner's flush.
+        let _ = token;
+        let flush = *self.flush_outcome.get_or_insert(Ok(()));
         flush?;
         self.lifecycle_completed = Some(AdminLifecyclePhase::Flush);
         Ok(AdminLifecycleOutcome::Complete)
@@ -2961,6 +2999,21 @@ mod tests {
             readiness,
             liveness,
         }
+    }
+
+    #[test]
+    fn only_a_full_retention_checkpoint_reports_a_backlog() {
+        let ceiling = u64::try_from(crate::state_core::durable::MAX_AUDIT_RETENTION_EVENTS)
+            .unwrap_or(u64::MAX);
+        assert_eq!(RetentionProgress::after(0), RetentionProgress::Settled);
+        assert_eq!(
+            RetentionProgress::after(ceiling - 1),
+            RetentionProgress::Settled
+        );
+        assert_eq!(
+            RetentionProgress::after(ceiling),
+            RetentionProgress::Backlog
+        );
     }
 
     fn lifecycle_owner() -> Result<AdminOwner, RuntimeError> {

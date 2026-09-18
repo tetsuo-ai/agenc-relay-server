@@ -134,6 +134,7 @@ impl AuditAuthority {
         match result {
             Ok(next) => {
                 self.cursor = next;
+                self.note_created_at(prepared.event.tbs().position().created_at());
                 Ok(())
             }
             Err(error) => {

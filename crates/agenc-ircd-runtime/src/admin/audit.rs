@@ -39,6 +39,15 @@ pub(crate) struct AuditAuthority {
     signing_not_after: u64,
     cursor: AuditChainCursor,
     retained_first_sequence: u64,
+    /// Hash the first retained event names as its previous hash: zero for an
+    /// unpruned chain, otherwise the last checkpoint's deleted-last hash.
+    /// With `retained_first_sequence` it is the verified lower mark a
+    /// bounded retention scan starts from (RUN-12).
+    retained_previous_hash: [u8; 32],
+    /// Latest creation time over every verified checkpoint and event. The
+    /// chain is verified once at `reconstruct` and every later event is
+    /// signed here, so this and `cursor` are the verified high-water mark.
+    latest_created_at: u64,
     next_checkpoint_sequence: u64,
     previous_checkpoint_hash: [u8; 32],
     policy: AdminPolicySeed,
@@ -194,6 +203,8 @@ impl AuditAuthority {
             signing_not_after: current.not_after,
             cursor: events.cursor,
             retained_first_sequence,
+            retained_previous_hash: checkpoints.cursor.previous_event_hash,
+            latest_created_at: checkpoints.latest_created_at.max(events.latest_created_at),
             next_checkpoint_sequence: checkpoints.next_sequence,
             previous_checkpoint_hash: checkpoints.previous_hash,
             policy: events.policy,
@@ -289,6 +300,7 @@ impl AuditAuthority {
             .advance(outcome)
             .map_err(|_| RuntimeError::InvalidValue)?;
         self.cursor = next;
+        self.note_created_at(outcome.tbs().created_at);
         self.startup_action_in_progress = None;
         Ok(())
     }
@@ -330,8 +342,12 @@ impl AuditAuthority {
             now,
             retention_seconds,
             signing_key_id: self.signing_key_id,
-            expected_cursor: self.cursor,
-            expected_retained_first_sequence: self.retained_first_sequence,
+            retained: AuditChainCursor {
+                previous_event_hash: self.retained_previous_hash,
+                next_sequence: self.retained_first_sequence,
+            },
+            head_sequence: self.cursor.next_sequence,
+            latest_created_at: self.latest_created_at,
             expected_checkpoint_sequence: self.next_checkpoint_sequence,
             expected_checkpoint_hash: self.previous_checkpoint_hash,
         })
@@ -371,6 +387,8 @@ impl AuditAuthority {
             .verify(self.signing_key.public_key())
             .map_err(|_| RuntimeError::InvalidValue)?;
         self.retained_first_sequence = tbs.next_retained_sequence;
+        self.retained_previous_hash = tbs.deleted_last_event_hash;
+        self.note_created_at(tbs.created_at);
         self.next_checkpoint_sequence = self
             .next_checkpoint_sequence
             .checked_add(1)
@@ -421,7 +439,13 @@ impl AuditAuthority {
             .cursor
             .advance(event)
             .map_err(|_| RuntimeError::InvalidValue)?;
+        self.note_created_at(event.tbs().created_at);
         Ok(())
+    }
+
+    /// Raises the verified creation-time mark after a committed append.
+    pub(super) fn note_created_at(&mut self, created_at: u64) {
+        self.latest_created_at = self.latest_created_at.max(created_at);
     }
 
     #[cfg(test)]
@@ -445,6 +469,8 @@ impl AuditAuthority {
             signing_not_after: u64::MAX,
             cursor: AuditChainCursor::genesis(),
             retained_first_sequence: 0,
+            retained_previous_hash: [0; 32],
+            latest_created_at: 0,
             next_checkpoint_sequence: 0,
             previous_checkpoint_hash: [0; 32],
             policy: AdminPolicySeed::default(),
@@ -456,28 +482,72 @@ impl AuditAuthority {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Events the last retention scan on this thread read and verified, so a
+    /// regression can require the scan to be bounded by its ceiling and not
+    /// by the size of the log.
+    pub(super) static RETENTION_EVENTS_VISITED: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// One bounded retention scan, frozen from the authority's verified marks.
+///
+/// The authority verified the whole chain at `reconstruct` and signed every
+/// later event itself, so the job neither rescans the permanent checkpoint
+/// table nor re-verifies the retained tail. It reads forward from the first
+/// retained event, verifies exactly the events it proposes to delete against
+/// the retained chain position, and stops at the first event inside the
+/// retention window or at `MAX_AUDIT_RETENTION_EVENTS`. Its cost is bounded
+/// by that ceiling whatever the size of the log, and a backlog is worked off
+/// one signed checkpoint per sweep: the checkpoint chain is the persisted
+/// continuation, so a restart resumes at the next retained sequence.
 pub(crate) struct AuditRetentionJob {
     source: Arc<AuditExportSource>,
     now: u64,
     retention_seconds: u64,
     signing_key_id: [u8; 32],
-    expected_cursor: AuditChainCursor,
-    expected_retained_first_sequence: u64,
+    retained: AuditChainCursor,
+    head_sequence: u64,
+    latest_created_at: u64,
     expected_checkpoint_sequence: u64,
     expected_checkpoint_hash: [u8; 32],
 }
 
 impl AuditRetentionJob {
     pub(crate) fn run(self) -> Result<Option<AdminAuditCheckpointTbs>, RuntimeError> {
-        self.source.retention_tbs(
-            self.now,
-            self.retention_seconds,
-            self.signing_key_id,
-            self.expected_cursor,
-            self.expected_retained_first_sequence,
-            self.expected_checkpoint_sequence,
-            self.expected_checkpoint_hash,
-        )
+        // A clock behind the verified chain never signs a checkpoint.
+        if self.now < self.latest_created_at {
+            return Ok(None);
+        }
+        let Some(cutoff) = self.now.checked_sub(self.retention_seconds) else {
+            return Ok(None);
+        };
+        let Some((deleted_last_sequence, deleted_last_event_hash)) =
+            self.source
+                .expired_prefix(self.retained, self.head_sequence, cutoff)?
+        else {
+            return Ok(None);
+        };
+        let deleted_count = deleted_last_sequence
+            .checked_sub(self.retained.next_sequence)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(RuntimeError::Overflow)?;
+        Ok(Some(AdminAuditCheckpointTbs {
+            network_id: self.source.binding.network_id,
+            server_id: self.source.binding.server_id,
+            audit_signing_key_id: self.signing_key_id,
+            checkpoint_sequence: self.expected_checkpoint_sequence,
+            created_at: self.now,
+            deleted_first_sequence: self.retained.next_sequence,
+            deleted_last_sequence,
+            deleted_count,
+            deleted_last_event_hash,
+            next_retained_sequence: deleted_last_sequence
+                .checked_add(1)
+                .ok_or(RuntimeError::Overflow)?,
+            previous_checkpoint_hash: self.expected_checkpoint_hash,
+        }))
     }
 }
 
@@ -607,79 +677,34 @@ impl AuditExportSource {
         })
     }
 
-    // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=retention freeze keeps every expected audit and checkpoint fence explicit at the blocking boundary
-    // agenc-review: focus owner=runtime reviewed=2026-08-30 reason=the signed checkpoint scan preserves all current cursor and trust fences in one immutable job
-    #[allow(clippy::too_many_arguments)]
-    fn retention_tbs(
+    /// Verifies and selects the expired prefix that starts at `retained`.
+    ///
+    /// Every selected event is verified here, chained from the retained
+    /// position: trust window, signature, hash, sequence and intent pairing.
+    /// A gap, fork or bad signature fails closed, as Section 16 requires of
+    /// a deletion. The scan ends with the selector, so events inside the
+    /// retention window are neither read nor verified again.
+    fn expired_prefix(
         &self,
-        now: u64,
-        retention_seconds: u64,
-        signing_key_id: [u8; 32],
-        expected_cursor: AuditChainCursor,
-        expected_retained_first_sequence: u64,
-        expected_checkpoint_sequence: u64,
-        expected_checkpoint_hash: [u8; 32],
-    ) -> Result<Option<AdminAuditCheckpointTbs>, RuntimeError> {
-        let cutoff = now.checked_sub(retention_seconds);
-        let mut selector = cutoff.map(RetentionSelector::new);
-        let mut checkpoint_verifier = CheckpointVerifier::new(self.binding, &self.trust);
-        scan_checkpoints(&self.storage, &self.keys, |checkpoint| {
-            checkpoint_verifier.observe(&checkpoint)
-        })?;
-        let checkpoints = checkpoint_verifier.finish();
-        if checkpoints.cursor.next_sequence != expected_retained_first_sequence
-            || checkpoints.next_sequence != expected_checkpoint_sequence
-            || checkpoints.previous_hash != expected_checkpoint_hash
-        {
-            return Err(RuntimeError::InvalidValue);
-        }
-        let mut event_verifier = EventVerifier::new(
-            self.binding,
-            &self.trust,
-            &self.operators,
-            checkpoints.cursor,
-        );
-        scan_events(&self.storage, &self.keys, |event| {
-            event_verifier.observe_event(&event)?;
-            if let Some(selector) = &mut selector {
-                selector.observe_event(&event)?;
+        retained: AuditChainCursor,
+        head_sequence: u64,
+        cutoff: u64,
+    ) -> Result<Option<(u64, [u8; 32])>, RuntimeError> {
+        let mut selector = RetentionSelector::new(cutoff);
+        let mut verifier = EventVerifier::new(self.binding, &self.trust, &self.operators, retained);
+        #[cfg(test)]
+        RETENTION_EVENTS_VISITED.with(|visited| visited.set(0));
+        scan_events_from(&self.storage, &self.keys, retained.next_sequence, |event| {
+            #[cfg(test)]
+            RETENTION_EVENTS_VISITED.with(|visited| visited.set(visited.get() + 1));
+            if event.audit_sequence() >= head_sequence {
+                return Ok(false);
             }
-            Ok(())
+            verifier.observe_event(&event)?;
+            selector.observe_event(&event)?;
+            Ok(!selector.is_complete())
         })?;
-        let events = event_verifier.finish_reconciled()?;
-        if events.cursor != expected_cursor {
-            return Err(RuntimeError::InvalidValue);
-        }
-        let latest_created_at = checkpoints.latest_created_at.max(events.latest_created_at);
-        if now < latest_created_at {
-            return Ok(None);
-        }
-
-        let Some(selector) = selector else {
-            return Ok(None);
-        };
-        let Some((deleted_last_sequence, deleted_last_event_hash)) = selector.candidate() else {
-            return Ok(None);
-        };
-        let deleted_count = deleted_last_sequence
-            .checked_sub(expected_retained_first_sequence)
-            .and_then(|count| count.checked_add(1))
-            .ok_or(RuntimeError::Overflow)?;
-        Ok(Some(AdminAuditCheckpointTbs {
-            network_id: self.binding.network_id,
-            server_id: self.binding.server_id,
-            audit_signing_key_id: signing_key_id,
-            checkpoint_sequence: expected_checkpoint_sequence,
-            created_at: now,
-            deleted_first_sequence: expected_retained_first_sequence,
-            deleted_last_sequence,
-            deleted_count,
-            deleted_last_event_hash,
-            next_retained_sequence: deleted_last_sequence
-                .checked_add(1)
-                .ok_or(RuntimeError::Overflow)?,
-            previous_checkpoint_hash: expected_checkpoint_hash,
-        }))
+        Ok(selector.candidate())
     }
 }
 
@@ -838,6 +863,11 @@ impl RetentionSelector {
     fn candidate(self) -> Option<(u64, [u8; 32])> {
         self.candidate
     }
+
+    /// Whether no later event can extend the selected prefix.
+    const fn is_complete(&self) -> bool {
+        self.complete
+    }
 }
 
 #[cfg(test)]
@@ -979,6 +1009,22 @@ fn scan_events(
     })
 }
 
+/// Visits events from `start` until `visit` returns `false`.
+fn scan_events_from(
+    storage: &StoragePort,
+    keys: &KeyDeriver,
+    start: u64,
+    mut visit: impl FnMut(AuditEvent) -> Result<bool, RuntimeError>,
+) -> Result<u64, RuntimeError> {
+    scan_table_pages_from(
+        keys,
+        TableId::Audit,
+        start,
+        |plan| Ok(storage.try_read(plan)?.wait()?),
+        |sequence, kind, body| visit(mixed::decode_event(sequence, kind, body)?),
+    )
+}
+
 // AdminOwner serializes audit mutations while a live scan runs. Its captured
 // event and checkpoint hashes fence the complete signed chains. Unrelated
 // storage commits may advance between pages without changing those chains.
@@ -998,14 +1044,26 @@ fn scan_table(
     )
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-09-05 reason=bounded authenticated audit pages preserve sequence ordering and reject regressing storage positions while the caller verifies both captured signed chain heads
 fn scan_table_pages(
     keys: &KeyDeriver,
     table: TableId,
-    mut read: impl FnMut(ReadPlan) -> Result<agenc_ircd_storage::ReadResult, RuntimeError>,
+    read: impl FnMut(ReadPlan) -> Result<agenc_ircd_storage::ReadResult, RuntimeError>,
     mut visit: impl FnMut(u64, u16, &[u8]) -> Result<(), RuntimeError>,
 ) -> Result<u64, RuntimeError> {
-    let mut start = 0_u64;
+    scan_table_pages_from(keys, table, 0, read, |sequence, kind, body| {
+        visit(sequence, kind, body)?;
+        Ok(true)
+    })
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-09-05 reason=bounded authenticated audit pages preserve sequence ordering and reject regressing storage positions while the caller verifies both captured signed chain heads
+fn scan_table_pages_from(
+    keys: &KeyDeriver,
+    table: TableId,
+    mut start: u64,
+    mut read: impl FnMut(ReadPlan) -> Result<agenc_ircd_storage::ReadResult, RuntimeError>,
+    mut visit: impl FnMut(u64, u16, &[u8]) -> Result<bool, RuntimeError>,
+) -> Result<u64, RuntimeError> {
     let end = StoredKey::new(vec![0xff; 9])?;
     let mut expected_commit = None;
     loop {
@@ -1055,7 +1113,10 @@ fn scan_table_pages(
             {
                 return Err(RuntimeError::InvalidValue);
             }
-            visit(sequence, value.record_kind(), value.body())?;
+            if !visit(sequence, value.record_kind(), value.body())? {
+                // The caller has all it needs: later pages are not read.
+                return expected_commit.ok_or(RuntimeError::InvalidValue);
+            }
             last = Some(sequence);
         }
         // A page may stop short of the row limit at the storage byte budget,
