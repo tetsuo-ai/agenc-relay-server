@@ -891,56 +891,31 @@ fn transaction_capacity_admission_observes_minus_equal_and_plus_one_boundaries()
     let directory = TestDirectory::create()?;
     let tuple = StateDirectory::probe(directory.path())?;
     let qualification = signed_qualification(tuple)?;
-    let state = StateDirectory::open(directory.path(), &[qualification])?;
+    // The capacity sample is injected: available bytes are the reserve plus the headroom,
+    // so `R(F) + G` is exact whatever the other tests do to the shared filesystem.
+    let faults = StorageFaultInjector::disabled().with_capacity_headroom(0);
+    let state =
+        StateDirectory::open_with_faults(directory.path(), &[qualification], faults.clone())?;
     let growth = agenc_ircd_storage::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH;
-    observe_capacity_boundary(&state, growth, 1, false)?;
-    observe_capacity_boundary(&state, growth, 0, true)?;
-    observe_capacity_boundary(&state, growth, -1, true)?;
+    for (headroom, admitted) in [(growth - 1, false), (growth, true), (growth + 1, true)] {
+        faults.set_capacity_headroom(headroom)?;
+        let result = state.admit_transaction(test_limits().fixed_reserve_bytes, 1);
+        assert_eq!(result.is_ok(), admitted, "headroom {headroom}");
+        if !admitted {
+            assert_eq!(
+                result.err(),
+                Some(StorageError::FilesystemRejected(
+                    agenc_ircd_storage::FilesystemCause::InsufficientCapacity
+                ))
+            );
+        }
+    }
+    assert_eq!(
+        StorageFaultInjector::disabled().set_capacity_headroom(1),
+        Err(StorageError::InvalidEncoding)
+    );
     Ok(())
 }
-
-fn observe_capacity_boundary(
-    state: &StateDirectory,
-    growth: u64,
-    reserve_delta: i8,
-    expected_admitted: bool,
-) -> Result<(), Box<dyn Error>> {
-    // Other tests share this filesystem, so free space can move between the two
-    // probes below. Retry with a bounded backoff instead of spinning on yield_now.
-    let mut backoff = CAPACITY_RETRY_INITIAL_BACKOFF;
-    for _ in 0..CAPACITY_RETRY_ATTEMPTS {
-        let before = state.capacity(0, 0)?.available_bytes;
-        let exact_reserve = before
-            .checked_sub(growth)
-            .ok_or("qualification filesystem is smaller than the fixed growth allowance")?;
-        let reserve = match reserve_delta {
-            -1 => exact_reserve
-                .checked_sub(1)
-                .ok_or("plus-one reserve underflow")?,
-            0 => exact_reserve,
-            1 => exact_reserve
-                .checked_add(1)
-                .ok_or("minus-one reserve overflow")?,
-            _ => return Err("unsupported capacity boundary delta".into()),
-        };
-        let result = state.admit_transaction(reserve, 0);
-        let after = state.capacity(0, 0)?.available_bytes;
-        if before != after {
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(CAPACITY_RETRY_MAX_BACKOFF);
-            continue;
-        }
-        assert_eq!(result.is_ok(), expected_admitted);
-        return Ok(());
-    }
-    Err("filesystem capacity did not stabilize for a boundary observation".into())
-}
-
-/// Capacity observations retry for roughly five seconds at most: 10 ms doubling to a
-/// 100 ms ceiling over 48 attempts.
-const CAPACITY_RETRY_ATTEMPTS: usize = 48;
-const CAPACITY_RETRY_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
-const CAPACITY_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[test]
 fn qualification_rejects_every_report_and_measurement_boundary() -> Result<(), Box<dyn Error>> {

@@ -7,7 +7,7 @@
 
 use std::error::Error;
 use std::fs;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use agenc_ircd_crypto::{Ed25519SecretKey, RollbackGuardRootKey, StorageMasterKey};
@@ -20,9 +20,7 @@ use agenc_ircd_storage::{
 };
 use agenc_ircd_types::{AccountRandomId, TransactionId};
 
-use super::{
-    InitializedLiveFixture, TestDirectory, initialized_live_fixture, live_open_config, test_limits,
-};
+use super::{InitializedLiveFixture, TestDirectory, initialized_live_fixture, live_open_config};
 
 const SIGNING_KEY: [u8; 32] = [209; 32];
 const BACKUP_TEMPORARY_PREFIX: &str = ".agenc-backup-tmp-v1-";
@@ -257,139 +255,47 @@ fn a_refusal_at_each_pass_boundary_leaves_no_temporary_and_the_same_name_retries
     Ok(())
 }
 
-struct RemoveOnDrop(std::path::PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Boundary {
-    /// Available bytes are `R(F) + O - 1`: refused before any output.
-    MinusOne,
-    /// Available bytes are exactly `R(F) + O`: admitted.
-    Equal,
-    /// Available bytes are `R(F) + O + 1`: admitted.
-    PlusOne,
-}
-
-impl Boundary {
-    /// The fixed reserve that places `R(F) + O` at this offset from the
-    /// sampled available bytes.
-    fn reserve(self, available: u64, output_length: u64) -> Option<u64> {
-        let base = available.checked_sub(output_length)?;
-        match self {
-            Self::MinusOne => base.checked_add(1),
-            Self::Equal => Some(base),
-            Self::PlusOne => base.checked_sub(1),
-        }
-    }
-
-    const fn admits(self) -> bool {
-        !matches!(self, Self::MinusOne)
-    }
-}
-
-fn filesystem_sample(directory: &Path) -> Result<(u64, u64), Box<dyn Error>> {
-    let statistics = rustix::fs::statvfs(directory)?;
-    Ok((
-        statistics
-            .f_bavail
-            .checked_mul(statistics.f_frsize)
-            .ok_or("available overflow")?,
-        statistics
-            .f_blocks
-            .checked_mul(statistics.f_frsize)
-            .ok_or("total overflow")?,
-    ))
-}
-
 #[test]
 fn output_admission_holds_at_the_reserve_plus_the_authenticated_length()
 -> Result<(), Box<dyn Error>> {
-    const ATTEMPTS: u32 = 8;
     let fixture = initialized_live_fixture()?;
     let output_length = fixture.backup_stream_bytes;
-    let backups = TestDirectory::create()?;
-    // Startup admits its own scratch at `R(F) + G` on the state filesystem,
-    // so a reserve placed one byte around `R(F) + O` on the backup filesystem
-    // only opens when the state directory lives on a different, roomier one.
-    let state = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("backup-boundary-state-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&state);
-    fs::create_dir_all(&state)?;
-    fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
-    let _cleanup = RemoveOnDrop(state.clone());
-    for entry in fs::read_dir(fixture.directory.path())? {
-        let entry = entry?;
-        let target = state.join(entry.file_name());
-        fs::copy(entry.path(), &target)?;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
-    }
-    let qualification = super::signed_qualification(StateDirectory::probe(&state)?)?;
-    let (state_available, _) = filesystem_sample(&state)?;
-    let (backup_available, _) = filesystem_sample(backups.path())?;
-    if fs::metadata(&state)?.dev() == fs::metadata(backups.path())?.dev()
-        || state_available / 2 < backup_available
-    {
-        eprintln!("skipping: no separate, roomier filesystem for the state directory");
-        return Ok(());
-    }
-    let (_, total) = filesystem_sample(backups.path())?;
-    let percent_reserve = total
-        .checked_mul(1)
-        .and_then(|bytes| bytes.checked_add(99))
-        .ok_or("overflow")?
-        / 100;
-    for boundary in [Boundary::MinusOne, Boundary::Equal, Boundary::PlusOne] {
-        let mut settled = false;
-        for attempt in 1..=ATTEMPTS {
-            let (available, _) = filesystem_sample(backups.path())?;
-            let Some(reserve) = boundary.reserve(available, output_length) else {
-                eprintln!(
-                    "skipping {boundary:?}: {available} available bytes cannot hold the boundary"
-                );
-                settled = true;
-                break;
-            };
-            if reserve < percent_reserve.max(test_limits().fixed_reserve_bytes) {
-                eprintln!("skipping {boundary:?}: reserve {reserve} below the configurable floor");
-                settled = true;
-                break;
+    // The capacity sample is injected, so `R(F) + O` is exact whatever the other tests of
+    // this binary do to the live filesystem: available bytes are the reserve plus this much.
+    for (label, headroom, admits) in [
+        ("minus one", output_length - 1, false),
+        ("equal", output_length, true),
+        ("plus one", output_length + 1, true),
+    ] {
+        let backups = TestDirectory::create()?;
+        let owner = StorageOwner::start(live_open_config(StateDirectory::open_with_faults(
+            fixture.directory.path(),
+            &[fixture.qualification],
+            StorageFaultInjector::disabled().with_capacity_headroom(headroom),
+        )?))?;
+        let outcome = backup(&owner.port(), backups.path(), "boundary.backup", 1);
+        let _ = owner.shutdown();
+        match outcome {
+            Ok(receipt) => {
+                assert!(admits, "{label} admitted");
+                assert_eq!(receipt.stream_bytes, output_length);
+                verified_bytes(&backups.path().join("boundary.backup"), &receipt)?;
             }
-            let mut config = live_open_config(StateDirectory::open(&state, &[qualification])?);
-            config.limits.fixed_reserve_bytes = reserve;
-            let owner = StorageOwner::start(config)?;
-            let name = format!("boundary-{boundary:?}-{attempt}.backup");
-            let outcome = backup(&owner.port(), backups.path(), &name, 1);
-            owner.shutdown()?;
-            let admitted = match outcome {
-                Ok(receipt) => {
-                    assert_eq!(receipt.stream_bytes, output_length);
-                    verified_bytes(&backups.path().join(&name), &receipt)?;
-                    true
-                }
-                Err(StorageError::FilesystemRejected(FilesystemCause::InsufficientCapacity)) => {
-                    assert!(!backups.path().join(&name).exists());
-                    false
-                }
-                Err(error) => return Err(format!("{boundary:?}: {error}").into()),
-            };
-            assert_eq!(
-                names_with_prefix(backups.path(), BACKUP_TEMPORARY_PREFIX)?,
-                Vec::<String>::new()
-            );
-            if admitted == boundary.admits() {
-                settled = true;
-                break;
+            Err(StorageError::FilesystemRejected(FilesystemCause::InsufficientCapacity)) => {
+                assert!(!admits, "{label} refused");
+                // Side-effect free: neither the final name nor a temporary.
+                assert_eq!(directory_names(backups.path())?, Vec::<String>::new());
             }
-            // Another writer moved the free space between the sample and the
-            // admission; sample again.
-            eprintln!("{boundary:?} attempt {attempt}: free space moved, retrying");
+            Err(error) => return Err(format!("{label}: {error}").into()),
         }
-        assert!(settled, "{boundary:?} never observed a quiet filesystem");
+        assert_eq!(
+            names_with_prefix(backups.path(), BACKUP_TEMPORARY_PREFIX)?,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            names_with_prefix(fixture.directory.path(), SCRATCH_PREFIX)?,
+            Vec::<String>::new()
+        );
     }
     Ok(())
 }

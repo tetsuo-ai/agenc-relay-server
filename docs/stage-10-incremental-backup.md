@@ -188,3 +188,28 @@ deterministically at the owner level with a shrunken slice budget and through
 the real owner with a corpus larger than one production slice; the production
 budget itself is the checkpoint scan's. Native release qualification of the
 whole path remains with REL-10 (#84).
+
+## Deterministic reserve boundaries (follow-up)
+
+`output_admission_holds_at_the_reserve_plus_the_authenticated_length` placed
+its one-byte boundary on the live filesystem's free space and retried when
+the space moved. Inside `cargo test`, some 140 other tests of the same binary
+write to the same filesystem, so eight retries could all lose; it failed the
+release gate that way. STO-04's owner-open boundary test, the transaction
+`R(F) + G` boundary test and the engine's scratch-gate boundary test had the
+same shape. All four now inject the capacity sample instead:
+`StorageFaultInjector::with_capacity_headroom(bytes)` makes every admission
+site that samples through the injector (`StateDirectory::capacity`, and
+through it `admit_transaction` and the scratch gate, and
+`admit_backup_output`) use available bytes equal to the computed reserve
+`R(F)` plus the headroom, and `set_capacity_headroom` moves it. A headroom
+equal to the admitted quantity is exactly the boundary. The retry loops, the
+backoff constants and the separate-filesystem skip are gone. The override is
+reachable only through the test-only injector; a disabled handle, the only
+kind the daemon constructs, returns the `fstatvfs` sample unchanged, so
+production admission is byte-for-byte what it was. The qualification
+workload still measures the real filesystem with ballast, which is its
+purpose. Evidence: the plain `cargo test -p agenc-ircd-storage --all-features
+--locked` suite, with its default in-process parallelism and the build target
+on ext4 (the qualification workload does not pass on the XFS data volume
+before or after this change), passed ten of ten consecutive runs.

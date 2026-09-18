@@ -391,6 +391,7 @@ impl BackupJob {
             expected,
             engine.limits.fixed_reserve_bytes,
             engine.limits.reserve_percent,
+            &engine.state_directory.faults(),
         )?;
         let writer_file = output
             .file()

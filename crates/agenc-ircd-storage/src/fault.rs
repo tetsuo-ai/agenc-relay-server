@@ -1,9 +1,10 @@
 //! Exhaustive deterministic fault schedules for storage qualification.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::qualification::StorageGrowthProbe;
-use crate::{StorageError, StorageError::DatabaseRejected};
+use crate::{FilesystemCapacity, StorageError, StorageError::DatabaseRejected};
 
 /// Closed logical storage boundary registry exercised by the fault campaign.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -268,6 +269,7 @@ pub struct StorageFaultInjector {
     schedule: Option<Arc<Mutex<StorageFaultSchedule>>>,
     probe: Option<Arc<StorageGrowthProbe>>,
     growth_cap: Option<u64>,
+    capacity_headroom: Option<Arc<AtomicU64>>,
 }
 
 impl StorageFaultInjector {
@@ -278,6 +280,7 @@ impl StorageFaultInjector {
             schedule: None,
             probe: None,
             growth_cap: None,
+            capacity_headroom: None,
         }
     }
 
@@ -289,6 +292,7 @@ impl StorageFaultInjector {
             )?))),
             probe: None,
             growth_cap: None,
+            capacity_headroom: None,
         })
     }
 
@@ -302,6 +306,7 @@ impl StorageFaultInjector {
             schedule: None,
             probe: Some(probe),
             growth_cap: None,
+            capacity_headroom: None,
         }
     }
 
@@ -322,6 +327,49 @@ impl StorageFaultInjector {
     #[must_use]
     pub const fn growth_cap(&self) -> Option<u64> {
         self.growth_cap
+    }
+
+    /// Replaces every capacity sample the admission sites take through this handle: available bytes become the computed reserve `R(F)` plus
+    /// `headroom`, whatever the live filesystem reports.
+    ///
+    /// A reserve boundary is one byte wide, and a test that places it on the live free
+    /// space loses to any other writer on the same filesystem. With the sample injected,
+    /// `headroom` equal to the admitted quantity is exactly the boundary, deterministically.
+    /// The override does not enable fault injection, so on a disabled handle the production
+    /// redb backend stays selected. It exists for tests only; the daemon never constructs one, and a
+    /// disabled handle leaves every admission site reading `fstatvfs` unchanged.
+    #[must_use]
+    pub fn with_capacity_headroom(mut self, headroom: u64) -> Self {
+        self.capacity_headroom = Some(Arc::new(AtomicU64::new(headroom)));
+        self
+    }
+
+    /// Moves the injected headroom, as space returning to or leaving the filesystem would.
+    /// A handle created without an override refuses.
+    pub fn set_capacity_headroom(&self, headroom: u64) -> Result<(), StorageError> {
+        self.capacity_headroom
+            .as_ref()
+            .ok_or(StorageError::InvalidEncoding)?
+            .store(headroom, Ordering::Release);
+        Ok(())
+    }
+
+    /// Returns the capacity an admission site must use: the live sample, or, under a
+    /// test-installed override, the sample's reserve plus the injected headroom.
+    pub(crate) fn observed_capacity(
+        &self,
+        sampled: FilesystemCapacity,
+    ) -> Result<FilesystemCapacity, StorageError> {
+        let Some(headroom) = &self.capacity_headroom else {
+            return Ok(sampled);
+        };
+        Ok(FilesystemCapacity {
+            available_bytes: sampled
+                .reserve_bytes
+                .checked_add(headroom.load(Ordering::Acquire))
+                .ok_or(StorageError::Overflow)?,
+            reserve_bytes: sampled.reserve_bytes,
+        })
     }
 
     /// Returns whether this handle can inject a fault.

@@ -9,11 +9,6 @@ use crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH;
 use crate::scratch::SCRATCH_SLICE_BYTES;
 
 const SCRATCH_PREFIX: &str = ".agenc-recovery-scratch-v1-";
-/// Capacity observations retry for roughly five seconds at most: 10 ms doubling to a 100 ms
-/// ceiling over 48 attempts, because other tests share the filesystem.
-const CAPACITY_RETRY_ATTEMPTS: usize = 48;
-const CAPACITY_RETRY_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
-const CAPACITY_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn scratch_entries(path: &Path) -> Result<Vec<String>, StorageError> {
     let mut names = std::fs::read_dir(path)
@@ -280,52 +275,35 @@ fn a_refused_startup_scratch_admission_fails_closed_and_leaves_no_entry() -> Res
 
 #[test]
 fn the_scratch_gate_admits_at_exactly_the_reserve_plus_the_allowance() -> Result<(), StorageError> {
-    let fixture = EngineFixture::create()?;
+    // The capacity sample is injected: available bytes are the reserve plus the headroom,
+    // so the one-byte boundary does not depend on what else writes to this filesystem.
+    let faults = StorageFaultInjector::disabled().with_capacity_headroom(1 << 40);
+    let fixture = EngineFixture::create_with_faults(faults.clone())?;
     let engine = fixture.engine()?;
     let allowance = AllocationAllowance::new(1_048_576);
-    for (delta, admitted) in [(1_i8, false), (0, true), (-1, true)] {
-        let mut backoff = CAPACITY_RETRY_INITIAL_BACKOFF;
-        let mut settled = false;
-        for _attempt in 0..CAPACITY_RETRY_ATTEMPTS {
-            let before = engine.state_directory.capacity(0, 0)?.available_bytes;
-            let exact = before
-                .checked_sub(allowance.bytes())
-                .ok_or(StorageError::Overflow)?;
-            let reserve = match delta {
-                1 => exact.checked_add(1).ok_or(StorageError::Overflow)?,
-                0 => exact,
-                _ => exact.checked_sub(1).ok_or(StorageError::Overflow)?,
-            };
-            let gate = ScratchGate {
-                directory: &engine.state_directory,
-                fixed_reserve_bytes: reserve,
-                reserve_percent: 0,
-            };
-            let result = gate.admit_scratch(allowance);
-            let after = engine.state_directory.capacity(0, 0)?.available_bytes;
-            if before != after {
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(CAPACITY_RETRY_MAX_BACKOFF);
-                continue;
-            }
-            if admitted {
-                assert_eq!(result, Ok(()), "delta {delta}");
-            } else {
-                assert_eq!(
-                    result,
-                    Err(StorageError::FilesystemRejected(
-                        crate::FilesystemCause::InsufficientCapacity
-                    )),
-                    "delta {delta}"
-                );
-            }
-            settled = true;
-            break;
+    for (headroom, admitted) in [
+        (allowance.bytes() - 1, false),
+        (allowance.bytes(), true),
+        (allowance.bytes() + 1, true),
+    ] {
+        faults.set_capacity_headroom(headroom)?;
+        let gate = ScratchGate {
+            directory: &engine.state_directory,
+            fixed_reserve_bytes: engine.limits.fixed_reserve_bytes,
+            reserve_percent: engine.limits.reserve_percent,
+        };
+        let result = gate.admit_scratch(allowance);
+        if admitted {
+            assert_eq!(result, Ok(()), "headroom {headroom}");
+        } else {
+            assert_eq!(
+                result,
+                Err(StorageError::FilesystemRejected(
+                    crate::FilesystemCause::InsufficientCapacity
+                )),
+                "headroom {headroom}"
+            );
         }
-        assert!(
-            settled,
-            "filesystem capacity did not settle for delta {delta}"
-        );
     }
     Ok(())
 }

@@ -558,7 +558,11 @@ impl StateDirectory {
             return Err(StorageError::LimitExceeded);
         }
         let statistics = fstatvfs(&self.directory).map_err(rustix_rejected)?;
-        capacity_from_statistics(&statistics, fixed_reserve_bytes, reserve_percent)
+        self.faults.observed_capacity(capacity_from_statistics(
+            &statistics,
+            fixed_reserve_bytes,
+            reserve_percent,
+        )?)
     }
 
     /// Enforces `R(F) + G` immediately before a durable transaction.
@@ -1018,6 +1022,7 @@ pub(crate) fn admit_backup_output(
     required_stream_bytes: u64,
     fixed_reserve_bytes: u64,
     reserve_percent: u8,
+    faults: &StorageFaultInjector,
 ) -> Result<(), StorageError> {
     if reserve_percent > 100 {
         return Err(StorageError::FilesystemRejected(
@@ -1031,7 +1036,11 @@ pub(crate) fn admit_backup_output(
     }
     validate_file(file, FileType::RegularFile, Mode::RUSR | Mode::WUSR)?;
     let statistics = fstatvfs(file).map_err(rustix_rejected)?;
-    let capacity = capacity_from_statistics(&statistics, fixed_reserve_bytes, reserve_percent)?;
+    let capacity = faults.observed_capacity(capacity_from_statistics(
+        &statistics,
+        fixed_reserve_bytes,
+        reserve_percent,
+    )?)?;
     let required = capacity
         .reserve_bytes
         .checked_add(required_stream_bytes)
@@ -1522,26 +1531,32 @@ mod tests {
             ))
         );
         assert_eq!(
-            admit_backup_output(&file, 0, 0, 101),
+            admit_backup_output(&file, 0, 0, 101, &StorageFaultInjector::disabled()),
             Err(StorageError::FilesystemRejected(
                 FilesystemCause::Unqualified
             ))
         );
         assert_eq!(
-            admit_backup_output(&file, u64::MAX / 2, 0, 0),
+            admit_backup_output(&file, u64::MAX / 2, 0, 0, &StorageFaultInjector::disabled()),
             Err(StorageError::FilesystemRejected(
                 FilesystemCause::InsufficientCapacity
             ))
         );
-        admit_backup_output(&file, 0, 0, 0)?;
+        admit_backup_output(&file, 0, 0, 0, &StorageFaultInjector::disabled())?;
         assert_eq!(
-            admit_backup_output(&file, u64::MAX, u64::MAX, 0),
+            admit_backup_output(
+                &file,
+                u64::MAX,
+                u64::MAX,
+                0,
+                &StorageFaultInjector::disabled()
+            ),
             Err(StorageError::Overflow)
         );
 
         file.set_len(1).map_err(io_rejected)?;
         assert_eq!(
-            admit_backup_output(&file, 0, 0, 0),
+            admit_backup_output(&file, 0, 0, 0, &StorageFaultInjector::disabled()),
             Err(StorageError::FilesystemRejected(
                 FilesystemCause::UnsafePath
             ))
