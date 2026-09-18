@@ -794,6 +794,12 @@ fn build_live_state(
 }
 
 fn startup_transaction_id() -> Result<TransactionId, DaemonError> {
+    Ok(startup_transaction_id_value()?)
+}
+
+/// The same fresh transaction identifier as the runtime refusal an entropy
+/// failure raises, for the startup paths that label their own refusals.
+fn startup_transaction_id_value() -> Result<TransactionId, RuntimeError> {
     let mut bytes = [0_u8; 16];
     OsEntropy
         .fill_exact(&mut bytes)
@@ -810,6 +816,18 @@ struct RecoveredSessionScope {
     keep_remote: bool,
 }
 
+/// Reconciles the recovered sessions and labels **every** refusal it raises
+/// with the surface that raised it.
+///
+/// This is the only conversion from the reconciliation's `RuntimeError` to a
+/// `DaemonError`, which is what makes the label total: an inner refusal
+/// cannot escape unlabelled because the inner function has no way to build a
+/// `DaemonError` at all. Before this, the loop's own commit path converted
+/// through `?`, so an allocation, ceiling or projection refusal printed
+/// `runtime startup failed: storage owner failed: storage state is stale or
+/// inconsistent` naming no surface — the exact line that sent issue #124 to
+/// the storage layer — and a refused commit or read printed `storage owner
+/// failed: ...` alone, which is the storage open's own line.
 fn reconcile_recovered_sessions(
     storage: &StoragePort,
     reconstruction: &mut Reconstruction,
@@ -817,6 +835,21 @@ fn reconcile_recovered_sessions(
     ceilings: AccountingCeilings,
     scope: RecoveredSessionScope,
 ) -> Result<(), DaemonError> {
+    reconcile_recovered_session_scope(storage, reconstruction, keys, ceilings, scope).map_err(
+        |error| DaemonError::Reconstruction(ReconstructionSurface::RecoveredSessions, error),
+    )
+}
+
+/// Closes every recovered session the scope owns, one committed plan at a
+/// time. It returns `RuntimeError` so that no refusal it raises can reach the
+/// operator without the surface its caller adds.
+fn reconcile_recovered_session_scope(
+    storage: &StoragePort,
+    reconstruction: &mut Reconstruction,
+    keys: &KeyDeriver,
+    ceilings: AccountingCeilings,
+    scope: RecoveredSessionScope,
+) -> Result<(), RuntimeError> {
     let recovered: Vec<UserId> = reconstruction.domain.session_user_ids().collect();
     for user_id in recovered {
         let remote = reconstruction
@@ -841,8 +874,8 @@ fn commit_startup_plan(
     keys: &KeyDeriver,
     ceilings: AccountingCeilings,
     plan: agenc_ircd_domain::MutationPlan,
-) -> Result<(), DaemonError> {
-    let transaction_id = startup_transaction_id()?;
+) -> Result<(), RuntimeError> {
+    let transaction_id = startup_transaction_id_value()?;
     let expected_revision = plan.resulting_revision();
     let projections = [PlanProjection {
         plan: &plan,
@@ -869,11 +902,9 @@ fn commit_startup_plan(
             receipt
         }
         CommitOutcome::Committed(_) | CommitOutcome::Indeterminate => {
-            return Err(DaemonError::Runtime(RuntimeError::Storage(
-                StorageError::Unavailable,
-            )));
+            return Err(RuntimeError::Storage(StorageError::Unavailable));
         }
-        CommitOutcome::Rejected(error) => return Err(DaemonError::Storage(error)),
+        CommitOutcome::Rejected(error) => return Err(RuntimeError::Storage(error)),
     };
     reconstruction.head = retained.advance(&receipt);
     reconstruction.index.apply(retained.updates());
@@ -896,7 +927,7 @@ fn refresh_startup_rows(
     storage: &StoragePort,
     reconstruction: &mut Reconstruction,
     storage_commit_sequence: u64,
-) -> Result<(), DaemonError> {
+) -> Result<(), RuntimeError> {
     let pending = reconstruction.index.pending_rows();
     let mut rows = Vec::new();
     rows.try_reserve_exact(pending.len())
@@ -915,11 +946,10 @@ fn refresh_startup_rows(
 }
 
 /// The recovered-session reconciliation could not prove the state it read.
-fn startup_stale_state() -> DaemonError {
-    DaemonError::Reconstruction(
-        ReconstructionSurface::RecoveredSessions,
-        RuntimeError::Storage(StorageError::StaleState),
-    )
+/// The surface is added once, where the reconciliation converts to a
+/// `DaemonError`.
+fn startup_stale_state() -> RuntimeError {
+    RuntimeError::Storage(StorageError::StaleState)
 }
 
 fn registration_config(
@@ -5300,5 +5330,81 @@ mod tests {
         assert!(budget.capacity() > 0);
         assert_eq!(budget.available(), budget.capacity());
         Ok(())
+    }
+
+    /// The recovered session reconciliation converts to a `DaemonError` in
+    /// exactly one place, where it names its surface.
+    ///
+    /// The loop closes one recovered session per committed plan, so its work
+    /// is proportional to the live client sessions a kill leaves behind, and
+    /// its commit path used to convert through `?`: a projection refusal
+    /// printed `runtime startup failed: storage owner failed: storage state
+    /// is stale or inconsistent` naming no surface, which is exactly the line
+    /// issue #124 was filed against the storage layer on, and a refused
+    /// commit or read printed the storage open's own single-prefix line.
+    /// Binding the four signatures here fails to compile if any inner step
+    /// regains the ability to build a `DaemonError` of its own.
+    #[test]
+    fn the_recovered_session_reconciliation_labels_at_its_only_conversion() {
+        let _scope: fn(
+            &agenc_ircd_storage::StoragePort,
+            &mut crate::state_core::reconstruct::Reconstruction,
+            &crate::state_core::durable::KeyDeriver,
+            crate::state_core::durable::AccountingCeilings,
+            super::RecoveredSessionScope,
+        ) -> Result<(), RuntimeError> = super::reconcile_recovered_session_scope;
+        let _commit: fn(
+            &agenc_ircd_storage::StoragePort,
+            &mut crate::state_core::reconstruct::Reconstruction,
+            &crate::state_core::durable::KeyDeriver,
+            crate::state_core::durable::AccountingCeilings,
+            agenc_ircd_domain::MutationPlan,
+        ) -> Result<(), RuntimeError> = super::commit_startup_plan;
+        let _refresh: fn(
+            &agenc_ircd_storage::StoragePort,
+            &mut crate::state_core::reconstruct::Reconstruction,
+            u64,
+        ) -> Result<(), RuntimeError> = super::refresh_startup_rows;
+        let _labelled: fn(
+            &agenc_ircd_storage::StoragePort,
+            &mut crate::state_core::reconstruct::Reconstruction,
+            &crate::state_core::durable::KeyDeriver,
+            crate::state_core::durable::AccountingCeilings,
+            super::RecoveredSessionScope,
+        ) -> Result<(), DaemonError> = super::reconcile_recovered_sessions;
+        assert_eq!(
+            super::startup_stale_state(),
+            RuntimeError::Storage(StorageError::StaleState),
+        );
+    }
+
+    /// Every kind the recovered session reconciliation can raise prints with
+    /// its surface named, and none of them prints either line that a reader
+    /// has already mistaken for the storage open.
+    #[test]
+    fn no_recovered_session_refusal_prints_either_unlabelled_line() {
+        let two_prefix = "runtime startup failed: storage owner failed: storage state is stale                           or inconsistent";
+        let one_prefix = "storage owner failed: storage state is stale or inconsistent";
+        for error in [
+            RuntimeError::Storage(StorageError::StaleState),
+            RuntimeError::Storage(StorageError::Unavailable),
+            RuntimeError::MemoryExhausted,
+            RuntimeError::LimitExceeded,
+            RuntimeError::Overflow,
+            RuntimeError::InvalidValue,
+        ] {
+            let printed =
+                DaemonError::Reconstruction(ReconstructionSurface::RecoveredSessions, error)
+                    .to_string();
+            assert!(
+                printed.starts_with(
+                    "runtime startup failed: recovered session reconciliation refused the \
+                     recovered state: "
+                ),
+                "{printed} does not name the surface that refused",
+            );
+            assert_ne!(printed, two_prefix);
+            assert_ne!(printed, one_prefix);
+        }
     }
 }

@@ -515,8 +515,12 @@ impl Restore {
             return Err(invalid());
         }
         let entries = std::mem::take(&mut self.projection);
+        // The active generation is this edge's own rows, not a coordinator
+        // snapshot: `apply` reaches states the snapshot closure refuses, and a
+        // restore that cannot rebuild one of them bricks a node that crossed
+        // no rule (RUN-08, issue #134). Everything else still refuses.
         edge.replica
-            .install(peer.projection_generation, entries)
+            .install_recovered(peer.projection_generation, entries)
             .map_err(|error| {
                 *cause = EdgeRestoreCause::ActiveProjection(error);
                 invalid()

@@ -2387,3 +2387,385 @@ fn run_campaign(settings: &Settings, network: &Network) -> TestResult {
     }
     Ok(())
 }
+
+/// Campaign directory of the RUN-08 peer-loss kill drill.
+const KILL_DIRECTORY_ENV: &str = "AGENC_RUN08_KILL_DIR";
+/// How many kill rounds the drill runs.
+const KILL_ROUNDS_ENV: &str = "AGENC_RUN08_KILL_ROUNDS";
+/// The client population the drill holds while it kills.
+const KILL_CONNECTIONS_ENV: &str = "AGENC_RUN08_KILL_CONNECTIONS";
+/// Most kill rounds one invocation may run.
+const MAX_KILL_ROUNDS: u64 = 4_096;
+/// Kill rounds step their phase by this much, so successive kills land at
+/// different points of the restarted edge's recovery instead of one fixed
+/// instant: the coordinator's post-restart resynchronization, the paced
+/// return of the population, and the settled steady state beyond it.
+const KILL_PHASE_STEP: Duration = Duration::from_millis(1_500);
+/// Distinct phases the step sweeps before it wraps. Twenty-four steps of
+/// 1.5 s reach 34.5 s after the link, which covers the whole paced return of
+/// a 32-worker edge (12.4 s) and includes `scenario_peer_loss`'s own 12 s.
+const KILL_PHASES: u64 = 24;
+/// How long edge b stays down between the kill and the restart, exactly the
+/// pause `scenario_peer_loss` takes.
+const KILL_DOWNTIME: Duration = Duration::from_secs(5);
+/// Every second round kills the restarted edge again **during its own
+/// startup**, before it has re-established the link, so the start after it
+/// reads a state torn inside the startup work rather than inside the live
+/// path: the durable reconstruction, the recovered session reconciliation's
+/// one committed plan per recovered session, the edge federation restore and
+/// the history load. This is the step that sweeps that second kill's own
+/// phase.
+const STARTUP_KILL_STEP: Duration = Duration::from_millis(1_000);
+/// Distinct startup phases the step sweeps before it wraps. Twenty steps of
+/// one second reach past the storage open and the whole reconstruction of a
+/// warm edge on this host.
+const STARTUP_KILL_PHASES: u64 = 20;
+/// Bound on the stderr capture kept with a refused restart.
+const MAX_STDERR_BYTES: u64 = 1_024 * 1_024;
+
+/// Drill inputs read from the environment.
+struct KillDrillSettings {
+    directory: PathBuf,
+    rounds: u64,
+    connections: usize,
+    workload: Workload,
+}
+
+impl KillDrillSettings {
+    fn from_environment() -> TestResult<Self> {
+        let directory = PathBuf::from(
+            std::env::var_os(KILL_DIRECTORY_ENV)
+                .ok_or_else(|| failure("kill drill directory is not configured"))?,
+        );
+        let rounds: u64 = std::env::var(KILL_ROUNDS_ENV)?.parse()?;
+        if !(1..=MAX_KILL_ROUNDS).contains(&rounds) {
+            return Err(failure("kill drill round count is outside its bound"));
+        }
+        let requested: usize = match std::env::var(KILL_CONNECTIONS_ENV) {
+            Ok(text) => text.parse()?,
+            Err(_) => DEFAULT_CONNECTIONS,
+        };
+        let ceiling = usize::try_from(MAX_CLIENT_CONNECTIONS)?
+            .checked_mul(CLIENT_NODES)
+            .ok_or_else(|| failure("kill drill ceiling overflows"))?;
+        if !(4..=ceiling).contains(&requested) {
+            return Err(failure("kill drill connection count is outside its bound"));
+        }
+        let workload = Workload::select(u64::try_from(requested)?)?;
+        Ok(Self {
+            directory,
+            rounds,
+            connections: usize::try_from(workload.total_connections())?,
+            workload,
+        })
+    }
+}
+
+/// What one kill round observed.
+struct KillRound {
+    number: u64,
+    phase_ms: u64,
+    startup_kill_ms: Option<u64>,
+    live_at_kill: [u64; 3],
+    charged_at_kill: [u64; 3],
+    budget_at_kill: [u64; 3],
+    killed_at_ns: u64,
+    back_ms: u64,
+    refusal: Option<String>,
+}
+
+/// Every node's `STATS RUNTIME` occupancy, charge and budget.
+fn runtime_occupancy(admins: &[AdminIdentity; 3]) -> TestResult<([u64; 3], [u64; 3], [u64; 3])> {
+    let mut live = [0_u64; 3];
+    let mut charged = [0_u64; 3];
+    let mut budget = [0_u64; 3];
+    for (index, identity) in admins.iter().enumerate() {
+        let mut admin = AdminSession::connect(identity)?;
+        for (name, value) in admin.stats("RUNTIME")? {
+            let slot = match name.as_str() {
+                "live_client_connections" => live.get_mut(index),
+                "memory_charged_bytes" => charged.get_mut(index),
+                "memory_budget_bytes" => budget.get_mut(index),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                *slot = value;
+            }
+        }
+        admin.quit()?;
+    }
+    Ok((live, charged, budget))
+}
+
+/// Copies one directory tree, so a refused restart keeps the exact durable
+/// state the killed edge left behind before the fixture is removed.
+fn copy_tree(source: &Path, target: &Path) -> TestResult {
+    fs::create_dir_all(target)?;
+    let mut pending = vec![(source.to_path_buf(), target.to_path_buf())];
+    while let Some((from, into)) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&from) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let destination = into.join(entry.file_name());
+            if file_type.is_dir() {
+                fs::create_dir_all(&destination)?;
+                pending.push((entry.path(), destination));
+            } else if file_type.is_file() {
+                fs::copy(entry.path(), &destination)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The daemon's own stderr since the drill started, which is where a
+/// fail-closed startup prints the line an operator reads.
+fn edge_b_stderr(directory: &Path) -> String {
+    read_bounded(
+        &directory.join("logs").join("edge-b.stderr"),
+        MAX_STDERR_BYTES,
+    )
+    .unwrap_or_else(|error| format!("stderr unavailable: {error}"))
+}
+
+/// Runs the kill rounds against a warm population.
+fn kill_rounds(
+    settings: &KillDrillSettings,
+    network: &Network,
+    shared: &Shared,
+    admins: &[AdminIdentity; 3],
+    nodes: &mut Nodes,
+    rounds: &mut Vec<KillRound>,
+) -> TestResult {
+    let warm_up = MINIMUM_WARM_UP.max(
+        RESUME_SLOT * u32::try_from(settings.workload.workers_per_address()).unwrap_or(0)
+            + Duration::from_secs(5),
+    );
+    println!("[drill] warming up for {} seconds", warm_up.as_secs());
+    thread::sleep(warm_up);
+    for number in 1..=settings.rounds {
+        let phase =
+            KILL_PHASE_STEP * u32::try_from(number.saturating_sub(1) % KILL_PHASES).unwrap_or(0);
+        thread::sleep(phase);
+        let (live_at_kill, charged_at_kill, budget_at_kill) = runtime_occupancy(admins)?;
+        shared.maintenance.store(true, Ordering::Relaxed);
+        let killed_at_ns = shared.nanos();
+        nodes.edge_b.kill()?;
+        thread::sleep(KILL_DOWNTIME);
+        let mut before = links_established(&network.edge_b);
+        let started = Instant::now();
+        nodes.restart_edge_b(&network.edge_b.config_path)?;
+        // Every second round kills the restart again before it has reached
+        // its link, so the start that has to survive reads a state a kill
+        // tore inside the startup work itself.
+        let startup_kill = (number % 2 == 0).then(|| {
+            STARTUP_KILL_STEP
+                * u32::try_from(number.saturating_div(2).saturating_sub(1) % STARTUP_KILL_PHASES)
+                    .unwrap_or(0)
+        });
+        if let Some(wait) = startup_kill {
+            thread::sleep(wait);
+            nodes.edge_b.kill()?;
+            thread::sleep(KILL_DOWNTIME);
+            before = links_established(&network.edge_b);
+            nodes.restart_edge_b(&network.edge_b.config_path)?;
+        }
+        let back = wait_for_link(&network.edge_b, before);
+        let back_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let startup_kill_ms =
+            startup_kill.map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+        let refusal = match back {
+            Ok(()) => {
+                shared.maintenance.store(false, Ordering::Relaxed);
+                None
+            }
+            Err(error) => Some(format!("{error}")),
+        };
+        println!(
+            "[drill] round {number} phase={} ms startup_kill={startup_kill_ms:?} \
+live={live_at_kill:?} charged={charged_at_kill:?} budget={budget_at_kill:?} back={back_ms} ms \
+refused={}",
+            u64::try_from(phase.as_millis()).unwrap_or(u64::MAX),
+            refusal.is_some(),
+        );
+        rounds.push(KillRound {
+            number,
+            phase_ms: u64::try_from(phase.as_millis()).unwrap_or(u64::MAX),
+            startup_kill_ms,
+            live_at_kill,
+            charged_at_kill,
+            budget_at_kill,
+            killed_at_ns,
+            back_ms,
+            refusal: refusal.clone(),
+        });
+        if refusal.is_some() {
+            // The durable state the kill left is the evidence; keep it and the
+            // daemon's own stderr before the fixture directory is removed.
+            copy_tree(
+                &network.edge_b.data_dir,
+                &settings.directory.join("edge-b-durable-state"),
+            )?;
+            let stderr = edge_b_stderr(&settings.directory);
+            write_private(
+                &settings.directory.join("edge-b-refusal.log"),
+                stderr.as_bytes(),
+            )?;
+            return Err(failure(format!(
+                "edge b refused its restart in round {number}; its stderr ends: {}",
+                stderr.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Writes the drill's own record beside the campaign's.
+fn write_kill_record(
+    settings: &KillDrillSettings,
+    rounds: &[KillRound],
+    refused: bool,
+) -> TestResult {
+    let mut text = format!(
+        "{{\"rounds\":{},\"connections\":{},\"memory_budget_bytes\":{},\"refused\":{},\"round\":[",
+        rounds.len(),
+        settings.connections,
+        DEFAULT_BUDGET_BYTES,
+        refused
+    );
+    for (position, round) in rounds.iter().enumerate() {
+        if position > 0 {
+            text.push(',');
+        }
+        let refusal = match &round.refusal {
+            Some(reason) => format!("\"{}\"", escape_record(reason)),
+            None => "null".to_owned(),
+        };
+        let startup_kill = match round.startup_kill_ms {
+            Some(milliseconds) => milliseconds.to_string(),
+            None => "null".to_owned(),
+        };
+        text.push_str(&format!(
+            "{{\"number\":{},\"phase_ms\":{},\"startup_kill_ms\":{startup_kill},\
+\"live\":{:?},\"charged\":{:?},\"budget\":{:?},\
+\"killed_at_ns\":{},\"back_ms\":{},\"refusal\":{refusal}}}",
+            round.number,
+            round.phase_ms,
+            round.live_at_kill,
+            round.charged_at_kill,
+            round.budget_at_kill,
+            round.killed_at_ns,
+            round.back_ms,
+        ));
+    }
+    text.push_str("]}");
+    let path = settings.directory.join("peer-loss-kill-drill.json");
+    let _stale = fs::remove_file(&path);
+    write_private(&path, text.as_bytes())
+}
+
+/// Escapes the few characters a drill reason can carry into JSON.
+fn escape_record(text: &str) -> String {
+    let mut escaped = String::new();
+    for character in text.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            control if control.is_control() => escaped.push(' '),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// The RUN-08 peer-loss kill drill (issue #134).
+///
+/// `scenario_peer_loss` SIGKILLs edge b under the campaign's load at the
+/// published `server.memory_budget_bytes` and restarts it, once per campaign
+/// cycle. This drill holds the same population against the same three daemons
+/// at the same budget and repeats **only** that kill, stepping the phase of
+/// each kill across the restarted edge's paced client return so the rounds
+/// sweep the window rather than sampling one instant of it. A refused restart
+/// keeps the killed edge's whole durable directory and the daemon's own
+/// stderr, and fails the drill naming the line.
+#[test]
+#[ignore = "requires the Stage 10 peer-loss kill drill controller"]
+fn peer_loss_kill_drill() -> TestResult {
+    let settings = KillDrillSettings::from_environment()?;
+    fs::create_dir_all(&settings.directory)?;
+    let network = build_network_with(Some(CapacityPlan {
+        max_connections: settings.workload.listener_ceiling(CONTROLLER_PROBES)?,
+        connections_per_address: settings.workload.generator().connections_per_address(),
+        memory_budget_bytes: DEFAULT_BUDGET_BYTES,
+    }))?;
+    let outcome = run_kill_drill(&settings, &network);
+    preserve_logs(&network, &settings.directory)?;
+    outcome
+}
+
+fn run_kill_drill(settings: &KillDrillSettings, network: &Network) -> TestResult {
+    let shared = Shared::new();
+    let mut nodes = Nodes::start(network, ResourceSource::Procfs, &settings.directory)?;
+    println!("[drill] daemons started; waiting for both edge links");
+    wait_for_link(&network.edge_a, 0)?;
+    wait_for_link(&network.edge_b, 0)?;
+    let admins = [
+        admin_identity(&network.coordinator),
+        admin_identity(&network.edge_a),
+        admin_identity(&network.edge_b),
+    ];
+    let plans = (0..settings.connections)
+        .map(|index| -> TestResult<WorkerPlan> {
+            let edge = index % CLIENT_NODES;
+            Ok(WorkerPlan {
+                index,
+                nick: format!("load{index:04}"),
+                peer: format!("load{:04}", (index + 2) % settings.connections),
+                edge,
+                load_channel: settings.workload.load_channel(index)?,
+                source: settings.workload.generator().source_address(edge, index)?,
+                slot_index: settings.workload.slot_index(index)?,
+            })
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    let mut rounds = Vec::new();
+    let outcome: TestResult = thread::scope(|scope| {
+        for plan in &plans {
+            let shared = &shared;
+            let fixtures = [&network.edge_a, &network.edge_b];
+            scope.spawn(move || worker(shared, fixtures, plan));
+        }
+        // Any controller error must release the workers, or the scope never ends.
+        let result = kill_rounds(settings, network, &shared, &admins, &mut nodes, &mut rounds);
+        shared.stop.store(true, Ordering::Relaxed);
+        result
+    });
+    write_worker_errors(&settings.directory, &shared)?;
+    write_kill_record(settings, &rounds, outcome.is_err())?;
+    let survived = rounds
+        .iter()
+        .filter(|round| round.refusal.is_none())
+        .count();
+    println!(
+        "[drill] {survived} of {} kill rounds restarted; budget={DEFAULT_BUDGET_BYTES}",
+        rounds.len()
+    );
+    let mut stopped = true;
+    for daemon in [&mut nodes.coordinator, &mut nodes.edge_a, &mut nodes.edge_b] {
+        stopped &= daemon
+            .stop()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    outcome?;
+    if !stopped {
+        return Err(failure(
+            "a daemon did not stop cleanly at the end of the drill",
+        ));
+    }
+    Ok(())
+}
