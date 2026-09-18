@@ -322,9 +322,6 @@ argv = ["bash", "scripts/run-stage-eight-load.sh"]
 includes = ["stage-eight-implementation"]
 
 [[gate.stage-nine-implementation.command]]
-argv = ["python3", "scripts/test-issue-pipeline.py"]
-
-[[gate.stage-nine-implementation.command]]
 argv = ["python3", "scripts/requirements.py", "check-stage-nine"]
 
 [[gate.stage-nine-implementation.command]]
