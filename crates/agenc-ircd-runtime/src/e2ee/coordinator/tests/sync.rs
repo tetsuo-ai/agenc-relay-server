@@ -37,7 +37,7 @@ pub(crate) struct FakeHost {
     origin: Option<BaseOriginView>,
     ready: bool,
     resync_epoch: u64,
-    revision: u64,
+    pub(super) revision: u64,
     backing: crate::budget::BackingReservationPort,
     clock: Result<
         super::super::sync::CutClockSample,

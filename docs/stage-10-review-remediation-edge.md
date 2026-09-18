@@ -57,12 +57,14 @@ before every full cut and re-derives direct standing from
 `hosts_direct_account`, which is what the reset that precedes a full cut
 already means for the origins and events those references stood for. A later
 direct event re-projects its route first, exactly as for a first entitlement.
-The missing release on the live path is unchanged and is reported separately.
+The missing release on the live path was reported separately and is repaired
+by ENC-23 (#173), recorded in
+[the direct route release record](stage-10-direct-route-release.md).
 
-Known limit: the coordinator republishes an interrupted cut unchanged. A cut
-that named an account this edge hosted at the time, republished after a link
-loss to an edge that no longer hosts it and never projected the route, is
-refused until the cut's 15-minute token retires it and the next cut is taken.
+The limit first recorded here, that an interrupted cut was republished
+unchanged and refused until its 15-minute token expired, is narrowed by the
+same change: a pending cut that names a pair the edge no longer hosts is
+retired at the next `ERESUME`.
 
 ## ENC-16: fragment-zero charging and the decoded-byte ingress bucket
 
@@ -164,10 +166,9 @@ the row, like any other record under a key the link did not negotiate.
 - The live `route_state_changed` path is not entitlement-checked; companion
   12.5 assigns that verification to the snapshot, and a live change arrives
   in the same ordered plan as the base delta that entitles it.
-- The coordinator still never releases a direct reference between full cuts,
-  and its cut names every direct route of a hosted account; both are
-  coordinator-side divergences from the companion's least-information rules
-  that this change neither introduced nor repaired.
+- The coordinator's missing live release was repaired afterwards by ENC-23
+  (#173); its cut still names every bound direct pair of a hosted account,
+  which that record keeps on purpose for the edge-side downgrade refusal.
 - A terminal certificate's time is the receipt it embeds, so a terminal
   certified after the window under a successor whose receipt was sequenced
   inside it is admitted. No record arm carries a later signed time.

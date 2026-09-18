@@ -183,6 +183,11 @@ fragment-zero charge with the dedicated decoded-byte ingress bucket, and the
 successor credential's overlap window in witness resolution (ENC-15, ENC-16
 and ENC-17, issues #160, #161 and #162) — is recorded in
 [the edge review remediation record](stage-10-review-remediation-edge.md).
+The live release of a direct route projection when its edge stops hosting
+both accounts, the cut and edge check that now enforce one hosting rule, and
+the interrupted cut that is retired instead of republished (ENC-23, issue
+#173) are recorded in
+[the direct route release record](stage-10-direct-route-release.md).
 The recovery and reference scratch admitted against the exact filesystem and
 bounded by the fork's allowance before every one of its transactions, the
 checkpoint that reads its cut back before it publishes and allocates no

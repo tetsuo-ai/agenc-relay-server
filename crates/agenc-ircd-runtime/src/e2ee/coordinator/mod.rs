@@ -36,6 +36,7 @@ use crate::federation::LinkId;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
 mod delivery_owner;
+mod direct_release;
 pub(crate) mod object_read;
 pub(crate) use delivery_owner::acknowledgement::read::{
     Job as AckReadJob, Request as AckReadRequest,

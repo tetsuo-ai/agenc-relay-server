@@ -389,6 +389,7 @@ fn execute(
             .collect()
     };
     let attached_edges = |digest: &[u8; 32]| attached_origin_edges(coordinator, digest);
+    let hosts_base = |edge: ServerId, account: &[u8; 24]| base_hosts(context, edge, account);
     let channel_member = |channel: ChannelInstanceId| {
         user_id.is_some_and(|user| {
             domain
@@ -425,6 +426,7 @@ fn execute(
     match ops::execute(&mut exec) {
         Ok(ops::Prepared::Complete(mut outcome)) => {
             project_routes(&exec, &mut outcome);
+            super::direct_release::plan_releases(&exec, &hosts_base, &mut outcome);
             ops::Prepared::Complete(outcome)
         }
         Ok(ops::Prepared::Read(request)) => ops::Prepared::Read(request),
@@ -432,6 +434,16 @@ fn execute(
             ops::Prepared::Complete(Box::new(Outcome::failed(code, context)))
         }
     }
+}
+
+/// Whether the base standing projection of `edge` holds `account`: the edge
+/// hosts at least one session of it.
+fn base_hosts(context: &StateCoreContext, edge: ServerId, account: &[u8; 24]) -> bool {
+    let standing = context
+        .federation()
+        .and_then(|projector| projector.index().edge(edge));
+    agenc_ircd_types::AccountId::parse_wire_bytes(account)
+        .is_ok_and(|id| standing.is_some_and(|standing| standing.holds_account(id)))
 }
 
 fn attached_origin_edges(coordinator: &CompanionCoordinator, digest: &[u8; 32]) -> Vec<ServerId> {

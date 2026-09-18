@@ -635,7 +635,18 @@ impl References {
 pub struct RouteEntitlements {
     channel: BTreeMap<(ServerId, Id), bool>,
     direct: BTreeMap<(ServerId, Id), References>,
+    /// Direct standings whose hosting may have ended, each with the looks it
+    /// still has before it is settled as hosted.
+    departing: BTreeMap<(ServerId, Id), u8>,
 }
+
+/// Most direct standings that await a hosting check at once; a departure
+/// beyond it is corrected by the edge's next full cut.
+pub const MAX_DEPARTING_DIRECT: usize = 4_096;
+/// Mutation plans that may find a departing standing still hosted before it
+/// is settled; a base session that ends after its companion origin is seen
+/// on a later look.
+pub const DEPARTING_DIRECT_LOOKS: u8 = 8;
 
 impl RouteEntitlements {
     /// Retires standing route views when a verified successor takes the route.
@@ -643,6 +654,7 @@ impl RouteEntitlements {
     pub fn retire_conversation(&mut self, conversation: Id) {
         self.channel.retain(|(_, id), _| *id != conversation);
         self.direct.retain(|(_, id), _| *id != conversation);
+        self.departing.retain(|(_, id), _| *id != conversation);
     }
 
     /// Empty entitlements.
@@ -717,6 +729,52 @@ impl RouteEntitlements {
     /// standing from what the edge hosts and never restates a stale pair.
     pub fn fence_direct(&mut self, edge: ServerId) {
         self.direct.retain(|(server, _), _| *server != edge);
+        self.departing.retain(|(server, _), _| *server != edge);
+    }
+
+    /// A session or attached device left `edge`: every direct standing it
+    /// holds awaits a hosting check by a later mutation plan (companion
+    /// 12.5, "hidden as soon as its last exact reason is ... fenced").
+    pub fn mark_departure(&mut self, edge: ServerId) {
+        let standing: Vec<Id> = self
+            .direct
+            .range((edge, [0; 32])..=(edge, [0xff; 32]))
+            .map(|((_, conversation), _)| *conversation)
+            .collect();
+        for conversation in standing {
+            if self.departing.len() >= MAX_DEPARTING_DIRECT {
+                break;
+            }
+            self.departing
+                .insert((edge, conversation), DEPARTING_DIRECT_LOOKS);
+        }
+    }
+
+    /// The first `limit` departing direct standings in canonical order.
+    #[must_use]
+    pub fn departing(&self, limit: usize) -> Vec<(ServerId, Id)> {
+        self.departing.keys().take(limit).copied().collect()
+    }
+
+    /// A plan found the departing standing still hosted: it keeps its
+    /// reference and leaves the queue once its looks are spent.
+    pub fn still_hosted(&mut self, edge: ServerId, conversation: Id) {
+        let key = (edge, conversation);
+        let spent = self.departing.get_mut(&key).is_none_or(|looks| {
+            *looks = looks.saturating_sub(1);
+            *looks == 0
+        });
+        if spent {
+            self.departing.remove(&key);
+        }
+    }
+
+    /// The committed plan hid the route from `edge`: every reference it
+    /// held is gone, so the next event projects the route again first.
+    /// Returns whether a standing was dropped.
+    pub fn release_departed(&mut self, edge: ServerId, conversation: Id) -> bool {
+        self.departing.remove(&(edge, conversation));
+        self.direct.remove(&(edge, conversation)).is_some()
     }
 
     /// Every conversation `edge` is entitled to, in canonical order: the
@@ -766,6 +824,7 @@ impl RouteEntitlements {
     pub fn fence(&mut self, edge: ServerId) {
         self.channel.retain(|(server, _), _| *server != edge);
         self.direct.retain(|(server, _), _| *server != edge);
+        self.departing.retain(|(server, _), _| *server != edge);
     }
 }
 
