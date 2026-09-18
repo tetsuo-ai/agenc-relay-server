@@ -991,6 +991,7 @@ mod tests {
     use agenc_ircd_types::{AdminPermission, AdminPermissionSet, OperatorId};
 
     use super::*;
+    use crate::connection::queue::OVERFLOW_CELL_CHARGE;
     use crate::connection::{
         CONTROL_ITEM_SLOTS, ClientQueueDemand, ClientSink, ConnectionGeneration, ConnectionLimits,
         MAX_DEMAND_FRAMES, QueueLimits, SinkReserveError, WriterQueue,
@@ -1118,6 +1119,16 @@ mod tests {
         Ok(())
     }
 
+    /// Reserves and rolls back a demand of `frames` one-byte frames, returning
+    /// its backing charge: a demand beyond the live open-response ceiling
+    /// carries the overflow cell charge.
+    fn cell_charge(queue: &WriterQueue, frames: usize) -> Result<u64, RuntimeError> {
+        let reserved = queue
+            .try_reserve(ClientQueueDemand::new(vec![1; frames])?)
+            .map_err(|_| RuntimeError::LimitExceeded)?;
+        Ok(reserved.backing_charge())
+    }
+
     #[test]
     fn live_queue_limits_gate_new_work_while_old_reservations_drain()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1151,17 +1162,15 @@ mod tests {
 
         assert_eq!(queue.limits().response_batches(), 1);
         assert_eq!(queue.queue_snapshot().capacity_bytes(), 262_144);
-        assert_eq!(
-            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
-            Some(SinkReserveError::Full)
-        );
+        assert_eq!(cell_charge(&queue, 1)?, OVERFLOW_CELL_CHARGE);
         drop(first);
         assert_eq!(
-            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
-            Some(SinkReserveError::Full),
+            cell_charge(&queue, 1)?,
+            OVERFLOW_CELL_CHARGE,
             "the second old reservation remains valid and occupies the lowered ceiling"
         );
         drop(second);
+        assert_eq!(cell_charge(&queue, 1)?, 0, "the one fixed entry is free");
         assert_eq!(
             queue
                 .try_reserve(ClientQueueDemand::new(vec![4_096; 49])?)
@@ -1212,9 +1221,9 @@ mod tests {
             .try_reserve(ClientQueueDemand::new(vec![1; 2])?)
             .map_err(|_| RuntimeError::LimitExceeded)?;
         assert_eq!(
-            queue.try_reserve(ClientQueueDemand::new(vec![1; 2])?).err(),
-            Some(SinkReserveError::Full),
-            "one response batch is configured"
+            cell_charge(&queue, 2)?,
+            4_096 + OVERFLOW_CELL_CHARGE,
+            "one response batch is configured, so the next demand brings its cell"
         );
         publish(&handle, 3, 4, ConnectionLimits::DEFAULT.queue)?;
         let second = queue
@@ -1227,9 +1236,9 @@ mod tests {
         );
         publish(&handle, 4, 1, one_batch)?;
         assert_eq!(
-            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
-            Some(SinkReserveError::Full),
-            "lowering refuses new work while accepted reservations remain"
+            cell_charge(&queue, 1)?,
+            OVERFLOW_CELL_CHARGE,
+            "lowering charges new work a cell while accepted reservations remain"
         );
         drop((first, second));
         assert_eq!(queue.normal_bytes(), 0);

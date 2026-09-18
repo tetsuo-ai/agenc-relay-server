@@ -74,6 +74,11 @@ bootstrap-activation votes that reload as the live coordinator admitted them,
 and conversation-charged retained terminal requests (ENC-19 to ENC-22, issues
 #166 to #169, from the internal independent review) are recorded in
 [the coordinator review remediation record](stage-10-review-remediation-coordinator.md).
+The writer queue that is full only at its byte or item ceiling, so pipelined
+one-line replies and deliveries no longer close a connection as a slow
+consumer, and the `ERROR` line a slow-consumer close now sends from the
+reserved control slot (RUN-10, issue #174) are recorded in
+[the pipelined commands record](stage-10-pipelined-commands.md).
 The owners of all three Section-19.3 overload classes — the refused guest and
 expensive query at 80 percent, the refused channel creation at 90 percent, and
 whole-connection eviction down to the 85-percent recovery mark at 95 percent

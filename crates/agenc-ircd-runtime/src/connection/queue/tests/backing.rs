@@ -335,7 +335,10 @@ fn a_multi_frame_reservation_without_prepared_storage_excludes_the_whole_sink() 
     let ledger: Arc<dyn QueueReservationLedger> = queue.shared.clone();
     {
         let mut state = lock(&queue.shared.state);
-        assert!(queue.admit_normal(&mut state, &demand_of(&frames)?, QueueLimits::DEFAULT, 4));
+        assert_eq!(
+            WriterQueue::admit_normal(&mut state, &demand_of(&frames)?, QueueLimits::DEFAULT, 4),
+            Some(Placement::Ring)
+        );
     }
     let tentative = TentativeClientQueueReservation::new(
         ConnectionGeneration::new(1),
@@ -366,7 +369,7 @@ fn a_full_entry_ring_excludes_the_sink_instead_of_dropping_a_frame() -> TestResu
         let mut state = lock(&queue.shared.state);
         while state
             .entries
-            .push_back(Entry::Control(text.clone()))
+            .push_back(Entry::Control(0, text.clone()))
             .is_ok()
         {}
         assert_eq!(state.entries.len, QUEUE_ENTRY_SLOTS);
@@ -385,13 +388,17 @@ fn the_ring_holds_every_admissible_batch_and_the_control_reserve() -> TestResult
     let limits = QueueLimits::new(MAX_OUTPUT_BYTES, MAX_CONTROL_OUTPUT_BYTES, MAX_QUEUE_ITEMS)?;
     let queue = WriterQueue::new(ConnectionGeneration::new(1), limits)?;
     for _ in 0..MAX_RESPONSE_BATCHES {
-        commit(&budget, &queue, &[small.clone(), small.clone()])?;
+        let prepared = prepare(&budget, &queue, &[small.clone(), small.clone()])?;
+        assert!(prepared.cell_is_absent(), "the ring holds this demand");
+        let frames = vec![small.clone(), small.clone()];
+        let bound = BoundedSharedClientFrames::for_reservation(&prepared, frames)?;
+        queue.commit(prepared, bound);
     }
-    assert_eq!(
-        queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
-        Some(SinkReserveError::Full),
-        "normal output is exhausted"
-    );
+    let next = queue
+        .try_reserve(ClientQueueDemand::new(vec![1])?)
+        .map_err(|_| RuntimeError::LimitExceeded)?;
+    assert_eq!(next.backing_charge(), OVERFLOW_CELL_CHARGE);
+    drop(next);
     for _ in 0..CONTROL_ITEM_SLOTS {
         queue
             .push_control(small.clone())
@@ -517,5 +524,109 @@ fn draining_a_smaller_query_snapshot_first_keeps_the_largest_until_it_drains() -
     );
     assert_eq!(drain(&queue).len(), 2);
     assert_eq!(queue.queue_snapshot().largest_query_rows(), 0);
+    Ok(())
+}
+
+fn texts(frames: &[SharedClientFrame]) -> Vec<String> {
+    frames
+        .iter()
+        .map(|frame| String::from_utf8_lossy(frame.as_bytes()).into_owned())
+        .collect()
+}
+
+/// RUN-10: a sink is full at its byte or item ceiling, never at a count of
+/// small demands. Thirty-two one-frame demands, a control frame, and one
+/// multi-frame demand queue with no pop between them and drain in commit
+/// order, and every charge returns with the last frame.
+#[test]
+fn small_demands_beyond_the_ring_queue_in_order_and_return_every_charge() -> TestResult {
+    let budget = MemoryBudget::new(64 * 1_048_576);
+    let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT)?;
+    let idle = budget.charged();
+    let mut expected = Vec::new();
+    for index in 0..32 {
+        let line = frame(&budget, &format!("burst-{index:02}"))?;
+        expected.extend(texts(std::slice::from_ref(&line)));
+        commit(&budget, &queue, &[line])?;
+    }
+    let control = frame(&budget, "control")?;
+    expected.extend(texts(std::slice::from_ref(&control)));
+    queue
+        .push_control(control)
+        .map_err(|_| RuntimeError::LimitExceeded)?;
+    let pair = [frame(&budget, "pair-a")?, frame(&budget, "pair-b")?];
+    expected.extend(texts(&pair));
+    commit(&budget, &queue, &pair)?;
+    drop(pair);
+    assert_eq!(queue.closed_reason(), None);
+    assert_eq!(texts(&drain(&queue)), expected);
+    assert_eq!(queue.normal_bytes(), 0);
+    assert_eq!(budget.charged(), idle, "cells, storage and frames returned");
+    Ok(())
+}
+
+/// A ring demand committed after a demand beyond the ring still drains
+/// after it: placement never reorders output.
+#[test]
+fn a_ring_demand_committed_after_an_overflow_demand_drains_after_it() -> TestResult {
+    let budget = MemoryBudget::new(64 * 1_048_576);
+    let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT)?;
+    let lines: Vec<SharedClientFrame> = (0..6)
+        .map(|index| frame(&budget, &format!("line-{index}")))
+        .collect::<TestResult<_>>()?;
+    for line in lines.iter().take(5) {
+        commit(&budget, &queue, std::slice::from_ref(line))?;
+    }
+    assert!(matches!(queue.pop(), QueuePop::Frame(_)));
+    assert!(matches!(queue.pop(), QueuePop::Frame(_)));
+    let last = lines.last().ok_or(RuntimeError::InvalidValue)?;
+    let prepared = prepare(&budget, &queue, std::slice::from_ref(last))?;
+    assert!(prepared.cell_is_absent(), "a ring entry is free again");
+    let bound = BoundedSharedClientFrames::for_reservation(&prepared, vec![last.clone()])?;
+    queue.commit(prepared, bound);
+    assert_eq!(texts(&drain(&queue)), texts(lines.get(2..).unwrap_or(&[])));
+    Ok(())
+}
+
+/// The item ceiling is still the hard limit: the demand that crosses it is
+/// refused whole and the sink joins the slow-consumer close list.
+#[test]
+fn the_item_ceiling_still_refuses_the_demand_that_crosses_it() -> TestResult {
+    let budget = MemoryBudget::new(64 * 1_048_576);
+    let limits = QueueLimits::new(4_096, 1_024, 6 + CONTROL_ITEM_SLOTS)?;
+    let queue = WriterQueue::new(ConnectionGeneration::new(1), limits)?;
+    let line = frame(&budget, "x")?;
+    for _ in 0..6 {
+        commit(&budget, &queue, std::slice::from_ref(&line))?;
+    }
+    assert_eq!(
+        queue
+            .try_reserve(demand_of(std::slice::from_ref(&line))?)
+            .err(),
+        Some(SinkReserveError::Full)
+    );
+    Ok(())
+}
+
+/// A slow-consumer close destroys the normal queue and leaves exactly the
+/// armed `ERROR` line for the writer, then reports the close.
+#[test]
+fn a_slow_consumer_close_delivers_only_the_armed_error_line() -> TestResult {
+    let budget = MemoryBudget::new(64 * 1_048_576);
+    let queue = WriterQueue::new(ConnectionGeneration::new(1), QueueLimits::DEFAULT)?;
+    let notice = frame(&budget, "ERROR notice")?;
+    queue.arm_slow_consumer_notice(notice.clone());
+    for _ in 0..8 {
+        commit(&budget, &queue, &[frame(&budget, "queued")?])?;
+    }
+    queue.begin_slow_consumer_close();
+    assert_eq!(queue.normal_bytes(), 0);
+    assert_eq!(texts(&drain(&queue)), texts(&[notice]));
+    assert!(matches!(
+        queue.pop(),
+        QueuePop::Closed(CloseReason::SlowConsumer)
+    ));
+    queue.begin_slow_consumer_close();
+    assert!(matches!(queue.pop(), QueuePop::Closed(_)), "sent once");
     Ok(())
 }
