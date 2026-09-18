@@ -69,6 +69,11 @@ returns each closed connection's whole charge (issue #113), are recorded in
 [the overload threshold record](stage-10-overload-threshold-defaults.md).
 The project-owned redb fork that replaces the withdrawn upstream submission
 (STO-02, issue #55) is recorded in [the redb fork record](stage-10-redb-fork.md).
+The coordinator's `EWITNESS` publication side, terminal proofs and
+bootstrap-activation votes that reload as the live coordinator admitted them,
+and conversation-charged retained terminal requests (ENC-19 to ENC-22, issues
+#166 to #169, from the internal independent review) are recorded in
+[the coordinator review remediation record](stage-10-review-remediation-coordinator.md).
 The owners of all three Section-19.3 overload classes — the refused guest and
 expensive query at 80 percent, the refused channel creation at 90 percent, and
 whole-connection eviction down to the 85-percent recovery mark at 95 percent
