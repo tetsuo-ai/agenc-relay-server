@@ -398,8 +398,10 @@ struct ObjectIndex {
 
 /// The votes one retained terminal request carries for its subject.
 enum TerminalRequest {
-    /// A finalization request and its finalization identifier.
-    Finalize([u8; 32], Vec<IrcFinalityVote>),
+    /// A finalization request, its finalization identifier, and the
+    /// resulting policy whose council votes beside the old one when the
+    /// request is a bootstrap activation (companion 9.5).
+    Finalize([u8; 32], Vec<IrcFinalityVote>, Option<[u8; 32]>),
     /// An abort request, its abort identifier, and its reason code.
     Abort([u8; 32], u16, Vec<IrcFinalityVote>),
     /// A ReInit activation request and its activation identifier.
@@ -452,9 +454,17 @@ impl ObjectIndex {
                     .entry(core.conversation_id)
                     .or_default()
                     .insert(finalization_id, object_id);
+                let authorization = &request.proof.authorization.tbs;
+                let resulting = (authorization.authorization_rule
+                    == IrcCommitAuthorizationRule::BootstrapActivation)
+                    .then_some(authorization.resulting_policy_id);
                 self.terminal_requests.insert(
                     object_id,
-                    TerminalRequest::Finalize(finalization_id, request.votes.as_slice().to_vec()),
+                    TerminalRequest::Finalize(
+                        finalization_id,
+                        request.votes.as_slice().to_vec(),
+                        resulting,
+                    ),
                 );
             }
             IrcWireObjectKind::AbortRequest => self.index_abort(object_id, bytes),
@@ -1803,13 +1813,19 @@ fn policy_rosters(
     Some(rosters)
 }
 
-/// The terminal and votes of one retained request for a candidate slot.
-fn candidate_terminal(request: &TerminalRequest) -> Option<(Terminal, &[IrcFinalityVote])> {
+/// A candidate terminal, its votes, and the bootstrap resulting policy.
+type CandidateTerminal<'a> = (Terminal, &'a [IrcFinalityVote], Option<[u8; 32]>);
+
+/// The terminal, votes, and bootstrap resulting policy of one retained
+/// request for a candidate slot.
+fn candidate_terminal(request: &TerminalRequest) -> Option<CandidateTerminal<'_>> {
     match request {
-        TerminalRequest::Finalize(id, votes) => Some((Terminal::finalize(*id), votes)),
+        TerminalRequest::Finalize(id, votes, resulting) => {
+            Some((Terminal::finalize(*id), votes, *resulting))
+        }
         TerminalRequest::Abort(id, reason, votes) => Terminal::abort(*id, *reason)
             .ok()
-            .map(|terminal| (terminal, votes.as_slice())),
+            .map(|terminal| (terminal, votes.as_slice(), None)),
         _ => None,
     }
 }
@@ -1846,6 +1862,7 @@ fn restore_ledgers(
         return;
     };
     let conversation_id = *log.conversation_id();
+    let mut unreplayed = 0_u32;
     if let Some(slot) = log.candidate() {
         let vote_slot = VoteSlot {
             network_id: *network_id,
@@ -1857,23 +1874,40 @@ fn restore_ledgers(
         };
         let mut ledger = QuorumLedger::new();
         for (parts, object_id) in vote_rows_of(rows, conversation_id, slot.candidate_id) {
-            let Some((terminal, votes)) = index
+            let Some((terminal, votes, resulting)) = index
                 .terminal_requests
                 .get(&object_id)
                 .and_then(candidate_terminal)
             else {
+                unreplayed += 1;
                 continue;
             };
+            // A bootstrap activation counted this signer under the council
+            // it sits on, the old one first (companion 9.5).
+            let resulting = resulting
+                .and_then(|policy_id| conversation.policies.get(&policy_id))
+                .map(|retained| &retained.policy);
             let tbs = vote_tbs(&vote_slot, slot.candidate_id, terminal);
-            replay_vote(
+            let replayed = replay_vote(
                 &mut ledger,
                 historical,
                 parts,
                 votes,
-                |ledger, rosters, vote| ledger.record(&policy, rosters, &tbs, vote),
+                |ledger, rosters, vote| {
+                    let signer = (&vote.signer_root_fingerprint, &vote.signer_device_id);
+                    let council = resulting
+                        .filter(|council| {
+                            policy.council_member(signer.0, signer.1).is_none()
+                                && council.council_member(signer.0, signer.1).is_some()
+                        })
+                        .unwrap_or(&policy);
+                    ledger.record(council, rosters, &tbs, vote)
+                },
             );
+            unreplayed += u32::from(!replayed);
         }
         conversation.vote_ledgers.insert(slot.candidate_id, ledger);
+        conversation.unreplayed_votes = unreplayed;
     }
     let (
         Some(attempt),
@@ -1898,18 +1932,21 @@ fn restore_ledgers(
             .get(&object_id)
             .and_then(attempt_terminal)
         else {
+            unreplayed += 1;
             continue;
         };
         let tbs = reinit_vote_tbs(&reinit_slot, attempt.attempt_id, terminal);
-        replay_vote(
+        let replayed = replay_vote(
             &mut ledger,
             historical,
             parts,
             votes,
             |ledger, rosters, vote| ledger.record_reinit(&policy, rosters, &tbs, vote),
         );
+        unreplayed += u32::from(!replayed);
     }
     conversation.vote_ledgers.insert(attempt.attempt_id, ledger);
+    conversation.unreplayed_votes = unreplayed;
 }
 
 /// The durable vote rows of one subject: the request each principal's
@@ -1928,7 +1965,8 @@ fn vote_rows_of(
 }
 
 /// Replays a counted vote using its exact retained certificate, including
-/// when the device was retired after the vote was committed.
+/// when the device was retired after the vote was committed. Returns whether
+/// the durable row came back as a counted vote.
 fn replay_vote(
     ledger: &mut QuorumLedger,
     historical: &[(VerifiedRoot, VerifiedRoster)],
@@ -1939,12 +1977,12 @@ fn replay_vote(
         &PrincipalRosters,
         &IrcFinalityVote,
     ) -> Result<(), E2eeError>,
-) {
+) -> bool {
     let vote = votes.iter().find(|vote| {
         vote.signer_root_fingerprint == parts.root_fingerprint
             && vote.signer_device_id == parts.device_id
     });
-    if let Some(vote) = vote {
+    vote.is_some_and(|vote| {
         let Some((root, roster)) = historical.iter().find(|(root, roster)| {
             root.fingerprint == vote.signer_root_fingerprint
                 && roster
@@ -1953,11 +1991,11 @@ fn replay_vote(
                         certificate.certificate_id == vote.signer_device_certificate_id
                     })
         }) else {
-            return;
+            return false;
         };
         let rosters = PrincipalRosters::from([(root.account_id, (*root, roster.clone()))]);
-        let _ = record(ledger, &rosters, vote);
-    }
+        record(ledger, &rosters, vote).is_ok()
+    })
 }
 
 fn activates_bootstrap(state: &CompanionState, record: &RecordRow) -> bool {

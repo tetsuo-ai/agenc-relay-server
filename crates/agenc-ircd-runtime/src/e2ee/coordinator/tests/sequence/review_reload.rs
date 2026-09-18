@@ -89,6 +89,7 @@ fn a_reload_keeps_the_resulting_council_votes_of_a_pending_bootstrap_activation(
         ResultBody::Pending(_, PendingKind::Finalization, _)
     ));
     let mut reloaded = harness.reloaded()?;
+    assert_eq!(reloaded.coordinator.unreplayed_votes(), 0);
     let (old_only, _) = finalization_bytes(&reloaded, &opened, None, &[DEVICE])?;
     let outcome = ok(reloaded.run(Op::SubmitFinalization, &conversation, Some(&old_only))?)?;
     assert!(
@@ -219,5 +220,24 @@ fn a_reload_restores_every_certified_terminal_proof() -> TestResult {
     assert_eq!(live.len(), 2);
     assert!(live.contains_key(&abort_id));
     assert_eq!(proofs(&harness.reloaded()?), Some(live));
+    Ok(())
+}
+
+/// A durable vote row that cannot be counted again is reported, never
+/// dropped in silence (companion 12.4).
+#[test]
+fn a_reload_reports_a_vote_row_it_cannot_count_again() -> TestResult {
+    use crate::state_core::durable::AccountServiceDurableWrite as Write;
+    let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
+    let conversation = harness.bind_channel()?;
+    let opened = open_finalization(&mut harness, conversation, 0)?;
+    let (one_vote, _) = finalization_bytes(&harness, &opened, None, &[DEVICE])?;
+    ok(harness.run(Op::SubmitFinalization, &conversation, Some(&one_vote))?)?;
+    // The retained request the vote row names is lost.
+    let lost = agenc_ircd_storage::e2ee_records::object_key(&object_id(&one_vote))?;
+    harness.writes.retain(|write| {
+        !matches!(write, Write::Put { table: agenc_ircd_storage::TableId::E2eeObject, key, .. } if *key == lost)
+    });
+    assert_eq!(harness.reloaded()?.coordinator.unreplayed_votes(), 1);
     Ok(())
 }
