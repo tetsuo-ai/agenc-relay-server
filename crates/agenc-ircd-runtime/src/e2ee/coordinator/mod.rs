@@ -61,6 +61,7 @@ pub(crate) mod request_expiry;
 mod resident;
 pub(crate) mod response_read;
 pub mod results;
+mod roster_snapshots;
 mod sequencer_signing;
 pub(crate) mod signer_startup;
 pub use signer_startup::SignerReport;
@@ -242,6 +243,10 @@ pub struct CompanionState {
     pub principals: BTreeMap<[u8; 32], (VerifiedRoot, VerifiedRoster)>,
     /// Verified capability heads by account digest and device.
     pub capabilities: BTreeMap<([u8; 32], [u8; 16]), VerifiedCapabilities>,
+    /// Retained roster snapshot objects by roster identifier, so a statement
+    /// naming a predecessor roster resolves as it does at startup
+    /// (companion 13.7.3).
+    pub(crate) roster_snapshots: roster_snapshots::Index,
     /// Roots published before their first roster.
     pub pending_roots: BTreeMap<[u8; 32], VerifiedRoot>,
     /// Outstanding attach challenges by account digest and device.

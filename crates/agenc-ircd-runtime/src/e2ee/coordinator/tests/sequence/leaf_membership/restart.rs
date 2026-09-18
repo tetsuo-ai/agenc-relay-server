@@ -90,7 +90,7 @@ fn replay_after_restart(
     Ok(())
 }
 
-fn conversation_of(
+pub(super) fn conversation_of(
     harness: &Harness,
     conversation: [u8; 32],
 ) -> TestResult<&super::super::super::super::ConversationState> {
@@ -261,7 +261,10 @@ fn replace_row(
     Ok(())
 }
 
-fn memberships_of(harness: &Harness, conversation: [u8; 32]) -> TestResult<Vec<(u32, bool)>> {
+pub(super) fn memberships_of(
+    harness: &Harness,
+    conversation: [u8; 32],
+) -> TestResult<Vec<(u32, bool)>> {
     Ok(conversation_of(harness, conversation)?
         .memberships
         .iter()
@@ -438,7 +441,7 @@ fn an_ack_signer_is_restored_only_through_a_restored_proof() -> TestResult {
 
 /// Retains `proof` as an injected object with its `membership/v1/` row, as
 /// if a row had been written without passing admission.
-fn inject(
+pub(super) fn inject(
     harness: &mut Harness,
     conversation: [u8; 32],
     proof: &agenc_ircd_e2ee::objects::membership::IrcLeafMembershipProof,

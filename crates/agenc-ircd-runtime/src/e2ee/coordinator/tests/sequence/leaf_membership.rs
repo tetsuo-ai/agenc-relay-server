@@ -12,6 +12,7 @@ use super::super::{DEVICE_ID, LEAF_SEED, account_bytes, origin_key};
 use super::*;
 
 pub(in crate::e2ee::coordinator::tests::sequence) mod finalization;
+mod named_roster;
 mod restart;
 
 /// The old leaf key `SECOND_DEVICE` holds.

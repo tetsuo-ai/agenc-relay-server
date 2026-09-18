@@ -19,13 +19,15 @@ use agenc_ircd_storage::e2ee_records::{SEQUENCER_ROW_KIND, SequencerRow};
 
 use super::super::CompanionCoordinator;
 use super::super::request::{Outcome, ResultBody, state_row};
+use super::super::roster_snapshots::{Named, RESOLUTION_WORK_BYTES, resolve};
 use super::{Exec, Fail};
 
 /// `submit_membership`: the attached device whose Device ID equals the
 /// proof's, on an account that is a principal of the current binding,
 /// publishes one proof. The proof is verified against the account's
-/// retained root and roster, admitted under the 13.7.3 replacement and
-/// conflict rules, and retained durably before any ACK it authenticates.
+/// retained root and the retained roster snapshot it names, admitted under
+/// the 13.7.3 replacement and conflict rules, and retained durably before
+/// any ACK it authenticates.
 pub fn submit_membership(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
     let (device, _) = exec.attached_device()?;
@@ -62,7 +64,18 @@ fn decode_proof(
 }
 
 /// The attached device's own proof on its own account, verified against
-/// the account's current retained root and roster.
+/// the retained root and roster snapshot the proof names (companion
+/// 13.7.3). A continuing leaf keeps the credential it was authorized
+/// under, so after a roster or root rotation its proof still names the
+/// predecessor; the snapshot is resolved from the same retained objects
+/// startup reconstruction re-verifies, and a roster that was never
+/// retained is a roster mismatch. The device must have been active in that
+/// named roster, which the verifier checks, and must be roster-active now,
+/// which `attached_device` has already checked against the directory for
+/// this same device, as ACK identification does. Both dispositions take
+/// this one path: a `removed` proof comes from a device that is still
+/// roster-active, and a revoked device states nothing because revocation
+/// already took its claim out of the expected set.
 fn verify(
     exec: &Exec<'_>,
     conversation_id: &[u8; 32],
@@ -73,28 +86,30 @@ fn verify(
     if proof.tbs.device_id != *device {
         return Err(Fail::with(E2eeReplyCode::DeviceRequired, conversation_id));
     }
-    if proof.tbs.account_id.as_slice() != exec.account_id()? {
+    let account = exec.account_id()?;
+    if proof.tbs.account_id.as_slice() != account {
         return Err(invalid());
     }
-    let (root, roster) = exec
-        .coordinator
-        .state
-        .principals
-        .get(&exec.account_digest()?)
-        .ok_or_else(invalid)?;
-    verify_leaf_membership_proof(
-        &exec.coordinator.network_id,
-        conversation_id,
-        proof,
-        root,
-        roster,
+    let named = Named {
+        root_fingerprint: proof.tbs.root_fingerprint,
+        root_generation: proof.tbs.root_generation,
+        roster_id: proof.tbs.roster_id,
+    };
+    let _memory = exec
+        .backing
+        .reserve(RESOLUTION_WORK_BYTES)
+        .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?;
+    let network_id = &exec.coordinator.network_id;
+    let (root, roster) =
+        resolve(&exec.coordinator.state, network_id, &account, &named).ok_or_else(invalid)?;
+    verify_leaf_membership_proof(network_id, conversation_id, proof, &root, &roster).map_err(
+        |refusal| match refusal {
+            MembershipRefusal::DeviceInactive => {
+                Fail::with(E2eeReplyCode::DeviceRequired, conversation_id)
+            }
+            MembershipRefusal::Invalid | MembershipRefusal::SignatureInvalid => invalid(),
+        },
     )
-    .map_err(|refusal| match refusal {
-        MembershipRefusal::DeviceInactive => {
-            Fail::with(E2eeReplyCode::DeviceRequired, conversation_id)
-        }
-        MembershipRefusal::Invalid | MembershipRefusal::SignatureInvalid => invalid(),
-    })
 }
 
 /// The conversation's rules: a removed proof names a retained finalized
