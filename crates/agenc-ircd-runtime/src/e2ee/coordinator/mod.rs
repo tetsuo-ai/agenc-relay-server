@@ -350,11 +350,18 @@ pub struct ConversationState {
     pub predecessor_close_id: Option<[u8; 32]>,
     /// Published policies by policy identifier (companion 9.3).
     pub policies: BTreeMap<[u8; 32], RetainedPolicy>,
+    /// Retained terminal requests below quorum per candidate or attempt,
+    /// each owned by its retained-request row until the slot's terminal.
+    pub pending_requests: BTreeMap<[u8; 32], std::collections::BTreeSet<[u8; 32]>>,
     /// Council votes counted so far per candidate or attempt (12.4).
     pub vote_ledgers: BTreeMap<[u8; 32], agenc_ircd_e2ee::finality::QuorumLedger>,
     /// Accepted leaf-membership proofs by old leaf (companion 13.7.3):
     /// the public device-to-leaf mapping that identifies ACK signers.
     pub memberships: agenc_ircd_e2ee::membership::LeafMembershipSet,
+    /// Durable vote rows a reload could not count again: the row names no
+    /// retained request, no vote of its signer, or a signer on neither
+    /// council. Zero on every consistent store; never silently dropped.
+    pub unreplayed_votes: u32,
 }
 
 /// One published policy the sequencer retains for its quorum check.
@@ -1108,6 +1115,17 @@ impl CompanionCoordinator {
                 Ok(Some(sync::Committed::Request(pending)))
             }
         }
+    }
+
+    /// The durable vote rows the last reload could not count again, over
+    /// every conversation (companion 12.4).
+    #[must_use]
+    pub fn unreplayed_votes(&self) -> u64 {
+        self.state
+            .conversations
+            .values()
+            .map(|state| u64::from(state.unreplayed_votes))
+            .sum()
     }
 
     /// Drops the staged batch after a rejected commit.

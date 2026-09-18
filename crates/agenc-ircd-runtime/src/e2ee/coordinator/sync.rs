@@ -103,6 +103,8 @@ pub trait CompanionHost {
     fn hosts_account(&self, account: &[u8; 24]) -> bool;
 }
 
+pub(crate) mod witness;
+
 /// What the owner does after one companion frame.
 pub(crate) enum Action {
     /// Executes one complete request.
@@ -217,6 +219,8 @@ pub struct PeerSync {
     pub snapshot: Option<Snapshot>,
     /// The READY recorded durably, answered by the identical ACTIVE.
     pub ready_cut: Option<Cut>,
+    /// The witness resolutions this link publishes (companion 12.5.1).
+    pub witness: witness::Publication,
 }
 
 pub(super) fn line(
@@ -275,12 +279,23 @@ impl CompanionCoordinator {
         let sync = self.peers.entry(peer).or_default();
         sync.origins_reset = true;
         sync.origins_ready = false;
-        if host.base_origins_ready(peer) {
-            return self
-                .origins_ready(peer, incarnation)
-                .map(|line| line.map_or_else(Vec::new, |line| vec![Action::Send(vec![line])]));
+        // A blocked edge dropped every delivery it received; once its rows
+        // settle it replays its origins, and the unacknowledged rows go out
+        // again (companion 12.5.1).
+        let mut lines = Vec::new();
+        if sync.witness.take_served()
+            && let Some(stream) = self.state.streams.get(&peer)
+        {
+            lines.extend(retransmission(&self.server_name, peer, stream)?);
         }
-        Ok(Vec::new())
+        if host.base_origins_ready(peer) {
+            lines.extend(self.origins_ready(peer, incarnation)?);
+        }
+        Ok(if lines.is_empty() {
+            Vec::new()
+        } else {
+            vec![Action::Send(lines)]
+        })
     }
 
     /// Sends EORIGIN READY once the base set is ready and the companion
@@ -1065,6 +1080,7 @@ impl CompanionCoordinator {
             }
             sync.origins_reset = false;
             sync.origins_ready = false;
+            sync.witness = witness::Publication::default();
         }
         let home = *peer.as_bytes();
         for (key, origin) in self.state.origins.iter_mut() {
@@ -1198,6 +1214,37 @@ impl CompanionCoordinator {
                     host,
                 )
             }
+            CompanionFrame::WitnessRequest {
+                coordinator_server_id,
+                conversation_id,
+                expected_sequence,
+                expected_head_id,
+            } => self.witness_request(
+                peer,
+                coordinator_server_id,
+                witness::Request {
+                    conversation: conversation_id,
+                    expected_sequence,
+                    expected_head_id,
+                },
+                entropy,
+            ),
+            CompanionFrame::WitnessResolved {
+                coordinator_server_id,
+                conversation_id,
+                resolution_token,
+                new_head_sequence,
+                new_head_id,
+            } => self.witness_resolved(
+                peer,
+                coordinator_server_id,
+                (
+                    conversation_id,
+                    resolution_token,
+                    (new_head_sequence, new_head_id),
+                ),
+                entropy,
+            ),
             _ => Err(CompanionFault::Protocol),
         }
     }

@@ -277,17 +277,122 @@ fn council_reached(ledger: &QuorumLedger, policy: &VerifiedPolicy, terminal: &Te
     count >= usize::from(policy.quorum)
 }
 
-/// The `PENDING` answer of a terminal request below quorum: the request is
-/// retained and the counted votes are kept for the subject.
-fn pending(
+/// The root of a retained-request row. No root fingerprint is all zero, so
+/// the row never reads back as a principal's vote.
+pub(in crate::e2ee::coordinator) const REQUEST_ROW_ROOT: [u8; 32] = [0; 32];
+
+/// The retained terminal requests one candidate or attempt may hold below
+/// quorum: twice the largest council, since a useful request adds a vote.
+const MAX_PENDING_TERMINAL_REQUESTS: usize = 2 * agenc_ircd_e2ee::limits::MAX_FINALITY_PRINCIPALS;
+
+/// The key of the row that owns one retained terminal request under its
+/// conversation (companion 15 and 16): a vote-accumulator row under the
+/// all-zero root, keyed by the leading bytes of the request identifier.
+fn request_row_key(
+    conversation_id: &[u8; 32],
+    subject: &[u8; 32],
+    request_object_id: &[u8; 32],
+) -> Result<agenc_ircd_storage::StoredKey, Fail> {
+    let mut device = [0; 16];
+    for (slot, byte) in device.iter_mut().zip(request_object_id) {
+        *slot = *byte;
+    }
+    SequencerRow::proof_key(
+        ProofRole::Vote,
+        conversation_id,
+        subject,
+        &REQUEST_ROW_ROOT,
+        &device,
+    )
+    .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))
+}
+
+/// The row that charges one retained terminal request to its conversation.
+fn request_row(
+    conversation_id: &[u8; 32],
+    subject: &[u8; 32],
+    request_object_id: [u8; 32],
+    terminal: Terminal,
+) -> Result<crate::state_core::durable::AccountServiceDurableWrite, Fail> {
+    let slot = match terminal.disposition {
+        agenc_ircd_e2ee::objects::sequencing::IrcDisposition::Finalize => VOTE_ROW_FINALIZE,
+        agenc_ircd_e2ee::objects::sequencing::IrcDisposition::Abort => VOTE_ROW_ABORT,
+    };
+    state_row(
+        TableId::E2eeState,
+        SEQUENCER_ROW_KIND,
+        request_row_key(conversation_id, subject, &request_object_id)?,
+        SequencerRow::Proof {
+            role: ProofRole::Vote,
+            object_id: request_object_id,
+            slot,
+        }
+        .encode()
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    )
+    .map_err(Fail::from)
+}
+
+/// Retires the retained-request rows of a slot that reached its terminal,
+/// keeping the certifying request's. A request no vote row names is then
+/// unowned and ages out through the expiry collector.
+fn retire_requests(
+    exec: &Exec<'_>,
+    conversation_id: &[u8; 32],
+    subject: &[u8; 32],
+    certifying: &[u8; 32],
+) -> Result<Vec<crate::state_core::durable::AccountServiceDurableWrite>, Fail> {
+    conversation(exec, conversation_id)?
+        .pending_requests
+        .get(subject)
+        .into_iter()
+        .flatten()
+        .filter(|request| *request != certifying)
+        .map(|request| {
+            crate::state_core::durable::AccountServiceDurableWrite::delete(
+                TableId::E2eeState,
+                request_row_key(conversation_id, subject, request)?,
+            )
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))
+        })
+        .collect()
+}
+
+/// One terminal request that stayed below quorum.
+struct PendingTerminal {
     conversation_id: [u8; 32],
     kind: PendingKind,
     request_object_id: [u8; 32],
-    bytes: &[u8],
     subject: [u8; 32],
     terminal: Terminal,
+}
+
+/// The `PENDING` answer of a terminal request below quorum: the request is
+/// retained under a row that charges it to its conversation, and the
+/// counted votes are kept for the subject. A slot that already retains its
+/// ceiling of other requests refuses with `E2EE_RATE_LIMITED`.
+fn pending(
+    exec: &Exec<'_>,
+    request: PendingTerminal,
+    bytes: &[u8],
     quorum: Quorum,
 ) -> Result<Outcome, Fail> {
+    let PendingTerminal {
+        conversation_id,
+        kind,
+        request_object_id,
+        subject,
+        terminal,
+    } = request;
+    let retained = conversation(exec, &conversation_id)?
+        .pending_requests
+        .get(&subject);
+    let known = retained.is_some_and(|requests| requests.contains(&request_object_id));
+    if !known
+        && retained.map_or(0, std::collections::BTreeSet::len) >= MAX_PENDING_TERMINAL_REQUESTS
+    {
+        return Err(Fail::with(E2eeReplyCode::RateLimited, &conversation_id));
+    }
     let mut outcome = Outcome::scalar(ResultBody::Pending(
         conversation_id,
         kind,
@@ -296,6 +401,12 @@ fn pending(
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
+    outcome.writes.push(request_row(
+        &conversation_id,
+        &subject,
+        request_object_id,
+        terminal,
+    )?);
     outcome.writes.extend(vote_rows(
         &conversation_id,
         &subject,
@@ -307,6 +418,11 @@ fn pending(
     outcome.effects.push(Box::new(move |companion| {
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.vote_ledgers.insert(subject, ledger);
+            state
+                .pending_requests
+                .entry(subject)
+                .or_default()
+                .insert(request_object_id);
         }
     }));
     Ok(outcome)
@@ -777,12 +893,15 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     if !quorum.reached {
         return pending(
-            conversation_id,
-            PendingKind::Finalization,
-            request_object_id,
+            exec,
+            PendingTerminal {
+                conversation_id,
+                kind: PendingKind::Finalization,
+                request_object_id,
+                subject: core.candidate_id,
+                terminal,
+            },
             bytes,
-            core.candidate_id,
-            terminal,
             quorum,
         );
     }
@@ -853,6 +972,12 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     outcome.security_mutation = true;
     outcome.writes.extend(refresh.writes);
     outcome.writes.extend(finalize_rows);
+    outcome.writes.extend(retire_requests(
+        exec,
+        &conversation_id,
+        &core.candidate_id,
+        &request_object_id,
+    )?);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -894,6 +1019,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.acks.remove(&candidate_id);
             state.ack_signers.remove(&candidate_id);
             state.vote_ledgers.remove(&candidate_id);
+            state.pending_requests.remove(&candidate_id);
             state.current_policy_id = resulting_policy_id;
             state.route_object_id = route_object_id;
             if let Some(pin) = next_pin {
@@ -966,12 +1092,15 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     )?;
     if !quorum.reached {
         return pending(
-            conversation_id,
-            PendingKind::Abort,
-            request_object_id,
+            exec,
+            PendingTerminal {
+                conversation_id,
+                kind: PendingKind::Abort,
+                request_object_id,
+                subject: core.candidate_id,
+                terminal,
+            },
             bytes,
-            core.candidate_id,
-            terminal,
             quorum,
         );
     }
@@ -1030,6 +1159,12 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     outcome.security_mutation = true;
     outcome.writes.extend(refresh.writes);
     outcome.writes.extend(abort_rows);
+    outcome.writes.extend(retire_requests(
+        exec,
+        &conversation_id,
+        &candidate_id,
+        &request_object_id,
+    )?);
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
@@ -1067,6 +1202,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.acks.remove(&candidate_id);
             state.ack_signers.remove(&candidate_id);
             state.vote_ledgers.remove(&candidate_id);
+            state.pending_requests.remove(&candidate_id);
             state.route_object_id = route_object_id;
         }
     }));
@@ -1448,12 +1584,15 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             PendingKind::ReinitAbort
         };
         return pending(
-            old_conversation_id,
-            kind,
-            request_object_id,
+            exec,
+            PendingTerminal {
+                conversation_id: old_conversation_id,
+                kind,
+                request_object_id,
+                subject: attempt_id,
+                terminal,
+            },
             bytes,
-            attempt_id,
-            terminal,
             quorum,
         );
     }
@@ -1506,6 +1645,12 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
     let mut outcome = Outcome::scalar(result);
     outcome.writes.extend(refresh.writes);
     outcome.writes.extend(attempt_rows);
+    outcome.writes.extend(retire_requests(
+        exec,
+        &old_conversation_id,
+        &attempt_id,
+        &request_object_id,
+    )?);
     outcome.security_mutation = true;
     outcome
         .writes
@@ -1550,6 +1695,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             state.records.insert(position.route_sequence, record_id);
             state.proofs.insert(terminal_id, request_object_id);
             state.vote_ledgers.remove(&attempt_id);
+            state.pending_requests.remove(&attempt_id);
             state.route_object_id = route_object_id;
         }
     }));
