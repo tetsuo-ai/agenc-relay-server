@@ -1,4 +1,9 @@
 //! Narrow redb adapter with fixed tables and mandatory durable commit settings.
+//!
+//! Every durable write of the live database is one bounded, immediate, two-phase transaction
+//! charged to the allowance its caller derived from Section 19.3's `G`; the adapter reports the
+//! bytes each transaction charged so the caller can debit one ledger across the operation. The
+//! scratch databases keep redb's ordinary transactions until their own allowances arrive.
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -10,12 +15,17 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use agenc_ircd_crypto::{StorageDigest, TrackedStateHasher, tracked_record_commitment};
 use redb::{
-    CommitError, Database, Durability, ReadOnlyDatabase, ReadTransaction, ReadableDatabase as _,
-    ReadableTable as _, ReadableTableMetadata as _, StorageBackend, TableDefinition,
-    TableHandle as _, WriteTransaction,
+    AllocationAllowance, BoundedWriteTransaction, Database, ReadOnlyDatabase, ReadTransaction,
+    ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _, ReclaimProgress,
+    StorageBackend, TableDefinition, TableHandle as _, WriteTransaction,
 };
 use rustix::fs::{AtFlags, unlinkat};
 
+use crate::bounded::{
+    LIVE_DATABASE_REGION_BYTES, MAX_DEFERRED_RECLAIM_RECORDS, MaintenanceOutcome,
+    live_database_builder, map_maintenance, map_preparation_error, map_publication_error,
+    map_table_error, map_write_error,
+};
 use crate::{
     IntegrityRecordMutation, IntegrityRecordVersion, MAX_SEALED_RECORD_BYTES, MAX_STORED_KEY_BYTES,
     RecordReference, StorageError, StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
@@ -38,6 +48,7 @@ pub(crate) struct RedbStore {
     database: RedbDatabase,
     faults: StorageFaultInjector,
     commit_flushes: Arc<CommitFlushCounter>,
+    repaired: Arc<AtomicBool>,
 }
 
 enum RedbDatabase {
@@ -54,11 +65,17 @@ impl RedbDatabase {
         .map_err(|_| StorageError::DatabaseRejected)
     }
 
+    fn writable(&self) -> Result<&Database, StorageError> {
+        match self {
+            Self::Writable(database) => Ok(database),
+            Self::ReadOnly(_) => Err(StorageError::DatabaseRejected),
+        }
+    }
+
+    /// An unbounded transaction, kept for the tests that shape a database the adapter refuses.
+    #[cfg(test)]
     fn begin_write(&self) -> Result<WriteTransaction, StorageError> {
-        let Self::Writable(database) = self else {
-            return Err(StorageError::DatabaseRejected);
-        };
-        database
+        self.writable()?
             .begin_write()
             .map_err(|_| StorageError::DatabaseRejected)
     }
@@ -798,8 +815,11 @@ impl RedbStore {
         if cache_bytes == 0 {
             return Err(StorageError::LimitExceeded);
         }
-        let mut builder = redb::Builder::new();
-        builder.set_cache_size(cache_bytes);
+        require_bounded_region(&file)?;
+        let mut builder = live_database_builder(cache_bytes);
+        let repaired = Arc::new(AtomicBool::new(false));
+        let observed_repair = Arc::clone(&repaired);
+        builder.set_repair_callback(move |_session| observed_repair.store(true, Ordering::Release));
         let commit_flushes = Arc::new(CommitFlushCounter::default());
         let database = if faults.is_enabled() {
             builder
@@ -818,7 +838,14 @@ impl RedbStore {
             database: RedbDatabase::Writable(database),
             faults,
             commit_flushes,
+            repaired,
         })
+    }
+
+    /// Reports whether this open had to repair the database, which a close that persisted
+    /// its allocator state within its allowance makes unnecessary.
+    pub(crate) fn opened_after_repair(&self) -> bool {
+        self.repaired.load(Ordering::Acquire)
     }
 
     pub(crate) fn open_read_only(
@@ -837,6 +864,7 @@ impl RedbStore {
             database: RedbDatabase::ReadOnly(database),
             faults: StorageFaultInjector::disabled(),
             commit_flushes: Arc::new(CommitFlushCounter::default()),
+            repaired: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1060,8 +1088,14 @@ impl RedbStore {
         Ok(())
     }
 
-    pub(crate) fn write_meta(&self, key: &[u8], value: &[u8]) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+    /// Writes one control record within `allowance` and returns the bytes charged.
+    pub(crate) fn write_meta(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         {
             let mut table = transaction.open_table(META_TABLE).map_err(rejected_table)?;
             table.insert(key, value).map_err(rejected_storage)?;
@@ -1069,13 +1103,16 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
+    /// Creates every table and the first control records within `allowance` and returns the
+    /// bytes charged.
     pub(crate) fn initialize_database(
         &self,
         header: &[u8],
         reservation: &[u8],
         writes: &[RedbWrite<'_>],
-    ) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         {
             let mut meta = transaction.open_table(META_TABLE).map_err(rejected_table)?;
             meta.insert(HEADER_META_KEY, header)
@@ -1098,12 +1135,15 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
+    /// Commits application rows and the committed reservation record within `allowance` and
+    /// returns the bytes charged.
     pub(crate) fn commit_records(
         &self,
         writes: &[RedbWrite<'_>],
         reservation: &[u8],
-    ) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         apply_writes(&transaction, writes)?;
         {
             let mut meta = transaction.open_table(META_TABLE).map_err(rejected_table)?;
@@ -1113,6 +1153,8 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
+    /// Installs one checkpoint, prunes its ancestors and writes the committed reservation
+    /// record within `allowance`, and returns the bytes charged.
     pub(crate) fn commit_checkpoint(
         &self,
         checkpoint_key: &[u8; 8],
@@ -1120,8 +1162,9 @@ impl RedbStore {
         previous_checkpoint_key: &[u8; 8],
         state_meta_record: &[u8],
         reservation: &[u8],
-    ) -> Result<(), RedbCommitFailure> {
-        let transaction = self.begin_durable_write()?;
+        allowance: AllocationAllowance,
+    ) -> Result<u64, RedbCommitFailure> {
+        let transaction = self.begin_bounded_write(allowance)?;
         {
             let mut checkpoints = transaction
                 .open_table(table_definition(TableId::IntegrityCheckpoint))
@@ -1159,7 +1202,16 @@ impl RedbStore {
         self.finish_transaction(transaction)
     }
 
-    fn begin_durable_write(&self) -> Result<WriteTransaction, RedbCommitFailure> {
+    /// Begins one bounded write transaction charged to `allowance`.
+    ///
+    /// A bounded transaction is always immediately durable; two-phase commit is enabled
+    /// explicitly so its publication flushes the secondary header slot before the primary slot
+    /// swap, the two flushes the `TransactionPhaseOne` and `TransactionPhaseTwo` fault sites
+    /// label.
+    fn begin_bounded_write(
+        &self,
+        allowance: AllocationAllowance,
+    ) -> Result<BoundedWriteTransaction, RedbCommitFailure> {
         self.faults
             .check(
                 StorageFaultSite::TransactionBegin,
@@ -1168,7 +1220,9 @@ impl RedbStore {
             .map_err(RedbCommitFailure::Rejected)?;
         let mut transaction = self
             .database
-            .begin_write()
+            .writable()
+            .map_err(RedbCommitFailure::Rejected)?
+            .begin_write_bounded(allowance)
             .map_err(|_| RedbCommitFailure::Rejected(StorageError::DatabaseRejected))?;
         self.faults
             .check(
@@ -1176,16 +1230,83 @@ impl RedbStore {
                 StorageFaultBoundary::After,
             )
             .map_err(RedbCommitFailure::Rejected)?;
-        transaction
-            .set_durability(Durability::Immediate)
-            .map_err(|_| RedbCommitFailure::Rejected(StorageError::DatabaseRejected))?;
         transaction.set_two_phase_commit(true);
         Ok(transaction)
+    }
+
+    /// Reclaims freed-page records of earlier transactions in one bounded publication of at
+    /// most [`MAX_DEFERRED_RECLAIM_RECORDS`] records.
+    ///
+    /// Bounded transactions never reclaim in their own commit, so this is the deferred cleanup
+    /// of the operation that owns `allowance`. Progress is durable and monotonic: a refusal
+    /// reclaims nothing and leaves the database usable, and a later call resumes where the
+    /// last publication stopped, including after a restart.
+    pub(crate) fn reclaim_deferred(
+        &self,
+        allowance: AllocationAllowance,
+    ) -> Result<MaintenanceOutcome<ReclaimProgress>, RedbCommitFailure> {
+        let database = self
+            .database
+            .writable()
+            .map_err(RedbCommitFailure::Rejected)?;
+        map_maintenance(database.reclaim_bounded(allowance, MAX_DEFERRED_RECLAIM_RECORDS))
+    }
+
+    /// Persists the allocator state within `allowance` so that the next open needs no repair,
+    /// and takes that duty from the close path whatever the outcome: after a refusal the drop
+    /// only flushes and closes the file, and the next open repairs it exactly as after a crash.
+    pub(crate) fn persist_for_close(
+        &self,
+        allowance: AllocationAllowance,
+    ) -> Result<MaintenanceOutcome<()>, RedbCommitFailure> {
+        let database = self
+            .database
+            .writable()
+            .map_err(RedbCommitFailure::Rejected)?;
+        map_maintenance(database.persist_allocator_state_bounded(allowance))
     }
 }
 
 fn table_definition(table: TableId) -> TableDefinition<'static, &'static [u8], &'static [u8]> {
     TableDefinition::new(table.name())
+}
+
+/// The redb 4.2.0 file header fields that fix a database's region layout: the magic number,
+/// then at fixed little-endian offsets the page size and the data pages per region.
+const REDB_MAGIC: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+const REDB_PAGE_SIZE_OFFSET: u64 = 12;
+const REDB_REGION_MAX_DATA_PAGES_OFFSET: u64 = 20;
+
+/// Refuses an existing database whose header lays it out with regions larger than
+/// [`LIVE_DATABASE_REGION_BYTES`], which the bounded allowance could never extend.
+///
+/// An empty file is a creation, which the builder lays out bounded; a file too short or
+/// without the magic number is left for redb to reject. The region size is read exactly as
+/// the vendored header parser reads it, so the check cannot disagree with the open.
+fn require_bounded_region(file: &File) -> Result<(), StorageError> {
+    let length = file.metadata().map_err(crate::filesystem_rejected)?.len();
+    if length < REDB_REGION_MAX_DATA_PAGES_OFFSET + 4 {
+        return Ok(());
+    }
+    let mut magic = [0_u8; 9];
+    file.read_exact_at(&mut magic, 0)
+        .map_err(crate::filesystem_rejected)?;
+    if magic != REDB_MAGIC {
+        return Ok(());
+    }
+    let mut field = [0_u8; 4];
+    file.read_exact_at(&mut field, REDB_PAGE_SIZE_OFFSET)
+        .map_err(crate::filesystem_rejected)?;
+    let page_size = u64::from(u32::from_le_bytes(field));
+    file.read_exact_at(&mut field, REDB_REGION_MAX_DATA_PAGES_OFFSET)
+        .map_err(crate::filesystem_rejected)?;
+    let region_bytes = u64::from(u32::from_le_bytes(field))
+        .checked_mul(page_size)
+        .ok_or(StorageError::Overflow)?;
+    if region_bytes > LIVE_DATABASE_REGION_BYTES {
+        return Err(StorageError::UnboundedRegion(region_bytes));
+    }
+    Ok(())
 }
 
 /// Applies writes with one open table handle per run of same-table writes.
@@ -1223,29 +1344,43 @@ fn apply_writes(
     Ok(())
 }
 
-fn rejected_table(_error: redb::TableError) -> RedbCommitFailure {
-    RedbCommitFailure::Rejected(StorageError::DatabaseRejected)
+/// A table could not be opened for writing; an allowance refusal keeps its own determinate
+/// outcome and everything else is the determinate rejection before commit.
+fn rejected_table(error: redb::TableError) -> RedbCommitFailure {
+    RedbCommitFailure::Rejected(map_table_error(error))
 }
 
-fn rejected_storage(_error: redb::StorageError) -> RedbCommitFailure {
-    RedbCommitFailure::Rejected(StorageError::DatabaseRejected)
+/// A row could not be written; an allowance refusal keeps its own determinate outcome and
+/// everything else is the determinate rejection before commit.
+fn rejected_storage(error: redb::StorageError) -> RedbCommitFailure {
+    RedbCommitFailure::Rejected(map_write_error(error))
 }
 
 impl RedbStore {
-    /// Runs the durable two-phase completion with its flushes labeled as transaction phases.
-    fn finish_transaction(&self, transaction: WriteTransaction) -> Result<(), RedbCommitFailure> {
+    /// Prepares and publishes one bounded transaction, with the two durable flushes of its
+    /// publication labeled as the transaction phases, and returns the bytes it charged.
+    ///
+    /// A refusal during preparation aborted the transaction cleanly: no root changed, every page
+    /// it freed is allocated again, and the next writer is unaffected. Any other preparation or
+    /// publication failure is uncertain and keeps Section 21.5's indeterminate outcome.
+    fn finish_transaction(
+        &self,
+        transaction: BoundedWriteTransaction,
+    ) -> Result<u64, RedbCommitFailure> {
         self.commit_flushes.begin();
-        let result = transaction.commit();
+        let result = prepare_and_publish(transaction);
         self.commit_flushes.end();
-        match result {
-            Ok(()) => Ok(()),
-            Err(CommitError::TransactionPoisoned) => {
-                Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected))
-            }
-            Err(CommitError::Storage(_)) => Err(RedbCommitFailure::Indeterminate),
-            Err(_) => Err(RedbCommitFailure::Indeterminate),
-        }
+        result
     }
+}
+
+fn prepare_and_publish(transaction: BoundedWriteTransaction) -> Result<u64, RedbCommitFailure> {
+    let prepared = transaction.prepare().map_err(map_preparation_error)?;
+    let charged = prepared
+        .allowance_charged()
+        .map_err(|_| RedbCommitFailure::Rejected(StorageError::DatabaseRejected))?;
+    prepared.publish().map_err(map_publication_error)?;
+    Ok(charged)
 }
 
 /// Rejects a stored row whose key or value exceeds the schema ceilings before it is copied.
@@ -1272,6 +1407,7 @@ mod tests {
     use redb::MultimapTableDefinition;
 
     use super::*;
+    use crate::AllowancePhase;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -1321,13 +1457,23 @@ mod tests {
         Ok((directory, store))
     }
 
+    /// The whole Section 19.3 allowance, which every ordinary test transaction fits.
+    fn full_allowance() -> AllocationAllowance {
+        AllocationAllowance::new(crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH)
+    }
+
+    fn certain(failure: RedbCommitFailure) -> StorageError {
+        match failure {
+            RedbCommitFailure::Rejected(error) => error,
+            RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
+        }
+    }
+
     fn initialize(store: &RedbStore, writes: &[RedbWrite<'_>]) -> Result<(), StorageError> {
         store
-            .initialize_database(b"header", b"reservation", writes)
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })
+            .initialize_database(b"header", b"reservation", writes, full_allowance())
+            .map(|_| ())
+            .map_err(certain)
     }
 
     fn scratch(
@@ -1616,6 +1762,7 @@ mod tests {
                 key: b"key",
                 value: None,
             }],
+            full_allowance(),
         );
         assert!(matches!(
             rejected,
@@ -1625,11 +1772,8 @@ mod tests {
         store.validate_inventory()?;
         store.validate_meta_membership()?;
         store
-            .write_meta(b"unexpected", b"value")
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })?;
+            .write_meta(b"unexpected", b"value", full_allowance())
+            .map_err(certain)?;
         assert_eq!(
             store.validate_meta_membership(),
             Err(StorageError::InvalidEncoding)
@@ -1694,11 +1838,9 @@ mod tests {
                     value: Some(b"first"),
                 }],
                 b"reservation-2",
+                full_allowance(),
             )
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })?;
+            .map_err(certain)?;
         assert_eq!(
             store.read_record(TableId::E2eeObject, &key)?,
             Some(b"first".to_vec())
@@ -1711,11 +1853,9 @@ mod tests {
                     value: None,
                 }],
                 b"reservation-3",
+                full_allowance(),
             )
-            .map_err(|failure| match failure {
-                RedbCommitFailure::Rejected(error) => error,
-                RedbCommitFailure::Indeterminate => StorageError::DatabaseRejected,
-            })?;
+            .map_err(certain)?;
         assert_eq!(store.read_record(TableId::E2eeObject, &key)?, None);
         assert_eq!(
             store.read_meta(RESERVATION_META_KEY)?,
@@ -1835,9 +1975,181 @@ mod tests {
         )?;
         let store = RedbStore::open_with_faults(file, 1_048_576, injector)?;
         assert!(matches!(
-            store.write_meta(b"key", b"value"),
+            store.write_meta(b"key", b"value", full_allowance()),
             Err(RedbCommitFailure::Rejected(StorageError::DatabaseRejected))
         ));
+        Ok(())
+    }
+
+    fn reopen_store(directory: &TestDirectory, name: &str) -> Result<RedbStore, StorageError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.path().join(name))
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        RedbStore::open_with_faults(file, 1_048_576, StorageFaultInjector::disabled())
+    }
+
+    const CHARGED_KEY: [u8; 32] = [8_u8; 32];
+
+    fn charged_write() -> RedbWrite<'static> {
+        RedbWrite {
+            table: TableId::E2eeObject,
+            key: &CHARGED_KEY,
+            value: Some(b"first"),
+        }
+    }
+
+    /// Initializes a fresh store and commits one fixed row under `allowance`, so that the same
+    /// deterministic transaction can be replayed against different allowances.
+    fn first_commit(
+        label: &str,
+        allowance: AllocationAllowance,
+    ) -> Result<(TestDirectory, RedbStore, Result<u64, RedbCommitFailure>), StorageError> {
+        let (directory, store) = open_store(label)?;
+        initialize(&store, &[])?;
+        let outcome = store.commit_records(&[charged_write()], b"reservation-2", allowance);
+        Ok((directory, store, outcome))
+    }
+
+    #[test]
+    fn bounded_commits_are_charged_exactly_and_refused_without_side_effects()
+    -> Result<(), StorageError> {
+        let (_reference_directory, _reference, measured) =
+            first_commit("charge-reference", full_allowance())?;
+        let charged = measured.map_err(certain)?;
+        assert!(charged > 0 && charged <= crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH);
+
+        // Exactly the measured charge fits, to the byte.
+        let (_exact_directory, exact, outcome) =
+            first_commit("charge-exact", AllocationAllowance::new(charged))?;
+        assert_eq!(outcome.map_err(certain)?, charged);
+        assert_eq!(
+            exact.read_record(TableId::E2eeObject, &CHARGED_KEY)?,
+            Some(b"first".to_vec())
+        );
+
+        // One byte less refuses during preparation: nothing is written, the reservation record
+        // is untouched, and the next writer on the same store is usable.
+        let (_short_directory, short, outcome) =
+            first_commit("charge-short", AllocationAllowance::new(charged - 1))?;
+        assert!(matches!(
+            outcome,
+            Err(RedbCommitFailure::Rejected(StorageError::AllowanceRefused(
+                AllowancePhase::Preparation
+            )))
+        ));
+        assert_eq!(short.read_record(TableId::E2eeObject, &CHARGED_KEY)?, None);
+        assert_eq!(
+            short.read_meta(RESERVATION_META_KEY)?,
+            Some(b"reservation".to_vec())
+        );
+        short
+            .commit_records(&[charged_write()], b"reservation-2", full_allowance())
+            .map_err(certain)?;
+        assert_eq!(
+            short.read_record(TableId::E2eeObject, &CHARGED_KEY)?,
+            Some(b"first".to_vec())
+        );
+        assert_eq!(
+            short.read_meta(RESERVATION_META_KEY)?,
+            Some(b"reservation-2".to_vec())
+        );
+
+        // No allowance at all refuses the first mutation, before anything is prepared.
+        let (_none_directory, none, outcome) =
+            first_commit("charge-none", AllocationAllowance::new(0))?;
+        assert!(matches!(
+            outcome,
+            Err(RedbCommitFailure::Rejected(StorageError::AllowanceRefused(
+                AllowancePhase::Mutation
+            )))
+        ));
+        assert_eq!(
+            none.read_meta(RESERVATION_META_KEY)?,
+            Some(b"reservation".to_vec())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_cleanup_and_close_stay_inside_their_allowances() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("cleanup")?;
+        let store = RedbStore::open_with_faults(
+            directory.create_file("state.redb")?,
+            1_048_576,
+            StorageFaultInjector::disabled(),
+        )?;
+        initialize(&store, &[])?;
+        store
+            .commit_records(&[charged_write()], b"reservation-2", full_allowance())
+            .map_err(certain)?;
+
+        // A reclamation without allowance reclaims nothing and leaves the database usable; a
+        // reclamation with allowance returns the pages the commit freed, then finds nothing.
+        assert!(matches!(
+            store.reclaim_deferred(AllocationAllowance::new(0)),
+            Ok(MaintenanceOutcome::Refused(AllowancePhase::Cleanup))
+        ));
+        let progress = store
+            .reclaim_deferred(full_allowance())
+            .ok()
+            .and_then(MaintenanceOutcome::completed)
+            .ok_or(StorageError::StaleState)?;
+        assert!(progress.records >= 1 && progress.pages >= 1);
+        assert!(!progress.remaining);
+        let drained = store
+            .reclaim_deferred(full_allowance())
+            .ok()
+            .and_then(MaintenanceOutcome::completed)
+            .ok_or(StorageError::StaleState)?;
+        assert_eq!((drained.records, drained.remaining), (0, false));
+
+        // A refused close persists nothing, so the next open repairs exactly as after a crash;
+        // a close within its allowance leaves the next open clean.
+        assert!(matches!(
+            store.persist_for_close(AllocationAllowance::new(0)),
+            Ok(MaintenanceOutcome::Refused(AllowancePhase::Close))
+        ));
+        drop(store);
+        let repaired = reopen_store(&directory, "state.redb")?;
+        assert!(repaired.opened_after_repair());
+        assert_eq!(
+            repaired.read_record(TableId::E2eeObject, &CHARGED_KEY)?,
+            Some(b"first".to_vec())
+        );
+        assert!(matches!(
+            repaired.persist_for_close(full_allowance()),
+            Ok(MaintenanceOutcome::Completed(()))
+        ));
+        drop(repaired);
+        let clean = reopen_store(&directory, "state.redb")?;
+        assert!(!clean.opened_after_repair());
+        Ok(())
+    }
+
+    #[test]
+    fn a_database_laid_out_with_unbounded_regions_is_refused_at_open() -> Result<(), StorageError> {
+        let directory = TestDirectory::create("regions")?;
+        let file = directory.create_file("unbounded.redb")?;
+        // The upstream default region, which the bounded allowance could never extend.
+        let mut builder = redb::Builder::new();
+        builder.set_cache_size(1_048_576);
+        let database = builder
+            .create_file(file)
+            .map_err(|_| StorageError::DatabaseRejected)?;
+        drop(database);
+        assert_eq!(
+            reopen_store(&directory, "unbounded.redb").err(),
+            Some(StorageError::UnboundedRegion(4_294_967_296))
+        );
+
+        // A database the adapter created opens again, and an empty file is a creation.
+        let (bounded_directory, bounded) = open_store("regions-bounded")?;
+        initialize(&bounded, &[])?;
+        drop(bounded);
+        let reopened = reopen_store(&bounded_directory, "state.redb")?;
+        reopened.validate_inventory()?;
         Ok(())
     }
 }

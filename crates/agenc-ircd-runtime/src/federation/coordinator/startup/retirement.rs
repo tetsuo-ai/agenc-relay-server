@@ -263,6 +263,7 @@ fn retryable(error: StorageError) -> bool {
             | StorageError::LimitExceeded
             | StorageError::FilesystemRejected(_)
             | StorageError::DatabaseRejected
+            | StorageError::AllowanceRefused(_)
     )
 }
 

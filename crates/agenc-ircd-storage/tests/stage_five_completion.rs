@@ -1396,9 +1396,34 @@ fn storage_errors_and_fault_controllers_cover_the_closed_failure_surface()
             StorageError::ResumeMismatch,
             "storage construction cannot be resumed",
         ),
+        (
+            StorageError::AllowanceRefused(agenc_ircd_storage::AllowancePhase::Preparation),
+            "storage growth allowance refused the operation during preparation",
+        ),
+        (
+            StorageError::UnboundedRegion(4_294_967_296),
+            "database region size 4294967296 bytes cannot grow under the bounded allowance; \
+             recreate the database with 67108864-byte regions",
+        ),
     ];
     for (error, expected) in errors {
         assert_eq!(error.to_string(), expected);
+    }
+    // The allowance phase set is closed and fixed-label as well.
+    let mut phases = agenc_ircd_storage::AllowancePhase::ALL
+        .iter()
+        .map(|phase| phase.label())
+        .collect::<Vec<_>>();
+    assert_eq!(phases.len(), 4);
+    phases.sort_unstable();
+    phases.dedup();
+    assert_eq!(phases.len(), 4);
+    for phase in agenc_ircd_storage::AllowancePhase::ALL {
+        assert!(phase.label().bytes().all(|byte| byte.is_ascii_lowercase()));
+        assert_eq!(
+            StorageError::AllowanceRefused(phase).to_string(),
+            format!("storage growth allowance refused the operation during {phase}")
+        );
     }
     // The cause set is closed and fixed-label: one distinct lowercase label per
     // cause, rendered inside the same outer rejection, and every classified

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bounded_operation;
 mod domain_records;
 mod e2ee_records;
 mod federation_records;

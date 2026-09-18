@@ -2552,7 +2552,9 @@ fn map_backup_failure(error: StorageError) -> AdminCoreFailure {
         | StorageError::FilesystemRejected(_)
         | StorageError::WriterLocked
         | StorageError::DatabaseRejected
-        | StorageError::ResumeMismatch => AdminCoreFailure::StorageUnavailable,
+        | StorageError::ResumeMismatch
+        | StorageError::AllowanceRefused(_)
+        | StorageError::UnboundedRegion(_) => AdminCoreFailure::StorageUnavailable,
     }
 }
 
@@ -4651,6 +4653,8 @@ mod tests {
             StorageError::WriterLocked,
             StorageError::DatabaseRejected,
             StorageError::ResumeMismatch,
+            StorageError::AllowanceRefused(agenc_ircd_storage::AllowancePhase::Mutation),
+            StorageError::UnboundedRegion(4_294_967_296),
         ] {
             assert_eq!(
                 map_backup_failure(error),

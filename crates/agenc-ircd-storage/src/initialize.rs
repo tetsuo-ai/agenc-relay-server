@@ -8,6 +8,7 @@ use agenc_ircd_crypto::{
 };
 use zeroize::Zeroizing;
 
+use crate::bounded::OperationAllowance;
 use crate::engine::{StorageEngineLimits, draw_nonces_with_faults};
 use crate::integrity::TrackedRecord;
 use crate::redb_store::{RedbCommitFailure, RedbStore, RedbWrite};
@@ -138,7 +139,7 @@ pub(crate) fn initialize_stopped_construction(
     initialize_storage_inner(config)
 }
 
-// agenc-review: focus owner=storage reviewed=2026-09-04 reason=sequence-zero construction retains the existing linear nonce-charge-commit transcript after explicit schema admission
+// agenc-review: focus owner=storage reviewed=2026-09-18 reason=sequence-zero construction retains the existing linear nonce-charge-commit transcript under one physical allowance after explicit schema admission
 fn initialize_storage_inner(
     mut config: StorageInitializationConfig,
 ) -> Result<StorageInitializationOutcome, StorageError> {
@@ -148,6 +149,9 @@ fn initialize_storage_inner(
     let _capacity = config
         .state_directory
         .admit_transaction(limits.fixed_reserve_bytes, limits.reserve_percent)?;
+    // One allowance spans the initializing transaction, the first guard and the close.
+    let mut allowance = OperationAllowance::new(config.state_directory.tuple().block_size, 1)?
+        .capped(config.state_directory.faults().growth_cap());
     let file = config.state_directory.create_database_file()?;
     if file.metadata().map_err(crate::filesystem_rejected)?.len() != 0 {
         return Err(StorageError::StaleState);
@@ -380,13 +384,18 @@ fn initialize_storage_inner(
         key: state_meta_key.as_bytes(),
         value: Some(&state_meta_record),
     });
-    match store.initialize_database(&header.encode()?, &reservation.encode()?, &writes) {
-        Ok(()) => {}
+    let charged = match store.initialize_database(
+        &header.encode()?,
+        &reservation.encode()?,
+        &writes,
+        allowance.allowance(),
+    ) {
+        Ok(charged) => charged,
         Err(RedbCommitFailure::Rejected(error)) => return Err(error),
         Err(RedbCommitFailure::Indeterminate) => {
             return Ok(StorageInitializationOutcome::Indeterminate);
         }
-    }
+    };
     let guard_bytes = guard.encode()?;
     if config
         .state_directory
@@ -394,6 +403,12 @@ fn initialize_storage_inner(
         .is_err()
     {
         return Ok(StorageInitializationOutcome::Indeterminate);
+    }
+    // The database is complete and its guard published; the close persists the allocator
+    // state within what remains of the allowance, and a refusal or failure here leaves that
+    // persistence to the next open's repair, which changes nothing the guard names.
+    if allowance.charge(charged).is_ok() {
+        let _closed = store.persist_for_close(allowance.allowance());
     }
     Ok(StorageInitializationOutcome::Complete {
         rollback_guard_hash: guard.complete_hash()?,

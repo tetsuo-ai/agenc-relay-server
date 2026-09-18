@@ -44,15 +44,16 @@ async fn a_retryable_refusal_returns_the_candidate_and_paces_one_fixed_retry() -
     Ok(())
 }
 
-/// The retryable set is exactly the five bounded refusals; every other
+/// The retryable set is exactly the six bounded refusals; every other
 /// storage outcome, including each filesystem cause, is determinate.
 #[test]
-fn exactly_the_five_bounded_storage_refusals_are_retryable() -> TestResult {
+fn exactly_the_six_bounded_storage_refusals_are_retryable() -> TestResult {
     let paced = [
         StorageError::AllocationFailed,
         StorageError::QueueFull,
         StorageError::LimitExceeded,
         StorageError::DatabaseRejected,
+        StorageError::AllowanceRefused(agenc_ircd_storage::AllowancePhase::Preparation),
     ];
     let refused = [
         StorageError::InvalidEncoding,
@@ -63,6 +64,7 @@ fn exactly_the_five_bounded_storage_refusals_are_retryable() -> TestResult {
         StorageError::Unavailable,
         StorageError::WriterLocked,
         StorageError::ResumeMismatch,
+        StorageError::UnboundedRegion(4_294_967_296),
     ];
     for error in paced {
         assert!(retryable(error), "{error:?} must be paced");

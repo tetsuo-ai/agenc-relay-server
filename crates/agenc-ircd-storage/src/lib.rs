@@ -3,6 +3,7 @@
 //! Durable record codecs, bounded transaction ownership, backup, and recovery.
 
 mod backup;
+mod bounded;
 mod codec;
 mod construction;
 mod construction_directory;
@@ -39,6 +40,7 @@ pub use backup::{
     BackupTrailer, BackupTrustKey, MAX_BACKUP_TRUST_KEYS, VerifiedBackup, backup_stream_bytes,
     verify_backup,
 };
+pub use bounded::{LIVE_DATABASE_REGION_BYTES, guard_replacement_charge};
 pub use construction::{
     MAX_CONSTRUCTION_PLAN_BYTES, STORAGE_CONSTRUCTION_KEY, StorageConstruction,
     StorageConstructionAction, StorageConstructionCursor, StorageConstructionKind,
@@ -75,7 +77,9 @@ pub use engine::{
     StorageInspectionConfig, StorageOpenConfig, StorageRuntimeLimits, StorageStatistics,
     inspect_storage,
 };
-pub use error::{FilesystemCause, FilesystemFailure, StorageError, filesystem_rejected};
+pub use error::{
+    AllowancePhase, FilesystemCause, FilesystemFailure, StorageError, filesystem_rejected,
+};
 pub use fault::{
     StorageFaultBoundary, StorageFaultCase, StorageFaultInjector, StorageFaultSchedule,
     StorageFaultSite,

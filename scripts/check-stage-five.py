@@ -12,7 +12,7 @@ from typing import NoReturn
 
 PROFILE_PATH = "conformance/stage-five-storage-profile.toml"
 EXPECTED_MODULES = {
-    "backup.rs", "codec.rs", "construction.rs", "construction_directory.rs",
+    "backup.rs", "bounded.rs", "codec.rs", "construction.rs", "construction_directory.rs",
     "construction_runtime.rs", "construction_schema.rs", "control.rs", "domain_records.rs", "engine.rs", "error.rs",
     "fault.rs", "e2ee_records.rs",
     "federation_records.rs", "initialize.rs", "integrity.rs", "lib.rs", "login_index.rs",

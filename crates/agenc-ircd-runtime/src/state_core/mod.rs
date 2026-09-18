@@ -1861,7 +1861,9 @@ fn next_transaction_id(entropy: &mut dyn EntropySource) -> Result<TransactionId,
 
 const fn storage_rejection_result(error: StorageError) -> ResultClass {
     match error {
-        StorageError::LimitExceeded | StorageError::StaleState => ResultClass::Rejected,
+        StorageError::LimitExceeded
+        | StorageError::StaleState
+        | StorageError::AllowanceRefused(_) => ResultClass::Rejected,
         StorageError::AllocationFailed | StorageError::QueueFull => ResultClass::Busy,
         StorageError::InvalidEncoding
         | StorageError::UnsupportedVersion
@@ -1871,7 +1873,8 @@ const fn storage_rejection_result(error: StorageError) -> ResultClass {
         | StorageError::FilesystemRejected(_)
         | StorageError::WriterLocked
         | StorageError::DatabaseRejected
-        | StorageError::ResumeMismatch => ResultClass::Error,
+        | StorageError::ResumeMismatch
+        | StorageError::UnboundedRegion(_) => ResultClass::Error,
     }
 }
 

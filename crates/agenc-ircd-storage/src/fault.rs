@@ -267,6 +267,7 @@ impl StorageFaultSchedule {
 pub struct StorageFaultInjector {
     schedule: Option<Arc<Mutex<StorageFaultSchedule>>>,
     probe: Option<Arc<StorageGrowthProbe>>,
+    growth_cap: Option<u64>,
 }
 
 impl StorageFaultInjector {
@@ -276,6 +277,7 @@ impl StorageFaultInjector {
         Self {
             schedule: None,
             probe: None,
+            growth_cap: None,
         }
     }
 
@@ -286,6 +288,7 @@ impl StorageFaultInjector {
                 case, occurrence,
             )?))),
             probe: None,
+            growth_cap: None,
         })
     }
 
@@ -298,7 +301,27 @@ impl StorageFaultInjector {
         Self {
             schedule: None,
             probe: Some(probe),
+            growth_cap: None,
         }
+    }
+
+    /// Lowers every durable operation's physical growth allowance to `bytes` of redb
+    /// allocation, after the guard headroom of the operation is charged.
+    ///
+    /// The cap exists for the qualification campaign and the test suites, which reach the
+    /// Section 19.3 allowance boundary without a 256 MiB transaction. It can only lower the
+    /// allowance, never raise it, it leaves the `R(F) + G` gate untouched, and it does not
+    /// enable the handle, so the production redb backend stays selected.
+    #[must_use]
+    pub fn with_growth_cap(mut self, bytes: u64) -> Self {
+        self.growth_cap = Some(bytes);
+        self
+    }
+
+    /// Returns the qualification cap on each operation's redb allocation, when one is set.
+    #[must_use]
+    pub const fn growth_cap(&self) -> Option<u64> {
+        self.growth_cap
     }
 
     /// Returns whether this handle can inject a fault.
