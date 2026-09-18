@@ -687,3 +687,56 @@ fn a_stored_proof_is_fetched_only_under_its_conversation_by_a_principal() -> Tes
     assert_eq!(outside.result, ResultBody::Empty(EmptyKind::Objects));
     Ok(())
 }
+
+// enc-11 review: companion 13.7.3 says a leaf-membership proof's root, roster,
+// and credential fields "equal the leaf authorization of that credential" and
+// that "the proof's device must be active in the retained roster named by
+// `roster_id` at the record's validation time". A continuing leaf keeps the
+// same credential across a roster rotation (8.5), so a proof for that leaf
+// keeps naming the roster the credential was authorized under. This test
+// rotates the account's roster to generation one (the device staying active)
+// and then submits a spec-conforming continuing proof that names the retained
+// generation-zero roster. Reconstruction (`membership_restore::restore`)
+// verifies exactly such a proof against the roster snapshot it names, but the
+// live `submit_membership` path verifies against the account's current roster
+// only, so it refuses the proof. The assertion is the spec-conforming outcome
+// and therefore fails on the current tree.
+#[test]
+fn a_conforming_proof_naming_a_predecessor_roster_is_admitted() -> TestResult {
+    let (mut harness, conversation) = two_member_channel()?;
+    // The account publishes its next complete roster, keeping both devices
+    // active. This is the ordinary directory rotation a roster proposal
+    // mirrors; it advances `state.principals` to generation one.
+    let certificates = [DEVICE, SECOND_DEVICE]
+        .iter()
+        .map(|seed| {
+            super::super::support::certificate(
+                &harness.principal.root_secret,
+                &harness.principal.root,
+                &super::super::support::DeviceSpec::new(*seed),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let successor = super::super::support::roster(
+        &harness.principal.root_secret,
+        &harness.principal.root,
+        1,
+        super::super::support::roster_id(&harness.principal.roster)?,
+        (100, 100 + 6 * 24 * 3600),
+        certificates,
+        Vec::new(),
+    )?;
+    let roster_bytes = wire(IrcWireObjectKind::DeviceRoster, &successor)?;
+    ok(harness.run(Op::PublishRoster, &[], Some(&roster_bytes))?)?;
+    // A continuing proof for a still-held leaf names the credential's
+    // authorization roster, which is the retained generation-zero roster.
+    let conforming = harness.leaf_proof(conversation, DEVICE, LEAF_SEED, 5)?;
+    let bytes = proof_bytes(&conforming)?;
+    let outcome = harness.run(Op::SubmitMembership, &conversation, Some(&bytes))?;
+    assert_eq!(
+        code(outcome),
+        None,
+        "a proof naming the retained predecessor roster must be admitted (companion 13.7.3)"
+    );
+    Ok(())
+}
