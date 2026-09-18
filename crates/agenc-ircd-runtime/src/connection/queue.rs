@@ -10,9 +10,14 @@
 //! one exact-capacity frame storage whose charge the fanout acquires with its
 //! frame buffers and `prepare` allocates, so committing never allocates. The
 //! storage and its permit leave together when the demand's final frame
-//! drains or the queue closes. The ring holds every response batch the
-//! hard maximum admits plus the control slots, so a reservation the counts
-//! admit always has an entry.
+//! drains or the queue closes. The ring holds every open response the hard
+//! maximum admits plus the control slots. A demand reserved while more
+//! demands are open than the open-response ceiling brings one more charged
+//! cell instead (`queue/overflow.rs`), so a reservation the counts admit
+//! always has a place and the sink is full only at its byte or item ceiling
+//! (spec 15.3): a burst of one-line replies or deliveries is never a slow
+//! consumer. Entries carry their commit sequence, and the writer drains the
+//! ring and the cells in that one order.
 //!
 //! New reservations use the current runtime byte, item, and response
 //! ceilings. A reload does not remove earlier reservations; an increase only
@@ -25,6 +30,11 @@
 use std::collections::VecDeque;
 
 use tokio::sync::Notify;
+
+mod overflow;
+
+use overflow::OverflowQueue;
+pub(crate) use overflow::{OVERFLOW_CELL_CHARGE, OverflowCell};
 
 use super::sink::{
     BoundedSharedClientFrames, ClientQueueDemand, ClientQueueReservation, ClientQueueSnapshot,
@@ -198,6 +208,7 @@ impl DemandFrames {
 
 /// One committed response batch and the query snapshot it drains.
 struct Response {
+    sequence: u64,
     frames: DemandFrames,
     query_snapshot: Option<QuerySnapshotPermit>,
 }
@@ -206,7 +217,11 @@ impl Response {
     /// Places a committed demand's frames: one inline, more in the storage
     /// its reservation prepared. `None` when a multi-frame transfer carries
     /// no fitting storage, which only a foreign reservation can produce.
-    fn assemble(transfer: &mut QueueTransfer, frames: Vec<SharedClientFrame>) -> Option<Self> {
+    fn assemble(
+        transfer: &mut QueueTransfer,
+        frames: Vec<SharedClientFrame>,
+        sequence: u64,
+    ) -> Option<Self> {
         let frames = if frames.len() == 1 {
             DemandFrames::Inline(frames.into_iter().next())
         } else {
@@ -217,6 +232,7 @@ impl Response {
             }
         };
         Some(Self {
+            sequence,
             frames,
             query_snapshot: transfer.take_query_snapshot(),
         })
@@ -224,8 +240,17 @@ impl Response {
 }
 
 enum Entry {
-    Control(SharedClientFrame),
+    Control(u64, SharedClientFrame),
     Response(Response),
+}
+
+impl Entry {
+    const fn sequence(&self) -> u64 {
+        match self {
+            Self::Control(sequence, _) => *sequence,
+            Self::Response(response) => response.sequence,
+        }
+    }
 }
 
 /// A fixed ring of queue entries stored inside the connection state.
@@ -287,13 +312,18 @@ impl EntryRing {
         self.head = 0;
     }
 
+    fn front_sequence(&self) -> Option<u64> {
+        let slot = self.slots.get(self.head % QUEUE_ENTRY_SLOTS)?;
+        slot.as_ref().map(Entry::sequence)
+    }
+
     fn largest_query_rows(&self) -> u64 {
         self.slots
             .iter()
             .flatten()
             .filter_map(|entry| match entry {
                 Entry::Response(response) => response.query_snapshot.as_ref(),
-                Entry::Control(_) => None,
+                Entry::Control(..) => None,
             })
             .map(QuerySnapshotPermit::rows)
             .max()
@@ -301,8 +331,20 @@ impl EntryRing {
     }
 }
 
+/// Where an admitted demand will be committed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Placement {
+    /// A fixed ring entry; no allocation.
+    Ring,
+    /// One charged overflow cell behind the ring.
+    Beyond,
+}
+
 struct QueueState {
     entries: EntryRing,
+    overflow: OverflowQueue,
+    next_sequence: u64,
+    close_notice: Option<SharedClientFrame>,
     normal_bytes: usize,
     normal_items: usize,
     control_bytes: usize,
@@ -336,20 +378,122 @@ impl QueueState {
         self.query_rows = self.query_rows.saturating_sub(snapshot.rows());
         self.query_bytes = self.query_bytes.saturating_sub(snapshot.bytes());
         if snapshot.rows() == self.largest_query_rows {
-            self.largest_query_rows = self.entries.largest_query_rows();
+            let beyond = self
+                .overflow
+                .responses()
+                .filter_map(|response| response.query_snapshot.as_ref())
+                .map(QuerySnapshotPermit::rows)
+                .max()
+                .unwrap_or(0);
+            self.largest_query_rows = self.entries.largest_query_rows().max(beyond);
         }
+    }
+
+    fn take_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence.wrapping_add(1);
+        sequence
+    }
+
+    /// Discards every queued frame and releases its counts and permits.
+    fn discard_all(&mut self) {
+        self.entries.clear();
+        self.overflow.clear();
+        self.normal_bytes = 0;
+        self.normal_items = 0;
+        self.control_bytes = 0;
+        self.control_items = 0;
+        self.normal_batches = 0;
+        self.query_snapshots = 0;
+        self.query_rows = 0;
+        self.query_bytes = 0;
+        self.largest_query_rows = 0;
+    }
+
+    /// Enqueues one control frame when the control reserve has room.
+    fn push_control(
+        &mut self,
+        frame: SharedClientFrame,
+        limits: QueueLimits,
+    ) -> Result<(), SinkReserveError> {
+        let next_bytes = self
+            .control_bytes
+            .checked_add(frame.as_bytes().len())
+            .ok_or(SinkReserveError::Full)?;
+        if next_bytes > limits.control_bytes() || self.control_items >= CONTROL_ITEM_SLOTS {
+            return Err(SinkReserveError::Full);
+        }
+        let sequence = self.next_sequence;
+        if self
+            .entries
+            .push_back(Entry::Control(sequence, frame))
+            .is_err()
+        {
+            return Err(SinkReserveError::Full);
+        }
+        self.next_sequence = sequence.wrapping_add(1);
+        self.control_bytes = next_bytes;
+        self.control_items += 1;
+        Ok(())
+    }
+
+    /// Whether the oldest queued frame lives beyond the ring.
+    fn oldest_is_beyond(&mut self) -> bool {
+        match (
+            self.entries.front_sequence(),
+            self.overflow.front_sequence(),
+        ) {
+            (Some(ring), Some(beyond)) => beyond < ring,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Takes the next frame of the oldest overflow demand; its cell, frame
+    /// storage, permit, batch count, and query snapshot leave with its final
+    /// frame.
+    fn pop_overflow_frame(&mut self) -> Option<SharedClientFrame> {
+        let response = self.overflow.front_response()?;
+        let frame = response.frames.pop_front()?;
+        let drained = response.frames.is_empty();
+        let snapshot = drained.then(|| response.query_snapshot.take()).flatten();
+        self.normal_items = self.normal_items.saturating_sub(1);
+        self.normal_bytes = self.normal_bytes.saturating_sub(frame.as_bytes().len());
+        if drained {
+            self.normal_batches = self.normal_batches.saturating_sub(1);
+            self.overflow.remove_front();
+        }
+        if let Some(snapshot) = snapshot.as_ref() {
+            self.release_query_snapshot(snapshot);
+        }
+        Some(frame)
     }
 
     /// Dequeues the next frame in output order and releases its logical
     /// counts exactly once.
     fn pop_frame(&mut self) -> Option<SharedClientFrame> {
+        if self.oldest_is_beyond() {
+            return self.pop_overflow_frame();
+        }
         match self.entries.pop_front()? {
-            Entry::Control(frame) => {
+            Entry::Control(_, frame) => {
                 self.control_items = self.control_items.saturating_sub(1);
                 self.control_bytes = self.control_bytes.saturating_sub(frame.as_bytes().len());
                 Some(frame)
             }
             Entry::Response(response) => self.pop_response_frame(response),
+        }
+    }
+
+    /// Places a committed response in its prepared cell, or in the ring
+    /// entry its ring placement guaranteed.
+    fn place(&mut self, transfer: &mut QueueTransfer, response: Response) -> bool {
+        match transfer.take_cell() {
+            Some(cell) => self
+                .overflow
+                .push_back(cell, response, transfer.take_backing())
+                .is_ok(),
+            None => self.entries.push_back(Entry::Response(response)).is_ok(),
         }
     }
 
@@ -435,6 +579,9 @@ impl WriterQueue {
             shared: Arc::new(QueueShared {
                 state: Mutex::new(QueueState {
                     entries: EntryRing::new(),
+                    overflow: OverflowQueue::default(),
+                    next_sequence: 0,
+                    close_notice: None,
                     normal_bytes: 0,
                     normal_items: 0,
                     control_bytes: 0,
@@ -494,24 +641,12 @@ impl WriterQueue {
     /// Enqueues one control frame inside the control reserve, bypassing the
     /// normal ceiling (spec lines 2750-2756).
     pub fn push_control(&self, frame: SharedClientFrame) -> Result<(), SinkReserveError> {
-        let bytes = frame.as_bytes().len();
         let limits = self.current_limits();
         let mut state = lock(&self.shared.state);
         if state.closed.is_some() {
             return Err(SinkReserveError::Closed);
         }
-        let next_bytes = state
-            .control_bytes
-            .checked_add(bytes)
-            .ok_or(SinkReserveError::Full)?;
-        if next_bytes > limits.control_bytes() || state.control_items >= CONTROL_ITEM_SLOTS {
-            return Err(SinkReserveError::Full);
-        }
-        if state.entries.push_back(Entry::Control(frame)).is_err() {
-            return Err(SinkReserveError::Full);
-        }
-        state.control_bytes = next_bytes;
-        state.control_items += 1;
+        state.push_control(frame, limits)?;
         drop(state);
         self.shared.notify.notify_one();
         Ok(())
@@ -526,16 +661,7 @@ impl WriterQueue {
             state.close_started = Some(tokio::time::Instant::now());
         }
         if policy == ClosePolicy::Immediate {
-            state.entries.clear();
-            state.normal_bytes = 0;
-            state.normal_items = 0;
-            state.control_bytes = 0;
-            state.control_items = 0;
-            state.normal_batches = 0;
-            state.query_snapshots = 0;
-            state.query_rows = 0;
-            state.query_bytes = 0;
-            state.largest_query_rows = 0;
+            state.discard_all();
         }
         drop(state);
         self.shared.notify.notify_one();
@@ -584,27 +710,23 @@ impl WriterQueue {
         }
     }
 
+    /// Admits a whole demand against the byte and item ceilings, the only
+    /// ceilings that make a sink full (spec 15.3). The open-response ceiling
+    /// decides where the demand lives, never whether it is admitted: within
+    /// it the demand takes a fixed ring entry, beyond it one charged cell.
+    /// A ring placement is granted only while every open demand fits the
+    /// ring, so a ring demand always finds its entry at commit.
     fn admit_normal(
-        &self,
         state: &mut QueueState,
         demand: &ClientQueueDemand,
         limits: QueueLimits,
         response_batches: usize,
-    ) -> bool {
-        let Some(next_items) = state.normal_items.checked_add(demand.frame_count()) else {
-            return false;
-        };
-        let Some(next_bytes) = state.normal_bytes.checked_add(demand.total_bytes()) else {
-            return false;
-        };
-        let Some(next_batches) = state.normal_batches.checked_add(1) else {
-            return false;
-        };
-        if next_items > limits.normal_items()
-            || next_bytes > limits.normal_bytes()
-            || next_batches > response_batches
-        {
-            return false;
+    ) -> Option<Placement> {
+        let next_items = state.normal_items.checked_add(demand.frame_count())?;
+        let next_bytes = state.normal_bytes.checked_add(demand.total_bytes())?;
+        let next_batches = state.normal_batches.checked_add(1)?;
+        if next_items > limits.normal_items() || next_bytes > limits.normal_bytes() {
+            return None;
         }
         state.normal_items = next_items;
         state.normal_bytes = next_bytes;
@@ -613,7 +735,11 @@ impl WriterQueue {
             state.warning_armed = false;
             state.warning_pending = true;
         }
-        true
+        if next_batches > response_batches.min(MAX_RESPONSE_BATCHES) {
+            Some(Placement::Beyond)
+        } else {
+            Some(Placement::Ring)
+        }
     }
 
     fn current_limits(&self) -> QueueLimits {
@@ -650,18 +776,17 @@ impl ClientSink for WriterQueue {
         if state.closed.is_some() {
             return Err(SinkReserveError::Closed);
         }
-        if !self.admit_normal(&mut state, &demand, limits, response_batches) {
-            return Err(SinkReserveError::Full);
-        }
+        let placement = Self::admit_normal(&mut state, &demand, limits, response_batches)
+            .ok_or(SinkReserveError::Full)?;
         drop(state);
         let backing_charge = frame_storage_charge(demand.frame_count());
         let ledger: Arc<dyn QueueReservationLedger> = self.shared.clone();
-        Ok(TentativeClientQueueReservation::new(
-            self.generation,
-            demand,
-            backing_charge,
-            ledger,
-        ))
+        let tentative =
+            TentativeClientQueueReservation::new(self.generation, demand, backing_charge, ledger);
+        Ok(match placement {
+            Placement::Ring => tentative,
+            Placement::Beyond => tentative.beyond_fixed_entries(),
+        })
     }
 
     fn prepare(
@@ -685,13 +810,13 @@ impl ClientSink for WriterQueue {
             return;
         }
         let usage = transfer.query_snapshot_usage();
-        let placed = Response::assemble(&mut transfer, frames.into_frames())
-            .map(|response| state.entries.push_back(Entry::Response(response)));
-        if !matches!(placed, Some(Ok(()))) {
+        let sequence = state.take_sequence();
+        let placed = Response::assemble(&mut transfer, frames.into_frames(), sequence)
+            .map(|response| state.place(&mut transfer, response));
+        if !matches!(placed, Some(true)) {
             // Only a foreign reservation can arrive without fitting storage
             // or an entry. Exclude the whole sink rather than drop a frame.
             drop(state);
-            drop(placed);
             transfer.discard();
             self.begin_slow_consumer_close();
             return;
@@ -704,8 +829,33 @@ impl ClientSink for WriterQueue {
         self.shared.notify.notify_one();
     }
 
-    fn begin_slow_consumer_close(&self) {
+    fn begin_forced_close(&self) {
         self.close(CloseReason::SlowConsumer, ClosePolicy::Immediate);
+    }
+
+    fn arm_slow_consumer_notice(&self, notice: SharedClientFrame) {
+        lock(&self.shared.state).close_notice = Some(notice);
+    }
+
+    /// Destroys the whole queue and, on the first close, leaves only the
+    /// armed `ERROR` line in the reserved control slot for the writer to
+    /// deliver before it closes the transport (spec 1.2; spec 19.3).
+    fn begin_slow_consumer_close(&self) {
+        let limits = self.current_limits();
+        let mut state = lock(&self.shared.state);
+        let first_close = state.closed.is_none();
+        if first_close {
+            state.closed = Some(CloseReason::SlowConsumer);
+            state.close_started = Some(tokio::time::Instant::now());
+        }
+        state.discard_all();
+        if let Some(notice) = state.close_notice.take().filter(|_| first_close) {
+            // The reserve was just emptied, so only a notice larger than the
+            // whole control reserve is dropped; the close never waits on it.
+            let _queued = state.push_control(notice, limits);
+        }
+        drop(state);
+        self.shared.notify.notify_one();
     }
 
     fn close_after_flush(&self, reason: CloseReason) -> FlushAcknowledgement {
@@ -922,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn response_batch_slot_releases_only_after_its_final_frame() -> Result<(), RuntimeError> {
+    fn a_ring_entry_returns_only_after_its_final_frame() -> Result<(), RuntimeError> {
         let budget = budget();
         let limits = QueueLimits::new(400, 100, 12)?;
         let queue = queue(&budget, 1, limits)?;
@@ -930,20 +1080,17 @@ mod tests {
         let last = frame(&budget, "last")?;
         reserve_and_commit(&budget, &queue, vec![first, last])?;
 
-        assert_eq!(
-            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
-            Some(SinkReserveError::Full)
-        );
+        let beyond = |queue: &WriterQueue| -> Result<u64, RuntimeError> {
+            let reserved = queue
+                .try_reserve(ClientQueueDemand::new(vec![1])?)
+                .map_err(|_| RuntimeError::LimitExceeded)?;
+            Ok(reserved.backing_charge())
+        };
+        assert_eq!(beyond(&queue)?, OVERFLOW_CELL_CHARGE);
         let _first = queue.pop();
-        assert_eq!(
-            queue.try_reserve(ClientQueueDemand::new(vec![1])?).err(),
-            Some(SinkReserveError::Full)
-        );
+        assert_eq!(beyond(&queue)?, OVERFLOW_CELL_CHARGE);
         let _last = queue.pop();
-        let next = queue
-            .try_reserve(ClientQueueDemand::new(vec![1])?)
-            .map_err(|_| RuntimeError::LimitExceeded)?;
-        drop(next);
+        assert_eq!(beyond(&queue)?, 0, "the drained demand returned its entry");
         Ok(())
     }
 

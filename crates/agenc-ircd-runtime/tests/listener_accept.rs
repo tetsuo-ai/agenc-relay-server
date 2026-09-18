@@ -397,6 +397,106 @@ fn enqueue(
     Ok(())
 }
 
+type Rendered =
+    Arc<agenc_ircd_client_wire::RenderedMessage<agenc_ircd_runtime::budget::MemoryPermit>>;
+
+fn rendered(
+    budget: &MemoryBudget,
+    command: &str,
+    text: &str,
+) -> Result<Rendered, Box<dyn Error + Send + Sync>> {
+    let message = WireMessage::new("server.test", command, &[], Some(text))?;
+    let measured = message.measure()?;
+    let bytes = u64::try_from(measured.bytes())?;
+    let mut batch =
+        budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::allocation(
+            bytes,
+        )?])?)?;
+    Ok(Arc::new(
+        measured.encode(&mut PermitCursor::new(&mut batch))?,
+    ))
+}
+
+/// Commits `frame` as one demand with exactly the backing its reservation
+/// charged; `false` once the sink reports its ceiling.
+fn enqueue_shared(
+    budget: &MemoryBudget,
+    sink: &Arc<dyn ClientSink>,
+    frame: &Rendered,
+) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    let demand = ClientQueueDemand::new(vec![frame.as_bytes().len()])?;
+    let Ok(tentative) = sink.try_reserve(demand) else {
+        return Ok(false);
+    };
+    let backing = match tentative.backing_charge() {
+        0 => None,
+        charge => budget
+            .try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(charge)])?)?
+            .split_exact(charge),
+    };
+    let prepared = sink.prepare(tentative, backing)?;
+    let frames = BoundedSharedClientFrames::for_reservation(&prepared, vec![Arc::clone(frame)])?;
+    sink.commit(prepared, frames);
+    Ok(true)
+}
+
+/// RUN-10: an output queue driven to its hard ceiling is still closed as a
+/// slow consumer, and the client is told why: it receives exactly the armed
+/// `ERROR` line from the reserved control slot, never a silent EOF and never
+/// the destroyed backlog.
+#[tokio::test]
+async fn a_full_output_queue_closes_with_the_error_line_first() -> TestResult {
+    let fixture = fixture(57)?;
+    let spec = tcp_spec(
+        ListenerPurpose::ClientTls,
+        4,
+        Some(server(
+            &fixture,
+            TlsEndpointProfile::Client,
+            ClientAuth::None,
+        )?),
+    )?;
+    let mut harness = start(vec![spec], HarnessOptions::default())?;
+    let address = tcp_address(&harness, 0)?;
+    let client = tls_client(
+        address,
+        client(&fixture, CLIENT_ALPN, false)?,
+        b"NICK slow\r\n".to_vec(),
+    );
+    let (generation, sink) = expect_opened(&mut harness.inbox, ListenerPurpose::ClientTls).await?;
+    assert_eq!(expect_line(&mut harness.inbox, generation).await?, "NICK");
+    sink.arm_slow_consumer_notice(rendered(
+        &harness.budget,
+        "ERROR",
+        "Closing connection: output queue exceeded",
+    )?);
+    // The writer shares this current-thread runtime, so nothing drains while
+    // this loop fills the queue to the ceiling that refuses a whole demand.
+    let backlog = rendered(&harness.budget, "NOTICE", "backlog")?;
+    let mut queued = 0_usize;
+    while enqueue_shared(&harness.budget, &sink, &backlog)? {
+        queued += 1;
+    }
+    assert!(
+        queued > 1_024,
+        "the queue held {queued} demands before it was full"
+    );
+    sink.begin_slow_consumer_close();
+    assert_eq!(
+        expect_closed(harness.recorder.as_ref(), generation).await?,
+        CloseReason::SlowConsumer
+    );
+    let received = joined(client).await??;
+    assert_eq!(
+        String::from_utf8_lossy(&received),
+        ":server.test ERROR :Closing connection: output queue exceeded\r\n"
+    );
+    drop((sink, backlog));
+    let (admitted, refused) = finish(harness).await?;
+    assert_eq!((admitted, refused), (1, 0));
+    Ok(())
+}
+
 async fn finish(harness: Harness) -> Result<(u64, u64), Box<dyn Error + Send + Sync>> {
     harness.set.stop_accepting();
     harness.set.cancel_connections();

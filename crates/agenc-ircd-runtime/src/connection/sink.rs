@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use agenc_ircd_client_wire::{MAX_PHYSICAL_LINE_BYTES, MAX_SEMANTIC_REPLIES, RenderedMessage};
 use tokio::sync::Notify;
 
+use super::queue::{OVERFLOW_CELL_CHARGE, OverflowCell};
 use crate::RuntimeError;
 use crate::budget::{ALLOCATION_BOOKKEEPING_BYTES, MEMORY_QUANTUM_BYTES, MemoryPermit};
 use crate::state_core::inbox::CloseReason;
@@ -371,6 +372,7 @@ pub struct TentativeClientQueueReservation {
     token: ReservationToken,
     demand: ClientQueueDemand,
     backing_charge: u64,
+    overflow: bool,
     ledger: Option<Arc<dyn QueueReservationLedger>>,
 }
 
@@ -389,8 +391,17 @@ impl TentativeClientQueueReservation {
             token: ReservationToken::next(),
             demand,
             backing_charge,
+            overflow: false,
             ledger: Some(ledger),
         }
+    }
+
+    /// Marks a demand reserved beyond the sink's fixed entries: it brings one
+    /// more charged cell, which `prepare` allocates beside any frame storage.
+    pub(crate) const fn beyond_fixed_entries(mut self) -> Self {
+        self.backing_charge = self.backing_charge.saturating_add(OVERFLOW_CELL_CHARGE);
+        self.overflow = true;
+        self
     }
 
     /// Returns the queue generation this reservation is bound to.
@@ -464,6 +475,7 @@ pub struct ClientQueueReservation {
     tentative: TentativeClientQueueReservation,
     // Fields drop in declaration order: free the storage before its permit.
     storage: Option<PreparedFrameStorage>,
+    cell: Option<OverflowCell>,
     backing: Option<MemoryPermit>,
     query_snapshot: Option<QuerySnapshotPermit>,
 }
@@ -487,18 +499,27 @@ impl ClientQueueReservation {
         if !matches {
             return Err(QueueAllocationError::PermitMismatch);
         }
-        let storage = match backing {
-            Some(_) => Some(PreparedFrameStorage::allocate(
-                tentative.demand().frame_count(),
-            )?),
-            None => None,
-        };
+        let frame_count = tentative.demand().frame_count();
+        let storage = (frame_count > INLINE_DEMAND_FRAMES)
+            .then(|| PreparedFrameStorage::allocate(frame_count))
+            .transpose()?;
+        let cell = tentative
+            .overflow
+            .then(OverflowCell::allocate)
+            .transpose()?;
         Ok(Self {
             tentative,
             storage,
+            cell,
             backing,
             query_snapshot: None,
         })
+    }
+
+    /// Whether the demand waits in a fixed entry rather than a charged cell.
+    #[cfg(test)]
+    pub(crate) const fn cell_is_absent(&self) -> bool {
+        self.cell.is_none()
     }
 
     pub(crate) fn with_query_snapshot(mut self, snapshot: QuerySnapshotPermit) -> Self {
@@ -535,6 +556,7 @@ impl ClientQueueReservation {
             frame_count: self.tentative.demand().frame_count(),
             total_bytes: self.tentative.demand().total_bytes(),
             storage: self.storage.take(),
+            cell: self.cell.take(),
             backing: self.backing.take(),
             query_snapshot: self.query_snapshot.take(),
             ledger,
@@ -551,6 +573,7 @@ pub struct QueueTransfer {
     total_bytes: usize,
     // Fields drop in declaration order: free the storage before its permit.
     storage: Option<PreparedFrameStorage>,
+    cell: Option<OverflowCell>,
     backing: Option<MemoryPermit>,
     query_snapshot: Option<QuerySnapshotPermit>,
     ledger: Option<Arc<dyn QueueReservationLedger>>,
@@ -585,6 +608,11 @@ impl QueueTransfer {
         self.storage.take()
     }
 
+    /// Takes the cell `prepare` created for a demand beyond the fixed entries.
+    pub(crate) fn take_cell(&mut self) -> Option<OverflowCell> {
+        self.cell.take()
+    }
+
     pub(crate) fn query_snapshot_usage(&self) -> Option<(u64, u64)> {
         self.query_snapshot
             .as_ref()
@@ -603,6 +631,7 @@ impl QueueTransfer {
             ledger.rollback(self.frame_count, self.total_bytes);
         }
         self.storage = None;
+        self.cell = None;
         self.backing = None;
         self.query_snapshot = None;
     }
@@ -691,8 +720,20 @@ pub trait ClientSink: Send + Sync {
     /// Enqueues the frames into the prepared slots without allocating.
     fn commit(&self, reservation: ClientQueueReservation, frames: BoundedSharedClientFrames);
 
+    /// Arms the one shared `ERROR` line a slow-consumer close delivers from
+    /// the reserved control slot. Embedding sinks without a transport ignore
+    /// it.
+    fn arm_slow_consumer_notice(&self, _notice: SharedClientFrame) {}
+
     /// Marks the connection closing after a full-queue exclusion.
     fn begin_slow_consumer_close(&self);
+
+    /// Destroys the queue for an administrative removal, which is not a
+    /// slow-consumer close and does not carry its `ERROR` reason. Embedding
+    /// sinks close the same way for both.
+    fn begin_forced_close(&self) {
+        self.begin_slow_consumer_close();
+    }
 
     /// Queues an orderly close after all already accepted frames and returns
     /// an acknowledgement completed by the transport writer.

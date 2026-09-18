@@ -12,6 +12,7 @@
 pub(crate) mod admin;
 mod admin_history;
 pub mod client_input;
+pub(crate) mod close_notice;
 pub mod durable;
 pub(crate) mod edge_checkpoint;
 pub mod fanout;
@@ -610,6 +611,7 @@ pub struct StateCoreContext {
     next_mutation: MutationContext,
     remote_account_results: BTreeMap<ConnectionGeneration, remote_result::RemoteResultBinding>,
     secret_floor: secret_floor::SecretFloor,
+    close_notice: close_notice::CloseNotice,
     next_correlation: Option<RequestBinding>,
     next_cross_profile: BTreeMap<ServerId, projector::CrossProfileAssignment>,
     outbound_events: Vec<OutboundEvent>,
@@ -1700,6 +1702,8 @@ impl StateCoreContext {
         sink: Arc<dyn crate::connection::sink::ClientSink>,
     ) -> Result<(), RuntimeError> {
         let now = self.now();
+        self.close_notice
+            .arm(sink.as_ref(), &self.server_prefix, self.budget.as_ref());
         self.sessions
             .open(generation, purpose, source_prefix, sink, now)?;
         let evicted = match self.prefixes.connection_opened(source_prefix, now) {
@@ -2274,6 +2278,7 @@ impl StateCore {
                 secret_floor: secret_floor::SecretFloor::new(
                     inputs.config.secret_lookup_floor_millis,
                 ),
+                close_notice: close_notice::CloseNotice::default(),
                 next_correlation: None,
                 next_cross_profile: BTreeMap::new(),
                 outbound_events: Vec::new(),
@@ -3364,7 +3369,7 @@ impl StateCore {
         let Some(sink) = self.context.sessions.sink_for_generation(generation) else {
             return Err(AdminCoreFailure::InvalidTarget);
         };
-        sink.begin_slow_consumer_close();
+        sink.begin_forced_close();
         self.context.sessions.mark_sink_gone(generation);
         Ok(())
     }
@@ -3383,7 +3388,7 @@ impl StateCore {
                 for user_id in users {
                     if let Some(generation) = self.context.sessions.generation_for_user(user_id) {
                         if let Some(sink) = self.context.sessions.sink_for_generation(generation) {
-                            sink.begin_slow_consumer_close();
+                            sink.begin_forced_close();
                         }
                         self.context.sessions.mark_sink_gone(generation);
                     }

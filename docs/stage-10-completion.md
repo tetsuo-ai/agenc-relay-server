@@ -80,6 +80,11 @@ and the close of every durable operation on the core write path, its
 determinate refusal, and the bounded region size a live database is created
 with (STO-03, issue #61) are recorded in
 [the bounded durable operation record](stage-10-bounded-durable-operation.md).
+The writer queue that is full only at its byte or item ceiling, so pipelined
+one-line replies and deliveries no longer close a connection as a slow
+consumer, and the `ERROR` line a slow-consumer close now sends from the
+reserved control slot (RUN-10, issue #174) are recorded in
+[the pipelined commands record](stage-10-pipelined-commands.md).
 The owners of all three Section-19.3 overload classes — the refused guest and
 expensive query at 80 percent, the refused channel creation at 90 percent, and
 whole-connection eviction down to the 85-percent recovery mark at 95 percent
