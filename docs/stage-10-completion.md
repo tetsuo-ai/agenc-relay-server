@@ -142,6 +142,12 @@ client without `standard-replies` reads, and the drill retry and capacity
 predicate that now read the line instead of guessing (RUN-09, issue #152) are
 recorded in
 [the SASL unavailable authority record](stage-10-sasl-unavailable.md).
+Leaf-membership proofs verified against the retained roster snapshot they
+name instead of the account's current heads, so live admission decides as
+startup reconstruction does after a roster or root rotation, the explicit
+`removed`-proof reading, and the internal-review finding it remediates
+(ENC-18, issue #164) are recorded in
+[the named-roster membership record](stage-10-membership-named-roster.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

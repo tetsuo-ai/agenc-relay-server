@@ -837,6 +837,7 @@ fn restore_directory(
     for (digest, entry) in entries {
         state.directory.restore_account(digest, entry);
     }
+    super::roster_snapshots::rebuild(state);
 }
 
 /// Re-verifies one root chain oldest first.
@@ -1695,7 +1696,7 @@ fn principal_rosters(
     rosters
 }
 
-fn principal_roots(
+pub(super) fn principal_roots(
     state: &CompanionState,
     network_id: &[u8; 32],
     account: &[u8; 24],

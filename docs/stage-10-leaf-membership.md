@@ -25,8 +25,11 @@ possession field and a nonzero removal ID.
 
 The coordinator's `submit_membership` admits a proof only from the attached,
 roster-active device the proof names, on an account that is a principal of
-the conversation's binding, verified against that account's current retained
-root and roster. It then applies the conversation rules:
+the conversation's binding, verified against that account's retained root and
+the retained roster snapshot the proof names (ENC-18, issue #164, replaced the
+original check against the current heads; see
+[the named-roster membership record](stage-10-membership-named-roster.md)).
+It then applies the conversation rules:
 
 - a `removed` proof must name a retained finalization (a terminal whose
   retained request is a `finalization_request`);
