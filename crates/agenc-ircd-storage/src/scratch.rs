@@ -61,6 +61,10 @@ const SCRATCH_RECLAIM_RECORDS: usize = 64;
 /// Reclamation publications one slice may need before the pages it freed are back in the
 /// allocator; each publication makes monotonic progress, so the loop always stops.
 const SCRATCH_RECLAIM_ROUNDS: usize = 4;
+/// Allowance granted to one reclamation publication and debited from the window in full,
+/// because the fork does not report what a reclamation charged. A reclamation rewrites only a
+/// handful of freed-table pages; one that this grant refuses reclaims nothing and is skipped.
+const SCRATCH_RECLAIM_ALLOWANCE: u64 = 4 * 1_048_576;
 
 /// A scratch table: raw keys and values, exactly as the store's own tables.
 pub(crate) type ScratchTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
@@ -128,6 +132,11 @@ pub(crate) struct ScratchDatabase<'a> {
     cleanup: Option<(File, String)>,
     admission: &'a dyn ScratchAdmission,
     allowance: AllocationAllowance,
+    /// Unspent remainder of the last admitted allowance. One admission covers every
+    /// transaction until three quarters of it are no longer left, so the scratch's own growth
+    /// is charged to the admission that made room for it instead of pushing the next sample
+    /// under the gate, and no transaction ever begins with less than three quarters of `G`.
+    window: u64,
     usage: ScratchUsage,
 }
 
@@ -181,6 +190,7 @@ impl<'a> ScratchDatabase<'a> {
             cleanup,
             admission,
             allowance,
+            window: 0,
             usage: ScratchUsage {
                 cache_bytes: u64::try_from(SCRATCH_CACHE_BYTES)
                     .map_err(|_| StorageError::Overflow)?,
@@ -189,7 +199,7 @@ impl<'a> ScratchDatabase<'a> {
             },
         };
         // From here on a refusal or failure drops `scratch`, which removes the entry.
-        admission.admit_scratch(allowance)?;
+        scratch.admit_window()?;
         let redb_file = scratch
             .file
             .try_clone()
@@ -201,6 +211,7 @@ impl<'a> ScratchDatabase<'a> {
             Some(open(&builder, redb_file).map_err(|_| StorageError::DatabaseRejected)?);
         scratch.usage.creation_bytes = scratch.file_length()?;
         scratch.usage.peak_file_bytes = scratch.usage.creation_bytes;
+        scratch.window = scratch.window.saturating_sub(scratch.usage.creation_bytes);
         let transaction = scratch.begin()?;
         for table in tables {
             let _created = transaction.open_table(*table).map_err(map_table_error)?;
@@ -235,14 +246,25 @@ impl<'a> ScratchDatabase<'a> {
     ///
     /// The transaction is single-phase: nothing in a scratch survives a restart, so it needs no
     /// second header flush.
-    pub(crate) fn begin(&self) -> Result<BoundedWriteTransaction, StorageError> {
-        self.admission.admit_scratch(self.allowance)?;
+    pub(crate) fn begin(&mut self) -> Result<BoundedWriteTransaction, StorageError> {
+        self.admit_window()?;
         self.database()?
-            .begin_write_bounded(self.allowance)
+            .begin_write_bounded(AllocationAllowance::new(self.window))
             .map_err(|error: TransactionError| match error {
                 TransactionError::Storage(error) => map_write_error(error),
                 _ => StorageError::DatabaseRejected,
             })
+    }
+
+    /// Samples the filesystem afresh for a whole allowance whenever less than three quarters of
+    /// the last admitted one is left; otherwise the next transaction spends the remainder.
+    fn admit_window(&mut self) -> Result<(), StorageError> {
+        let floor = self.allowance.bytes() - self.allowance.bytes() / 4;
+        if self.window < floor {
+            self.admission.admit_scratch(self.allowance)?;
+            self.window = self.allowance.bytes();
+        }
+        Ok(())
     }
 
     /// Prepares and publishes one bounded transaction, records its charge, and reclaims the
@@ -267,6 +289,7 @@ impl<'a> ScratchDatabase<'a> {
             .checked_add(charged)
             .ok_or(StorageError::Overflow)?;
         self.usage.peak_transaction_bytes = self.usage.peak_transaction_bytes.max(charged);
+        self.window = self.window.saturating_sub(charged);
         self.observe_file_length()?;
         self.reclaim()
     }
@@ -275,16 +298,18 @@ impl<'a> ScratchDatabase<'a> {
     /// slice rewrote; each publication is admitted and bounded like a slice.
     fn reclaim(&mut self) -> Result<(), StorageError> {
         for _round in 0..SCRATCH_RECLAIM_ROUNDS {
-            self.admission.admit_scratch(self.allowance)?;
-            let progress = self
+            self.admit_window()?;
+            let grant = self.window.min(SCRATCH_RECLAIM_ALLOWANCE);
+            self.window = self.window.saturating_sub(grant);
+            let progress = match self
                 .database()?
-                .reclaim_bounded(self.allowance, SCRATCH_RECLAIM_RECORDS)
-                .map_err(|error: RedbError| match error {
-                    RedbError::Allowance(refusal) => {
-                        StorageError::AllowanceRefused(refusal_phase(refusal))
-                    }
-                    _ => StorageError::DatabaseRejected,
-                })?;
+                .reclaim_bounded(AllocationAllowance::new(grant), SCRATCH_RECLAIM_RECORDS)
+            {
+                Ok(progress) => progress,
+                // A refused reclamation wrote nothing; the pages stay freed for a later one.
+                Err(RedbError::Allowance(_)) => break,
+                Err(_) => return Err(StorageError::DatabaseRejected),
+            };
             self.usage.reclamations = self
                 .usage
                 .reclamations
@@ -668,35 +693,53 @@ mod tests {
     }
 
     #[test]
-    fn every_transaction_is_admitted_afresh_with_the_fixed_allowance_and_a_refusal_is_determinate()
+    fn one_admission_covers_a_window_and_a_refused_window_is_determinate()
     -> Result<(), StorageError> {
         let directory = TestDirectory::create("admission")?;
         let admission = CountingAdmission::new(None, SCRATCH_TRANSACTION_ALLOWANCE);
         let mut scratch =
             ScratchDatabase::create(directory.exclusive("scratch.redb")?, &admission, &[TABLE])?;
-        let after_creation = admission.calls();
-        // Creation, the table transaction and its reclamation are each admitted.
-        assert!(after_creation >= 3);
+        // One sample admitted the whole allowance: creation, the table transaction, the slice
+        // and their reclamations spend it, so the scratch's own growth never pushes a second
+        // sample under the gate it just passed.
+        assert_eq!(admission.calls(), 1);
         publish_rows(&mut scratch, 0, 8, 32)?;
-        assert!(admission.calls() > after_creation);
+        assert_eq!(admission.calls(), 1);
         assert_eq!(admission.unexpected_allowance.load(Ordering::Acquire), 0);
         let usage = scratch.close();
         assert_eq!(usage.transactions, 2);
 
-        // External consumption between two slices: the second slice's own admission refuses,
-        // with the filesystem's classified cause, before the slice begins.
+        // A window is spent once less than three quarters of it are left; the next transaction
+        // then needs a fresh sample. External consumption in between refuses that sample, with
+        // the filesystem's classified cause, before the slice begins.
+        let measured = fixed_workload(&directory, "measure.redb", SCRATCH_TRANSACTION_ALLOWANCE)?;
+        let small = AllocationAllowance::new(measured.peak_transaction_bytes);
+        let counting = CountingAdmission::new(None, small);
+        let scratch = ScratchDatabase::create_with_allowance(
+            directory.exclusive("windows.redb")?,
+            &counting,
+            &[TABLE],
+            small,
+        )?;
+        let after_creation = counting.calls();
+        assert!(after_creation >= 2);
+        drop(scratch);
         let refusing = CountingAdmission::new(
             Some(
                 after_creation
                     .checked_add(1)
                     .ok_or(StorageError::Overflow)?,
             ),
-            SCRATCH_TRANSACTION_ALLOWANCE,
+            small,
         );
-        let mut scratch =
-            ScratchDatabase::create(directory.exclusive("refused.redb")?, &refusing, &[TABLE])?;
+        let mut scratch = ScratchDatabase::create_with_allowance(
+            directory.exclusive("refused.redb")?,
+            &refusing,
+            &[TABLE],
+            small,
+        )?;
         assert_eq!(
-            publish_rows(&mut scratch, 0, 8, 32),
+            publish_rows(&mut scratch, 0, 64, 32),
             Err(StorageError::FilesystemRejected(
                 FilesystemCause::InsufficientCapacity
             ))

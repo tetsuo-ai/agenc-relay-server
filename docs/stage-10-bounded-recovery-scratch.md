@@ -31,15 +31,21 @@ published through the frozen `prepare`/`publish` pair. `RecoveryScratch` and
 `ReferenceScratch` in `redb_store.rs` are built on it and keep their table
 layout and their checks; only their transaction shape changed.
 
-- **Admission.** Before creation, before every slice, before every
-  reclamation and before nothing else, the scratch asks its
-  `ScratchAdmission` for the transaction's allowance. The engine's
-  `ScratchGate` samples the state filesystem afresh (`fstatvfs` through the
-  retained directory descriptor, the same sample `admit_transaction` takes)
-  and requires `available >= R(F) + allowance`. The gate is the Section 19.3
-  `R(F) + G` gate with `G` spelled out, and it works for both authorities:
-  the writer-locked `StateDirectory` and the read-only
-  `InspectionStateDirectory`, which samples capacity without the lock.
+- **Admission.** The scratch asks its `ScratchAdmission` for a whole
+  allowance before creation and again whenever less than three quarters of
+  the last admitted allowance is left; every transaction in between spends
+  the remainder of that window. The engine's `ScratchGate` samples the state
+  filesystem afresh (`fstatvfs` through the retained directory descriptor,
+  the same sample `admit_transaction` takes) and requires
+  `available >= R(F) + allowance`. One admission per window, rather than one
+  per transaction, is what makes the gate exact: the scratch's own growth is
+  charged to the admission that made room for it, so at exactly `R(F) + G`
+  the 1 MiB the scratch file occupies does not push its next sample under
+  the gate it just passed. No transaction ever begins with less than three
+  quarters of `G`, and growth since the last sample never exceeds `G`. The
+  gate works for both authorities: the writer-locked `StateDirectory` and the
+  read-only `InspectionStateDirectory`, which samples capacity without the
+  lock.
 - **Allowance.** Every scratch transaction is bounded by
   `MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH`, the fixed 268,435,456-byte `G`
   of Section 19.3. The fork's account debits every page extent at its rounded
@@ -60,7 +66,8 @@ layout and their checks; only their transaction shape changed.
   transaction that opens its tables are admitted and bounded like every
   slice. After every publication the scratch runs
   `Database::reclaim_bounded` under the same admission and allowance, at most
-  64 freed-page records per publication and at most four publications, so the
+  64 freed-page records per publication and at most four publications, each
+  granted 4 MiB of the window, so the
   pages a slice or a reverse chunk rewrote return to the allocator instead of
   growing the file. The close calls `persist_allocator_state_bounded` with a
   **zero** allowance on purpose: nothing in a scratch survives, so its
@@ -79,6 +86,44 @@ layout and their checks; only their transaction shape changed.
   `set_two_phase_commit` exists for durable publications that a restart must
   find; a scratch is never trusted across a restart and is removed on the
   next open, so it needs no second header flush.
+
+## Low disk disables durable writes, never the open
+
+The first version of this work admitted the startup scratch before the owner
+opened and let a refusal fail `StorageOwner::start`. The combined gate's
+`qualification_workload` found it: at one byte below `R(F) + G` the raw log
+read `refused|open|clean` where main reads `refused|commit|clean`. Under
+`rust-gdb`, a breakpoint on the gate's refusal showed the caller chain
+`StorageOwner::start` -> `startup_scan` -> `verify_integrity_ledger_metered`
+-> `reconstruct_tracked_state` -> `RecoveryScratch::create` ->
+`ScratchDatabase::begin` -> `ScratchGate::admit_scratch`, and showed the
+refusing sample was the scratch's *second* one, taken after its own file had
+consumed space. Both were defects: Section 19.3 keeps a node below the reserve
+running with "new durable mutations and history" disabled, so low disk must
+not become an outage and a restart under pressure must stay possible.
+
+Now a writer whose scratch the filesystem cannot admit
+(`FilesystemRejected(InsufficientCapacity)`, and only that: a failed sample, a
+refused allowance and a scratch I/O failure still fail the open closed) opens
+anyway. Everything that needs no scratch still runs at open: inventory and
+meta membership, the complete control chain, and the full AEAD, schema,
+domain, accounting and singleton scan. Only the two scratch halves, the
+tracked-state reconstruction and the reference validation, are owed;
+`RecoveredStorageState` reports both usages as zero. The engine records the
+debt (`verification_deferred`) and `ensure_verified` pays it before any
+durable write is accepted: at the head of a commit's admission and of a
+checkpoint installation. A backup is not held behind the debt: it writes
+nothing to this database, Section 19.3 admits it at `R(F) + O` on its own
+filesystem, far below the scratch gate, and a restore reconstructs and
+verifies the whole ledger again; its scan defers like the open's and the debt
+stays recorded. While the space is still missing, the write
+is refused with the same determinate capacity rejection it would get anyway
+and reads keep being served; once the space is back, the first write runs the
+bounded reconstruction and the reference validation in fresh scratch and then
+proceeds. A deferred verification that fails is the fatal ledger mismatch it
+would have been at startup: the write is not applied and the owner closes.
+Nothing is written on unverified state and nothing is skipped. An inspection
+has no later write to gate, so it never defers: it is refused.
 
 ## Where the scratch lives
 
@@ -248,6 +293,16 @@ Storage crate, `cargo test -p agenc-ircd-storage --all-features --locked --
   at the checkpoint and at startup; a scratch entry an interrupted
   verification left behind is removed on the next open while an unrelated
   entry survives.
+- Low disk: through the real owner, the three Section 28.7 boundaries open
+  the owner in all three cases and read refused-at-commit, admitted,
+  admitted; an owner opened one byte below the gate behind 8 MiB of ballast
+  refuses its first write, and once the ballast is removed the next write
+  pays the owed verification, leaves no scratch entry and commits. In the
+  engine: an unadmitted startup scratch opens with reads served and commit
+  and checkpoint refused with the capacity cause, then verifies before the
+  first write; a record substituted while the verification was owed makes
+  that first write `Indeterminate` with nothing applied; an inspection never
+  defers. `qualification_workload` passes on the ext4 target.
 - The existing checkpoint fault matrix
   (`every_checkpoint_fault_reopens_to_a_verified_commit_or_checkpoint`), the
   STO-10 guard publication window, every integrity-ledger corruption case and
@@ -274,9 +329,12 @@ Storage crate, `cargo test -p agenc-ircd-storage --all-features --locked --
   own builder rather than `live_database_builder`, which carries the live
   cache and is documented for files that become a live database; both use
   64 MiB regions.
-- The qualification workload was not rerun on this branch; its checkpoint
-  cases now sample capacity a few more times per checkpoint, inside the
-  existing sample ceiling.
+- A reclamation is granted 4 MiB and debited in full, because the fork does
+  not report what a reclamation charged; one that the grant refuses is
+  skipped, which costs file growth, never correctness.
+- An owner that opened with its verification owed serves reads from state
+  whose control chain and records were verified but whose tracked-state
+  digest and references were not yet; no write is accepted until they are.
 - A readback that does not reproduce the scan is reported as
   `Indeterminate` because that is the only fatal outcome the checkpoint has;
   nothing was published in that case, and the restart's startup

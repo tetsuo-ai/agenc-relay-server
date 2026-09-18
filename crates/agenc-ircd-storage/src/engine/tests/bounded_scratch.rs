@@ -140,11 +140,10 @@ fn a_refused_checkpoint_readback_admission_rejects_before_any_publication_and_ke
         assert!(matches!(engine.commit(batch), CommitOutcome::Committed(_)));
         assert_eq!(scratch_entries(&path)?, Vec::<String>::new());
     }
-    // Creation, the table transaction, its reclamation, the current-row slice, its
-    // reclamation and the checkpoint transaction's own sample were each refused in turn before
-    // one run passed them all.
+    // The readback's one window sample and the checkpoint transaction's own sample were each
+    // refused in turn before one run passed them both.
     assert!(
-        installed_at.is_some_and(|occurrence| occurrence >= 6),
+        installed_at.is_some_and(|occurrence| occurrence >= 3),
         "{installed_at:?}"
     );
     Ok(())
@@ -255,7 +254,7 @@ fn startup_reconstruction_is_admitted_bounded_and_metered_by_both_authorities()
 #[test]
 fn a_refused_startup_scratch_admission_fails_closed_and_leaves_no_entry() -> Result<(), StorageError>
 {
-    for occurrence in 1..=4_u64 {
+    for occurrence in 1..=2_u64 {
         let faults = capacity_admission_faults()?;
         let mut fixture = EngineFixture::create_with_faults(faults.clone())?;
         let path = fixture.path().to_path_buf();
@@ -328,5 +327,122 @@ fn the_scratch_gate_admits_at_exactly_the_reserve_plus_the_allowance() -> Result
             "filesystem capacity did not settle for delta {delta}"
         );
     }
+    Ok(())
+}
+
+/// Raises the reserve past anything the filesystem holds, which is what a disk below
+/// `R(F) + G` looks like to the gate, and returns the reserve to restore.
+fn exhaust_reserve(engine: &mut StorageEngine) -> u64 {
+    let reserve = engine.limits.fixed_reserve_bytes;
+    engine.limits.fixed_reserve_bytes = u64::MAX / 2;
+    reserve
+}
+
+#[test]
+fn an_unadmitted_startup_scratch_opens_with_writes_refused_and_verifies_before_the_first_write()
+-> Result<(), StorageError> {
+    let mut fixture = EngineFixture::create()?;
+    let path = fixture.path().to_path_buf();
+    let engine = fixture.engine_mut()?;
+    let batch = EngineFixture::advancing_batch(engine, 51)?;
+    assert!(matches!(engine.commit(batch), CommitOutcome::Committed(_)));
+
+    // Below the reserve the writer still opens: the chain and the domain scan ran, the scratch
+    // half is owed, and no scratch entry was left.
+    let reserve = exhaust_reserve(engine);
+    let recovered = engine.startup_scan()?;
+    assert!(engine.verification_is_deferred());
+    assert_eq!(recovered.verification_scratch(), ScratchUsage::default());
+    assert_eq!(recovered.reference_scratch(), ScratchUsage::default());
+    assert_eq!(scratch_entries(&path)?, Vec::<String>::new());
+
+    // Reads are served; every durable write is refused with the capacity cause, determinately,
+    // and the verification stays owed.
+    let plan = ReadPlan::exact(TableId::Account, EngineFixture::account_key(51)?);
+    assert_eq!(engine.read(&plan)?.records.len(), 1);
+    let batch = EngineFixture::advancing_batch(engine, 52)?;
+    assert!(matches!(
+        engine.commit(batch),
+        CommitOutcome::Rejected(StorageError::FilesystemRejected(
+            crate::FilesystemCause::InsufficientCapacity
+        ))
+    ));
+    assert!(matches!(
+        run_checkpoint(engine),
+        Err(EngineCommitFailure::Rejected(
+            StorageError::FilesystemRejected(crate::FilesystemCause::InsufficientCapacity)
+        ))
+    ));
+    assert!(engine.verification_is_deferred());
+
+    // Space returns: the first write runs the owed verification, then commits.
+    engine.limits.fixed_reserve_bytes = reserve;
+    let batch = EngineFixture::advancing_batch(engine, 52)?;
+    assert!(matches!(engine.commit(batch), CommitOutcome::Committed(_)));
+    assert!(!engine.verification_is_deferred());
+    assert_bounded(engine.startup_scan()?.verification_scratch())?;
+    Ok(())
+}
+
+#[test]
+fn a_deferred_verification_that_fails_closes_the_owner_before_the_write() -> Result<(), StorageError>
+{
+    let mut fixture = EngineFixture::create()?;
+    let engine = fixture.engine_mut()?;
+    let batch = EngineFixture::advancing_batch(engine, 53)?;
+    assert!(matches!(engine.commit(batch), CommitOutcome::Committed(_)));
+    let reserve = exhaust_reserve(engine);
+    let _recovered = engine.startup_scan()?;
+    assert!(engine.verification_is_deferred());
+
+    // A record substituted while the verification was owed: same key, an envelope that still
+    // decodes, a different identifier, no manifest.
+    let key = EngineFixture::account_key(53)?;
+    let mut encoded = engine
+        .store
+        .read_record(TableId::Account, key.as_bytes())?
+        .ok_or(StorageError::StaleState)?;
+    let byte = encoded.get_mut(48).ok_or(StorageError::InvalidEncoding)?;
+    *byte ^= 0x5a;
+    let reservation = engine.reservation.encode()?;
+    engine
+        .store
+        .commit_records(
+            &[RedbWrite {
+                table: TableId::Account,
+                key: key.as_bytes(),
+                value: Some(&encoded),
+            }],
+            &reservation,
+            full_allowance(),
+        )
+        .map_err(|_| StorageError::DatabaseRejected)?;
+    let state_before = *engine.state_meta.tbs();
+
+    // With space back, the first write runs the owed verification, which fails: nothing is
+    // written on the unverified state and the owner takes the fatal exit.
+    engine.limits.fixed_reserve_bytes = reserve;
+    let batch = EngineFixture::advancing_batch(engine, 54)?;
+    assert!(matches!(engine.commit(batch), CommitOutcome::Indeterminate));
+    assert_eq!(*engine.state_meta.tbs(), state_before);
+    assert!(engine.verification_is_deferred());
+    Ok(())
+}
+
+#[test]
+fn an_inspection_never_defers_its_verification() -> Result<(), StorageError> {
+    let mut fixture = EngineFixture::create()?;
+    let path = fixture.path().to_path_buf();
+    drop(fixture.engine.take());
+    std::fs::remove_file(path.join("writer.lock")).map_err(crate::filesystem_rejected)?;
+    let mut inspected = StorageEngine::open_inspection(inspection_config(&path)?)?;
+    let _reserve = exhaust_reserve(&mut inspected);
+    assert_eq!(
+        inspected.startup_scan().map(|_recovered| ()),
+        Err(StorageError::FilesystemRejected(
+            crate::FilesystemCause::InsufficientCapacity
+        ))
+    );
+    assert!(!inspected.verification_is_deferred());
     Ok(())
 }

@@ -4,6 +4,7 @@ mod stopped;
 
 use std::fs::File;
 use std::io::{Seek as _, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agenc_ircd_crypto::{
@@ -938,6 +939,10 @@ pub(crate) struct StorageEngine {
     retained_manifest_bytes: u64,
     checkpoint_job: Option<CheckpointJob>,
     backup_job: Option<BackupJob>,
+    /// Whether the scratch half of the startup verification is still owed: the filesystem could
+    /// not admit it when the owner opened, so the owner opened with every durable write refused
+    /// until a write finds the space to run it first.
+    verification_deferred: AtomicBool,
     cleanup: DeferredCleanup,
     last_operation_charged_bytes: u64,
     close_handled: bool,
@@ -1152,6 +1157,7 @@ impl StorageEngine {
             retained_manifest_bytes: authenticated.retained_manifest_bytes,
             checkpoint_job: None,
             backup_job: None,
+            verification_deferred: AtomicBool::new(false),
             cleanup: DeferredCleanup {
                 pending: true,
                 reclaimed_pages: 0,
@@ -1648,6 +1654,10 @@ impl StorageEngine {
         if (self.backup_job.is_some(), self.checkpoint_job.is_some()) != (false, false) {
             return Err(StorageError::QueueFull);
         }
+        // A backup writes nothing to this database and is admitted at `R(F) + O` on its own
+        // filesystem, far below the scratch gate, so it is not held behind an owed scratch
+        // verification: its scan defers like the open's, the debt stays recorded for the next
+        // durable write, and a restore reconstructs and verifies the whole ledger again.
         let _capacity = self.startup_scan()?;
         let snapshot = self.store.snapshot()?;
         let (logical_database_bytes, backup_stream_bytes) =
@@ -1907,6 +1917,7 @@ impl StorageEngine {
         // reservation guard, the transaction or the committed guard exist: the scratch that
         // reverses the current records to the cut is admitted slice by slice against the same
         // reserve the transaction is admitted against, and a refusal leaves nothing written.
+        self.ensure_verified().map_err(readback_failure)?;
         let readback = self
             .readback_checkpoint_cut(&completed)
             .map_err(readback_failure)?;
@@ -2334,6 +2345,7 @@ impl StorageEngine {
                 .check(site, StorageFaultBoundary::Before)
                 .map_err(rejected)?;
         }
+        self.ensure_verified().map_err(readback_failure)?;
         let _capacity = self
             .state_directory
             .admit_transaction(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)
@@ -2818,11 +2830,35 @@ impl StorageEngine {
     pub(crate) fn startup_scan(&self) -> Result<RecoveredStorageState, StorageError> {
         self.store.validate_inventory()?;
         self.store.validate_meta_membership()?;
-        let verification_scratch = self.verify_integrity_ledger_metered()?;
+        // Section 19.3: below the reserve durable mutation is disabled, the node is not. A
+        // scratch the filesystem cannot admit never refuses the open of a writer: the control
+        // chain and the complete domain scan below still run, the scratch half is owed, and
+        // `ensure_verified` pays it before the first durable write is accepted. An inspection
+        // has no later write to gate, so it is refused instead of skipping verification.
+        let may_defer = self.state_directory.installs_repairable_guard();
+        let mut deferred = false;
+        let verification_scratch = match self.verify_integrity_ledger_metered() {
+            Ok(usage) => usage,
+            Err(error) if may_defer && scratch_unadmitted(error) => {
+                deferred = true;
+                ScratchUsage::default()
+            }
+            Err(error) => return Err(error),
+        };
         let gate = self.scratch_gate();
-        let mut reference_scratch =
-            ReferenceScratch::create(self.state_directory.scratch_location()?, &gate)?;
-        let mut reference_writer = reference_scratch.begin();
+        let mut reference_scratch = if deferred {
+            None
+        } else {
+            match ReferenceScratch::create(self.state_directory.scratch_location()?, &gate) {
+                Ok(scratch) => Some(scratch),
+                Err(error) if may_defer && scratch_unadmitted(error) => {
+                    deferred = true;
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let mut reference_writer = reference_scratch.as_mut().map(ReferenceScratch::begin);
         let mut logical_bytes =
             logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
                 .checked_add(logical_meta_charge(
@@ -2893,7 +2929,17 @@ impl StorageEngine {
                             &stored_key,
                             plaintext.expose_for_storage_codec(),
                         )?;
-                        reference_writer.insert(table, &stored_key, &references)?;
+                        let inserted = reference_writer.as_mut().map_or(Ok(()), |writer| {
+                            writer.insert(table, &stored_key, &references)
+                        });
+                        match inserted {
+                            Ok(()) => {}
+                            Err(error) if may_defer && scratch_unadmitted(error) => {
+                                reference_writer = None;
+                                deferred = true;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                     logical_bytes = logical_bytes
                         .checked_add(logical_record_charge(key.len(), encoded.len())?)
@@ -2967,9 +3013,24 @@ impl StorageEngine {
                 })?;
         }
         history_inventory.finish()?;
-        reference_writer.finish()?;
-        reference_scratch.validate()?;
-        let reference_scratch = reference_scratch.close();
+        match reference_writer
+            .take()
+            .map_or(Ok(()), |writer| writer.finish())
+        {
+            Ok(()) => {}
+            Err(error) if may_defer && scratch_unadmitted(error) => deferred = true,
+            Err(error) => return Err(error),
+        }
+        let reference_scratch = match reference_scratch {
+            Some(scratch) if !deferred => {
+                scratch.validate()?;
+                scratch.close()
+            }
+            _ => ScratchUsage::default(),
+        };
+        if deferred {
+            self.verification_deferred.store(true, Ordering::Release);
+        }
         let expected_previous_login_entries =
             previous_login_generation.map_or(0, |(_, count)| count);
         if (
@@ -3186,6 +3247,64 @@ impl StorageEngine {
     /// reconstructed in bounded scratch back to the checkpoint cut.
     fn verify_integrity_ledger(&self) -> Result<(), StorageError> {
         self.verify_integrity_ledger_metered().map(|_usage| ())
+    }
+
+    /// Whether the scratch half of the startup verification is still owed.
+    pub(crate) fn verification_is_deferred(&self) -> bool {
+        self.verification_deferred.load(Ordering::Acquire)
+    }
+
+    /// Pays a deferred startup verification before a durable write is accepted: the bounded
+    /// ledger reconstruction and the complete reference validation, exactly what the open would
+    /// have run. While the filesystem still cannot admit the scratch this refuses with the same
+    /// capacity rejection the write itself would get; a verification that fails is the fatal
+    /// ledger mismatch it would have been at startup. Nothing is ever written on unverified
+    /// state and nothing is skipped.
+    fn ensure_verified(&self) -> Result<(), StorageError> {
+        if !self.verification_is_deferred() {
+            return Ok(());
+        }
+        let _ledger = self.verify_integrity_ledger_metered()?;
+        let _references = self.verify_references()?;
+        self.verification_deferred.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Validates every record reference in a bounded scratch of its own, as the startup scan
+    /// does while it walks the tables.
+    fn verify_references(&self) -> Result<ScratchUsage, StorageError> {
+        let gate = self.scratch_gate();
+        let mut scratch =
+            ReferenceScratch::create(self.state_directory.scratch_location()?, &gate)?;
+        let mut writer = scratch.begin();
+        for number in 0_u16..=26 {
+            let table = TableId::from_u16(number)?;
+            if !table.is_integrity_tracked() {
+                continue;
+            }
+            self.store
+                .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                    let stored_key = StoredKey::new(key.to_vec())?;
+                    let sealed = SealedRecord::decode(encoded)?;
+                    let plaintext = sealed.open(
+                        &self.master_key,
+                        self.binding,
+                        table,
+                        sealed.record_schema(),
+                        self.header.tbs().storage_key_generation,
+                        &stored_key,
+                    )?;
+                    let references = record_references(
+                        table,
+                        &stored_key,
+                        plaintext.expose_for_storage_codec(),
+                    )?;
+                    writer.insert(table, &stored_key, &references)
+                })?;
+        }
+        writer.finish()?;
+        scratch.validate()?;
+        Ok(scratch.close())
     }
 
     /// Verifies the complete ledger and reports the metered scratch its reconstruction used.
@@ -4024,6 +4143,13 @@ fn rejected(error: StorageError) -> EngineCommitFailure {
 
 fn indeterminate(_error: StorageError) -> EngineCommitFailure {
     EngineCommitFailure::Indeterminate
+}
+
+/// Whether a scratch was refused because the filesystem is below `R(F)` plus its allowance:
+/// the one condition Section 19.3 answers with disabled durable mutation rather than a closed
+/// owner. A failed sample, a refused allowance or a scratch I/O failure is not low disk.
+fn scratch_unadmitted(error: StorageError) -> bool {
+    error == StorageError::FilesystemRejected(crate::FilesystemCause::InsufficientCapacity)
 }
 
 /// Classifies a readback failure raised before anything was published. A resource refusal is a

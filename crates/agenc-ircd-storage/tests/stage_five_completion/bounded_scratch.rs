@@ -254,7 +254,7 @@ fn a_refused_checkpoint_scratch_admission_rejects_without_publishing_and_keeps_t
         assert_bounded(verification, "reopened verification")?;
         assert_bounded(references, "reopened references")?;
     }
-    if !installed_at.is_some_and(|occurrence| occurrence >= 6) {
+    if !installed_at.is_some_and(|occurrence| occurrence >= 3) {
         return Err(format!("too few scratch admissions were refused: {installed_at:?}").into());
     }
     Ok(())
@@ -273,7 +273,7 @@ fn a_refused_startup_scratch_admission_fails_closed_and_leaves_no_scratch_behind
         driver.commit_certainly(2)?;
         owner.shutdown()?;
     }
-    for occurrence in 1..=4_u64 {
+    for occurrence in 1..=2_u64 {
         let faults = capacity_admission_faults()?;
         let state_directory = StateDirectory::open_with_faults(
             fixture.directory.path(),
@@ -383,5 +383,154 @@ fn a_scratch_left_by_an_interrupted_verification_is_removed_on_reopen_and_never_
     if !scratch_entries(fixture.directory.path())?.is_empty() {
         return Err("the reopen left a scratch entry of its own".into());
     }
+    Ok(())
+}
+
+/// Offset of the configured reserve from the exact `available - G` point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Boundary {
+    /// Available space is one byte below `R(F) + G`.
+    MinusOne,
+    /// Available space is exactly `R(F) + G`.
+    Equal,
+    /// Available space is one byte above `R(F) + G`.
+    PlusOne,
+}
+
+const BOUNDARY_ATTEMPTS: usize = 24;
+
+/// Opens the real owner with a reserve that puts the filesystem at `boundary`, on a sample the
+/// open itself did not move, and returns it with whether its scratch verification was deferred.
+fn open_at_boundary(
+    fixture: &InitializedLiveFixture,
+    boundary: Boundary,
+) -> Result<(StorageOwner, bool), Box<dyn Error>> {
+    for _attempt in 0..BOUNDARY_ATTEMPTS {
+        let before = StateDirectory::open(fixture.directory.path(), &[fixture.qualification])?
+            .capacity(0, 0)?
+            .available_bytes;
+        let exact = before
+            .checked_sub(MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH)
+            .ok_or("the test filesystem is smaller than the growth allowance")?;
+        let mut limits = test_limits();
+        limits.fixed_reserve_bytes = match boundary {
+            Boundary::MinusOne => exact.checked_add(1).ok_or(StorageError::Overflow)?,
+            Boundary::Equal => exact,
+            Boundary::PlusOne => exact.checked_sub(1).ok_or(StorageError::Overflow)?,
+        };
+        let mut config = live_open_config(StateDirectory::open(
+            fixture.directory.path(),
+            &[fixture.qualification],
+        )?);
+        config.limits = limits;
+        // Section 19.3: whatever the boundary, the owner opens.
+        let owner = StorageOwner::start(config)?;
+        let statistics = owner.port().try_statistics()?.wait()?;
+        if statistics.filesystem_available_bytes() != before
+            || statistics.filesystem_reserve_bytes() != limits.fixed_reserve_bytes
+        {
+            let _ = owner.shutdown();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        let deferred = owner.recovered_state().verification_scratch().transactions == 0;
+        return Ok((owner, deferred));
+    }
+    Err("filesystem capacity did not settle for a boundary observation".into())
+}
+
+#[test]
+fn the_owner_opens_at_all_three_reserve_boundaries_and_only_the_commit_is_refused()
+-> Result<(), Box<dyn Error>> {
+    for boundary in [Boundary::MinusOne, Boundary::Equal, Boundary::PlusOne] {
+        let fixture = initialized_live_fixture()?;
+        let (owner, deferred) = open_at_boundary(&fixture, boundary)?;
+        let mut driver = AccountDriver::new(owner.port(), &fixture);
+        let outcome = driver.commit(1)?;
+        match boundary {
+            Boundary::MinusOne => {
+                if !deferred {
+                    return Err("one byte below the gate did not defer the scratch".into());
+                }
+                if !matches!(
+                    outcome,
+                    CommitOutcome::Rejected(StorageError::FilesystemRejected(
+                        agenc_ircd_storage::FilesystemCause::InsufficientCapacity
+                    ))
+                ) {
+                    return Err("one byte below the gate was not refused at the commit".into());
+                }
+            }
+            Boundary::Equal | Boundary::PlusOne => {
+                if deferred {
+                    return Err(format!("{boundary:?} deferred a scratch it could admit").into());
+                }
+                if !matches!(outcome, CommitOutcome::Committed(_)) {
+                    return Err(format!("{boundary:?} did not admit the commit").into());
+                }
+            }
+        }
+        if !scratch_entries(fixture.directory.path())?.is_empty() {
+            return Err(format!("{boundary:?} left a scratch entry").into());
+        }
+        // A shutdown checkpoint under the same pressure may be refused; the open is the claim.
+        let _ = owner.shutdown();
+    }
+    Ok(())
+}
+
+#[test]
+fn a_deferred_verification_runs_and_gates_the_first_write_once_space_returns()
+-> Result<(), Box<dyn Error>> {
+    let fixture = initialized_live_fixture()?;
+    {
+        let owner = StorageOwner::start(live_open_config(StateDirectory::open(
+            fixture.directory.path(),
+            &[fixture.qualification],
+        )?))?;
+        let mut driver = AccountDriver::new(owner.port(), &fixture);
+        driver.commit_certainly(3)?;
+        owner.shutdown()?;
+    }
+    // Eight MiB of ballast hold the filesystem one byte below the gate; removing them is the
+    // space returning.
+    let ballast = fixture.directory.path().join("ballast.keep");
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&ballast)?;
+        file.write_all(&vec![0xB5_u8; 8 * 1_048_576])?;
+        file.sync_all()?;
+    }
+    let (owner, deferred) = open_at_boundary(&fixture, Boundary::MinusOne)?;
+    if !deferred {
+        return Err("the open below the gate did not defer its scratch verification".into());
+    }
+    let statistics = owner.port().try_statistics()?.wait()?;
+    let mut driver = AccountDriver::new(owner.port(), &fixture);
+    driver.commit_sequence = owner.recovered_state().storage_commit_sequence();
+    driver.state_generation = owner.recovered_state().state_generation();
+    driver.logical_database_bytes = statistics.logical_database_bytes();
+    driver.backup_stream_bytes = statistics.backup_stream_bytes();
+    driver.next_account = 100;
+    if !matches!(
+        driver.commit(1)?,
+        CommitOutcome::Rejected(StorageError::FilesystemRejected(
+            agenc_ircd_storage::FilesystemCause::InsufficientCapacity
+        ))
+    ) {
+        return Err("a write was accepted while the verification was owed".into());
+    }
+    fs::remove_file(&ballast)?;
+    // The first write after the space returned pays the owed verification in fresh bounded
+    // scratch, leaves no entry, and commits.
+    driver.commit_certainly(1)?;
+    if !scratch_entries(fixture.directory.path())?.is_empty() {
+        return Err("the deferred verification left a scratch entry".into());
+    }
+    driver.commit_certainly(1)?;
+    let _ = owner.shutdown();
     Ok(())
 }

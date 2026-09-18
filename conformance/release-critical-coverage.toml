@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 854
-reviewed_source_sha256 = "0282d5e9ee52c7e780f9a9286f1cb01a790bb396e7f769394a5fc0cc18ecd3dd"
+reviewed_source_sha256 = "926478fad0864fae8d81fb005288f4060bc7c6ee2fd783f7d93d2512bbdbd2d1"
 deferred = []
 
 [[region]]
@@ -3751,9 +3751,9 @@ id = "storage-admission-engine-validate-recovered-domain-record"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-storage/src/engine.rs"
 item = "validate_recovered_domain_record"
-source_sha256 = "c6d38bba118a9d22f2996b7b6c042fc3ecd632a3e823d232d53d8e3994ce16e2"
-start_line = 3520
-end_line = 3561
+source_sha256 = "c7697982e2881887eab9b55dcd955ee73f8cc21b2f39cdb3ef9d59f2de94198f"
+start_line = 3639
+end_line = 3680
 span_sha256 = "46a3960182682b0ab3e4ba137a90ce2d2e3c8f1c90b83d5ff7a674c02faf6d6a"
 metric = "regions"
 reason = "Recovered rows require canonical ownership and target existence, including exactly one Account reference for a redeemed invitation and empty Account and Session tombstones."
