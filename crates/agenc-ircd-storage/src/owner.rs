@@ -455,11 +455,12 @@ impl StorageOwner {
 impl Drop for StorageOwner {
     /// Performs the same joined shutdown as [`StorageOwner::shutdown`] and discards its result.
     ///
-    /// The owner thread finishes any active checkpoint, then runs one complete checkpoint scan
-    /// when manifests are retained. An audited reload reservation skips that final scan so
-    /// startup reconciliation can resolve the reservation. The close then persists the
-    /// allocator state within its own bounded allowance. Dropping waits behind any deferred
-    /// backup; callers that need the outcome must call `shutdown` instead.
+    /// The owner thread cancels any backup still in its phases (its holder receives
+    /// `Unavailable` and no artifact is published), finishes any active checkpoint, then runs
+    /// one complete checkpoint scan when manifests are retained. An audited reload reservation
+    /// skips that final scan so startup reconciliation can resolve the reservation. The close
+    /// then persists the allocator state within its own bounded allowance. Callers that need
+    /// the outcome must call `shutdown` instead.
     fn drop(&mut self) {
         let _ = self.join_owner();
     }
@@ -559,7 +560,6 @@ const fn defers_beside(job: ActiveJob, request: &StorageRequest) -> bool {
         (job, request),
         (_, StorageRequest::Backup { .. })
             | (ActiveJob::Backup, StorageRequest::Checkpoint { .. })
-            | (ActiveJob::Backup, StorageRequest::Shutdown { .. })
             | (ActiveJob::Checkpoint, StorageRequest::Commit { .. })
             | (ActiveJob::Checkpoint, StorageRequest::Checkpoint { .. })
             | (ActiveJob::Checkpoint, StorageRequest::LimitsChanged)
@@ -695,6 +695,13 @@ fn dispatch_request(
         }
         StorageRequest::LimitsChanged => OwnerStep::Continue,
         StorageRequest::Shutdown { completion } => {
+            // A backup still in its phases is cancelled, not waited for: the
+            // job drops its temporary and scratch, its holder learns the
+            // owner is closing, and the bounded shutdown checkpoint starts.
+            if engine.backup_is_active() {
+                engine.abandon_backup();
+                finish_backup(state, Err(StorageError::Unavailable));
+            }
             let result = finish_for_shutdown(engine);
             let _ = completion.send(result);
             OwnerStep::Stop
@@ -1193,3 +1200,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "owner/tests/backup_phases.rs"]
+mod backup_phase_tests;

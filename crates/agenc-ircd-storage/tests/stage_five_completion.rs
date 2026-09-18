@@ -5264,3 +5264,6 @@ fn key_for(table: TableId) -> Result<StoredKey, Box<dyn Error>> {
 fn digest(byte: u8) -> StorageDigest {
     StorageDigest::from_bytes([byte; 32])
 }
+
+#[path = "stage_five_completion/backup_phases.rs"]
+mod backup_phases;

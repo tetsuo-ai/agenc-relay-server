@@ -1,12 +1,12 @@
 //! Authenticated, bounded, streaming backup format and verification.
 
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead as _, BufReader, Read, Write};
 
 use agenc_ircd_crypto::{
     BackupStreamHasher, DatabaseBinding, Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature,
-    RollbackGuardRootKey, SignatureDomain, StorageDigest, StorageIntegrityContext,
-    StorageIntegrityKeys, StorageMasterKey, backup_signing_key_id, derive_storage_integrity_keys,
-    sign_canonical, verify_canonical,
+    OpenedStoragePlaintext, RollbackGuardRootKey, SignatureDomain, StorageDigest,
+    StorageIntegrityContext, StorageIntegrityKeys, StorageMasterKey, backup_signing_key_id,
+    derive_storage_integrity_keys, sign_canonical, verify_canonical,
 };
 
 use crate::codec::{Decoder, Encoder};
@@ -14,8 +14,8 @@ use crate::{
     DATABASE_HEADER_BYTES, DatabaseHeader, IntegrityCheckpoint, IntegrityManifest,
     LoginIndexKeyState, LoginIndexStoredKey, NONCE_RESERVATION_BYTES, NonceReservationState,
     ROLLBACK_GUARD_BYTES, RollbackGuard, SealedRecord, StateMeta, StorageConstruction,
-    StorageError, StorageOperationCompletion, StoredKey, TableId, logical_record_charge,
-    verify_guard_pair,
+    StorageError, StorageFaultBoundary, StorageFaultInjector, StorageFaultSite,
+    StorageOperationCompletion, StoredKey, TableId, logical_record_charge, verify_guard_pair,
 };
 
 const BACKUP_MAGIC: &[u8; 21] = b"AGENC-IRCD-BACKUP-V1\0";
@@ -741,67 +741,149 @@ pub struct BackupReceipt {
 }
 
 /// Fully streams, decrypts, authenticates, and size-checks one backup.
-// agenc-review: focus owner=storage reviewed=2026-08-27 reason=single-pass backup grammar keeps digest and EOF state co-located
+///
+/// This is the one-shot form of [`BackupStreamVerifier`]: the same header,
+/// record, trailer, digest, signature, schema and accounting grammar, driven
+/// to completion in a single call with no fault injection.
 pub fn verify_backup<R: Read>(
-    mut input: R,
+    input: R,
     source_master_key: &StorageMasterKey,
     source_guard_root: &RollbackGuardRootKey,
     trusted_keys: &[BackupTrustKey],
     maximum_bytes: u64,
 ) -> Result<VerifiedBackup, StorageError> {
-    verify_backup_reader(
-        &mut input,
-        source_master_key,
-        source_guard_root,
-        trusted_keys,
-        maximum_bytes,
-    )
+    let mut verifier =
+        BackupStreamVerifier::start(input, source_guard_root, trusted_keys, maximum_bytes)?;
+    let faults = StorageFaultInjector::disabled();
+    while !verifier.step(source_master_key, &faults, usize::MAX, usize::MAX)? {}
+    verifier.finish()
 }
 
-fn verify_backup_reader(
-    input: &mut dyn Read,
-    source_master_key: &StorageMasterKey,
-    source_guard_root: &RollbackGuardRootKey,
-    trusted_keys: &[BackupTrustKey],
+/// Resumable verification of one backup stream.
+///
+/// `start` authenticates the magic and the fixed header and selects the one
+/// trusted signing key; each `step` verifies a bounded number of record
+/// frames in stream order; `finish` binds the trailer's count, digest and
+/// signature to what was observed and runs the cross-record checks. Between
+/// steps the verifier retains only the running digest, the bounded record
+/// accumulators and the buffered reader, so the owner thread can service
+/// other requests between slices of one post-write pass.
+pub(crate) struct BackupStreamVerifier<R: Read> {
+    input: BufReader<R>,
+    hasher: BackupStreamHasher,
+    header: BackupHeader,
+    trusted_public_key: Ed25519PublicKey,
+    verification: BackupRecordVerification,
     maximum_bytes: u64,
-) -> Result<VerifiedBackup, StorageError> {
-    if trusted_keys.is_empty() || trusted_keys.len() > MAX_BACKUP_TRUST_KEYS {
-        return Err(StorageError::LimitExceeded);
+    trailer_frame: Option<Vec<u8>>,
+}
+
+impl<R: Read> BackupStreamVerifier<R> {
+    /// Reads and authenticates the stream prefix up to the first record.
+    pub(crate) fn start(
+        input: R,
+        source_guard_root: &RollbackGuardRootKey,
+        trusted_keys: &[BackupTrustKey],
+        maximum_bytes: u64,
+    ) -> Result<Self, StorageError> {
+        if trusted_keys.is_empty() || trusted_keys.len() > MAX_BACKUP_TRUST_KEYS {
+            return Err(StorageError::LimitExceeded);
+        }
+        let mut input = BufReader::new(input);
+        let mut hasher = BackupStreamHasher::new(maximum_bytes)?;
+        let header = read_backup_header(&mut input, &mut hasher, source_guard_root)?;
+        let trusted_public_key = trusted_backup_key(&header, trusted_keys)?;
+        let verification = BackupRecordVerification::new(&header, source_guard_root)?;
+        Ok(Self {
+            input,
+            hasher,
+            header,
+            trusted_public_key,
+            verification,
+            maximum_bytes,
+            trailer_frame: None,
+        })
     }
-    let mut input = BufReader::new(input);
-    let mut hasher = BackupStreamHasher::new(maximum_bytes)?;
-    let header = read_backup_header(&mut input, &mut hasher, source_guard_root)?;
-    let trusted_public_key = trusted_backup_key(&header, trusted_keys)?;
-    let mut verification =
-        BackupRecordVerification::new(&header, source_master_key, source_guard_root)?;
-    let trailer_bytes = read_backup_records(&mut input, &mut hasher, &mut verification)?;
-    let prefix_bytes = hasher.bytes_seen();
-    let stream_bytes = prefix_bytes
-        .checked_add(4)
-        .and_then(|bytes| bytes.checked_add(BACKUP_TRAILER_BYTES as u64))
-        .ok_or(StorageError::Overflow)?;
-    if stream_bytes > maximum_bytes {
-        return Err(StorageError::LimitExceeded);
+
+    /// Verifies at most `maximum_records` frames or `maximum_bytes` framed
+    /// bytes, whichever comes first, and reports whether the trailer frame
+    /// has been reached. Every frame is hashed before it is observed, and the
+    /// trailer is the one final frame of exactly the trailer length.
+    // agenc-review: focus owner=storage reviewed=2026-09-18 reason=one bounded frame loop keeps trailer detection digest order and the slice budget co-located
+    pub(crate) fn step(
+        &mut self,
+        source_master_key: &StorageMasterKey,
+        faults: &StorageFaultInjector,
+        maximum_records: usize,
+        maximum_bytes: usize,
+    ) -> Result<bool, StorageError> {
+        if maximum_records == 0 || maximum_bytes == 0 {
+            return Err(StorageError::LimitExceeded);
+        }
+        if self.trailer_frame.is_some() {
+            return Ok(true);
+        }
+        let mut records = 0_usize;
+        let mut bytes = 0_usize;
+        loop {
+            let (length_bytes, encoded) = read_frame(&mut self.input)?;
+            if encoded.len() == BACKUP_TRAILER_BYTES
+                && self.input.fill_buf().map_err(io_rejected)?.is_empty()
+            {
+                self.trailer_frame = Some(encoded);
+                return Ok(true);
+            }
+            faults.check(StorageFaultSite::BackupRecord, StorageFaultBoundary::Before)?;
+            self.hasher.update(&length_bytes)?;
+            self.hasher.update(&encoded)?;
+            self.verification
+                .observe(source_master_key, &BackupRecord::decode(&encoded)?)?;
+            faults.check(StorageFaultSite::BackupRecord, StorageFaultBoundary::After)?;
+            records = records.checked_add(1).ok_or(StorageError::Overflow)?;
+            bytes = bytes
+                .checked_add(encoded.len())
+                .and_then(|bytes| bytes.checked_add(length_bytes.len()))
+                .ok_or(StorageError::Overflow)?;
+            if records >= maximum_records || bytes >= maximum_bytes {
+                return Ok(false);
+            }
+        }
     }
-    let prefix_digest = hasher.finalize();
-    let trailer = BackupTrailer::decode(&trailer_bytes)?;
-    if trailer.record_count != verification.record_count || trailer.stream_digest != prefix_digest {
-        return Err(StorageError::AuthenticationFailed);
+
+    /// Binds the trailer to every observed record and returns the
+    /// authenticated facts.
+    pub(crate) fn finish(self) -> Result<VerifiedBackup, StorageError> {
+        let trailer_bytes = self.trailer_frame.ok_or(StorageError::InvalidEncoding)?;
+        let prefix_bytes = self.hasher.bytes_seen();
+        let stream_bytes = prefix_bytes
+            .checked_add(4)
+            .and_then(|bytes| bytes.checked_add(BACKUP_TRAILER_BYTES as u64))
+            .ok_or(StorageError::Overflow)?;
+        if stream_bytes > self.maximum_bytes {
+            return Err(StorageError::LimitExceeded);
+        }
+        let prefix_digest = self.hasher.finalize();
+        let trailer = BackupTrailer::decode(&trailer_bytes)?;
+        if trailer.record_count != self.verification.record_count()
+            || trailer.stream_digest != prefix_digest
+        {
+            return Err(StorageError::AuthenticationFailed);
+        }
+        verify_canonical(
+            self.trusted_public_key,
+            SignatureDomain::BackupSignature,
+            trailer.stream_digest.as_bytes(),
+            trailer.signature,
+        )?;
+        let (logical_database_bytes, state_meta) = self.verification.finish(stream_bytes)?;
+        Ok(VerifiedBackup {
+            header: self.header,
+            trailer,
+            stream_bytes,
+            logical_database_bytes,
+            state_meta,
+        })
     }
-    verify_canonical(
-        trusted_public_key,
-        SignatureDomain::BackupSignature,
-        trailer.stream_digest.as_bytes(),
-        trailer.signature,
-    )?;
-    let (logical_database_bytes, state_meta) = verification.finish(stream_bytes)?;
-    Ok(VerifiedBackup {
-        header,
-        trailer,
-        stream_bytes,
-        logical_database_bytes,
-        state_meta,
-    })
 }
 
 fn read_backup_header<R: Read>(
@@ -820,6 +902,25 @@ fn read_backup_header<R: Read>(
         &read_vector_hashed(input, hasher, BACKUP_HEADER_BYTES)?,
         source_guard_root,
     )
+}
+
+/// Reads one length-prefixed frame without hashing it; the caller decides
+/// whether it is a record or the trailer.
+fn read_frame<R: Read>(input: &mut BufReader<R>) -> Result<([u8; 4], Vec<u8>), StorageError> {
+    let mut length_bytes = [0_u8; 4];
+    input.read_exact(&mut length_bytes).map_err(io_rejected)?;
+    let length =
+        usize::try_from(u32::from_be_bytes(length_bytes)).map_err(|_| StorageError::Overflow)?;
+    if length == 0 || length > MAX_BACKUP_RECORD_BYTES {
+        return Err(StorageError::LimitExceeded);
+    }
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(length)
+        .map_err(|_| StorageError::AllocationFailed)?;
+    encoded.resize(length, 0);
+    input.read_exact(&mut encoded).map_err(io_rejected)?;
+    Ok((length_bytes, encoded))
 }
 
 /// Selects the one retained key whose ID matches the header and whose
@@ -847,10 +948,21 @@ fn trusted_backup_key(
     Ok(trusted_public_key)
 }
 
-struct BackupRecordVerification<'a> {
+/// Per-record verification state shared by the source-side accounting pass
+/// and the post-write stream pass.
+///
+/// It owns copies of the boundary facts it binds records to (the source
+/// header, the reservation counters, the integrity keys and the database
+/// binding) rather than borrowing the header, so one instance can live
+/// across owner-thread slices. Every record is decrypted under the caller's
+/// master key, checked against the closed schema, fed to the singleton,
+/// chain, checkpoint and history accumulators, and charged to the logical
+/// counter; `finish` binds those accumulators and the exact stream length to
+/// the authenticated StateMeta row.
+pub(crate) struct BackupRecordVerification {
     history_inventory: crate::history_records::HistoryInventory,
-    header: &'a BackupHeader,
-    source_master_key: &'a StorageMasterKey,
+    source_header: DatabaseHeader,
+    reservation: crate::NonceReservationTbs,
     binding: DatabaseBinding,
     integrity_keys: StorageIntegrityKeys,
     record_count: u64,
@@ -861,13 +973,12 @@ struct BackupRecordVerification<'a> {
     reconstruction: BackupReconstruction,
 }
 
-impl<'a> BackupRecordVerification<'a> {
-    fn new(
-        header: &'a BackupHeader,
-        source_master_key: &'a StorageMasterKey,
+impl BackupRecordVerification {
+    pub(crate) fn new(
+        header: &BackupHeader,
         source_guard_root: &RollbackGuardRootKey,
     ) -> Result<Self, StorageError> {
-        let source_header = header.source_header();
+        let source_header = *header.source_header();
         let integrity_keys = derive_storage_integrity_keys(
             source_guard_root,
             StorageIntegrityContext::new(
@@ -877,10 +988,10 @@ impl<'a> BackupRecordVerification<'a> {
             ),
         )?;
         Ok(Self {
-            header,
             history_inventory: crate::history_records::HistoryInventory::new(1_073_741_824),
-            source_master_key,
-            binding: database_binding(source_header),
+            source_header,
+            reservation: *header.source_nonce_reservation().tbs(),
+            binding: database_binding(&source_header),
             integrity_keys,
             record_count: 0,
             logical_database_bytes: meta_logical_bytes()?,
@@ -891,7 +1002,24 @@ impl<'a> BackupRecordVerification<'a> {
         })
     }
 
-    fn observe(&mut self, record: &BackupRecord) -> Result<(), StorageError> {
+    /// Returns the number of records observed so far.
+    pub(crate) const fn record_count(&self) -> u64 {
+        self.record_count
+    }
+
+    /// Returns the logical charge accumulated so far, including the fixed
+    /// meta rows.
+    pub(crate) const fn logical_database_bytes(&self) -> u64 {
+        self.logical_database_bytes
+    }
+
+    /// Observes one record in canonical order and returns its authenticated
+    /// plaintext for the caller's own per-record checks.
+    pub(crate) fn observe(
+        &mut self,
+        source_master_key: &StorageMasterKey,
+        record: &BackupRecord,
+    ) -> Result<OpenedStoragePlaintext, StorageError> {
         let identity = (record.table(), record.stored_key().as_bytes());
         if self
             .previous
@@ -901,39 +1029,39 @@ impl<'a> BackupRecordVerification<'a> {
             return Err(StorageError::InvalidEncoding);
         }
         let sealed = SealedRecord::decode(record.sealed_record())?;
-        let source_generation = self.header.source_header().tbs().storage_key_generation;
+        let source_generation = self.source_header.tbs().storage_key_generation;
         if sealed.key_generation() != source_generation {
             return Err(StorageError::AuthenticationFailed);
         }
         let plaintext = sealed.open(
-            self.source_master_key,
+            source_master_key,
             self.binding,
             record.table(),
             record.record_schema(),
             source_generation,
             record.stored_key(),
         )?;
-        let plaintext = plaintext.expose_for_storage_codec();
+        let exposed = plaintext.expose_for_storage_codec();
         crate::AuthenticatedSourceRecord::checked(
-            self.header.source_header().tbs().schema_generation,
+            self.source_header.tbs().schema_generation,
             record.table(),
             record.stored_key(),
             record.record_schema(),
-            plaintext,
+            exposed,
         )?;
         self.reconstruction.observe(
             record,
-            plaintext,
-            self.header.source_header().tbs().database_instance_id,
+            exposed,
+            self.source_header.tbs().database_instance_id,
         )?;
         self.history_inventory.observe(
             record.table(),
             record.stored_key(),
             record.sealed_record().len(),
-            plaintext,
+            exposed,
         )?;
-        self.observe_key_check(record, &sealed, plaintext)?;
-        self.observe_state_meta(record, &sealed, plaintext)?;
+        self.observe_key_check(record, &sealed, exposed)?;
+        self.observe_state_meta(record, &sealed, exposed)?;
         self.logical_database_bytes = self
             .logical_database_bytes
             .checked_add(logical_record_charge(
@@ -946,7 +1074,7 @@ impl<'a> BackupRecordVerification<'a> {
             .checked_add(1)
             .ok_or(StorageError::Overflow)?;
         self.previous = Some((record.table(), record.stored_key().as_bytes().to_vec()));
-        Ok(())
+        Ok(plaintext)
     }
 
     fn observe_key_check(
@@ -961,12 +1089,8 @@ impl<'a> BackupRecordVerification<'a> {
         if (self.key_check_seen, sealed.record_id()?, plaintext)
             != (
                 false,
-                self.header.source_header().key_check_object_id(),
-                self.header
-                    .source_header()
-                    .tbs()
-                    .key_check_plaintext()?
-                    .as_bytes(),
+                self.source_header.key_check_object_id(),
+                self.source_header.tbs().key_check_plaintext()?.as_bytes(),
             )
         {
             return Err(StorageError::AuthenticationFailed);
@@ -986,27 +1110,23 @@ impl<'a> BackupRecordVerification<'a> {
             return Ok(());
         }
         if (self.state_meta.is_some(), sealed.record_id()?)
-            != (
-                false,
-                self.header
-                    .source_nonce_reservation()
-                    .tbs()
-                    .state_meta_record_id,
-            )
+            != (false, self.reservation.state_meta_record_id)
         {
             return Err(StorageError::StaleState);
         }
         self.state_meta = Some(StateMeta::decode_and_verify(
             plaintext,
-            self.header.source_header().complete_hash()?,
+            self.source_header.complete_hash()?,
             &self.integrity_keys,
         )?);
         Ok(())
     }
 
-    fn finish(self, stream_bytes: u64) -> Result<(u64, StateMeta), StorageError> {
+    /// Binds the accumulators to the authenticated StateMeta row and the
+    /// exact stream length.
+    pub(crate) fn finish(self, stream_bytes: u64) -> Result<(u64, StateMeta), StorageError> {
         let state_meta = self.state_meta.ok_or(StorageError::InvalidEncoding)?;
-        let reservation = self.header.source_nonce_reservation().tbs();
+        let reservation = self.reservation;
         if !self.key_check_seen
             || state_meta.tbs().logical_database_bytes != self.logical_database_bytes
             || state_meta.tbs().backup_stream_bytes != stream_bytes
@@ -1019,34 +1139,6 @@ impl<'a> BackupRecordVerification<'a> {
         self.history_inventory.finish()?;
         self.reconstruction.finish(&state_meta)?;
         Ok((self.logical_database_bytes, state_meta))
-    }
-}
-
-fn read_backup_records<R: std::io::BufRead>(
-    input: &mut R,
-    hasher: &mut BackupStreamHasher,
-    verification: &mut BackupRecordVerification<'_>,
-) -> Result<Vec<u8>, StorageError> {
-    loop {
-        let mut length_bytes = [0_u8; 4];
-        input.read_exact(&mut length_bytes).map_err(io_rejected)?;
-        let length = usize::try_from(u32::from_be_bytes(length_bytes))
-            .map_err(|_| StorageError::Overflow)?;
-        if length == 0 || length > MAX_BACKUP_RECORD_BYTES {
-            return Err(StorageError::LimitExceeded);
-        }
-        let mut encoded = Vec::new();
-        encoded
-            .try_reserve_exact(length)
-            .map_err(|_| StorageError::AllocationFailed)?;
-        encoded.resize(length, 0);
-        input.read_exact(&mut encoded).map_err(io_rejected)?;
-        if length == BACKUP_TRAILER_BYTES && input.fill_buf().map_err(io_rejected)?.is_empty() {
-            return Ok(encoded);
-        }
-        hasher.update(&length_bytes)?;
-        hasher.update(&encoded)?;
-        verification.observe(&BackupRecord::decode(&encoded)?)?;
     }
 }
 
@@ -1063,7 +1155,11 @@ pub fn backup_stream_bytes<'a>(
     Ok(bytes)
 }
 
-fn backup_record_charge(key_bytes: usize, sealed_bytes: usize) -> Result<u64, StorageError> {
+/// Exact stream bytes one numbered record adds: its logical charge plus the frame overhead.
+pub(crate) fn backup_record_charge(
+    key_bytes: usize,
+    sealed_bytes: usize,
+) -> Result<u64, StorageError> {
     let logical = logical_record_charge(key_bytes, sealed_bytes)?;
     logical
         .checked_add(BACKUP_RECORD_OVERHEAD_BYTES)
@@ -1353,13 +1449,12 @@ mod tests {
         ))
     }
 
-    fn complete_verification<'a>(
-        header: &'a BackupHeader,
-        master_key: &'a StorageMasterKey,
+    fn complete_verification(
+        header: &BackupHeader,
         guard_root: &RollbackGuardRootKey,
         stream_bytes: u64,
-    ) -> Result<BackupRecordVerification<'a>, StorageError> {
-        let mut verification = BackupRecordVerification::new(header, master_key, guard_root)?;
+    ) -> Result<BackupRecordVerification, StorageError> {
+        let mut verification = BackupRecordVerification::new(header, guard_root)?;
         let source = header.source_header();
         let keys = derive_storage_integrity_keys(
             guard_root,
@@ -1892,14 +1987,11 @@ mod tests {
             Err(StorageError::LimitExceeded)
         );
 
-        let mut verification = BackupRecordVerification::new(&header, &master_key, &guard_root)?;
-        let mut hasher = BackupStreamHasher::new(BACKUP_FIXED_STREAM_BYTES)?;
         assert_eq!(
-            read_backup_records(
-                &mut std::io::Cursor::new(0_u32.to_be_bytes()),
-                &mut hasher,
-                &mut verification,
-            ),
+            read_frame(&mut BufReader::new(std::io::Cursor::new(
+                0_u32.to_be_bytes()
+            )))
+            .map(|_| ()),
             Err(StorageError::LimitExceeded)
         );
         let too_large = u32::try_from(MAX_BACKUP_RECORD_BYTES)
@@ -1907,11 +1999,10 @@ mod tests {
             .checked_add(1)
             .ok_or(StorageError::Overflow)?;
         assert_eq!(
-            read_backup_records(
-                &mut std::io::Cursor::new(too_large.to_be_bytes()),
-                &mut hasher,
-                &mut verification,
-            ),
+            read_frame(&mut BufReader::new(std::io::Cursor::new(
+                too_large.to_be_bytes()
+            )))
+            .map(|_| ()),
             Err(StorageError::LimitExceeded)
         );
         Ok(())
@@ -1933,11 +2024,10 @@ mod tests {
     #[test]
     fn record_verification_finish_binds_each_state_and_reservation_counter()
     -> Result<(), StorageError> {
-        let (header, master_key, guard_root, _) = backup_boundary()?;
+        let (header, _, guard_root, _) = backup_boundary()?;
         let stream_bytes = BACKUP_FIXED_STREAM_BYTES;
         for changed in 0..6 {
-            let mut verification =
-                complete_verification(&header, &master_key, &guard_root, stream_bytes)?;
+            let mut verification = complete_verification(&header, &guard_root, stream_bytes)?;
             match changed {
                 0 => verification.key_check_seen = false,
                 1 => verification.logical_database_bytes += 1,
@@ -2061,7 +2151,7 @@ mod tests {
             record_schema: 1,
             sealed_record: Vec::new(),
         };
-        let mut verification = BackupRecordVerification::new(&header, &master_key, &guard_root)?;
+        let mut verification = BackupRecordVerification::new(&header, &guard_root)?;
         verification.observe_key_check(&wrong_key_check, &sealed, &plaintext)?;
         verification.key_check_seen = true;
         let key_check = BackupRecord {

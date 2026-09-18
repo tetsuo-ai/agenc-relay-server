@@ -155,6 +155,11 @@ scratch afterwards, the refusal mapping that never reports a refused scratch
 as stale state or as an uncertain commit, and the metered scratch startup and
 checkpoints now report (STO-04, issue #65) are recorded in
 [the bounded recovery scratch record](stage-10-bounded-recovery-scratch.md).
+The online backup that yields between bounded slices of every phase while
+reading one authenticated snapshot cut, the exact final length fixed before
+its temporary exists, and the bounded scratch written through the
+project-owned fork (STO-05, issue #68) are recorded in
+[the incremental backup record](stage-10-incremental-backup.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

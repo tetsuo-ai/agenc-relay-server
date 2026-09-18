@@ -1,17 +1,17 @@
 //! Authenticated storage transaction state machine owned by one blocking thread.
 
+pub(crate) mod backup_job;
 mod stopped;
 
 use std::fs::File;
-use std::io::{Seek as _, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agenc_ircd_crypto::{
-    DatabaseBinding, Ed25519SecretKey, LoginIndexKey, LoginIndexKeyId, OsEntropy,
-    RollbackGuardRootKey, StorageDigest, StorageIntegrityContext, StorageIntegrityKeys,
-    StorageMasterKey, StorageTable, TrackedStateHasher, derive_storage_index,
-    derive_storage_integrity_keys, tracked_record_commitment,
+    DatabaseBinding, LoginIndexKey, LoginIndexKeyId, OsEntropy, RollbackGuardRootKey,
+    StorageDigest, StorageIntegrityContext, StorageIntegrityKeys, StorageMasterKey, StorageTable,
+    TrackedStateHasher, derive_storage_index, derive_storage_integrity_keys,
+    tracked_record_commitment,
 };
 #[cfg(test)]
 use agenc_ircd_types::ChannelName;
@@ -23,23 +23,22 @@ use crate::bounded::{MaintenanceOutcome, OperationAllowance};
 use crate::mutation::ReadPlanKind;
 use crate::redb_store::{
     HEADER_META_KEY, RESERVATION_META_KEY, RecoveryScratch, RedbCommitFailure, RedbStore,
-    RedbWrite, ReferenceScratch, SnapshotScan, StorageSnapshot,
+    RedbWrite, ReferenceScratch, SnapshotScan,
 };
 use crate::scratch::{ScratchAdmission, ScratchLocation, ScratchUsage};
 use crate::{
-    BACKUP_FIXED_STREAM_BYTES, BackupDestination, BackupHeader, BackupOutput, BackupReceipt,
-    BackupRecord, BackupStreamWriter, BackupTrustKey, ChannelNameRecordBody, CommitOutcome,
-    CommitReceipt, DatabaseHeader, ExistingRecord, FilesystemCapacity, InspectionStateDirectory,
-    IntegrityCheckpoint, IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs,
-    IntegrityRecordMutation, IntegrityRecordVersion, LoginIndexKeyState, LoginIndexStoredKey,
-    LoginIndexValueKind, NonceReservationState, NonceReservationTbs, ROLLBACK_GUARD_BYTES,
-    ReadPlan, ReadRecord, ReadResult, RecordReference, RecoveryDisposition, RollbackGuard,
-    RollbackGuardPhase, RollbackGuardTbs, SealedRecord, StateDirectory, StateMeta, StateMetaTbs,
+    BACKUP_FIXED_STREAM_BYTES, ChannelNameRecordBody, CommitOutcome, CommitReceipt, DatabaseHeader,
+    ExistingRecord, FilesystemCapacity, InspectionStateDirectory, IntegrityCheckpoint,
+    IntegrityCheckpointTbs, IntegrityManifest, IntegrityManifestTbs, IntegrityRecordMutation,
+    IntegrityRecordVersion, LoginIndexKeyState, LoginIndexStoredKey, LoginIndexValueKind,
+    NonceReservationState, NonceReservationTbs, ROLLBACK_GUARD_BYTES, ReadPlan, ReadRecord,
+    ReadResult, RecordReference, RecoveryDisposition, RollbackGuard, RollbackGuardPhase,
+    RollbackGuardTbs, SealedRecord, StateDirectory, StateMeta, StateMetaTbs,
     StorageAccountingLimits, StorageConstruction, StorageConstructionSource, StorageError,
     StorageFaultBoundary, StorageFaultInjector, StorageFaultSite, StorageMutationBatch,
     StorageMutationHead, StorageOperationCompletion, StorageOperationIdentity, StorageSealContext,
     StoredKey, TableId, classify_recovery_state, logical_meta_charge, logical_record_charge,
-    verify_backup, verify_guard_pair,
+    verify_guard_pair,
 };
 
 const KEY_CHECK_KEY: &[u8] = b"agenc-chat/key-check/v1";
@@ -938,7 +937,7 @@ pub(crate) struct StorageEngine {
     retained_manifest_count: u64,
     retained_manifest_bytes: u64,
     checkpoint_job: Option<CheckpointJob>,
-    backup_job: Option<BackupJob>,
+    backup_job: Option<backup_job::BackupJob>,
     /// Whether the scratch half of the startup verification is still owed: the filesystem could
     /// not admit it when the owner opened, so the owner opened with every durable write refused
     /// until a write finds the space to run it first.
@@ -1642,152 +1641,6 @@ impl StorageEngine {
             self.retained_manifest_count,
             self.retained_manifest_bytes,
         );
-    }
-
-    pub(crate) fn start_backup(
-        &mut self,
-        destination: BackupDestination,
-        signing_key: Ed25519SecretKey,
-        created_at: u64,
-        backup_id: [u8; 16],
-    ) -> Result<(), StorageError> {
-        if (self.backup_job.is_some(), self.checkpoint_job.is_some()) != (false, false) {
-            return Err(StorageError::QueueFull);
-        }
-        // A backup writes nothing to this database and is admitted at `R(F) + O` on its own
-        // filesystem, far below the scratch gate, so it is not held behind an owed scratch
-        // verification: its scan defers like the open's, the debt stays recorded for the next
-        // durable write, and a restore reconstructs and verifies the whole ledger again.
-        let _capacity = self.startup_scan()?;
-        let snapshot = self.store.snapshot()?;
-        let (logical_database_bytes, backup_stream_bytes) =
-            self.verify_snapshot_accounting(&snapshot)?;
-        if (logical_database_bytes, backup_stream_bytes)
-            != (
-                self.state_meta.tbs().logical_database_bytes,
-                self.state_meta.tbs().backup_stream_bytes,
-            )
-        {
-            return Err(StorageError::StaleState);
-        }
-        let output = destination.create_output(self.state_directory.faults())?;
-        crate::platform::admit_backup_output(
-            output.file(),
-            backup_stream_bytes,
-            self.limits.fixed_reserve_bytes,
-            self.limits.reserve_percent,
-        )?;
-        let reservation = NonceReservationState::decode_and_verify(
-            &self.reservation.encode()?,
-            &self.integrity_keys,
-        )?;
-        let guard = RollbackGuard::decode_and_verify(&self.guard.encode()?, &self.integrity_keys)?;
-        let header = BackupHeader::new(
-            self.header,
-            reservation,
-            guard,
-            created_at,
-            backup_id,
-            signing_key.public_key(),
-        )?;
-        let writer_file = output
-            .file()
-            .try_clone()
-            .map_err(crate::filesystem_rejected)?;
-        let writer = BackupStreamWriter::start(writer_file, &header, backup_stream_bytes)?;
-        self.backup_job = Some(BackupJob {
-            scan: self.store.snapshot_scan()?,
-            writer: Some(writer),
-            output: Some(output),
-            signing_key,
-            expected_state_meta: *self.state_meta.tbs(),
-            expected_stream_bytes: backup_stream_bytes,
-            maximum_bytes: self.limits.backup_max_bytes,
-        });
-        Ok(())
-    }
-
-    pub(crate) fn backup_is_active(&self) -> bool {
-        self.backup_job.is_some()
-    }
-
-    pub(crate) fn service_backup(&mut self) -> Result<Option<BackupReceipt>, StorageError> {
-        let service = (|| {
-            let job = self.backup_job.as_mut().ok_or(StorageError::StaleState)?;
-            let slice = job
-                .scan
-                .next_all_slice(CHECKPOINT_SLICE_RECORDS, CHECKPOINT_SLICE_BYTES)?;
-            let writer = job.writer.as_mut().ok_or(StorageError::StaleState)?;
-            for (table, key, sealed_record) in slice.rows {
-                let sealed = SealedRecord::decode(&sealed_record)?;
-                self.state_directory
-                    .faults()
-                    .check(StorageFaultSite::BackupRecord, StorageFaultBoundary::Before)?;
-                writer.write_record(&BackupRecord::new(
-                    table,
-                    StoredKey::new(key)?,
-                    sealed.record_schema(),
-                    sealed_record,
-                )?)?;
-                self.state_directory
-                    .faults()
-                    .check(StorageFaultSite::BackupRecord, StorageFaultBoundary::After)?;
-            }
-            Ok(slice.complete)
-        })();
-        let complete = match service {
-            Ok(complete) => complete,
-            Err(error) => {
-                self.backup_job = None;
-                return Err(error);
-            }
-        };
-        if !complete {
-            return Ok(None);
-        }
-        let job = self.backup_job.take().ok_or(StorageError::StaleState)?;
-        job.finish(&self.master_key, &self.guard_root_key).map(Some)
-    }
-
-    fn verify_snapshot_accounting(
-        &self,
-        snapshot: &StorageSnapshot,
-    ) -> Result<(u64, u64), StorageError> {
-        let mut logical = logical_meta_charge(HEADER_META_KEY.len(), crate::DATABASE_HEADER_BYTES)?
-            .checked_add(logical_meta_charge(
-                RESERVATION_META_KEY.len(),
-                crate::NONCE_RESERVATION_BYTES,
-            )?)
-            .ok_or(StorageError::Overflow)?;
-        let mut backup = BACKUP_FIXED_STREAM_BYTES;
-        for number in 0_u16..=26 {
-            let table = TableId::from_u16(number)?;
-            snapshot.visit_table(table, self.limits.database_max_bytes, |key, encoded| {
-                let stored_key = StoredKey::new(key.to_vec())?;
-                let sealed = crate::validate_sealed_record(table, &stored_key, encoded)?;
-                let plaintext = sealed.open(
-                    &self.master_key,
-                    self.binding,
-                    table,
-                    sealed.record_schema(),
-                    self.header.tbs().storage_key_generation,
-                    &stored_key,
-                )?;
-                crate::validate_record_plaintext(
-                    table,
-                    &stored_key,
-                    sealed.record_schema(),
-                    plaintext.expose_for_storage_codec(),
-                )?;
-                let charge = logical_record_charge(key.len(), encoded.len())?;
-                logical = logical.checked_add(charge).ok_or(StorageError::Overflow)?;
-                backup = backup
-                    .checked_add(backup_charge(charge)?)
-                    .ok_or(StorageError::Overflow)?;
-                Ok(())
-            })?;
-        }
-        Ok((logical, backup))
     }
 
     /// Reports whether retained manifests reached the configured or protocol ceiling.
@@ -3959,79 +3812,6 @@ struct PreparedCheckpoint {
     committed_guard: RollbackGuard,
 }
 
-struct BackupJob {
-    scan: SnapshotScan,
-    writer: Option<BackupStreamWriter<File>>,
-    output: Option<BackupOutput>,
-    signing_key: Ed25519SecretKey,
-    expected_state_meta: StateMetaTbs,
-    expected_stream_bytes: u64,
-    maximum_bytes: u64,
-}
-
-impl BackupJob {
-    fn finish(
-        mut self,
-        master_key: &StorageMasterKey,
-        guard_root_key: &RollbackGuardRootKey,
-    ) -> Result<BackupReceipt, StorageError> {
-        let writer = self.writer.take().ok_or(StorageError::StaleState)?;
-        let (_file, trailer) = writer.finish(&self.signing_key)?;
-        let mut output = self.output.take().ok_or(StorageError::StaleState)?;
-        output
-            .file_mut()
-            .sync_all()
-            .map_err(crate::filesystem_rejected)?;
-        let actual_bytes = output
-            .file()
-            .metadata()
-            .map_err(crate::filesystem_rejected)?
-            .len();
-        if actual_bytes != self.expected_stream_bytes {
-            return Err(StorageError::StaleState);
-        }
-        output
-            .file_mut()
-            .seek(SeekFrom::Start(0))
-            .map_err(crate::filesystem_rejected)?;
-        let trusted_key = BackupTrustKey::new(self.signing_key.public_key())?;
-        let verified = verify_backup(
-            output.file_mut(),
-            master_key,
-            guard_root_key,
-            &[trusted_key],
-            self.maximum_bytes,
-        )?;
-        if (
-            verified.stream_bytes,
-            verified.trailer,
-            verified.state_meta.tbs(),
-        ) != (actual_bytes, trailer, &self.expected_state_meta)
-        {
-            return Err(StorageError::AuthenticationFailed);
-        }
-        // The one full verification above ran on the descriptor that the
-        // rename carries under the final name; publication proves by inode
-        // identity that the final name refers to that verified file, so no
-        // second O(database) pass runs on the owner thread and no failure
-        // after the rename leaves the final name occupied.
-        let mut published = output.publish()?;
-        let published_bytes = published
-            .file_mut()
-            .metadata()
-            .map_err(crate::filesystem_rejected)?
-            .len();
-        if published_bytes != actual_bytes {
-            return Err(StorageError::AuthenticationFailed);
-        }
-        Ok(BackupReceipt {
-            stream_bytes: actual_bytes,
-            record_count: trailer.record_count,
-            stream_digest: trailer.stream_digest,
-        })
-    }
-}
-
 struct CheckpointJob {
     cut: StateMetaTbs,
     scan: SnapshotScan,
@@ -4320,13 +4100,14 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use agenc_ircd_crypto::{StorageDigest, derive_login_index};
+    use agenc_ircd_crypto::{Ed25519SecretKey, StorageDigest, derive_login_index};
     use agenc_ircd_types::{
         AccountRandomId, DatabaseId, NetworkId, NormalizedLogin, OpaqueCredentialId, RecoveryEpoch,
         ServerIncarnation, TransactionId,
     };
 
     use super::*;
+    use crate::BackupDestination;
     use crate::{
         AllowancePhase, InitialStorageRecord, LoginIndexValue, PersistentRecordValue,
         QualificationTarget, RecordMutation, SCHEMA_GENERATION, StorageConstructionKind,
@@ -4399,20 +4180,23 @@ pub(crate) mod tests {
             if !matches!(outcome, StorageInitializationOutcome::Complete { .. }) {
                 return Err(StorageError::Unavailable);
             }
-            let engine = StorageEngine::open(StorageOpenConfig {
-                expected_network_id: network,
-                expected_server_id: server,
-                state_directory: StateDirectory::open_with_faults(&path, &qualifications, faults)?,
-                storage_master_key: StorageMasterKey::from_bytes([27; 32]),
-                rollback_guard_root_key: RollbackGuardRootKey::from_bytes([28; 32]),
-                login_index_key: login_key,
-                previous_login_index_key: None,
-                limits,
-            })?;
+            let engine = open_fixture_engine(&path, &qualifications, faults)?;
             Ok(Self {
                 engine: Some(engine),
                 path,
             })
+        }
+
+        /// Closes the engine and opens the same directory again, as a restart does.
+        pub(crate) fn reopen(&mut self) -> Result<(), StorageError> {
+            drop(self.engine.take());
+            let qualifications = vec![test_qualification(&self.path)?];
+            self.engine = Some(open_fixture_engine(
+                &self.path,
+                &qualifications,
+                StorageFaultInjector::disabled(),
+            )?);
+            Ok(())
         }
 
         fn engine(&self) -> Result<&StorageEngine, StorageError> {
@@ -4471,6 +4255,23 @@ pub(crate) mod tests {
             drop(self.engine.take());
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    fn open_fixture_engine(
+        path: &std::path::Path,
+        qualifications: &[StorageQualification],
+        faults: StorageFaultInjector,
+    ) -> Result<StorageEngine, StorageError> {
+        StorageEngine::open(StorageOpenConfig {
+            expected_network_id: NetworkId::from_bytes([21; 32]),
+            expected_server_id: ServerId::from_bytes([22; 16]),
+            state_directory: StateDirectory::open_with_faults(path, qualifications, faults)?,
+            storage_master_key: StorageMasterKey::from_bytes([27; 32]),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes([28; 32]),
+            login_index_key: LoginIndexKey::from_bytes([23; 32]),
+            previous_login_index_key: None,
+            limits: engine_limits(),
+        })
     }
 
     const fn engine_limits() -> StorageEngineLimits {
@@ -5292,7 +5093,7 @@ pub(crate) mod tests {
                 .backup_job
                 .as_ref()
                 .ok_or(StorageError::StaleState)?
-                .maximum_bytes,
+                .maximum_bytes(),
             initial.backup_max_bytes()
         );
         engine.backup_job = None;
