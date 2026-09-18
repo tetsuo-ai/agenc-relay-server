@@ -273,3 +273,7 @@ fn retry(coordinator: &mut FederationCoordinator, context: &StateCoreContext) {
     };
     coordinator.loader.retirement.retry_at = next;
 }
+
+#[cfg(test)]
+#[path = "retirement/tests/refusal.rs"]
+mod refusal_tests;
