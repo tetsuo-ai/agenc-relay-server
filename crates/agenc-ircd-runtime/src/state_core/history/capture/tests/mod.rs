@@ -129,3 +129,149 @@ async fn empty_control_does_not_block_binding_and_bound_channel_rejects_plaintex
     );
     Ok(())
 }
+
+fn restored(domain: &DomainState, channel: &DurableChannel) -> TestResult<DomainState> {
+    Ok(DomainState::restore(
+        domain.revision(),
+        domain.durable_accounts().collect(),
+        vec![channel.clone()],
+        Vec::new(),
+    )?)
+}
+
+#[tokio::test]
+async fn message_channels_need_a_trusted_clock_and_a_listed_global_registered_channel() -> TestResult
+{
+    let (domain, base) = channel()?;
+    let plan = domain.plan_account_service_checkpoint()?;
+    let intent = MutationContext::default();
+    let untrusted = CaptureInput {
+        domain: &domain,
+        plan: &plan,
+        intent: &intent,
+        wall_trusted: false,
+        accepting_generation: 1,
+    };
+    let live = restored(&domain, &base)?;
+    assert!(
+        validate_message_channel(&untrusted, live.channel(base.channel_id).ok_or("channel")?)
+            .is_err()
+    );
+    let mut unlisted = base.clone();
+    unlisted.visibility = Visibility::Unlisted;
+    let live = restored(&domain, &unlisted)?;
+    let plan = live.plan_account_service_checkpoint()?;
+    let input = CaptureInput {
+        domain: &live,
+        plan: &plan,
+        intent: &intent,
+        wall_trusted: true,
+        accepting_generation: 1,
+    };
+    assert!(
+        validate_message_channel(&input, live.channel(base.channel_id).ok_or("channel")?).is_err()
+    );
+    let mut quarantined = restored(&domain, &base)?;
+    quarantined.admin_quarantine_channel(base.channel_id)?;
+    let plan = quarantined.plan_account_service_checkpoint()?;
+    let input = CaptureInput {
+        domain: &quarantined,
+        plan: &plan,
+        intent: &intent,
+        wall_trusted: true,
+        accepting_generation: 1,
+    };
+    assert!(
+        validate_message_channel(
+            &input,
+            quarantined.channel(base.channel_id).ok_or("channel")?
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn policy_changes_are_detected_field_by_field() -> TestResult {
+    let (domain, base) = channel()?;
+    let live = restored(&domain, &base)?;
+    assert!(!policy_changed(&live, &base));
+    let mut persistence = base.clone();
+    persistence.persistence = PersistencePolicy::Ephemeral;
+    assert!(policy_changed(&live, &persistence));
+    let mut quarantined = base.clone();
+    quarantined.admin_quarantined = true;
+    assert!(policy_changed(&live, &quarantined));
+    Ok(())
+}
+
+#[tokio::test]
+async fn admitted_messages_advance_the_high_water_mark_and_changes_apply_exactly() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    fixture.context_mut()?.enable_history_for_test(true);
+    let history = fixture.context_mut()?.history.as_mut().ok_or("history")?;
+    let (_, channel) = channel()?;
+    let revision = channel.revision.get();
+    let mut pending = HistoryMutation::new();
+    history.admit_message(&mut pending, message(&channel)?, &mut Vec::new(), revision)?;
+    history.committed(pending)?;
+
+    let mut repeated = HistoryMutation::new();
+    assert!(
+        history
+            .admit_message(&mut repeated, message(&channel)?, &mut Vec::new(), revision)
+            .is_err(),
+        "a sequence at or below the high-water mark is corrupt"
+    );
+
+    let unknown_deletion = || -> TestResult<HistoryMutation> {
+        let mut pending = HistoryMutation::new();
+        pending.changes.insert(
+            channel.channel_id,
+            ChannelChange {
+                control: HistoryControlRecord::empty(channel.channel_id, revision)?,
+                new_control_permit: None,
+                rows: Vec::new(),
+                deleted: vec![999],
+                remove_control: false,
+            },
+        );
+        Ok(pending)
+    };
+    assert!(history.committed(unknown_deletion()?).is_err());
+
+    let permit = history.reserve_index_entry()?;
+    let mut duplicate = HistoryMutation::new();
+    duplicate.changes.insert(
+        channel.channel_id,
+        ChannelChange {
+            control: HistoryControlRecord::empty(channel.channel_id, revision)?,
+            new_control_permit: None,
+            rows: vec![HistoryRow {
+                reference: row_reference(&message(&channel)?),
+                logical_bytes: 1,
+                _permit: permit,
+            }],
+            deleted: Vec::new(),
+            remove_control: false,
+        },
+    );
+    assert!(history.committed(duplicate).is_err());
+
+    let mut removal = HistoryMutation::new();
+    removal.changes.insert(
+        channel.channel_id,
+        ChannelChange {
+            control: HistoryControlRecord::empty(channel.channel_id, revision)?,
+            new_control_permit: None,
+            rows: Vec::new(),
+            deleted: Vec::new(),
+            remove_control: true,
+        },
+    );
+    assert!(
+        history.committed(removal).is_err(),
+        "a control with retained rows cannot be removed"
+    );
+    Ok(())
+}
