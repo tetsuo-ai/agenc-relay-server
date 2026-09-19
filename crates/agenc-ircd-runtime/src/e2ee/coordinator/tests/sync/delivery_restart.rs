@@ -788,3 +788,45 @@ async fn shared_event_payload_and_response_storage_puts_are_exactly_deduplicated
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn an_acknowledgement_behind_another_pending_batch_is_a_ceiling() -> TestResult {
+    let mut fixture = RestartFixture::new().await?;
+    let first = fixture.copies.first().ok_or("first durable event")?;
+    let position = DeliveryPosition {
+        server_id: *fixture.storage.identity.server_id.as_bytes(),
+        delivery_generation: first.generation,
+        delivery_sequence: first.row.sequence,
+        event_id: first.row.event_id,
+    };
+    let owner = fixture
+        .coordinator
+        .state
+        .streams
+        .get(&home())
+        .and_then(|stream| stream.owner.clone())
+        .ok_or("stream owner")?;
+    fixture.coordinator.set_pending(PendingWork::Activate {
+        peer: home(),
+        link: LinkId::new(1),
+        owner,
+    });
+    let mut probe = |frame: CompanionFrame| {
+        fixture
+            .coordinator
+            .on_frame(
+                LinkId::new(1),
+                home(),
+                frame,
+                NOW_MILLIS,
+                &fixture.host,
+                &mut fixture.entropy,
+            )
+            .err()
+    };
+    assert_eq!(
+        probe(CompanionFrame::Ack(position)),
+        Some(CompanionFault::Ceiling)
+    );
+    Ok(())
+}
