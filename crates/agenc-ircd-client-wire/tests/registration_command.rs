@@ -706,6 +706,11 @@ fn local_information_and_presence_queries_enforce_exact_arity_and_counts()
         validate(&format!("SETNAME :{}", "a".repeat(65))).err(),
         Some(RegistrationGrammarError::InputTooLong)
     );
+    // Past the PRECIS input bound the text is refused before preparation.
+    assert_eq!(
+        validate(&format!("SETNAME :{}", "a".repeat(257))).err(),
+        Some(RegistrationGrammarError::InputTooLong)
+    );
     for line in ["SETNAME", "SETNAME display", "SETNAME extra :display"] {
         assert!(validate(line).is_err(), "{line}");
     }
