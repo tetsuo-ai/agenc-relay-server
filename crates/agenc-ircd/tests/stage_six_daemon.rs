@@ -105,7 +105,11 @@ const DATABASE_MAX_BYTES: u64 = 1_073_741_824;
 const BACKUP_MAX_BYTES: u64 = 2_147_483_648;
 const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
-const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a fixture waits for a daemon it started to open its listener. A debug daemon on
+/// a host running several times more test threads than cores needed more than 20 seconds
+/// (issue #175); the wait ends as soon as the listener answers, so a generous bound costs a
+/// passing test nothing.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 /// Fresh connections the guest helpers open before giving up on a silent close.
 const FRESH_CONNECTION_ATTEMPTS: usize = 4;
