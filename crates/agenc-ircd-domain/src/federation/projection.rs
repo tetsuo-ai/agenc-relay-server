@@ -764,7 +764,15 @@ impl Derivation<'_> {
     /// Edges hosting the principal after apply.
     fn hosting_edges(&self, principal: Principal) -> BTreeSet<ServerId> {
         match principal {
-            Principal::Guest(user_id) => self.home_of(user_id).into_iter().collect(),
+            // A closed session hosts nothing, and neither does a guest
+            // identity its session left by logging in.
+            Principal::Guest(user_id) => self
+                .view
+                .post_session(user_id)
+                .filter(|session| session.account_id.is_none())
+                .map(|session| session.home_server_id)
+                .into_iter()
+                .collect(),
             Principal::Account(account_id) => self
                 .view
                 .post_sessions()
@@ -918,21 +926,60 @@ impl Derivation<'_> {
         user_id: UserId,
     ) -> Result<(), DomainError> {
         self.touched_users.insert(user_id);
-        if let Some(previous) = self
-            .view
-            .pre_session(user_id)
-            .and_then(|session| session.account_id)
-        {
-            self.touched_accounts.insert(previous);
+        let previous = self.view.pre_session(user_id);
+        if let Some(account_id) = previous.as_ref().and_then(|session| session.account_id) {
+            self.touched_accounts.insert(account_id);
         }
         let Some(home) = self.home_of(user_id) else {
             return Ok(());
         };
+        if let Some(previous) = previous {
+            self.project_principal_invites_hidden(index, principal_of(&previous), home);
+            self.project_member_authority(index, user_id, &previous.joined_channels);
+        }
         if let Some(view) = self.event_view(user_id, home) {
             self.emit(index, home, ProjectedEvent::SessionVisible(view));
         }
         self.project_account_hosting(index, user_id, home);
         self.reproject_account_invites(index, user_id, home)
+    }
+
+    /// An account switch recomputes the session's membership in every joined
+    /// channel and advances that channel, so each member edge takes the
+    /// resulting revision and the home edge the recomputed role.
+    fn project_member_authority(
+        &mut self,
+        index: u16,
+        user_id: UserId,
+        joined: &[ChannelInstanceId],
+    ) {
+        let resulting = self.resulting_revision();
+        let actor = self.actor_view();
+        for channel_id in joined.iter().copied() {
+            let advanced = self
+                .view
+                .post_channel(channel_id)
+                .is_some_and(|channel| channel.revision == resulting);
+            let Some(view) = self
+                .membership_view(channel_id, user_id)
+                .filter(|_| advanced)
+            else {
+                continue;
+            };
+            self.touch_channel(channel_id);
+            for edge in self.member_edges(channel_id) {
+                self.emit(
+                    index,
+                    edge,
+                    ProjectedEvent::ChannelMembershipsRecomputed {
+                        channel_id,
+                        resulting_revision: resulting,
+                        actor: actor.clone(),
+                        memberships: vec![view.clone()],
+                    },
+                );
+            }
+        }
     }
 
     /// Emits the account projection to the home edge when it is new there.
@@ -1776,7 +1823,7 @@ impl Derivation<'_> {
         Some(ProjectedEvent::Invited {
             channel_id,
             invite_id,
-            resulting_revision: invite.creation_revision,
+            resulting_revision: channel.revision,
             local_projection,
             inviter,
             named_target,
@@ -1930,6 +1977,7 @@ impl Derivation<'_> {
     /// Adds entitlement transitions, orders every copy, and computes the
     /// standing deltas for each touched edge.
     fn finish(mut self) -> Result<MutationProjection, DomainError> {
+        self.project_revision_carriers();
         self.project_entitlement_transitions();
         let emissions = std::mem::take(&mut self.emissions);
         let mut deltas = group_emissions(emissions);
@@ -1951,6 +1999,49 @@ impl Derivation<'_> {
         Ok(MutationProjection {
             edges: deltas.into_values().collect(),
         })
+    }
+
+    /// Sends the complete resulting detail to every edge that keeps a channel
+    /// this plan advanced but receives no copy carrying that revision: an
+    /// edge entitled only by an invite, or a member edge of a channel whose
+    /// invite was removed. A delivered message binds to the installed
+    /// revision, so an edge left behind would refuse the next one.
+    fn project_revision_carriers(&mut self) {
+        let advanced: Vec<ChannelInstanceId> = self
+            .view
+            .channels
+            .iter()
+            .filter(|(channel_id, post)| {
+                let pre = self.view.pre_channel(**channel_id);
+                pre.zip(post.as_ref())
+                    .is_some_and(|(pre, post)| pre.revision != post.revision)
+            })
+            .map(|(channel_id, _)| *channel_id)
+            .collect();
+        let edges: Vec<ServerId> = self.index.edges.keys().copied().collect();
+        for channel_id in advanced {
+            for edge in &edges {
+                self.project_revision_carrier(*edge, channel_id);
+            }
+        }
+    }
+
+    fn project_revision_carrier(&mut self, edge: ServerId, channel_id: ChannelInstanceId) {
+        if !self.entitled_before(edge, channel_id) {
+            return;
+        }
+        self.touch_channel(channel_id);
+        let carried = self
+            .emissions
+            .iter()
+            .any(|emission| emission.edge == edge && advances_channel(&emission.event, channel_id));
+        if carried || !self.entitled_after(edge, channel_id) {
+            return;
+        }
+        if let Some(detail) = self.detail(channel_id) {
+            let index = self.last_index_for(channel_id);
+            self.emit(index, edge, ProjectedEvent::ChannelPolicyChanged(detail));
+        }
     }
 
     /// Every edge whose standing may change: homes of touched users before or
@@ -2266,6 +2357,29 @@ fn group_emissions(mut emissions: Vec<Emission>) -> BTreeMap<ServerId, EdgeDelta
         }
     }
     deltas
+}
+
+/// Whether an edge applying the copy installs the channel's resulting
+/// revision. A `projection_hidden` removal repeats the installed revision and
+/// a channel transition belongs to an edge that does not keep the channel.
+fn advances_channel(event: &ProjectedEvent, channel: ChannelInstanceId) -> bool {
+    match event {
+        ProjectedEvent::MemberJoined { view, .. } => view.membership.channel_id == channel,
+        ProjectedEvent::SessionHidden { channels, .. } => {
+            channels.iter().any(|(listed, _)| *listed == channel)
+        }
+        ProjectedEvent::InviteRemoved {
+            channel_id, kind, ..
+        } => *channel_id == channel && *kind != InviteRemovalKind::ProjectionHidden,
+        ProjectedEvent::ChannelPolicyChanged(detail) => detail.channel_id == channel,
+        ProjectedEvent::MemberParted { channel_id, .. }
+        | ProjectedEvent::Kicked { channel_id, .. }
+        | ProjectedEvent::ChannelModesChanged { channel_id, .. }
+        | ProjectedEvent::TopicChanged { channel_id, .. }
+        | ProjectedEvent::ChannelMembershipsRecomputed { channel_id, .. }
+        | ProjectedEvent::Invited { channel_id, .. } => *channel_id == channel,
+        _ => false,
+    }
 }
 
 fn scalar_mode_changes(

@@ -620,6 +620,14 @@ impl EdgeReplica {
                         .local_recipients
                         .extend(self.principal_users(record.target));
                 } else {
+                    // The invite advanced the channel on the coordinator, so a
+                    // member edge that hosts no target still takes the revision.
+                    self.bump_channel_revision(
+                        *channel_id,
+                        *resulting_revision,
+                        generation,
+                        &mut outcome,
+                    )?;
                     outcome
                         .local_recipients
                         .extend(self.local_members(*channel_id));
