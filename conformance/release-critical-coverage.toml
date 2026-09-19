@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 974
-reviewed_source_sha256 = "70ab97b6a6ba93922ffeb6a50643950bf1b138d017a1e22e0d0cafe5ab2fdb24"
+reviewed_source_files = 975
+reviewed_source_sha256 = "ae2ed4e5a324617f887d35e62c736c531228d2264267a98da63844b2cd33e077"
 deferred = []
 
 [[region]]
@@ -8215,7 +8215,7 @@ id = "cap96-replay-response-completeness"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/e2ee/coordinator/request.rs"
 item = "replay_key"
-source_sha256 = "aee8554f33131e3decd23f45b6e8f553e7da1aa96001bf975ec1d853a42d2778"
+source_sha256 = "58a6cf096bd7ad16b4362f499b5e3e6d0446cbac184c5b4b5dba711717fc09db"
 start_line = 466
 end_line = 504
 span_sha256 = "843935917b7a9a79918b3c2563116b92bd9d73312c90286fb36c94cc22ea2ece"
