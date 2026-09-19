@@ -45,7 +45,7 @@ fn hex_nibble(byte: u8) -> TestResult<u8> {
     }
 }
 
-fn vector<const N: usize>(name: &str) -> TestResult<[u8; N]> {
+pub(super) fn vector<const N: usize>(name: &str) -> TestResult<[u8; N]> {
     let record = OPAQUE_VECTORS
         .lines()
         .find(|line| line.starts_with("VEC-S04-007-OPAQUE|"))
@@ -70,7 +70,7 @@ fn vector<const N: usize>(name: &str) -> TestResult<[u8; N]> {
     Ok(decoded)
 }
 
-fn base64url(bytes: &[u8]) -> TestResult<String> {
+pub(super) fn base64url(bytes: &[u8]) -> TestResult<String> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut encoded = String::new();
     for chunk in bytes.chunks(3) {
@@ -90,7 +90,7 @@ fn base64url(bytes: &[u8]) -> TestResult<String> {
     Ok(encoded)
 }
 
-fn opened_request(
+pub(super) fn opened_request(
     identity: &FixtureIdentity,
     request_seed: u8,
     payload: AccountRequestPayload,
@@ -118,7 +118,7 @@ fn opened_request(
     Ok((opened, envelope))
 }
 
-fn issued_invitation(
+pub(super) fn issued_invitation(
     identity: &FixtureIdentity,
     invite_byte: u8,
 ) -> TestResult<(AccountCreationInvite, Ed25519SecretKey)> {
@@ -133,7 +133,7 @@ fn issued_invitation(
     Ok((invitation, authority))
 }
 
-fn request(
+pub(super) fn request(
     generation: ConnectionGeneration,
     carrier_generation: u64,
     route: ConnectionRoute,
@@ -153,7 +153,7 @@ fn request(
 
 /// Feeds one complete chunked ACCTCREATE request so the carrier waits for
 /// the phase response exactly as it would after a real client exchange.
-fn feed_transfer(
+pub(super) fn feed_transfer(
     transfer: &mut AccountTransfer,
     phase: AccountCarrierPhase,
     envelope: &AccountServiceEnvelope,
@@ -181,7 +181,7 @@ fn feed_transfer(
     Ok(())
 }
 
-fn open_connection(
+pub(super) fn open_connection(
     fixture: &mut CoordinatorFixture,
     generation: ConnectionGeneration,
 ) -> TestResult<(Arc<FrameSink>, ConnectionRoute)> {
@@ -206,7 +206,7 @@ fn open_connection(
     Ok((sink, route))
 }
 
-fn transfer(
+pub(super) fn transfer(
     coordinator: &mut AccountServiceCoordinator,
     generation: ConnectionGeneration,
 ) -> TestResult<&mut AccountTransfer> {
@@ -219,7 +219,7 @@ fn transfer(
 
 /// Commits one creation START through the real staging path and installs its
 /// live transaction, reservation timer and ownership on the connection.
-async fn commit_start(
+pub(super) async fn commit_start(
     fixture: &mut CoordinatorFixture,
     generation: ConnectionGeneration,
     route: ConnectionRoute,
@@ -307,17 +307,17 @@ async fn commit_start(
 
 /// One worker-side FINISH result, boxed so the async helpers that await
 /// storage receipts do not carry the sealed outcome in their futures.
-struct WorkerOutcome {
-    transaction_id: TransactionId,
-    sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
-    reservation: Option<CreationReservation>,
-    envelope: AccountServiceEnvelope,
+pub(super) struct WorkerOutcome {
+    pub(super) transaction_id: TransactionId,
+    pub(super) sealed: SealedAccountFinishOutcome<CreateAccountIntent>,
+    pub(super) reservation: Option<CreationReservation>,
+    pub(super) envelope: AccountServiceEnvelope,
 }
 
 /// The worker-side FINISH: the live transaction leaves the connection, the
 /// trusted UTC read taken at open becomes the operation context, and the
 /// auth crate produces the sealed outcome the runtime later admits.
-fn worker_finish(
+pub(super) fn worker_finish(
     fixture: &mut CoordinatorFixture,
     generation: ConnectionGeneration,
     route: ConnectionRoute,
@@ -468,7 +468,7 @@ async fn refuse_and_clean_up(
 
 /// Stages one worker outcome at `stage_wall`, commits it and installs the
 /// live login key exactly as the state core does after the storage receipt.
-async fn commit_finish(
+pub(super) async fn commit_finish(
     fixture: &mut CoordinatorFixture,
     generation: ConnectionGeneration,
     route: ConnectionRoute,

@@ -1043,6 +1043,17 @@ impl RegistrationRouter {
                 let observation = observation.take().ok_or(RuntimeError::InvalidValue)?;
                 state.deferred_observations.push_back(observation);
             }
+            RegistrationAction::NicknameInUse(nickname) => {
+                record_result(result, ResultClass::Rejected);
+                self.send_numeric(
+                    context,
+                    generation,
+                    state,
+                    433,
+                    &[nickname.as_str()],
+                    "Nickname is already in use",
+                )?;
+            }
             RegistrationAction::NotRegistered => {
                 record_result(result, ResultClass::Rejected);
                 self.send_numeric(
@@ -3384,13 +3395,14 @@ impl CommandRouter for RegistrationRouter {
         if self.owned_timer_fired(context, entry) {
             return;
         }
-        let Some(accounts) = self.accounts.as_mut() else {
-            return;
-        };
-        let (handled, completions) = accounts.timer_fired(context, entry);
-        self.apply_account_completions(context, completions);
-        if handled {
-            return;
+        // An edge hosts no account service. Its command continuations, registration
+        // deadlines and keepalive timers still fire, so only the account step is skipped.
+        if let Some(accounts) = self.accounts.as_mut() {
+            let (handled, completions) = accounts.timer_fired(context, entry);
+            self.apply_account_completions(context, completions);
+            if handled {
+                return;
+            }
         }
         match self.commands.timer_fired(context, entry) {
             Ok(true) => return,
@@ -3887,6 +3899,45 @@ pub(crate) fn apply_ready_barrier(
 #[cfg(test)]
 #[path = "registration/tests/close.rs"]
 mod close_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/support.rs"]
+mod test_harness;
+
+#[cfg(test)]
+#[path = "registration/tests/nickname_in_use.rs"]
+mod nickname_in_use_tests;
+#[cfg(test)]
+#[path = "registration/tests/timers.rs"]
+mod timer_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/edge_answers.rs"]
+mod edge_answer_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/edge_carriers.rs"]
+mod edge_carrier_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/actions.rs"]
+mod action_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/edge_completions.rs"]
+mod edge_completion_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/hooks.rs"]
+mod hook_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/e2ee_lines.rs"]
+mod e2ee_line_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/core_lines.rs"]
+mod core_line_tests;
 
 #[cfg(test)]
 mod tests {

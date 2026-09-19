@@ -4114,6 +4114,10 @@ async fn shutdown_blocking_owners(
 }
 
 #[cfg(test)]
+#[path = "daemon/tests/classification.rs"]
+mod classification_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{DaemonError, ReconstructionSurface};
     use crate::RuntimeError;

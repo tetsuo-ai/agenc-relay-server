@@ -587,6 +587,22 @@ impl ClientTranscriptHarness {
         Ok(())
     }
 
+    fn queue_numeric(
+        &mut self,
+        target: &str,
+        code: u16,
+        parameters: &[&str],
+        text: &str,
+    ) -> Result<(), ClientTranscriptError> {
+        self.queue_wire(numeric_reply(
+            TRANSCRIPT_SERVER,
+            code,
+            target,
+            parameters,
+            Some(text),
+        )?)
+    }
+
     fn render_non_capability_action(
         &mut self,
         target: &str,
@@ -595,22 +611,18 @@ impl ClientTranscriptHarness {
         match action {
             RegistrationAction::WelcomeBurst(steps) => self.queue_welcome(target, &steps)?,
             RegistrationAction::NotRegistered => {
-                self.queue_wire(numeric_reply(
-                    TRANSCRIPT_SERVER,
-                    451,
+                self.queue_numeric(target, 451, &[], "You have not registered")?;
+            }
+            RegistrationAction::NicknameInUse(nickname) => {
+                self.queue_numeric(
                     target,
-                    &[],
-                    Some("You have not registered"),
-                )?)?;
+                    433,
+                    &[nickname.as_str()],
+                    "Nickname is already in use",
+                )?;
             }
             RegistrationAction::AlreadyRegistered => {
-                self.queue_wire(numeric_reply(
-                    TRANSCRIPT_SERVER,
-                    462,
-                    target,
-                    &[],
-                    Some("You may not reregister"),
-                )?)?;
+                self.queue_numeric(target, 462, &[], "You may not reregister")?;
             }
             RegistrationAction::Pong(token) => {
                 self.queue_wire(WireMessage::new(

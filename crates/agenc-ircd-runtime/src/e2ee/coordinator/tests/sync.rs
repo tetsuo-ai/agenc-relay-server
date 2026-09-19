@@ -5,6 +5,7 @@
 
 mod delivery_restart;
 mod origin_admission;
+mod origin_refusals;
 mod review_witness;
 
 use agenc_ircd_crypto::SemanticHashDomain;
