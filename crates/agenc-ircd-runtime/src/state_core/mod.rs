@@ -4044,10 +4044,15 @@ impl StateCore {
             let safe_point =
                 !in_flight && self.context.pending_len() == 0 && self.router.reload_ready();
             if safe_point {
-                if self.reload_pending.is_some()
-                    && let Some(exit) = self.activate_pending_reload()
-                {
-                    return exit;
+                if self.reload_pending.is_some() {
+                    match self.activate_pending_reload() {
+                        Some(exit) => return exit,
+                        // The pending reload kept this pass from beginning the
+                        // router shutdown above. Restart the pass so that guard
+                        // runs before any Drain acknowledgement; the activation
+                        // always takes the pending reload, so this cannot repeat.
+                        None => continue,
+                    }
                 }
                 let activation_barrier =
                     self.reload_pending.is_some() || self.reload_provisional.is_some();
