@@ -16,6 +16,9 @@ mod membership;
 #[path = "history/candidate_positions.rs"]
 mod candidate_positions;
 
+#[path = "history/terminal_faults.rs"]
+mod terminal_faults;
+
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_e2ee::history::{
     AlternativeRecord, ChainLimits, ChainStep, HistoricalChain, Lifecycle, RecordReferences,
