@@ -412,3 +412,24 @@ async fn a_materialized_page_must_be_exactly_the_requested_rows() -> TestResult 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn history_authority_and_time_need_a_trusted_wall_clock() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let (identity, id) = install_reader(context)?;
+    let bound = crate::test_support::bound(identity);
+    context.history_select(bound, id, latest()?)?;
+    let trusted = context.history_now()?;
+    context.set_untrusted_wall_for_test(None);
+    assert!(!context.history_clock_safe());
+    assert!(context.history_select(bound, id, latest()?).is_err());
+    assert!(context.history_now().is_err());
+    // A wall clock that jumped far from the monotonic clock is not trusted either.
+    context.set_untrusted_wall_for_test(Some(trusted / 1_000 + 86_400 * 365));
+    assert!(
+        context.history_now().is_err() || context.history_select(bound, id, latest()?).is_err(),
+        "a wall clock adrift of the monotonic clock is refused"
+    );
+    Ok(())
+}
