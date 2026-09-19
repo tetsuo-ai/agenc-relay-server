@@ -103,6 +103,34 @@ impl StorageLimitWriter {
         self.notify_owner()
     }
 
+    /// Replaces one audited reservation with another and wakes the owner once.
+    ///
+    /// A rollback followed by a reserve would queue two wake notices ahead of the outcome
+    /// commit the caller submits next, and the request queue holds two entries: a commit
+    /// that finds both slots taken is refused as full. The owner reads the limit cell when
+    /// it wakes, so one notice carries both changes.
+    pub fn replace_reservation(
+        &self,
+        replaced: TransactionId,
+        token: TransactionId,
+        candidate: StorageRuntimeLimits,
+        projected_logical_database_bytes: u64,
+        projected_backup_stream_bytes: u64,
+    ) -> Result<(), StorageError> {
+        self.limits.rollback(replaced)?;
+        self.limits.reserve(
+            token,
+            candidate,
+            projected_logical_database_bytes,
+            projected_backup_stream_bytes,
+        )?;
+        if let Err(error) = self.notify_owner() {
+            let _rolled_back = self.limits.rollback(token);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Restores the prior limits when an audited outcome did not commit.
     pub fn rollback(&self, token: TransactionId) -> Result<(), StorageError> {
         self.limits.rollback(token)?;
@@ -1204,3 +1232,7 @@ mod tests {
 #[cfg(test)]
 #[path = "owner/tests/backup_phases.rs"]
 mod backup_phase_tests;
+
+#[cfg(test)]
+#[path = "owner/tests/limit_notices.rs"]
+mod limit_notice_tests;
