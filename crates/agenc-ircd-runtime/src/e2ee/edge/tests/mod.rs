@@ -13,6 +13,7 @@ use super::router::Resolved;
 use super::{E2eeEdge, E2eeEdgeConfig, LocalOrigin, PendingRequest, Phase};
 use crate::connection::ConnectionGeneration;
 
+mod event_faults;
 mod ingress;
 mod projection;
 mod responses;
