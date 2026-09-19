@@ -223,3 +223,28 @@ async fn a_pending_channel_key_job_expires_at_its_deadline() -> TestResult {
     assert!(!saw(&sink, "+k"), "lines: {:?}", sink.lines());
     Ok(())
 }
+
+#[tokio::test]
+async fn commands_deferred_behind_a_join_stop_at_the_deferral_ceiling() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = core.open(1)?;
+    core.line(1, "NICK stacker")?;
+    core.line(1, "USER stacker 0 * :Stacker")?;
+    core.settle().await?;
+    core.line(1, "JOIN #stack")?;
+    for _ in 0..33 {
+        core.line(1, "TOPIC #stack")?;
+    }
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(!open, "the command over the ceiling closes the connection");
+    core.settle().await?;
+    let lines = sink.lines();
+    let topics = lines.iter().filter(|line| line.contains(" 331 ")).count();
+    assert!(topics <= 1, "deferred commands never answer: {lines:?}");
+    Ok(())
+}

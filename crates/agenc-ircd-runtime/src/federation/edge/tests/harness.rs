@@ -4121,6 +4121,8 @@ async fn resync_snapshot_cannot_replace_an_incomplete_cross_profile_completion()
 
 mod carrier_during_origin_update;
 
+mod origin_acks;
+
 mod restored_journal;
 
 mod restored_projection;
