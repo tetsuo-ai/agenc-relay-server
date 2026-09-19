@@ -674,3 +674,7 @@ pub fn read_blocking(port: &StoragePort, plan: ReadPlan) -> Result<ReadResult, R
     let completion = port.try_read(plan)?;
     Ok(completion.wait()?)
 }
+
+#[cfg(test)]
+#[path = "tests/ledger_reach.rs"]
+mod ledger_reach;
