@@ -64,6 +64,7 @@ fn every_fragment_grammar_rule_has_a_negative() -> TestResult {
         ("long final segment", format!("v1.{id}.2.3.6000.{full}")),
         ("leading zero", format!("v1.{id}.01.3.6000.{full}")),
         ("five index digits", format!("v1.{id}.00000.3.6000.{full}")),
+        ("five count digits", format!("v1.{id}.0.00003.6000.{full}")),
         ("eight total digits", format!("v1.{id}.0.3.00006000.{full}")),
         (
             "short object id",

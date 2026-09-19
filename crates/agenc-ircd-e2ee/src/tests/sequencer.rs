@@ -290,3 +290,41 @@ fn a_successor_credential_is_admitted_only_inside_its_overlap_window() -> TestRe
     );
     Ok(())
 }
+
+#[test]
+fn credentials_are_checked_for_network_genesis_shape_lineage_and_file_size() -> TestResult {
+    use crate::sequencer::{MAX_SEQUENCER_CREDENTIALS_FILE_BYTES, SequencerCredentialsFile};
+
+    let first_secret = key(60);
+    let first = sequencer_credential(&first_secret, 0, (0, 1_000_000), None)?;
+    let verified_first = verify_sequencer_credential(&NETWORK, &first, None)?;
+    assert_eq!(
+        verify_sequencer_credential(&[9; 32], &first, None),
+        Err(E2eeError::ProfileMismatch),
+        "another network"
+    );
+    let mut signed_genesis = first.clone();
+    signed_genesis.continuity_signature = Opaque::new(vec![0; 64])?;
+    assert_eq!(
+        verify_sequencer_credential(&NETWORK, &signed_genesis, None),
+        Err(E2eeError::InvalidValue),
+        "a generation-zero credential with a continuity signature"
+    );
+    let mut wrong_previous = sequencer_credential(
+        &key(61),
+        1,
+        (500_000, 2_000_000),
+        Some((&first_secret, &first)),
+    )?;
+    wrong_previous.tbs.previous_key_id = [9; 32];
+    assert_eq!(
+        verify_sequencer_credential(&NETWORK, &wrong_previous, Some(&verified_first)),
+        Err(E2eeError::InvalidValue),
+        "a successor naming another predecessor"
+    );
+    assert_eq!(
+        SequencerCredentialsFile::parse(&vec![0; MAX_SEQUENCER_CREDENTIALS_FILE_BYTES + 1]).err(),
+        Some(E2eeError::LimitExceeded)
+    );
+    Ok(())
+}

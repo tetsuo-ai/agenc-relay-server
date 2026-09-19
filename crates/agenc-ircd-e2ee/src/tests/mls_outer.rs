@@ -306,3 +306,26 @@ fn key_packages_outside_the_profile_are_refused() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn key_packages_of_another_version_or_leaf_source_are_refused() -> TestResult {
+    let secret = Ed25519SecretKey::from_bytes([24; 32]);
+    let sample = key_package(&secret, None)?;
+    let mut wrong_version = sample.bytes.clone();
+    wrong_version.splice(4..6, [0, 2]);
+    assert_eq!(
+        parse_mls_message(&wrong_version, &mut budget()),
+        Err(E2eeError::ProfileMismatch)
+    );
+    // The leaf node source byte follows the key package header, the three
+    // keys, the credential and the five capability vectors.
+    let source_offset = 4 + 2 + 2 + 33 + 33 + 33 + 2 + 22 + 13;
+    let mut wrong_source = sample.bytes.clone();
+    assert_eq!(wrong_source.get(source_offset), Some(&1));
+    *wrong_source.get_mut(source_offset).ok_or("source byte")? = 2;
+    assert_eq!(
+        parse_mls_message(&wrong_source, &mut budget()),
+        Err(E2eeError::ProfileMismatch)
+    );
+    Ok(())
+}

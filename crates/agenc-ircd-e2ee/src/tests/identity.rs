@@ -749,6 +749,17 @@ fn a_credential_bundle_names_one_client_and_agrees_with_its_key_package() -> Tes
             },
         ),
         (
+            "lifetime start",
+            KeyPackageSpec {
+                identity: &identity,
+                leaf_seed: 30,
+                suite: 1,
+                lifetime: (101, 1_000),
+                capabilities: capability_vectors.clone(),
+                leaf_extensions: Vec::new(),
+            },
+        ),
+        (
             "suite",
             KeyPackageSpec {
                 identity: &identity,
