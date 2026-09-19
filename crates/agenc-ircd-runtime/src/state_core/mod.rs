@@ -2983,19 +2983,17 @@ impl StateCore {
                 return Some(StateCoreExit::Corrupt(CorruptionCause::ApplyFailed));
             }
         };
+        // One wake notice, not two: the outcome commit below needs a free request slot.
         if self
             .storage_limit_writer
-            .rollback(provisional.reservation_transaction_id)
+            .replace_reservation(
+                provisional.reservation_transaction_id,
+                failure.transaction_id,
+                provisional.previous.storage_limits(),
+                failure.resulting_logical_database_bytes,
+                failure.resulting_backup_stream_bytes,
+            )
             .is_err()
-            || self
-                .storage_limit_writer
-                .reserve(
-                    failure.transaction_id,
-                    provisional.previous.storage_limits(),
-                    failure.resulting_logical_database_bytes,
-                    failure.resulting_backup_stream_bytes,
-                )
-                .is_err()
         {
             provisional.state = AuditedReloadState::CommittingFailure { rejection };
             self.reload_provisional = Some(provisional);
@@ -4044,10 +4042,15 @@ impl StateCore {
             let safe_point =
                 !in_flight && self.context.pending_len() == 0 && self.router.reload_ready();
             if safe_point {
-                if self.reload_pending.is_some()
-                    && let Some(exit) = self.activate_pending_reload()
-                {
-                    return exit;
+                if self.reload_pending.is_some() {
+                    match self.activate_pending_reload() {
+                        Some(exit) => return exit,
+                        // The pending reload kept this pass from beginning the
+                        // router shutdown above. Restart the pass so that guard
+                        // runs before any Drain acknowledgement; the activation
+                        // always takes the pending reload, so this cannot repeat.
+                        None => continue,
+                    }
                 }
                 let activation_barrier =
                     self.reload_pending.is_some() || self.reload_provisional.is_some();

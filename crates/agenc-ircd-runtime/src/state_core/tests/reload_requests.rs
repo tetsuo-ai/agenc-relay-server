@@ -5,7 +5,7 @@
 use agenc_ircd_admin::AdminAuditPhase::{OutcomeFailure, OutcomeSuccess};
 use agenc_ircd_types::TransactionId;
 
-use super::support::{account_plan, audit_event, empty_fanout};
+use super::support::{account_plan, audit_event, empty_fanout, storage_owner_idle};
 use super::*;
 use crate::runtime_config::{
     AuditedReloadResult, AuditedReloadStart, ConfigRevision, PreparedReload, ReloadActivation,
@@ -229,8 +229,9 @@ fn an_audited_reload_without_transaction_entropy_ends_the_core() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn a_stale_audited_reload_reserves_its_failure_outcome_without_changing_live_state() -> TestResult {
+#[tokio::test]
+async fn a_stale_audited_reload_reserves_its_failure_outcome_without_changing_live_state()
+-> TestResult {
     let Reloading {
         mut fixture,
         handle,
@@ -247,6 +248,10 @@ fn a_stale_audited_reload_reserves_its_failure_outcome_without_changing_live_sta
     let activation = provisional(state, Box::new(stale))?;
     assert!(!activation.changes_live_state);
     assert_eq!(activation.revision, handle.load().revision());
+    // The activation and the reservation each notified the storage owner;
+    // the outcome is submitted once its two-slot queue has room again.
+    storage_owner_idle(&mut fixture).await?;
+    let state = fixture.state_mut()?;
     let (exit, answer) = commit(state, activation);
     assert!(exit.is_none());
     assert_eq!(answer, None, "the failure outcome waits for its receipt");

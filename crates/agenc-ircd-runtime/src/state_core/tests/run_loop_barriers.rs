@@ -405,3 +405,150 @@ async fn drain_completes_even_when_the_router_declines_to_begin_shutdown() -> Te
     );
     Ok(())
 }
+
+/// A sink that notes how often the router had begun its shutdown at the
+/// moment the actor told this connection to shut down.
+struct ShutdownOrderSink {
+    inner: Arc<FrameSink>,
+    router_shutdowns: Arc<AtomicUsize>,
+    seen_at_connection_shutdown: std::sync::Mutex<Option<usize>>,
+}
+
+impl ClientSink for ShutdownOrderSink {
+    fn generation(&self) -> ConnectionGeneration {
+        self.inner.generation()
+    }
+
+    fn try_reserve(
+        &self,
+        demand: crate::connection::sink::ClientQueueDemand,
+    ) -> Result<
+        crate::connection::sink::TentativeClientQueueReservation,
+        crate::connection::sink::SinkReserveError,
+    > {
+        self.inner.try_reserve(demand)
+    }
+
+    fn prepare(
+        &self,
+        tentative: crate::connection::sink::TentativeClientQueueReservation,
+        backing: Option<crate::budget::MemoryPermit>,
+    ) -> Result<
+        crate::connection::sink::ClientQueueReservation,
+        crate::connection::sink::QueueAllocationError,
+    > {
+        self.inner.prepare(tentative, backing)
+    }
+
+    fn commit(
+        &self,
+        reservation: crate::connection::sink::ClientQueueReservation,
+        frames: crate::connection::sink::BoundedSharedClientFrames,
+    ) {
+        self.inner.commit(reservation, frames);
+    }
+
+    fn begin_slow_consumer_close(&self) {
+        self.inner.begin_slow_consumer_close();
+    }
+
+    fn close_after_flush(
+        &self,
+        reason: crate::state_core::inbox::CloseReason,
+    ) -> crate::connection::FlushAcknowledgement {
+        if let Ok(mut seen) = self.seen_at_connection_shutdown.lock() {
+            let _first = seen.get_or_insert(self.router_shutdowns.load(Ordering::SeqCst));
+        }
+        self.inner.close_after_flush(reason)
+    }
+
+    fn queue_snapshot(&self) -> crate::connection::ClientQueueSnapshot {
+        self.inner.queue_snapshot()
+    }
+}
+
+async fn open_ordered_connection(
+    inbox: &mpsc::Sender<StateCoreMessage>,
+    sink: &Arc<ShutdownOrderSink>,
+) -> TestResult {
+    let (acknowledgement, accepted) = oneshot::channel();
+    send(
+        inbox,
+        StateCoreMessage::Opened {
+            generation: ConnectionGeneration::new(1),
+            purpose: ListenerPurpose::ClientOnion,
+            source: SourceAddressKey::onion_listener(),
+            sink: Arc::clone(sink) as Arc<dyn ClientSink>,
+            acknowledgement,
+        },
+    )
+    .await?;
+    if !matches!(accepted.await?, ConnectionOpenOutcome::Accepted) {
+        return Err("the connection was not admitted".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn drain_behind_a_pending_reload_is_acknowledged_only_after_the_router_began_shutdown()
+-> TestResult {
+    let Gate {
+        mut fixture,
+        handle,
+        port,
+        reload_ready,
+        shutdown_calls,
+        ..
+    } = gated(false, 0)?;
+    let first = motd_reload(&handle, "BeforeDrain")?;
+    let nudge = motd_reload(&handle, "Nudge")?;
+    let sink = Arc::new(ShutdownOrderSink {
+        inner: FrameSink::new(ConnectionGeneration::new(1), true),
+        router_shutdowns: Arc::clone(&shutdown_calls),
+        seen_at_connection_shutdown: std::sync::Mutex::new(None),
+    });
+    let driver_sink = Arc::clone(&sink);
+    let calls = Arc::clone(&shutdown_calls);
+    let (exit, (_inbox, outcome, drained, calls_at_drain), _state) =
+        run_fixture(&mut fixture, |controls| async move {
+            open_ordered_connection(&controls.inbox, &driver_sink).await?;
+            let activation = port.activate_signal(first);
+            let script = async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let mut draining = Box::pin(controls.lifecycle.request(LifecyclePhase::Drain));
+                let early = tokio::time::timeout(Duration::from_millis(100), &mut draining).await;
+                if early.is_ok() {
+                    return Err("drain passed the pending reload".into());
+                }
+                let _nudged = open_gate(&reload_ready, &port, nudge).await;
+                let drained = tokio::time::timeout(Duration::from_secs(5), draining).await?;
+                TestResult::Ok((drained, calls.load(Ordering::SeqCst)))
+            };
+            let (outcome, script) = tokio::join!(activation, script);
+            let (drained, calls_at_drain) = script?;
+            controls
+                .lifecycle
+                .request(LifecyclePhase::Stop)
+                .await
+                .map_err(|_| "stop")?;
+            Ok((controls.inbox, outcome, drained, calls_at_drain))
+        })
+        .await?;
+    assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+    assert!(matches!(outcome, ReloadOutcome::Applied(_)), "{outcome:?}");
+    assert_eq!(drained, Ok(()));
+    let seen = *sink
+        .seen_at_connection_shutdown
+        .lock()
+        .map_err(|_| "sink lock")?;
+    assert_eq!(
+        seen,
+        Some(1),
+        "connections were told to shut down before the router began its shutdown"
+    );
+    assert_eq!(
+        calls_at_drain, 1,
+        "Drain was acknowledged before the router began its shutdown"
+    );
+    Ok(())
+}
