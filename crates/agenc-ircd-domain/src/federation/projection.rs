@@ -764,7 +764,15 @@ impl Derivation<'_> {
     /// Edges hosting the principal after apply.
     fn hosting_edges(&self, principal: Principal) -> BTreeSet<ServerId> {
         match principal {
-            Principal::Guest(user_id) => self.home_of(user_id).into_iter().collect(),
+            // A closed session hosts nothing, and neither does a guest
+            // identity its session left by logging in.
+            Principal::Guest(user_id) => self
+                .view
+                .post_session(user_id)
+                .filter(|session| session.account_id.is_none())
+                .map(|session| session.home_server_id)
+                .into_iter()
+                .collect(),
             Principal::Account(account_id) => self
                 .view
                 .post_sessions()
@@ -926,6 +934,7 @@ impl Derivation<'_> {
             return Ok(());
         };
         if let Some(previous) = previous {
+            self.project_principal_invites_hidden(index, principal_of(&previous), home);
             self.project_member_authority(index, user_id, &previous.joined_channels);
         }
         if let Some(view) = self.event_view(user_id, home) {

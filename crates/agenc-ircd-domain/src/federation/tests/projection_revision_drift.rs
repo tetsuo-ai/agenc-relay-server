@@ -1,6 +1,7 @@
 //! Every coordinator mutation that advances a channel's revision reaches each
 //! edge holding that channel, so the next channel message binds to the
-//! revision the edge installed.
+//! revision the edge installed. A principal that stops being hosted on an
+//! edge, by closing, logging in or logging out, takes its invite copies along.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -199,6 +200,50 @@ fn invite_user(harness: &mut Harness, inviter: UserId, target: u8) -> Result<(),
 }
 
 #[test]
+fn a_closed_guest_leaves_no_invite_behind_on_its_home_edge() -> Result<(), DomainError> {
+    let mut harness = three_edges()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_A)?;
+    join(&mut harness, alice)?;
+    invite_user(&mut harness, alice, 2)?;
+    let plan = harness.state.plan_session_disconnected(bob)?;
+    assert_eq!(
+        deliver(&mut harness, plan)?,
+        [
+            vec![K::ChannelPolicyChanged, K::SessionHidden, K::InviteRemoved],
+            Vec::new(),
+            Vec::new()
+        ]
+    );
+    assert_eq!(say(&mut harness, alice)?, heard(&[EDGE_A]));
+    assert_replicas_match_the_cut(&harness)?;
+    Ok(())
+}
+
+#[test]
+fn a_closed_guest_invite_advances_the_channel_on_every_member_edge() -> Result<(), DomainError> {
+    let mut harness = three_edges()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let carol = harness.open(3, EDGE_C)?;
+    join(&mut harness, alice)?;
+    join(&mut harness, carol)?;
+    invite_user(&mut harness, alice, 2)?;
+    let plan = harness.state.plan_session_disconnected(bob)?;
+    assert_eq!(
+        deliver(&mut harness, plan)?,
+        [
+            vec![K::ChannelPolicyChanged],
+            vec![K::SessionHidden, K::InviteRemoved, K::ChannelHidden],
+            vec![K::ChannelPolicyChanged]
+        ]
+    );
+    assert_eq!(say(&mut harness, carol)?, heard(&[EDGE_A, EDGE_C]));
+    assert_replicas_match_the_cut(&harness)?;
+    Ok(())
+}
+
+#[test]
 fn an_expired_invite_advances_the_channel_on_edges_that_held_no_copy() -> Result<(), DomainError> {
     let mut harness = three_edges()?;
     let alice = harness.open(1, EDGE_A)?;
@@ -258,6 +303,55 @@ fn a_reprojected_invite_repeats_the_current_channel_revision() -> Result<(), Dom
             ]
         ]
     );
+    assert_replicas_match_the_cut(&harness)?;
+    Ok(())
+}
+
+#[test]
+fn a_guest_logging_in_leaves_no_guest_invite_behind() -> Result<(), DomainError> {
+    let mut harness = three_edges()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let carol = harness.open(3, EDGE_C)?;
+    join(&mut harness, alice)?;
+    join(&mut harness, carol)?;
+    invite_user(&mut harness, alice, 2)?;
+    let account = create_account(&mut harness, 41)?;
+    assert_eq!(
+        switch(&mut harness, bob, Some(account))?,
+        [
+            vec![K::ChannelPolicyChanged],
+            vec![
+                K::SessionVisible,
+                K::AccountStateChanged,
+                K::InviteRemoved,
+                K::ChannelHidden
+            ],
+            vec![K::ChannelPolicyChanged]
+        ]
+    );
+    assert_eq!(say(&mut harness, carol)?, heard(&[EDGE_A, EDGE_C]));
+    assert_replicas_match_the_cut(&harness)?;
+    Ok(())
+}
+
+#[test]
+fn an_account_logging_out_hides_its_invite_copy_on_that_edge() -> Result<(), DomainError> {
+    let mut harness = three_edges()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    harness.register(bob, 41)?;
+    join(&mut harness, alice)?;
+    invite_user(&mut harness, alice, 2)?;
+    assert_eq!(
+        switch(&mut harness, bob, None)?,
+        [
+            Vec::new(),
+            vec![K::SessionVisible, K::InviteRemoved, K::ChannelHidden],
+            Vec::new()
+        ]
+    );
+    assert_eq!(say(&mut harness, alice)?, heard(&[EDGE_A]));
     assert_replicas_match_the_cut(&harness)?;
     Ok(())
 }
