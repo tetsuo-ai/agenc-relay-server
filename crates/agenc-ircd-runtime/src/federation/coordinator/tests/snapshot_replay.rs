@@ -9,7 +9,7 @@ use crate::bridge::{StorageReadCompletionMessage, StorageReadId};
 use crate::state_core::projector::{EdgeDelivery, FederationProjector};
 use crate::state_core::timers::{TimedId, TimerKind};
 use agenc_ircd_federation_wire::DeliveryCursor;
-use agenc_ircd_storage::federation_records::{OutboxEventRecord, outbox_key};
+use agenc_ircd_storage::federation_records::{OUTBOX_EVENT_KIND, OutboxEventRecord, outbox_key};
 use agenc_ircd_storage::{ReadRecord, ReadResult, StorageError, StoredKey};
 use agenc_ircd_types::EventId;
 
@@ -250,6 +250,51 @@ async fn a_second_replay_step_never_issues_a_second_read_for_the_same_page() -> 
 }
 
 /// The durable key, record and envelope value of one consistent outbox row.
+#[tokio::test]
+async fn a_replayed_row_keyed_to_another_edge_retires_the_link() -> TestResult {
+    let mut replay = replaying(1)?;
+    let mut page = replay.page(0).await?;
+    let (record, _) = outbox_row()?;
+    let plaintext = PersistentRecordValue::new(
+        TableId::EdgeOutbox,
+        OUTBOX_EVENT_KIND,
+        1,
+        0,
+        None,
+        Vec::new(),
+        record.encode()?,
+    )?
+    .encode()?;
+    let key = outbox_key(STRANGER, 0, 0)?;
+    let sealed_record = replay
+        .fixture
+        .seal_row_for_test(TableId::EdgeOutbox, &key, &plaintext)?;
+    let result = page
+        .result
+        .as_mut()
+        .map_err(|error| format!("replay page: {error:?}"))?;
+    result.records = vec![ReadRecord {
+        table: TableId::EdgeOutbox,
+        key,
+        sealed_record,
+    }];
+    replay.complete(page)?;
+    assert!(replay.retired()?);
+    assert_eq!(replay.coordinator.counters.events_sent, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_replayed_row_whose_size_contradicts_the_window_retires_the_link() -> TestResult {
+    let mut replay = replaying(1)?;
+    let page = replay.page(0).await?;
+    replay.peer()?.outbox.unacked.push_back((0, RETAINED, 1));
+    replay.complete(page)?;
+    assert!(replay.retired()?);
+    assert_eq!(replay.coordinator.counters.events_sent, 0);
+    Ok(())
+}
+
 fn outbox_row() -> TestResult<(OutboxEventRecord, StoredKey)> {
     let event = ProjectedEvent::NetworkNotice {
         code: "REPLAY".to_owned(),
