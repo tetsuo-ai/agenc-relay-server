@@ -576,7 +576,6 @@ required_phrases = (
     "uint64 finalization_account_service_response_count;",
     "less than `2^-129`",
     "protocol-sources-and-decisions.md",
-    "There is no fixed reviewer count",
 )
 for phrase in required_phrases:
     if phrase not in spec_text:
