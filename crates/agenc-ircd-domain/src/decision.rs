@@ -5782,6 +5782,43 @@ mod tests {
     use crate::{MessageCommand, MessageText};
     use agenc_ircd_types::{AccountRandomId, ControlPolicy, ServerId, SessionId};
 
+    fn mutation_of(decision: PlanDecision) -> Result<MutationPlan, DomainError> {
+        match decision {
+            PlanDecision::Mutation(plan) => Ok(plan),
+            _ => Err(DomainError::InvariantViolation),
+        }
+    }
+
+    fn external_of(decision: PlanDecision) -> Result<Vec<ExternalInputRequest>, DomainError> {
+        match decision {
+            PlanDecision::NeedsExternal(requests) => Ok(requests),
+            _ => Err(DomainError::InvariantViolation),
+        }
+    }
+
+    fn rejected_of(decision: PlanDecision) -> Result<RejectedPlan, DomainError> {
+        match decision {
+            PlanDecision::Rejected(rejected) => Ok(rejected),
+            _ => Err(DomainError::InvariantViolation),
+        }
+    }
+
+    fn role_change_parts(
+        change: ModeChange,
+    ) -> Result<(ModeOperation, NicknameValue, Role), DomainError> {
+        match change {
+            ModeChange::Role {
+                operation,
+                target,
+                role,
+            } => Ok((operation, target, role)),
+            _ => Err(DomainError::InvariantViolation),
+        }
+    }
+
+    #[path = "../../tests/decision_reach.rs"]
+    mod reach;
+
     struct Fixture {
         state: DomainState,
         owner: SessionState,
@@ -5930,9 +5967,10 @@ mod tests {
     {
         let mut f = fixture()?;
         let names = listed_channels(&mut f, 3)?;
-        let [listed, unlisted, secret] = names.as_slice() else {
-            return Err(DomainError::InvariantViolation);
-        };
+        let [listed, unlisted, secret]: [ChannelNameValue; 3] = names
+            .try_into()
+            .map_err(|_| DomainError::InvariantViolation)?;
+        let (listed, unlisted, secret) = (&listed, &unlisted, &secret);
         for (name, visibility) in [
             (unlisted, Visibility::Unlisted),
             (secret, Visibility::Secret),
@@ -5962,7 +6000,8 @@ mod tests {
         // with the same scan count and no row shape.
         let hidden = f.state.select_channel_list(std::slice::from_ref(secret))?;
         let missing = f.state.select_channel_list(std::slice::from_ref(&absent))?;
-        assert!(hidden.rows().is_empty() && missing.rows().is_empty());
+        assert!(hidden.rows().is_empty());
+        assert!(missing.rows().is_empty());
         assert_eq!(hidden.scanned_records(), missing.scanned_records());
         // The unselected scan examines hidden records but never returns them.
         let page = f.state.select_channel_list(&[])?;
@@ -6212,9 +6251,7 @@ mod tests {
         let authorized = state
             .authorize(envelope(session, state.revision, command), credit)
             .map_err(|failure| failure.error())?;
-        let PlanDecision::Rejected(rejected) = state.plan_authorized(authorized, None)? else {
-            return Err(DomainError::InvariantViolation);
-        };
+        let rejected = rejected_of(state.plan_authorized(authorized, None)?)?;
         rejected
             .failures()
             .first()
@@ -7527,14 +7564,7 @@ mod tests {
                 &[],
             )?;
             for change in raise_without_demotion {
-                let ModeChange::Role {
-                    operation,
-                    target,
-                    role,
-                } = change
-                else {
-                    return Err(DomainError::InvariantViolation);
-                };
+                let (operation, target, role) = role_change_parts(change)?;
                 apply_role_change(
                     &fixture.state.nicknames,
                     &mut channel,
@@ -7577,14 +7607,7 @@ mod tests {
                 &[],
             )?;
             for change in transfer {
-                let ModeChange::Role {
-                    operation,
-                    target,
-                    role,
-                } = change
-                else {
-                    return Err(DomainError::InvariantViolation);
-                };
+                let (operation, target, role) = role_change_parts(change)?;
                 apply_role_change(
                     &fixture.state.nicknames,
                     &mut channel,
@@ -7949,18 +7972,18 @@ mod tests {
         let session_id = seed.session_id;
         let opened = state.plan_session_opened(seed)?;
         assert_eq!(opened.storage_class(), StorageClass::Durable);
-        assert!(matches!(
-            opened.durable_writes(),
-            [DurableWrite::PutSession(session)] if session.session_id == session_id
-        ));
+        match opened.durable_writes() {
+            [DurableWrite::PutSession(session)] => assert_eq!(session.session_id, session_id),
+            _ => return Err(DomainError::InvariantViolation),
+        }
         let prepared = state.prepare_mutation(opened)?;
         state.apply_prepared(prepared)?;
 
         let disconnected = state.plan_session_disconnected(user_id)?;
-        assert!(matches!(
-            disconnected.durable_writes(),
-            [DurableWrite::TombstoneSession(tombstoned)] if *tombstoned == session_id
-        ));
+        match disconnected.durable_writes() {
+            [DurableWrite::TombstoneSession(tombstoned)] => assert_eq!(*tombstoned, session_id),
+            _ => return Err(DomainError::InvariantViolation),
+        }
         let prepared = state.prepare_mutation(disconnected)?;
         state.apply_prepared(prepared)?;
         assert_eq!(state.session_count(), 0);
@@ -9109,15 +9132,12 @@ mod tests {
         fixture
             .state
             .apply_part(local_id, fixture.outsider.user_id, Revision::new(1)?);
-        let PlanDecision::Mutation(part_plan) = fixture.state.plan_part_ids(
+        let part_plan = mutation_of(fixture.state.plan_part_ids(
             fixture.outsider.user_id,
             vec![global_id],
             Vec::new(),
             Vec::new(),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         assert!(
             part_plan
                 .events()
@@ -10151,26 +10171,20 @@ mod tests {
     #[test]
     fn nickname_and_display_name_changes_emit_distinct_events() -> Result<(), DomainError> {
         let fixture = fixture()?;
-        let PlanDecision::Mutation(nickname) = fixture.state.plan_nick(
+        let nickname = mutation_of(fixture.state.plan_nick(
             fixture.owner.user_id,
             NicknameValue::parse("renamed")?,
             Vec::new(),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         assert_eq!(
             nickname.events(),
             &[DomainEvent::NicknameChanged(fixture.owner.user_id)]
         );
-        let PlanDecision::Mutation(display_name) = fixture.state.plan_setname(
+        let display_name = mutation_of(fixture.state.plan_setname(
             fixture.owner.user_id,
             DisplayNameValue::prepare("Renamed Display")?,
             Vec::new(),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         assert_eq!(
             display_name.events(),
             &[DomainEvent::DisplayNameChanged(fixture.owner.user_id)]
@@ -10287,7 +10301,7 @@ mod tests {
         let (mut state, user_id, account_id) = private_auth_session()?;
         let before = public_session_record(&state, user_id)?;
         let revision = state.revision();
-        let PlanDecision::Mutation(start) = state.plan_account_deletion_start(
+        let start = mutation_of(state.plan_account_deletion_start(
             user_id,
             account_id,
             Vec::new(),
@@ -10296,10 +10310,7 @@ mod tests {
                 deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(231))],
                 ..ExternalInputs::default()
             },
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         assert_eq!(
             start.events(),
             &[DomainEvent::AccountDeletionChallengeStarted(user_id)]
@@ -10319,7 +10330,7 @@ mod tests {
             None
         );
         state.validate()?;
-        let PlanDecision::Mutation(confirmed) = state.plan_account_deletion_confirm(
+        let confirmed = mutation_of(state.plan_account_deletion_confirm(
             user_id,
             account_id,
             AccountDeletionToken::from_bytes(bytes(231)),
@@ -10328,10 +10339,7 @@ mod tests {
                 monotonic_now: Some(MonotonicTick::from_ticks(102)),
                 ..ExternalInputs::default()
             },
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         assert_eq!(
             confirmed.events(),
             &[DomainEvent::AccountDeleted(account_id)]
@@ -10398,11 +10406,12 @@ mod tests {
         )?;
         let prepared = state.prepare_mutation(fresh)?;
         state.apply_prepared(prepared)?;
-        let PlanDecision::NeedsExternal(requests) =
-            account_command_plan(&state, &live_session, AccountCommand::DeleteStart, None)?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        let requests = external_of(account_command_plan(
+            &state,
+            &live_session,
+            AccountCommand::DeleteStart,
+            None,
+        )?)?;
         assert_eq!(requests.len(), 2);
         let start = account_command_plan(
             &state,
@@ -10414,9 +10423,7 @@ mod tests {
                 ..ExternalInputs::default()
             }),
         )?;
-        let PlanDecision::Mutation(start) = start else {
-            return Err(DomainError::InvariantViolation);
-        };
+        let start = mutation_of(start)?;
         assert_eq!(start.account_deletion_token(), Some(&bytes(231)));
         assert_eq!(
             start.account_deletion_expires_at(),
@@ -10453,9 +10460,7 @@ mod tests {
                 ..ExternalInputs::default()
             }),
         )?;
-        let PlanDecision::Mutation(rejected) = rejected else {
-            return Err(DomainError::InvariantViolation);
-        };
+        let rejected = mutation_of(rejected)?;
         assert_eq!(
             rejected.events(),
             &[DomainEvent::AccountDeletionConfirmationRejected(
@@ -10475,7 +10480,7 @@ mod tests {
         )?;
         let prepared = state.prepare_mutation(fresh)?;
         state.apply_prepared(prepared)?;
-        let PlanDecision::Mutation(start) = account_command_plan(
+        let start = mutation_of(account_command_plan(
             &state,
             &live_session,
             AccountCommand::DeleteStart,
@@ -10484,10 +10489,7 @@ mod tests {
                 deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(233))],
                 ..ExternalInputs::default()
             }),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         let prepared = state.prepare_mutation(start)?;
         state.apply_prepared(prepared)?;
         let fresh = state.plan_session_fresh_authentication(
@@ -10499,7 +10501,7 @@ mod tests {
         let prepared = state.prepare_mutation(fresh)?;
         state.apply_prepared(prepared)?;
         assert!(state.account_deletion_challenges.is_empty());
-        let PlanDecision::Mutation(start) = account_command_plan(
+        let start = mutation_of(account_command_plan(
             &state,
             &live_session,
             AccountCommand::DeleteStart,
@@ -10508,13 +10510,10 @@ mod tests {
                 deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(234))],
                 ..ExternalInputs::default()
             }),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         let prepared = state.prepare_mutation(start)?;
         state.apply_prepared(prepared)?;
-        let PlanDecision::Mutation(confirmed) = account_command_plan(
+        let confirmed = mutation_of(account_command_plan(
             &state,
             &live_session,
             AccountCommand::DeleteConfirm(AccountDeletionToken::from_bytes(bytes(234))),
@@ -10522,10 +10521,7 @@ mod tests {
                 monotonic_now: Some(MonotonicTick::from_ticks(60_203)),
                 ..ExternalInputs::default()
             }),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         assert_eq!(
             confirmed.events(),
             &[DomainEvent::AccountDeleted(account_id)]
@@ -10563,7 +10559,7 @@ mod tests {
         let prepared = state.prepare_mutation(fresh)?;
         state.apply_prepared(prepared)?;
 
-        let PlanDecision::Mutation(start) = account_command_plan(
+        let start = mutation_of(account_command_plan(
             &state,
             &confirming_session,
             AccountCommand::DeleteStart,
@@ -10572,15 +10568,12 @@ mod tests {
                 deletion_tokens: vec![AccountDeletionToken::from_bytes(bytes(238))],
                 ..ExternalInputs::default()
             }),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         let prepared = state.prepare_mutation(start)?;
         state.apply_prepared(prepared)?;
         assert_eq!(state.account_deletion_challenges.len(), 1);
 
-        let PlanDecision::Mutation(rejected) = account_command_plan(
+        let rejected = mutation_of(account_command_plan(
             &state,
             &confirming_session,
             AccountCommand::DeleteConfirm(AccountDeletionToken::from_bytes(bytes(238))),
@@ -10588,10 +10581,7 @@ mod tests {
                 monotonic_now: Some(MonotonicTick::from_ticks(102)),
                 ..ExternalInputs::default()
             }),
-        )?
-        else {
-            return Err(DomainError::InvariantViolation);
-        };
+        )?)?;
         assert_eq!(
             rejected.events(),
             &[DomainEvent::AccountDeletionConfirmationRejected(
@@ -10936,9 +10926,7 @@ mod tests {
             entry_ids: vec![EntryId::from_bytes(bytes(90))],
             ..ExternalInputs::default()
         };
-        let PlanDecision::Mutation(plan) = state.plan_authorized(authorized, Some(inputs))? else {
-            return Err(DomainError::InvariantViolation);
-        };
+        let plan = mutation_of(state.plan_authorized(authorized, Some(inputs))?)?;
         let prepared = state.prepare_mutation(plan)?;
         state.apply_prepared(prepared)?;
         let entry = state

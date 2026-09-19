@@ -2413,6 +2413,9 @@ mod tests {
         Ok(())
     }
 
+    #[path = "../../tests/model_reach.rs"]
+    mod reach;
+
     fn id(seed: u8) -> [u8; 16] {
         [seed; 16]
     }

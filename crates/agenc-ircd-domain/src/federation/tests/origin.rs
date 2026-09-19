@@ -545,3 +545,153 @@ fn resync_a_replaced_incarnation_cannot_return_after_another_reset() -> Result<(
     );
     Ok(())
 }
+
+const OTHER_EDGE: ServerId = ServerId::from_bytes([5; 16]);
+
+#[test]
+fn a_restored_suspended_link_keeps_its_grace_deadline() -> Result<(), OriginError> {
+    let mut table = OriginTable::new();
+    table.restore_edge(
+        EDGE,
+        EdgeLink {
+            server_incarnation: INCARNATION,
+            phase: EdgePhase::Suspended {
+                grace_deadline: MonotonicTick::from_ticks(50),
+            },
+        },
+    );
+    assert_eq!(table.expire(EDGE, MonotonicTick::from_ticks(49)), None);
+    assert_eq!(
+        table.expire(EDGE, MonotonicTick::from_ticks(51)),
+        Some(Vec::new())
+    );
+    Ok(())
+}
+
+#[test]
+fn a_reset_suspends_live_origins_until_they_are_replayed() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    table.reset(EDGE, INCARNATION);
+    assert_eq!(
+        table.origin(&key(1)).map(|entry| entry.status),
+        Some(OriginStatus::Suspended)
+    );
+    assert_eq!(table.ready(EDGE, INCARNATION), Err(OriginError::WrongPhase));
+    table.add(add(1))?;
+    table.ready(EDGE, INCARNATION)?;
+    table.fence_edge(OTHER_EDGE);
+    assert_eq!(table.edge(OTHER_EDGE), None);
+    Ok(())
+}
+
+#[test]
+fn a_fresh_origin_declares_no_predecessor_and_no_principal() -> Result<(), OriginError> {
+    let mut table = OriginTable::new();
+    table.reset(EDGE, INCARNATION);
+    let mut chained = add(2);
+    chained.previous_object_id = [1; 32];
+    assert_eq!(table.add(chained), Err(OriginError::InvalidDeclaration));
+    let mut registered_at_birth = add(2);
+    registered_at_birth.principal = registered(2);
+    assert_eq!(
+        table.add(registered_at_birth),
+        Err(OriginError::InvalidDeclaration)
+    );
+    Ok(())
+}
+
+#[test]
+fn an_update_repeating_the_generation_with_another_object_is_refused() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    table.update(update(1, 1, [1; 32], registered(1)))?;
+    let mut other = update(1, 1, [1; 32], registered(1));
+    other.object_id = [77; 32];
+    assert_eq!(table.update(other), Err(OriginError::WrongGeneration));
+    let mut with_account = update(1, 2, [2; 32], registered(1));
+    with_account.principal.account = Some((
+        AccountId::from_random(AccountRandomId::from_bytes([1; 16])),
+        Generation::new(1).map_err(|_| OriginError::Overflow)?,
+    ));
+    table.update(with_account)?;
+    Ok(())
+}
+
+#[test]
+fn a_repeated_deletion_must_name_the_same_sequence() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    table.commit_request(operation(1, 0, 0), request(1))?;
+    assert_eq!(
+        table.delete(key(1), 0, 0),
+        Err(OriginError::WrongGeneration)
+    );
+    table.delete(key(1), 0, 1)?;
+    table.delete(key(1), 0, 1)?;
+    assert_eq!(table.delete(key(1), 0, 2), Err(OriginError::Conflict));
+    table.block(&key(1))?;
+    assert_eq!(
+        table.origin(&key(1)).map(|entry| entry.status),
+        Some(OriginStatus::Deleted)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_retained_request_with_another_object_is_a_conflict() -> Result<(), OriginError> {
+    let table = ready_table()?;
+    let retained = RetainedRequest {
+        request_id: request(10),
+        request_object_id: [10; 32],
+    };
+    let mut table = table;
+    table.commit_request(operation(1, 0, 0), request(10))?;
+    assert_eq!(
+        table.classify_request(operation(1, 0, 0), request(10), [11; 32], Some(retained)),
+        Ok(ReplayDecision::Conflict)
+    );
+    assert_eq!(
+        table.commit_request(operation(1, 5, 1), request(11)),
+        Err(OriginError::WrongGeneration)
+    );
+    Ok(())
+}
+
+#[test]
+fn link_loss_and_expiry_touch_only_the_named_incarnation_and_edge() -> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    table.update(update(1, 1, [1; 32], registered(1)))?;
+    table.reset(OTHER_EDGE, INCARNATION);
+    let mut elsewhere = add(3);
+    elsewhere.origin.home_server_id = OTHER_EDGE;
+    table.add(elsewhere)?;
+    table.ready(OTHER_EDGE, INCARNATION)?;
+    table.reset(EDGE, NEXT_INCARNATION);
+    let mut next = add(2);
+    next.origin.server_incarnation = NEXT_INCARNATION;
+    table.add(next)?;
+    let mut deleted = add(4);
+    deleted.origin.server_incarnation = NEXT_INCARNATION;
+    table.add(deleted)?;
+    table.ready(EDGE, NEXT_INCARNATION)?;
+    let mut registered_then_deleted = update(4, 1, [4; 32], registered(4));
+    registered_then_deleted.origin.server_incarnation = NEXT_INCARNATION;
+    table.update(registered_then_deleted)?;
+    let mut deleted_key = key(4);
+    deleted_key.server_incarnation = NEXT_INCARNATION;
+    table.delete(deleted_key, 1, 0)?;
+    table.link_lost(EDGE, NEXT_INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    assert_eq!(
+        table.expire(EDGE, MonotonicTick::from_ticks(200_000)),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        table.origin(&key(1)).map(|entry| entry.status),
+        Some(OriginStatus::Fenced)
+    );
+    let mut elsewhere_key = key(3);
+    elsewhere_key.home_server_id = OTHER_EDGE;
+    assert_eq!(
+        table.origin(&elsewhere_key).map(|entry| entry.status),
+        Some(OriginStatus::Live)
+    );
+    Ok(())
+}
