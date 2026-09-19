@@ -1007,3 +1007,7 @@ fn continue_fetch(
 #[cfg(test)]
 #[path = "companion/tests/transfer.rs"]
 mod transfer_tests;
+
+#[cfg(test)]
+#[path = "companion/tests/host_view.rs"]
+mod host_view_tests;

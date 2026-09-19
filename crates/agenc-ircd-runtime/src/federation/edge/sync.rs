@@ -862,3 +862,7 @@ pub(super) fn rejected_install(edge: &mut EdgeFederation) {
         edge.snapshot = None;
     }
 }
+
+#[cfg(test)]
+#[path = "tests/sync_stages.rs"]
+mod sync_stages;

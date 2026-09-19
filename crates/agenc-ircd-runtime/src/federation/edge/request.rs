@@ -2014,3 +2014,7 @@ fn reply_chunk(reply: &agenc_ircd_client_wire::WireMessage, sasl: bool) -> Optio
         reply.command() == "ACCTCREATE" && middle.first().map(String::as_str) == Some("DATA");
     data.then(|| middle.get(1).cloned())?
 }
+
+#[cfg(test)]
+#[path = "tests/request_outcomes.rs"]
+mod request_outcomes;

@@ -759,3 +759,7 @@ fn select_objects(
     coordinator.loader.objects_selected = true;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "startup/tests/row_admission.rs"]
+mod row_admission;
