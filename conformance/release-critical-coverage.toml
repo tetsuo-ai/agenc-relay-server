@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 990
-reviewed_source_sha256 = "6b044612743b786afffbef8724cc430bc32fc4d4d1bd6ee08bf95fb29fe765aa"
+reviewed_source_sha256 = "d0c4d4f422bccf02ce5ac833e73e6bc7ed48d5470a394d8b7ade8e470b383a1d"
 deferred = []
 
 [[region]]
@@ -2455,7 +2455,7 @@ id = "cap5-secrets-secretset-load-for-login-index-start"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-config/src/secrets.rs"
 item = "load_for_login_index_start"
-source_sha256 = "f14373621a4667c9c6061fcae98c4c7bab154ebb4b168100d112934ea3c8873d"
+source_sha256 = "187f30de246563098944017a3a7ca4cb3863bf59035a519c05792223ba0542b7"
 start_line = 266
 end_line = 288
 span_sha256 = "c890ee2e027dfca384d76792a5e115181b845303dc30af9b3af4edacc2692ba7"
@@ -13099,7 +13099,7 @@ id = "config-tls-alias-separation"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-config/src/secrets.rs"
 item = "Loader"
-source_sha256 = "f14373621a4667c9c6061fcae98c4c7bab154ebb4b168100d112934ea3c8873d"
+source_sha256 = "187f30de246563098944017a3a7ca4cb3863bf59035a519c05792223ba0542b7"
 start_line = 440
 end_line = 471
 span_sha256 = "9f77bcdc8c4aac3c4ed8729b762a3067364deb1cf2aeba5bee20c37fd1befb20"

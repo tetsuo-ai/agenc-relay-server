@@ -799,6 +799,11 @@ mod file_tests {
             Some(ConfigError::FileRejected)
         );
         assert_eq!(
+            trusted_metadata(&directory.root.join("..").join("escaped.key")).err(),
+            Some(ConfigError::FileRejected),
+            "an absolute path with a parent component"
+        );
+        assert_eq!(
             trusted_metadata(&directory.root).err(),
             Some(ConfigError::FileRejected),
             "a directory is not a secret"
