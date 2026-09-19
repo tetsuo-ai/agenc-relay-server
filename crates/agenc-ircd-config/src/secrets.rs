@@ -723,3 +723,134 @@ mod alias_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod file_tests {
+    use std::fs;
+    use std::io;
+    use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory {
+        root: PathBuf,
+    }
+
+    impl TestDirectory {
+        fn create() -> io::Result<Self> {
+            let candidates = [
+                std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+                std::env::var_os("CARGO_TARGET_TMPDIR").map(PathBuf::from),
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")),
+            ];
+            let base = candidates
+                .into_iter()
+                .flatten()
+                .find(|base| {
+                    fs::create_dir_all(base).is_ok()
+                        && crate::paths::protected_ancestors(&base.join("agenc-test-entry")).is_ok()
+                })
+                .ok_or_else(|| io::Error::other("no protected base for secret tests"))?;
+            for _ in 0..32 {
+                let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+                let root = base.join(format!(
+                    "agenc-secret-file-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&root) {
+                    Ok(()) => {
+                        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+                        return Ok(Self { root });
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(io::Error::other(
+                "could not allocate a secret test directory",
+            ))
+        }
+
+        fn file(&self, name: &str, contents: &[u8], mode: u32) -> io::Result<PathBuf> {
+            let path = self.root.join(name);
+            fs::write(&path, contents)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+            Ok(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn a_trusted_secret_file_is_an_absolute_private_unlinked_32_byte_regular_file() -> TestResult {
+        let directory = TestDirectory::create()?;
+        assert_eq!(
+            trusted_metadata(Path::new("relative.key")).err(),
+            Some(ConfigError::FileRejected)
+        );
+        assert_eq!(
+            trusted_metadata(&directory.root).err(),
+            Some(ConfigError::FileRejected),
+            "a directory is not a secret"
+        );
+        let good = directory.file("good.key", &[7; 32], 0o600)?;
+        let link = directory.root.join("link.key");
+        symlink(&good, &link)?;
+        assert_eq!(
+            trusted_metadata(&link).err(),
+            Some(ConfigError::FileRejected),
+            "a symbolic link is refused"
+        );
+        let short = directory.file("short.key", &[7; 31], 0o600)?;
+        assert_eq!(
+            trusted_metadata(&short).err(),
+            Some(ConfigError::FileRejected),
+            "31 bytes is not a key"
+        );
+        let shared = directory.file("shared.key", &[7; 32], 0o640)?;
+        assert!(trusted_metadata(&shared).is_ok(), "group read is tolerated");
+        let group_writable = directory.file("group.key", &[7; 32], 0o620)?;
+        assert_eq!(
+            trusted_metadata(&group_writable).err(),
+            Some(ConfigError::FileRejected),
+            "group write is refused"
+        );
+        let linked = directory.file("linked.key", &[7; 32], 0o600)?;
+        fs::hard_link(&linked, directory.root.join("twin.key"))?;
+        assert_eq!(
+            trusted_metadata(&linked).err(),
+            Some(ConfigError::FileRejected),
+            "a second hard link is refused"
+        );
+        let (metadata, mode) = trusted_metadata(&good)?;
+        assert_eq!(metadata.len(), 32);
+        assert_eq!(mode, 0o600);
+        Ok(())
+    }
+
+    #[test]
+    fn a_secret_read_once_must_stop_at_its_exact_length() -> TestResult {
+        let directory = TestDirectory::create()?;
+        let long = directory.file("long.key", &[7; 33], 0o600)?;
+        assert_eq!(
+            read_once(fs::File::open(&long)?, SecretLength::Exact(32)).err(),
+            Some(ConfigError::FileRejected)
+        );
+        let exact = directory.file("exact.key", &[7; 32], 0o600)?;
+        assert_eq!(
+            read_once(fs::File::open(&exact)?, SecretLength::Exact(32))?.len(),
+            32
+        );
+        Ok(())
+    }
+}
