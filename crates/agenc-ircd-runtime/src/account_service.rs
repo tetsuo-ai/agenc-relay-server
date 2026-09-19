@@ -7026,9 +7026,12 @@ fn opaque_version_precedes_account(
 
 #[cfg(test)]
 mod tests {
+    mod harness;
     mod invitation_window;
+    mod open_refusals;
     mod sasl_unavailable;
     mod shutdown;
+    mod teardown;
     use super::{
         AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountCreationPolicy,
         AccountDeletionBarrier, AccountServiceCoordinator, CarrierCompletion, CarrierRoute,
