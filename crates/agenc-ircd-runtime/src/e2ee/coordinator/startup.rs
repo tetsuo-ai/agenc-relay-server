@@ -19,6 +19,18 @@ mod objects;
 #[path = "tests/startup_objects.rs"]
 mod object_tests;
 
+#[cfg(test)]
+#[path = "tests/startup_rows.rs"]
+mod row_tests;
+
+#[cfg(test)]
+#[path = "tests/startup_directory.rs"]
+mod directory_tests;
+
+#[cfg(test)]
+#[path = "tests/startup_routes.rs"]
+mod route_tests;
+
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_domain::e2ee::directory::{
     AccountEntry, Attachment, CapabilityHead, Challenge, ClaimOutcome, ClaimParameters, Package,
