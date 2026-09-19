@@ -424,12 +424,15 @@ fn assert_commit_lease(
     expected_reservation: u64,
     expected_nickname: &str,
 ) -> Result<u64, io::Error> {
+    // A refused replacement answers 433 first; the commit that follows keeps the held lease.
     let Some(RegistrationAction::CommitRegistration {
         generation,
         nickname_reservation_generation,
         nickname,
         ..
-    }) = actions.first()
+    }) = actions
+        .iter()
+        .find(|action| !matches!(action, RegistrationAction::NicknameInUse(_)))
     else {
         return Err(test_error());
     };

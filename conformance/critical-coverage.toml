@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 913
-reviewed_source_sha256 = "cc55cc2830f4f535ca9cbcb2dd776f06b71d51e2b26bdf489e717eecb1b44009"
+reviewed_source_files = 914
+reviewed_source_sha256 = "356d90c8e029de1d8521802dcc0a25bfcd59f749f45eb15892938016210dcadd"
 deferred = []
 
 [[region]]
@@ -108,9 +108,9 @@ id = "registered-control-capability-admission"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-client-wire/src/registration.rs"
 item = "require_command_capabilities"
-source_sha256 = "b75a5736698957b46a129e84f4379047a77dcb14b60021c4b6101136a9f3f366"
-start_line = 945
-end_line = 966
+source_sha256 = "85a845d3a40b876b47cb7068a40f5f327cf0577bb52b6b30dd22e49c49f8dd57"
+start_line = 960
+end_line = 981
 span_sha256 = "a7c797158ebfb75356075c060222c9a50c83dac91979096f5dde02a0064ac61e"
 metric = "branches"
 reason = "Control mutations and history cannot be admitted without their response capabilities."

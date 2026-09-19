@@ -1714,7 +1714,7 @@ fn registration_covers_cap_pass_generation_close_and_keepalive_paths() -> Result
             .as_slice(),
         [RegistrationAction::ReleaseNickname { generation }] if *generation == first
     ));
-    assert!(
+    assert!(matches!(
         fields
             .event(
                 RegistrationEvent::NicknameReserved {
@@ -1723,8 +1723,9 @@ fn registration_covers_cap_pass_generation_close_and_keepalive_paths() -> Result
                 },
                 8
             )?
-            .is_empty()
-    );
+            .as_slice(),
+        [RegistrationAction::NicknameInUse(nickname)] if nickname == "Second"
+    ));
     let third = reserve_generation(&fields.message(parsed("NICK Third")?, 9, &advertised)?)?;
     let commit = commit_generation(&fields.event(
         RegistrationEvent::NicknameReserved {

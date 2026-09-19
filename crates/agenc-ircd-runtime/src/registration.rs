@@ -1043,6 +1043,17 @@ impl RegistrationRouter {
                 let observation = observation.take().ok_or(RuntimeError::InvalidValue)?;
                 state.deferred_observations.push_back(observation);
             }
+            RegistrationAction::NicknameInUse(nickname) => {
+                record_result(result, ResultClass::Rejected);
+                self.send_numeric(
+                    context,
+                    generation,
+                    state,
+                    433,
+                    &[nickname.as_str()],
+                    "Nickname is already in use",
+                )?;
+            }
             RegistrationAction::NotRegistered => {
                 record_result(result, ResultClass::Rejected);
                 self.send_numeric(
@@ -3893,6 +3904,9 @@ mod close_tests;
 #[path = "registration/tests/support.rs"]
 mod test_harness;
 
+#[cfg(test)]
+#[path = "registration/tests/nickname_in_use.rs"]
+mod nickname_in_use_tests;
 #[cfg(test)]
 #[path = "registration/tests/timers.rs"]
 mod timer_tests;
