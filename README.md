@@ -89,7 +89,7 @@ plaintext history, bounded purge and expiry, and authenticated history replay. S
 [Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
 [Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json), the
-[Stage 08 checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json), the
+[Stage 08 checkpoint](conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json), the
 [Stage 07 checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json), the
 [Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
 [Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
@@ -180,9 +180,9 @@ layer, the bounded federation model, the three-process daemon test, and
 10,000 deterministic runs of each federation fuzz target to the inherited
 Stage 06 checks.
 
-The [Stage 08 manifest](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
-contains 160 passed records and closes exact source commit
-`ae6457fb62fef8961d3caf904febed580e8b4a91`. Its recorded gate ran 97 commands.
+The [Stage 08 manifest](conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json)
+contains 159 passed records and closes exact source commit
+`26f0f8029dcad4aad27bff2706c4f0d255a555ba`. Its recorded gate ran 98 commands.
 This checkpoint does not claim that Stage 10 production qualification has
 been completed.
 

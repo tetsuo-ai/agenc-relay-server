@@ -58,7 +58,7 @@ References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation
 | 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
 | 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
 | 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
-| 08 | Conforming E2EE server adapter | Complete | Pass, 2026-09-04 | [Current checkpoint](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json) |
+| 08 | Conforming E2EE server adapter | Complete | Pass, 2026-09-19 | [Current checkpoint](conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json) |
 | 09 | Optional WSS and history profiles | Complete | Pass, 2026-09-05, exact checkpoint source | [Current checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json) |
 | 10 | Production qualification and release evidence | In progress | Runner, drivers, release image, and x86_64 reproduction done; jobs running | Absent |
 
@@ -2629,8 +2629,9 @@ recorded here so a later reviewer does not have to rediscover them.
 The design revision of 2026-09-04 (`S08-040` to `S08-044`) changed the profile
 after the first closure and moved the profile hash; the stage was re-closed the
 same day at exact source commit `ae6457fb62fef8961d3caf904febed580e8b4a91`
-(after the ledger replay, policy adjacency, durable vote row, and queued witness follow-ups), whose manifest
-supersedes the `52c7ccb`, `a6e3c54`, and `e751e9e` checkpoints (kept as history). Its
+(after the ledger replay, policy adjacency, durable vote row, and queued witness follow-ups), and
+re-closed on 2026-09-19 at `26f0f8029dcad4aad27bff2706c4f0d255a555ba`, whose manifest is the
+sole retained Stage 08 checkpoint. Its
 interpretations: the server retains published policies per conversation under
 `policy/v1/` rows and keeps the current policy identifier as the policy the last
 finalization installed; the sequencer keeps a per-slot vote ledger across

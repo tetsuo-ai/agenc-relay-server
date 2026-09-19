@@ -2021,8 +2021,8 @@ and their existing durable binding are unchanged.
 The live two-client regression fails in `cap58-red.log` because an enabled
 server-time tag is absent. All five related tests pass in `cap58-green.log`,
 including actual tagged delivery after enable, untagged delivery after disable,
-and rejection of another session or connection's update. Independent review
-found no additional issue.
+and rejection of another session or connection's update. No additional
+issue was found.
 
 ### CAP-59: federated query replies lose labels and pagination can release later commands
 
