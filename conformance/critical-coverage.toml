@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 990
-reviewed_source_sha256 = "d0c4d4f422bccf02ce5ac833e73e6bc7ed48d5470a394d8b7ade8e470b383a1d"
+reviewed_source_sha256 = "91dbcff638b5e01b8057cc4533004d5c5e1d3996c7795861c610c9096e3c9e25"
 deferred = []
 
 [[region]]
@@ -180,7 +180,7 @@ id = "guest-control-before-name-lookup"
 category = "authorization-decisions"
 file = "crates/agenc-ircd-runtime/src/command_convert.rs"
 item = "require_channel_control_account"
-source_sha256 = "bfc51a5bd00ea07fd0bbd84f3502a7284c3450bdd1b92e8ead2b18860e505500"
+source_sha256 = "4595de3d122fbfdfc553fcd7d68a21e9f36a61aca5e519e340eb8d5bc2e51714"
 start_line = 34
 end_line = 46
 span_sha256 = "5196974af33d87927d9c6eea8ec83c11a6191930b4ba13c8bd8b2b0fc2e16da0"

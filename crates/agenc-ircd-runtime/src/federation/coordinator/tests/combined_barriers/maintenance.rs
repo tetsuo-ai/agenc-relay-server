@@ -135,6 +135,9 @@ async fn replay_maintenance_answers_only_its_own_global_timer() -> TestResult {
     let mut fixture = Box::pin(Fixture::new()).await?;
     let context = fixture.core.context_mut()?;
     let deadline = context.now();
+    // The coordinator's own maintenance timer may already be due on a slow
+    // host; only the timers this test schedules are popped below.
+    while context.timers_mut().pop_due(deadline).is_some() {}
     context
         .timers_mut()
         .schedule(deadline, TimerKind::Batch, TimedId::Global)?;
