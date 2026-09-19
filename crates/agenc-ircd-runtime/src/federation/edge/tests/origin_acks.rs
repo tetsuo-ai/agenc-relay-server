@@ -139,3 +139,57 @@ fn a_companion_deadline_is_routed_only_for_the_edges_coordinator() -> TestResult
     assert!(edge.live.is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn an_unchanged_origin_update_is_folded_and_the_deferral_ceiling_holds() -> TestResult {
+    use crate::federation::edge::journal::queue_update;
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let connection = ConnectionGeneration::new(1);
+    let mut edge = bound_edge(context, connection)?;
+    let pending = |edge: &EdgeFederation| -> TestResult<usize> {
+        Ok(edge
+            .origins
+            .get(&connection)
+            .ok_or("origin")?
+            .pending_updates
+            .len())
+    };
+    assert_eq!(pending(&edge)?, 1);
+    queue_update(&mut edge, connection).map_err(|violation| format!("{violation:?}"))?;
+    assert_eq!(
+        pending(&edge)?,
+        1,
+        "the same facts fold into the last update"
+    );
+    let sessions = [
+        Some((
+            SessionId::from_bytes([41; 16]),
+            UserId::from_bytes([42; 16]),
+        )),
+        Some((
+            SessionId::from_bytes([43; 16]),
+            UserId::from_bytes([44; 16]),
+        )),
+    ];
+    for index in 1..crate::federation::edge::MAX_DEFERRED_COMMANDS {
+        let origin = edge.origins.get_mut(&connection).ok_or("origin")?;
+        origin.session = sessions.get(index % 2).copied().flatten();
+        queue_update(&mut edge, connection).map_err(|violation| format!("{violation:?}"))?;
+        assert_eq!(pending(&edge)?, index + 1);
+    }
+    let origin = edge.origins.get_mut(&connection).ok_or("origin")?;
+    origin.session = sessions
+        .get(crate::federation::edge::MAX_DEFERRED_COMMANDS % 2)
+        .copied()
+        .flatten();
+    assert!(matches!(
+        queue_update(&mut edge, connection),
+        Err(Violation::Ceiling)
+    ));
+    assert_eq!(
+        pending(&edge)?,
+        crate::federation::edge::MAX_DEFERRED_COMMANDS
+    );
+    Ok(())
+}
