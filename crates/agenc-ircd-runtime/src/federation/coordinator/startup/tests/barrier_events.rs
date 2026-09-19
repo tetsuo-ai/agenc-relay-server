@@ -131,7 +131,18 @@ fn outside_the_base_window_only_ordinary_or_covered_foreign_parts_pass() -> Test
         "an uncovered barrier part outside the window is not this gate's"
     );
     assert_eq!(
-        validate_event(&gate, &encoded(&header(9, Some(part_at(9))))?, true),
+        validate_event(
+            &gate,
+            &encoded(&header(
+                9,
+                Some(CrossProfilePart {
+                    mutation_id: MUTATION,
+                    part_index: 3,
+                    part_count: 4,
+                }),
+            ))?,
+            true,
+        ),
         Err(Violation::Codec),
         "a covered part of this mutation past the window is a fork"
     );
