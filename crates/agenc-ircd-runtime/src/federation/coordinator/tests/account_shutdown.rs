@@ -343,3 +343,19 @@ async fn a_second_carrier_request_is_refused_while_the_first_is_in_flight() -> T
     assert!(coordinator.take_remote_account_work().is_empty());
     Ok(())
 }
+
+#[test]
+fn an_account_service_needs_a_live_origin_generation() -> TestResult {
+    let fixture = StateCoreFixture::new(entropy_script())?;
+    let mut config = crate::test_support::account_service_config(
+        &fixture.identity,
+        &fixture.opaque,
+        fixture.key_state,
+    )?;
+    config.origin_generation = agenc_ircd_types::Generation::new(0)?;
+    assert!(matches!(
+        crate::account_service::AccountServiceCoordinator::new(config).err(),
+        Some(crate::RuntimeError::InvalidValue)
+    ));
+    Ok(())
+}

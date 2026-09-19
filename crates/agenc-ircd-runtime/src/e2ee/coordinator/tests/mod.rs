@@ -41,6 +41,7 @@ mod binding_faults;
 pub(crate) mod direct_release;
 mod directory_faults;
 mod live_payloads;
+mod request_envelope;
 mod sequence;
 pub(crate) mod support;
 pub(crate) mod sync;

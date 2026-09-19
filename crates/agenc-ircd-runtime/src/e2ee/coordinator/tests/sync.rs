@@ -4,6 +4,7 @@
 //! transfer, driven through the frame entry point with a fake base host.
 
 mod delivery_restart;
+mod frame_addressing;
 mod origin_admission;
 mod origin_mirror;
 mod origin_refusals;
