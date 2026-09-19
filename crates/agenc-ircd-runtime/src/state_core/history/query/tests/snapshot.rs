@@ -433,3 +433,46 @@ async fn history_authority_and_time_need_a_trusted_wall_clock() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_history_message_cannot_join_a_batch_that_is_already_pending() -> TestResult {
+    use crate::state_core::StageRefused;
+    use crate::state_core::fanout::FanoutRequest;
+    use crate::test_support::plan_live;
+    use agenc_ircd_domain::{
+        CanonicalCommand, MessageCommand, MessageKind, MessageTarget, MessageText, PlanDecision,
+    };
+    use agenc_ircd_storage::{StoredKey, TableId};
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let (identity, _id) = install_reader(context)?;
+    // One durable account-service write keeps a batch pending.
+    let checkpoint = context.domain().plan_account_service_checkpoint()?;
+    let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+    let write = crate::state_core::durable::AccountServiceDurableWrite::delete(
+        TableId::AuthTransaction,
+        StoredKey::new(vec![5; 16])?,
+    )?;
+    context
+        .stage_durable_with_account_service(checkpoint, fanout, None, 0, vec![write])
+        .map_err(|refused| format!("{refused:?}"))?;
+    assert_eq!(context.pending_len(), 1);
+    let privmsg = || {
+        Ok(CanonicalCommand::message(MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![MessageTarget::Channel(ChannelNameValue::parse("#history")?)],
+            Some(MessageText::parse("captured")?),
+        )?))
+    };
+    let PlanDecision::Mutation(plan) = plan_live(context, identity, &privmsg)? else {
+        return Err("PRIVMSG was not a mutation".into());
+    };
+    let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+    let refused = context.stage_durable_with_account_service(plan, fanout, None, 0, Vec::new());
+    assert!(
+        matches!(refused, Err(StageRefused::Busy)),
+        "a captured message waits for the pending batch"
+    );
+    assert_eq!(context.pending_len(), 1);
+    Ok(())
+}
