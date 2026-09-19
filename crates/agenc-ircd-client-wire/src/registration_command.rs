@@ -1982,3 +1982,7 @@ mod display_tests {
         assert_eq!(unique.len(), rendered.len(), "{rendered:?}");
     }
 }
+
+#[cfg(test)]
+#[path = "tests/registration_command_reach.rs"]
+mod reach;
