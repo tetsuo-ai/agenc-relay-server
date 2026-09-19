@@ -496,24 +496,42 @@ fn evidence_must_match_the_pins_one_principal_at_a_time() -> TestResult {
     assert!(short.verify().is_err(), "fewer evidence pairs than pins");
 
     let mut fingerprint = Fixture::new()?;
-    let mut pins = fingerprint.package.binding.tbs.principals.as_slice().to_vec();
+    let mut pins = fingerprint
+        .package
+        .binding
+        .tbs
+        .principals
+        .as_slice()
+        .to_vec();
     pins.first_mut().ok_or("pin")?.root_fingerprint = [9; 32];
     fingerprint.package.binding.tbs.principals = TlsVec::new(pins)?;
     fingerprint.seal()?;
     assert!(fingerprint.verify().is_err(), "pinned root fingerprint");
 
     let mut generation = Fixture::new()?;
-    let mut pins = generation.package.binding.tbs.principals.as_slice().to_vec();
+    let mut pins = generation
+        .package
+        .binding
+        .tbs
+        .principals
+        .as_slice()
+        .to_vec();
     pins.first_mut().ok_or("pin")?.roster_generation = 5;
     generation.package.binding.tbs.principals = TlsVec::new(pins)?;
     generation.seal()?;
     assert!(generation.verify().is_err(), "pinned roster generation");
 
     let mut late = Fixture::new()?;
-    install_credential(&mut late, sequencer_credential(&key(60), 0, (0, 5_000_000), None)?)?;
+    install_credential(
+        &mut late,
+        sequencer_credential(&key(60), 0, (0, 5_000_000), None)?,
+    )?;
     late.core.initial_validation_time = 2_500_000;
     late.seal()?;
-    assert!(late.verify().is_err(), "roots no longer cover the initial time");
+    assert!(
+        late.verify().is_err(),
+        "roots no longer cover the initial time"
+    );
     Ok(())
 }
 
@@ -582,7 +600,10 @@ fn the_sequencer_credential_is_checked_field_by_field() -> TestResult {
     assert!(network.verify().is_err(), "network");
 
     let mut reversed = Fixture::new()?;
-    install_credential(&mut reversed, sequencer_credential(&key(60), 0, (10, 5), None)?)?;
+    install_credential(
+        &mut reversed,
+        sequencer_credential(&key(60), 0, (10, 5), None)?,
+    )?;
     assert!(reversed.verify().is_err(), "reversed interval");
 
     let mut chained = Fixture::new()?;
@@ -591,7 +612,10 @@ fn the_sequencer_credential_is_checked_field_by_field() -> TestResult {
         &mut chained,
         sequencer_credential(&key(60), 0, (0, 1_000_000), Some((&key(61), &previous)))?,
     )?;
-    assert!(chained.verify().is_err(), "generation zero with a predecessor");
+    assert!(
+        chained.verify().is_err(),
+        "generation zero with a predecessor"
+    );
 
     let mut stray = Fixture::new()?;
     stray.credential.continuity_signature = Opaque::new(vec![1; 64])?;
