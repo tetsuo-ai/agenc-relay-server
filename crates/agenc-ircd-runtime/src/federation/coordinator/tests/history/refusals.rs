@@ -313,3 +313,139 @@ fn committed_cleanup_forgets_exactly_the_retained_requests_it_deleted() -> TestR
     assert_eq!(retaining.coordinator.retained.len(), 1);
     Ok(())
 }
+
+/// Like `paged_reader`, also returning the session revision the join committed.
+async fn paged_reader_with_join_revision(
+    edge: &mut Edge,
+    origin: &mut Origin,
+) -> TestResult<(
+    SessionId,
+    agenc_ircd_types::ChannelInstanceId,
+    [u8; 32],
+    u64,
+)> {
+    let (session, _, revision) = open_session(edge, origin, "reader", &mut Vec::new()).await?;
+    let channel = join_channel(edge, origin, session, revision, "#history").await?;
+    let joined_revision = *edge
+        .channel_revisions
+        .get(&channel)
+        .ok_or("join revision")?;
+    for number in 0..10 {
+        let expected_revision = *edge
+            .channel_revisions
+            .get(&channel)
+            .ok_or("channel revision")?;
+        let message = FederatedOperation::Message {
+            session_id: session,
+            kind: MessageKind::Privmsg,
+            targets: vec![MessageTargetArg::Channel {
+                channel_id: channel,
+                expected_revision,
+            }],
+            tags: Vec::new(),
+            body: format!("original-{number}"),
+        };
+        complete(edge, origin, &message).await?;
+    }
+    let first = complete(edge, origin, &latest(session, channel, 100, None)?).await?;
+    let ResultArm::HistoryPage(page) = &first.arm else {
+        return Err("first page".into());
+    };
+    let cursor = page.next_cursor()?.ok_or("next cursor")?;
+    Ok((session, channel, cursor, joined_revision))
+}
+
+#[tokio::test]
+async fn a_cursor_binds_its_origin_channel_session_and_membership() -> TestResult {
+    run_history(|inbox| async move {
+        let mut edge = Edge::new(inbox, 41);
+        let mut origin = Origin::new(61);
+        let mut other = Origin::new(63);
+        edge.establish().await?;
+        synchronize_ok(&mut edge, &mut [&mut origin, &mut other]).await?;
+        let (session, channel, cursor, joined_revision) =
+            paged_reader_with_join_revision(&mut edge, &mut origin).await?;
+
+        let (other_session, _, other_revision) =
+            open_session(&mut edge, &mut other, "other", &mut Vec::new()).await?;
+        let joined = complete(
+            &mut edge,
+            &mut other,
+            &FederatedOperation::Join {
+                session_id: other_session,
+                expected_session_revision: other_revision,
+                targets: vec![JoinTarget {
+                    channel_name: "#history".to_owned(),
+                    join_key: zeroize::Zeroizing::new(Vec::new()),
+                }],
+            },
+        )
+        .await?;
+        assert_eq!(joined.header.result_kind, FederationResultKind::Committed);
+        let elsewhere = complete(
+            &mut edge,
+            &mut other,
+            &latest(other_session, channel, 100, Some(cursor))?,
+        )
+        .await?;
+        assert_eq!(
+            failure_code(&elsewhere),
+            Some("QUERY_EXPIRED"),
+            "another origin"
+        );
+
+        let wrong_channel = latest(
+            session,
+            agenc_ircd_types::ChannelInstanceId::from_bytes([9; 16]),
+            100,
+            Some(cursor),
+        )?;
+        let refused = complete(&mut edge, &mut origin, &wrong_channel).await?;
+        assert_eq!(
+            failure_code(&refused),
+            Some("QUERY_EXPIRED"),
+            "another channel"
+        );
+
+        let (second_session, _, _) =
+            open_session(&mut edge, &mut origin, "reader2", &mut Vec::new()).await?;
+        let refused = complete(
+            &mut edge,
+            &mut origin,
+            &latest(second_session, channel, 100, Some(cursor))?,
+        )
+        .await?;
+        assert_eq!(
+            failure_code(&refused),
+            Some("QUERY_EXPIRED"),
+            "another session"
+        );
+
+        let parted = complete(
+            &mut edge,
+            &mut origin,
+            &FederatedOperation::Part {
+                session_id: session,
+                expected_session_revision: joined_revision,
+                all_channels: false,
+                channels: vec![channel],
+                reason: "done".into(),
+            },
+        )
+        .await?;
+        assert_eq!(parted.header.result_kind, FederationResultKind::Committed);
+        let refused = complete(
+            &mut edge,
+            &mut origin,
+            &latest(session, channel, 100, Some(cursor))?,
+        )
+        .await?;
+        assert_eq!(
+            failure_code(&refused),
+            Some("QUERY_EXPIRED"),
+            "after parting"
+        );
+        Ok(())
+    })
+    .await
+}
