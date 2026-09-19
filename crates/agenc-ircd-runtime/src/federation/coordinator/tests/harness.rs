@@ -5088,3 +5088,8 @@ async fn a_remote_deletion_keeps_its_commit_barrier_after_link_loss() -> TestRes
 mod startup_rows;
 
 mod misaddressed_requests;
+
+mod companion_negotiation;
+mod link_refusals;
+mod outbox_window;
+mod receipt_settlement;
