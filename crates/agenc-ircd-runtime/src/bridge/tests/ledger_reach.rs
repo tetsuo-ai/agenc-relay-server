@@ -3,8 +3,8 @@
 //! once any identity is duplicated or answered twice.
 #![forbid(unsafe_code)]
 
-use super::{BridgeFailure, CompletionLedger};
-use crate::bridge::{StorageCheckpointId, StorageReadId};
+use super::storage::{BridgeFailure, CompletionLedger};
+use super::{StorageCheckpointId, StorageReadId};
 use agenc_ircd_storage::StorageError;
 use agenc_ircd_types::TransactionId;
 

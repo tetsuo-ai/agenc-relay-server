@@ -148,7 +148,7 @@ impl CompletionLedger {
         lock(&self.state).in_flight.remove(&transaction_id);
     }
 
-    fn begin_read(&self, read_id: StorageReadId) -> Result<(), StorageError> {
+    pub(super) fn begin_read(&self, read_id: StorageReadId) -> Result<(), StorageError> {
         let mut state = lock(&self.state);
         if state.failed.is_some() {
             return Err(StorageError::Unavailable);
@@ -163,11 +163,11 @@ impl CompletionLedger {
         Ok(())
     }
 
-    fn abandon_read(&self, read_id: StorageReadId) {
+    pub(super) fn abandon_read(&self, read_id: StorageReadId) {
         lock(&self.state).reads_in_flight.remove(&read_id);
     }
 
-    fn finish_read(&self, read_id: StorageReadId) -> Result<(), BridgeFailure> {
+    pub(super) fn finish_read(&self, read_id: StorageReadId) -> Result<(), BridgeFailure> {
         let mut state = lock(&self.state);
         if let Some(failure) = state.failed {
             return Err(failure);
@@ -179,7 +179,10 @@ impl CompletionLedger {
         Ok(())
     }
 
-    fn begin_checkpoint(&self, checkpoint_id: StorageCheckpointId) -> Result<(), StorageError> {
+    pub(super) fn begin_checkpoint(
+        &self,
+        checkpoint_id: StorageCheckpointId,
+    ) -> Result<(), StorageError> {
         let mut state = lock(&self.state);
         if state.failed.is_some() {
             return Err(StorageError::Unavailable);
@@ -194,14 +197,17 @@ impl CompletionLedger {
         Ok(())
     }
 
-    fn abandon_checkpoint(&self, checkpoint_id: StorageCheckpointId) {
+    pub(super) fn abandon_checkpoint(&self, checkpoint_id: StorageCheckpointId) {
         let mut state = lock(&self.state);
         if state.checkpoint_in_flight == Some(checkpoint_id) {
             state.checkpoint_in_flight = None;
         }
     }
 
-    fn finish_checkpoint(&self, checkpoint_id: StorageCheckpointId) -> Result<(), BridgeFailure> {
+    pub(super) fn finish_checkpoint(
+        &self,
+        checkpoint_id: StorageCheckpointId,
+    ) -> Result<(), BridgeFailure> {
         let mut state = lock(&self.state);
         if let Some(failure) = state.failed {
             return Err(failure);
@@ -674,7 +680,3 @@ pub fn read_blocking(port: &StoragePort, plan: ReadPlan) -> Result<ReadResult, R
     let completion = port.try_read(plan)?;
     Ok(completion.wait()?)
 }
-
-#[cfg(test)]
-#[path = "tests/ledger_reach.rs"]
-mod ledger_reach;
