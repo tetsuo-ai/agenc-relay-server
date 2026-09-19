@@ -739,6 +739,7 @@ mod reinit {
     mod ack_context;
     mod admission;
     mod attempt_authority;
+    mod core_mismatch;
     mod leaf_membership;
     pub(in crate::e2ee::coordinator::tests::sequence) mod successor;
 

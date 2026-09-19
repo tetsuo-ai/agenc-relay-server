@@ -18,6 +18,9 @@ mod binding_delivery_auth;
 #[path = "reinit_collision.rs"]
 mod reinit_collision;
 
+#[path = "welcome_delivery.rs"]
+mod welcome_delivery;
+
 #[path = "mailbox_ack_restart.rs"]
 mod mailbox_ack_restart;
 
