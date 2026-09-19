@@ -305,3 +305,95 @@ fn a_foreign_activation_never_matches_the_provisional_reload() -> TestResult {
     );
     Ok(())
 }
+
+fn audited_provisional(
+    state: &mut StateCore,
+    handle: &RuntimeConfigHandle,
+) -> TestResult<ReloadActivation> {
+    let prepared = PreparedReload::new(
+        &handle.load(),
+        golden_config()?,
+        golden_parts("AgenC", Some("Provisional"))?,
+    )?;
+    let (reply, mut response) = oneshot::channel();
+    let exit = state.step_reload_request(ReloadCoreRequest::ActivateAudited {
+        prepared: Box::new(prepared),
+        success_event: Box::new(audit_event(OutcomeSuccess, REHASH)?),
+        failure_event: Box::new(audit_event(OutcomeFailure, REHASH)?),
+        reply,
+    });
+    assert!(exit.is_none());
+    assert!(state.activate_pending_reload().is_none());
+    match response.try_recv()? {
+        AuditedReloadStart::Provisional(activation) => Ok(activation),
+        other => Err(format!("not provisional: {other:?}").into()),
+    }
+}
+
+#[test]
+fn a_provisional_reload_keeps_every_later_activation_busy() -> TestResult {
+    let (mut fixture, handle) = reloading()?;
+    let state = fixture.state_mut()?;
+    let activation = audited_provisional(state, &handle)?;
+    assert!(activation.changes_live_state);
+    let prepared = PreparedReload::new(
+        &handle.load(),
+        golden_config()?,
+        golden_parts("AgenC", Some("Second"))?,
+    )?;
+    let (reply, mut response) = oneshot::channel();
+    assert!(
+        state
+            .step_reload_request(ReloadCoreRequest::ActivateSignal {
+                prepared: Box::new(prepared),
+                reply,
+            })
+            .is_none()
+    );
+    assert_eq!(
+        response.try_recv()?,
+        ReloadOutcome::Rejected(ReloadRejection::Busy)
+    );
+    let prepared = PreparedReload::new(
+        &handle.load(),
+        golden_config()?,
+        golden_parts("AgenC", Some("Third"))?,
+    )?;
+    let (reply, mut response) = oneshot::channel();
+    assert!(
+        state
+            .step_reload_request(ReloadCoreRequest::ActivateAudited {
+                prepared: Box::new(prepared),
+                success_event: Box::new(audit_event(OutcomeSuccess, REHASH)?),
+                failure_event: Box::new(audit_event(OutcomeFailure, REHASH)?),
+                reply,
+            })
+            .is_none()
+    );
+    assert_eq!(
+        response.try_recv()?,
+        AuditedReloadStart::Refused(ReloadRejection::Busy)
+    );
+    assert!(state.reload_pending.is_none());
+    assert!(state.reload_provisional.is_some());
+    Ok(())
+}
+
+#[test]
+fn a_reload_inbox_cannot_be_installed_over_a_provisional_reload() -> TestResult {
+    let (mut fixture, handle) = reloading()?;
+    let state = fixture.state_mut()?;
+    let _activation = audited_provisional(state, &handle)?;
+    let admission = std::sync::Arc::new(crate::admission::TransportAdmission::new(
+        handle.load().rates(),
+        1,
+        std::sync::Arc::new(crate::budget::MemoryBudget::new(64 * 1_024 * 1_024)),
+        Box::new(crate::clock::SystemMonotonicClock::start()),
+    )?);
+    let (_port, inbox) = crate::runtime_config::reload_channel(handle, admission);
+    assert_eq!(
+        state.install_reload_inbox(inbox).err(),
+        Some(crate::RuntimeError::InvalidValue)
+    );
+    Ok(())
+}
