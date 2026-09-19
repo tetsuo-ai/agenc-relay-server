@@ -248,3 +248,76 @@ async fn commands_deferred_behind_a_join_stop_at_the_deferral_ceiling() -> TestR
     assert!(topics <= 1, "deferred commands never answer: {lines:?}");
     Ok(())
 }
+
+/// Registers one guest and joins it to a fresh channel while its sink reports a
+/// queue above half, so the NAMES continuation waits for the queue instead of
+/// delivering its page.
+async fn congested_join(core: &mut Core) -> TestResult<Arc<FrameSink>> {
+    let sink = core.open(1)?;
+    core.line(1, "NICK waiter")?;
+    core.line(1, "USER waiter 0 * :Waiter")?;
+    core.settle().await?;
+    sink.set_congested(true);
+    core.line(1, "JOIN #slow")?;
+    core.settle().await?;
+    assert!(saw(&sink, "JOIN"), "lines: {:?}", sink.lines());
+    assert!(
+        !saw(&sink, " 366 "),
+        "the names page waits: {:?}",
+        sink.lines()
+    );
+    Ok(sink)
+}
+
+#[tokio::test]
+async fn a_names_continuation_waiting_on_a_full_queue_expires_at_its_idle_deadline() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = congested_join(&mut core).await?;
+    let now = core.fixture.context_mut()?.now().get();
+    core.fixture.context_mut()?.set_monotonic_for_test(now + 50);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    assert!(!saw(&sink, " 366 "), "still waiting: {:?}", sink.lines());
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(open, "a waiting continuation keeps its connection");
+    core.fixture
+        .context_mut()?
+        .set_monotonic_for_test(now + 60_000);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(!open, "the idle deadline closes the connection");
+    assert!(!saw(&sink, " 366 "), "lines: {:?}", sink.lines());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_names_continuation_delivers_once_the_queue_drains() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = congested_join(&mut core).await?;
+    sink.set_congested(false);
+    let now = core.fixture.context_mut()?.now().get();
+    core.fixture.context_mut()?.set_monotonic_for_test(now + 50);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    assert!(
+        saw(&sink, " 366 waiter #slow "),
+        "lines: {:?}",
+        sink.lines()
+    );
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(open, "a delivered continuation keeps its connection");
+    Ok(())
+}

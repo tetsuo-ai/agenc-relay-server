@@ -630,7 +630,7 @@ mod tests {
     use super::*;
     use agenc_ircd_client_wire::numeric_reply;
 
-    type TestResult = Result<(), Box<dyn core::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn core::error::Error>>;
 
     #[test]
     fn a_large_valid_join_charges_its_retained_tags_and_all_channel_names() -> TestResult {
@@ -750,6 +750,119 @@ mod tests {
         }
         assert!(matches!(
             accepted_channels(&many),
+            Err(RuntimeError::InvalidValue)
+        ));
+        Ok(())
+    }
+
+    fn continuation(request: Option<Box<ParsedMessage>>) -> TestResult<JoinNamesContinuation> {
+        Ok(JoinNamesContinuation {
+            channels: vec![ChannelNameValue::parse("#one")?],
+            request,
+            cursor: None,
+            page_sequence: 0,
+            idle_deadline: 1_000,
+            absolute_deadline: 5_000,
+            source: JoinNamesSource::Edge,
+            permit: None,
+        })
+    }
+
+    fn join_request() -> TestResult<Box<ParsedMessage>> {
+        Ok(Box::new(
+            agenc_ircd_client_wire::parse_message(agenc_ircd_client_wire::FramedLine::new(
+                "JOIN #one",
+            )?)?
+            .ok_or("empty JOIN")?,
+        ))
+    }
+
+    fn ending(channel: &str) -> TestResult<WireMessage> {
+        let frame = numeric_reply(
+            "edge.test",
+            366,
+            "sam",
+            &[channel],
+            Some("End of NAMES list"),
+        )?;
+        Ok(frame)
+    }
+
+    #[test]
+    fn a_join_continuation_expires_at_its_idle_or_absolute_deadline() -> TestResult {
+        let mut pending = continuation(None)?;
+        assert!(!pending.expired(MonotonicTick::from_ticks(999)));
+        assert!(pending.expired(MonotonicTick::from_ticks(1_000)));
+        pending.idle_deadline = 9_000;
+        assert!(!pending.expired(MonotonicTick::from_ticks(4_999)));
+        assert!(pending.expired(MonotonicTick::from_ticks(5_000)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_page_is_refused_while_the_request_is_still_held() -> TestResult {
+        let mut pending = continuation(Some(join_request()?))?;
+        assert_eq!(
+            pending.accept_page((0, true), &[], MonotonicTick::from_ticks(1)),
+            Err(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_page_out_of_sequence_or_after_the_deadline_is_refused() -> TestResult {
+        let mut pending = continuation(None)?;
+        assert_eq!(
+            pending.accept_page((1, true), &[], MonotonicTick::from_ticks(1)),
+            Err(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            pending.accept_page((0, true), &[], MonotonicTick::from_ticks(1_000)),
+            Err(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_continued_page_may_not_end_any_names_list() -> TestResult {
+        let mut pending = continuation(None)?;
+        assert_eq!(
+            pending.accept_page((0, true), &[ending("#one")?], MonotonicTick::from_ticks(1)),
+            Err(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            pending.accept_page((0, false), &[], MonotonicTick::from_ticks(1)),
+            Err(RuntimeError::InvalidValue),
+            "the final page must end every accepted channel"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_accepted_page_advances_the_sequence_and_the_idle_deadline() -> TestResult {
+        let mut pending = continuation(None)?;
+        pending.accept_page((0, true), &[], MonotonicTick::from_ticks(7))?;
+        assert_eq!(pending.page_sequence, 1);
+        assert_eq!(pending.idle_deadline, 7 + IDLE_MILLIS);
+        pending.accept_page((1, false), &[ending("#ONE")?], MonotonicTick::from_ticks(8))?;
+        assert_eq!(pending.page_sequence, 2);
+        assert_eq!(pending.idle_deadline, 8 + IDLE_MILLIS);
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_join_names_refuse_a_repeated_target() -> TestResult {
+        let topic = || {
+            numeric_reply(
+                "edge.test",
+                331,
+                "sam",
+                &["#twice"],
+                Some("No topic is set"),
+            )
+        };
+        assert!(matches!(
+            accepted_channels(&[topic()?, topic()?]),
             Err(RuntimeError::InvalidValue)
         ));
         Ok(())

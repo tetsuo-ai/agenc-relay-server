@@ -362,3 +362,35 @@ async fn completed_channel_setting_is_noted_only_with_standard_replies() -> Test
     assert_eq!(noted.lines().len(), before);
     Ok(())
 }
+
+#[tokio::test]
+async fn committed_join_that_accepted_no_channel_answers_and_keeps_the_client() -> TestResult {
+    let mut harness = Harness::new(Role::Edge)?;
+    let sink = edge_client(&mut harness, 1, "joiner")?;
+    let before = sink.lines().len();
+    let refused = numeric_reply(
+        "server.example",
+        473,
+        "joiner",
+        &["#closed"],
+        Some("Cannot join channel (+i)"),
+    )?;
+    complete(
+        &mut harness,
+        EdgeCompletion::JoinCommitted {
+            generation: ConnectionGeneration::new(1),
+            frames: vec![refused],
+            echo_permits: Vec::new(),
+            message: Box::new(parsed("JOIN #closed")?),
+        },
+    )?;
+    assert!(!harness.sink_gone(1)?);
+    assert!(harness.state(1)?.join_names.is_none());
+    assert_eq!(sink.lines().len(), before + 1, "lines: {:?}", sink.lines());
+    assert!(
+        saw(&sink, " 473 joiner #closed "),
+        "lines: {:?}",
+        sink.lines()
+    );
+    Ok(())
+}

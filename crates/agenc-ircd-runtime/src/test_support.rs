@@ -1207,6 +1207,7 @@ impl QueueReservationLedger for NoopLedger {
 pub(crate) struct FrameSink {
     generation: ConnectionGeneration,
     admit: bool,
+    congested: std::sync::atomic::AtomicBool,
     commits: AtomicUsize,
     lines: std::sync::Mutex<Vec<String>>,
 }
@@ -1216,9 +1217,15 @@ impl FrameSink {
         Arc::new(Self {
             generation,
             admit,
+            congested: std::sync::atomic::AtomicBool::new(false),
             commits: AtomicUsize::new(0),
             lines: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Makes the sink report a queue above half its capacity, or drained again.
+    pub(crate) fn set_congested(&self, congested: bool) {
+        self.congested.store(congested, Ordering::SeqCst);
     }
 
     pub(crate) fn commits(&self) -> usize {
@@ -1280,7 +1287,11 @@ impl ClientSink for FrameSink {
     }
 
     fn queue_snapshot(&self) -> ClientQueueSnapshot {
-        // Recorded frames have already drained from this nonblocking test sink.
+        // Recorded frames have already drained from this nonblocking test sink,
+        // unless a test holds it congested to keep a continuation waiting.
+        if self.congested.load(Ordering::SeqCst) {
+            return ClientQueueSnapshot::new(1_000_000, 1_048_576);
+        }
         ClientQueueSnapshot::new(0, 1_048_576)
     }
 }
