@@ -7028,9 +7028,12 @@ fn opaque_version_precedes_account(
 mod tests {
     mod commit_outcomes;
     mod crypto_backpressure;
+    mod deletion;
     mod harness;
     mod invitation_window;
+    mod logout;
     mod open_refusals;
+    mod replay;
     mod sasl_unavailable;
     mod shutdown;
     mod staging;
