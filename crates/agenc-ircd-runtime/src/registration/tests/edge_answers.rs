@@ -40,7 +40,7 @@ pub(super) fn sasl_waiting_start() -> TestResult<EdgeCarrier> {
     Ok(carrier)
 }
 
-fn sasl_waiting_finish() -> TestResult<EdgeCarrier> {
+pub(super) fn sasl_waiting_finish() -> TestResult<EdgeCarrier> {
     let mut carrier = sasl_waiting_start()?;
     carrier
         .sasl

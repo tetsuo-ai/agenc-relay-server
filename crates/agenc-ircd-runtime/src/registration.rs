@@ -3917,6 +3917,14 @@ mod edge_completion_tests;
 mod hook_tests;
 
 #[cfg(test)]
+#[path = "registration/tests/e2ee_lines.rs"]
+mod e2ee_line_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/core_lines.rs"]
+mod core_line_tests;
+
+#[cfg(test)]
 mod tests {
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use agenc_ircd_types::MonotonicTick;

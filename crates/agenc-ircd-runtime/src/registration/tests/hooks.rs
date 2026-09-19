@@ -6,6 +6,14 @@ use super::test_harness::{Harness, Options, Role, TestResult, executor, saw};
 use super::*;
 use crate::state_core::inbox::MaintenanceEvent;
 
+const ALL_ROLES: [Role; 5] = [
+    Role::Plain,
+    Role::Hosted,
+    Role::Edge,
+    Role::Coordinator,
+    Role::E2eeEdge,
+];
+
 fn hosted_config(
     harness: &Harness,
     network_id: NetworkId,
@@ -169,7 +177,7 @@ fn maintain(harness: &mut Harness) -> TestResult<usize> {
 
 #[tokio::test]
 async fn idle_maintenance_stages_nothing_in_any_role() -> TestResult {
-    for role in [Role::Plain, Role::Hosted, Role::Edge, Role::Coordinator] {
+    for role in ALL_ROLES {
         let mut harness = Harness::new(role)?;
         assert_eq!(maintain(&mut harness)?, 0);
         assert!(harness.router.reload_ready());
@@ -186,7 +194,7 @@ fn schedule(harness: &mut Harness, kind: TimerKind, id: TimedId) -> TestResult {
 
 #[tokio::test]
 async fn timers_no_owner_claims_are_dropped_in_every_role() -> TestResult {
-    for role in [Role::Plain, Role::Hosted, Role::Edge, Role::Coordinator] {
+    for role in ALL_ROLES {
         let mut harness = Harness::new(role)?;
         let sink = harness.open(1, true)?;
         schedule(&mut harness, TimerKind::Reservation, TimedId::Global)?;
@@ -262,7 +270,7 @@ async fn keepalive_timer_that_would_overflow_the_clock_closes_the_client() -> Te
 
 #[tokio::test]
 async fn unowned_crypto_and_storage_completions_are_dropped() -> TestResult {
-    for role in [Role::Plain, Role::Hosted, Role::Edge, Role::Coordinator] {
+    for role in ALL_ROLES {
         let mut harness = Harness::new(role)?;
         let sink = harness.open(1, true)?;
         let context = harness.fixture.context_mut()?;
@@ -288,18 +296,20 @@ async fn unowned_crypto_and_storage_completions_are_dropped() -> TestResult {
 
 #[tokio::test]
 async fn carrier_completion_for_a_vanished_connection_is_dropped() -> TestResult {
-    let mut harness = Harness::new(Role::Hosted)?;
-    let context = harness.fixture.context_mut()?;
-    harness.router.apply_account_completions(
-        context,
-        vec![CarrierCompletion {
-            generation: ConnectionGeneration::new(4),
-            carrier_generation: 0,
-            close: false,
-            result: ResultClass::Ok,
-        }],
-    );
-    assert!(harness.router.connections.is_empty());
+    for role in [Role::Hosted, Role::Coordinator] {
+        let mut harness = Harness::new(role)?;
+        let context = harness.fixture.context_mut()?;
+        harness.router.apply_account_completions(
+            context,
+            vec![CarrierCompletion {
+                generation: ConnectionGeneration::new(4),
+                carrier_generation: 0,
+                close: false,
+                result: ResultClass::Ok,
+            }],
+        );
+        assert!(harness.router.connections.is_empty());
+    }
     Ok(())
 }
 
@@ -336,7 +346,7 @@ fn reject(harness: &mut Harness, origin: Option<StagedOrigin>) -> TestResult {
 
 #[tokio::test]
 async fn rejected_batch_without_an_origin_reaches_no_client_in_any_role() -> TestResult {
-    for role in [Role::Plain, Role::Hosted, Role::Edge, Role::Coordinator] {
+    for role in ALL_ROLES {
         let mut harness = Harness::new(role)?;
         let sink = harness.open(1, true)?;
         reject(&mut harness, None)?;
@@ -455,5 +465,94 @@ async fn retained_failure_for_a_gone_transport_is_not_delivered() -> TestResult 
     reject(&mut harness, Some(origin))?;
     assert!(sink.lines().is_empty());
     assert!(harness.sink_gone(1)?);
+    Ok(())
+}
+
+/// Stages, by hand, an authenticated registration whose grant the account
+/// service never issued.
+fn pending_without_a_grant(harness: &mut Harness, nick: &str) -> TestResult<BoundSession> {
+    let generation = ConnectionGeneration::new(1);
+    harness.line(1, &format!("NICK {nick}"))?;
+    let actions = harness.actions(1, &format!("USER {nick} 0 * :Real"))?;
+    let Some(RegistrationAction::CommitRegistration {
+        generation: event_generation,
+        ..
+    }) = actions.into_iter().next()
+    else {
+        return Err("expected the registration commit".into());
+    };
+    let bound = BoundSession {
+        session_id: SessionId::from_bytes([71; 16]),
+        user_id: UserId::from_bytes([72; 16]),
+        capability_hash: [0; 32],
+    };
+    harness.fixture.context_mut()?.sessions_mut().bind_session(
+        generation,
+        bound,
+        crate::test_support::negotiated_capabilities(&[])?,
+    )?;
+    harness.router.pending_registrations.insert(
+        generation,
+        PendingRegistration {
+            event_generation,
+            bound,
+            nickname: nick.to_owned(),
+            authenticated: true,
+        },
+    );
+    Ok(bound)
+}
+
+#[tokio::test]
+async fn authenticated_registration_without_its_grant_is_closed_at_commit() -> TestResult {
+    let mut harness = Harness::new(Role::Hosted)?;
+    let sink = harness.open(1, true)?;
+    pending_without_a_grant(&mut harness, "grantless")?;
+    let context = harness.fixture.context_mut()?;
+    harness.router.batch_applied(context, 1);
+    assert!(harness.sink_gone(1)?);
+    assert!(!saw(&sink, " 001 "), "lines: {:?}", sink.lines());
+    assert!(harness.router.pending_registrations.is_empty());
+    assert!(matches!(harness.state(1)?.deadline, DeadlineState::None));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_authenticated_registration_is_unbound_and_closed() -> TestResult {
+    let mut harness = Harness::new(Role::Hosted)?;
+    let sink = harness.open(1, true)?;
+    let generation = ConnectionGeneration::new(1);
+    pending_without_a_grant(&mut harness, "rejected")?;
+    reject(&mut harness, Some(StagedOrigin::silent(generation)))?;
+    assert!(
+        saw(&sink, "ERROR :Registration rejected"),
+        "lines: {:?}",
+        sink.lines()
+    );
+    assert!(harness.sink_gone(1)?);
+    let context = harness.fixture.context_mut()?;
+    assert_eq!(
+        context
+            .sessions()
+            .connection(generation)
+            .and_then(crate::state_core::session::ConnectionEntry::session),
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn coordinator_consumes_a_grace_timer_of_a_peer_without_origins() -> TestResult {
+    let mut harness = Harness::new(Role::Coordinator)?;
+    let sink = harness.open(1, true)?;
+    schedule(
+        &mut harness,
+        TimerKind::FederationGrace,
+        TimedId::Peer(ServerId::from_bytes([90; 16])),
+    )?;
+    let now = harness.fixture.context_mut()?.now().get();
+    assert_eq!(harness.fire_timers_at(now)?, 1);
+    assert!(sink.lines().is_empty());
+    assert_eq!(harness.fixture.context_mut()?.pending_len(), 0);
     Ok(())
 }

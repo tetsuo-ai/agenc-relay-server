@@ -8,7 +8,9 @@ use agenc_ircd_client_wire::{
     encode_account_payload, encode_sasl_payload,
 };
 
-use super::edge_answer_tests::{account_waiting, sasl_waiting_start, text_chunks};
+use super::edge_answer_tests::{
+    account_waiting, sasl_waiting_finish, sasl_waiting_start, text_chunks,
+};
 use super::test_harness::{Harness, Role, TestResult, saw};
 use super::*;
 use crate::federation::edge::{EdgeCompletion, RemoteCarrierOutcome};
@@ -399,5 +401,36 @@ async fn credential_transfer_lines_use_the_credential_transport() -> TestResult 
     };
     assert_eq!(result, ResultClass::Ok);
     assert_eq!(frames.first().map(WireMessage::command), Some("ACCTCRED"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_of_an_edge_authenticated_client_is_refused_and_keeps_the_grant() -> TestResult {
+    let mut harness = Harness::new(Role::Edge)?;
+    let _sink = harness.open(1, true)?;
+    let generation = ConnectionGeneration::new(1);
+    let mut carrier = sasl_waiting_finish()?;
+    carrier
+        .sasl
+        .server_response(&[0; ACCOUNT_RESPONSE_BYTES], 0)?;
+    carrier.sasl.complete(true, 0)?;
+    carrier.grant = Some((
+        agenc_ircd_types::AccountId::parse("a_AAAAAAAAAAAAAAAAAAAAAA")?,
+        1,
+        [9; 32],
+    ));
+    harness.router.edge_carriers.insert(generation, carrier);
+    let context = harness.fixture.context_mut()?;
+    let route =
+        harness
+            .router
+            .edge_sasl_line(context, generation, 1, (PREFIX, "*"), ("*", true), 0);
+    let CarrierRoute::Finished { frames, result } = route else {
+        return Err("the logout must be answered locally".into());
+    };
+    assert_eq!(result, ResultClass::Rejected);
+    assert_eq!(frames.first().map(WireMessage::command), Some("904"));
+    let kept = harness.router.edge_carriers.get(&generation);
+    assert!(kept.is_some_and(|carrier| carrier.grant.is_some()));
     Ok(())
 }

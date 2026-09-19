@@ -23,6 +23,8 @@ pub(super) enum Role {
     Edge,
     /// The hosted account service beside the federation coordinator role.
     Coordinator,
+    /// An edge with the E2EE edge router attached; its link is down.
+    E2eeEdge,
 }
 
 /// Router inputs a test overrides.
@@ -94,6 +96,18 @@ pub(super) fn edge_role(fixture: &StateCoreFixture) -> EdgeFederation {
     })
 }
 
+pub(super) fn e2ee_role(fixture: &StateCoreFixture) -> crate::e2ee::edge::E2eeEdge {
+    crate::e2ee::edge::E2eeEdge::new(crate::e2ee::edge::E2eeEdgeConfig {
+        network_id: *fixture.identity.network_id.as_bytes(),
+        server_id: fixture.identity.server_id,
+        server_name: "server.example".to_owned(),
+        coordinator_server_id: coordinator_identity().server_id(),
+        sequencer_key_set: None,
+        incarnation: *fixture.identity.server_incarnation.as_bytes(),
+        global_disk_bytes: 1 << 30,
+    })
+}
+
 pub(super) fn coordinator_role(fixture: &StateCoreFixture) -> TestResult<FederationCoordinator> {
     let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestChannelKeyVerifier);
     let salt = [7; CHANNEL_KEY_SALT_BYTES];
@@ -154,6 +168,9 @@ impl Harness {
         )?;
         let router = match options.role {
             Role::Edge => router.with_edge(edge_role(&fixture)),
+            Role::E2eeEdge => router
+                .with_edge(edge_role(&fixture))
+                .with_e2ee_edge(e2ee_role(&fixture))?,
             Role::Coordinator => router.with_federation(coordinator_role(&fixture)?),
             Role::Plain | Role::Hosted => router,
         };

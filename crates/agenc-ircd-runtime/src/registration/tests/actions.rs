@@ -282,3 +282,32 @@ async fn registration_committed_after_its_client_left_is_closed_again() -> TestR
     assert!(harness.router.reload_ready());
     Ok(())
 }
+
+#[tokio::test]
+async fn nickname_claimed_by_a_remote_session_before_the_commit_refuses_the_registration()
+-> TestResult {
+    let mut harness = Harness::new(Role::Plain)?;
+    let sink = harness.open(1, true)?;
+    harness.line(1, "NICK raced")?;
+    let home = ServerId::from_bytes([99; 16]);
+    let context = harness.fixture.context_mut()?;
+    let seed = crate::test_support::remote_session_seed(context, home, "raced")?;
+    let opened = context.domain().plan_session_opened(seed)?;
+    context
+        .stage_durable(opened, FanoutRequest::new(Vec::new(), Vec::new())?, None, 0)
+        .map_err(|error| format!("remote session: {error:?}"))?;
+    harness.fixture.commit_staged_batch().await?;
+    let outcome = harness.line(1, "USER raced 0 * :Raced")?;
+    assert!(matches!(
+        outcome,
+        RouteOutcome::Close(CloseReason::ClientQuit)
+    ));
+    assert!(
+        saw(&sink, "ERROR :Registration rejected"),
+        "lines: {:?}",
+        sink.lines()
+    );
+    assert!(harness.router.pending_registrations.is_empty());
+    assert!(harness.router.leases.is_empty());
+    Ok(())
+}
