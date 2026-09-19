@@ -2807,6 +2807,11 @@ async fn finish_admin_writer<W: AsyncWrite + Unpin>(writer: &mut W) {
 
 #[cfg(test)]
 mod tests {
+    mod action_failures;
+    mod command_failures;
+    mod harness;
+    mod owner_boundaries;
+    mod process_and_guards;
     mod reload_refusal;
     use std::fs::{self, OpenOptions};
     use std::io;
