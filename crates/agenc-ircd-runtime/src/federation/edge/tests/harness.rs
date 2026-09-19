@@ -4127,6 +4127,8 @@ mod restored_journal;
 
 mod restored_projection;
 
+mod restored_history;
+
 mod snapshot_refusals;
 
 mod result_refusals;
