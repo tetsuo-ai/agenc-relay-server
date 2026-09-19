@@ -2931,6 +2931,180 @@ mod tests {
         Ok(())
     }
 
+    struct ScanKeys {
+        master: agenc_ircd_crypto::StorageMasterKey,
+        binding: agenc_ircd_crypto::DatabaseBinding,
+        keys: KeyDeriver,
+    }
+
+    fn scan_keys() -> Result<ScanKeys, RuntimeError> {
+        use agenc_ircd_types::{DatabaseId, ServerIncarnation};
+        let session = binding();
+        let master = agenc_ircd_crypto::StorageMasterKey::from_bytes([7; 32]);
+        let binding = agenc_ircd_crypto::DatabaseBinding::new(
+            session.network_id,
+            session.server_id,
+            ServerIncarnation::from_bytes([3; 16]),
+            DatabaseId::from_bytes([4; 16]),
+        );
+        let keys = KeyDeriver::new(
+            agenc_ircd_crypto::StorageMasterKey::from_bytes([7; 32]),
+            binding,
+            1,
+        )?;
+        Ok(ScanKeys {
+            master,
+            binding,
+            keys,
+        })
+    }
+
+    /// One sealed audit row at `sequence` whose value carries the given counters.
+    fn audit_row(
+        scan: &ScanKeys,
+        sequence: u64,
+        counters: (u64, u64, Option<u64>),
+    ) -> Result<agenc_ircd_storage::ReadRecord, RuntimeError> {
+        let (revision, generation, expires_at) = counters;
+        let key = StoredKey::new(sequence.to_be_bytes().to_vec())?;
+        let plaintext = PersistentRecordValue::new(
+            TableId::Audit,
+            1,
+            revision,
+            generation,
+            expires_at,
+            Vec::new(),
+            vec![9; 16],
+        )?
+        .encode()?;
+        let sealed = agenc_ircd_storage::StorageSealContext::new(&scan.master, scan.binding, 1)?
+            .seal(
+                TableId::Audit,
+                DOMAIN_RECORD_SCHEMA,
+                [u8::try_from(sequence % 251).unwrap_or_default(); 24],
+                &key,
+                &plaintext,
+            )?
+            .encode()?;
+        Ok(agenc_ircd_storage::ReadRecord {
+            table: TableId::Audit,
+            key,
+            sealed_record: sealed,
+        })
+    }
+
+    fn page(
+        records: Vec<agenc_ircd_storage::ReadRecord>,
+        commit: u64,
+        truncated: bool,
+    ) -> agenc_ircd_storage::ReadResult {
+        agenc_ircd_storage::ReadResult {
+            storage_commit_sequence: commit,
+            records,
+            truncated,
+        }
+    }
+
+    fn scan_from(
+        scan: &ScanKeys,
+        start: u64,
+        pages: Vec<agenc_ircd_storage::ReadResult>,
+    ) -> Result<u64, RuntimeError> {
+        let mut pages = std::collections::VecDeque::from(pages);
+        scan_table_pages_from(
+            &scan.keys,
+            TableId::Audit,
+            start,
+            |_| pages.pop_front().ok_or(RuntimeError::InvalidValue),
+            |_, _, _| Ok(true),
+        )
+    }
+
+    #[test]
+    fn an_audit_page_is_refused_over_its_row_limit_or_off_its_table_or_out_of_order()
+    -> Result<(), RuntimeError> {
+        let scan = scan_keys()?;
+        let oversized = (0..=usize::from(RANGE_READ_LIMIT))
+            .map(|_| {
+                Ok(agenc_ircd_storage::ReadRecord {
+                    table: TableId::Audit,
+                    key: StoredKey::new(vec![0; 8])?,
+                    sealed_record: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        assert_eq!(
+            scan_from(&scan, 0, vec![page(oversized, 10, true)]).err(),
+            Some(RuntimeError::LimitExceeded)
+        );
+        let mut foreign = audit_row(&scan, 5, (6, 0, None))?;
+        foreign.table = TableId::AuditCheckpoint;
+        assert_eq!(
+            scan_from(&scan, 5, vec![page(vec![foreign], 10, false)]).err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        let behind = audit_row(&scan, 3, (4, 0, None))?;
+        assert_eq!(
+            scan_from(&scan, 5, vec![page(vec![behind], 10, false)]).err(),
+            Some(RuntimeError::InvalidValue),
+            "a row below the page start"
+        );
+        let first = audit_row(&scan, 5, (6, 0, None))?;
+        let repeated = audit_row(&scan, 5, (6, 0, None))?;
+        assert_eq!(
+            scan_from(&scan, 5, vec![page(vec![first, repeated], 10, false)]).err(),
+            Some(RuntimeError::InvalidValue),
+            "a row that does not advance"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_audit_row_must_carry_its_sequence_revision_and_no_other_counters()
+    -> Result<(), RuntimeError> {
+        let scan = scan_keys()?;
+        for counters in [(7, 0, None), (6, 1, None), (6, 0, Some(99))] {
+            let row = audit_row(&scan, 5, counters)?;
+            assert_eq!(
+                scan_from(&scan, 5, vec![page(vec![row], 10, false)]).err(),
+                Some(RuntimeError::InvalidValue),
+                "{counters:?}"
+            );
+        }
+        let row = audit_row(&scan, 5, (6, 0, None))?;
+        assert_eq!(scan_from(&scan, 5, vec![page(vec![row], 10, false)])?, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_pages_must_not_regress_the_storage_position_between_reads() -> Result<(), RuntimeError>
+    {
+        let scan = scan_keys()?;
+        let first = audit_row(&scan, 5, (6, 0, None))?;
+        let second = audit_row(&scan, 6, (7, 0, None))?;
+        assert_eq!(
+            scan_from(
+                &scan,
+                5,
+                vec![page(vec![first], 10, true), page(vec![second], 9, false)]
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        let first = audit_row(&scan, 5, (6, 0, None))?;
+        let second = audit_row(&scan, 6, (7, 0, None))?;
+        assert_eq!(
+            scan_from(
+                &scan,
+                5,
+                vec![page(vec![first], 10, true), page(vec![second], 11, false)]
+            )?,
+            11,
+            "the later page's position is reported"
+        );
+        Ok(())
+    }
+
     #[path = "authority_fences.rs"]
     mod authority_fences;
 }
