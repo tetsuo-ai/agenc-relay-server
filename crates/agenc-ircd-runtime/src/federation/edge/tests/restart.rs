@@ -531,3 +531,4 @@ async fn a_replacement_coordinator_fences_the_old_stage_before_resuming() -> Tes
 }
 
 mod part_binding;
+mod row_binding;

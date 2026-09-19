@@ -4123,6 +4123,8 @@ mod carrier_during_origin_update;
 
 mod restored_journal;
 
+mod restored_projection;
+
 mod snapshot_refusals;
 
 mod result_refusals;
