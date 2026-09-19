@@ -335,4 +335,26 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn a_ticket_over_the_encoded_ceiling_or_shorter_than_its_tag_is_refused() -> TestResult {
+        let key = fixed_key(1, 2);
+        let oversized = vec![7_u8; MAX_TLS_TICKET_PLAINTEXT_BYTES + 1];
+        assert_eq!(
+            key.seal(&oversized).err(),
+            Some(CryptoError::LimitExceeded),
+            "the plaintext ceiling keeps the ticket under the encoded ceiling"
+        );
+        let encoded = key.seal(b"session")?;
+        let truncated = encoded
+            .get(..TLS_TICKET_HEADER_BYTES + TLS_TICKET_TAG_BYTES - 1)
+            .ok_or("ticket header")?;
+        assert_eq!(
+            key.open(truncated).err(),
+            Some(CryptoError::InvalidEncoding),
+            "a ciphertext shorter than its tag"
+        );
+        assert_eq!(key.open(&encoded)?.into_rustls_plaintext(), b"session");
+        Ok(())
+    }
 }

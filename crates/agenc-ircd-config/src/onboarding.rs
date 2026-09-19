@@ -283,3 +283,72 @@ pub fn render_onboarding(config: &Config, facts: &OnboardingFacts) -> Result<Str
     }
     Ok(descriptor)
 }
+
+#[cfg(test)]
+mod grammar_tests {
+    use super::*;
+
+    #[test]
+    fn a_canonical_number_is_non_empty_unpadded_and_all_digits() {
+        for text in ["", "007", "12a", "0x10"] {
+            assert_eq!(
+                canonical_u64(text).err(),
+                Some(ConfigError::InvalidValue),
+                "{text:?}"
+            );
+        }
+        assert_eq!(canonical_u64("0").ok(), Some(0));
+        assert_eq!(canonical_u64("6697").ok(), Some(6_697));
+    }
+
+    #[test]
+    fn an_endpoint_needs_a_name_before_its_port() {
+        assert_eq!(
+            parse_endpoint(":6697").err(),
+            Some(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            parse_endpoint("hub.example").err(),
+            Some(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            parse_endpoint("hub.example:6697").ok(),
+            Some(("hub.example", 6_697))
+        );
+    }
+
+    #[test]
+    fn a_required_value_must_follow_its_prefix_and_be_non_empty() {
+        let mut lines = ["network-id=", "network-id=abc"].into_iter();
+        assert_eq!(
+            required_value(&mut lines, "network-id=").err(),
+            Some(ConfigError::InvalidValue)
+        );
+        assert_eq!(required_value(&mut lines, "network-id=").ok(), Some("abc"));
+        assert_eq!(
+            required_value(&mut lines, "network-id=").err(),
+            Some(ConfigError::MissingValue)
+        );
+        let mut other = ["server-id=abc"].into_iter();
+        assert_eq!(
+            required_value(&mut other, "network-id=").err(),
+            Some(ConfigError::InvalidDocument)
+        );
+    }
+
+    #[test]
+    fn a_descriptor_body_is_non_empty_graphic_text_ending_in_a_newline() {
+        for text in ["", "no newline", "tab\there\n", "bad byte \u{e9}\n"] {
+            assert_eq!(
+                descriptor_body(text).err(),
+                Some(ConfigError::InvalidDocument),
+                "{text:?}"
+            );
+        }
+        let long = format!("{}\n", "x".repeat(MAX_ONBOARDING_DESCRIPTOR_BYTES));
+        assert_eq!(
+            descriptor_body(&long).err(),
+            Some(ConfigError::InvalidDocument)
+        );
+    }
+}
