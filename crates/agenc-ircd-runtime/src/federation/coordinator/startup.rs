@@ -763,3 +763,7 @@ fn select_objects(
 #[cfg(test)]
 #[path = "startup/tests/row_admission.rs"]
 mod row_admission;
+
+#[cfg(test)]
+#[path = "startup/tests/barrier_events.rs"]
+mod barrier_events;
