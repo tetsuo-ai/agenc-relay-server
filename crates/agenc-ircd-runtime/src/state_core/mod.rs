@@ -647,6 +647,16 @@ impl PreparedQuerySnapshot {
 }
 
 impl StateCoreContext {
+    /// Reports the check that refused an account or authentication request.
+    pub(crate) fn account_request_refused(
+        &self,
+        reason: crate::observe::events::AccountRefusalReason,
+    ) {
+        if let Some(observer) = &self.observer {
+            observer.account_request_refused(reason);
+        }
+    }
+
     /// Reports a coordinator startup's signer facts through the observer.
     pub(crate) fn e2ee_signer_report(&self, blocked_routes: u64, retired_missing: bool) {
         if let Some(observer) = &self.observer {

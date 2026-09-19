@@ -1389,7 +1389,7 @@ impl RegistrationRouter {
                 sasl,
                 finish,
                 outcome,
-            } => self.edge_carrier_answered(
+            } => self.edge_carrier_outcome(
                 context,
                 generation,
                 carrier_generation,
@@ -1409,7 +1409,7 @@ impl RegistrationRouter {
                 finish,
                 outcome,
             } => {
-                self.edge_carrier_answered(
+                self.edge_carrier_outcome(
                     context,
                     generation,
                     carrier_generation,
@@ -1541,6 +1541,9 @@ impl RegistrationRouter {
                     if sent {
                         return CarrierRoute::Pending;
                     }
+                    context.account_request_refused(
+                        crate::observe::events::AccountRefusalReason::ForwardUnavailable,
+                    );
                     let Ok(actions) = carrier.sasl.unavailable(now) else {
                         return CarrierRoute::Close;
                     };
@@ -1639,6 +1642,9 @@ impl RegistrationRouter {
                     if sent {
                         return CarrierRoute::Pending;
                     }
+                    context.account_request_refused(
+                        crate::observe::events::AccountRefusalReason::ForwardUnavailable,
+                    );
                     transfer.reject();
                     return account_unavailable(prefix, kind);
                 }
@@ -1652,6 +1658,19 @@ impl RegistrationRouter {
             },
             Err(_) => CarrierRoute::Close,
         }
+    }
+
+    /// Names a bare authority refusal in the log, then renders the answer.
+    fn edge_carrier_outcome(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        phase: (RegistrationAuthCarrier, bool),
+        outcome: crate::federation::edge::RemoteCarrierOutcome,
+    ) {
+        note_bare_refusal(context, &outcome);
+        self.edge_carrier_answered(context, generation, carrier_generation, phase, outcome);
     }
 
     /// The coordinator answered one forwarded carrier envelope: the edge
@@ -3676,6 +3695,22 @@ fn account_unavailable(prefix: &str, kind: AccountCarrierKind) -> CarrierRoute {
             result: ResultClass::Rejected,
         },
         Err(_) => CarrierRoute::Close,
+    }
+}
+
+/// An authority refusal that carries no response reaches the client as the same bare failure
+/// as every other refusal, so the log names it.
+fn note_bare_refusal(
+    context: &StateCoreContext,
+    outcome: &crate::federation::edge::RemoteCarrierOutcome,
+) {
+    if matches!(
+        outcome,
+        crate::federation::edge::RemoteCarrierOutcome::Failed { chunks } if chunks.is_empty()
+    ) {
+        context.account_request_refused(
+            crate::observe::events::AccountRefusalReason::AuthorityRefused,
+        );
     }
 }
 

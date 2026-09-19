@@ -505,6 +505,9 @@ fn run_operation(
                 // A previously accepted origin can still name a session
                 // revoked before its edge applies SessionHidden. Refuse this
                 // operation durably without disconnecting the entire edge.
+                context.account_request_refused(
+                    crate::observe::events::AccountRefusalReason::PrincipalMismatch,
+                );
                 return finish_failed(
                     coordinator,
                     context,

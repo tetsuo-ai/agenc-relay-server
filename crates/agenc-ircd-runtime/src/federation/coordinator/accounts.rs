@@ -370,6 +370,8 @@ impl FederationCoordinator {
             .get(&generation)
             .is_some_and(|carrier| carrier.in_flight.is_some());
         if busy {
+            context
+                .account_request_refused(crate::observe::events::AccountRefusalReason::CarrierBusy);
             return Err(Violation::Ceiling);
         }
         let carrier_generation = fresh.header.replay_key.operation_sequence.saturating_add(1);

@@ -65,6 +65,8 @@ pub enum LogEventCode {
     ReloadRejected,
     /// One authenticated administrative command completed or was rejected.
     AdminAction,
+    /// An account or authentication request was refused; the reason field names the check.
+    AccountRequestRefused,
     /// A shutdown phase began.
     ShutdownPhase,
     /// The shutdown quiesce phase began.
@@ -105,7 +107,7 @@ pub enum LogEventCode {
 
 impl LogEventCode {
     /// Every registered code.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::ProcessStarted,
         Self::ConfigurationRejected,
         Self::StorageRecovered,
@@ -126,6 +128,7 @@ impl LogEventCode {
         Self::ReloadApplied,
         Self::ReloadRejected,
         Self::AdminAction,
+        Self::AccountRequestRefused,
         Self::ShutdownPhase,
         Self::ShutdownQuiesce,
         Self::ShutdownDrain,
@@ -167,6 +170,7 @@ impl LogEventCode {
             Self::ReloadApplied => "reload_applied",
             Self::ReloadRejected => "reload_rejected",
             Self::AdminAction => "admin_action",
+            Self::AccountRequestRefused => "account_request_refused",
             Self::ShutdownPhase => "shutdown_phase",
             Self::ShutdownQuiesce => "shutdown_quiesce",
             Self::ShutdownDrain => "shutdown_drain",
@@ -469,6 +473,51 @@ impl CorrelationSource {
     }
 }
 
+/// Why an account or authentication request was refused. The set is closed and names the
+/// check that refused, never a login, an account, a session or a connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountRefusalReason {
+    /// The sealed request could not be parsed or opened.
+    RequestUnreadable,
+    /// The request's kind does not belong to the exchange phase it arrived in.
+    WrongPhase,
+    /// The connection already has an exchange of this kind in progress.
+    ExchangeInProgress,
+    /// A finish arrived for an exchange the connection no longer holds.
+    NoLiveExchange,
+    /// The connection used its authentication attempts.
+    ConnectionAttemptLimit,
+    /// A rate bucket refused the request.
+    RateLimit,
+    /// The edge could not forward the request to the account authority.
+    ForwardUnavailable,
+    /// The account authority answered with a refusal that carries no response.
+    AuthorityRefused,
+    /// The declared principal does not match the live session at the authority.
+    PrincipalMismatch,
+    /// The authority is still answering this connection's previous carrier.
+    CarrierBusy,
+}
+
+impl AccountRefusalReason {
+    /// The stable log label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RequestUnreadable => "request_unreadable",
+            Self::WrongPhase => "wrong_phase",
+            Self::ExchangeInProgress => "exchange_in_progress",
+            Self::NoLiveExchange => "no_live_exchange",
+            Self::ConnectionAttemptLimit => "connection_attempt_limit",
+            Self::RateLimit => "rate_limit",
+            Self::ForwardUnavailable => "forward_unavailable",
+            Self::AuthorityRefused => "authority_refused",
+            Self::PrincipalMismatch => "principal_mismatch",
+            Self::CarrierBusy => "carrier_busy",
+        }
+    }
+}
+
 /// One structured log line holding only the allowed common fields.
 pub struct LogEvent {
     code: LogEventCode,
@@ -479,6 +528,7 @@ pub struct LogEvent {
     error_code: Option<PublicErrorCode>,
     duration: Option<DurationBucket>,
     count: Option<CountBucket>,
+    refusal: Option<AccountRefusalReason>,
     correlation: CorrelationNumber,
 }
 
@@ -501,8 +551,16 @@ impl LogEvent {
             error_code: None,
             duration: None,
             count: None,
+            refusal: None,
             correlation,
         }
+    }
+
+    /// Attaches the check that refused an account request.
+    #[must_use]
+    pub const fn with_refusal(mut self, reason: AccountRefusalReason) -> Self {
+        self.refusal = Some(reason);
+        self
     }
 
     /// Attaches the listener purpose.
@@ -581,6 +639,9 @@ impl fmt::Display for LogEvent {
         if let Some(count) = self.count {
             write!(formatter, " count={}", count.label())?;
         }
+        if let Some(reason) = self.refusal {
+            write!(formatter, " reason={}", reason.label())?;
+        }
         write!(formatter, " correlation={}", self.correlation.get())
     }
 }
@@ -589,6 +650,54 @@ impl fmt::Display for LogEvent {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn a_refused_account_request_names_its_check_and_nothing_else() {
+        let labels = [
+            (
+                AccountRefusalReason::RequestUnreadable,
+                "request_unreadable",
+            ),
+            (AccountRefusalReason::WrongPhase, "wrong_phase"),
+            (
+                AccountRefusalReason::ExchangeInProgress,
+                "exchange_in_progress",
+            ),
+            (AccountRefusalReason::NoLiveExchange, "no_live_exchange"),
+            (
+                AccountRefusalReason::ConnectionAttemptLimit,
+                "connection_attempt_limit",
+            ),
+            (AccountRefusalReason::RateLimit, "rate_limit"),
+            (
+                AccountRefusalReason::ForwardUnavailable,
+                "forward_unavailable",
+            ),
+            (AccountRefusalReason::AuthorityRefused, "authority_refused"),
+            (
+                AccountRefusalReason::PrincipalMismatch,
+                "principal_mismatch",
+            ),
+            (AccountRefusalReason::CarrierBusy, "carrier_busy"),
+        ];
+        for (reason, label) in labels {
+            assert_eq!(reason.label(), label);
+            let line = LogEvent::new(
+                LogEventCode::AccountRequestRefused,
+                Severity::Warning,
+                UtcSecond::from_unix_seconds(1_767_225_600),
+                ServerId::from_bytes([3; 16]),
+                CorrelationSource::new(0).next(),
+            )
+            .with_refusal(reason)
+            .to_string();
+            assert!(
+                line.starts_with("event=account_request_refused severity=warning utc=1767225600 ")
+            );
+            assert!(line.contains(&format!(" reason={label} correlation=")));
+            assert!(!line.contains("purpose=") && !line.contains("error="));
+        }
+    }
 
     const FORBIDDEN: [&str; 24] = [
         "198.51.100.77",

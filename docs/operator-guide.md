@@ -62,6 +62,8 @@ The command parses the complete document, opens every configured secret under th
 
 A storage refusal names its closed cause after the fixed text `filesystem policy rejected storage:`; the same label appears as `error=filesystem_<cause>` on the daemon's log events. The cause is diagnostic only: it never changes whether an operation was refused, committed, or left indeterminate, and it never carries a path, an errno string, or content.
 
+A client reads the same bare failure (`904`, or `FAIL ... UNAVAILABLE`) whichever check refused its login or account request. The daemon records the check as `event=account_request_refused severity=warning reason=<check>`. The reasons are a closed set: `request_unreadable`, `wrong_phase`, `exchange_in_progress`, `no_live_exchange`, `connection_attempt_limit`, `rate_limit`, `forward_unavailable` (an edge could not forward the request to the account authority), `authority_refused`, `principal_mismatch` and `carrier_busy`. The event never names a login, an account, a session or a connection.
+
 | Cause | Meaning | Action |
 | --- | --- | --- |
 | `missing_state` | a required entry (rollback guard, database, lock, directory, plan) is absent | do not create or regenerate it by hand; restore from a verified backup into a new directory, or run the stopped construction command that owns it |

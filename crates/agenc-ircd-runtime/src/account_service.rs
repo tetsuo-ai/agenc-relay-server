@@ -5,6 +5,7 @@
 //! exact request replay, and the durable barrier that makes a response visible
 //! only with its transaction/result/session effects.
 
+use crate::observe::events::AccountRefusalReason;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agenc_ircd_auth::{
@@ -2223,7 +2224,12 @@ impl AccountServiceCoordinator {
             return CarrierRoute::Close;
         };
         let Ok(envelope) = AccountServiceEnvelope::parse(encoded) else {
-            return self.fail_route(context, generation, target);
+            return self.fail_route(
+                context,
+                generation,
+                target,
+                AccountRefusalReason::RequestUnreadable,
+            );
         };
         let phase = if finish {
             AccountCarrierPhase::Finish
@@ -2235,7 +2241,12 @@ impl AccountServiceCoordinator {
             AccountCarrierPhase::Finish => AccountServiceMessageKind::OpaqueAuthFinish,
         };
         if envelope.message_kind() != expected {
-            return self.fail_route(context, generation, target);
+            return self.fail_route(
+                context,
+                generation,
+                target,
+                AccountRefusalReason::WrongPhase,
+            );
         }
         let request = RequestContext {
             generation,
@@ -2376,7 +2387,9 @@ impl AccountServiceCoordinator {
         context: &StateCoreContext,
         generation: ConnectionGeneration,
         target: &str,
+        reason: AccountRefusalReason,
     ) -> CarrierRoute {
+        context.account_request_refused(reason);
         let Some(connection) = self.connections.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
@@ -2730,7 +2743,7 @@ impl AccountServiceCoordinator {
         opened: Result<OpenedAccountServiceRequest, agenc_ircd_auth::AuthError>,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
         let Ok(opened) = opened else {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::RequestUnreadable);
         };
         match opened {
             OpenedAccountServiceRequest::CreationStart(opened) if !request.is_finish() => {
@@ -2751,7 +2764,7 @@ impl AccountServiceCoordinator {
             OpenedAccountServiceRequest::AuthenticationFinish(opened) if request.is_finish() => {
                 self.open_authentication_finish(context, request, opened)
             }
-            _ => self.fail_pending(context, request),
+            _ => self.fail_pending(context, request, AccountRefusalReason::WrongPhase),
         }
     }
 
@@ -2766,7 +2779,7 @@ impl AccountServiceCoordinator {
             .get(&request.generation)
             .is_none_or(|connection| connection.creation_transaction.is_some())
         {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::ExchangeInProgress);
         }
         match self.config.creation_policy {
             AccountCreationPolicy::Invite(authority) => {
@@ -2799,7 +2812,7 @@ impl AccountServiceCoordinator {
             .get_mut(&request.generation)
             .and_then(|connection| connection.creation_transaction.take())
         else {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::NoLiveExchange);
         };
         let transaction_id = live.transaction.binding().transaction_id();
         context
@@ -2883,7 +2896,7 @@ impl AccountServiceCoordinator {
             .charge_all_or_nothing(now, &[demand])
             .is_err()
         {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::RateLimit);
         }
         let authentication_in_flight = self.account_authentication_in_flight(account_id);
         let connection = self
@@ -2891,7 +2904,7 @@ impl AccountServiceCoordinator {
             .get_mut(&request.generation)
             .ok_or(RuntimeError::InvalidValue)?;
         if connection.credential_transaction.is_some() {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::ExchangeInProgress);
         }
         let proof = connection.fresh_authentication.take();
         let credential_id = connection
@@ -3025,7 +3038,7 @@ impl AccountServiceCoordinator {
             .get_mut(&request.generation)
             .and_then(|connection| connection.credential_transaction.take())
         else {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::NoLiveExchange);
         };
         let transaction_id = live.transaction.binding().transaction_id();
         context
@@ -3150,12 +3163,16 @@ impl AccountServiceCoordinator {
                 consume_opaque_connection_attempt(&mut connection.opaque_attempts)
             });
         if attempt.is_err() {
-            return self.fail_pending(context, request);
+            return self.fail_pending(
+                context,
+                request,
+                AccountRefusalReason::ConnectionAttemptLimit,
+            );
         }
         let login = NormalizedLogin::prepare(opened.payload().login.as_str())
             .map_err(|_| RuntimeError::InvalidValue)?;
         if self.charge_opaque_attempt(context, &login).is_err() {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::RateLimit);
         }
         let schedule = LoginIndexLookupSchedule::new(
             self.config.network_id,
@@ -3195,7 +3212,7 @@ impl AccountServiceCoordinator {
             .get_mut(&request.generation)
             .and_then(|connection| connection.transaction.take())
         else {
-            return self.fail_pending(context, request);
+            return self.fail_pending(context, request, AccountRefusalReason::NoLiveExchange);
         };
         let transaction_id = live.transaction.binding().transaction_id();
         context
@@ -5227,10 +5244,14 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
+        reason: AccountRefusalReason,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
         let route = match request.carrier {
-            RequestCarrier::Sasl => self.fail_route(context, request.generation, &request.target),
+            RequestCarrier::Sasl => {
+                self.fail_route(context, request.generation, &request.target, reason)
+            }
             RequestCarrier::Account(kind) => {
+                context.account_request_refused(reason);
                 self.fail_account_route(context, request.generation, kind)
             }
         };
@@ -8066,7 +8087,12 @@ mod tests {
                 CarrierRoute::Finished { .. }
             ));
             assert!(matches!(
-                coordinator.fail_route(context, unknown, "tester"),
+                coordinator.fail_route(
+                    context,
+                    unknown,
+                    "tester",
+                    crate::observe::events::AccountRefusalReason::WrongPhase,
+                ),
                 CarrierRoute::Close
             ));
             assert!(matches!(
@@ -8091,7 +8117,12 @@ mod tests {
                 let _actions = connection.sasl.client(chunk, context.now().get())?;
             }
             assert!(matches!(
-                coordinator.fail_route(context, ConnectionGeneration::new(8), "tester"),
+                coordinator.fail_route(
+                    context,
+                    ConnectionGeneration::new(8),
+                    "tester",
+                    crate::observe::events::AccountRefusalReason::WrongPhase,
+                ),
                 CarrierRoute::Finished { .. }
             ));
             assert!(matches!(

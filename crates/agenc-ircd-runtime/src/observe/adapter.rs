@@ -7,6 +7,7 @@ use crate::admission::OverloadClass;
 use crate::clock::{SystemMonotonicClock, SystemWallClock};
 use crate::connection::{AdmittedConnection, ConnectionExit, PeerIdentity};
 use crate::listener::{ConnectionObserver, RefusalReason, TlsOutcome};
+use crate::observe::events::AccountRefusalReason;
 use crate::observe::events::{
     CorrelationSource, CountBucket, LogEvent, LogEventCode, PublicErrorCode, Severity,
 };
@@ -323,6 +324,26 @@ impl RuntimeObserver {
         let retention = LogRetention::hours(hours)?;
         self.log.set_retention(retention);
         Ok(())
+    }
+
+    /// Records the check that refused one account or authentication request. The client
+    /// reads the same bare failure for every check, so this event is the only place the
+    /// operator can tell them apart.
+    pub fn account_request_refused(&self, reason: AccountRefusalReason) {
+        let Ok(now) = self.wall.utc_now() else {
+            return;
+        };
+        let event = LogEvent::new(
+            LogEventCode::AccountRequestRefused,
+            Severity::Warning,
+            now,
+            self.server_id,
+            self.correlation.next(),
+        )
+        .with_refusal(reason);
+        if self.log.try_emit_outcome(event) == LogEmitOutcome::Full {
+            self.increment(MetricName::LogEventsDropped, &[], 1);
+        }
     }
 
     /// Records one authenticated administrative command outcome.
