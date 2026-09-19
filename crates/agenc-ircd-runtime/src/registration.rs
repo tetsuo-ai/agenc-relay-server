@@ -3909,6 +3909,14 @@ mod edge_carrier_tests;
 mod action_tests;
 
 #[cfg(test)]
+#[path = "registration/tests/edge_completions.rs"]
+mod edge_completion_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/hooks.rs"]
+mod hook_tests;
+
+#[cfg(test)]
 mod tests {
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use agenc_ircd_types::MonotonicTick;

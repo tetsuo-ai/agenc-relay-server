@@ -12,6 +12,7 @@ fn token_options(token: [u8; 32]) -> Options {
         role: Role::Plain,
         allow_guests: true,
         access_token: Some(token),
+        entropy: None,
     }
 }
 
@@ -207,6 +208,7 @@ async fn guests_are_refused_when_policy_forbids_them() -> TestResult {
         role: Role::Plain,
         allow_guests: false,
         access_token: None,
+        entropy: None,
     })?;
     let sink = harness.open(1, true)?;
     harness.line(1, "NICK guest")?;

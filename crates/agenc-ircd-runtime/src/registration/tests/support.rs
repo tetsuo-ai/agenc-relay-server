@@ -21,6 +21,8 @@ pub(super) enum Role {
     Hosted,
     /// An edge whose coordinator link is down.
     Edge,
+    /// The hosted account service beside the federation coordinator role.
+    Coordinator,
 }
 
 /// Router inputs a test overrides.
@@ -28,6 +30,7 @@ pub(super) struct Options {
     pub(super) role: Role,
     pub(super) allow_guests: bool,
     pub(super) access_token: Option<[u8; 32]>,
+    pub(super) entropy: Option<Vec<u8>>,
 }
 
 impl Options {
@@ -36,6 +39,7 @@ impl Options {
             role,
             allow_guests: true,
             access_token: None,
+            entropy: None,
         }
     }
 }
@@ -90,6 +94,27 @@ pub(super) fn edge_role(fixture: &StateCoreFixture) -> EdgeFederation {
     })
 }
 
+pub(super) fn coordinator_role(fixture: &StateCoreFixture) -> TestResult<FederationCoordinator> {
+    let verifier: Arc<dyn ChannelKeyVerifier> = Arc::new(TestChannelKeyVerifier);
+    let salt = [7; CHANNEL_KEY_SALT_BYTES];
+    let hash = verifier.derive(b"dummy", &salt)?;
+    Ok(FederationCoordinator::new(
+        crate::federation::coordinator::CoordinatorConfig {
+            network_id: fixture.identity.network_id,
+            server_id: fixture.identity.server_id,
+            server_name: "server.example".to_owned(),
+            recovery_epoch: fixture.identity.recovery_epoch,
+            query_cursor_key: [21; 32],
+            process_nonce: [22; 16],
+            outbox_bytes_per_edge: 1 << 20,
+            outbox_objects_per_edge: 64,
+        },
+        Vec::new(),
+        verifier,
+        ChannelKeyVerifierRecord::new(salt, hash),
+    ))
+}
+
 pub(super) fn parsed(line: &str) -> TestResult<agenc_ircd_client_wire::ParsedMessage> {
     parse_message(FramedLine::new(line)?)?.ok_or_else(|| "empty test line".into())
 }
@@ -100,8 +125,10 @@ impl Harness {
     }
 
     pub(super) fn with(options: Options) -> TestResult<Self> {
-        let fixture = StateCoreFixture::new(entropy_script())?;
-        let account_service = if options.role == Role::Hosted {
+        let entropy = options.entropy.unwrap_or_else(entropy_script);
+        let fixture = StateCoreFixture::new(entropy)?;
+        let hosted = matches!(options.role, Role::Hosted | Role::Coordinator);
+        let account_service = if hosted {
             AccountServiceRole::Hosted(Box::new(crate::test_support::account_service_config(
                 &fixture.identity,
                 &fixture.opaque,
@@ -125,10 +152,10 @@ impl Harness {
             },
             executor()?,
         )?;
-        let router = if options.role == Role::Edge {
-            router.with_edge(edge_role(&fixture))
-        } else {
-            router
+        let router = match options.role {
+            Role::Edge => router.with_edge(edge_role(&fixture)),
+            Role::Coordinator => router.with_federation(coordinator_role(&fixture)?),
+            Role::Plain | Role::Hosted => router,
         };
         Ok(Self { fixture, router })
     }

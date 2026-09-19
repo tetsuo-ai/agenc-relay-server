@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 893
-reviewed_source_sha256 = "917ca65dfb3d761f638d3b848a5843ad1a00a0f04a954faaafcdc067147118ce"
+reviewed_source_files = 895
+reviewed_source_sha256 = "692d4a53180ce726468491307b17a7f12a571315e9bd3dfbc069eb0be005dbfa"
 deferred = []
 
 [[region]]
