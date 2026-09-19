@@ -275,3 +275,54 @@ async fn admitted_messages_advance_the_high_water_mark_and_changes_apply_exactly
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn content_and_visibility_changes_count_as_policy_changes() -> TestResult {
+    let (domain, base) = channel()?;
+    let live = restored(&domain, &base)?;
+    let mut encrypted = base.clone();
+    encrypted.content_policy = ContentPolicy::E2eeBound;
+    assert!(policy_changed(&live, &encrypted));
+    let mut unlisted = base.clone();
+    unlisted.visibility = Visibility::Unlisted;
+    assert!(policy_changed(&live, &unlisted));
+    let mut retained = base.clone();
+    retained.history = HistoryPolicy::Off;
+    assert!(!policy_changed(&live, &retained));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_channel_at_its_message_or_byte_ceiling_admits_nothing_more() -> TestResult {
+    for (name, messages, bytes) in [
+        ("messages", MAX_CHANNEL_MESSAGES, 0),
+        ("bytes", 0, MAX_CHANNEL_BYTES),
+    ] {
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        fixture.context_mut()?.enable_history_for_test(true);
+        let history = fixture.context_mut()?.history.as_mut().ok_or("history")?;
+        let (_, channel) = channel()?;
+        let revision = channel.revision.get();
+        let mut pending = HistoryMutation::new();
+        history.admit_message(&mut pending, message(&channel)?, &mut Vec::new(), revision)?;
+        history.committed(pending)?;
+        let retained = history
+            .channels
+            .get_mut(&channel.channel_id)
+            .ok_or("retained channel")?;
+        retained.control.retained_message_count = messages;
+        retained.control.retained_logical_bytes = bytes;
+        let mut next = message(&channel)?;
+        next.channel_sequence = revision + 1;
+        next.message_id = MessageId::from_bytes([5; 16]);
+        let mut pending = HistoryMutation::new();
+        assert_eq!(
+            history
+                .admit_message(&mut pending, next, &mut Vec::new(), revision + 1)
+                .err(),
+            Some(RuntimeError::LimitExceeded),
+            "{name}"
+        );
+    }
+    Ok(())
+}
