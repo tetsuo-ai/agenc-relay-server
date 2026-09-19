@@ -73,6 +73,12 @@ mod query_receipt;
 #[path = "shutdown_recovery.rs"]
 mod shutdown_recovery;
 
+#[path = "snapshot_refusals.rs"]
+mod snapshot_refusals;
+
+#[path = "snapshot_replay.rs"]
+mod snapshot_replay;
+
 const NETWORK: NetworkId = NetworkId::from_bytes([31; 32]);
 const COORDINATOR: ServerId = ServerId::from_bytes([32; 16]);
 const COORDINATOR_NAME: &str = "server.example";
