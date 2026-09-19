@@ -287,6 +287,15 @@ LANE_TEST_SHARE = {
     "matrix": 1,
 }
 LANE_BUILD_SHARE = 3
+BULK_TARGET_ENVIRONMENT = "AGENC_IRCD_GATE_BULK_TARGET"
+BULK_LANES = {
+    "check-host",
+    "check-x86_64-unknown-linux-gnu",
+    "check-aarch64-unknown-linux-gnu",
+    "clippy",
+    "matrix",
+    "stage-tests",
+}
 # Commands that start real daemons and talk to them under wall-clock timeouts. Those tests
 # fail on a saturated host (issue #175), so one such command runs at a time; every other
 # command still overlaps with it.
@@ -340,11 +349,30 @@ def gate_lane(argv: list[str]) -> str:
     return "static"
 
 
+def lane_directory(root: Path, lane: str, inherited: Mapping[str, str]) -> Path:
+    """Return a lane's target directory.
+
+    Test daemons commit durably, and their commits stall for seconds while other lanes write
+    build output to the same filesystem; the daemon tests then miss their socket deadlines.
+    A host with a second filesystem names a directory on it in BULK_TARGET_ENVIRONMENT, and
+    the lanes that only compile build there. Lanes that start daemons, and the storage lanes
+    whose qualification workload needs the build root's filesystem, stay under `target/`.
+    """
+    name = LANE_TARGETS.get(lane, lane)
+    bulk = inherited.get(BULK_TARGET_ENVIRONMENT)
+    if bulk and lane in BULK_LANES:
+        path = Path(bulk)
+        if not path.is_absolute() or not path.is_dir():
+            raise GateError(f"{BULK_TARGET_ENVIRONMENT} must name an existing absolute directory")
+        return path / "lanes" / name
+    return root / "target" / "lanes" / name
+
+
 def lane_environment(root: Path, lane: str, environment: dict[str, str]) -> dict[str, str]:
-    """Give a Cargo lane its own target directory under the ignored build root."""
+    """Give a Cargo lane its own target directory and its share of the host."""
     if lane in {"static", "fuzz"}:
         return environment
-    directory = root / "target" / "lanes" / LANE_TARGETS.get(lane, lane)
+    directory = lane_directory(root, lane, os.environ)
     lane_state = {"CARGO_TARGET_DIR": str(directory)}
     if lane != EXCLUSIVE_LANE:
         cores = len(os.sched_getaffinity(0))
@@ -368,7 +396,11 @@ class LaneRunner:
         self.running: set[subprocess.Popen[bytes]] = set()
 
     def run_command(self, index: int, lane: str) -> bool:
-        if not starts_daemons(self.commands[index]["argv"]):  # type: ignore[arg-type]
+        # With the compile-only lanes on another filesystem the daemons' commits no longer
+        # queue behind build output, so the daemon commands may overlap as well.
+        if os.environ.get(BULK_TARGET_ENVIRONMENT) or not starts_daemons(
+            self.commands[index]["argv"]  # type: ignore[arg-type]
+        ):
             return self.run_admitted(index, lane)
         with self.daemon_tests:
             return self.run_admitted(index, lane)
