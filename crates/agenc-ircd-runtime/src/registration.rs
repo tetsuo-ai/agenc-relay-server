@@ -3384,13 +3384,14 @@ impl CommandRouter for RegistrationRouter {
         if self.owned_timer_fired(context, entry) {
             return;
         }
-        let Some(accounts) = self.accounts.as_mut() else {
-            return;
-        };
-        let (handled, completions) = accounts.timer_fired(context, entry);
-        self.apply_account_completions(context, completions);
-        if handled {
-            return;
+        // An edge hosts no account service. Its command continuations, registration
+        // deadlines and keepalive timers still fire, so only the account step is skipped.
+        if let Some(accounts) = self.accounts.as_mut() {
+            let (handled, completions) = accounts.timer_fired(context, entry);
+            self.apply_account_completions(context, completions);
+            if handled {
+                return;
+            }
         }
         match self.commands.timer_fired(context, entry) {
             Ok(true) => return,
