@@ -29,11 +29,21 @@ fn a_routine_record_refuses_every_supplied_transition_object() -> TestResult {
         attempt_object: Some(&policy_object),
         ..RecordReferences::default()
     };
+    let with_root = RecordReferences {
+        root_objects: &[&policy_object],
+        ..RecordReferences::default()
+    };
+    let with_roster = RecordReferences {
+        roster_objects: &[&policy_object],
+        ..RecordReferences::default()
+    };
     for (name, references) in [
         ("policy", &with_policy),
         ("binding", &with_binding),
         ("credential", &with_credential),
         ("attempt", &with_attempt),
+        ("root", &with_root),
+        ("roster", &with_roster),
     ] {
         let mut probe = chain.clone();
         assert!(
