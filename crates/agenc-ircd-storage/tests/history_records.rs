@@ -386,3 +386,128 @@ fn history_edge_records_need_a_deadline_and_exactly_their_phase_shape() -> Resul
     );
     Ok(())
 }
+
+fn page() -> HistoryPageMetadata {
+    HistoryPageMetadata {
+        authorization: authorization(),
+        channel_id: [1; 16],
+        channel_name: "#history".into(),
+        snapshot_token: [9; 32],
+        state_cut: 10,
+        page_sequence: 0,
+        next_cursor: None,
+        selected: vec![HistoryRowReference {
+            channel_sequence: 1,
+            message_id: [2; 16],
+            received_unix_milliseconds: 100,
+            expires_unix_milliseconds: 3_600_100,
+        }],
+        created_unix_milliseconds: 101,
+        deadline_unix_milliseconds: 60_101,
+    }
+}
+
+#[test]
+fn history_page_metadata_rejects_each_scope_cut_deadline_and_row_bound() -> Result<(), StorageError>
+{
+    assert!(page().validate().is_ok());
+    let row = *page()
+        .selected
+        .first()
+        .ok_or(StorageError::InvalidEncoding)?;
+    let mut local = page();
+    local.channel_name = "&history".into();
+    assert!(local.validate().is_err(), "a local channel");
+    let mut no_cut = page();
+    no_cut.state_cut = 0;
+    assert!(no_cut.validate().is_err(), "a zero state cut");
+    let mut deadline = page();
+    deadline.deadline_unix_milliseconds = deadline.created_unix_milliseconds;
+    assert!(deadline.validate().is_err(), "a deadline at creation");
+    let mut beyond = page();
+    beyond.selected = vec![HistoryRowReference {
+        channel_sequence: 11,
+        ..row
+    }];
+    assert!(beyond.validate().is_err(), "a row past the cut");
+    let mut expired = page();
+    expired.selected = vec![HistoryRowReference {
+        expires_unix_milliseconds: row.received_unix_milliseconds,
+        ..row
+    }];
+    assert!(expired.validate().is_err(), "a row expiring at receipt");
+    let mut unordered = page();
+    unordered.selected = vec![
+        HistoryRowReference {
+            channel_sequence: 2,
+            ..row
+        },
+        row,
+    ];
+    assert!(unordered.validate().is_err(), "descending rows");
+    let mut empty_request = HistoryCoordinatorResultRecord {
+        request: request(),
+        original_result_object_id: [8; 32],
+        page: page(),
+        status: HistoryResultStatus::Available,
+    };
+    empty_request.request.request_object.clear();
+    assert!(empty_request.encode().is_err(), "an empty request object");
+    Ok(())
+}
+
+#[test]
+fn history_control_rejects_each_accounting_and_purge_bound() -> Result<(), StorageError> {
+    let base = || -> Result<HistoryControlRecord, StorageError> {
+        let mut control = HistoryControlRecord::empty(ChannelInstanceId::from_bytes([1; 16]), 7)?;
+        control.high_water_sequence = 10;
+        control.retained_message_count = 1;
+        control.retained_logical_bytes = 100;
+        control.purged_through = 7;
+        Ok(control)
+    };
+    assert!(base()?.validate().is_ok());
+    let mut too_many = base()?;
+    too_many.high_water_sequence = 65_537;
+    too_many.retained_message_count = 65_537;
+    assert!(
+        too_many.validate().is_err(),
+        "more messages than the ceiling"
+    );
+    let mut too_large = base()?;
+    too_large.retained_logical_bytes = 67_108_865;
+    assert!(too_large.validate().is_err(), "more bytes than the ceiling");
+    let mut purged_past_head = base()?;
+    purged_past_head.purged_through = 11;
+    assert!(
+        purged_past_head.validate().is_err(),
+        "a purge past the high water"
+    );
+    let mut bytes_without_messages = base()?;
+    bytes_without_messages.retained_message_count = 0;
+    assert!(
+        bytes_without_messages.validate().is_err(),
+        "bytes retained without messages"
+    );
+    let mut cutoff = base()?;
+    cutoff.purge = HistoryPurgeState::Active {
+        cutoff_sequence: 8,
+        last_scanned_sequence: 8,
+        operation_id: [1; 32],
+        audit_intent_sequence: 1,
+    };
+    assert!(cutoff.validate().is_err(), "a cutoff past the purge point");
+    let mut unnamed = base()?;
+    unnamed.purge = HistoryPurgeState::Active {
+        cutoff_sequence: 7,
+        last_scanned_sequence: 7,
+        operation_id: [0; 32],
+        audit_intent_sequence: 1,
+    };
+    assert!(unnamed.validate().is_err(), "a purge without an operation");
+    assert!(matches!(
+        HistoryControlRecord::decode(&[0; 129]),
+        Err(StorageError::LimitExceeded)
+    ));
+    Ok(())
+}

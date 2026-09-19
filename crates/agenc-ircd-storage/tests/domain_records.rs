@@ -6,11 +6,11 @@ use std::error::Error;
 
 use agenc_ircd_domain::{
     ChannelKeyVerifier, ChannelModes, ChannelNameValue, ChannelScope, ContentPolicy,
-    DirectMessagePolicy, DisplayNameValue, DurableAccount, DurableChannel, DurableInvite,
-    DurableListEntry, DurableMembership, DurableSanction, DurableSession, DurableTopic,
-    GuestDirectMessagePolicy, HistoryPolicy, MAX_CONTACTS_PER_ACCOUNT, MAX_MASK_ENTRIES_PER_LIST,
-    MAX_RESERVED_NICKNAMES, ModerationAction, ModerationReasonCode, NicknameValue,
-    PersistencePolicy, PresencePolicy, Principal, Role, Visibility,
+    DirectMessagePolicy, DisplayNameValue, DomainError, DurableAccount, DurableChannel,
+    DurableInvite, DurableListEntry, DurableMembership, DurableSanction, DurableSession,
+    DurableTopic, GuestDirectMessagePolicy, HistoryPolicy, MAX_CONTACTS_PER_ACCOUNT,
+    MAX_MASK_ENTRIES_PER_LIST, MAX_RESERVED_NICKNAMES, ModerationAction, ModerationReasonCode,
+    NicknameValue, PersistencePolicy, PresencePolicy, Principal, Role, Visibility,
 };
 use agenc_ircd_storage::{
     AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, LIVE_RECORD_KIND,
@@ -845,4 +845,38 @@ fn body_ceilings_are_derived_from_the_domain_limits() {
     assert_eq!(MAX_SESSION_RECORD_BODY_BYTES, 4_655);
     assert_eq!(MAX_CHANNEL_RECORD_BODY_BYTES, 5_824_355);
     assert_eq!(MAX_SANCTION_RECORD_BODY_BYTES, 597);
+}
+
+#[test]
+fn a_persisted_session_rebuilds_only_from_a_consistent_record() -> Result<(), Box<dyn Error>> {
+    assert!(full_session()?.into_state().is_ok());
+    let mut unsorted = full_session()?;
+    unsorted.joined_channels.reverse();
+    assert_eq!(
+        unsorted.into_state().err(),
+        Some(DomainError::InvalidArgument),
+        "unsorted channels"
+    );
+    let mut guest_with_generation = full_session()?;
+    guest_with_generation.account_id = None;
+    assert_eq!(
+        guest_with_generation.into_state().err(),
+        Some(DomainError::InvalidArgument),
+        "a guest with an account generation"
+    );
+    let mut account_without_generation = full_session()?;
+    account_without_generation.account_session_generation = Generation::new(0)?;
+    assert_eq!(
+        account_without_generation.into_state().err(),
+        Some(DomainError::InvalidArgument),
+        "an account without a generation"
+    );
+    let mut unborn = full_session()?;
+    unborn.generation = Generation::new(0)?;
+    assert_eq!(
+        unborn.into_state().err(),
+        Some(DomainError::InvalidArgument),
+        "a zero session generation"
+    );
+    Ok(())
 }
