@@ -73,7 +73,7 @@ async fn a_head_naming_another_coordinator_refuses_at_the_companion_state() -> T
     let mut rows = crash_rows(0, false)?;
     let mut other = identity(2);
     other.coordinator_server_id = [99; 16];
-    let head = BarrierHead::Stage(BarrierAssembly::open(other.clone())?.head().clone());
+    let head = BarrierHead::Stage(BarrierAssembly::open(other)?.head().clone());
     *rows.get_mut(2).ok_or("head row")? = head_record(&head, other.head_key()?)?;
     assert_eq!(refused(rows)?.0, Some(EdgeRestoreStep::CompanionState));
     Ok(())
@@ -94,7 +94,7 @@ async fn a_second_open_stage_refuses_at_the_barrier_install() -> TestResult {
     let mut rows = crash_rows(1, false)?;
     let mut other = identity(2);
     other.mutation_id = [78; 16];
-    let head = BarrierHead::Stage(BarrierAssembly::open(other.clone())?.head().clone());
+    let head = BarrierHead::Stage(BarrierAssembly::open(other)?.head().clone());
     rows.push(head_record(&head, other.head_key()?)?);
     assert_eq!(refused(rows)?.0, Some(EdgeRestoreStep::BarrierInstall));
     Ok(())
