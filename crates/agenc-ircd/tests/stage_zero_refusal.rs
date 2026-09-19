@@ -17,3 +17,20 @@ fn binary_refuses_to_impersonate_an_implemented_daemon() -> Result<(), Box<dyn E
 
     Ok(())
 }
+
+#[test]
+fn storage_subcommands_without_their_arguments_print_usage() -> Result<(), Box<dyn Error>> {
+    for arguments in [["storage", "qualify"], ["storage", "unknown"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))
+            .args(arguments)
+            .output()?;
+        assert!(!output.status.success(), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("usage"),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
