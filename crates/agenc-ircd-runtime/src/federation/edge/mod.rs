@@ -257,8 +257,22 @@ pub struct EdgeFederation {
     /// so the revisions they carry are read from a replica that already
     /// reflects that request (spec 20.5 ordering per origin).
     deferred: BTreeMap<ConnectionGeneration, crate::budget::RetainedQueue<DeferredCommand>>,
+    /// The account carrier a connection sent while its origin update awaited the
+    /// coordinator's acknowledgement; a carrier is one exchange at a time, so one per
+    /// connection.
+    deferred_carriers: BTreeMap<ConnectionGeneration, DeferredCarrier>,
     companion: CompanionLinks,
     barrier: barrier::BarrierState,
+}
+
+/// One account carrier envelope held back behind the connection's origin update.
+pub(super) struct DeferredCarrier {
+    pub(super) opcode: agenc_ircd_types::FederationOpcode,
+    pub(super) envelope: Vec<u8>,
+    pub(super) finish: bool,
+    pub(super) carrier_generation: u64,
+    /// Returned only after the retained envelope has been dropped.
+    pub(super) _permit: crate::budget::MemoryPermit,
 }
 
 /// One client command held back behind an in-flight request.
@@ -328,6 +342,7 @@ impl EdgeFederation {
             counters: EdgeCounters::default(),
             readiness: None,
             deferred: BTreeMap::new(),
+            deferred_carriers: BTreeMap::new(),
             barrier: barrier::BarrierState::default(),
         }
     }
@@ -1171,6 +1186,7 @@ impl EdgeFederation {
         }
         request::delete_origin(self, context, generation);
         self.deferred.remove(&generation);
+        self.deferred_carriers.remove(&generation);
         let changed: Vec<_> = self
             .pending
             .iter_mut()

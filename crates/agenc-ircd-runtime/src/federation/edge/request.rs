@@ -15,7 +15,9 @@ use agenc_ircd_federation_wire::{
 use agenc_ircd_types::{FederationResultKind, RequestId, SessionId, UserId};
 use zeroize::Zeroizing;
 
-use super::{DeferredCommand, EdgeFederation, MAX_DEFERRED_COMMANDS, Phase, Violation};
+use super::{
+    DeferredCarrier, DeferredCommand, EdgeFederation, MAX_DEFERRED_COMMANDS, Phase, Violation,
+};
 use crate::connection::ConnectionGeneration;
 use crate::federation::codec::operations::{
     FederatedOperation, JoinTarget, MessageTargetArg, ModeChangeArg, USER_MODE_CODE_WALLOPS,
@@ -550,8 +552,27 @@ pub(super) fn send_account_carrier(
         return Err(Violation::Phase);
     }
     let mut budget = DecodeBudget::new(8_192, 64);
-    let envelope = SchemaObject::decode_exact("AccountServiceEnvelope", envelope, &mut budget)
+    let bytes = envelope;
+    let envelope = SchemaObject::decode_exact("AccountServiceEnvelope", bytes, &mut budget)
         .map_err(|_| Violation::Codec)?;
+    // Registration queues an origin update and welcomes the client before the coordinator
+    // acknowledges it. No request can be built until then, so a carrier that arrives in that
+    // window waits for the acknowledgement as a command does, instead of failing the client.
+    if edge
+        .origins
+        .get(&generation)
+        .is_some_and(|origin| !origin.deleted && !origin.pending_updates.is_empty())
+    {
+        return defer_account_carrier(
+            edge,
+            context,
+            generation,
+            opcode,
+            bytes,
+            finish,
+            carrier_generation,
+        );
+    }
     let sasl = matches!(
         opcode,
         agenc_ircd_types::FederationOpcode::OpaqueAuthStart
@@ -668,6 +689,93 @@ pub(super) fn send_command(
         PendingKind::Command { message },
     );
     Ok(())
+}
+
+fn defer_account_carrier(
+    edge: &mut EdgeFederation,
+    context: &StateCoreContext,
+    generation: ConnectionGeneration,
+    opcode: agenc_ircd_types::FederationOpcode,
+    envelope: &[u8],
+    finish: bool,
+    carrier_generation: u64,
+) -> Result<(), Violation> {
+    if edge.deferred_carriers.contains_key(&generation) {
+        return Err(Violation::Ceiling);
+    }
+    let backing = envelope
+        .len()
+        .checked_add(size_of::<DeferredCarrier>())
+        .ok_or(Violation::Ceiling)?;
+    let permit = context
+        .reserve_output_backing(backing)
+        .map_err(|_| Violation::Ceiling)?;
+    let mut retained = Vec::new();
+    retained
+        .try_reserve_exact(envelope.len())
+        .map_err(|_| Violation::Ceiling)?;
+    retained.extend_from_slice(envelope);
+    edge.deferred_carriers.insert(
+        generation,
+        DeferredCarrier {
+            opcode,
+            envelope: retained,
+            finish,
+            carrier_generation,
+            _permit: permit,
+        },
+    );
+    Ok(())
+}
+
+/// Forwards the carrier held behind the connection's origin update once the coordinator
+/// has acknowledged it; a carrier that still cannot be sent fails to the client.
+fn dispatch_deferred_carrier(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+) -> Option<EdgeCompletion> {
+    let updating = edge
+        .origins
+        .get(&generation)
+        .is_some_and(|origin| !origin.pending_updates.is_empty());
+    if updating {
+        return None;
+    }
+    let carrier = edge.deferred_carriers.remove(&generation)?;
+    send_account_carrier(
+        edge,
+        context,
+        generation,
+        carrier.opcode,
+        &carrier.envelope,
+        carrier.finish,
+        carrier.carrier_generation,
+    )
+    .err()?;
+    let outcome = RemoteCarrierOutcome::Failed { chunks: Vec::new() };
+    Some(match carrier.opcode {
+        agenc_ircd_types::FederationOpcode::CredentialChangeStart
+        | agenc_ircd_types::FederationOpcode::CredentialChangeFinish => {
+            EdgeCompletion::CredentialCarrier {
+                generation,
+                carrier_generation: carrier.carrier_generation,
+                finish: carrier.finish,
+                outcome,
+            }
+        }
+        opcode => EdgeCompletion::AccountCarrier {
+            generation,
+            carrier_generation: carrier.carrier_generation,
+            sasl: matches!(
+                opcode,
+                agenc_ircd_types::FederationOpcode::OpaqueAuthStart
+                    | agenc_ircd_types::FederationOpcode::OpaqueAuthFinish
+            ),
+            finish: carrier.finish,
+            outcome,
+        },
+    })
 }
 
 fn defer_command(
@@ -1479,6 +1587,7 @@ pub(super) fn dispatch_deferred(
     generation: ConnectionGeneration,
 ) -> Vec<EdgeCompletion> {
     let mut completions = Vec::new();
+    completions.extend(dispatch_deferred_carrier(edge, context, generation));
     loop {
         let in_flight = edge
             .pending
