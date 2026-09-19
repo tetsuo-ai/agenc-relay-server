@@ -649,3 +649,112 @@ async fn a_head_is_not_installed_on_a_channel_route_the_base_no_longer_hosts() -
     );
     Ok(())
 }
+
+type ResolutionEdit = fn(&mut IrcFederationWitnessResolution);
+
+/// A resolution object over `records` whose body was edited after it was
+/// anchored to the retained row.
+fn edited_resolution(records: &[Record], edit: ResolutionEdit) -> TestResult<Vec<u8>> {
+    let head = records.last().ok_or("records")?.semantic_id;
+    let ids: Vec<u8> = records.iter().flat_map(|record| record.object_id).collect();
+    let mut body = IrcFederationWitnessResolution {
+        profile_version: 1,
+        network_id: [1; 32],
+        coordinator_server_id: COORDINATOR,
+        target_server_id: EDGE,
+        conversation_id: CONVERSATION,
+        resolution_token: TOKEN,
+        expected_sequence: EXPECTED,
+        expected_head_id: HEAD,
+        record_count: u32::try_from(records.len())?,
+        new_head_sequence: EXPECTED + 1,
+        new_head_id: head,
+        record_object_ids: Opaque::new(ids)?,
+    };
+    edit(&mut body);
+    Ok(IrcWireObject::new(IrcWireObjectKind::WitnessResolution, body.encode()?)?.encode()?)
+}
+
+fn begin_frames_to(
+    target: [u8; 16],
+    token: [u8; 16],
+    object: &[u8],
+) -> TestResult<Vec<CompanionFrame>> {
+    let object_id = *agenc_ircd_e2ee::ObjectId::compute(object).as_bytes();
+    Ok(fragment_object(object)?
+        .into_iter()
+        .map(|fragment| CompanionFrame::WitnessBegin {
+            target_server_id: target,
+            conversation_id: CONVERSATION,
+            resolution_token: token,
+            object_id,
+            fragment,
+        })
+        .collect())
+}
+
+#[tokio::test]
+async fn a_resolution_body_that_is_not_addressed_to_this_edge_is_refused() -> TestResult {
+    let records = continuation()?;
+    let edits: [(&str, ResolutionEdit); 7] = [
+        ("profile", |body| body.profile_version = 2),
+        ("network", |body| body.network_id = [9; 32]),
+        ("coordinator", |body| body.coordinator_server_id = [9; 16]),
+        ("target", |body| body.target_server_id = [9; 16]),
+        ("token", |body| body.resolution_token = [9; 16]),
+        ("count", |body| body.record_count = 3),
+        ("count over the ceiling", |body| {
+            body.record_count = u32::MAX
+        }),
+    ];
+    for (name, edit) in edits {
+        let object = edited_resolution(&records, edit)?;
+        Box::pin(assert_refused(begin_frames(CONVERSATION, &object)?))
+            .await
+            .map_err(|error| format!("{name}: {error}"))?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_begin_for_another_edge_or_beside_an_open_resolution_is_refused() -> TestResult {
+    let records = continuation()?;
+    let head = records.last().ok_or("records")?.semantic_id;
+    let object = resolution_object(CONVERSATION, &records, (EXPECTED + 1, head))?;
+    Box::pin(assert_refused(begin_frames_to([9; 16], TOKEN, &object)?)).await?;
+
+    let (mut fixture, _queue) = Box::pin(requesting()).await?;
+    feed(&mut fixture, begin_frames(CONVERSATION, &object)?)?;
+    assert!(fixture.companion.witness_resolution.is_some());
+    assert_eq!(fixture.companion.phase, Phase::Witness);
+    // A second resolution under the same token is ignored while one is open.
+    let other = resolution_object(CONVERSATION, &records, (EXPECTED + 1, [7; 32]))?;
+    feed(&mut fixture, begin_frames(CONVERSATION, &other)?)?;
+    assert_eq!(fixture.companion.phase, Phase::Witness);
+    // A resolution under another token beside the open one is refused.
+    feed(&mut fixture, begin_frames_to(EDGE, [8; 16], &object)?)?;
+    assert_eq!(fixture.companion.phase, Phase::Down);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_entry_for_another_edge_or_outside_the_declared_set_is_refused() -> TestResult {
+    let records = continuation()?;
+    let head = records.last().ok_or("records")?.semantic_id;
+    let object = resolution_object(CONVERSATION, &records, (EXPECTED + 1, head))?;
+    let first = records.first().ok_or("records")?;
+    let mut frames = begin_frames(CONVERSATION, &object)?;
+    frames.extend(fragment_object(&first.bytes)?.into_iter().map(|fragment| {
+        CompanionFrame::WitnessEntry {
+            target_server_id: [9; 16],
+            resolution_token: TOKEN,
+            entry_sequence: 0,
+            object_id: first.object_id,
+            fragment,
+        }
+    }));
+    Box::pin(assert_refused(frames)).await?;
+    let mut frames = begin_frames(CONVERSATION, &object)?;
+    frames.extend(entry_frames(5, first)?);
+    Box::pin(assert_refused(frames)).await
+}
