@@ -10,6 +10,7 @@ mod fuzz_seeds;
 mod guard_reopen;
 mod history_records;
 mod initialization_guard;
+mod open_mismatch;
 mod qualification_workload;
 mod recovery_matrix;
 mod witness_cursor;
