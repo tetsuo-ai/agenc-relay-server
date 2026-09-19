@@ -1,6 +1,7 @@
 //! Both streams and ACK transitions pass through the actual storage owner.
 #![forbid(unsafe_code)]
 
+mod ack_faults;
 mod ack_read;
 mod maintenance;
 mod page_read;
