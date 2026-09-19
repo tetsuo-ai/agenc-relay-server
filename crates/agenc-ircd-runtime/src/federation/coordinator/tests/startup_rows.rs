@@ -5,8 +5,9 @@
 use agenc_ircd_domain::federation::OriginKey;
 use agenc_ircd_federation_wire::{CanonicalEncode, OriginRecord, federation_object_id};
 use agenc_ircd_storage::federation_records::{
-    FederationOriginRecord, ORIGIN_RECORD_KIND, OriginRowStatus, PROJECTION_MARKER_KIND,
-    ProjectionGenerationState, ProjectionMarkerRecord, origin_key, projection_marker_key,
+    FederationOriginRecord, ORIGIN_RECORD_KIND, OUTBOX_EVENT_KIND, OriginRowStatus,
+    OutboxEventRecord, PROJECTION_MARKER_KIND, ProjectionGenerationState, ProjectionMarkerRecord,
+    origin_key, outbox_key, projection_marker_key,
 };
 use agenc_ircd_types::{ConnectionId, OriginId};
 
@@ -205,5 +206,127 @@ async fn only_the_active_marker_of_the_current_generation_restores_a_ready_ident
     let identity = state.ready_identity.ok_or("ready identity")?;
     assert_eq!(identity.projection_generation, 1);
     assert_eq!(identity.state_generation, 4);
+    Ok(())
+}
+
+/// One retained ordinary event of projection generation zero at `sequence`.
+fn retained_outbox_row(sequence: u64) -> TestResult<InitialStorageRecord> {
+    let event = ProjectedEvent::NetworkNotice {
+        code: "REPLAY".to_owned(),
+        text: "committed while disconnected".to_owned(),
+    };
+    let event_id = EventId::from_bytes([u8::try_from(sequence % 200)? + 60; 16]);
+    let header = EventHeader {
+        network_id: NETWORK,
+        target_server_id: PEER,
+        projection_generation: 0,
+        coordinator_state_generation: 1,
+        delivery_sequence: sequence,
+        event_id,
+        event_kind: event.kind(),
+        correlation: None,
+        cross_profile: None,
+    };
+    let arm = crate::federation::codec::events::event_arm_object(&event)
+        .map_err(|error| format!("{error:?}"))?;
+    let bytes = header.build(&arm)?.encode_canonical()?.as_slice().to_vec();
+    let body = OutboxEventRecord {
+        event_id: *event_id.as_bytes(),
+        event_object_id: *federation_object_id(&bytes).as_bytes(),
+        event_object: bytes,
+        coordinator_state_generation: 1,
+        acknowledged: false,
+        completion_replay_key: None,
+    }
+    .encode()?;
+    sealed(
+        TableId::EdgeOutbox,
+        OUTBOX_EVENT_KIND,
+        outbox_key(PEER, 0, sequence)?,
+        0,
+        body,
+    )
+}
+
+/// Boots a coordinator with the federation projector installed, so the
+/// restored peer facts reach the projector's edge table.
+async fn boot_with_projector(
+    rows: Vec<InitialStorageRecord>,
+    configure: fn(&mut FederationCoordinator),
+) -> TestResult<(StateCoreFixture, FederationCoordinator)> {
+    let mut fixture =
+        StateCoreFixture::with_registration_router_and_records(entropy_script(), rows)?;
+    fixture.context_mut()?.install_federation_projector(
+        crate::state_core::projector::FederationProjector::new(NETWORK, COORDINATOR),
+    );
+    let mut coordinator = standalone_coordinator(PEER);
+    configure(&mut coordinator);
+    coordinator.startup(fixture.context_mut()?);
+    for _ in 0..64 {
+        if coordinator.loaded() {
+            break;
+        }
+        let message = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.next_storage_read(),
+        )
+        .await??;
+        coordinator.storage_read_completed(fixture.context_mut()?, message);
+    }
+    assert!(coordinator.loaded());
+    Ok((fixture, coordinator))
+}
+
+#[tokio::test]
+async fn a_peer_row_that_requires_a_snapshot_restores_that_requirement() -> TestResult {
+    let record = FederationPeerRecord {
+        fenced_incarnations: Vec::new(),
+        server_incarnation: *INCARNATION.as_bytes(),
+        recovery_epoch: [0; 16],
+        accepted_epochs: Vec::new(),
+        phase: PeerPhase::Suspended,
+        projection_generation: 1,
+        next_delivery_sequence: 0,
+        cursor: None,
+        active_entry_count: 0,
+        active_entry_bytes: 0,
+        pending_generation: None,
+        snapshot_required: true,
+        cleanup_cursor: None,
+        quarantined: false,
+        client_resync_epoch: 0,
+    };
+    let row = sealed(
+        TableId::FederationPeer,
+        PEER_RECORD_KIND,
+        peer_key(PEER)?,
+        0,
+        record.encode()?,
+    )?;
+    let (_fixture, coordinator) = boot_with_projector(vec![row], |_| {}).await?;
+    let state = coordinator.peers.get(&PEER).ok_or("peer")?;
+    assert!(state.outbox.snapshot_required);
+    assert_eq!(state.projection_generation, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn retained_outbox_bytes_over_the_ceiling_require_a_snapshot_at_startup() -> TestResult {
+    let rows = vec![
+        restored_peer_record(PEER, INCARNATION, PeerPhase::Ready)?,
+        retained_outbox_row(0)?,
+        retained_outbox_row(1)?,
+    ];
+    let (_fixture, coordinator) = boot_with_projector(rows, |coordinator| {
+        coordinator.config.outbox_objects_per_edge = 512;
+        coordinator.config.outbox_bytes_per_edge = 1;
+    })
+    .await?;
+    let state = coordinator.peers.get(&PEER).ok_or("peer")?;
+    assert!(
+        state.outbox.snapshot_required,
+        "retained bytes over the ceiling fence the outbox"
+    );
+    assert!(state.outbox.dirty);
     Ok(())
 }
