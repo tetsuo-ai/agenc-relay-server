@@ -24,6 +24,7 @@ type AdminResult<T = ()> = Result<T, AdminError>;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_TRANSCRIPT_LINES: usize = 256;
+const BUSY_RETRY: Duration = Duration::from_millis(50);
 
 fn failure(message: impl Into<String>) -> AdminError {
     message.into().into()
@@ -183,8 +184,27 @@ impl<'a> AdminSession<'a> {
 
     /// Sends one command and returns every line through the batch end.
     pub(crate) fn command_batch(&mut self, command: &str) -> AdminResult<Vec<String>> {
-        self.send(command, None)?;
-        read_until(&mut self.reader, |line| line.starts_with("BATCH -"))
+        // A refused command answers one FAIL line and no batch, so a reader that waits only
+        // for the batch end sits until its socket deadline. `FAIL <verb> BUSY` is the
+        // daemon's transient refusal, which it gives while its audit commit cannot be
+        // admitted; the command is repeated until it is served or the deadline passes.
+        let deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            self.send(command, None)?;
+            let mut in_batch = false;
+            let lines = read_until(&mut self.reader, |line| {
+                in_batch |= line.starts_with("BATCH +");
+                line.starts_with("BATCH -") || (!in_batch && line.starts_with("FAIL "))
+            })?;
+            let busy = lines.last().is_some_and(|line| {
+                let mut words = line.split_ascii_whitespace();
+                words.next() == Some("FAIL") && words.nth(1) == Some("BUSY")
+            });
+            if !busy || Instant::now() >= deadline {
+                return Ok(lines);
+            }
+            thread::sleep(BUSY_RETRY);
+        }
     }
 
     /// Reads one STATS selector into ordered field and value pairs.
