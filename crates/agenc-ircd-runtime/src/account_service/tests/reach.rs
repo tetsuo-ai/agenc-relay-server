@@ -484,3 +484,82 @@ async fn ready_seals_stop_at_their_ceiling_and_wait_behind_a_ready_stage() -> Te
     assert!(coordinator.ready_stage.is_some());
     Ok(())
 }
+
+fn assert_credential_refused(live: &Live, completions: &[CarrierCompletion]) -> TestResult {
+    let [completion] = completions else {
+        return Err("a refusal completes exactly one carrier".into());
+    };
+    assert_eq!(completion.generation, live.generation);
+    assert!(!completion.close);
+    assert_eq!(completion.result, ResultClass::Rejected);
+    assert!(live.fixture.coordinator.reads.is_empty());
+    let lines = live.sink.lines();
+    assert!(
+        lines.iter().any(|sent| sent.contains("FAIL ACCTCRED")),
+        "missing the credential failure in {lines:?}"
+    );
+    Ok(())
+}
+
+/// A credential-change START behind a live credential change on the same
+/// connection is refused as an exchange in progress.
+#[tokio::test]
+async fn a_second_credential_start_behind_a_live_change_is_refused() -> TestResult {
+    use super::harness::{commit_credential_start, credential_start};
+    use agenc_ircd_auth::OpenedAccountServiceRequest;
+    let (mut live, account_id) = Live::open_registered()?;
+    let _live_change = commit_credential_start(&mut live, 1, account_id).await?;
+    let (opened, envelope) = credential_start(&live.fixture.core.identity, 2, account_id)?;
+    let request = live.account(
+        AccountCarrierKind::Credentials,
+        AccountCarrierPhase::Start,
+        envelope,
+    );
+    let (coordinator, context) = live.fixture.parts()?;
+    let completions = coordinator.open_completed(
+        context,
+        request,
+        Ok(OpenedAccountServiceRequest::CredentialChangeStart(opened)),
+    )?;
+    assert_credential_refused(&live, &completions)
+}
+
+/// A credential-change START over the account's rate bucket is refused.
+#[test]
+fn a_credential_start_over_the_account_rate_bucket_is_refused() -> TestResult {
+    use super::harness::credential_start;
+    use crate::admission::{BucketDemand, BucketKey, BucketKind};
+    use agenc_ircd_auth::OpenedAccountServiceRequest;
+    let (mut live, account_id) = Live::open_registered()?;
+    let (opened, envelope) = credential_start(&live.fixture.core.identity, 1, account_id)?;
+    let request = live.account(
+        AccountCarrierKind::Credentials,
+        AccountCarrierPhase::Start,
+        envelope,
+    );
+    let (coordinator, context) = live.fixture.parts()?;
+    let now = context.now();
+    let mut drained = false;
+    for _ in 0..10_000 {
+        let demand = BucketDemand::new(
+            BucketKind::CredentialChange,
+            BucketKey::Account(account_id),
+            1,
+        )?;
+        if context
+            .buckets_mut()
+            .charge_all_or_nothing(now, &[demand])
+            .is_err()
+        {
+            drained = true;
+            break;
+        }
+    }
+    assert!(drained, "the credential-change bucket never emptied");
+    let completions = coordinator.open_completed(
+        context,
+        request,
+        Ok(OpenedAccountServiceRequest::CredentialChangeStart(opened)),
+    )?;
+    assert_credential_refused(&live, &completions)
+}
