@@ -11,9 +11,9 @@
 
 ## Verification
 
-<!-- List exact commands and results. The current full gate is:
-bash scripts/check-stage-nine.sh
--->
+<!-- List the exact commands you ran and their results. Run what the change needs
+(see CONTRIBUTING.md, Validation); the full gate, bash scripts/check-stage-nine.sh,
+is for release candidates, stage closures and changes to the gate itself. -->
 
 ## Deferred work
 
