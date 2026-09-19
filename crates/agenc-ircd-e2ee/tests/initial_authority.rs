@@ -475,3 +475,126 @@ fn a_direct_credential_pin_does_not_claim_predecessor_continuity() -> TestResult
     assert!(fixture.verify().is_err());
     Ok(())
 }
+
+/// Installs `credential` as the fixture's sequencer credential and re-pins it.
+fn install_credential(
+    fixture: &mut Fixture,
+    credential: agenc_ircd_e2ee::objects::conversation::IrcSequencerCredential,
+) -> TestResult {
+    let id = semantic_id_of(SemanticHashDomain::SequencerKey, &credential.tbs)?;
+    fixture.credential = credential;
+    fixture.core.sequencer_credential_id = id;
+    fixture.package.binding.tbs.sequencer_credential_id = id;
+    fixture.seal()?;
+    Ok(())
+}
+
+#[test]
+fn evidence_must_match_the_pins_one_principal_at_a_time() -> TestResult {
+    let mut short = Fixture::new()?;
+    short.principals.pop();
+    assert!(short.verify().is_err(), "fewer evidence pairs than pins");
+
+    let mut fingerprint = Fixture::new()?;
+    let mut pins = fingerprint.package.binding.tbs.principals.as_slice().to_vec();
+    pins.first_mut().ok_or("pin")?.root_fingerprint = [9; 32];
+    fingerprint.package.binding.tbs.principals = TlsVec::new(pins)?;
+    fingerprint.seal()?;
+    assert!(fingerprint.verify().is_err(), "pinned root fingerprint");
+
+    let mut generation = Fixture::new()?;
+    let mut pins = generation.package.binding.tbs.principals.as_slice().to_vec();
+    pins.first_mut().ok_or("pin")?.roster_generation = 5;
+    generation.package.binding.tbs.principals = TlsVec::new(pins)?;
+    generation.seal()?;
+    assert!(generation.verify().is_err(), "pinned roster generation");
+
+    let mut late = Fixture::new()?;
+    install_credential(&mut late, sequencer_credential(&key(60), 0, (0, 5_000_000), None)?)?;
+    late.core.initial_validation_time = 2_500_000;
+    late.seal()?;
+    assert!(late.verify().is_err(), "roots no longer cover the initial time");
+    Ok(())
+}
+
+#[test]
+fn the_context_core_policy_ids_are_distinct_and_present() -> TestResult {
+    for change in 0..3 {
+        let mut fixture = Fixture::new()?;
+        match change {
+            0 => {
+                fixture.core.initial_policy_id = [0; 32];
+                fixture.package.binding.tbs.initial_policy_id = [0; 32];
+            }
+            1 => {
+                fixture.core.required_operational_policy_id = [0; 32];
+                fixture.package.binding.tbs.required_operational_policy_id = [0; 32];
+            }
+            _ => {
+                let same = fixture.core.initial_policy_id;
+                fixture.core.required_operational_policy_id = same;
+                fixture.package.binding.tbs.required_operational_policy_id = same;
+            }
+        }
+        fixture.seal()?;
+        assert!(fixture.verify().is_err(), "core change {change}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_initial_policy_must_match_the_binding_kind_and_carry_no_fault_bound() -> TestResult {
+    for change in 0..2 {
+        let mut fixture = Fixture::new()?;
+        let refs = fixture.principals.iter().collect::<Vec<_>>();
+        let mut spec = PolicySpec::bootstrap(
+            &refs,
+            fixture.expected.conversation_id,
+            IrcConversationKind::Channel,
+        )?;
+        if change == 0 {
+            spec.kind = IrcConversationKind::Direct;
+        } else {
+            spec.fault_bound = 1;
+        }
+        fixture.policy = policy(&spec)?;
+        let id = policy_id_of(&fixture.policy)?;
+        fixture.core.initial_policy_id = id;
+        fixture.package.binding.tbs.initial_policy_id = id;
+        fixture.seal()?;
+        assert!(fixture.verify().is_err(), "policy change {change}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_sequencer_credential_is_checked_field_by_field() -> TestResult {
+    let mut profile = Fixture::new()?;
+    let mut credential = sequencer_credential(&key(60), 0, (0, 1_000_000), None)?;
+    credential.tbs.profile_version = 2;
+    install_credential(&mut profile, credential)?;
+    assert!(profile.verify().is_err(), "profile version");
+
+    let mut network = Fixture::new()?;
+    let mut credential = sequencer_credential(&key(60), 0, (0, 1_000_000), None)?;
+    credential.tbs.network_id = [9; 32];
+    install_credential(&mut network, credential)?;
+    assert!(network.verify().is_err(), "network");
+
+    let mut reversed = Fixture::new()?;
+    install_credential(&mut reversed, sequencer_credential(&key(60), 0, (10, 5), None)?)?;
+    assert!(reversed.verify().is_err(), "reversed interval");
+
+    let mut chained = Fixture::new()?;
+    let previous = sequencer_credential(&key(61), 0, (0, 1_000_000), None)?;
+    install_credential(
+        &mut chained,
+        sequencer_credential(&key(60), 0, (0, 1_000_000), Some((&key(61), &previous)))?,
+    )?;
+    assert!(chained.verify().is_err(), "generation zero with a predecessor");
+
+    let mut stray = Fixture::new()?;
+    stray.credential.continuity_signature = Opaque::new(vec![1; 64])?;
+    assert!(stray.verify().is_err(), "continuity without a predecessor");
+    Ok(())
+}
