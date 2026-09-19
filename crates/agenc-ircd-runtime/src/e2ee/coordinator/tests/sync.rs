@@ -1199,3 +1199,75 @@ fn an_expired_pending_cut_resets_to_the_next_delivery_generation() -> TestResult
     assert_ne!(next.token, cut.token);
     Ok(())
 }
+
+fn state_cut(cut: &Cut) -> CompanionFrame {
+    CompanionFrame::StateCut {
+        active: false,
+        server_id: COORDINATOR,
+        snapshot_token: cut.token,
+        state_generation: cut.state_generation,
+        delivery_generation: cut.delivery_generation,
+        snapshot_digest: cut.digest,
+    }
+}
+
+#[test]
+fn a_ready_is_refused_behind_a_pending_batch_for_another_cut_scope_or_after_expiry() -> TestResult {
+    let mut sync = Sync::new()?;
+    let page = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (cut, _, _) = begin_cut(&page)?;
+    let mut other_cut = cut;
+    other_cut.token = [9; 32];
+    assert_eq!(
+        sync.frame(state_cut(&other_cut)).err(),
+        Some(CompanionFault::Protocol),
+        "another cut"
+    );
+    let late = NOW_MILLIS + 16 * 60 * 1_000;
+    assert_eq!(
+        sync.frame_at(state_cut(&cut), late).err(),
+        Some(CompanionFault::Protocol),
+        "an expired cut"
+    );
+    sync.host.incarnation = Some([9; 16]);
+    assert_eq!(
+        sync.frame(state_cut(&cut)).err(),
+        Some(CompanionFault::Protocol),
+        "another live incarnation"
+    );
+    sync.host.incarnation = Some(INCARNATION);
+    let actions = sync.frame(state_cut(&cut))?;
+    let Some(Action::Stage { work, .. }) = actions.into_iter().next() else {
+        return Err("expected one staged batch".into());
+    };
+    sync.harness.coordinator.set_pending(work);
+    assert_eq!(
+        sync.frame(state_cut(&cut)).err(),
+        Some(CompanionFault::Ceiling),
+        "a READY behind the pending batch"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_resumed_final_ack_commit_never_activates_an_active_stream() -> TestResult {
+    let mut sync = Sync::new()?;
+    let page = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (cut, _, _) = begin_cut(&page)?;
+    sync.ready(cut)?;
+    assert_eq!(
+        sync.harness
+            .coordinator
+            .resume_ack_committed(home(), LinkId::new(1))
+            .err(),
+        Some(CompanionFault::Protocol)
+    );
+    assert!(
+        sync.harness
+            .coordinator
+            .resume_ack_committed(home(), LinkId::new(2))?
+            .is_empty(),
+        "another link's commit is ignored"
+    );
+    Ok(())
+}
