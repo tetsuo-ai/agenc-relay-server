@@ -4754,6 +4754,7 @@ mod tests {
     mod overload_ladder;
     mod rehash_outcome_pairs;
     mod reload_barrier_fences;
+    mod reload_floors;
     mod reload_requests;
     mod run_loop_barriers;
     mod staging_refusals;
@@ -5391,8 +5392,10 @@ mod tests {
         assert!(stopped.is_ok());
         assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
         let commits: Vec<_> = sinks.iter().map(|sink| sink.commits()).collect();
+        assert_eq!(commits.len(), 3, "{commits:?}");
+        assert_eq!(commits.last(), Some(&0), "{commits:?}");
         assert!(
-            matches!(commits[..], [first, second, 0] if first > 0 && second > 0),
+            commits.iter().take(2).all(|commits| *commits > 0),
             "{commits:?}"
         );
         Ok(())
@@ -5661,10 +5664,13 @@ mod tests {
             },
             |inbox, lifecycle, _token, ()| async move {
                 let outcomes = open_connections(&inbox, &sinks).await?;
-                let Some(ConnectionOpenOutcome::AcceptedInput(port)) = outcomes.into_iter().next()
-                else {
-                    return Err("missing admitted input port".into());
-                };
+                let port = outcomes
+                    .into_iter()
+                    .find_map(|outcome| match outcome {
+                        ConnectionOpenOutcome::AcceptedInput(port) => Some(port),
+                        _ => None,
+                    })
+                    .ok_or("missing admitted input port")?;
                 drive_script(&inbox, &sinks, REGISTER).await?;
                 // AWAY stages a durable batch; the MONITOR sequence is ephemeral
                 // and arrives inside the gather window with no pacing at all.
@@ -5698,13 +5704,12 @@ mod tests {
                 (line.contains(" 730 alice ") && line.ends_with(":alice")).then_some(index)
             })
             .collect();
-        let [added, status] = monitor.as_slice() else {
-            return Err(format!("expected both MONITOR replies: {lines:?}").into());
-        };
-        assert!(
-            away.is_some_and(|away| away < *added && added < status),
-            "{lines:?}"
-        );
+        assert_eq!(monitor.len(), 2, "expected both MONITOR replies: {lines:?}");
+        let added = monitor.first().copied().ok_or("no MONITOR addition")?;
+        let status = monitor.last().copied().ok_or("no MONITOR status")?;
+        let away = away.ok_or("no AWAY reply")?;
+        assert!(away < added, "{lines:?}");
+        assert!(added < status, "{lines:?}");
         assert!(
             !lines.iter().any(|line| line.contains("SERVERBUSY")),
             "{lines:?}"
