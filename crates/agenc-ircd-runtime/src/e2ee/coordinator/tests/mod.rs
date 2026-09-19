@@ -37,6 +37,7 @@ use super::request::{self, Classified, Outcome, ResultBody};
 use super::{CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteRequest};
 
 mod barrier;
+mod binding_faults;
 pub(crate) mod direct_release;
 mod directory_faults;
 mod live_payloads;
@@ -126,6 +127,8 @@ struct Harness {
     writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
     /// The principal's device seeds, so a reload rebuilds the same policies.
     devices: Vec<u8>,
+    /// Whether the base profile counts the origin as a member of every channel.
+    channel_member: bool,
 }
 
 impl Harness {
@@ -212,6 +215,7 @@ impl Harness {
             operational_policy,
             writes: Vec::new(),
             devices: devices.to_vec(),
+            channel_member: true,
         })
     }
 
@@ -351,7 +355,8 @@ impl Harness {
         let holds = |_: ServerId, _: ChannelInstanceId| true;
         let hosting = |_: ChannelInstanceId| vec![home];
         let attached = |_: &[u8; 32]| vec![home];
-        let member = |_: ChannelInstanceId| true;
+        let channel_member = self.channel_member;
+        let member = move |_: ChannelInstanceId| channel_member;
         // The harness carries no base channel state; the coordinator glue
         // supplies the binding plan there.
         let plan_binding = |_: ChannelInstanceId, _: &[[u8; 24]]| Ok(None);

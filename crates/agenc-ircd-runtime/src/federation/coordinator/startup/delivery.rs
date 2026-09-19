@@ -262,3 +262,7 @@ fn admit(
 #[cfg(test)]
 #[path = "delivery/tests/cancellation.rs"]
 mod cancellation_tests;
+
+#[cfg(test)]
+#[path = "delivery/tests/inventory_faults.rs"]
+mod inventory_fault_tests;
