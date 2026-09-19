@@ -2780,6 +2780,36 @@ mod tests {
             checkpoint.checkpoint_hash()
         );
         assert!(authority.commit_retention(&checkpoint).is_err());
+
+        // A later checkpoint signed by the authority's own key that names
+        // another predecessor is refused at commit.
+        let second = command_event(binding, &operator_key, 1, b"MOTD")?;
+        let second_event = authority.prepare_event(
+            binding,
+            operator_id,
+            &second,
+            AdminAuditPhase::Observed,
+            CREATED_AT,
+        )?;
+        authority.commit_event(&second_event)?;
+        let later_tbs = AdminAuditCheckpointTbs {
+            checkpoint_sequence: 1,
+            deleted_first_sequence: 1,
+            deleted_last_sequence: 1,
+            deleted_last_event_hash: second_event.event_hash(),
+            next_retained_sequence: 2,
+            previous_checkpoint_hash: [5; 32],
+            ..checkpoint_tbs
+        };
+        let wrong_lineage = AdminAuditCheckpoint::sign(later_tbs, &authority.signing_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(authority.commit_retention(&wrong_lineage).is_err());
+        let later = authority.sign_retention(AdminAuditCheckpointTbs {
+            previous_checkpoint_hash: authority.previous_checkpoint_hash,
+            ..later_tbs
+        })?;
+        authority.commit_retention(&later)?;
+        assert_eq!(authority.retained_first_sequence, 2);
         Ok(())
     }
 

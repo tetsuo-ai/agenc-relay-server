@@ -898,6 +898,60 @@ mod tests {
     }
 
     #[test]
+    fn bound_frames_must_match_the_reservation_count_and_sizes() -> Result<(), RuntimeError> {
+        use crate::budget::PermitCursor;
+        use agenc_ircd_client_wire::WireMessage;
+        let budget = MemoryBudget::new(100_000);
+        let message = WireMessage::new("server.test", "NOTICE", &["*"], Some("fill"))
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let measured = message.measure().map_err(|_| RuntimeError::InvalidValue)?;
+        let bytes = measured.bytes();
+        let mut batch = budget.try_acquire_batch(BoundedMemoryCharges::new(&[
+            MemoryCharge::allocation(u64::try_from(bytes).map_err(|_| RuntimeError::Overflow)?)?,
+            MemoryCharge::fixed(4_096),
+        ])?)?;
+        let frame: SharedClientFrame = Arc::new(
+            measured
+                .encode(&mut PermitCursor::new(&mut batch))
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        );
+        let ledger = Arc::new(CountingLedger::default());
+        let reservation = |frames: &[usize]| -> Result<ClientQueueReservation, RuntimeError> {
+            let tentative = TentativeClientQueueReservation::new(
+                ConnectionGeneration::new(3),
+                demand(frames)?,
+                0,
+                ledger.clone(),
+            );
+            ClientQueueReservation::prepare(tentative, None).map_err(|_| RuntimeError::InvalidValue)
+        };
+        assert_eq!(
+            BoundedSharedClientFrames::for_reservation(
+                &reservation(&[bytes, bytes])?,
+                vec![frame.clone()]
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue),
+            "fewer frames than reserved"
+        );
+        assert_eq!(
+            BoundedSharedClientFrames::for_reservation(
+                &reservation(&[bytes + 1])?,
+                vec![frame.clone()]
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue),
+            "a frame of another size"
+        );
+        assert!(
+            BoundedSharedClientFrames::for_reservation(&reservation(&[bytes])?, vec![frame])
+                .is_ok()
+        );
+        drop(batch);
+        Ok(())
+    }
+
+    #[test]
     fn a_committed_transfer_disarms_rollback_and_discard_releases_once() -> Result<(), RuntimeError>
     {
         let budget = MemoryBudget::new(100_000);
