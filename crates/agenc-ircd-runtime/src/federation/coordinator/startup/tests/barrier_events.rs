@@ -59,7 +59,7 @@ fn header(sequence: u64, part: Option<CrossProfilePart>) -> EventHeader {
         },
         event_kind: ProjectedEvent::NetworkNotice {
             code: "REPLAY".to_owned(),
-            text: String::new(),
+            text: "replayed".to_owned(),
         }
         .kind(),
         correlation: None,
@@ -78,7 +78,7 @@ fn part_at(sequence: u64) -> CrossProfilePart {
 fn encoded(header: &EventHeader) -> TestResult<Vec<u8>> {
     let event = ProjectedEvent::NetworkNotice {
         code: "REPLAY".to_owned(),
-        text: String::new(),
+        text: "replayed".to_owned(),
     };
     let arm = crate::federation::codec::events::event_arm_object(&event)
         .map_err(|error| format!("{error:?}"))?;
