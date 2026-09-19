@@ -181,6 +181,9 @@ argv = ["python3", "scripts/check-stage-five.py", "self-test"]
 argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--all-features", "--locked"]
 
 [[gate.stage-five-implementation.command]]
+argv = ["cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--all-features", "--locked", "--profile", "disk"]
+
+[[gate.stage-five-implementation.command]]
 argv = ["cargo", "+nightly-2026-08-24", "fmt", "--manifest-path", "fuzz/Cargo.toml", "--", "--check"]
 
 [[gate.stage-five-implementation.command]]

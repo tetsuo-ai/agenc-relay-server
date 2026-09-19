@@ -161,6 +161,10 @@ REQUIRED_STAGE_FIVE = (
         "cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--all-features", "--locked",
     ),
     (
+        "cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--all-features", "--locked",
+        "--profile", "disk",
+    ),
+    (
         "cargo", "+nightly-2026-08-24", "fmt", "--manifest-path",
         "fuzz/Cargo.toml", "--", "--check",
     ),

@@ -1781,7 +1781,14 @@ def validate_run_artifact(
     raw_results = artifact.get("command_results")
     if not isinstance(raw_results, list) or len(raw_results) != len(expected_commands):
         raise EvidenceError("closure artifact command results are incomplete")
-    previous_end = started
+    # Lanes run concurrently, so only commands of one lane are ordered against each other.
+    # The exclusive lane runs alone: nothing else may still be running when it starts.
+    runner = runpy.run_path(
+        str(Path(__file__).with_name("run-gate.py")), run_name="agenc_ircd_gate_runner"
+    )
+    gate_lane = runner["gate_lane"]
+    exclusive_lane = runner["EXCLUSIVE_LANE"]
+    lane_end: dict[str, datetime] = {}
     for index, (raw_result, expected) in enumerate(zip(raw_results, expected_commands)):
         if not isinstance(raw_result, dict) or set(raw_result) != RUN_COMMAND_FIELDS:
             raise EvidenceError(f"closure artifact command result {index} has invalid fields")
@@ -1799,6 +1806,11 @@ def validate_run_artifact(
             raw_result.get("ended_at"),
             f"closure artifact command result {index} ended_at",
         )
+        lane = gate_lane(expected["argv"])
+        previous_end = max(
+            lane_end.values() if lane == exclusive_lane else [lane_end.get(lane, started)],
+            default=started,
+        )
         if (
             command_started < previous_end
             or command_ended < command_started
@@ -1811,7 +1823,7 @@ def validate_run_artifact(
             raise EvidenceError(
                 f"closure artifact command result {index} did not pass"
             )
-        previous_end = command_ended
+        lane_end[lane] = command_ended
 
     expected_command = " ".join(expected_argv)
     for evidence_id, entry in sorted(

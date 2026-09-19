@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import runpy
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from datetime import datetime, timezone
@@ -265,32 +267,196 @@ def utc_timestamp() -> str:
     )
 
 
-def execute(root: Path, name: str) -> list[CommandResult]:
-    """Execute one gate and return ordered, output-free command results."""
-    commands = resolve_commands(load_gates(root), name)
-    results: list[CommandResult] = []
-    for command in commands:
+EXCLUSIVE_LANE = "exclusive"
+DISK_PROFILE = ("--profile", "disk")
+LANE_TARGETS = {
+    # The exclusive lane reruns the storage suite's build, so it shares that lane's artifacts.
+    EXCLUSIVE_LANE: "stage-storage",
+}
+STAGE_SCRIPT_STAGES = {"six", "seven", "eight"}
+# Eighths of the host's cores that a lane's test runner may use. Every test lane running 64
+# threads at once starved the daemons under test until their 20-second socket reads timed
+# out; a lane's wall time is set by its few long tests, not by its thread count, so the
+# lanes share the machine instead. The exclusive lane runs alone and keeps every core.
+LANE_TEST_SHARE = {
+    "tests": 3,
+    "coverage": 3,
+    "stage-tests": 1.5,
+    "stage-storage": 1.5,
+    "scripts": 3,
+    "matrix": 1,
+}
+LANE_BUILD_SHARE = 3
+# Commands that start real daemons and talk to them under wall-clock timeouts. Those tests
+# fail on a saturated host (issue #175), so one such command runs at a time; every other
+# command still overlaps with it.
+DAEMON_TEST_SCRIPTS = ("-transcripts.sh", "-soak.sh", "-load.sh")
+
+
+def starts_daemons(argv: list[str]) -> bool:
+    """Return whether one reviewed command runs the daemon integration tests."""
+    if argv[:2] == ["cargo", "llvm-cov"]:
+        return True
+    if argv[:3] == ["cargo", "nextest", "run"]:
+        return "--workspace" in argv
+    return argv[0] == "bash" and argv[-1].endswith(DAEMON_TEST_SCRIPTS)
+
+
+def gate_lane(argv: list[str]) -> str:
+    """Return the lane of one reviewed command.
+
+    Commands of one lane run in manifest order; lanes run concurrently, each Cargo lane in
+    its own target directory so no lane waits for another's build lock. The exclusive lane
+    runs alone after every other lane has finished: the storage qualification workload
+    measures its filesystem's free space to the byte and fails beside any other writer.
+    """
+    text = " ".join(argv)
+    if argv[:3] == ["cargo", "nextest", "run"] and tuple(argv[-2:]) == DISK_PROFILE:
+        return EXCLUSIVE_LANE
+    if "fuzz" in text:
+        return "fuzz"
+    if argv[:2] == ["cargo", "llvm-cov"] or argv[:3] == [
+        "python3",
+        "scripts/check-coverage.py",
+        "check",
+    ]:
+        return "coverage"
+    if argv[:2] == ["cargo", "check"]:
+        return "check-" + (argv[argv.index("--target") + 1] if "--target" in argv else "host")
+    if argv[:2] == ["cargo", "clippy"]:
+        return "clippy"
+    if argv[:2] == ["cargo", "test"] or (
+        argv[:3] == ["cargo", "nextest", "run"] and "--workspace" in argv
+    ):
+        return "tests"
+    if argv[:3] == ["cargo", "nextest", "run"]:
+        return "stage-storage" if "agenc-ircd-storage" in argv else "stage-tests"
+    if argv[0] == "bash" and argv[1:] == ["scripts/check-stage-nine-matrix.sh"]:
+        return "matrix"
+    if argv[0] == "bash" and len(argv) == 2 and argv[1].startswith("scripts/run-stage-"):
+        stage = argv[1].removeprefix("scripts/run-stage-").split("-", 1)[0]
+        if stage in STAGE_SCRIPT_STAGES:
+            return "scripts"
+    return "static"
+
+
+def lane_environment(root: Path, lane: str, environment: dict[str, str]) -> dict[str, str]:
+    """Give a Cargo lane its own target directory under the ignored build root."""
+    if lane in {"static", "fuzz"}:
+        return environment
+    directory = root / "target" / "lanes" / LANE_TARGETS.get(lane, lane)
+    lane_state = {"CARGO_TARGET_DIR": str(directory)}
+    if lane != EXCLUSIVE_LANE:
+        cores = len(os.sched_getaffinity(0))
+        lane_state["CARGO_BUILD_JOBS"] = str(max(4, cores * LANE_BUILD_SHARE // 8))
+        share = LANE_TEST_SHARE.get(lane)
+        if share is not None:
+            lane_state["NEXTEST_TEST_THREADS"] = str(max(2, round(cores * share / 8)))
+    return {**environment, **lane_state}
+
+
+class LaneRunner:
+    """Run the lanes of one gate and keep their results in manifest order."""
+
+    def __init__(self, root: Path, commands: list[dict[str, object]]) -> None:
+        self.root = root
+        self.commands = commands
+        self.results: list[CommandResult | None] = [None] * len(commands)
+        self.failure: str | None = None
+        self.lock = threading.Lock()
+        self.daemon_tests = threading.Lock()
+        self.running: set[subprocess.Popen[bytes]] = set()
+
+    def run_command(self, index: int, lane: str) -> bool:
+        if not starts_daemons(self.commands[index]["argv"]):  # type: ignore[arg-type]
+            return self.run_admitted(index, lane)
+        with self.daemon_tests:
+            return self.run_admitted(index, lane)
+
+    def run_admitted(self, index: int, lane: str) -> bool:
+        command = self.commands[index]
         argv = command["argv"]
-        reviewed_environment = command.get("environment", {})
-        environment = command_environment(os.environ, reviewed_environment)
-        print("+ " + " ".join(argv), flush=True)
-        started_at = utc_timestamp()
-        started = time.monotonic()
-        completed = subprocess.run(argv, cwd=root, env=environment, check=False)
-        ended_at = utc_timestamp()
-        print(f"= {time.monotonic() - started:.1f}s " + " ".join(argv), flush=True)
-        if completed.returncode != 0:
-            raise GateError(f"command failed with status {completed.returncode}: {argv!r}")
-        results.append(
-            {
-                "argv": list(argv),
-                "environment": dict(reviewed_environment),
-                "started_at": started_at,
-                "ended_at": ended_at,
-                "exit_code": completed.returncode,
-            }
+        reviewed = command.get("environment", {})
+        environment = lane_environment(
+            self.root, lane, command_environment(os.environ, reviewed)  # type: ignore[arg-type]
         )
-    return results
+        with tempfile.TemporaryFile() as output:
+            started_at = utc_timestamp()
+            started = time.monotonic()
+            with self.lock:
+                if self.failure is not None:
+                    return False
+                process = subprocess.Popen(  # noqa: S603 - reviewed argv, no shell
+                    argv,  # type: ignore[arg-type]
+                    cwd=self.root,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                self.running.add(process)
+            returncode = process.wait()
+            ended_at = utc_timestamp()
+            elapsed = time.monotonic() - started
+            output.seek(0)
+            with self.lock:
+                self.running.discard(process)
+                stopped = self.failure is not None
+                if not stopped:
+                    sys.stdout.write(f"+ [{lane}] " + " ".join(argv) + "\n")  # type: ignore[arg-type]
+                    sys.stdout.flush()
+                    sys.stdout.buffer.write(output.read())
+                    sys.stdout.write(f"= {elapsed:.1f}s [{lane}] " + " ".join(argv) + "\n")  # type: ignore[arg-type]
+                    sys.stdout.flush()
+                if returncode != 0 and not stopped:
+                    self.failure = f"command failed with status {returncode}: {argv!r}"
+                    for other in self.running:
+                        try:
+                            os.killpg(other.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+        if returncode != 0 or stopped:
+            return False
+        self.results[index] = {
+            "argv": list(argv),  # type: ignore[arg-type]
+            "environment": dict(reviewed),  # type: ignore[arg-type]
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "exit_code": returncode,
+        }
+        return True
+
+    def run_lane(self, lane: str, indexes: list[int]) -> None:
+        for index in indexes:
+            if not self.run_command(index, lane):
+                return
+
+    def run(self) -> list[CommandResult]:
+        lanes: dict[str, list[int]] = {}
+        for index, command in enumerate(self.commands):
+            lanes.setdefault(gate_lane(command["argv"]), []).append(index)  # type: ignore[arg-type]
+        exclusive = lanes.pop(EXCLUSIVE_LANE, [])
+        threads = [
+            threading.Thread(target=self.run_lane, args=(lane, indexes), name=lane)
+            for lane, indexes in lanes.items()
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if self.failure is None:
+            self.run_lane(EXCLUSIVE_LANE, exclusive)
+        if self.failure is not None:
+            raise GateError(self.failure)
+        if any(result is None for result in self.results):
+            raise GateError("a gate lane ended without running every command")
+        return [result for result in self.results if result is not None]
+
+
+def execute(root: Path, name: str) -> list[CommandResult]:
+    """Execute one gate and return manifest-ordered, output-free command results."""
+    return LaneRunner(root, resolve_commands(load_gates(root), name)).run()
 
 
 def evidence_policy(root: Path) -> dict[str, object]:
