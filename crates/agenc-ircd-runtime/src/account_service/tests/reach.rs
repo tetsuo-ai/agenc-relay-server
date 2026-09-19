@@ -418,3 +418,69 @@ async fn a_credential_finish_output_for_another_transaction_closes_its_carrier()
     assert!(coordinator.ready_seals.is_empty());
     Ok(())
 }
+
+/// Ready seals queue up to their ceiling; the outcome that would exceed it
+/// closes its carrier, and no seal moves while a ready stage waits.
+#[tokio::test]
+async fn ready_seals_stop_at_their_ceiling_and_wait_behind_a_ready_stage() -> TestResult {
+    use super::harness::{sealed_unknown_authentication, unsealed_unknown_authentication};
+    use crate::account_service::{MAX_READY_SEALS, ReadySeal, ReadyStage};
+    let mut live = Live::open()?;
+    for seed in 0..MAX_READY_SEALS {
+        let seed = u8::try_from(seed % 200).unwrap_or_default();
+        let (outcome, envelope) = unsealed_unknown_authentication(&mut live, seed, "queued")?;
+        let ready = ReadySeal::Start {
+            request: live.sasl(AccountCarrierPhase::Start, envelope),
+            outcome,
+            account_id: None,
+            login: NormalizedLogin::prepare("queued")?,
+            previous_value: None,
+        };
+        live.fixture.coordinator.ready_seals.push_back(ready);
+    }
+    assert_eq!(live.fixture.coordinator.ready_seals.len(), MAX_READY_SEALS);
+    let (outcome, envelope) = unsealed_unknown_authentication(&mut live, 201, "queued")?;
+    let request = live.sasl(AccountCarrierPhase::Start, envelope);
+    let (stage, stage_envelope) = sealed_unknown_authentication(&mut live, 202, "queued")?;
+    let stage_request = live.sasl(AccountCarrierPhase::Start, stage_envelope);
+    let generation = live.generation;
+    // A batch already pending keeps the ready stage from being staged below.
+    live.occupy_pending_batch()?;
+    let (coordinator, context) = live.fixture.parts()?;
+    let job_id = CryptoJobId::new(83);
+    coordinator.crypto.insert(
+        job_id,
+        PendingCrypto::Start {
+            request,
+            account_id: None,
+            login: NormalizedLogin::prepare("queued")?,
+            previous_value: None,
+        },
+    );
+    let completions = coordinator.crypto_completed(
+        context,
+        CryptoCompletionMessage {
+            job_id,
+            output: Ok(CryptoJobOutput::OpaqueStart(Box::new(Ok(outcome)))),
+        },
+    );
+    assert!(matches!(
+        completions.as_slice(),
+        [completion] if completion.close && completion.generation == generation
+    ));
+    assert_eq!(coordinator.ready_seals.len(), MAX_READY_SEALS);
+
+    // A ready stage holds every queued seal in place.
+    coordinator.ready_stage = Some(ReadyStage::Start {
+        request: stage_request,
+        sealed: stage,
+        account_id: None,
+        login: NormalizedLogin::prepare("queued")?,
+        previous_value: None,
+    });
+    let held = coordinator.progress(context);
+    assert!(held.is_empty(), "nothing moves behind the ready stage");
+    assert_eq!(coordinator.ready_seals.len(), MAX_READY_SEALS);
+    assert!(coordinator.ready_stage.is_some());
+    Ok(())
+}
