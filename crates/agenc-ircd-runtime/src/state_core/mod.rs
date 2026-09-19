@@ -4735,13 +4735,18 @@ mod tests {
     mod account_shutdown;
     mod admin_requests;
     mod admin_revision;
+    mod apply_and_query_fences;
     mod checkpoint_receipts;
     mod client_input;
     mod completion_exits;
+    mod direct_steps;
+    mod install_guards;
     mod local_join;
     mod overload_ladder;
     mod rehash_outcome_pairs;
+    mod reload_barrier_fences;
     mod reload_requests;
+    mod run_loop_barriers;
     mod staging_refusals;
     mod support;
     use agenc_ircd_client_wire::{FramedLine, parse_message};
