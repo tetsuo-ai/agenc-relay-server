@@ -395,7 +395,7 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
     if not isinstance(package, dict):
         raise WorkspaceError("workspace.package is missing")
     expected_package = {
-        "version": "0.0.0",
+        "version": "1.0.0-rc.2",
         "edition": EDITION,
         "rust-version": RUST_VERSION,
         "publish": False,
@@ -425,7 +425,7 @@ def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
         declaration = dependencies.get(name)
         if not isinstance(declaration, dict):
             raise WorkspaceError(f"workspace dependency {name} must be a table")
-        expected = {"version": "=0.0.0", "path": f"crates/{name}"}
+        expected = {"version": "=1.0.0-rc.2", "path": f"crates/{name}"}
         if declaration != expected:
             raise WorkspaceError(f"workspace dependency {name} has a forbidden declaration")
 
@@ -861,8 +861,8 @@ def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]
     for name, package in packages.items():
         if package.get("edition") != EDITION or package.get("rust_version") != RUST_VERSION:
             raise WorkspaceError(f"package {name} has stale edition or rust-version metadata")
-        if package.get("version") != "0.0.0":
-            raise WorkspaceError(f"package {name} version differs from required 0.0.0")
+        if package.get("version") != "1.0.0-rc.2":
+            raise WorkspaceError(f"package {name} version differs from required 1.0.0-rc.2")
         features = package.get("features")
         if features != EXPECTED_FEATURES.get(name, {}):
             raise WorkspaceError(f"package {name} exposes an unexpected production feature")

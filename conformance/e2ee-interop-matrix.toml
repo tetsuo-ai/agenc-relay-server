@@ -13,7 +13,7 @@ role = "mls-client"
 
 [[library]]
 name = "agenc-ircd-e2ee"
-version = "0.0.0"
+version = "1.0.0-rc.2"
 role = "delivery-service-view"
 
 [[result]]

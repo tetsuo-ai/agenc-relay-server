@@ -1,6 +1,6 @@
 [package]
 name = "agenc-ircd-fuzz"
-version = "0.0.0"
+version = "1.0.0-rc.2"
 edition = "2024"
 rust-version = "1.98"
 publish = false
@@ -13,15 +13,15 @@ default = []
 wss = ["agenc-ircd-client-wire/wss"]
 
 [dependencies]
-agenc-ircd-client-wire = { version = "=0.0.0", path = "../crates/agenc-ircd-client-wire" }
-agenc-ircd-admin = { version = "=0.0.0", path = "../crates/agenc-ircd-admin" }
-agenc-ircd-auth = { version = "=0.0.0", path = "../crates/agenc-ircd-auth" }
-agenc-ircd-config = { version = "=0.0.0", path = "../crates/agenc-ircd-config" }
-agenc-ircd-crypto = { version = "=0.0.0", path = "../crates/agenc-ircd-crypto" }
-agenc-ircd-e2ee = { version = "=0.0.0", path = "../crates/agenc-ircd-e2ee" }
-agenc-ircd-federation-wire = { version = "=0.0.0", path = "../crates/agenc-ircd-federation-wire" }
-agenc-ircd-storage = { version = "=0.0.0", path = "../crates/agenc-ircd-storage" }
-agenc-ircd-types = { version = "=0.0.0", path = "../crates/agenc-ircd-types" }
+agenc-ircd-client-wire = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-client-wire" }
+agenc-ircd-admin = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-admin" }
+agenc-ircd-auth = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-auth" }
+agenc-ircd-config = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-config" }
+agenc-ircd-crypto = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-crypto" }
+agenc-ircd-e2ee = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-e2ee" }
+agenc-ircd-federation-wire = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-federation-wire" }
+agenc-ircd-storage = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-storage" }
+agenc-ircd-types = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-types" }
 libfuzzer-sys = "=0.4.13"
 
 [[bin]]
