@@ -247,6 +247,8 @@ pub enum RegistrationAction {
     InputDeferred,
     /// Return deferred messages in receive order after the commit completes.
     ResumeDeferredInput(PendingInputQueue),
+    /// Emit ERR_NICKNAMEINUSE (433) for the nickname whose reservation was refused.
+    NicknameInUse(String),
     /// Emit ERR_NOTREGISTERED (451).
     NotRegistered,
     /// Emit ERR_ALREADYREGISTRED (462).
@@ -279,6 +281,7 @@ impl fmt::Debug for RegistrationAction {
             Self::ForwardRegisteredCommand(_) => "ForwardRegisteredCommand",
             Self::InputDeferred => "InputDeferred",
             Self::ResumeDeferredInput(_) => "ResumeDeferredInput",
+            Self::NicknameInUse(_) => "NicknameInUse",
             Self::NotRegistered => "NotRegistered",
             Self::AlreadyRegistered => "AlreadyRegistered",
             Self::Pong(_) => "Pong",
@@ -746,8 +749,20 @@ impl RegistrationState {
             return Ok(Vec::new());
         }
         if !accepted {
-            self.pending_nickname = None;
-            return self.try_commit();
+            // A client chooses its next nickname from this reply; silence leaves it waiting
+            // for the registration deadline.
+            let refused = self.pending_nickname.take();
+            let mut actions = self.try_commit()?;
+            if let Some(refused) = refused {
+                actions
+                    .try_reserve(1)
+                    .map_err(|_| RegistrationError::AllocationFailed)?;
+                actions.insert(
+                    0,
+                    RegistrationAction::NicknameInUse(refused.nickname.clone()),
+                );
+            }
+            return Ok(actions);
         }
         let reservation = self
             .pending_nickname
