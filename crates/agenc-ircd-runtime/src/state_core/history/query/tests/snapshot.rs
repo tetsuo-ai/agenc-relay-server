@@ -305,3 +305,110 @@ async fn restored_selections_reads_and_rechecks_are_bound_to_their_snapshot() ->
     assert!(context.history_recheck(&with_rows).is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_materialized_page_must_be_exactly_the_requested_rows() -> TestResult {
+    use agenc_ircd_storage::history_records::history_message_key;
+    use agenc_ircd_storage::{ReadRecord, ReadResult, StoredKey, TableId};
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let (identity, id) = install_reader(context)?;
+    let bound = crate::test_support::bound(identity);
+    let now = context.history_now()?;
+    let history = context.history.as_mut().ok_or("history")?;
+    let permit = history.reserve_index_entry()?;
+    let reference = HistoryRowReference {
+        channel_sequence: 5,
+        message_id: [7; 16],
+        received_unix_milliseconds: now,
+        expires_unix_milliseconds: now.checked_add(3_600_000).ok_or("expiry")?,
+    };
+    history.channels.get_mut(&id).ok_or("channel")?.rows.insert(
+        5,
+        crate::state_core::history::HistoryRow {
+            reference,
+            logical_bytes: 10,
+            _permit: permit,
+        },
+    );
+    let snapshot = context.history_select(bound, id, latest()?)?;
+    let position = HistoryPosition::new(5, agenc_ircd_types::MessageId::from_bytes([7; 16]), now)?;
+    let key = history_message_key(id, 5)?;
+    let row = |table: TableId, key: StoredKey| ReadRecord {
+        table,
+        key,
+        sealed_record: Vec::new(),
+    };
+    let page = |records: Vec<ReadRecord>, truncated: bool| ReadResult {
+        storage_commit_sequence: 1,
+        records,
+        truncated,
+    };
+    let expected = [position];
+    let cases: Vec<(&str, &[HistoryPosition], ReadResult)> = vec![
+        (
+            "truncated",
+            &expected,
+            page(vec![row(TableId::History, key.clone())], true),
+        ),
+        ("no positions", &[], page(Vec::new(), false)),
+        (
+            "row count",
+            &expected,
+            page(
+                vec![
+                    row(TableId::History, key.clone()),
+                    row(TableId::History, key.clone()),
+                ],
+                false,
+            ),
+        ),
+        (
+            "table",
+            &expected,
+            page(vec![row(TableId::Channel, key.clone())], false),
+        ),
+        (
+            "key",
+            &expected,
+            page(
+                vec![row(TableId::History, StoredKey::new(vec![9; 24])?)],
+                false,
+            ),
+        ),
+    ];
+    for (name, expected, result) in cases {
+        assert!(
+            context
+                .history_materialize(&snapshot, expected, &result)
+                .is_err(),
+            "{name}"
+        );
+    }
+    let too_many = vec![position; HISTORY_PAGE_MESSAGES + 1];
+    let rows = (0..=HISTORY_PAGE_MESSAGES)
+        .map(|_| row(TableId::History, key.clone()))
+        .collect();
+    assert!(
+        context
+            .history_materialize(&snapshot, &too_many, &page(rows, false))
+            .is_err(),
+        "over the page ceiling"
+    );
+    let unselected =
+        HistoryPosition::new(6, agenc_ircd_types::MessageId::from_bytes([8; 16]), now)?;
+    assert!(
+        context
+            .history_materialize(
+                &snapshot,
+                &[unselected],
+                &page(
+                    vec![row(TableId::History, history_message_key(id, 6)?)],
+                    false
+                )
+            )
+            .is_err(),
+        "a position the selection never held"
+    );
+    Ok(())
+}
