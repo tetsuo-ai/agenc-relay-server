@@ -471,6 +471,7 @@ def validate_manifest(manifest: dict[str, object]) -> None:
 
 
 REQUIRED_STAGE_NINE = (
+    ("python3", "scripts/test-release-qualification.py"),
     ("python3", "scripts/requirements.py", "check-stage-nine"),
     ("python3", "scripts/check-stage-nine.py", "check"),
     ("python3", "scripts/check-stage-nine.py", "self-test"),
