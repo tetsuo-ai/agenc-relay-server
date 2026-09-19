@@ -794,4 +794,136 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn json_grammar_limits_and_consume_mismatches_are_rejected() {
+        let members = (0..40)
+            .map(|index| format!("\"k{index:03}\":1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let elements = vec!["1"; 40].join(",");
+        let long_text = "a".repeat(300);
+        rejects(&[
+            ("{\"a\" 1}".to_owned(), ReleaseDecisionError::InvalidJson),
+            (format!("{{{members}}}"), ReleaseDecisionError::InvalidJson),
+            (
+                format!("{{\"a\":[{elements}]}}"),
+                ReleaseDecisionError::InvalidJson,
+            ),
+            (
+                format!("{{\"a\":\"{long_text}\"}}"),
+                ReleaseDecisionError::InvalidJson,
+            ),
+            ("{\"a\":-x}".to_owned(), ReleaseDecisionError::InvalidJson),
+        ]);
+    }
+
+    #[test]
+    fn schema_fields_are_checked_one_rule_at_a_time() {
+        let base = canonical();
+        let swap = |from: &str, to: &str| base.replacen(from, to, 1);
+        let claims_field = "\"claims\":[\"core-v1\",\"wss\"]";
+        let targets_field = format!("\"targets\":[\"{ARM}\",\"{X86}\"]");
+        let stamp_field = format!("\"decided_at\":\"{STAMP}\"");
+        let candidate_field = format!("\"candidate_sha256\":\"{HEX64}\"");
+        let bad_hex = format!("\"candidate_sha256\":\"{}\"", "zz".repeat(32));
+        let long_target = "t".repeat(200);
+        rejects(&[
+            (
+                swap("\"schema_version\":1", "\"schema_version\":12"),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(&candidate_field, &bad_hex),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(claims_field, "\"claims\":1"),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(&targets_field, "\"targets\":1"),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(&targets_field, "\"targets\":[]"),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(
+                    &targets_field,
+                    &format!("\"targets\":[\"{X86}\",\"{ARM}\"]"),
+                ),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(&targets_field, &format!("\"targets\":[\"{ARM}\",\"\"]")),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(
+                    &targets_field,
+                    &format!("\"targets\":[\"{ARM}\",\"{long_target}\"]"),
+                ),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(&targets_field, &format!("\"targets\":[\"{ARM}\"]")),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(
+                    &format!("\"artifacts\":[{},{}]", artifact(ARM), artifact(X86)),
+                    "\"artifacts\":1",
+                ),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(
+                    &format!("\"target\":\"{ARM}\""),
+                    &format!("\"target\":\"{X86}\""),
+                ),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(
+                    &format!("\"path\":\"artifacts/{ARM}/agenc-ircd\""),
+                    &format!("\"path\":\"artifacts/{ARM}/other\""),
+                ),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(&stamp_field, "\"decided_at\":\"2026-09-05T12:00:00\""),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+            (
+                swap(&stamp_field, "\"decided_at\":\"abcd-09-05T12:00:00Z\""),
+                ReleaseDecisionError::InvalidSchema,
+            ),
+        ]);
+        let many = (0..9)
+            .map(|index| format!("\"t{index:02}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        rejects(&[(
+            swap(&targets_field, &format!("\"targets\":[{many}]")),
+            ReleaseDecisionError::InvalidSchema,
+        )]);
+    }
+
+    #[test]
+    fn pem_lines_are_bounded_and_the_footer_is_required() {
+        let long_line = "A".repeat(1_000);
+        let unbounded =
+            format!("-----BEGIN PUBLIC KEY-----\n{long_line}\n-----END PUBLIC KEY-----\n");
+        assert_eq!(
+            parse_release_public_key_pem(unbounded.as_bytes()).err(),
+            Some(ReleaseDecisionError::InvalidPublicKey)
+        );
+        let unterminated = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA\n";
+        assert_eq!(
+            parse_release_public_key_pem(unterminated.as_bytes()).err(),
+            Some(ReleaseDecisionError::InvalidPublicKey)
+        );
+    }
 }

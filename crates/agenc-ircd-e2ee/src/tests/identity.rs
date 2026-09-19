@@ -922,3 +922,336 @@ fn pinned_heads_classify_every_observation() -> TestResult {
     assert!(!same.same_client(&other_device, |_, _| true));
     Ok(())
 }
+
+#[test]
+fn root_identities_are_checked_before_and_after_their_signatures() -> TestResult {
+    let secret = key(50);
+    let first_secret = key(51);
+    let mut mismatched = root(&secret, &ACCOUNT, 0, ROOT_INTERVAL, None)?;
+    mismatched.tbs.profile_version = 2;
+    assert_eq!(
+        verify_root_identity(&NETWORK, &mismatched, None),
+        Err(E2eeError::ProfileMismatch)
+    );
+    assert_eq!(
+        verify_root_standalone(&NETWORK, &mismatched),
+        Err(E2eeError::ProfileMismatch)
+    );
+    let first = root(&first_secret, &ACCOUNT, 0, ROOT_INTERVAL, None)?;
+    let zero_with_predecessor = root(
+        &secret,
+        &ACCOUNT,
+        0,
+        ROOT_INTERVAL,
+        Some((&first_secret, &first)),
+    )?;
+    assert_eq!(
+        verify_root_identity(&NETWORK, &zero_with_predecessor, None),
+        Err(E2eeError::InvalidValue)
+    );
+    assert_eq!(
+        verify_root_standalone(&NETWORK, &zero_with_predecessor),
+        Err(E2eeError::InvalidValue)
+    );
+    let mut stray = root(&secret, &ACCOUNT, 0, ROOT_INTERVAL, None)?;
+    stray.continuity_signature = Opaque::new(vec![7; 64])?;
+    assert_eq!(
+        verify_root_identity(&NETWORK, &stray, None),
+        Err(E2eeError::InvalidValue)
+    );
+    let first_verified = verify_root_identity(&NETWORK, &first, None)?;
+    let other = root(&key(52), &ACCOUNT, 0, ROOT_INTERVAL, None)?;
+    let other_verified = verify_root_identity(&NETWORK, &other, None)?;
+    let second = root(
+        &secret,
+        &ACCOUNT,
+        1,
+        (500, 3_000_000),
+        Some((&first_secret, &first)),
+    )?;
+    assert_eq!(
+        verify_root_identity(&NETWORK, &second, Some(&other_verified)),
+        Err(E2eeError::InvalidValue),
+        "the predecessor fingerprint differs"
+    );
+    let foreign = root(
+        &secret,
+        &OTHER_ACCOUNT,
+        1,
+        (500, 3_000_000),
+        Some((&first_secret, &first)),
+    )?;
+    assert_eq!(
+        verify_root_identity(&NETWORK, &foreign, Some(&first_verified)),
+        Err(E2eeError::InvalidValue),
+        "the predecessor belongs to another account"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_device_certificate_is_checked_field_by_field_against_its_root_and_enrollment() -> TestResult {
+    let account = account_with(&[7])?;
+    let good = certificate(&account.root_secret, &account.root, &DeviceSpec::new(7))?;
+    let verify = |certificate: &IrcDeviceCertificate| {
+        verify_device_certificate(&account.verified_root, certificate).err()
+    };
+    let mut profile = good.clone();
+    profile.tbs.profile_version = 2;
+    assert_eq!(verify(&profile), Some(E2eeError::ProfileMismatch));
+    let mut enrollment_profile = good.clone();
+    enrollment_profile.enrollment_proof.tbs.profile_version = 2;
+    assert_eq!(
+        verify(&enrollment_profile),
+        Some(E2eeError::ProfileMismatch)
+    );
+    let mut network = good.clone();
+    network.tbs.network_id = [9; 32];
+    assert_eq!(verify(&network), Some(E2eeError::InvalidValue));
+    let mut generation = good.clone();
+    generation.tbs.root_generation = 5;
+    assert_eq!(verify(&generation), Some(E2eeError::InvalidValue));
+
+    type Corrupt = fn(&mut IrcDeviceEnrollmentTbs) -> Result<(), E2eeError>;
+    let corruptions: [Corrupt; 7] = [
+        |tbs| {
+            tbs.network_id = [9; 32];
+            Ok(())
+        },
+        |tbs| {
+            tbs.account_id = account_field(&OTHER_ACCOUNT)?;
+            Ok(())
+        },
+        |tbs| {
+            tbs.root_generation = 5;
+            Ok(())
+        },
+        |tbs| {
+            tbs.root_fingerprint = [9; 32];
+            Ok(())
+        },
+        |tbs| {
+            tbs.target_roster_generation = 5;
+            Ok(())
+        },
+        |tbs| {
+            tbs.enrollment_challenge = [9; 32];
+            Ok(())
+        },
+        |tbs| {
+            tbs.device_id = [9; 16];
+            Ok(())
+        },
+    ];
+    for corrupt in corruptions {
+        let mut certificate = good.clone();
+        corrupt(&mut certificate.enrollment_proof.tbs)?;
+        assert_eq!(verify(&certificate), Some(E2eeError::InvalidValue));
+    }
+    let reversed_window = certificate(
+        &account.root_secret,
+        &account.root,
+        &DeviceSpec {
+            enrollment: (100, 90),
+            ..DeviceSpec::new(7)
+        },
+    )?;
+    assert_eq!(verify(&reversed_window), Some(E2eeError::InvalidValue));
+    let reversed_interval = certificate(
+        &account.root_secret,
+        &account.root,
+        &DeviceSpec {
+            interval: (500, 400),
+            ..DeviceSpec::new(7)
+        },
+    )?;
+    assert_eq!(verify(&reversed_interval), Some(E2eeError::InvalidValue));
+    Ok(())
+}
+
+#[test]
+fn a_roster_is_checked_against_its_root_keys_windows_and_lineage() -> TestResult {
+    let account = account_with(&[7])?;
+    let verify =
+        |roster: &IrcDeviceRoster| verify_roster(&account.verified_root, roster, None).err();
+    let mut profile = account.roster.clone();
+    profile.tbs.profile_version = 2;
+    assert_eq!(verify(&profile), Some(E2eeError::ProfileMismatch));
+    let mut network = account.roster.clone();
+    network.tbs.network_id = [9; 32];
+    assert_eq!(verify(&network), Some(E2eeError::InvalidValue));
+    let mut generation = account.roster.clone();
+    generation.tbs.root_generation = 5;
+    assert_eq!(verify(&generation), Some(E2eeError::InvalidValue));
+
+    let shared_key = vec![
+        certificate(&account.root_secret, &account.root, &DeviceSpec::new(7))?,
+        certificate(
+            &account.root_secret,
+            &account.root,
+            &DeviceSpec {
+                device_id: [8; 16],
+                ..DeviceSpec::new(7)
+            },
+        )?,
+    ];
+    let duplicate_keys = roster(
+        &account.root_secret,
+        &account.root,
+        0,
+        [0; 32],
+        ROSTER_INTERVAL,
+        shared_key,
+        Vec::new(),
+    )?;
+    assert_eq!(verify(&duplicate_keys), Some(E2eeError::InvalidValue));
+
+    let late_enrollment = vec![certificate(
+        &account.root_secret,
+        &account.root,
+        &DeviceSpec {
+            enrollment: (1_000, 1_100),
+            ..DeviceSpec::new(7)
+        },
+    )?];
+    let outside_window = roster(
+        &account.root_secret,
+        &account.root,
+        0,
+        [0; 32],
+        ROSTER_INTERVAL,
+        late_enrollment,
+        Vec::new(),
+    )?;
+    assert_eq!(verify(&outside_window), Some(E2eeError::InvalidValue));
+
+    let first_with_predecessor = roster(
+        &account.root_secret,
+        &account.root,
+        0,
+        [1; 32],
+        ROSTER_INTERVAL,
+        vec![certificate(
+            &account.root_secret,
+            &account.root,
+            &DeviceSpec::new(7),
+        )?],
+        Vec::new(),
+    )?;
+    assert_eq!(
+        verify(&first_with_predecessor),
+        Some(E2eeError::InvalidValue)
+    );
+    Ok(())
+}
+
+#[test]
+fn capability_statements_are_checked_against_their_roster_and_device_lineage() -> TestResult {
+    let account = account_with(&[7, 8])?;
+    let good = capabilities(7, &account.roster, 0, [0; 32], (100, 1_000), vec![1])?;
+    let verify = |capabilities: &IrcDeviceCapabilities,
+                  predecessor: Option<&VerifiedCapabilities>| {
+        verify_capabilities(&account.verified_roster, capabilities, predecessor).err()
+    };
+    let mut profile = good.clone();
+    profile.tbs.profile_version = 2;
+    assert_eq!(verify(&profile, None), Some(E2eeError::ProfileMismatch));
+    let mut foreign = good.clone();
+    foreign.tbs.account_id = account_field(&OTHER_ACCOUNT)?;
+    assert_eq!(verify(&foreign, None), Some(E2eeError::InvalidValue));
+    let mut fingerprint = good.clone();
+    fingerprint.tbs.root_fingerprint = [9; 32];
+    assert_eq!(verify(&fingerprint, None), Some(E2eeError::InvalidValue));
+    let mut generation = good.clone();
+    generation.tbs.roster_generation = 5;
+    assert_eq!(verify(&generation, None), Some(E2eeError::InvalidValue));
+
+    let first_with_predecessor =
+        capabilities(7, &account.roster, 0, [1; 32], (100, 1_000), vec![1])?;
+    assert_eq!(
+        verify(&first_with_predecessor, None),
+        Some(E2eeError::InvalidValue)
+    );
+    let verified_good = verify_capabilities(&account.verified_roster, &good, None)?;
+    let other_device = capabilities(8, &account.roster, 0, [0; 32], (100, 1_000), vec![1])?;
+    let verified_other = verify_capabilities(&account.verified_roster, &other_device, None)?;
+    let successor = capabilities(
+        7,
+        &account.roster,
+        1,
+        verified_good.capability_id,
+        (100, 1_000),
+        vec![1],
+    )?;
+    assert_eq!(
+        verify(&successor, Some(&verified_other)),
+        Some(E2eeError::InvalidValue),
+        "the predecessor belongs to another device"
+    );
+    let wrong_predecessor = capabilities(7, &account.roster, 1, [1; 32], (100, 1_000), vec![1])?;
+    assert_eq!(
+        verify(&wrong_predecessor, Some(&verified_good)),
+        Some(E2eeError::InvalidValue)
+    );
+    assert!(verify(&successor, Some(&verified_good)).is_none());
+    Ok(())
+}
+
+#[test]
+fn leaf_authorizations_and_bundles_are_checked_against_their_roster() -> TestResult {
+    let account = account_with(&[7, 8])?;
+    let good = leaf_authorization(&account.roster, &LeafSpec::new(7, 9))?;
+    let verify = |leaf: &IrcLeafAuthorization| {
+        verify_leaf_authorization(&account.verified_roster, leaf).err()
+    };
+    let mut profile = good.clone();
+    profile.tbs.profile_version = 2;
+    assert_eq!(verify(&profile), Some(E2eeError::ProfileMismatch));
+    let mut mls = good.clone();
+    mls.tbs.mls_version = 2;
+    assert_eq!(verify(&mls), Some(E2eeError::ProfileMismatch));
+    let mut foreign = good.clone();
+    foreign.tbs.account_id = account_field(&OTHER_ACCOUNT)?;
+    assert_eq!(verify(&foreign), Some(E2eeError::InvalidValue));
+    let mut generation = good.clone();
+    generation.tbs.root_generation = 5;
+    assert_eq!(verify(&generation), Some(E2eeError::InvalidValue));
+    let beyond_certificate = leaf_authorization(
+        &account.roster,
+        &LeafSpec {
+            interval: (999_990, 1_000_010),
+            ..LeafSpec::new(7, 9)
+        },
+    )?;
+    assert_eq!(verify(&beyond_certificate), Some(E2eeError::InvalidValue));
+
+    let mismatched = IrcCredentialBundle {
+        root: account.root.clone(),
+        device_certificate: certificate(&account.root_secret, &account.root, &DeviceSpec::new(7))?,
+        leaf_authorization: leaf_authorization(&account.roster, &LeafSpec::new(8, 9))?,
+    };
+    assert_eq!(
+        verify_credential_bundle(&NETWORK, &account.verified_roster, &mismatched),
+        Err(E2eeError::InvalidValue)
+    );
+
+    let client = ClientIdentity {
+        network_id: NETWORK,
+        account_id: account.verified_root.account_id,
+        root_fingerprint: account.verified_root.fingerprint,
+        device_id: [7; 16],
+    };
+    let never = |_: &SemanticId, _: &SemanticId| false;
+    assert!(client.same_client(&client, never));
+    let other_network = ClientIdentity {
+        network_id: [9; 32],
+        ..client
+    };
+    assert!(!client.same_client(&other_network, never));
+    let other_account = ClientIdentity {
+        account_id: account_id_bytes(&account_field(&OTHER_ACCOUNT)?)?,
+        ..client
+    };
+    assert!(!client.same_client(&other_account, never));
+    Ok(())
+}
