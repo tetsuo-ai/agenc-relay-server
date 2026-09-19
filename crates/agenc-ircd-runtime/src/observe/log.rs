@@ -997,11 +997,10 @@ mod tests {
         writer.report_dropped(UtcSecond::from_unix_seconds(6));
         let lines = writer.target.segments.get(&0).cloned().unwrap_or_default();
         assert_eq!(lines.len(), 2);
-        assert!(lines.get(1).is_some_and(
-            |line| line.contains("event=log_dropped severity=warning")
-                && line.contains("count=le_10")
-                && line.contains("utc=5")
-        ));
+        let dropped = lines.get(1).cloned().unwrap_or_default();
+        assert!(dropped.contains("event=log_dropped severity=warning"));
+        assert!(dropped.contains("count=le_10"));
+        assert!(dropped.contains("utc=5"));
     }
 
     #[test]
@@ -1253,6 +1252,56 @@ mod tests {
             Some(io::ErrorKind::PermissionDenied)
         );
         std::fs::remove_dir_all(data_directory)?;
+        Ok(())
+    }
+
+    fn scratch_directory(name: &str) -> io::Result<PathBuf> {
+        let directory =
+            std::env::temp_dir().join(format!("agenc-ircd-log-{name}-{}", std::process::id()));
+        let _cleaned = std::fs::remove_dir_all(&directory);
+        DirBuilder::new()
+            .mode(LOG_DIRECTORY_MODE)
+            .create(&directory)?;
+        Ok(directory)
+    }
+
+    #[test]
+    fn segments_must_be_private_regular_files() -> io::Result<()> {
+        let directory = scratch_directory("segments")?;
+        let mut target = FileLogTarget::new(directory.clone());
+        let broad = directory.join("agenc-ircd-1.log");
+        std::fs::File::create(&broad)?;
+        std::fs::set_permissions(&broad, std::fs::Permissions::from_mode(0o644))?;
+        assert!(
+            target.open_segment(1).is_err(),
+            "a broad segment is refused"
+        );
+        let real = directory.join("real.log");
+        std::fs::File::create(&real)?;
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(LOG_SEGMENT_MODE))?;
+        std::os::unix::fs::symlink(&real, directory.join("agenc-ircd-2.log"))?;
+        assert!(
+            target.open_segment(2).is_err(),
+            "a linked segment is refused"
+        );
+        target.open_segment(3)?;
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_retention_scan_without_a_deletion_or_entry_budget_makes_no_progress() -> io::Result<()> {
+        let directory = scratch_directory("retention")?;
+        std::fs::File::create(directory.join("agenc-ircd-1.log"))?;
+        let mut cursor = RetentionCursor {
+            oldest_kept: 5,
+            entries: std::fs::read_dir(&directory)?,
+        };
+        assert!(!scan_retention_cursor(&mut cursor, 0, 10)?);
+        assert!(!scan_retention_cursor(&mut cursor, 10, 0)?);
+        assert!(scan_retention_cursor(&mut cursor, 10, 10)?);
+        assert!(!directory.join("agenc-ircd-1.log").exists());
+        std::fs::remove_dir_all(&directory)?;
         Ok(())
     }
 }

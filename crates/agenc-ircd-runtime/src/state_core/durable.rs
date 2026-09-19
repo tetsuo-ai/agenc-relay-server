@@ -2131,4 +2131,137 @@ mod tests {
         assert!(Revision::new(0).is_ok());
         Ok(())
     }
+
+    #[test]
+    fn read_back_records_must_be_exactly_one_matching_row() -> Result<(), RuntimeError> {
+        let key = StoredKey::new(vec![9])?;
+        let record = |table: TableId, key: &StoredKey| agenc_ircd_storage::ReadRecord {
+            table,
+            key: key.clone(),
+            sealed_record: Vec::new(),
+        };
+        let result =
+            |records: Vec<agenc_ircd_storage::ReadRecord>| agenc_ircd_storage::ReadResult {
+                storage_commit_sequence: 0,
+                records,
+                truncated: false,
+            };
+        let stale = Some(RuntimeError::Storage(StorageError::StaleState));
+        assert_eq!(
+            read_back_record(
+                TableId::Account,
+                key.clone(),
+                result(vec![
+                    record(TableId::Account, &key),
+                    record(TableId::Account, &key)
+                ]),
+            )
+            .err(),
+            stale
+        );
+        assert_eq!(
+            read_back_record(
+                TableId::Account,
+                key.clone(),
+                result(vec![record(TableId::Session, &key)]),
+            )
+            .err(),
+            stale
+        );
+        let other = StoredKey::new(vec![10])?;
+        assert_eq!(
+            read_back_record(
+                TableId::Account,
+                key.clone(),
+                result(vec![record(TableId::Account, &other)]),
+            )
+            .err(),
+            stale
+        );
+        assert!(
+            read_back_record(TableId::Account, key, result(Vec::new()))?
+                .2
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_batch_touches_each_row_once_and_holds_at_most_the_plan_ceiling() -> Result<(), RuntimeError>
+    {
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = account_plan()?;
+        let projection = || PlanProjection {
+            plan: &plan,
+            response_count_increment: 0,
+            account_service_writes: &[],
+        };
+        let twice = [projection(), projection()];
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([3; 16]),
+                &twice,
+                &DurableIndex::new(),
+                &keys()?,
+                head(0, 0),
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        let many: Vec<PlanProjection<'_>> =
+            (0..=MAX_TRANSACTION_PLANS).map(|_| projection()).collect();
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([4; 16]),
+                &many,
+                &DurableIndex::new(),
+                &keys()?,
+                head(0, 0),
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_session_row_carries_the_batch_revision() -> Result<(), RuntimeError> {
+        let (_, plan, _, _) = session_plan()?;
+        let session = plan
+            .durable_writes()
+            .iter()
+            .find_map(|write| match write {
+                DurableWrite::PutSession(session) => Some(session),
+                _ => None,
+            })
+            .ok_or(RuntimeError::InvalidValue)?;
+        let keys = keys()?;
+        let index = DurableIndex::new();
+        let mut projection = Projection {
+            index: &index,
+            keys: &keys,
+            mutations: Vec::new(),
+            updates: Vec::new(),
+            touched: BTreeSet::new(),
+        };
+        assert_eq!(
+            projection.put_session(session, 999).err(),
+            Some(RuntimeError::Storage(StorageError::StaleState))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_deletes_name_only_account_service_tables() -> Result<(), RuntimeError> {
+        assert_eq!(
+            AccountServiceDurableWrite::delete(TableId::Audit, StoredKey::new(vec![1])?).err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
 }
