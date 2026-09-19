@@ -321,3 +321,22 @@ fn mailbox_query_incarnation_fencing_keeps_an_unchanged_suspended_cut() -> TestR
     );
     Ok(())
 }
+
+#[test]
+fn a_snapshot_reservation_needs_at_least_one_row() -> TestResult {
+    let (source, _) = mailbox()?;
+    let port = source.query_sessions.query_reservations(
+        UserId::from_bytes([199; 16]),
+        source.query_limits,
+        source.backing.clone(),
+    );
+    assert!(matches!(
+        port.reserve_snapshot(0, 0),
+        Err(crate::RuntimeError::InvalidValue)
+    ));
+    let held = port.reserve_snapshot(1, 0)?;
+    assert_eq!(source.query_sessions.queue_snapshot().query_snapshots(), 1);
+    drop(held);
+    assert_eq!(source.query_sessions.queue_snapshot().query_snapshots(), 0);
+    Ok(())
+}

@@ -809,6 +809,49 @@ mod tests {
     }
 
     #[test]
+    fn bindings_refuse_reused_users_unlisted_identities_and_empty_queries()
+    -> Result<(), RuntimeError> {
+        let mut table = SessionTable::new();
+        let now = MonotonicTick::from_ticks(1);
+        let first = ConnectionGeneration::new(1);
+        let second = ConnectionGeneration::new(2);
+        let internal = ConnectionGeneration::new(3);
+        for generation in [first, second] {
+            table.open(
+                generation,
+                ListenerPurpose::ClientTls,
+                SourceAddressKey::onion_listener(),
+                sink(generation.get()),
+                now,
+            )?;
+        }
+        table.bind_session(first, bound(1), CapabilityState::default())?;
+        // The same user cannot be bound to a second connection.
+        assert!(
+            table
+                .bind_session(second, bound(1), CapabilityState::default())
+                .is_err()
+        );
+        // A virtual carrier is not listed as the user's connection, so a
+        // refresh or an unbind addressed to it as a local binding is refused.
+        table.open_virtual(internal, sink(3), now)?;
+        table.bind_virtual_session(internal, bound(2))?;
+        assert!(
+            table
+                .refresh_capabilities(internal, bound(2), &CapabilityState::default())
+                .is_err()
+        );
+        assert!(table.unbind_session(internal, bound(2)).is_err());
+        assert!(table.bind_virtual_session(internal, bound(1)).is_err());
+        assert_eq!(
+            table.begin_active_query(second, 1, 0),
+            Err(RuntimeError::InvalidValue)
+        );
+        table.begin_active_query(second, 1, 1)?;
+        Ok(())
+    }
+
+    #[test]
     fn virtual_authority_never_receives_chat_or_removes_a_later_local_binding()
     -> Result<(), RuntimeError> {
         let mut table = SessionTable::new();
