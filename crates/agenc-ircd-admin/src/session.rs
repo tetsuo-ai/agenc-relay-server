@@ -703,11 +703,13 @@ mod tests {
             }
             _ => return Err(AdminError::Command),
         }
-        assert!(matches!(
-            session.accept_line(&signed_line(1, "PING x", None)?, tick(0)?, &registry),
-            Ok(AdminEvent::Command(accepted))
-                if matches!(accepted.command, AdminCommand::Ping(_)) && accepted.counter == 1
-        ));
+        match session.accept_line(&signed_line(1, "PING x", None)?, tick(0)?, &registry) {
+            Ok(AdminEvent::Command(accepted)) => {
+                assert!(matches!(accepted.command, AdminCommand::Ping(_)));
+                assert_eq!(accepted.counter, 1);
+            }
+            _ => return Err(AdminError::Command),
+        }
         assert!(matches!(
             session.accept_line(
                 &signed_line(2, "REHASH :now please", None)?,
@@ -745,9 +747,8 @@ mod tests {
         }
         let (mut fresh, registry) = authenticated(&[AdminPermission::Observe])?;
         let mut forged = signed_line(0, "STATS RUNTIME", None)?;
-        if let Some(byte) = forged.get_mut(25) {
-            *byte = if *byte == b'A' { b'B' } else { b'A' };
-        }
+        let byte = forged.get_mut(25).ok_or(AdminError::Command)?;
+        *byte = b'A'.wrapping_add(u8::from(*byte == b'A'));
         assert_eq!(
             fresh.accept_line(&forged, tick(0)?, &registry).err(),
             Some(AdminCloseReason::BadSignature)
@@ -786,11 +787,12 @@ mod tests {
             tick(1_000)?,
             &registry,
         );
-        assert!(matches!(
-            first,
-            Ok(AdminEvent::Command(accepted))
-                if accepted.confirmation == ConfirmationState::Required
-        ));
+        match first {
+            Ok(AdminEvent::Command(accepted)) => {
+                assert_eq!(accepted.confirmation, ConfirmationState::Required);
+            }
+            _ => return Err(AdminError::Command),
+        }
         let token_bytes = [7_u8; 16];
         let revision = Revision::new(5).map_err(|_| AdminError::Overflow)?;
         session.issue_confirmation(
@@ -804,11 +806,15 @@ mod tests {
             "DIE :planned maintenance",
             Some(&ConfirmationToken::from_bytes(token_bytes)),
         )?;
-        assert!(matches!(
-            session.accept_line(&repeat, tick(30_000)?, &registry),
-            Ok(AdminEvent::Command(accepted))
-                if accepted.confirmation == ConfirmationState::Satisfied { target_revision: revision }
-        ));
+        match session.accept_line(&repeat, tick(30_000)?, &registry) {
+            Ok(AdminEvent::Command(accepted)) => assert_eq!(
+                accepted.confirmation,
+                ConfirmationState::Satisfied {
+                    target_revision: revision
+                }
+            ),
+            _ => return Err(AdminError::Command),
+        }
 
         // A second repeat has nothing pending: the token was consumed.
         let again = signed_line(
@@ -904,11 +910,12 @@ mod tests {
             revision,
         )?;
         // A fresh first step consumes the earlier token.
-        assert!(matches!(
-            replaced.accept_line(&signed_line(1, "RESTART :x y", None)?, tick(0)?, &registry),
-            Ok(AdminEvent::Command(accepted))
-                if accepted.confirmation == ConfirmationState::Required
-        ));
+        match replaced.accept_line(&signed_line(1, "RESTART :x y", None)?, tick(0)?, &registry) {
+            Ok(AdminEvent::Command(accepted)) => {
+                assert_eq!(accepted.confirmation, ConfirmationState::Required);
+            }
+            _ => return Err(AdminError::Command),
+        }
         let stale = signed_line(
             2,
             "DIE :x y",
@@ -983,10 +990,9 @@ mod tests {
 
         let expanded = registry(&[AdminPermission::Observe, AdminPermission::Process])?;
         assert!(session.reconcile_authority(&expanded));
-        assert!(session.operator().is_some_and(|(_, permissions)| {
-            permissions.contains(AdminPermission::Observe)
-                && permissions.contains(AdminPermission::Process)
-        }));
+        let (_, permissions) = session.operator().ok_or(AdminError::Command)?;
+        assert!(permissions.contains(AdminPermission::Observe));
+        assert!(permissions.contains(AdminPermission::Process));
         assert_eq!(
             session
                 .accept_line(
@@ -1003,6 +1009,39 @@ mod tests {
         assert_eq!(
             session.state(),
             AdminSessionState::Closed(AdminCloseReason::Terminated)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_operator_whose_signing_key_changed_is_terminated_on_reconcile() -> Result<(), AdminError>
+    {
+        let (mut session, _registry) = authenticated(&[AdminPermission::Observe])?;
+        let mut set = AdminPermissionSet::EMPTY;
+        set.insert(AdminPermission::Observe);
+        let rekeyed = OperatorRegistry::from_records(vec![OperatorRecord::new(
+            operator_id(),
+            Ed25519SecretKey::from_bytes([22; 32]).public_key(),
+            None,
+            vec![1000],
+            vec![],
+            set,
+            true,
+        )?])?;
+        assert!(!session.reconcile_authority(&rekeyed));
+        Ok(())
+    }
+
+    #[test]
+    fn an_overlong_pre_authentication_line_is_malformed() -> Result<(), AdminError> {
+        let registry = registry(&[AdminPermission::Observe])?;
+        let mut fresh = AdminSession::new(binding(), challenge(), peer());
+        let line = format!("PING {}\r\n", "x".repeat(crate::MAX_ADMIN_COMMAND_BYTES));
+        assert_eq!(
+            fresh
+                .accept_line(line.as_bytes(), tick(0)?, &registry)
+                .err(),
+            Some(AdminCloseReason::MalformedLine)
         );
         Ok(())
     }

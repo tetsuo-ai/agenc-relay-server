@@ -1158,3 +1158,22 @@ fn push_snapshot_echo(text: &mut String, identity: &SnapshotIdentity) -> Result<
 #[cfg(test)]
 #[path = "tests/frames.rs"]
 mod tests;
+
+#[cfg(test)]
+mod rendered_line_tests {
+    use super::*;
+
+    #[test]
+    fn rendered_lines_need_a_body_a_bounded_length_and_no_control_bytes() {
+        assert!(FederationLineText::from_rendered("\r\n".to_owned()).is_err());
+        let long = format!("{}\r\n", "x".repeat(MAX_RENDERED_LINE_BYTES));
+        assert!(FederationLineText::from_rendered(long).is_err());
+        for body in ["a\rb", "a\nb", "a\0b"] {
+            assert!(
+                FederationLineText::from_rendered(format!("{body}\r\n")).is_err(),
+                "{body:?}"
+            );
+        }
+        assert!(FederationLineText::from_rendered("ok\r\n".to_owned()).is_ok());
+    }
+}

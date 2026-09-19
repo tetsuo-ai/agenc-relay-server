@@ -660,3 +660,19 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod entropy_tests {
+    use super::FallibleOpaqueRng;
+
+    #[test]
+    fn a_latched_entropy_failure_stays_failed_and_tolerates_empty_buffers() {
+        let mut rng = FallibleOpaqueRng { failed: true };
+        rng.fill_or_latch(&mut []);
+        assert!(!rng.succeeded());
+        let mut buffer = [7_u8; 4];
+        rng.fill_or_latch(&mut buffer);
+        assert_eq!(buffer, [1, 0, 0, 0]);
+        assert!(!rng.succeeded());
+    }
+}

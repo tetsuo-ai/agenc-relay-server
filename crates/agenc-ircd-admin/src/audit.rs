@@ -755,9 +755,7 @@ mod tests {
         assert_eq!(exhausted.advance(&last), Err(AdminError::Overflow));
 
         let mut tampered = encoded.clone();
-        if let Some(byte) = tampered.get_mut(60) {
-            *byte ^= 1;
-        }
+        *tampered.get_mut(60).ok_or(AdminError::Audit)? ^= 1;
         let decoded = AdminAuditEvent::decode_exact(&tampered)?;
         assert_eq!(
             decoded.verify(audit_key().public_key(), operator_key().public_key()),
@@ -773,9 +771,9 @@ mod tests {
         // The outcome code sits after the phase byte; flip its first letter.
         let phase_offset =
             2 + 32 + 16 + 32 + 8 + 8 + 16 + first.tbs().command_tbs.encode()?.len() + 64;
-        if let Some(byte) = wrong_code.get_mut(phase_offset + 2) {
-            *byte = b'X';
-        }
+        *wrong_code
+            .get_mut(phase_offset + 2)
+            .ok_or(AdminError::Audit)? = b'X';
         assert_eq!(
             AdminAuditEvent::decode_exact(&wrong_code),
             Err(AdminError::Audit)
@@ -833,9 +831,7 @@ mod tests {
             Err(AdminError::Audit)
         );
         let mut wrong_version = tbs.encode()?;
-        if let Some(byte) = wrong_version.get_mut(1) {
-            *byte = 9;
-        }
+        *wrong_version.get_mut(1).ok_or(AdminError::Audit)? = 9;
         assert_eq!(
             AdminAuditCheckpointTbs::decode_exact(&wrong_version),
             Err(AdminError::Audit)
@@ -867,14 +863,14 @@ mod tests {
             lines.first().map(String::as_str),
             Some("BATCH +AAAAAAAAAAAAAAAAAAAAAA agenc.ag/audit 0 5 1 1")
         );
-        assert!(lines.get(1).is_some_and(|line| {
-            line.starts_with("@batch=AAAAAAAAAAAAAAAAAAAAAA NOTE AUDIT CHECKPOINT ")
-                && line.ends_with(" :Audit checkpoint")
-        }));
-        assert!(lines.get(2).is_some_and(|line| {
-            line.starts_with("@batch=AAAAAAAAAAAAAAAAAAAAAA NOTE AUDIT EVENT ")
-                && line.ends_with(" :Audit event")
-        }));
+        let checkpoint_line = lines.get(1).cloned().unwrap_or_default();
+        assert!(
+            checkpoint_line.starts_with("@batch=AAAAAAAAAAAAAAAAAAAAAA NOTE AUDIT CHECKPOINT ")
+        );
+        assert!(checkpoint_line.ends_with(" :Audit checkpoint"));
+        let event_line = lines.get(2).cloned().unwrap_or_default();
+        assert!(event_line.starts_with("@batch=AAAAAAAAAAAAAAAAAAAAAA NOTE AUDIT EVENT "));
+        assert!(event_line.ends_with(" :Audit event"));
         assert!(
             lines
                 .iter()
@@ -955,4 +951,63 @@ mod tests {
 
     #[path = "export_records.rs"]
     mod export_records;
+
+    #[test]
+    fn a_checkpoint_with_a_mismatched_hash_fails_verification() -> Result<(), AdminError> {
+        let first = AdminAuditEvent::sign(
+            event_tbs(0, [0; 32], AdminAuditPhase::Observed)?,
+            &audit_key(),
+        )?;
+        let mut checkpoint =
+            AdminAuditCheckpoint::sign(checkpoint_tbs(0, 0, first.event_hash())?, &audit_key())?;
+        checkpoint.verify(audit_key().public_key())?;
+        checkpoint.checkpoint_hash = [9; 32];
+        assert_eq!(
+            checkpoint.verify(audit_key().public_key()),
+            Err(AdminError::Audit)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn export_checkpoints_must_intersect_the_requested_range() -> Result<(), AdminError> {
+        let first = AdminAuditEvent::sign(
+            event_tbs(0, [0; 32], AdminAuditPhase::Observed)?,
+            &audit_key(),
+        )?;
+        let second = AdminAuditEvent::sign(
+            event_tbs(1, first.event_hash(), AdminAuditPhase::Observed)?,
+            &audit_key(),
+        )?;
+        for (deleted_first, deleted_last) in [(20, 20), (0, 0)] {
+            let checkpoint = AdminAuditCheckpoint::sign(
+                checkpoint_tbs(deleted_first, deleted_last, first.event_hash())?,
+                &audit_key(),
+            )?;
+            assert_eq!(
+                render_export_batch(
+                    &[0; 16],
+                    AuditRange::new(10, 15)?,
+                    &[checkpoint],
+                    &[crate::AuditEvent::Admin(second.clone())],
+                )
+                .err(),
+                Some(AdminError::Audit),
+                "deleted {deleted_first}..={deleted_last}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn export_bytes_are_bounded() -> Result<(), AdminError> {
+        let limit =
+            usize::try_from(crate::MAX_AUDIT_EXPORT_BYTES).map_err(|_| AdminError::Overflow)?;
+        assert_eq!(
+            super::check_export_bytes(&["x".repeat(limit)]),
+            Err(AdminError::Limit)
+        );
+        assert_eq!(super::check_export_bytes(&["ok".to_owned()]), Ok(()));
+        Ok(())
+    }
 }
