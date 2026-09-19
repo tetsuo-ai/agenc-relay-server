@@ -537,3 +537,26 @@ async fn a_resume_acknowledgement_outside_the_retained_cursor_is_refused() -> Te
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn an_origin_ready_outside_the_origin_replay_is_a_violation() -> TestResult {
+    let mut fixture = WitnessFixture::new().await?;
+    assert_eq!(fixture.companion.phase, Phase::Active);
+    let before = fixture.companion.counters.violations;
+    assert!(
+        fixture
+            .companion
+            .handle_frames(
+                fixture.core.context_mut()?,
+                &mut fixture.base,
+                vec![CompanionFrame::OriginReady {
+                    home_server_id: [2; 16],
+                    server_incarnation: [4; 16],
+                }],
+            )
+            .is_empty()
+    );
+    assert_eq!(fixture.companion.counters.violations, before + 1);
+    assert_ne!(fixture.companion.phase, Phase::Active);
+    Ok(())
+}

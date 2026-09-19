@@ -354,3 +354,39 @@ fn a_maximum_size_object_completes_at_no_less_than_the_floor_rate() -> TestResul
     assert!(seconds < (1_427 - 20) / 4);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_command_that_needs_a_device_is_refused_before_attachment() -> TestResult {
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    if let Some(origin) = edge.origins.get_mut(&generation) {
+        origin.device = None;
+    }
+    let capabilities = capabilities()?;
+    let facts = SessionFacts {
+        user_id: USER,
+        account: Some(account_id().to_text().as_bytes().try_into()?),
+        capabilities: &capabilities,
+        nickname: "Sender",
+    };
+    let message = parse_message(FramedLine::new("EKEY CLAIM STATUS AAAAAAAAAAAAAAAAAAAAAA")?)?
+        .ok_or("message")?;
+    let outputs = edge.client_line(core.context_mut()?, &mut base, generation, &message, &facts);
+    let frame = outputs
+        .first()
+        .and_then(|output| output.frames.first())
+        .ok_or("a refusal")?;
+    assert_eq!(frame.command(), "FAIL");
+    assert!(
+        frame
+            .middle()
+            .iter()
+            .any(|value| value == "E2EE_DEVICE_REQUIRED"),
+        "{:?}",
+        frame.middle()
+    );
+    assert!(edge.pending.is_empty());
+    Ok(())
+}
