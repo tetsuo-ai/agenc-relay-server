@@ -12,9 +12,9 @@ use agenc_ircd_storage::{
     ORIGIN_FLAG_PENDING_DEL, ORIGIN_FLAG_SINK_GONE, ORIGIN_RECORD_KIND, OUTBOX_EVENT_KIND,
     OriginRowStatus, OutboxEventRecord, PEER_RECORD_KIND, PROJECTION_ENTRY_KIND,
     PROJECTION_MARKER_KIND, PeerPhase, PersistentRecordValue, ProjectionEntryRecord,
-    ProjectionGenerationState, ProjectionMarkerRecord, StorageError, TableId, origin_key,
-    outbox_key, outbox_range, parse_origin_key, parse_outbox_key, parse_projection_key, peer_key,
-    projection_entry_key, projection_marker_key, projection_range, request_result_key,
+    ProjectionGenerationState, ProjectionMarkerRecord, StorageError, StoredKey, TableId,
+    origin_key, outbox_key, outbox_range, parse_origin_key, parse_outbox_key, parse_projection_key,
+    peer_key, projection_entry_key, projection_marker_key, projection_range, request_result_key,
 };
 use agenc_ircd_types::{ServerId, ServerIncarnation};
 
@@ -463,5 +463,114 @@ fn persistent_envelope_accepts_every_federation_arm() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn peer_records_bound_and_order_fenced_incarnations() -> TestResult {
+    let mut crowded = peer();
+    crowded.fenced_incarnations = (0..1_025_u32)
+        .map(|index| {
+            let mut id = [0; 16];
+            id[..4].copy_from_slice(&index.to_be_bytes());
+            id
+        })
+        .collect();
+    assert_eq!(crowded.encode().err(), Some(StorageError::LimitExceeded));
+    let mut unsorted = peer();
+    unsorted.fenced_incarnations = vec![[2; 16], [1; 16]];
+    assert_eq!(unsorted.encode().err(), Some(StorageError::InvalidEncoding));
+
+    let mut fenced = peer();
+    fenced.fenced_incarnations = vec![[1; 16], [2; 16]];
+    let body = fenced.encode()?;
+    let count_at = body.len() - 34;
+    assert_eq!(&body[count_at..count_at + 2], &[0, 2]);
+    let mut zero = body.clone();
+    zero[count_at + 1] = 0;
+    assert_eq!(
+        FederationPeerRecord::decode(&zero).err(),
+        Some(StorageError::LimitExceeded)
+    );
+    let mut many = body.clone();
+    many[count_at] = 0xff;
+    many[count_at + 1] = 0xff;
+    assert_eq!(
+        FederationPeerRecord::decode(&many).err(),
+        Some(StorageError::LimitExceeded)
+    );
+    let mut swapped = body;
+    swapped[count_at + 2..count_at + 18].copy_from_slice(&[2; 16]);
+    swapped[count_at + 18..count_at + 34].copy_from_slice(&[1; 16]);
+    assert_eq!(
+        FederationPeerRecord::decode(&swapped).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn decoders_reject_unknown_versions_counts_and_absent_options_with_values() -> TestResult {
+    let mut peer_bytes = peer().encode()?;
+    patch(&mut peer_bytes, ENVELOPE_BYTES + 1, 9)?;
+    assert_eq!(
+        FederationPeerRecord::decode(&peer_bytes).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    let mut epochs = peer().encode()?;
+    assert_eq!(&epochs[ENVELOPE_BYTES + 34..ENVELOPE_BYTES + 36], &[0, 2]);
+    patch(&mut epochs, ENVELOPE_BYTES + 35, 65)?;
+    assert_eq!(
+        FederationPeerRecord::decode(&epochs).err(),
+        Some(StorageError::LimitExceeded)
+    );
+    let mut request_bytes = edge_request().encode()?;
+    patch(&mut request_bytes, ENVELOPE_BYTES + 1, 9)?;
+    assert_eq!(
+        EdgeRequestRecord::decode(&request_bytes).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    let mut origin_bytes = origin().encode()?;
+    patch(&mut origin_bytes, ENVELOPE_BYTES + 1, 9)?;
+    assert_eq!(
+        FederationOriginRecord::decode(&origin_bytes).err(),
+        Some(StorageError::UnsupportedVersion)
+    );
+
+    let cursor_present_offset = PEER_PHASE_OFFSET + 2 + 8 + 8;
+    let mut absent = peer();
+    absent.cursor = None;
+    let mut bytes = absent.encode()?;
+    patch(&mut bytes, cursor_present_offset + 2 + 8 + 15, 1)?;
+    assert_eq!(
+        FederationPeerRecord::decode(&bytes).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    let mut absent = peer();
+    absent.cursor = None;
+    absent.pending_generation = None;
+    let mut bytes = absent.encode()?;
+    let pending_offset = cursor_present_offset + 2 + 8 + 16 + 8 + 8;
+    assert_eq!(&bytes[pending_offset..pending_offset + 2], &[0, 0]);
+    patch(&mut bytes, pending_offset + 2 + 7, 1)?;
+    assert_eq!(
+        FederationPeerRecord::decode(&bytes).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn edge_requests_bound_their_objects_and_projection_keys_need_their_prefix() -> TestResult {
+    let mut huge = edge_request();
+    huge.request_object = vec![1; 262_145];
+    assert_eq!(huge.encode().err(), Some(StorageError::InvalidEncoding));
+    let mut huge = edge_request();
+    huge.result_object = vec![1; 262_145];
+    assert_eq!(huge.encode().err(), Some(StorageError::InvalidEncoding));
+    assert_eq!(
+        parse_projection_key(&StoredKey::new(vec![1; 8])?).err(),
+        Some(StorageError::InvalidEncoding)
+    );
     Ok(())
 }

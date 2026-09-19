@@ -2085,7 +2085,8 @@ mod tests {
         let (_reference_directory, _reference, measured) =
             first_commit("charge-reference", full_allowance())?;
         let charged = measured.map_err(certain)?;
-        assert!(charged > 0 && charged <= crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH);
+        assert!(charged > 0);
+        assert!(charged <= crate::MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH);
 
         // Exactly the measured charge fits, to the byte.
         let (_exact_directory, exact, outcome) =
@@ -2163,7 +2164,8 @@ mod tests {
             .ok()
             .and_then(MaintenanceOutcome::completed)
             .ok_or(StorageError::StaleState)?;
-        assert!(progress.records >= 1 && progress.pages >= 1);
+        assert!(progress.records >= 1);
+        assert!(progress.pages >= 1);
         assert!(!progress.remaining);
         let drained = store
             .reclaim_deferred(full_allowance())

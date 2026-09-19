@@ -260,3 +260,77 @@ fn history_edge_records_reject_impossible_render_and_expiry_states() -> Result<(
     assert!(record.encode().is_err());
     Ok(())
 }
+
+fn invalid_message(adjust: impl FnOnce(&mut HistoryMessageRecord)) -> Result<bool, StorageError> {
+    let mut record = message()?;
+    adjust(&mut record);
+    Ok(record.validate().is_err())
+}
+
+#[test]
+fn history_messages_reject_each_shape_violation() -> Result<(), StorageError> {
+    let local = ChannelNameValue::parse("&local").map_err(|_| StorageError::InvalidEncoding)?;
+    assert!(invalid_message(|record| record.channel_sequence = 0)?);
+    assert!(invalid_message(|record| record.channel_name = local)?);
+    assert!(invalid_message(|record| record.retention_seconds = 10)?);
+    assert!(invalid_message(|record| record.body = String::new())?);
+    assert!(invalid_message(|record| {
+        record.kind = MessageKind::Notice;
+        record.body = "x".repeat(513);
+    })?);
+    assert!(invalid_message(|record| {
+        record.tags = (0..17)
+            .map(|index| (format!("+t/{index:02}"), "v".to_owned()))
+            .collect();
+    })?);
+    assert!(!invalid_message(|record| {
+        record.kind = MessageKind::Notice;
+        record.body = String::new();
+    })?);
+    Ok(())
+}
+
+#[test]
+fn history_message_tags_are_bounded_clean_and_sorted() -> Result<(), StorageError> {
+    let long_key = format!("+{}", "k".repeat(255));
+    let bad_tags: [Vec<(String, String)>; 7] = [
+        vec![(long_key, "v".into())],
+        vec![("+a b".into(), "v".into())],
+        vec![("+agenc.ag/x".into(), "v".into())],
+        vec![("+a".into(), "v".repeat(257))],
+        vec![("+a".into(), "v\0".into())],
+        vec![("+b".into(), "v".into()), ("+a".into(), "v".into())],
+        vec![("+a".into(), "v".into()), ("+a".into(), "w".into())],
+    ];
+    for tags in bad_tags {
+        assert!(invalid_message(|record| record.tags = tags)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn history_message_decoding_bounds_the_body_and_the_tag_count() -> Result<(), StorageError> {
+    assert_eq!(
+        HistoryMessageRecord::decode(&vec![0; 1 << 20]).err(),
+        Some(StorageError::LimitExceeded)
+    );
+    let mut labelled = message()?;
+    labelled.sender.account_label = Some(
+        agenc_ircd_domain::AccountLabelValue::parse("alice")
+            .map_err(|_| StorageError::InvalidEncoding)?,
+    );
+    let body = labelled.encode()?;
+    assert!(HistoryMessageRecord::decode(&body)? == labelled);
+
+    let mut untagged = message()?;
+    untagged.tags.clear();
+    let mut body = untagged.encode()?;
+    let count_at = body.len() - 4 - untagged.body.len() - 2;
+    assert_eq!(&body[count_at..count_at + 2], &[0, 0]);
+    body[count_at + 1] = 17;
+    assert_eq!(
+        HistoryMessageRecord::decode(&body).err(),
+        Some(StorageError::LimitExceeded)
+    );
+    Ok(())
+}

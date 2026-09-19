@@ -4095,6 +4095,7 @@ pub(crate) fn draw_nonces_with_faults(
 pub(crate) mod tests {
     mod bounded_scratch;
     mod history_reads;
+    mod limits_reach;
     use std::fs::OpenOptions;
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};
@@ -4965,7 +4966,8 @@ pub(crate) mod tests {
             add_retired_charge(&mut logical, &mut backup, b"key", &sealed),
             Ok(())
         );
-        assert!(logical > 0 && backup > logical);
+        assert!(logical > 0);
+        assert!(backup > logical);
 
         let mut overflowed = u64::MAX;
         let mut backup = 0;
@@ -6646,7 +6648,8 @@ pub(crate) mod tests {
             .ok()
             .and_then(MaintenanceOutcome::completed)
             .ok_or(StorageError::StaleState)?;
-        assert!(progress.records >= 1 && progress.pages >= 1);
+        assert!(progress.records >= 1);
+        assert!(progress.pages >= 1);
         assert!(!progress.remaining);
         Ok(())
     }

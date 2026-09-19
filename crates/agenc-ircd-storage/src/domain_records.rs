@@ -1378,3 +1378,7 @@ pub(crate) mod fixtures {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "tests/domain_records_reach.rs"]
+mod reach;
