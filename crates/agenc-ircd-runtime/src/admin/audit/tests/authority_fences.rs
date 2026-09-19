@@ -171,3 +171,178 @@ fn only_the_assigned_table_and_record_kind_pairs_are_readable() {
         assert!(!mixed::permitted_kind(table, kind), "{table:?}/{kind}");
     }
 }
+
+/// A startup outcome is prepared only inside the signing window, at the exact
+/// chain position behind its intent, and for the action in progress; the
+/// committed outcome must be byte-identical to the prepared one.
+#[test]
+fn a_startup_outcome_is_prepared_only_at_its_exact_position_and_window() -> Result<(), RuntimeError>
+{
+    let binding = binding();
+    let audit_key = Ed25519SecretKey::from_bytes([4; 32]);
+    let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+    let operator_id = OperatorId::from_bytes([6; 16]);
+    let registry = registry(operator_id, &operator_key)?;
+    let trust = AuditTrust::new(&[trust_entry(&audit_key)?])?;
+    let fixture = EventFixture {
+        binding,
+        audit_key: &audit_key,
+        operator_key: &operator_key,
+        operator_id,
+    };
+    let intent = fixture.event(
+        AuditChainCursor::genesis(),
+        0,
+        AdminAuditPhase::Intent,
+        b"KILL AAAAAAAAAAAAAAAAAAAAAA :policy action",
+    )?;
+    let mut verifier = EventVerifier::new(binding, &trust, &registry, AuditChainCursor::genesis());
+    verifier.observe(&intent)?;
+    let verified = verifier.finish();
+    let mut authority = AuditAuthority::empty_for_test()?;
+    authority.cursor = verified.cursor;
+    authority.pending_startup_action = verified.pending_startup_action;
+
+    authority.reconciled = false;
+    assert!(
+        authority.take_pending_startup_action().is_none(),
+        "no action leaves an authority whose base is invalid"
+    );
+    authority.reconciled = true;
+    let action = authority
+        .take_pending_startup_action()
+        .ok_or(RuntimeError::InvalidValue)?;
+    let prepare = |authority: &AuditAuthority| {
+        authority.prepare_startup_outcome(&action, AdminAuditPhase::OutcomeSuccess, CREATED_AT)
+    };
+    let position = authority.cursor;
+
+    authority.signing_not_before = CREATED_AT + 1;
+    assert!(prepare(&authority).is_err(), "before the signing window");
+    authority.signing_not_before = 0;
+    authority.signing_not_after = CREATED_AT;
+    assert!(prepare(&authority).is_err(), "after the signing window");
+    authority.signing_not_after = u64::MAX;
+    authority.cursor.next_sequence = 5;
+    assert!(prepare(&authority).is_err(), "off the chain position");
+    authority.cursor = position;
+    authority.cursor.previous_event_hash = [1; 32];
+    assert!(prepare(&authority).is_err(), "behind another event");
+    authority.cursor = position;
+    authority.startup_action_in_progress = Some([7; 32]);
+    assert!(prepare(&authority).is_err(), "another action in progress");
+    authority.startup_action_in_progress = Some(action.intent_hash());
+
+    let outcome = prepare(&authority)?;
+    let foreign = AdminAuditEvent::sign(
+        outcome.tbs().clone(),
+        &Ed25519SecretKey::from_bytes([8; 32]),
+    )
+    .map_err(|_| RuntimeError::InvalidValue)?;
+    let action_for_foreign = PendingStartupAction::from_verified(
+        &intent,
+        &AdminCommand::parse(
+            CanonicalCommand::check(b"KILL AAAAAAAAAAAAAAAAAAAAAA :policy action")
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?,
+    )?;
+    assert!(
+        authority
+            .resolve_committed_startup_action(action_for_foreign, &foreign)
+            .is_err(),
+        "an outcome under another signature never advances authority"
+    );
+    assert_eq!(authority.cursor, position);
+    authority.resolve_committed_startup_action(action, &outcome)?;
+    assert!(authority.is_reconciled());
+    Ok(())
+}
+
+/// An unreconciled authority refuses to export, to commit an event and to
+/// commit a retention checkpoint, and a reconciled one refuses a checkpoint
+/// that is not the next one over the retained prefix, or an event whose
+/// command binds another server.
+#[test]
+fn an_unreconciled_authority_refuses_export_and_commits_and_checkpoints_must_chain()
+-> Result<(), RuntimeError> {
+    let binding = binding();
+    let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+    let operator_id = OperatorId::from_bytes([6; 16]);
+    let command = command_event(binding, &operator_key, 0, b"MOTD")?;
+    let mut authority = AuditAuthority::empty_for_test()?;
+    let event = authority.prepare_event(
+        binding,
+        operator_id,
+        &command,
+        AdminAuditPhase::Observed,
+        CREATED_AT,
+    )?;
+    let range = AuditRange::new(0, 0).map_err(|_| RuntimeError::InvalidValue)?;
+    let checkpoint = |authority: &AuditAuthority, first: u64, previous: [u8; 32]| {
+        AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                network_id: binding.network_id,
+                server_id: binding.server_id,
+                audit_signing_key_id: authority.signing_key_id,
+                checkpoint_sequence: 0,
+                created_at: CREATED_AT,
+                deleted_first_sequence: first,
+                deleted_last_sequence: first,
+                deleted_count: 1,
+                deleted_last_event_hash: event.event_hash(),
+                next_retained_sequence: first + 1,
+                previous_checkpoint_hash: previous,
+            },
+            &authority.signing_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    };
+
+    authority.reconciled = false;
+    assert!(authority.prepare_export(range, [0; 16]).is_err());
+    assert!(authority.commit_event(&event).is_err());
+    assert!(
+        authority
+            .commit_retention(&checkpoint(&authority, 0, [0; 32])?)
+            .is_err()
+    );
+    assert_eq!(authority.cursor, AuditChainCursor::genesis());
+
+    authority.reconciled = true;
+    authority.commit_event(&event)?;
+    assert!(
+        authority
+            .commit_retention(&checkpoint(&authority, 1, [0; 32])?)
+            .is_err(),
+        "the checkpoint must start at the retained prefix"
+    );
+    authority.previous_checkpoint_hash = [9; 32];
+    assert!(
+        authority
+            .commit_retention(&checkpoint(&authority, 0, [0; 32])?)
+            .is_err(),
+        "the checkpoint must chain from the previous one"
+    );
+    authority.previous_checkpoint_hash = [0; 32];
+    assert_eq!(authority.next_checkpoint_sequence, 0);
+    authority.commit_retention(&checkpoint(&authority, 0, [0; 32])?)?;
+    assert_eq!(authority.next_checkpoint_sequence, 1);
+
+    let mut foreign = binding;
+    foreign.server_id = agenc_ircd_types::ServerId::from_bytes([77; 16]);
+    let foreign_command = command_event(foreign, &operator_key, 1, b"MOTD")?;
+    assert!(
+        authority
+            .prepare_event(
+                binding,
+                operator_id,
+                &foreign_command,
+                AdminAuditPhase::Observed,
+                CREATED_AT,
+            )
+            .is_err(),
+        "a command bound to another server is never recorded here"
+    );
+    Ok(())
+}
