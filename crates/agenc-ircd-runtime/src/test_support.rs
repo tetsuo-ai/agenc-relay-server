@@ -717,6 +717,20 @@ impl StateCoreFixture {
         Self::build_with(entropy, true, None, records)
     }
 
+    /// The next crypto completion, for a test that steps the core by hand
+    /// while the real worker pool runs the job.
+    pub(crate) async fn next_crypto_completion(
+        &mut self,
+    ) -> TestResult<crate::bridge::CryptoCompletionMessage<crate::bridge::crypto::CryptoJobOutput>>
+    {
+        self.crypto_completions
+            .as_mut()
+            .ok_or("crypto completions were taken")?
+            .recv()
+            .await
+            .ok_or_else(|| "crypto completion channel closed".into())
+    }
+
     /// The next storage read completion, for a test that drives a router's
     /// reload by hand instead of running the actor loop.
     pub(crate) async fn next_storage_read(

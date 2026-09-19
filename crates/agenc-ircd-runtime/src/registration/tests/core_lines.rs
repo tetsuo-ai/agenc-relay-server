@@ -153,3 +153,73 @@ async fn command_behind_an_unfinished_join_waits_for_the_join_response() -> Test
     );
     Ok(())
 }
+
+/// A registered owner of `#locked` whose key MODE is waiting on its
+/// channel-key construction job.
+async fn pending_key_mode(core: &mut Core) -> TestResult<Arc<FrameSink>> {
+    let sink = core.open(1)?;
+    core.line(1, "NICK owner")?;
+    core.line(1, "USER owner 0 * :Owner")?;
+    core.settle().await?;
+    core.line(1, "JOIN #locked")?;
+    core.settle().await?;
+    core.line(1, "MODE #locked +k secretkey")?;
+    assert_eq!(
+        core.fixture
+            .context_mut()?
+            .crypto_mut()
+            .snapshot_in_flight(),
+        1
+    );
+    Ok(sink)
+}
+
+#[tokio::test]
+async fn a_channel_key_mode_defers_behind_its_job_and_resumes_when_it_completes() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = pending_key_mode(&mut core).await?;
+    let before = sink.lines().len();
+    core.line(1, "MODE #locked +k otherkey")?;
+    assert!(
+        sink.lines().len() > before,
+        "a second key command while one is pending is answered: {:?}",
+        sink.lines()
+    );
+    let completion = core.fixture.next_crypto_completion().await?;
+    core.fixture.state_mut()?.step_crypto(completion);
+    core.settle().await?;
+    assert!(saw(&sink, "+k"), "lines: {:?}", sink.lines());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_channel_key_job_answers_busy() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = pending_key_mode(&mut core).await?;
+    let before = sink.lines().len();
+    let completion = core.fixture.next_crypto_completion().await?;
+    core.fixture
+        .state_mut()?
+        .step_crypto(crate::bridge::CryptoCompletionMessage {
+            job_id: completion.job_id,
+            output: Err(agenc_ircd_crypto::CryptoWorkerError::QueueFull),
+        });
+    assert!(sink.lines().len() > before, "lines: {:?}", sink.lines());
+    assert!(!saw(&sink, "+k"), "lines: {:?}", sink.lines());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pending_channel_key_job_expires_at_its_deadline() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = pending_key_mode(&mut core).await?;
+    let before = sink.lines().len();
+    core.fixture
+        .context_mut()?
+        .set_monotonic_for_test(FROZEN_TICKS + 30_000 + 10);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    assert!(sink.lines().len() > before, "lines: {:?}", sink.lines());
+    assert_eq!(core.fixture.context_mut()?.crypto_mut().in_flight(), 0);
+    assert!(!saw(&sink, "+k"), "lines: {:?}", sink.lines());
+    Ok(())
+}

@@ -3845,6 +3845,12 @@ impl StateCore {
         }
     }
 
+    /// Delivers one crypto completion to the router, as the actor loop does.
+    #[cfg(test)]
+    pub(crate) fn step_crypto(&mut self, message: CryptoCompletionMessage<CryptoJobOutput>) {
+        self.router.crypto_completed(&mut self.context, message);
+    }
+
     /// Fires every due timer; `Some` ends the loop.
     pub fn step_wake(&mut self) -> Option<StateCoreExit> {
         let now = self.context.now();
