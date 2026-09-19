@@ -76,3 +76,76 @@ async fn background_work_is_idle_when_no_peer_owes_a_row() -> TestResult {
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn authority_fences_and_cleanup_wait_behind_a_staged_batch() -> TestResult {
+    use crate::federation::coordinator::authority;
+    let mut fixture = StateCoreFixture::with_federation_coordinator(
+        entropy_script(),
+        vec![peer_identity(PEER, "edge.example")],
+    )?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(PEER);
+    coordinator
+        .peers
+        .get_mut(&PEER)
+        .ok_or("peer")?
+        .fence_pending = true;
+    coordinator.continue_background(context);
+    assert_eq!(context.pending_len(), 1);
+    authority::continue_fence(&mut coordinator, context, PEER);
+    authority::continue_clean(&mut coordinator, context, PEER);
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "nothing is staged over the open batch"
+    );
+    assert!(matches!(
+        coordinator.pending,
+        Some(PendingCommit::AuthorityFence { peer: PEER, .. })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleanup_waits_for_an_expired_peer_with_no_fence_or_cleanup_pending() -> TestResult {
+    use crate::federation::coordinator::authority;
+    use agenc_ircd_storage::federation_records::PeerPhase;
+    let mut fixture = StateCoreFixture::with_federation_coordinator(
+        entropy_script(),
+        vec![peer_identity(PEER, "edge.example")],
+    )?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(PEER);
+    {
+        let state = coordinator.peers.get_mut(&PEER).ok_or("peer")?;
+        state.phase = PeerPhase::Expired;
+        state.fence_pending = true;
+    }
+    authority::continue_clean(&mut coordinator, context, PEER);
+    assert_eq!(context.pending_len(), 0, "a pending fence precedes cleanup");
+    {
+        let state = coordinator.peers.get_mut(&PEER).ok_or("peer")?;
+        state.fence_pending = false;
+        state.cleanup.push_back(UserId::from_bytes([7; 16]));
+    }
+    authority::continue_clean(&mut coordinator, context, PEER);
+    assert_eq!(
+        context.pending_len(),
+        0,
+        "queued session cleanup precedes the terminal row"
+    );
+    coordinator
+        .peers
+        .get_mut(&PEER)
+        .ok_or("peer")?
+        .cleanup
+        .clear();
+    authority::continue_clean(&mut coordinator, context, PEER);
+    assert_eq!(
+        context.pending_len(),
+        1,
+        "the empty cleanup reaches its durable terminal state"
+    );
+    Ok(())
+}
