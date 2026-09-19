@@ -7,17 +7,24 @@
 //! and credential exchanges therefore follow the latent-rejection path.
 #![forbid(unsafe_code)]
 
-use super::invitation_window::{open_connection, opened_request, vector};
+use super::invitation_window::{feed_transfer, open_connection, opened_request, vector};
 use super::*;
+use crate::bridge::crypto::{AccountOpenJob, RuntimeCryptoJob};
 use crate::state_core::timers::{TimedId, TimerKind};
-use crate::test_support::{FixtureIdentity, FrameSink, TestResult};
+use crate::test_support::{
+    FixtureIdentity, FrameSink, TestResult, bind_live_session, negotiated_capabilities,
+    seed_account, seed_session,
+};
 use agenc_ircd_auth::{
-    AccountAuthenticationState, AccountFinishOutcome, AccountRequestPayload, AccountStartOutcome,
-    AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationGrant, AuthenticationLookup,
-    AuthenticationStart, AuthenticationStartParameters, CreationFinish, CreationStart,
-    CredentialChangeFinish, CredentialChangeStart, OpaqueKe1, OpaqueKe3, OpaqueRegistrationRecord,
-    OpaqueRegistrationRequest, OpenedAccountServiceRequest, SealedAccountStart,
-    begin_authentication, finish_account_authentication,
+    AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
+    AccountFinishOutcome, AccountRequestPayload, AccountStartOutcome, AuthenticatedAccountRequest,
+    AuthenticationFinish, AuthenticationGrant, AuthenticationLookup, AuthenticationStart,
+    AuthenticationStartParameters, CreationAdmission, CreationFinish, CreationStart,
+    CredentialChangeFinish, CredentialChangeStart, CredentialChangeStartParameters,
+    CredentialChangeState, CredentialReplacementIntent, DestructiveAccountSnapshot, OpaqueKe1,
+    OpaqueKe3, OpaqueRegistrationRecord, OpaqueRegistrationRequest, OpenedAccountServiceRequest,
+    SealedAccountStart, begin_account_creation, begin_authentication, begin_credential_change,
+    finish_account_authentication, finish_credential_change,
 };
 use agenc_ircd_client_wire::{ACCOUNT_RESPONSE_BYTES, AUTH_CHUNK_CHARACTERS};
 use agenc_ircd_crypto::OpaqueFakeCredentialKey;
@@ -404,4 +411,216 @@ pub(super) fn exhaust_transaction_capacity(coordinator: &mut AccountServiceCoord
     coordinator
         .cleanup_queue
         .resize(MAX_PENDING_TRANSACTION_CLEANUPS, filler);
+}
+
+impl Live {
+    /// A fixture whose one connection is registered as `account` on a live
+    /// session, which the credential carrier requires.
+    pub(super) fn open_registered() -> TestResult<(Self, AccountId)> {
+        let mut fixture = CoordinatorFixture::new(vec![7; 4_096])?;
+        let generation = ConnectionGeneration::new(1);
+        let (coordinator, context) = fixture.parts()?;
+        context.set_wall_for_test(WALL);
+        let (account_id, account_generation) = seed_account(context, 9, 1)?;
+        let identity = seed_session(context, 9, "tester", Some((account_id, account_generation)))?;
+        let capabilities = negotiated_capabilities(&[])?;
+        let sink = bind_live_session(context, generation.get(), identity, capabilities, true)?;
+        coordinator.connection_opened(context, generation)?;
+        let route = coordinator
+            .connections
+            .get(&generation)
+            .ok_or("connection")?
+            .route;
+        let live = Self {
+            fixture,
+            generation,
+            route,
+            sink,
+        };
+        Ok((live, account_id))
+    }
+
+    pub(super) fn response_count(&mut self) -> TestResult<u64> {
+        Ok(self
+            .fixture
+            .core
+            .context_mut()?
+            .head()
+            .account_service_response_count)
+    }
+
+    /// Stages one cleanup so the next account batch finds the pending slot taken.
+    pub(super) fn occupy_pending_batch(&mut self) -> TestResult {
+        let (coordinator, context) = self.fixture.parts()?;
+        let cleanup = TransactionCleanup::authentication(TransactionId::from_bytes([0xcc; 16]));
+        coordinator.cleanup_queue.push_back(cleanup);
+        coordinator.try_stage_transaction_cleanup(context)?;
+        assert_eq!(context.pending_len(), 1);
+        Ok(())
+    }
+}
+
+/// One creation START the auth crate admits or, when the login is reported
+/// taken, answers with its latent rejection.
+pub(super) fn begin_creation(
+    live: &mut Live,
+    request_seed: u8,
+    login: &str,
+    login_is_available: bool,
+) -> TestResult<(
+    AccountStartOutcome<AccountCreationState>,
+    AccountServiceEnvelope,
+)> {
+    let (opened, envelope) = creation_start(&live.fixture.core.identity, request_seed, login)?;
+    let login_key = LoginIndexKey::from_bytes(live.fixture.core.identity.login_index);
+    let opaque = Arc::clone(&live.fixture.core.opaque);
+    let route = live.route;
+    let (coordinator, context) = live.fixture.parts()?;
+    let start = begin_account_creation(
+        &opaque,
+        &login_key,
+        AccountCreationStartParameters {
+            context: coordinator.operation_context(context, route)?,
+            request: opened,
+            admission: CreationAdmission::Open,
+            login_is_available,
+            invitation_is_available: true,
+        },
+    )?;
+    Ok((start, envelope))
+}
+
+/// One credential-change START without a fresh-authentication proof, which
+/// the auth crate answers with its latent rejection and no reservation.
+pub(super) fn begin_unavailable_credential_change(
+    live: &mut Live,
+    request_seed: u8,
+    account_id: AccountId,
+) -> TestResult<(
+    AccountStartOutcome<CredentialChangeState>,
+    AccountServiceEnvelope,
+)> {
+    let (opened, envelope) =
+        credential_start(&live.fixture.core.identity, request_seed, account_id)?;
+    let opaque = Arc::clone(&live.fixture.core.opaque);
+    let route = live.route;
+    let (coordinator, context) = live.fixture.parts()?;
+    let account = context.domain().account(account_id).ok_or("account")?;
+    let snapshot = DestructiveAccountSnapshot::new(
+        account_id,
+        account.revision(),
+        account.session_generation(),
+    );
+    let start = begin_credential_change(
+        &opaque,
+        CredentialChangeStartParameters {
+            context: coordinator.operation_context(context, route)?,
+            proof: None,
+            account: snapshot,
+            credential_id: OpaqueCredentialId::from_bytes([0; 32]),
+            request: opened,
+            operation_is_available: false,
+        },
+    )?;
+    Ok((start, envelope))
+}
+
+/// Feeds one complete chunked request so the named account carrier waits for
+/// the phase response.
+pub(super) fn arm_transfer(
+    live: &mut Live,
+    kind: AccountCarrierKind,
+    phase: AccountCarrierPhase,
+    envelope: &AccountServiceEnvelope,
+) -> TestResult {
+    let generation = live.generation;
+    let (coordinator, context) = live.fixture.parts()?;
+    let now = context.now().get();
+    let connection = coordinator
+        .connections
+        .get_mut(&generation)
+        .ok_or("connection")?;
+    let carrier = match kind {
+        AccountCarrierKind::Create => &mut connection.creation,
+        AccountCarrierKind::Credentials => &mut connection.credentials,
+    };
+    feed_transfer(carrier, phase, envelope, now)
+}
+
+/// Commits one latent-rejection credential-change START and returns the live
+/// transaction's identifier.
+pub(super) async fn commit_credential_start(
+    live: &mut Live,
+    request_seed: u8,
+    account_id: AccountId,
+) -> TestResult<TransactionId> {
+    let (start, envelope) = begin_unavailable_credential_change(live, request_seed, account_id)?;
+    let transaction_id = start.transaction_id();
+    let sealed = start.seal(live.response_count()?)?;
+    let kind = AccountCarrierKind::Credentials;
+    arm_transfer(live, kind, AccountCarrierPhase::Start, &envelope)?;
+    let request = live.account(kind, AccountCarrierPhase::Start, envelope);
+    let (coordinator, context) = live.fixture.parts()?;
+    coordinator
+        .stage_credential_start(context, request, sealed, None)
+        .map_err(|error| format!("stage credential START: {error:?}"))?;
+    live.fixture.core.commit_staged_batch().await?;
+    let (coordinator, context) = live.fixture.parts()?;
+    assert_eq!(coordinator.batch_applied(context).len(), 1);
+    assert!(coordinator.transaction_owners.contains_key(&transaction_id));
+    Ok(transaction_id)
+}
+
+/// Takes the live credential change off its connection and runs the
+/// worker-side FINISH, which rejects because START admitted nothing.
+pub(super) fn rejected_credential_finish(
+    live: &mut Live,
+    request_seed: u8,
+    transaction_id: TransactionId,
+) -> TestResult<(
+    AccountFinishOutcome<CredentialReplacementIntent>,
+    AccountServiceEnvelope,
+)> {
+    let (opened, envelope) =
+        credential_finish(&live.fixture.core.identity, request_seed, transaction_id)?;
+    let route = live.route;
+    let generation = live.generation;
+    let (coordinator, context) = live.fixture.parts()?;
+    let mut exchange = coordinator
+        .connections
+        .get_mut(&generation)
+        .ok_or("connection")?
+        .credential_transaction
+        .take()
+        .ok_or("live credential change")?;
+    let operation = coordinator.operation_context(context, route)?;
+    let outcome = finish_credential_change(&mut exchange.transaction, operation, opened)?;
+    assert!(outcome.result().is_err());
+    Ok((outcome, envelope))
+}
+
+/// Fills every completion slot of the crypto bridge. The waiters that free
+/// a slot only run when the test yields to its single-threaded runtime, so
+/// the bridge deterministically refuses the next job once this returns.
+pub(super) fn saturate_crypto(live: &mut Live) -> TestResult {
+    let (_, envelope) = authentication_start(&live.fixture.core.identity, 0xa0, "saturate")?;
+    let (coordinator, context) = live.fixture.parts()?;
+    let mut admitted = 0;
+    for _ in 0..10_000_000_u32 {
+        if admitted == context.crypto_mut().capacity() {
+            return Ok(());
+        }
+        let job = RuntimeCryptoJob::AccountOpen(Box::new(AccountOpenJob::new(
+            Arc::clone(&coordinator.config.hpke_private_key),
+            coordinator.config.recovery_epoch,
+            coordinator.config.network_id,
+            envelope.message_kind(),
+            AccountServiceEnvelope::parse(*envelope.as_bytes())?,
+        )));
+        match context.crypto_mut().try_submit(job) {
+            Ok(_) => admitted += 1,
+            Err(_) => std::thread::yield_now(),
+        }
+    }
+    Err("the crypto bridge never filled its completion slots".into())
 }
