@@ -1424,6 +1424,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_accept_slot_above_an_already_lowered_ceiling_is_released_before_accepting()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runtime =
+            RuntimeConfigHandle::new(crate::test_support::golden_snapshot("example", None)?);
+        publish_listener_ceiling(&runtime, 2)?;
+        let (shared, spec) = reload_accept_fixture(runtime.clone())?;
+        let tcp = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let listener = BoundListener::Tcp(tcp);
+        let slots = Arc::new(Semaphore::new(2));
+        let held = Arc::clone(&slots).acquire_owned().await?;
+        // The ceiling drops to one before the next accept starts: the second
+        // slot is taken and given back without touching the socket.
+        publish_listener_ceiling(&runtime, 1)?;
+        assert!(
+            next_accept(&listener, &slots, 2, &shared, &spec)
+                .await
+                .is_none()
+        );
+        assert_eq!(slots.available_permits(), 1);
+        drop(held);
+        assert_eq!(slots.available_permits(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_pending_accept_rechecks_a_lowered_listener_ceiling()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::future::Future as _;
