@@ -1895,6 +1895,7 @@ impl FederatedDeferred {
 #[cfg(test)]
 mod tests {
     mod deferred_revision;
+    mod refusals;
     use agenc_ircd_crypto::{CryptoError, CryptoWorkerError};
     use agenc_ircd_domain::{MessageCommand, MessageTarget, NicknameValue, RateBucket, RateCharge};
     use agenc_ircd_types::{MonotonicTick, UserId};
