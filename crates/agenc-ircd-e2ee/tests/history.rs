@@ -19,6 +19,9 @@ mod candidate_positions;
 #[path = "history/terminal_faults.rs"]
 mod terminal_faults;
 
+#[path = "history/reference_faults.rs"]
+mod reference_faults;
+
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_e2ee::history::{
     AlternativeRecord, ChainLimits, ChainStep, HistoricalChain, Lifecycle, RecordReferences,
