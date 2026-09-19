@@ -88,7 +88,11 @@ fn stale_plans_are_refused_by_every_renderer() -> TestResult {
         owner.user_id,
         &stale
     )));
-    assert!(refused(render_account_logout(context, bound(owner), &stale)));
+    assert!(refused(render_account_logout(
+        context,
+        bound(owner),
+        &stale
+    )));
     assert!(refused(render_account_credential_replacement(
         context,
         account.0,
@@ -241,7 +245,11 @@ fn parts_kicks_topics_invites_and_messages_must_match_their_plan() -> TestResult
         &part
     )));
 
-    let join = mutation(plan_live(context, owner, &join_of(&ChannelNameValue::parse("#fresh")?))?)?;
+    let join = mutation(plan_live(
+        context,
+        owner,
+        &join_of(&ChannelNameValue::parse("#fresh")?),
+    )?)?;
     let topic = CanonicalCommand::topic_set(
         name.clone(),
         TopicText::try_from_str("hello", ControlPolicy::RejectAll)?,
@@ -263,10 +271,17 @@ fn parts_kicks_topics_invites_and_messages_must_match_their_plan() -> TestResult
     )));
 
     let kick = mutation(plan_live(context, owner, &|| {
-        CanonicalCommand::kick(name.clone(), vec![NicknameValue::parse("LiveMember")?], None)
+        CanonicalCommand::kick(
+            name.clone(),
+            vec![NicknameValue::parse("LiveMember")?],
+            None,
+        )
     })?)?;
-    let elsewhere =
-        CanonicalCommand::kick(other.clone(), vec![NicknameValue::parse("LiveMember")?], None)?;
+    let elsewhere = CanonicalCommand::kick(
+        other.clone(),
+        vec![NicknameValue::parse("LiveMember")?],
+        None,
+    )?;
     assert!(refused(render_mutation(
         context,
         bound(owner),
@@ -299,7 +314,11 @@ fn channel_registration_notes_need_standard_replies() -> TestResult {
     let (owner, _, _, name) = live(&mut fixture)?;
     let context = fixture.context_mut()?;
     let channel_id = context.domain().resolve_channel(&name).ok_or("channel")?;
-    let register = || Ok(CanonicalCommand::channel(ChannelCommand::Register(channel_id)));
+    let register = || {
+        Ok(CanonicalCommand::channel(ChannelCommand::Register(
+            channel_id,
+        )))
+    };
     let plan = mutation(plan_live(context, owner, &register)?)?;
     let capabilities = negotiated_capabilities(&["batch"])?;
     let request = parsed("CHANNEL REGISTER #live")?;
