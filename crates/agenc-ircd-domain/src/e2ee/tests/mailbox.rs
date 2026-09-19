@@ -432,3 +432,82 @@ fn assert_invalid_acknowledgement_lookups(
     assert_eq!(item.2.object_id, [10; 32]);
     Ok(())
 }
+
+#[test]
+fn grant_snapshots_refuse_oversized_stale_and_expired_rows() -> Result<(), MailboxError> {
+    let mut mailboxes = Mailboxes::new();
+    let mut next_token = tokens();
+    for index in 0..33_u8 {
+        mailboxes.deliver(
+            TARGET,
+            MailboxKind::Welcome,
+            [index; 32],
+            [5; 32],
+            100,
+            1_000,
+        )?;
+    }
+    let selector = FetchSelector {
+        target: TARGET,
+        kind: MailboxKind::Welcome,
+        cursor: None,
+    };
+    let rows: Vec<(u64, Item)> = (0..33_u64)
+        .map(|sequence| {
+            mailboxes
+                .retained_item(TARGET, MailboxKind::Welcome, sequence)
+                .copied()
+                .map(|item| (sequence, item))
+                .ok_or(MailboxError::TokenInvalid)
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        mailboxes.grant_snapshot(selector, &rows, 1, 101, &mut next_token),
+        Err(MailboxError::AdmissionRefused),
+        "more rows than a page"
+    );
+    let page: Vec<(u64, Item)> = rows.iter().copied().take(32).collect();
+    let mut stale = page.clone();
+    if let Some((_, item)) = stale.first_mut() {
+        item.object_id = [99; 32];
+    }
+    assert_eq!(
+        mailboxes.grant_snapshot(selector, &stale, 1, 101, &mut next_token),
+        Err(MailboxError::TokenInvalid),
+        "a row that no longer matches its item"
+    );
+    assert_eq!(
+        mailboxes.grant_snapshot(selector, &page, 1, 1_100, &mut next_token),
+        Err(MailboxError::TokenInvalid),
+        "a row whose item expired"
+    );
+    let granted = mailboxes.grant_snapshot(selector, &page, 1, 101, &mut next_token)?;
+    assert_eq!(granted.len(), 32);
+    Ok(())
+}
+
+#[test]
+fn expired_items_are_skipped_by_a_fetch_and_a_detach_touches_one_target() -> Result<(), MailboxError>
+{
+    let mut mailboxes = Mailboxes::new();
+    let mut next_token = tokens();
+    mailboxes.deliver(TARGET, MailboxKind::Welcome, [1; 32], [5; 32], 100, 1_000)?;
+    mailboxes.deliver(OTHER, MailboxKind::Welcome, [2; 32], [5; 32], 100, 1_000)?;
+    let fetched = mailboxes.fetch(OTHER, MailboxKind::Welcome, None, 1, 101, &mut next_token)?;
+    assert_eq!(fetched.deliveries.len(), 1);
+    assert_eq!(mailboxes.detach(&OTHER), 1);
+    assert_eq!(mailboxes.detach(&TARGET), 0);
+    // At the retention boundary the item is not paged even before it is
+    // swept.
+    let boundary = mailboxes.fetch(
+        TARGET,
+        MailboxKind::Welcome,
+        None,
+        1,
+        1_100,
+        &mut next_token,
+    )?;
+    assert!(boundary.deliveries.is_empty());
+    assert_eq!(mailboxes.queued(&TARGET, MailboxKind::Welcome), 1);
+    Ok(())
+}
