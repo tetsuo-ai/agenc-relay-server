@@ -1418,4 +1418,33 @@ mod tests {
         waiter.await?;
         Ok(())
     }
+
+    #[test]
+    fn revisions_chunks_and_restart_material_keep_their_shape_rules() {
+        assert!(ConfigRevision::new(0).is_err());
+        assert_eq!(ConfigRevision::new(3).map(|revision| revision.get()), Ok(3));
+        // A multibyte character straddling the chunk boundary is kept whole.
+        let text = format!(
+            "{}é{}",
+            "a".repeat(PUBLIC_TEXT_CHUNK_BYTES - 1),
+            "b".repeat(4)
+        );
+        let chunks: Vec<&str> = public_text_chunks(&text).collect();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks.first().map(|chunk| chunk.len()),
+            Some(PUBLIC_TEXT_CHUNK_BYTES - 1)
+        );
+        assert!(chunks.get(1).is_some_and(|chunk| chunk.starts_with('é')));
+        let mut material = RestartMaterial::default();
+        assert!(
+            material
+                .insert(RestartMaterialKey::StorageMaster, [1; 32])
+                .is_ok()
+        );
+        assert!(matches!(
+            material.insert(RestartMaterialKey::StorageMaster, [2; 32]),
+            Err(ReloadPrepareFailure::InvalidMaterial)
+        ));
+    }
 }

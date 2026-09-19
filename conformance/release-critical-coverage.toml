@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 992
-reviewed_source_sha256 = "32b78454b89822cdd27aaf36be920ae379b994472a4451799a84f62d4fe09c5d"
+reviewed_source_sha256 = "10dbb4a1b254fe684e99057de37c4b2deace39a62719c7e227851381cc0863de"
 deferred = []
 
 [[region]]
@@ -12859,7 +12859,7 @@ id = "reload-admission-outcome"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/runtime_config.rs"
 item = "activate_audited"
-source_sha256 = "7f228cf605e2634b85b4b5658e57ebdfbe4b3696841537f5a32402573b342064"
+source_sha256 = "59e5ee16a8863d2010881cee4926bcf6a3b5d4427f848dbda0a8dc60f883abf6"
 start_line = 764
 end_line = 784
 span_sha256 = "c5e35434c2ad56a27927ffa2c131eb6b63fc04e0f949b21115b7058e0a0c80bb"
@@ -12871,7 +12871,7 @@ id = "reload-audit-submission-outcome"
 category = "persistence-recovery"
 file = "crates/agenc-ircd-runtime/src/runtime_config.rs"
 item = "commit_outcome"
-source_sha256 = "7f228cf605e2634b85b4b5658e57ebdfbe4b3696841537f5a32402573b342064"
+source_sha256 = "59e5ee16a8863d2010881cee4926bcf6a3b5d4427f848dbda0a8dc60f883abf6"
 start_line = 806
 end_line = 830
 span_sha256 = "cc1a85742c3ff234fe5ecbfebe1ce4e169f6b3420e8ac23147630123d09e1b3c"
