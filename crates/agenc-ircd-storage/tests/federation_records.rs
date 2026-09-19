@@ -485,23 +485,25 @@ fn peer_records_bound_and_order_fenced_incarnations() -> TestResult {
     fenced.fenced_incarnations = vec![[1; 16], [2; 16]];
     let body = fenced.encode()?;
     let count_at = body.len() - 34;
-    assert_eq!(&body[count_at..count_at + 2], &[0, 2]);
+    assert_eq!(body.get(count_at..count_at + 2), Some([0, 2].as_slice()));
     let mut zero = body.clone();
-    zero[count_at + 1] = 0;
+    patch(&mut zero, count_at + 1, 0)?;
     assert_eq!(
         FederationPeerRecord::decode(&zero).err(),
         Some(StorageError::LimitExceeded)
     );
     let mut many = body.clone();
-    many[count_at] = 0xff;
-    many[count_at + 1] = 0xff;
+    patch(&mut many, count_at, 0xff)?;
+    patch(&mut many, count_at + 1, 0xff)?;
     assert_eq!(
         FederationPeerRecord::decode(&many).err(),
         Some(StorageError::LimitExceeded)
     );
     let mut swapped = body;
-    swapped[count_at + 2..count_at + 18].copy_from_slice(&[2; 16]);
-    swapped[count_at + 18..count_at + 34].copy_from_slice(&[1; 16]);
+    swapped
+        .get_mut(count_at + 2..count_at + 34)
+        .ok_or("offset outside body")?
+        .copy_from_slice(&[[2_u8; 16], [1_u8; 16]].concat());
     assert_eq!(
         FederationPeerRecord::decode(&swapped).err(),
         Some(StorageError::InvalidEncoding)
@@ -518,7 +520,10 @@ fn decoders_reject_unknown_versions_counts_and_absent_options_with_values() -> T
         Some(StorageError::InvalidEncoding)
     );
     let mut epochs = peer().encode()?;
-    assert_eq!(&epochs[ENVELOPE_BYTES + 34..ENVELOPE_BYTES + 36], &[0, 2]);
+    assert_eq!(
+        epochs.get(ENVELOPE_BYTES + 34..ENVELOPE_BYTES + 36),
+        Some([0, 2].as_slice())
+    );
     patch(&mut epochs, ENVELOPE_BYTES + 35, 65)?;
     assert_eq!(
         FederationPeerRecord::decode(&epochs).err(),
@@ -551,7 +556,10 @@ fn decoders_reject_unknown_versions_counts_and_absent_options_with_values() -> T
     absent.pending_generation = None;
     let mut bytes = absent.encode()?;
     let pending_offset = cursor_present_offset + 2 + 8 + 16 + 8 + 8;
-    assert_eq!(&bytes[pending_offset..pending_offset + 2], &[0, 0]);
+    assert_eq!(
+        bytes.get(pending_offset..pending_offset + 2),
+        Some([0, 0].as_slice())
+    );
     patch(&mut bytes, pending_offset + 2 + 7, 1)?;
     assert_eq!(
         FederationPeerRecord::decode(&bytes).err(),

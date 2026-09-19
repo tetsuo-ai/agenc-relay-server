@@ -75,8 +75,12 @@ fn swapped(body: &[u8], first: &[u8], second: &[u8]) -> Result<Vec<u8>, StorageE
     };
     let (at_first, at_second) = (find(first)?, find(second)?);
     let mut out = body.to_vec();
-    out[at_first..at_first + first.len()].copy_from_slice(second);
-    out[at_second..at_second + second.len()].copy_from_slice(first);
+    out.get_mut(at_first..at_first + first.len())
+        .ok_or(StorageError::InvalidEncoding)?
+        .copy_from_slice(second);
+    out.get_mut(at_second..at_second + second.len())
+        .ok_or(StorageError::InvalidEncoding)?
+        .copy_from_slice(first);
     Ok(out)
 }
 
@@ -101,7 +105,16 @@ fn account_bodies_keep_reserved_nicknames_and_contacts_ascending() -> Result<(),
     contacts.contacts = vec![account_id(3), account_id(4)];
     contacts.contacts.sort();
     let body = AccountRecordBody::encode(&contacts)?;
-    let (low, high) = (contacts.contacts[0].random(), contacts.contacts[1].random());
+    let low = contacts
+        .contacts
+        .first()
+        .ok_or(StorageError::InvalidEncoding)?
+        .random();
+    let high = contacts
+        .contacts
+        .get(1)
+        .ok_or(StorageError::InvalidEncoding)?
+        .random();
     assert_eq!(
         AccountRecordBody::decode(&swapped(&body, low.as_bytes(), high.as_bytes())?).err(),
         Some(StorageError::InvalidEncoding)
@@ -141,7 +154,10 @@ fn a_session_display_name_must_already_be_prepared() -> Result<(), StorageError>
         .position(|window| window == b"Fixtures")
         .ok_or(StorageError::Overflow)?;
     let mut tampered = body.clone();
-    tampered[at..at + 8].copy_from_slice(unprepared.as_bytes());
+    tampered
+        .get_mut(at..at + 8)
+        .ok_or(StorageError::InvalidEncoding)?
+        .copy_from_slice(unprepared.as_bytes());
     let decoded = SessionRecordBody::decode(&tampered);
     assert_eq!(decoded.err(), Some(StorageError::InvalidEncoding));
     Ok(())
@@ -244,17 +260,15 @@ fn channel_collections_are_bounded_and_ordered() -> Result<(), StorageError> {
 #[test]
 fn channel_memberships_invites_and_pending_removals_bind_to_the_channel() -> Result<(), StorageError>
 {
-    let mut zero = channel(1)?;
-    zero.memberships = vec![membership(1, 1)?];
-    zero.memberships[0].membership_revision = revision(1)?;
     let mut ahead = channel(1)?;
     ahead.memberships = vec![membership(1, 5)?];
     assert!(refused(&ahead));
 
     let mut demoted = channel(1)?;
-    demoted.memberships = vec![membership(1, 1)?];
-    demoted.memberships[0].session_role = Role::Operator;
-    demoted.memberships[0].effective_role = Role::Member;
+    let mut demoted_member = membership(1, 1)?;
+    demoted_member.session_role = Role::Operator;
+    demoted_member.effective_role = Role::Member;
+    demoted.memberships = vec![demoted_member];
     assert!(refused(&demoted));
 
     let mut invite_ahead = channel(1)?;
@@ -279,12 +293,19 @@ fn decoded_channel_grants_must_ascend() -> Result<(), StorageError> {
     let mut granted = channel(1)?;
     granted.role_grants = vec![(account_id(3), Role::Owner), (account_id(4), Role::Owner)];
     granted.role_grants.sort_by_key(|(id, _)| *id);
-    granted.creator = Principal::Account(granted.role_grants[0].0);
+    let low = granted
+        .role_grants
+        .first()
+        .ok_or(StorageError::InvalidEncoding)?
+        .0;
+    let high = granted
+        .role_grants
+        .get(1)
+        .ok_or(StorageError::InvalidEncoding)?
+        .0;
+    granted.creator = Principal::Account(low);
     let body = ChannelRecordBody::encode(&granted)?;
-    let (low, high) = (
-        granted.role_grants[0].0.random(),
-        granted.role_grants[1].0.random(),
-    );
+    let (low, high) = (low.random(), high.random());
     assert_eq!(
         ChannelRecordBody::decode(&swapped(&body, low.as_bytes(), high.as_bytes())?).err(),
         Some(StorageError::InvalidEncoding)

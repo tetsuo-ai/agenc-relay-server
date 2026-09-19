@@ -326,8 +326,10 @@ fn history_message_decoding_bounds_the_body_and_the_tag_count() -> Result<(), St
     untagged.tags.clear();
     let mut body = untagged.encode()?;
     let count_at = body.len() - 4 - untagged.body.len() - 2;
-    assert_eq!(&body[count_at..count_at + 2], &[0, 0]);
-    body[count_at + 1] = 17;
+    assert_eq!(body.get(count_at..count_at + 2), Some([0, 0].as_slice()));
+    *body
+        .get_mut(count_at + 1)
+        .ok_or(StorageError::InvalidEncoding)? = 17;
     assert_eq!(
         HistoryMessageRecord::decode(&body).err(),
         Some(StorageError::LimitExceeded)
