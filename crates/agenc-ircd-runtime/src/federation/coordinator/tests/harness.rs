@@ -2980,6 +2980,43 @@ async fn a_request_queues_behind_its_peers_queued_requests_even_when_idle() -> T
 }
 
 #[tokio::test]
+async fn a_peer_whose_queue_is_full_loses_its_link_on_the_next_request() -> TestResult {
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator(peer);
+    let (unused_inbox, _unused_receiver) = mpsc::channel(1);
+    let mut edge = Edge::new(unused_inbox, 50);
+    let origin = Origin::new(72);
+    coordinator.inbound(
+        context,
+        established(50, peer, edge.incarnation, edge.handle.clone()),
+    );
+    synchronized_peer_fixture(&mut coordinator, peer, edge.incarnation)?;
+    let link = edge.link;
+    for seed in 0..MAX_QUEUED_REQUESTS {
+        enqueue(
+            &mut coordinator,
+            &mut edge,
+            &origin,
+            link,
+            u8::try_from(seed + 100)?,
+        )?;
+    }
+    let (descriptor, bytes) = encoded_request(&edge, &origin, 99)?;
+    inbound_object(&mut coordinator, context, &mut edge, &bytes, |fragment| {
+        FederationFrame::Request {
+            descriptor,
+            fragment,
+        }
+    })?;
+    let state = coordinator.peers.get(&peer).ok_or("peer state missing")?;
+    assert!(state.live.is_none(), "the link is retired");
+    assert_eq!(coordinator.counters().violations, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn queued_requests_drain_peer_by_peer_and_drop_a_dead_link() -> TestResult {
     let (a, b) = (
         ServerId::from_bytes([50; 16]),
