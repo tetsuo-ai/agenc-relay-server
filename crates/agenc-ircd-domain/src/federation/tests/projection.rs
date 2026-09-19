@@ -70,6 +70,20 @@ impl Harness {
         })
     }
 
+    /// Derives one plan's projection, applies the plan to the state and the
+    /// projection to the index, and leaves every replica untouched.
+    fn advance(
+        &mut self,
+        plan: crate::MutationPlan,
+        context: &MutationContext,
+    ) -> Result<(MutationProjection, Revision), DomainError> {
+        let projection = self.index.derive(&self.state, &plan, context)?;
+        let prepared = self.state.prepare_mutation(plan)?;
+        let receipt = self.state.apply_prepared(prepared)?;
+        self.index.apply(&projection);
+        Ok((projection, receipt.revision()))
+    }
+
     /// Applies one plan, derives its projection, commits it to the index,
     /// and applies every event copy to the matching replica.
     fn commit(
@@ -77,10 +91,7 @@ impl Harness {
         plan: crate::MutationPlan,
         context: &MutationContext,
     ) -> Result<MutationProjection, DomainError> {
-        let projection = self.index.derive(&self.state, &plan, context)?;
-        let prepared = self.state.prepare_mutation(plan)?;
-        let receipt = self.state.apply_prepared(prepared)?;
-        self.index.apply(&projection);
+        let (projection, revision) = self.advance(plan, context)?;
         for delta in &projection.edges {
             let replica = self
                 .replicas
@@ -88,7 +99,7 @@ impl Harness {
                 .ok_or(DomainError::NotFound)?;
             for event in &delta.events {
                 replica
-                    .apply(event, receipt.revision().get())
+                    .apply(event, revision.get())
                     .map_err(|_| DomainError::InvariantViolation)?;
             }
             replica
@@ -134,6 +145,16 @@ impl Harness {
         build: impl Fn() -> Result<CanonicalCommand, DomainError>,
         context: &MutationContext,
     ) -> Result<MutationProjection, DomainError> {
+        let plan = self.plan(user, build)?;
+        self.commit(plan, context)
+    }
+
+    /// Plans one client command, answering every external input request.
+    fn plan(
+        &mut self,
+        user: UserId,
+        build: impl Fn() -> Result<CanonicalCommand, DomainError>,
+    ) -> Result<crate::MutationPlan, DomainError> {
         let session = self.state.session(user).ok_or(DomainError::NotFound)?;
         let envelope = CommandEnvelope::new(
             session.session_id(),
@@ -216,7 +237,7 @@ impl Harness {
                 return Err(DomainError::InvariantViolation);
             }
         };
-        self.commit(plan, context)
+        Ok(plan)
     }
 }
 
@@ -839,3 +860,6 @@ mod invites;
 
 #[path = "projection_modes.rs"]
 mod modes;
+
+#[path = "projection_revision_drift.rs"]
+mod revision_drift;

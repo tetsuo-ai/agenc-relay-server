@@ -127,6 +127,17 @@ fn revision_changes_report_every_surviving_row_once() -> TestResult {
             },
         ),
         (
+            "invitation hosted elsewhere",
+            ProjectedEvent::Invited {
+                channel_id: channel,
+                invite_id: new_invite.invite_id,
+                resulting_revision: revision(4),
+                local_projection: None,
+                inviter: source(&alice),
+                named_target: source(&remote),
+            },
+        ),
+        (
             "expired invitation",
             ProjectedEvent::InviteRemoved {
                 channel_id: channel,
@@ -190,5 +201,56 @@ fn revision_changes_report_every_surviving_row_once() -> TestResult {
         }
     }
     assert!(omitted.is_empty(), "omitted durable mutations: {omitted:?}");
+    Ok(())
+}
+
+#[test]
+fn an_invitation_hosted_elsewhere_advances_the_channel_of_a_member_edge() -> TestResult {
+    let alice = session(1, LOCAL, None)?;
+    let remote = session(3, REMOTE, None)?;
+    let channel = ChannelInstanceId::from_bytes([7; 16]);
+    let mut entries = vec![
+        ProjectionRecord::Session(alice.clone()),
+        ProjectionRecord::ChannelDetail(detail(7, 3)?),
+        ProjectionRecord::Membership(membership(7, 1, 3)),
+    ];
+    entries.sort_by_key(ProjectionRecord::key);
+    let mut replica = EdgeReplica::new(LOCAL);
+    replica.install(1, entries)?;
+    let invited = |channel_id, resulting| ProjectedEvent::Invited {
+        channel_id,
+        invite_id: InviteId::from_bytes([9; 16]),
+        resulting_revision: revision(resulting),
+        local_projection: None,
+        inviter: source(&alice),
+        named_target: source(&remote),
+    };
+    let outcome = replica.apply(&invited(channel, 4), 4)?;
+    assert_eq!(
+        outcome.upserted,
+        vec![ProjectionKey::channel_detail(channel)]
+    );
+    assert!(outcome.local_recipients.contains(&alice.user_id));
+    assert_eq!(
+        replica
+            .channel(channel)
+            .map(|detail| detail.channel_revision),
+        Some(revision(4))
+    );
+    assert!(
+        replica
+            .invite(channel, InviteId::from_bytes([9; 16]))
+            .is_none()
+    );
+    assert_eq!(
+        replica.apply(&invited(channel, 3), 5),
+        Err(ReplicaError::Revision)
+    );
+    let unknown = ChannelInstanceId::from_bytes([8; 16]);
+    assert_eq!(
+        replica.apply(&invited(unknown, 5), 5),
+        Err(ReplicaError::UnknownEntity)
+    );
+    replica.validate()?;
     Ok(())
 }
