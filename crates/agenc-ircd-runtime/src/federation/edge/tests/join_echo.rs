@@ -6,6 +6,7 @@ use super::*;
 use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge};
 use crate::federation::codec::results::ResultArm;
 use crate::test_support::TestResult;
+use agenc_ircd_federation_wire::RequestHeader;
 use agenc_ircd_types::{OriginId, ServerId, ServerIncarnation};
 
 fn echo(
@@ -149,5 +150,114 @@ fn an_echo_cannot_be_covered_by_a_failure_or_another_generation() -> TestResult 
         )
         .is_ok()
     );
+    Ok(())
+}
+
+/// An active edge whose one pending request is the JOIN `command`.
+fn edge_with_pending(command: &str, header: RequestHeader) -> TestResult<EdgeFederation> {
+    use agenc_ircd_client_wire::{FramedLine, parse_message};
+    let mut edge = EdgeFederation::new(crate::federation::edge::EdgeConfig {
+        network_id: agenc_ircd_types::NetworkId::from_bytes([31; 32]),
+        server_id: ServerId::from_bytes([2; 16]),
+        server_name: "edge.example".to_owned(),
+        incarnation: ServerIncarnation::from_bytes([3; 16]),
+        coordinator: crate::federation::PeerIdentity::new(
+            ServerId::from_bytes([90; 16]),
+            "hub.example",
+            crate::federation::FederationRole::Coordinator,
+            agenc_ircd_types::RecoveryEpoch::from_bytes([91; 16]),
+            agenc_ircd_crypto::Ed25519SecretKey::from_bytes([12; 32]).public_key(),
+            [13; 32],
+        ),
+    });
+    let message = parse_message(FramedLine::new(command)?)?.ok_or("command")?;
+    edge.pending.insert(
+        header.request_id,
+        PendingRequest {
+            generation: ConnectionGeneration::new(1),
+            sink_gone: false,
+            kind: PendingKind::Command {
+                message: Box::new(message),
+            },
+            header,
+            bytes: Vec::new(),
+            sent: true,
+            result: None,
+            result_bytes: Vec::new(),
+            replies: Vec::new(),
+            join_echoes: Vec::new(),
+            completion: None,
+            completion_generation: None,
+            completion_coverage: None,
+        },
+    );
+    Ok(edge)
+}
+
+fn join_header(echo: &JoinEcho, opcode: agenc_ircd_types::FederationOpcode) -> RequestHeader {
+    RequestHeader {
+        network_id: agenc_ircd_types::NetworkId::from_bytes([31; 32]),
+        replay_key: echo.replay_key,
+        request_id: echo.request,
+        opcode,
+    }
+}
+
+#[test]
+fn a_committed_echo_is_kept_only_by_its_own_live_join_request() -> TestResult {
+    use agenc_ircd_types::FederationOpcode;
+    let budget = MemoryBudget::new(1 << 20);
+    let probe = echo(&budget, "#one", 1)?;
+    let header = join_header(&probe, FederationOpcode::Join);
+
+    // No such request: the echo is dropped without a fault.
+    let mut edge = edge_with_pending("JOIN #one", header)?;
+    edge.pending.clear();
+    assert!(committed(&mut edge, echo(&budget, "#one", 1)?).is_ok());
+
+    // The client left: the echo is dropped without a fault.
+    let mut edge = edge_with_pending("JOIN #one", header)?;
+    edge.pending
+        .get_mut(&probe.request)
+        .ok_or("pending")?
+        .sink_gone = true;
+    assert!(committed(&mut edge, echo(&budget, "#one", 1)?).is_ok());
+
+    // The request is not a JOIN.
+    let mut edge = edge_with_pending("PART #one", join_header(&probe, FederationOpcode::Part))?;
+    assert!(committed(&mut edge, echo(&budget, "#one", 1)?).is_err());
+
+    // The request carries another replay key.
+    let mut edge = edge_with_pending("JOIN #one", header)?;
+    edge.pending
+        .get_mut(&probe.request)
+        .ok_or("pending")?
+        .header
+        .replay_key
+        .operation_sequence = 99;
+    assert!(committed(&mut edge, echo(&budget, "#one", 1)?).is_err());
+
+    // The same channel twice, then the echo ceiling.
+    let mut edge = edge_with_pending("JOIN #one", header)?;
+    committed(&mut edge, echo(&budget, "#one", 1)?).map_err(|e| format!("{e:?}"))?;
+    assert!(committed(&mut edge, echo(&budget, "#one", 1)?).is_err());
+    for seed in 2..MAX_JOIN_ECHOES {
+        let seed = u8::try_from(seed)?;
+        committed(&mut edge, echo(&budget, "#one", seed)?).map_err(|e| format!("{e:?}"))?;
+    }
+    assert_eq!(
+        edge.pending
+            .get(&probe.request)
+            .ok_or("pending")?
+            .join_echoes
+            .len(),
+        MAX_JOIN_ECHOES - 1
+    );
+    committed(&mut edge, echo(&budget, "#one", 200)?).map_err(|e| format!("{e:?}"))?;
+    assert!(
+        committed(&mut edge, echo(&budget, "#one", 201)?).is_err(),
+        "the echo over the ceiling is refused"
+    );
+    assert!(budget.charged() > 0);
     Ok(())
 }
