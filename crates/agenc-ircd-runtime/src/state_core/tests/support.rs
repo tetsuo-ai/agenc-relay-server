@@ -157,3 +157,20 @@ pub(super) fn audit_event_at(
         &audit_key,
     )?)
 }
+
+/// Returns once the storage owner has taken every request queued before this
+/// call. The owner serves its two-slot request queue in order, so a read that
+/// completed proves nothing older is still waiting in it.
+pub(super) async fn storage_owner_idle(fixture: &mut StateCoreFixture) -> TestResult {
+    use agenc_ircd_storage::{ReadPlan, StorageError, StoredKey, TableId};
+    let read_id = loop {
+        let plan = ReadPlan::exact(TableId::OpaqueRecord, StoredKey::new(vec![1])?);
+        match fixture.context_mut()?.submit_storage_read(plan) {
+            Ok(read_id) => break read_id,
+            Err(StorageError::QueueFull) => tokio::task::yield_now().await,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    while fixture.next_storage_read().await?.read_id != read_id {}
+    Ok(())
+}
