@@ -301,3 +301,120 @@ fn live_request(
         envelope,
     )
 }
+
+/// A creation FINISH whose worker output carries another transaction than
+/// the job was submitted for closes its carrier.
+#[tokio::test]
+async fn a_creation_finish_output_for_another_transaction_closes_its_carrier() -> TestResult {
+    use super::harness::creation_finish;
+    use super::invitation_window::commit_start;
+    use crate::account_service::LiveCreation;
+    use crate::bridge::crypto::CreationFinishOutput;
+    let mut live = Live::open()?;
+    let generation = live.generation;
+    let route = live.route;
+    let started = commit_start(
+        &mut live.fixture,
+        generation,
+        route,
+        1,
+        "mismatch",
+        None,
+        WALL,
+    )
+    .await?;
+    let (_, envelope) = creation_finish(&live.fixture.core.identity, 2, started)?;
+    let request = live.account(
+        AccountCarrierKind::Create,
+        AccountCarrierPhase::Finish,
+        envelope,
+    );
+    let (coordinator, context) = live.fixture.parts()?;
+    let LiveCreation {
+        transaction,
+        reservation,
+    } = coordinator
+        .connections
+        .get_mut(&generation)
+        .ok_or("connection")?
+        .creation_transaction
+        .take()
+        .ok_or("live creation transaction")?;
+    let job_id = CryptoJobId::new(81);
+    coordinator.crypto.insert(
+        job_id,
+        PendingCrypto::CreationFinish {
+            request,
+            transaction_id: TransactionId::from_bytes([9; 16]),
+            reservation,
+        },
+    );
+    let output = CryptoJobOutput::CreationFinish(Box::new(CreationFinishOutput {
+        transaction,
+        outcome: Err(agenc_ircd_auth::AuthError::InvalidEncoding),
+    }));
+    let completions = coordinator.crypto_completed(
+        context,
+        CryptoCompletionMessage {
+            job_id,
+            output: Ok(output),
+        },
+    );
+    assert!(matches!(
+        completions.as_slice(),
+        [completion] if completion.close && completion.generation == generation
+    ));
+    assert!(coordinator.ready_seals.is_empty());
+    Ok(())
+}
+
+/// The same for a credential-change FINISH.
+#[tokio::test]
+async fn a_credential_finish_output_for_another_transaction_closes_its_carrier() -> TestResult {
+    use super::harness::{commit_credential_start, credential_finish};
+    use crate::account_service::LiveCredentialChange;
+    use crate::bridge::crypto::CredentialFinishOutput;
+    let (mut live, account_id) = Live::open_registered()?;
+    let generation = live.generation;
+    let started = commit_credential_start(&mut live, 1, account_id).await?;
+    let (_, envelope) = credential_finish(&live.fixture.core.identity, 2, started)?;
+    let request = live.account(
+        AccountCarrierKind::Credentials,
+        AccountCarrierPhase::Finish,
+        envelope,
+    );
+    let (coordinator, context) = live.fixture.parts()?;
+    let LiveCredentialChange { transaction, .. } = coordinator
+        .connections
+        .get_mut(&generation)
+        .ok_or("connection")?
+        .credential_transaction
+        .take()
+        .ok_or("live credential transaction")?;
+    let job_id = CryptoJobId::new(82);
+    coordinator.crypto.insert(
+        job_id,
+        PendingCrypto::CredentialFinish {
+            request,
+            transaction_id: TransactionId::from_bytes([9; 16]),
+            reservation: None,
+        },
+    );
+    let output = CryptoJobOutput::CredentialFinish(Box::new(CredentialFinishOutput {
+        transaction,
+        outcome: Err(agenc_ircd_auth::AuthError::InvalidEncoding),
+    }));
+    let completions = coordinator.crypto_completed(
+        context,
+        CryptoCompletionMessage {
+            job_id,
+            output: Ok(output),
+        },
+    );
+    assert!(matches!(
+        completions.as_slice(),
+        [completion] if completion.close && completion.generation == generation
+    ));
+    assert!(coordinator.ready_seals.is_empty());
+    Ok(())
+}
