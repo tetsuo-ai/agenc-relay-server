@@ -2080,8 +2080,14 @@ impl DomainState {
         if plan.expected_revision != self.revision {
             return Err(DomainError::StaleRevision);
         }
+        let held = self.held_channel_revisions(&plan);
         for mutation in plan.mutations {
             self.apply_mutation(mutation, plan.resulting_revision);
+        }
+        for (channel_id, revision) in held {
+            self.channels
+                .entry(channel_id)
+                .and_modify(|channel| channel.revision = revision);
         }
         self.revision = plan.resulting_revision;
         Ok(ApplyReceipt {
@@ -2093,6 +2099,32 @@ impl DomainState {
             charges: plan.charges,
             storage: plan.storage,
         })
+    }
+
+    /// The persisted revision of every touched channel the plan does not write.
+    ///
+    /// Such a channel keeps its persisted content, so its live revision must
+    /// stay the persisted one: the edges holding the channel learn of no
+    /// change and bind the next channel message to the revision they hold.
+    fn held_channel_revisions(&self, plan: &MutationPlan) -> Vec<(ChannelInstanceId, Revision)> {
+        let written: BTreeSet<ChannelInstanceId> = plan
+            .durable_writes
+            .iter()
+            .filter_map(|write| match write {
+                DurableWrite::PutChannel(channel) => Some(channel.channel_id),
+                DurableWrite::TombstoneChannel { channel_id, .. } => Some(*channel_id),
+                _ => None,
+            })
+            .collect();
+        TouchedEntities::collect(self, &plan.mutations)
+            .channels
+            .iter()
+            .filter(|channel_id| !written.contains(channel_id))
+            .filter_map(|channel_id| {
+                self.durable_channel(*channel_id)
+                    .map(|channel| (*channel_id, channel.revision))
+            })
+            .collect()
     }
 
     /// Creates one auditable typed sanction plan without inspecting message content.

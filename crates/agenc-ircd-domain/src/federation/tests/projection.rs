@@ -861,5 +861,8 @@ mod invites;
 #[path = "projection_modes.rs"]
 mod modes;
 
+#[path = "projection_reach.rs"]
+mod reach;
+
 #[path = "projection_revision_drift.rs"]
 mod revision_drift;

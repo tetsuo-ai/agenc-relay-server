@@ -355,3 +355,46 @@ fn an_account_logging_out_hides_its_invite_copy_on_that_edge() -> Result<(), Dom
     assert_replicas_match_the_cut(&harness)?;
     Ok(())
 }
+
+/// A MODE command that leaves every mode as it was persists nothing and
+/// projects nothing, so the channel revision every edge holds must stay the
+/// revision the next channel message binds to.
+#[test]
+fn a_mode_command_without_an_effective_change_keeps_the_channel_revision_edges_hold()
+-> Result<(), DomainError> {
+    let mut harness = three_edges()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    join(&mut harness, alice)?;
+    join(&mut harness, bob)?;
+    let name = room()?;
+    let channel = harness
+        .state
+        .resolve_channel(&name)
+        .ok_or(DomainError::NotFound)?;
+    let before = harness
+        .state
+        .durable_channel(channel)
+        .ok_or(DomainError::NotFound)?
+        .revision;
+    let unchanged =
+        || CanonicalCommand::mode(name.clone(), vec![crate::ModeChange::TopicProtected(true)]);
+    let plan = harness.plan(alice, unchanged)?;
+    assert!(plan.durable_writes().is_empty());
+    assert_eq!(
+        deliver(&mut harness, plan)?,
+        [Vec::new(), Vec::new(), Vec::new()]
+    );
+    let after = harness
+        .state
+        .durable_channel(channel)
+        .ok_or(DomainError::NotFound)?
+        .revision;
+    assert_eq!(
+        after, before,
+        "an unpersisted change must not advance the channel"
+    );
+    assert_replicas_match_the_cut(&harness)?;
+    assert_eq!(say(&mut harness, alice)?, heard(&[EDGE_A, EDGE_B]));
+    Ok(())
+}
