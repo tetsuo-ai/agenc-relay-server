@@ -5,6 +5,7 @@
 
 mod delivery_restart;
 mod frame_addressing;
+mod inactive_ready;
 mod origin_admission;
 mod origin_mirror;
 mod origin_refusals;
