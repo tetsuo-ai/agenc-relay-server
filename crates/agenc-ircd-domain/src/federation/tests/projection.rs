@@ -833,3 +833,9 @@ fn resync_expiry_hides_retained_sessions_from_presence_and_membership_queries()
     );
     Ok(())
 }
+
+#[path = "projection_invites.rs"]
+mod invites;
+
+#[path = "projection_modes.rs"]
+mod modes;
