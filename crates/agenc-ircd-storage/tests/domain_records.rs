@@ -880,3 +880,27 @@ fn a_persisted_session_rebuilds_only_from_a_consistent_record() -> Result<(), Bo
     );
     Ok(())
 }
+
+#[test]
+fn a_channel_record_needs_live_membership_and_invite_revisions() -> Result<(), Box<dyn Error>> {
+    assert!(ChannelRecordBody::encode(&complete_channel()?).is_ok());
+    let mut unborn_membership = complete_channel()?;
+    if let Some(membership) = unborn_membership.memberships.first_mut() {
+        membership.membership_revision = Revision::new(0)?;
+    }
+    assert_eq!(
+        ChannelRecordBody::encode(&unborn_membership),
+        Err(StorageError::LimitExceeded),
+        "a membership at revision zero"
+    );
+    let mut unborn_invite = complete_channel()?;
+    if let Some(invite) = unborn_invite.invites.first_mut() {
+        invite.creation_revision = Revision::new(0)?;
+    }
+    assert_eq!(
+        ChannelRecordBody::encode(&unborn_invite),
+        Err(StorageError::LimitExceeded),
+        "an invite created at revision zero"
+    );
+    Ok(())
+}

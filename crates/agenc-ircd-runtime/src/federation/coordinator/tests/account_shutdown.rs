@@ -288,3 +288,58 @@ async fn quiescence_refuses_new_remote_authentication_before_carrier_admission()
     assert!(completion.result?.records.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_second_carrier_request_is_refused_while_the_first_is_in_flight() -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let peer = ServerId::from_bytes([50; 16]);
+    let mut coordinator = standalone_coordinator(peer);
+    let context = fixture.context_mut()?;
+    // Durable origin rows carry the domain revision, which a fresh core has
+    // not advanced yet.
+    crate::test_support::seed_account(context, 31, 1)?;
+    let (mut fresh, edge) = remote_account_staging_request(&mut coordinator, context)?;
+    fresh.header.opcode = agenc_ircd_types::FederationOpcode::OpaqueAuthStart;
+    fresh.command = None;
+    let mut next_key = fresh.key;
+    next_key.sequence = 1;
+    let mut next_header = fresh.header;
+    next_header.replay_key.operation_sequence = 1;
+    next_header.request_id = RequestId::from_bytes([76; 16]);
+    let mut next_descriptor = fresh.descriptor;
+    next_descriptor.operation_sequence = 1;
+    next_descriptor.request_id = next_header.request_id;
+    next_descriptor.object_id = FederationHash32::from_bytes([77; 32]);
+    let second = crate::federation::coordinator::FreshRequest {
+        key: next_key,
+        header: next_header,
+        descriptor: next_descriptor,
+        request_object_id: FederationHash32::from_bytes([77; 32]),
+        bound: None,
+        command: None,
+        mutation: agenc_ircd_domain::federation::MutationContext::default(),
+        charge: None,
+    };
+    coordinator
+        .queue_remote_carrier(context, edge.link, peer, fresh, Vec::new())
+        .map_err(|error| format!("first carrier: {error:?}"))?;
+    let mut work = coordinator.take_remote_account_work();
+    let Some(super::super::accounts::RemoteAccountWork::Carrier {
+        generation,
+        in_flight,
+        ..
+    }) = work.pop()
+    else {
+        return Err("expected a queued carrier".into());
+    };
+    assert!(work.is_empty(), "one queued carrier");
+    coordinator
+        .remote_carrier_started(context, generation, in_flight)
+        .map_err(|error| format!("carrier start: {error:?}"))?;
+    assert!(matches!(
+        coordinator.queue_remote_carrier(context, edge.link, peer, second, Vec::new()),
+        Err(Violation::Ceiling)
+    ));
+    assert!(coordinator.take_remote_account_work().is_empty());
+    Ok(())
+}
