@@ -3889,6 +3889,26 @@ pub(crate) fn apply_ready_barrier(
 mod close_tests;
 
 #[cfg(test)]
+#[path = "registration/tests/support.rs"]
+mod test_harness;
+
+#[cfg(test)]
+#[path = "registration/tests/timers.rs"]
+mod timer_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/edge_answers.rs"]
+mod edge_answer_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/edge_carriers.rs"]
+mod edge_carrier_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/actions.rs"]
+mod action_tests;
+
+#[cfg(test)]
 mod tests {
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use agenc_ircd_types::MonotonicTick;
