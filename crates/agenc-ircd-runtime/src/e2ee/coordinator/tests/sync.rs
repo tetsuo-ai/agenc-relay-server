@@ -5,6 +5,7 @@
 
 mod delivery_restart;
 mod origin_admission;
+mod origin_mirror;
 mod origin_refusals;
 mod review_witness;
 
