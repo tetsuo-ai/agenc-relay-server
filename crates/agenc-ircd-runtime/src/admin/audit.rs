@@ -2783,6 +2783,154 @@ mod tests {
         Ok(())
     }
 
+    const KILL: &[u8] = b"KILL AAAAAAAAAAAAAAAAAAAAAA :reason text";
+
+    fn selection_checkpoint(
+        binding: AdminSessionBinding,
+        audit_key: &Ed25519SecretKey,
+        deleted: (u64, u64),
+    ) -> Result<AdminAuditCheckpoint, RuntimeError> {
+        let (first, last) = deleted;
+        AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                network_id: binding.network_id,
+                server_id: binding.server_id,
+                audit_signing_key_id: trust_entry(audit_key)?.key_id,
+                checkpoint_sequence: 0,
+                created_at: CREATED_AT,
+                deleted_first_sequence: first,
+                deleted_last_sequence: last,
+                deleted_count: last.saturating_sub(first).saturating_add(1),
+                deleted_last_event_hash: [8; 32],
+                next_retained_sequence: last.saturating_add(1),
+                previous_checkpoint_hash: [0; 32],
+            },
+            audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    #[test]
+    fn an_export_keeps_only_overlapping_checkpoints_and_stops_at_its_record_ceiling()
+    -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([7; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id: OperatorId::from_bytes([6; 16]),
+        };
+        let range = AuditRange::new(10, 20).map_err(|_| RuntimeError::InvalidValue)?;
+        let mut selection = ExportSelection::new(range);
+        for deleted in [(0, 4), (30, 40)] {
+            selection.consider_checkpoint(selection_checkpoint(binding, &audit_key, deleted)?)?;
+        }
+        assert!(
+            selection.checkpoints.is_empty(),
+            "no overlap with the range"
+        );
+        selection.consider_checkpoint(selection_checkpoint(binding, &audit_key, (15, 25))?)?;
+        assert_eq!(selection.checkpoints.len(), 1);
+        selection.consider_event(fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Intent,
+            KILL,
+        )?)?;
+        assert!(
+            selection.events.is_empty(),
+            "sequence zero is below the range"
+        );
+        selection.ensure_bounded()?;
+        let inside = fixture.event(
+            AuditChainCursor {
+                previous_event_hash: [0; 32],
+                next_sequence: 12,
+            },
+            0,
+            AdminAuditPhase::Intent,
+            KILL,
+        )?;
+        for _ in 0..MAX_AUDIT_EXPORT_RECORDS {
+            selection.consider_event(inside.clone())?;
+        }
+        assert_eq!(
+            selection.events.len() + selection.checkpoints.len(),
+            MAX_AUDIT_EXPORT_RECORDS,
+            "the record over the ceiling is dropped"
+        );
+        assert!(selection.overflowed);
+        assert_eq!(
+            selection.ensure_bounded().err(),
+            Some(RuntimeError::LimitExceeded)
+        );
+        selection.consider_checkpoint(selection_checkpoint(binding, &audit_key, (11, 12))?)?;
+        assert_eq!(
+            selection.checkpoints.len(),
+            1,
+            "nothing is kept after overflow"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retention_refuses_a_repeated_intent_and_an_outcome_without_one_and_bounds_its_scan()
+    -> Result<(), RuntimeError> {
+        let binding = binding();
+        let audit_key = Ed25519SecretKey::from_bytes([7; 32]);
+        let operator_key = Ed25519SecretKey::from_bytes([5; 32]);
+        let fixture = EventFixture {
+            binding,
+            audit_key: &audit_key,
+            operator_key: &operator_key,
+            operator_id: OperatorId::from_bytes([6; 16]),
+        };
+        let intent = fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::Intent,
+            KILL,
+        )?;
+        let outcome = fixture.event(
+            AuditChainCursor::genesis(),
+            0,
+            AdminAuditPhase::OutcomeSuccess,
+            KILL,
+        )?;
+        let mut selector = RetentionSelector::new(CREATED_AT + 1);
+        selector.observe(&intent)?;
+        assert_eq!(
+            selector.observe(&intent).err(),
+            Some(RuntimeError::InvalidValue),
+            "one intent cannot be pending twice"
+        );
+        let mut selector = RetentionSelector::new(CREATED_AT + 1);
+        assert_eq!(
+            selector.observe(&outcome).err(),
+            Some(RuntimeError::InvalidValue),
+            "an outcome needs its pending intent"
+        );
+        let mut selector = RetentionSelector::new(CREATED_AT + 1);
+        for _ in 0..MAX_AUDIT_RETENTION_EVENTS / 2 {
+            selector.observe(&intent)?;
+            selector.observe(&outcome)?;
+        }
+        assert!(!selector.is_complete());
+        selector.observe(&intent)?;
+        assert!(
+            selector.is_complete(),
+            "the scan stops at its event ceiling"
+        );
+        assert_eq!(
+            selector.candidate(),
+            Some((0, outcome.event_hash())),
+            "the last settled pair is the candidate"
+        );
+        Ok(())
+    }
+
     #[path = "authority_fences.rs"]
     mod authority_fences;
 }
