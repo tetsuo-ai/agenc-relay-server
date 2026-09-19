@@ -38,6 +38,7 @@ use super::{CompanionCoordinator, CompanionOrigin, CompanionOriginKey, CompleteR
 
 mod barrier;
 pub(crate) mod direct_release;
+mod directory_faults;
 mod live_payloads;
 mod sequence;
 pub(crate) mod support;
