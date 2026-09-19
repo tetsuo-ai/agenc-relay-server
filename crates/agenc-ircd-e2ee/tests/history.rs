@@ -25,6 +25,9 @@ mod reference_faults;
 #[path = "history/transition_faults.rs"]
 mod transition_faults;
 
+#[path = "history/reinit_faults.rs"]
+mod reinit_faults;
+
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_e2ee::history::{
     AlternativeRecord, ChainLimits, ChainStep, HistoricalChain, Lifecycle, RecordReferences,
