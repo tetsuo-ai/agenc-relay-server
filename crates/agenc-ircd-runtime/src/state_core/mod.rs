@@ -4733,10 +4733,17 @@ mod lifecycle_tests {
 #[cfg(test)]
 mod tests {
     mod account_shutdown;
+    mod admin_requests;
     mod admin_revision;
+    mod checkpoint_receipts;
     mod client_input;
+    mod completion_exits;
     mod local_join;
     mod overload_ladder;
+    mod rehash_outcome_pairs;
+    mod reload_requests;
+    mod staging_refusals;
+    mod support;
     use agenc_ircd_client_wire::{FramedLine, parse_message};
     use tokio::sync::{mpsc, oneshot};
 
