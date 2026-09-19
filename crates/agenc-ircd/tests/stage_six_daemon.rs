@@ -104,6 +104,8 @@ const MAX_CORE_V1_TRANSCRIPT_STEP_BYTES: usize = 4_610;
 const DATABASE_MAX_BYTES: u64 = 1_073_741_824;
 const BACKUP_MAX_BYTES: u64 = 2_147_483_648;
 const DISK_RESERVE_BYTES: u64 = 67_108_864;
+/// The software name the daemon reports, which follows the workspace version.
+const SOFTWARE_NAME: &str = concat!("agenc-ircd-", env!("CARGO_PKG_VERSION"));
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a fixture waits for a daemon it started to open its listener. A debug daemon on
 /// a host running several times more test threads than cores needed more than 20 seconds
@@ -2065,7 +2067,7 @@ fn exercise_client(fixture: &LiveFixture) -> TestResult<IrcClient> {
     let public_oper = client.send_until("OPER root password", " 481 ")?;
     assert_contains(&public_oper, " 481 ")?;
     assert_contains(&client.send_until("MOTD", " 422 ")?, " 422 ")?;
-    assert_contains(&client.send_until("VERSION", " 374 ")?, "agenc-ircd-0.0.0")?;
+    assert_contains(&client.send_until("VERSION", " 374 ")?, SOFTWARE_NAME)?;
     assert_contains(&client.send_until("TIME", " 391 ")?, " 391 ")?;
     assert_contains(&client.send_until("INFO", " 374 ")?, " 374 ")?;
     assert_contains(
@@ -2153,10 +2155,7 @@ fn exercise_admin(fixture: &LiveFixture, live_account: AccountId) -> TestResult<
     assert_eq!(admin.command_line("PING after-pong")?, "PONG :after-pong");
 
     assert_eq!(admin.command_line("MOTD")?, "422 * :MOTD File is missing");
-    assert_contains(
-        &admin.command_until("VERSION", " 374 ")?,
-        "agenc-ircd-0.0.0",
-    )?;
+    assert_contains(&admin.command_until("VERSION", " 374 ")?, SOFTWARE_NAME)?;
     assert_contains(&[admin.command_line("TIME")?], " 391 ")?;
     let info = admin.command_until("INFO", " 374 ")?;
     assert_eq!(info.len(), 2);
