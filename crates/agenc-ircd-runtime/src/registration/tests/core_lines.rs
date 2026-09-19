@@ -10,7 +10,20 @@ use crate::connection::sink::ClientSink;
 use crate::state_core::inbox::{SourceAddressKey, StateCoreMessage};
 use crate::test_support::{FrameSink, StateCoreFixture};
 
+/// The instant every test in this file runs at.
+const FROZEN_TICKS: u64 = 10;
+
 /// A state core that owns the production registration router.
+///
+/// `with_registration_router` composes the core for the actor loop, so it runs
+/// on the system monotonic clock. These tests step the core by hand and settle
+/// each batch with `commit_staged_batch`, which submits the gathering batch
+/// itself. On a running clock the one-millisecond gather window can end between
+/// two lines; the next step then submits the batch first, the helper submits it
+/// again under a second transaction, and the first receipt stops the core with
+/// `Indeterminate(TransactionMismatch)`. The clock is therefore frozen before
+/// any line is routed: a batch leaves only when the test settles it, and the
+/// rate buckets never refill behind the burst assertion.
 struct Core {
     fixture: StateCoreFixture,
     sequences: BTreeMap<u64, u64>,
@@ -18,10 +31,24 @@ struct Core {
 
 impl Core {
     fn new() -> TestResult<Self> {
+        let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+        fixture.context_mut()?.set_monotonic_for_test(FROZEN_TICKS);
         Ok(Self {
-            fixture: StateCoreFixture::with_registration_router(entropy_script())?,
+            fixture,
             sequences: BTreeMap::new(),
         })
+    }
+
+    /// Settles the batch the routed lines staged. The batch must still be
+    /// gathering: a core that already submitted it would be settled twice.
+    async fn settle(&mut self) -> TestResult {
+        let context = self.fixture.context_mut()?;
+        if context.pending_len() == 0 || context.in_flight() {
+            return Err(
+                "the staged batch left the gather window before the test settled it".into(),
+            );
+        }
+        self.fixture.commit_staged_batch().await
     }
 
     fn open(&mut self, number: u64) -> TestResult<Arc<FrameSink>> {
@@ -88,7 +115,7 @@ async fn input_behind_a_pending_registration_runs_after_the_welcome() -> TestRes
     core.line(1, "PING first")?;
     core.line(1, "NICK")?;
     assert!(!saw(&sink, "PONG"), "lines: {:?}", sink.lines());
-    core.fixture.commit_staged_batch().await?;
+    core.settle().await?;
     let lines = sink.lines();
     let welcome = lines.iter().position(|line| line.contains(" 001 early "));
     let pong = lines.iter().position(|line| line.contains("PONG"));
@@ -106,11 +133,11 @@ async fn command_behind_an_unfinished_join_waits_for_the_join_response() -> Test
     let sink = core.open(1)?;
     core.line(1, "NICK joiner")?;
     core.line(1, "USER joiner 0 * :Joiner")?;
-    core.fixture.commit_staged_batch().await?;
+    core.settle().await?;
     core.line(1, "JOIN #room")?;
     core.line(1, "TOPIC #room")?;
     assert!(!saw(&sink, " 331 "), "lines: {:?}", sink.lines());
-    core.fixture.commit_staged_batch().await?;
+    core.settle().await?;
     let lines = sink.lines();
     let names_end = lines
         .iter()
