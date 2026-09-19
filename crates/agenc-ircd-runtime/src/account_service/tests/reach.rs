@@ -2,7 +2,7 @@
 //! the wrong phase before any storage read is submitted.
 #![forbid(unsafe_code)]
 
-use super::harness::{Live, arm_sasl, authentication_start};
+use super::harness::{Live, WALL, arm_sasl, authentication_start};
 use super::*;
 use crate::test_support::TestResult;
 use agenc_ircd_auth::ACCOUNT_SERVICE_ENVELOPE_BYTES;
@@ -169,4 +169,135 @@ fn a_creation_seal_completing_behind_a_ready_stage_closes_its_carrier() -> TestR
     ));
     assert!(coordinator.ready_stage.is_some());
     Ok(())
+}
+
+/// The same fence for a sealed credential-change START.
+#[test]
+fn a_credential_seal_completing_behind_a_ready_stage_closes_its_carrier() -> TestResult {
+    use super::harness::begin_unavailable_credential_change;
+    use crate::account_service::ReadyStage;
+    let (mut live, account_id) = Live::open_registered()?;
+    let (start_a, envelope_a) = begin_unavailable_credential_change(&mut live, 5, account_id)?;
+    let (start_b, envelope_b) = begin_unavailable_credential_change(&mut live, 6, account_id)?;
+    let request_a = live.account(
+        AccountCarrierKind::Credentials,
+        AccountCarrierPhase::Start,
+        envelope_a,
+    );
+    let request_b = live.account(
+        AccountCarrierKind::Credentials,
+        AccountCarrierPhase::Start,
+        envelope_b,
+    );
+    let generation = live.generation;
+    let (coordinator, context) = live.fixture.parts()?;
+    let count = context.head().account_service_response_count;
+    coordinator.ready_stage = Some(ReadyStage::CredentialStart {
+        request: request_a,
+        sealed: start_a.seal(count)?,
+        reservation: None,
+    });
+    let job_id = CryptoJobId::new(79);
+    coordinator.crypto.insert(
+        job_id,
+        PendingCrypto::CredentialStartSeal {
+            request: request_b,
+            reservation: None,
+        },
+    );
+    let output = CryptoJobOutput::CredentialStartSealed(Box::new(Ok(start_b.seal(count)?)));
+    let completions = coordinator.crypto_completed(
+        context,
+        CryptoCompletionMessage {
+            job_id,
+            output: Ok(output),
+        },
+    );
+    assert!(matches!(
+        completions.as_slice(),
+        [completion] if completion.close && completion.generation == generation
+    ));
+    assert!(coordinator.ready_stage.is_some());
+    Ok(())
+}
+
+/// The same fence for a sealed creation FINISH, whose seal arrives with its
+/// transaction and reservation.
+#[tokio::test]
+async fn a_creation_finish_seal_completing_behind_a_ready_stage_closes_its_carrier() -> TestResult {
+    use super::invitation_window::{commit_start, open_connection, worker_finish};
+    use crate::account_service::ReadyStage;
+    let mut live = Live::open()?;
+    let generation = live.generation;
+    let route = live.route;
+    let first = commit_start(
+        &mut live.fixture,
+        generation,
+        route,
+        1,
+        "finisher",
+        None,
+        WALL,
+    )
+    .await?;
+    let first = worker_finish(&mut live.fixture, generation, route, 2, first, WALL)?;
+    // A second connection carries the second creation.
+    let other = ConnectionGeneration::new(2);
+    let (_other_sink, other_route) = open_connection(&mut live.fixture, other)?;
+    let second = commit_start(
+        &mut live.fixture,
+        other,
+        other_route,
+        3,
+        "finisher2",
+        None,
+        WALL,
+    )
+    .await?;
+    let second = worker_finish(&mut live.fixture, other, other_route, 4, second, WALL)?;
+    let (coordinator, context) = live.fixture.parts()?;
+    coordinator.ready_stage = Some(ReadyStage::CreationFinish {
+        request: live_request(generation, route, first.envelope),
+        transaction_id: first.transaction_id,
+        sealed: first.sealed,
+        reservation: first.reservation,
+    });
+    let job_id = CryptoJobId::new(80);
+    coordinator.crypto.insert(
+        job_id,
+        PendingCrypto::CreationFinishSeal {
+            request: live_request(other, other_route, second.envelope),
+            transaction_id: second.transaction_id,
+            reservation: second.reservation,
+        },
+    );
+    let output = CryptoJobOutput::CreationFinishSealed(Box::new(Ok(second.sealed)));
+    let completions = coordinator.crypto_completed(
+        context,
+        CryptoCompletionMessage {
+            job_id,
+            output: Ok(output),
+        },
+    );
+    assert!(matches!(
+        completions.as_slice(),
+        [completion] if completion.close && completion.generation == other
+    ));
+    assert!(coordinator.ready_stage.is_some());
+    Ok(())
+}
+
+fn live_request(
+    generation: ConnectionGeneration,
+    route: ConnectionRoute,
+    envelope: AccountServiceEnvelope,
+) -> RequestContext {
+    super::harness::account_request(
+        generation,
+        2,
+        route,
+        AccountCarrierKind::Create,
+        AccountCarrierPhase::Finish,
+        envelope,
+    )
 }
