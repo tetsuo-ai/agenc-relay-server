@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 985
-reviewed_source_sha256 = "b3c18e1e0506879d7d6b72dc34dc17c84bd43c7c50b294f8df6bbba5edcc11fd"
+reviewed_source_sha256 = "92bc09dd1a10e664819221ec657d9f6e74ae495c376915021cb4ee4d2592e7f7"
 deferred = []
 
 [[region]]
@@ -379,9 +379,9 @@ id = "release-decision-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-ircd-config/src/release_decision.rs"
 item = "fmt"
-source_sha256 = "7785552148de5f3ada8b23860ebfbe0838666cc23abd5ce1151b1c51a2eb9300"
-start_line = 73
-end_line = 82
+source_sha256 = "f55b90a6a0e40d643f1f4c64692c0cd44c1f6b910bd0f2d4e097c80af5e27ffd"
+start_line = 72
+end_line = 81
 span_sha256 = "da6bedbc9db9f009cbdca87691d439f500f5cef345a6c05a1152425a86ca45fc"
 metric = "regions"
 reason = "Every closed ReleaseDecisionError discriminant must be observed by an error reporting test."

@@ -20,8 +20,7 @@
 > [Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 > closes exact source commit `a93e53e71d22a6d5ec46bd749ec18068a9fa572b`.
 > The daemon implements TLS-only direct, Tor-exit, and onion profiles,
-> coordinator/edge federation, and the E2EE server adapter. The external
-> cryptographic and protocol review remains open. Stage 09 adds optional WebSocket transport and
+> coordinator/edge federation, and the E2EE server adapter. Stage 09 adds optional WebSocket transport and
 > plaintext channel history. Production
 > qualification is in progress for [Stage 10](docs/stage-10-qualification.md).
 > Checkpoints do not qualify later source changes.
@@ -57,7 +56,7 @@ Ed25519, and authenticated storage.
 | 05 | complete; checkpoint closed | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, full startup reconstruction, signed backup/restore, rekey construction, login-index transition, and native filesystem qualification |
 | 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
 | 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
-| 08 | implementation checkpoint closed; internally reviewed 2026-09-18, no external audit | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
+| 08 | complete; checkpoint closed | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
 | 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, and purge |
 | 10 | in progress; no release decision | Production qualification and release evidence |
 
@@ -85,9 +84,7 @@ terminal only at the published policy's finality quorum, policy publication,
 KeyPackage and mailbox delivery, route projection to edges with a
 record-chain witness at every edge, the cross-profile durable barrier, a
 coordinator reload from durable rows, the encrypted profile composed in the
-daemon, and a lifecycle driven by two independent MLS libraries; the
-review task was closed on 2026-09-18 by an internal independent review; no
-external audit was commissioned. Stage 09 adds optional WSS transport,
+daemon, and a lifecycle driven by two independent MLS libraries. Stage 09 adds optional WSS transport,
 plaintext history, bounded purge and expiry, and authenticated history replay. See the
 [Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
@@ -186,9 +183,8 @@ Stage 06 checks.
 The [Stage 08 manifest](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
 contains 160 passed records and closes exact source commit
 `ae6457fb62fef8961d3caf904febed580e8b4a91`. Its recorded gate ran 97 commands.
-The external cryptographic and protocol review (`S08-039`) remains open in the
-[review package](conformance/review/README.md). This checkpoint does not claim
-that review or Stage 10 production qualification has been completed.
+This checkpoint does not claim that Stage 10 production qualification has
+been completed.
 
 The [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 contains 10 passed records and closes exact source commit

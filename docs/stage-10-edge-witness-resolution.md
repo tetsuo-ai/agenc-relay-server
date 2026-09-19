@@ -97,7 +97,7 @@ or lost batch leaves the old head and the row exactly as they were.
 
 ## The successor's overlap window (ENC-17)
 
-The internal review of the encrypted profile found that `verify_record`
+The encrypted-profile defect sweep found that `verify_record`
 accepted either credential of the negotiated set at any time (issue #162).
 `SequencerKeySet::credential_at` now decides: the active credential signs at
 any second, and the successor only from its own `not_before` through
@@ -108,7 +108,7 @@ terminal carries and a lower bound on its own
 (`record_authentication::declared_sequenced_at`). The edge consults no clock.
 A successor record outside the window is a record under any other key: the
 link closes as a profile violation and the row is retained. The remediation
-record is [the edge review remediation](stage-10-review-remediation-edge.md).
+record is [the edge remediation record](stage-10-edge-remediation.md).
 
 ## Defects this exposed
 
@@ -126,7 +126,7 @@ no frames at all, and both were wrong once it reads `EWITNESS`:
 ## Limitations
 
 - The coordinator publication side landed with ENC-19 (issue #166, see
-  [the review remediation record](stage-10-review-remediation-coordinator.md)).
+  [the coordinator remediation record](stage-10-coordinator-remediation.md)).
   Until then the coordinator refused every `EWITNESS REQUEST` as a protocol
   violation, which closed the link on every reconnect of a blocked edge; this
   record originally described that gap as an unanswered request only.

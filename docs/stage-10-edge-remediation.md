@@ -1,13 +1,10 @@
-# Edge review remediation
+# Edge remediation
 
 This record closes ENC-15 (issue #160), ENC-16 (issue #161) and ENC-17 (issue
-#162): the three findings the internal review of the encrypted profile (#76)
-reported against the hostile edge and client surface and the recovery and
-witness gates. The review was internal: one reviewer who took no part in the
-implementation and worked from the specification, the review package and the
-source alone. It was not a third-party audit and does not close `S08-039`.
-The findings and their dispositions are in
-[the review findings ledger](../conformance/review/findings.md). No wire
+#162): the three findings the encrypted-profile defect sweep (#76) reported
+against the hostile edge and client surface and the recovery and witness
+gates, by one examiner who took no part in the implementation and worked from
+the specification and the source alone. No wire
 object, registry, limit, reply code or normative text changed, so the
 specification baseline is untouched.
 

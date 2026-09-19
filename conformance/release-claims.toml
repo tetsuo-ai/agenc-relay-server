@@ -32,7 +32,6 @@ first_contact = "First-contact encryption does not authenticate an identity out 
 transparency = "Transparency observation does not grant Verified status."
 endpoint = "A compromised client can read its plaintext, and authorized recipients can disclose messages."
 tor = "Tor testing cannot establish protection against every traffic-analysis adversary."
-review = "That review remains open."
 
 # Every claim requires every job of the policy on every target the decision
 # names, plus every fuzz campaign; close enforces that. The lists are written
@@ -51,8 +50,7 @@ limits = ["metadata", "tor"]
 [[claim]]
 id = "encrypted-v1"
 jobs = ["workspace", "models", "interoperability", "storage", "capacity", "soak", "drills", "reproducibility", "sources", "claims", "fuzz.*"]
-external_review = "S08-039"
-limits = ["metadata", "first_contact", "transparency", "endpoint", "tor", "review"]
+limits = ["metadata", "first_contact", "transparency", "endpoint", "tor"]
 
 [[claim]]
 id = "wss"

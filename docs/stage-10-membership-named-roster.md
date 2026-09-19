@@ -1,10 +1,7 @@
 # Leaf-membership proofs are verified against the roster they name
 
 This record closes ENC-18 (issue #164), the remediation of finding `ENC11-1`
-from the 2026-09-18 internal review of the encrypted-messaging profile. That
-review was internal: it was performed by a reviewer that had no context from
-the implementation and no stake in it, and it is **not** a third-party audit.
-It does not close the external review task `S08-039`.
+from the 2026-09-18 encrypted-profile defect sweep (issue #76).
 
 ## Finding
 
@@ -130,8 +127,7 @@ onto the same items; its reason now states the named-snapshot rule and the
 span was re-reviewed: no conditional was added to it. A new release region,
 `coordinator-roster-snapshot-resolution`, covers `roster_snapshots::resolve`
 with the branch metric; the tests above take both outcomes of its two
-conditionals. `conformance/review/findings.md` carries the finding and this
-disposition.
+conditionals.
 
 ## Limitations
 

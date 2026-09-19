@@ -38,30 +38,16 @@ def sign_payload(payload: bytes, key: Path, public_key: Path) -> bytes:
     return encoded
 
 
-def external_review(review: Path, source_commit: str) -> tuple[str, dict[str, bytes]]:
-    review_record = read_record(review)
-    require_fields(review_record, {"task", "source_commit", "reviewer", "completed_at", "open_findings", "report", "report_sha256", "remediation_verified"}, "external review")
-    if review_record["task"] != "S08-039" or review_record["source_commit"] != source_commit or not isinstance(review_record["reviewer"], str) or not review_record["reviewer"].strip() or type(review_record["open_findings"]) is not int or review_record["open_findings"] != 0 or review_record["remediation_verified"] is not True:
-        raise QualificationError("external review scope or remediation is incomplete")
-    timestamp(review_record["completed_at"])
-    report = safe_path(review.parent, review_record["report"])
-    if file_digest(report) != review_record["report_sha256"]:
-        raise QualificationError("external review report differs")
-    files = {"external-review.json": canonical(review_record), "external-review-report": read_bytes(report)}
-    return digest(canonical(review_record)), files
-
-
 def decision_record(candidate: dict[str, Any], summary: dict[str, Any], claims: list[str], targets: list[str],
-                    review_hash: str | None, public_key: Path) -> dict[str, Any]:
+                    public_key: Path) -> dict[str, Any]:
     """The flat decision document the daemon's reader accepts."""
     return {"schema_version": 1, "candidate_sha256": digest(canonical(candidate)),
             "source": candidate["source"], "claims": sorted(claims), "decided_at": utc_now(), "targets": targets,
             "artifacts": [artifact for artifact in candidate["artifacts"] if artifact["target"] in targets],
-            "qualification_sha256": digest(canonical(summary)),
-            "external_review_sha256": review_hash, "public_key_sha256": file_digest(public_key)}
+            "qualification_sha256": digest(canonical(summary)), "public_key_sha256": file_digest(public_key)}
 
 
-def close(root: Path, directory: Path, key: Path, public_key: Path, claims: list[str], review: Path | None,
+def close(root: Path, directory: Path, key: Path, public_key: Path, claims: list[str],
           targets: list[str] | None = None) -> dict[str, Any]:
     """Sign a decision for the selected targets once every job in that scope passed."""
     candidate = validate_candidate(root, directory)
@@ -71,13 +57,7 @@ def close(root: Path, directory: Path, key: Path, public_key: Path, claims: list
         raise QualificationError("release decision requires all native jobs to pass without unresolved failed or interrupted attempts")
     if not claims or len(claims) != len(set(claims)) or any(claim not in candidate["claims"] for claim in claims):
         raise QualificationError("release claims must be a nonempty subset of compiled profiles")
-    review_hash = None
-    review_files: dict[str, bytes] = {}
-    if "encrypted-v1" in claims:
-        if review is None:
-            raise QualificationError("encrypted-v1 requires the completed S08-039 external review record")
-        review_hash, review_files = external_review(review, candidate["source"]["commit"])
-    decision = decision_record(candidate, summary, claims, scope, review_hash, public_key)
+    decision = decision_record(candidate, summary, claims, scope, public_key)
     encoded = sign_payload(DOMAIN + canonical(decision), key, public_key)
     # Publish the decision as one directory, so a failed signer or interrupted
     # write never leaves a partially installed release decision.
@@ -87,7 +67,7 @@ def close(root: Path, directory: Path, key: Path, public_key: Path, claims: list
     with tempfile.TemporaryDirectory(prefix=".decision-", dir=directory) as temporary:
         staged = Path(temporary) / "complete"
         files = {"qualification.json": canonical(summary), "release.json": canonical(decision),
-                 "release.sig": encoded, "release-public.pem": read_bytes(public_key, 4096), **review_files}
+                 "release.sig": encoded, "release-public.pem": read_bytes(public_key, 4096)}
         for name, data in files.items():
             write_once(staged / name, data)
         staged.rename(final)

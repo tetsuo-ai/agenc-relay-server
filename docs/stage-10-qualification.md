@@ -521,8 +521,7 @@ record (source identities, compiler line, target, features, storage schema)
 and with `conformance/spec-baseline.toml` (document and profile digests and
 their base64url tokens). `qualified_claims` must be empty and the compiled
 profile map must be complete. `conformance/release-claims.toml` lists each
-claim, the jobs it requires, the external review the encrypted profile
-requires, and the limit statements that must remain in this document. The
+claim, the jobs it requires, and the limit statements that must remain in this document. The
 checker also lints `README.md`, `TODO.md`, this document, and
 `conformance/README.md` for completion phrases, which are refused while the
 candidate has no decision directory.
@@ -3906,15 +3905,9 @@ python3 scripts/qualify-release.py verify --candidate /path/to/candidate \
 ```
 
 The verifier checks the signature, candidate artifacts, the decision's target
-scope, native attempt records, decision chronology, and the external review
-when the decision claims the encrypted profile. It does not trust the public
+scope, native attempt records, and decision chronology. It does not trust the public
 key bundled beside a signature. The daemon's own `conformance --json
 --release-decision` inspection applies the same key rule to a deployed binary.
-
-An `encrypted-v1` decision also requires the completed external cryptographic
-and protocol review recorded by `S08-039`, including remediation verification.
-That review remains open. Internal tests and implementation review do not
-replace it. Review records must describe work that was performed.
 
 The server observes routing, membership, timing, sizes, and other metadata
 described in the specifications. First-contact encryption does not

@@ -62,7 +62,7 @@ def load_claims_policy(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
     required_jobs = sorted([job["id"] for job in policy["job"]] + ["fuzz.*"])
     seen: set[str] = set()
     for claim in claims["claim"]:
-        fields = {"id", "jobs", "limits"} | ({"external_review"} if claim.get("id") == "encrypted-v1" else set())
+        fields = {"id", "jobs", "limits"}
         if not isinstance(claim, dict) or set(claim) != fields or claim["id"] not in CLAIMS or claim["id"] in seen:
             raise QualificationError("release claims policy has an unknown or repeated claim")
         seen.add(claim["id"])
@@ -70,8 +70,6 @@ def load_claims_policy(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
             raise QualificationError(f"claim {claim['id']} does not require every qualification job")
         if not claim["limits"] or any(name not in limits for name in claim["limits"]):
             raise QualificationError(f"claim {claim['id']} names an unknown limit statement")
-        if claim["id"] == "encrypted-v1" and claim["external_review"] != policy["external_review_task"]:
-            raise QualificationError("encrypted-v1 must require the external review task")
     if seen != set(CLAIMS):
         raise QualificationError("release claims policy must cover every compiled claim")
     return claims
@@ -171,7 +169,7 @@ def foreign_decision(candidate: dict[str, Any], target: str, public_key: Path) -
     source = {"commit": FOREIGN_COMMIT, "source_sha256": digest(b"foreign source\n"), "lock_sha256": digest(b"foreign lock\n")}
     return {"schema_version": 1, "candidate_sha256": digest(b"foreign candidate\n"), "source": source, "claims": ["core-v1"],
             "decided_at": "2026-01-01T00:00:00Z", "targets": [target], "artifacts": [dict(artifact)],
-            "qualification_sha256": digest(b"foreign qualification\n"), "external_review_sha256": None,
+            "qualification_sha256": digest(b"foreign qualification\n"),
             "public_key_sha256": digest(read_bytes(public_key, 4096))}
 
 

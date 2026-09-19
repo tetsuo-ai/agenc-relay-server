@@ -43,8 +43,7 @@ bash scripts/check-stage-nine.sh
 A check does not close a stage by itself.
 The [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 records the closure for exact source commit
-`a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. The external cryptographic and
-protocol review (`S08-039`) remains open. Checkpoints apply to their named
+`a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. Checkpoints apply to their named
 source revisions; later changes require new artifact-backed evidence to close
 a stage at a new revision. See [TODO.md](TODO.md) for every stage's checkpoint
 and [conformance/evidence/README.md](conformance/evidence/README.md) for the

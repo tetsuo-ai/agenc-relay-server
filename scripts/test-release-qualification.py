@@ -481,7 +481,7 @@ class RunnerTests(unittest.TestCase):
             self.status(single, ["aarch64-unknown-linux-gnu"])
         private, public = self.keys("single")
         with mock.patch.object(candidate_module, "source_identity", return_value=dict(SyntheticCandidate.SOURCE)):
-            decision = close(self.root, single.directory, private, public, ["core-v1"], None)
+            decision = close(self.root, single.directory, private, public, ["core-v1"])
         self.assertEqual(decision["targets"], ["x86_64-unknown-linux-gnu"])
         self.assertEqual([artifact["target"] for artifact in decision["artifacts"]], ["x86_64-unknown-linux-gnu"])
         self.assertEqual(verify_decision(self.root, single.directory, public)["targets"], ["x86_64-unknown-linux-gnu"])
@@ -501,12 +501,12 @@ class RunnerTests(unittest.TestCase):
         private, public = self.keys("scoped")
         with mock.patch.object(candidate_module, "source_identity", return_value=dict(SyntheticCandidate.SOURCE)):
             with self.assertRaises(QualificationError):
-                close(self.root, self.directory, private, public, ["core-v1"], None)
+                close(self.root, self.directory, private, public, ["core-v1"])
             with self.assertRaises(QualificationError):
-                close(self.root, self.directory, private, public, ["core-v1"], None, ["aarch64-unknown-linux-gnu"])
+                close(self.root, self.directory, private, public, ["core-v1"], ["aarch64-unknown-linux-gnu"])
             with self.assertRaises(QualificationError):
-                close(self.root, self.directory, private, public, ["core-v1"], None, ["riscv64gc-unknown-linux-gnu"])
-            decision = close(self.root, self.directory, private, public, ["core-v1", "wss"], None, ["x86_64-unknown-linux-gnu"])
+                close(self.root, self.directory, private, public, ["core-v1"], ["riscv64gc-unknown-linux-gnu"])
+            decision = close(self.root, self.directory, private, public, ["core-v1", "wss"], ["x86_64-unknown-linux-gnu"])
         self.assertEqual(decision["targets"], ["x86_64-unknown-linux-gnu"])
         self.assertEqual(len(decision["artifacts"]), 1)
         verified = verify_decision(self.root, self.directory, public)
@@ -584,30 +584,19 @@ class RunnerTests(unittest.TestCase):
         from release_qualification.signing import close
 
         with self.assertRaises(QualificationError):
-            close(self.root, self.directory, Path("/absent"), Path("/absent"), ["core-v1"], None)
+            close(self.root, self.directory, Path("/absent"), Path("/absent"), ["core-v1"])
         self.complete_every_job()
         self.assertTrue(self.status()["ready"])
         private, public = self.keys("release")
         _, other_public = self.keys("other")
-        with self.assertRaises(QualificationError):
-            close(self.root, self.directory, private, public, ["encrypted-v1"], None)
-        review = Path(self.temporary.name) / "review.json"
-        report = Path(self.temporary.name) / "review-report"
-        report.write_bytes(b"review report\n")
-        record = {"task": "S08-039", "source_commit": SyntheticCandidate.SOURCE["commit"], "reviewer": "reviewer",
-                  "completed_at": timestamp_now(), "open_findings": 1, "report": "review-report",
-                  "report_sha256": digest(b"review report\n"), "remediation_verified": True}
-        review.write_bytes(canonical(record))
-        with self.assertRaises(QualificationError):
-            close(self.root, self.directory, private, public, ["encrypted-v1"], review)
         with mock.patch.object(candidate_module, "source_identity", return_value=dict(SyntheticCandidate.SOURCE)):
-            decision = close(self.root, self.directory, private, public, ["core-v1", "wss"], None)
+            decision = close(self.root, self.directory, private, public, ["core-v1", "wss"])
         self.assertEqual(decision["claims"], ["core-v1", "wss"])
         self.assertEqual(verify_decision(self.root, self.directory, public)["claims"], ["core-v1", "wss"])
         with self.assertRaises(QualificationError):
             verify_decision(self.root, self.directory, other_public)
         with self.assertRaises(QualificationError):
-            close(self.root, self.directory, private, public, ["core-v1"], None)
+            close(self.root, self.directory, private, public, ["core-v1"])
         log = self.directory / "runs/x86_64-unknown-linux-gnu/claims/0001/output.log"
         original = log.read_bytes()
         log.write_bytes(original + b"tampered\n")
@@ -1355,7 +1344,7 @@ class ClaimsDriverTests(unittest.TestCase):
             for name in claims["documents"]:
                 (root / name).write_text("placeholder\n")
             for text in (original.replace('"soak", ', "", 1), original.replace('limits = ["metadata", "tor"]', 'limits = ["metadata", "absent"]', 1),
-                         original.replace('id = "history"', 'id = "core-v1"'), original.replace('external_review = "S08-039"', 'external_review = "S08-001"'),
+                         original.replace('id = "history"', 'id = "core-v1"'),
                          original.replace("[[claim]]\nid = \"wss\"", "[[claim]]\nid = \"wss2\"")):
                 (root / driver.CLAIMS_PATH).write_text(text)
                 with self.subTest(text=text[:40]), self.assertRaises(QualificationError):

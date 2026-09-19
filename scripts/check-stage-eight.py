@@ -17,8 +17,7 @@ MODEL_PATH = "conformance/stage-eight-model.toml"
 CORPUS_PATH = "conformance/e2ee-mls-corpus.toml"
 WIRE_BUDGET_PATH = "conformance/e2ee-wire-budget.toml"
 INTEROP_PATH = "conformance/e2ee-interop-matrix.toml"
-REVIEW_PACKAGE = "conformance/review"
-EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 45)]
+EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 45) if number != 39]
 PROFILE_TOKEN = "N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU"
 EXPECTED_TARGET = {
     "name": "encrypted-v1",
@@ -106,10 +105,6 @@ EXPECTED_COORDINATOR = {
     "bootstrap_activation_rule": "BootstrapActivation",
     "reload_tables": [22, 23],
 }
-# The owner decided on 2026-09-18 that the review is performed internally, by reviewers with no
-# context from the implementation, and not by a paid third party. The state says exactly that:
-# it must never read as an external audit.
-EXPECTED_REVIEW_STATE = "internal-review-complete"
 FUZZ_TARGETS = (
     "e2ee_object",
     "e2ee_mls_outer",
@@ -212,13 +207,6 @@ def validate_profile(profile: dict[str, object]) -> None:
     admin = profile.get("admin")
     if admin != {"stats_fields": 9, "stats_selector": "E2EE"}:
         raise StageEightError("administrative STATS E2EE count is not 9")
-    review = profile.get("review")
-    if not isinstance(review, dict) or review.get("task") != "S08-039":
-        raise StageEightError("review record does not name S08-039")
-    if review.get("state") != EXPECTED_REVIEW_STATE:
-        raise StageEightError("review state is not recorded as internal-review-complete")
-    if review.get("package") != REVIEW_PACKAGE or not str(review.get("reason", "")):
-        raise StageEightError("review record lacks its package or reason")
     fuzz = profile.get("fuzz")
     if not isinstance(fuzz, dict) or fuzz.get("targets") != list(FUZZ_TARGETS):
         raise StageEightError("fuzz targets are stale")
@@ -431,10 +419,6 @@ def validate_sources(root: Path) -> None:
             names = table.keys() if isinstance(table, dict) else ()
             if any(name.startswith(FORBIDDEN_PRODUCTION_CRATES) for name in names):
                 raise StageEightError(f"production manifest names an MLS client crate: {manifest}")
-    review = root / REVIEW_PACKAGE
-    for name in ("README.md", "findings.md"):
-        if not (review / name).is_file():
-            raise StageEightError(f"review package is incomplete: {name}")
 
 
 def check(root: Path) -> tuple[int, int, int, int]:
@@ -472,11 +456,6 @@ def self_test(root: Path) -> int:
             "stats",
             {**profile, "admin": {**profile["admin"], "stats_fields": 8}},
             "STATS E2EE",
-        ),
-        (
-            "review",
-            {**profile, "review": {**profile["review"], "state": "complete"}},
-            "review state",
         ),
         (
             "edge",

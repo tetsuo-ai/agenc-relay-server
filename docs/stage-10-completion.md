@@ -72,8 +72,8 @@ The project-owned redb fork that replaces the withdrawn upstream submission
 The coordinator's `EWITNESS` publication side, terminal proofs and
 bootstrap-activation votes that reload as the live coordinator admitted them,
 and conversation-charged retained terminal requests (ENC-19 to ENC-22, issues
-#166 to #169, from the internal independent review) are recorded in
-[the coordinator review remediation record](stage-10-review-remediation-coordinator.md).
+#166 to #169) are recorded in
+[the coordinator remediation record](stage-10-coordinator-remediation.md).
 The one physical growth allowance that now spans the nonce reservation, both
 guard replacements, the main or checkpoint transaction, the deferred cleanup
 and the close of every durable operation on the core write path, its
@@ -181,15 +181,15 @@ flush (RUN-12, issue #180) are recorded in
 Leaf-membership proofs verified against the retained roster snapshot they
 name instead of the account's current heads, so live admission decides as
 startup reconstruction does after a roster or root rotation, the explicit
-`removed`-proof reading, and the internal-review finding it remediates
+`removed`-proof reading, and the finding it remediates
 (ENC-18, issue #164) are recorded in
 [the named-roster membership record](stage-10-membership-named-roster.md).
-The remediation of the internal encrypted-profile review's three edge
+The remediation of the three edge
 findings — the base entitlement an ESTATE snapshot entry now needs, the
 fragment-zero charge with the dedicated decoded-byte ingress bucket, and the
 successor credential's overlap window in witness resolution (ENC-15, ENC-16
 and ENC-17, issues #160, #161 and #162) — is recorded in
-[the edge review remediation record](stage-10-review-remediation-edge.md).
+[the edge remediation record](stage-10-edge-remediation.md).
 The live release of a direct route projection when its edge stops hosting
 both accounts, the cut and edge check that now enforce one hosting rule, and
 the interrupted cut that is retired instead of republished (ENC-23, issue
@@ -226,7 +226,7 @@ The preceding operational changes are recorded in
 and runtime repairs are recorded in
 [the credential and runtime repair report](stage-10-credential-runtime-repair.md).
 Earlier test and coverage measurements apply to their recorded sources. The
-ignored qualification jobs and the external encrypted-profile review remain
+ignored qualification jobs remain
 separate from the default workspace tests.
 
 The accepted constraints are current-format storage only, published upstream
@@ -461,7 +461,6 @@ acceptance and a published dependency remain open under STO-1.
 - [ ] Default 50,000-connection capacity within 4 GiB, advertised active workloads and recorded hardware.
 - [ ] Each of the 21 fuzz targets for 24 CPU-hours per native target.
 - [ ] Seven-day sustained operation and all recovery, deletion, key-lifecycle and hardening drills.
-- [ ] Independent E2EE review for S08-039 with all findings resolved.
 - [ ] Reproducible binaries, SBOM and complete requirement evidence for the frozen candidate.
 - [ ] Signed release decision and independent verification of the exact artifact hashes.
 
