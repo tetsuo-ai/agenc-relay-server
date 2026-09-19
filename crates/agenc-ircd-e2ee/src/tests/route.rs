@@ -455,3 +455,136 @@ fn close_authorization_ids_bind_the_intent() -> TestResult {
 
 #[path = "route/fences.rs"]
 mod fences;
+
+#[test]
+fn binding_shape_pins_approvals_and_locks_are_checked_field_by_field() -> TestResult {
+    let principals = vec![
+        principal(40, &ACCOUNT, &[7])?,
+        principal(41, &OTHER_ACCOUNT, &[9])?,
+    ];
+    let rosters = rosters(&principals)?;
+    let good = binding_package(&direct_spec(&principals)?)?;
+    let verify = |package: &crate::objects::conversation::IrcConversationBindingPackage| {
+        verify_binding_package(&NETWORK, package, &rosters).err()
+    };
+    let mut profile = good.clone();
+    profile.binding.tbs.profile_version = 2;
+    assert_eq!(verify(&profile), Some(E2eeError::ProfileMismatch));
+    let mut network = good.clone();
+    network.binding.tbs.network_id = [9; 32];
+    assert_eq!(verify(&network), Some(E2eeError::ProfileMismatch));
+    let mut mls = good.clone();
+    mls.binding.tbs.mls_version = 2;
+    assert_eq!(verify(&mls), Some(E2eeError::ProfileMismatch));
+    let mut kind = good.clone();
+    kind.binding.tbs.kind = IrcConversationKind::Channel;
+    assert_eq!(verify(&kind), Some(E2eeError::InvalidValue));
+    let mut core = good.clone();
+    core.binding.tbs.context_core_id = [0; 32];
+    assert_eq!(verify(&core), Some(E2eeError::InvalidValue));
+    let mut sequencer = good.clone();
+    sequencer.binding.tbs.sequencer_credential_id = [0; 32];
+    assert_eq!(verify(&sequencer), Some(E2eeError::InvalidValue));
+
+    let mut wrong_root = good.clone();
+    let mut pins = wrong_root.binding.tbs.principals.as_slice().to_vec();
+    if let Some(first) = pins.first_mut() {
+        first.root_fingerprint = [9; 32];
+    }
+    wrong_root.binding.tbs.principals = TlsVec::new(pins)?;
+    assert_eq!(verify(&wrong_root), Some(E2eeError::InvalidValue));
+    let mut wrong_roster = good.clone();
+    let mut pins = wrong_roster.binding.tbs.principals.as_slice().to_vec();
+    if let Some(first) = pins.first_mut() {
+        first.roster_id = [9; 32];
+    }
+    wrong_roster.binding.tbs.principals = TlsVec::new(pins)?;
+    assert_eq!(verify(&wrong_roster), Some(E2eeError::InvalidValue));
+
+    let mut wrong_certificate = good.clone();
+    let mut approvals = wrong_certificate.binding.approvals.as_slice().to_vec();
+    if let Some(first) = approvals.first_mut() {
+        first.signer_device_certificate_id = [9; 32];
+    }
+    wrong_certificate.binding.approvals = TlsVec::new(approvals)?;
+    assert_eq!(verify(&wrong_certificate), Some(E2eeError::InvalidValue));
+
+    type Corrupt = fn(&mut crate::objects::conversation::IrcRootBindingLockTbs);
+    let corruptions: [Corrupt; 7] = [
+        |lock| lock.profile_version = 2,
+        |lock| lock.network_id = [9; 32],
+        |lock| lock.root_fingerprint = [9; 32],
+        |lock| lock.semantic_route_lock_id = [9; 32],
+        |lock| lock.binding_id = [9; 32],
+        |lock| lock.roster_generation = 5,
+        |lock| lock.roster_id = [9; 32],
+    ];
+    for corrupt in corruptions {
+        let mut package = good.clone();
+        let mut locks = package.root_binding_locks.as_slice().to_vec();
+        if let Some(first) = locks.first_mut() {
+            corrupt(&mut first.tbs);
+        }
+        package.root_binding_locks = TlsVec::new(locks)?;
+        assert_eq!(verify(&package), Some(E2eeError::InvalidValue));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_direct_binding_names_exactly_the_route_principals() -> TestResult {
+    let principals = vec![
+        principal(40, &ACCOUNT, &[7])?,
+        principal(41, &OTHER_ACCOUNT, &[9])?,
+    ];
+    let rosters = rosters(&principals)?;
+    let third: [u8; 24] = [b'c'; 24];
+    let spec = BindingSpec {
+        route: direct_route(&ACCOUNT, &third)?,
+        ..direct_spec(&principals)?
+    };
+    let package = binding_package(&spec);
+    assert!(package.is_err() || verify_binding_package(&NETWORK, &package?, &rosters).is_err());
+    Ok(())
+}
+
+#[test]
+fn successor_and_incarnation_rules_check_each_field() -> TestResult {
+    let principals = vec![
+        principal(40, &ACCOUNT, &[7])?,
+        principal(41, &OTHER_ACCOUNT, &[9])?,
+    ];
+    let rosters = rosters(&principals)?;
+    let current = verify_binding_package(
+        &NETWORK,
+        &binding_package(&direct_spec(&principals)?)?,
+        &rosters,
+    )?;
+    let successor_spec = BindingSpec {
+        generation: 1,
+        previous_binding_id: current.binding_id,
+        ..direct_spec(&principals)?
+    };
+    let successor = verify_binding_package(&NETWORK, &binding_package(&successor_spec)?, &rosters)?;
+    assert!(is_binding_successor(&current, &successor));
+    let mut wrong_previous = successor.clone();
+    wrong_previous.previous_binding_id = [1; 32];
+    assert!(!is_binding_successor(&current, &wrong_previous));
+    let mut other_lock = successor.clone();
+    other_lock.route.lock_id = [1; 32];
+    assert!(!is_binding_successor(&current, &other_lock));
+
+    let closed = verify_semantic_route(&NETWORK, &direct_route(&ACCOUNT, &OTHER_ACCOUNT)?)?;
+    let mut next = closed.clone();
+    next.incarnation = 1;
+    next.predecessor_close_id = [5; 32];
+    assert!(is_next_incarnation(&closed, [5; 32], &next));
+    let mut other_key = verify_semantic_route(&NETWORK, &channel_route(b"#room", [4; 32])?)?;
+    other_key.incarnation = 1;
+    other_key.predecessor_close_id = [5; 32];
+    assert!(!is_next_incarnation(&closed, [5; 32], &other_key));
+    let mut skipped = next.clone();
+    skipped.incarnation = 2;
+    assert!(!is_next_incarnation(&closed, [5; 32], &skipped));
+    Ok(())
+}
