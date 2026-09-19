@@ -3,6 +3,7 @@
 
 mod ack_read;
 mod maintenance;
+mod page_read;
 mod replay;
 mod resume_prefix;
 
