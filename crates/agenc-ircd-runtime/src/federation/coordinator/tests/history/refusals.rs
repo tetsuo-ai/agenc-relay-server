@@ -449,3 +449,38 @@ async fn a_cursor_binds_its_origin_channel_session_and_membership() -> TestResul
     })
     .await
 }
+
+#[tokio::test]
+async fn a_cursor_presented_by_a_later_session_of_the_same_origin_expires() -> TestResult {
+    run_history(|inbox| async move {
+        let mut edge = Edge::new(inbox, 41);
+        let mut origin = Origin::new(61);
+        edge.establish().await?;
+        synchronize_ok(&mut edge, &mut [&mut origin]).await?;
+        let (session, channel, cursor) = paged_reader(&mut edge, &mut origin).await?;
+        complete(
+            &mut edge,
+            &mut origin,
+            &FederatedOperation::SessionClose {
+                session_id: session,
+                reason_code: 2,
+            },
+        )
+        .await?;
+        let (later, _, _) = open_session(&mut edge, &mut origin, "reader", &mut Vec::new()).await?;
+        assert_ne!(later, session, "the reopened session has its own identity");
+        let refused = complete(
+            &mut edge,
+            &mut origin,
+            &latest(later, channel, 100, Some(cursor))?,
+        )
+        .await?;
+        assert_eq!(
+            failure_code(&refused),
+            Some("QUERY_EXPIRED"),
+            "a cursor is bound to the session that selected it"
+        );
+        Ok(())
+    })
+    .await
+}
