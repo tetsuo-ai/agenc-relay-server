@@ -740,3 +740,5 @@ async fn a_partial_resume_commit_reloads_and_finishes_its_remaining_prefix() -> 
 mod page_faults;
 #[path = "retained_resume/row_faults.rs"]
 mod row_faults;
+#[path = "retained_resume/sealed_row_faults.rs"]
+mod sealed_row_faults;
