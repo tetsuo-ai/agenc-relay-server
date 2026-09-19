@@ -8,7 +8,7 @@ use agenc_ircd_client_wire::ParsedMessage;
 use agenc_ircd_domain::DomainError;
 use agenc_ircd_types::FederationOpcode;
 
-const CONNECTION: ConnectionGeneration = ConnectionGeneration::new(1);
+pub(super) const CONNECTION: ConnectionGeneration = ConnectionGeneration::new(1);
 
 fn sealed_envelope_of(kind: agenc_ircd_types::AccountServiceMessageKind) -> TestResult<Vec<u8>> {
     let private = agenc_ircd_crypto::AccountHpkePrivateKey::from_bytes([40; 32])?;
@@ -32,12 +32,12 @@ fn sealed_envelope_of(kind: agenc_ircd_types::AccountServiceMessageKind) -> Test
     )
 }
 
-fn sealed_envelope() -> TestResult<Vec<u8>> {
+pub(super) fn sealed_envelope() -> TestResult<Vec<u8>> {
     sealed_envelope_of(agenc_ircd_types::AccountServiceMessageKind::OpaqueAuthStart)
 }
 
 /// An active edge whose one connection holds an acknowledged, registered origin.
-fn registered_edge(context: &mut StateCoreContext) -> TestResult<EdgeFederation> {
+pub(super) fn registered_edge(context: &mut StateCoreContext) -> TestResult<EdgeFederation> {
     let mut edge = resync_edge();
     edge.phase = Phase::Active;
     edge.connection_opened(context, CONNECTION);
@@ -60,7 +60,7 @@ fn parsed(line: &str) -> TestResult<Box<ParsedMessage>> {
     ))
 }
 
-fn command(
+pub(super) fn command(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     line: &str,

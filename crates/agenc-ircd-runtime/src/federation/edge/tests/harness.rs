@@ -4127,4 +4127,5 @@ mod snapshot_refusals;
 
 mod result_refusals;
 
+mod request_completion;
 mod request_refusals;

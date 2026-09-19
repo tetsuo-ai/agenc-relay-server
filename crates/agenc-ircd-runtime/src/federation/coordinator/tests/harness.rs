@@ -5089,6 +5089,7 @@ mod startup_rows;
 
 mod misaddressed_requests;
 
+mod background_work;
 mod companion_negotiation;
 mod link_refusals;
 mod outbox_window;
