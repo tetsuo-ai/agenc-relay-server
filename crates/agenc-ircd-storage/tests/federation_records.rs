@@ -12,9 +12,10 @@ use agenc_ircd_storage::{
     ORIGIN_FLAG_PENDING_DEL, ORIGIN_FLAG_SINK_GONE, ORIGIN_RECORD_KIND, OUTBOX_EVENT_KIND,
     OriginRowStatus, OutboxEventRecord, PEER_RECORD_KIND, PROJECTION_ENTRY_KIND,
     PROJECTION_MARKER_KIND, PeerPhase, PersistentRecordValue, ProjectionEntryRecord,
-    ProjectionGenerationState, ProjectionMarkerRecord, StorageError, StoredKey, TableId,
-    origin_key, outbox_key, outbox_range, parse_origin_key, parse_outbox_key, parse_projection_key,
-    peer_key, projection_entry_key, projection_marker_key, projection_range, request_result_key,
+    ProjectionGenerationState, ProjectionMarkerRecord, ProtocolRecordBody, StorageError, StoredKey,
+    TableId, origin_key, outbox_key, outbox_range, parse_origin_key, parse_outbox_key,
+    parse_projection_key, peer_key, projection_entry_key, projection_marker_key, projection_range,
+    request_result_key,
 };
 use agenc_ircd_types::{ServerId, ServerIncarnation};
 
@@ -579,6 +580,100 @@ fn edge_requests_bound_their_objects_and_projection_keys_need_their_prefix() -> 
     assert_eq!(
         parse_projection_key(&StoredKey::new(vec![1; 8])?).err(),
         Some(StorageError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+fn inner_of(table: TableId, kind: u16, wrapped: &[u8]) -> Result<Vec<u8>, StorageError> {
+    Ok(ProtocolRecordBody::decode(table, kind, wrapped)?
+        .canonical_object()
+        .to_vec())
+}
+
+fn rewrap(table: TableId, kind: u16, inner: Vec<u8>) -> Result<Vec<u8>, StorageError> {
+    ProtocolRecordBody::new(table, kind, 1, inner)?.encode()
+}
+
+/// The body with the length-prefixed object at `offset` replaced by an empty one.
+fn without_object(inner: &[u8], offset: usize, length: usize) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut patched = inner.get(..offset).ok_or("prefix")?.to_vec();
+    patched.extend_from_slice(&[0; 4]);
+    patched.extend_from_slice(inner.get(offset + 4 + length..).ok_or("suffix")?);
+    Ok(patched)
+}
+
+#[test]
+fn decoders_refuse_records_whose_object_was_emptied() -> TestResult {
+    let origin_inner = inner_of(
+        TableId::FederationOrigin,
+        ORIGIN_RECORD_KIND,
+        &origin().encode()?,
+    )?;
+    assert_eq!(
+        FederationOriginRecord::decode(&rewrap(
+            TableId::FederationOrigin,
+            ORIGIN_RECORD_KIND,
+            without_object(&origin_inner, 2, 4)?
+        )?)
+        .err(),
+        Some(StorageError::InvalidEncoding),
+        "origin"
+    );
+    let result_inner = inner_of(
+        TableId::RequestResult,
+        COORDINATOR_RESULT_KIND,
+        &coordinator_result().encode()?,
+    )?;
+    assert_eq!(
+        CoordinatorResultRecord::decode(&rewrap(
+            TableId::RequestResult,
+            COORDINATOR_RESULT_KIND,
+            without_object(&result_inner, 82, 40)?
+        )?)
+        .err(),
+        Some(StorageError::InvalidEncoding),
+        "coordinator result"
+    );
+    let request_inner = inner_of(
+        TableId::RequestResult,
+        EDGE_REQUEST_KIND,
+        &edge_request().encode()?,
+    )?;
+    assert_eq!(
+        EdgeRequestRecord::decode(&rewrap(
+            TableId::RequestResult,
+            EDGE_REQUEST_KIND,
+            without_object(&request_inner, 50, 30)?
+        )?)
+        .err(),
+        Some(StorageError::InvalidEncoding),
+        "edge request"
+    );
+    let outbox_inner = inner_of(TableId::EdgeOutbox, OUTBOX_EVENT_KIND, &outbox().encode()?)?;
+    assert_eq!(
+        OutboxEventRecord::decode(&rewrap(
+            TableId::EdgeOutbox,
+            OUTBOX_EVENT_KIND,
+            without_object(&outbox_inner, 50, 50)?
+        )?)
+        .err(),
+        Some(StorageError::InvalidEncoding),
+        "outbox event"
+    );
+    let entry_inner = inner_of(
+        TableId::EdgeProjection,
+        PROJECTION_ENTRY_KIND,
+        &entry().encode()?,
+    )?;
+    assert_eq!(
+        ProjectionEntryRecord::decode(&rewrap(
+            TableId::EdgeProjection,
+            PROJECTION_ENTRY_KIND,
+            without_object(&entry_inner, 34, 60)?
+        )?)
+        .err(),
+        Some(StorageError::InvalidEncoding),
+        "projection entry"
     );
     Ok(())
 }

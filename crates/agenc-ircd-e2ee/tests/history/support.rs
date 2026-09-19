@@ -804,6 +804,18 @@ impl Log {
         attempt: &IrcReInitAttempt,
         council: &Council<'_>,
     ) -> Result<Built, E2eeError> {
+        self.reinit_activation_with(receipt, attempt, council, |_| {})
+    }
+
+    /// [`Self::reinit_activation`] with `edit` applied to the activation core before it
+    /// is voted and signed, so a test can name a result the open attempt did not stage.
+    pub(super) fn reinit_activation_with(
+        &mut self,
+        receipt: &IrcReInitAttemptReceipt,
+        attempt: &IrcReInitAttempt,
+        council: &Council<'_>,
+        edit: fn(&mut IrcReInitActivationCoreTbs),
+    ) -> Result<Built, E2eeError> {
         let acks = attempt
             .key_package_plan
             .entries
@@ -815,7 +827,7 @@ impl Log {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let tbs: Vec<_> = acks.iter().map(|ack| ack.tbs.clone()).collect();
-        let core = IrcReInitActivationCoreTbs {
+        let mut core = IrcReInitActivationCoreTbs {
             profile_version: 1,
             network_id: NETWORK,
             old_conversation_id: self.conversation,
@@ -832,6 +844,7 @@ impl Log {
                 &tbs,
             )?,
         };
+        edit(&mut core);
         let activation_id = semantic_id_of(SemanticHashDomain::ReinitActivationId, &core)?;
         let vote = reinit_vote_tbs(
             &self.reinit_slot(receipt),

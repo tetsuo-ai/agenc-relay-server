@@ -69,10 +69,19 @@ fn phase() -> Result<CutPhase, StorageError> {
 }
 
 fn entry(seed: u8) -> Result<SnapshotEntry, StorageError> {
+    entry_with(seed, 1, [1; 32], 0)
+}
+
+fn entry_with(
+    seed: u8,
+    profile_version: u16,
+    network_id: [u8; 32],
+    state_generation: u64,
+) -> Result<SnapshotEntry, StorageError> {
     let state = IrcFederationRouteState {
-        profile_version: 1,
-        network_id: [1; 32],
-        state_generation: 0,
+        profile_version,
+        network_id,
+        state_generation,
         conversation_id: [seed; 32],
         conversation_kind: IrcConversationKind::Channel,
         route_binding: [11; 32],
@@ -560,4 +569,82 @@ fn barrier_refuses_partial_ack_wrong_final_id_and_incomplete_part_ranges() -> Te
         .copy_from_slice(&[0, 2]);
     assert!(DeliveryRecoveryRow::decode(&wrap_inner(bad)?).is_err());
     Ok(())
+}
+
+#[test]
+fn page_validation_binds_the_identity_the_cut_shape_and_each_entry_scope() -> TestResult {
+    let single = || {
+        owner(
+            DeliveryCursor::new(0, 0, LastAcknowledged::BeforeFirst)?,
+            SnapshotCut::new(cut_fields(1, 100))?,
+            phase()?,
+        )
+    };
+    let owner = single()?;
+    SnapshotPage::new(page_identity(0)?, vec![entry(1)?], None)?.validate_for(&owner)?;
+    for (name, identity) in [
+        (
+            "another target",
+            SnapshotPageIdentity::new([6; 16], 0, [8; 32], 0)?,
+        ),
+        (
+            "another generation",
+            SnapshotPageIdentity::new([5; 16], 1, [8; 32], 0)?,
+        ),
+        (
+            "another token",
+            SnapshotPageIdentity::new([5; 16], 0, [9; 32], 0)?,
+        ),
+    ] {
+        let page = SnapshotPage::new(identity, vec![entry(1)?], None)?;
+        assert_eq!(
+            page.validate_for(&owner).err(),
+            Some(StorageError::StaleState),
+            "{name}"
+        );
+    }
+    let short = SnapshotPage::new(page_identity(0)?, Vec::new(), None)?;
+    assert_eq!(
+        short.validate_for(&owner).err(),
+        Some(StorageError::InvalidEncoding),
+        "fewer entries than the cut"
+    );
+    for (name, entry) in [
+        ("another network", entry_with(1, 1, [2; 32], 0)?),
+        ("a generation past the cut", entry_with(1, 1, [1; 32], 1)?),
+    ] {
+        let page = SnapshotPage::new(page_identity(0)?, vec![entry], None)?;
+        assert_eq!(
+            page.validate_for(&owner).err(),
+            Some(StorageError::StaleState),
+            "{name}"
+        );
+    }
+    // A final page may not offer a further cursor.
+    let full = owner_of(32)?;
+    let entries = (1..=32).map(entry).collect::<Result<Vec<_>, _>>()?;
+    SnapshotPage::new(page_identity(0)?, entries.clone(), None)?.validate_for(&full)?;
+    let continued = SnapshotPage::new(page_identity(0)?, entries, Some([24; 32]))?;
+    assert_eq!(
+        continued.validate_for(&full).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    // Entry bytes are bounded below and pinned to profile one.
+    assert_eq!(
+        SnapshotEntry::new([1; 32], Vec::new()).err(),
+        Some(StorageError::LimitExceeded)
+    );
+    assert_eq!(
+        entry_with(1, 2, [1; 32], 0).err(),
+        Some(StorageError::UnsupportedVersion)
+    );
+    Ok(())
+}
+
+fn owner_of(count: u32) -> Result<DeliveryOwner, StorageError> {
+    owner(
+        DeliveryCursor::new(0, 0, LastAcknowledged::BeforeFirst)?,
+        SnapshotCut::new(cut_fields(count, 100))?,
+        phase()?,
+    )
 }

@@ -6,7 +6,7 @@
 
 use super::*;
 use agenc_ircd_e2ee::objects::reinit::{
-    IrcReInitAbortCoreTbs, IrcReInitAttempt, IrcReInitAttemptReceipt,
+    IrcReInitAbortCoreTbs, IrcReInitActivationCoreTbs, IrcReInitAttempt, IrcReInitAttemptReceipt,
 };
 
 const TARGET: [u8; 32] = [72; 32];
@@ -23,6 +23,9 @@ type OpenAttempt = (
 
 /// One edit of an abort core.
 type CoreEdit = (&'static str, fn(&mut IrcReInitAbortCoreTbs));
+
+/// One edit of an activation core.
+type ActivationEdit = (&'static str, fn(&mut IrcReInitActivationCoreTbs));
 
 /// An activated chain moved into its ReInit lifecycle, with the reinit state id.
 fn reinit_pending() -> Result<(Genesis, HistoricalChain, Log, [u8; 32]), E2eeError> {
@@ -188,6 +191,41 @@ fn an_abort_core_must_name_the_open_attempt_and_reach_the_quorum() -> TestResult
     assert!(matches!(
         adopt(&mut probe, &abort)?,
         ChainStep::ReinitAborted { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn an_activation_core_must_repeat_the_open_attempt_and_its_acknowledgements() -> TestResult {
+    let (genesis, chain, log, _, receipt, attempt) = open_attempt()?;
+    let council = operational_council(&genesis);
+    let edits: [ActivationEdit; 3] = [
+        ("new conversation", |core| {
+            core.new_conversation_id = [9; 32]
+        }),
+        ("group info digest", |core| {
+            core.new_group_info_digest = [9; 32]
+        }),
+        ("acknowledgement set", |core| {
+            core.acknowledgement_set_digest = [9; 32]
+        }),
+    ];
+    for (name, edit) in edits {
+        let activation = log
+            .clone_for_fork()
+            .reinit_activation_with(&receipt, &attempt, &council, edit)?;
+        let mut probe = chain.clone();
+        assert!(adopt(&mut probe, &activation).is_err(), "{name}");
+        assert_eq!(probe.head(), chain.head(), "{name}");
+        assert!(!probe.is_terminal(), "{name}");
+    }
+    let activation = log
+        .clone_for_fork()
+        .reinit_activation(&receipt, &attempt, &council)?;
+    let mut probe = chain.clone();
+    assert!(matches!(
+        adopt(&mut probe, &activation)?,
+        ChainStep::ReinitActivated { .. }
     ));
     Ok(())
 }
