@@ -1657,4 +1657,31 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn the_local_admin_allow_list_is_nonempty_bounded_and_unique() {
+        assert!(LocalAdminAdmission::new(Vec::new(), vec![1]).is_err());
+        assert!(
+            LocalAdminAdmission::new((0..=MAX_ADMIN_CONNECTIONS as u32).collect(), Vec::new())
+                .is_err()
+        );
+        assert!(
+            LocalAdminAdmission::new(vec![1], (0..=MAX_ADMIN_CONNECTIONS as u32).collect())
+                .is_err()
+        );
+        assert!(LocalAdminAdmission::new(vec![1, 1], Vec::new()).is_err());
+        assert!(LocalAdminAdmission::new(vec![1], vec![2, 2]).is_err());
+    }
+
+    #[test]
+    fn the_local_admin_allow_list_admits_by_user_or_group() -> Result<(), ListenerError> {
+        let admission = LocalAdminAdmission::new(vec![3, 1], vec![9])?;
+        assert!(admission.admits(1, 0));
+        assert!(
+            admission.admits(0, 9),
+            "a listed group admits an unlisted user"
+        );
+        assert!(!admission.admits(0, 0));
+        Ok(())
+    }
 }

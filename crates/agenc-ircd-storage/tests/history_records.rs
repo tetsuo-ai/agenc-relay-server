@@ -336,3 +336,53 @@ fn history_message_decoding_bounds_the_body_and_the_tag_count() -> Result<(), St
     );
     Ok(())
 }
+
+#[test]
+fn history_edge_records_need_a_deadline_and_exactly_their_phase_shape() -> Result<(), StorageError>
+{
+    let pending = HistoryEdgeRequestRecord {
+        request: request(),
+        original_result_object_id: None,
+        expired_result_object_id: None,
+        authorization: None,
+        deadline_unix_milliseconds: 100,
+        phase: HistoryEdgePhase::Pending,
+        sink_gone: false,
+    };
+    let mut undated = pending.clone();
+    undated.deadline_unix_milliseconds = 0;
+    assert!(undated.encode().is_err(), "a record without a deadline");
+    let mut pending_with_original = pending.clone();
+    pending_with_original.original_result_object_id = Some([8; 32]);
+    assert!(
+        pending_with_original.encode().is_err(),
+        "a pending record with an original result"
+    );
+    let mut pending_with_expired = pending.clone();
+    pending_with_expired.expired_result_object_id = Some([9; 32]);
+    assert!(
+        pending_with_expired.encode().is_err(),
+        "a pending record with an expired result"
+    );
+    let mut received_expired = pending.clone();
+    received_expired.phase = HistoryEdgePhase::Received;
+    received_expired.original_result_object_id = Some([8; 32]);
+    received_expired.authorization = Some(authorization());
+    received_expired.expired_result_object_id = Some([9; 32]);
+    assert!(
+        received_expired.encode().is_err(),
+        "a received record with an expired result"
+    );
+    let mut expired_without_expiry = pending.clone();
+    expired_without_expiry.phase = HistoryEdgePhase::Expired;
+    expired_without_expiry.original_result_object_id = Some([8; 32]);
+    assert!(
+        expired_without_expiry.encode().is_err(),
+        "an expired record without its expired result"
+    );
+    assert_eq!(
+        HistoryEdgeRequestRecord::decode(&vec![0; MAX_HISTORY_RESULT_RECORD_BYTES + 1]).err(),
+        Some(StorageError::LimitExceeded)
+    );
+    Ok(())
+}
