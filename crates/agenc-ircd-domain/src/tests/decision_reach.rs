@@ -340,3 +340,44 @@ fn an_ephemeral_plan_that_would_write_is_an_invariant_violation() -> Result<(), 
     );
     Ok(())
 }
+
+#[test]
+fn a_mode_vector_may_not_carry_more_entry_ids_than_its_mask_additions() -> Result<(), DomainError> {
+    let fixture = fixture()?;
+    let channel = fixture
+        .state
+        .channels
+        .get(&fixture.channel_id)
+        .ok_or(DomainError::NotFound)?;
+    let changes = vec![ModeChange::AddMask {
+        list: MaskList::Ban,
+        mask: TypedMask::parse("$n:troll")?,
+    }];
+    let surplus = [
+        EntryId::from_bytes(bytes(90)),
+        EntryId::from_bytes(bytes(91)),
+    ];
+    assert_eq!(
+        validate_mode_vector(
+            &fixture.state,
+            channel,
+            fixture.owner.user_id,
+            &changes,
+            &surplus
+        )
+        .err(),
+        Some(DomainError::ExternalInputMismatch)
+    );
+    let exact = [EntryId::from_bytes(bytes(90))];
+    assert!(
+        validate_mode_vector(
+            &fixture.state,
+            channel,
+            fixture.owner.user_id,
+            &changes,
+            &exact
+        )
+        .is_ok()
+    );
+    Ok(())
+}
