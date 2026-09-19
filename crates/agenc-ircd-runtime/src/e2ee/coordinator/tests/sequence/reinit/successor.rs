@@ -4,6 +4,7 @@
 
 mod declared_recovery;
 pub(in crate::e2ee::coordinator::tests::sequence) mod reconstruction;
+mod target_mismatch;
 
 use super::*;
 use agenc_ircd_domain::e2ee::ConversationId;

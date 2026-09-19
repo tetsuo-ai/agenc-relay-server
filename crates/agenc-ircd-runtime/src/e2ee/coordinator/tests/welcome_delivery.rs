@@ -227,6 +227,16 @@ fn a_staged_reinit_must_name_the_conversation_and_attempt_it_is_delivered_under(
         outcome.result,
         ResultBody::Stored(StoreKind::StagedReinit, object_id(&staged))
     );
+    // The staged mailbox pages the wrapper back once its old conversation is
+    // admitted.
+    let page = ok(harness.run(Op::FetchMailbox, &[4, 0], None)?)?;
+    assert_eq!(page.result, ResultBody::MailboxPage);
+    assert_eq!(
+        page.responses
+            .first()
+            .map(|response| response.bytes.clone()),
+        Some(staged)
+    );
     Ok(())
 }
 

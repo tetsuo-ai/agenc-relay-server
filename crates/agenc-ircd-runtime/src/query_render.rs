@@ -2866,6 +2866,33 @@ mod tests {
         assert!(member_sink.commits() > 0);
         Ok(())
     }
+
+    #[test]
+    fn missing_motd_and_public_info_render_the_fixed_fallbacks() -> Result<(), Box<dyn Error>> {
+        use crate::test_support::StateCoreFixture;
+
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        assert!(context.motd().is_none());
+        assert!(context.public_info().is_none());
+        let motd = render_motd(context, "nick")?;
+        assert_eq!(motd.len(), 1);
+        assert_eq!(motd.first().map(WireMessage::command), Some("422"));
+        assert_eq!(
+            motd.first().and_then(WireMessage::trailing),
+            Some("MOTD File is missing")
+        );
+        let info = public_info_lines(context, "nick", &["first", "second"])?;
+        assert_eq!(
+            info.iter().map(WireMessage::command).collect::<Vec<_>>(),
+            ["371", "371", "374"]
+        );
+        assert_eq!(
+            info.iter().map(WireMessage::trailing).collect::<Vec<_>>(),
+            [Some("first"), Some("second"), Some("End of INFO")]
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
