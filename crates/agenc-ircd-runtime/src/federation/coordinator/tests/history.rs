@@ -7,6 +7,8 @@ use agenc_ircd_domain::{
     HistoryPolicy, HistorySelector, MessageKind, PlanDecision,
 };
 
+#[path = "history/refusals.rs"]
+mod refusals;
 #[path = "history/replay_concurrency.rs"]
 mod replay_concurrency;
 
