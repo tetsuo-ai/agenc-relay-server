@@ -155,6 +155,26 @@ impl Fixture {
             .collect()
     }
 
+    /// One stored outbox row with a chosen sequence and event identity.
+    fn row_with(&self, sequence: u64, event_id: [u8; 16]) -> TestResult<Vec<Record>> {
+        let row = ScopedOutbox::new(ScopedOutboxFields {
+            scope: *self.current.scope(),
+            generation: 0,
+            sequence,
+            event_id,
+            event_object_id: [18; 32],
+            event_bytes: 1024,
+            payload_object_id: None,
+            payload_bytes: 0,
+            acknowledgement: Acknowledgement::Unacknowledged,
+            cross_profile: None,
+        })?;
+        Ok(vec![(
+            row.key()?,
+            value(DeliveryRecoveryRow::Outbox(row).encode()?)?,
+        )])
+    }
+
     fn owner(&self) -> TestResult<Vec<Record>> {
         Ok(vec![ledger(ReplayLedgerRow::Owner(self.prior.owner))?])
     }
@@ -269,5 +289,149 @@ fn retention_cannot_remove_a_protected_barrier_prefix() -> TestResult {
     admit(&mut prefix, false, fixture.rows(4)?)?;
     assert!(matches!(prefix.next(), Err(CompanionFault::Ceiling)));
     assert!(prefix.finish().is_err());
+    Ok(())
+}
+
+/// The fixture's prior owner with individual fields replaced.
+fn altered(
+    fixture: &Fixture,
+    edit: impl FnOnce(&mut ReplayOwnerFields),
+) -> TestResult<ReplayOwner> {
+    let mut fields = *fixture.prior.owner.fields();
+    edit(&mut fields);
+    Ok(ReplayOwner::new(fields)?)
+}
+
+#[test]
+fn a_scan_needs_the_priors_own_floor_a_retained_row_and_an_unprotected_prefix() -> TestResult {
+    let fixture = Fixture::new(3)?;
+
+    let moved = altered(&fixture, |fields| {
+        fields.first_retained = 1;
+        fields.retained_rows = 2;
+        fields.retained_bytes = 2 * 1024;
+    })?;
+    let draft = Draft::maintenance(&fixture.current, moved, Some(200))?;
+    assert!(
+        Prefix::new(
+            fixture.current.clone(),
+            fixture.prior,
+            draft,
+            None,
+            Some(7),
+            &fixture.backing,
+        )
+        .is_err(),
+        "a draft that starts above the prior floor"
+    );
+
+    let emptied = altered(&fixture, |fields| {
+        fields.first_retained = 3;
+        fields.retained_rows = 0;
+        fields.retained_bytes = 0;
+    })?;
+    let draft = Draft::maintenance(&fixture.current, emptied, Some(200))?;
+    assert!(
+        Prefix::new(
+            fixture.current.clone(),
+            State {
+                owner: emptied,
+                head: None,
+            },
+            draft,
+            None,
+            Some(7),
+            &fixture.backing,
+        )
+        .is_err(),
+        "a prior inventory with no retained row"
+    );
+
+    let held = altered(&fixture, |fields| {
+        fields.first_retained = 1;
+        fields.retained_rows = 2;
+        fields.retained_bytes = 2 * 1024;
+    })?;
+    let draft = Draft::maintenance(&fixture.current, held, Some(200))?;
+    assert!(
+        Prefix::new(
+            fixture.current.clone(),
+            State {
+                owner: held,
+                head: None,
+            },
+            draft,
+            Some(0),
+            Some(7),
+            &fixture.backing,
+        )
+        .is_err(),
+        "a barrier protects a sequence below the floor"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_prefix_page_that_does_not_start_at_the_prior_floor_is_refused() -> TestResult {
+    let fixture = Fixture::new(3)?;
+    let mut prefix = fixture.prefix(200, None)?;
+    admit(&mut prefix, false, fixture.owner()?)?;
+    admit(&mut prefix, false, fixture.ranges(3)?)?;
+    let mut rows = fixture.rows(4)?;
+    let tail = rows.split_off(1);
+    admit(&mut prefix, false, tail)?;
+    assert!(prefix.next().is_err());
+    assert!(prefix.finish().is_err());
+    Ok(())
+}
+
+#[test]
+fn an_unacknowledged_row_outside_the_new_range_cannot_be_folded() -> TestResult {
+    for case in 0..2 {
+        let fixture = Fixture::new(3)?;
+        // The expiring clock trims the acknowledged prefix, so the scan
+        // reaches the row whose own acknowledgement must come from the range.
+        let mut prefix = fixture.prefix(86_500, None)?;
+        admit(&mut prefix, false, fixture.owner()?)?;
+        let (ranges, rows) = match case {
+            // Nothing acknowledges the prior prefix, so its first row sits
+            // below the range this scan would create.
+            0 => (Vec::new(), fixture.rows(4)?),
+            // The last covered sequence carries another event identity.
+            _ => {
+                let mut rows = fixture.rows(3)?;
+                rows.extend(fixture.row_with(3, id(99))?);
+                (fixture.ranges(3)?, rows)
+            }
+        };
+        admit(&mut prefix, false, ranges)?;
+        admit(&mut prefix, false, rows)?;
+        assert!(prefix.next().is_err(), "case {case}");
+        assert!(prefix.finish().is_err(), "case {case}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_reader_that_failed_or_already_proposed_admits_no_further_page() -> TestResult {
+    let fixture = Fixture::new(3)?;
+    let mut failed = fixture.prefix(200, None)?;
+    let request = query(&mut failed)?;
+    assert!(failed.admit(&request, 7, false, Vec::new()).is_err());
+    assert!(
+        failed.admit(&request, 7, false, fixture.owner()?).is_err(),
+        "a failed reader stays failed"
+    );
+
+    let mut done = fixture.prefix(86_500, None)?;
+    let last = query(&mut done)?;
+    done.admit(&last, 7, false, fixture.owner()?)?;
+    admit(&mut done, false, fixture.ranges(3)?)?;
+    admit(&mut done, false, fixture.rows(4)?)?;
+    assert!(matches!(done.next()?, Next::Done));
+    assert!(
+        done.admit(&last, 7, false, fixture.owner()?).is_err(),
+        "a finished scan takes no further page"
+    );
     Ok(())
 }
