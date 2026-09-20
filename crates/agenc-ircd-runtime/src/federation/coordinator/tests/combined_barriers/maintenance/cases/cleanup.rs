@@ -7,6 +7,7 @@ use agenc_ircd_storage::e2ee_records::delivery_recovery::{outbox, outbox::replay
 mod admission;
 mod bounded;
 mod failures;
+mod faults;
 
 async fn physical_rows(fixture: &mut Fixture, ranges: bool) -> TestResult<usize> {
     let plan = if ranges {
