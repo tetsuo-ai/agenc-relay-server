@@ -126,3 +126,7 @@ mod tests {
         assert_eq!(message.output, Err(CryptoWorkerError::QueueFull));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/ledger_reach.rs"]
+mod ledger_reach;

@@ -135,6 +135,12 @@ fn a_delivered_welcome_must_address_its_target_and_reference() -> TestResult {
         verify(&wrong_network, &CONVERSATION, &target()),
         Err(E2eeError::ProfileMismatch)
     );
+    let mut wrong_profile = good.clone();
+    wrong_profile.profile_version = 2;
+    assert_eq!(
+        verify(&wrong_profile, &CONVERSATION, &target()),
+        Err(E2eeError::ProfileMismatch)
+    );
     let unaddressed = delivered(welcome_message(&[vec![9; 32]])?)?;
     assert_eq!(
         verify(&unaddressed, &CONVERSATION, &target()),
@@ -193,6 +199,17 @@ fn a_staged_reinit_names_a_new_conversation() -> TestResult {
         ..target()
     };
     assert_eq!(verify(&good, &other_device), Err(E2eeError::InvalidValue));
+    let other_account = WelcomeTarget {
+        account_id_digest: [41; 32],
+        ..target()
+    };
+    assert_eq!(verify(&good, &other_account), Err(E2eeError::InvalidValue));
+    let mut wrong_network = good.clone();
+    wrong_network.receipt.tbs.network_id = [2; 32];
+    assert_eq!(
+        verify(&wrong_network, &target()),
+        Err(E2eeError::ProfileMismatch)
+    );
     let mut wrong_profile = good;
     wrong_profile.receipt.tbs.profile_version = 3;
     assert_eq!(

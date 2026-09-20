@@ -268,3 +268,51 @@ fn a_retention_checkpoint_over_events_storage_never_held_is_refused() -> TestRes
     assert!(state.admin_pending.is_none());
     Ok(())
 }
+
+#[test]
+fn a_channel_already_quarantined_is_an_invalid_quarantine_target() -> TestResult {
+    use crate::test_support::{apply_live_plan, plan_live};
+    use agenc_ircd_domain::{CanonicalCommand, ChannelNameValue, ChannelTarget, PlanDecision};
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let account = seed_account(context, 9, 1)?;
+    let owner = seed_session(context, 1, "Warden", Some(account))?;
+    let room = ChannelNameValue::parse("#quarantine")?;
+    let join = || CanonicalCommand::join(vec![ChannelTarget::new(room.clone(), false)]);
+    let PlanDecision::Mutation(plan) = plan_live(context, owner, &join)? else {
+        return Err("the join was not a mutation".into());
+    };
+    apply_live_plan(context, plan)?;
+    let channel_id = context
+        .domain()
+        .session(owner.user_id)
+        .and_then(|session| session.joined_channels().next())
+        .ok_or("joined channel")?;
+    // Only a registered channel can be quarantined.
+    let register = || {
+        Ok(CanonicalCommand::channel(
+            agenc_ircd_domain::ChannelCommand::Register(channel_id),
+        ))
+    };
+    let PlanDecision::Mutation(plan) = plan_live(context, owner, &register)? else {
+        return Err("the registration was not a mutation".into());
+    };
+    apply_live_plan(context, plan)?;
+    let state = fixture.state_mut()?;
+    let revision = state
+        .admin_target_revision(crate::state_core::admin::AdminTarget::Channel(channel_id))
+        .map_err(|failure| format!("{failure:?}"))?;
+    assert_eq!(
+        state.validate_admin_mutation(AdminMutation::QuarantineChannel(channel_id), revision),
+        Ok(())
+    );
+    state.context.domain.admin_quarantine_channel(channel_id)?;
+    let revision = state
+        .admin_target_revision(crate::state_core::admin::AdminTarget::Channel(channel_id))
+        .map_err(|failure| format!("{failure:?}"))?;
+    assert_eq!(
+        state.validate_admin_mutation(AdminMutation::QuarantineChannel(channel_id), revision),
+        Err(AdminCoreFailure::InvalidTarget)
+    );
+    Ok(())
+}

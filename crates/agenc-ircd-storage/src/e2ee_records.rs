@@ -3090,3 +3090,7 @@ pub mod fixtures {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/e2ee_records_reach.rs"]
+mod reach;

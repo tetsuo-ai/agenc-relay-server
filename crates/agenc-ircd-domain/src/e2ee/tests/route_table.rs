@@ -496,3 +496,16 @@ fn reservations_expire_and_collisions_have_one_winner() -> TestResult {
     assert!(!restored.channel_plaintext_allowed(&instance(1)));
     Ok(())
 }
+
+#[test]
+fn a_direct_pair_is_reserved_by_at_most_one_reservation_at_a_time() -> TestResult {
+    let mut table = RouteTable::new();
+    let pair = DirectPair::new(account(1), account(2))?;
+    table.reserve_direct(ReservationId([1; 16]), pair, [7; 32], pair.smaller(), 100)?;
+    assert_eq!(
+        table.reserve_direct(ReservationId([2; 16]), pair, [9; 32], pair.smaller(), 100),
+        Err(RouteConflict::GroupConflict)
+    );
+    assert!(table.direct_plaintext_allowed(&pair));
+    Ok(())
+}

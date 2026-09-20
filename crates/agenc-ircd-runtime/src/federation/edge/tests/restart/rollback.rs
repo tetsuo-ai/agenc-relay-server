@@ -229,6 +229,11 @@ async fn refused_barrier_apply_restores_projection_and_retries_the_retained_part
         );
         assert!(companion.is_active());
         assert_eq!(base.barrier_ready(), Some(MUTATION));
+        // A busy commit slot holds the complete barrier back.
+        base.commit = Some(PendingCommit::BarrierFence);
+        assert_eq!(base.barrier_ready(), None);
+        base.commit = None;
+        assert_eq!(base.barrier_ready(), Some(MUTATION));
         if rejected {
             fixture
                 .state_mut()?

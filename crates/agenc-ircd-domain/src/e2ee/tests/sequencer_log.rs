@@ -242,3 +242,36 @@ fn reinit_restore_rejects_a_slot_that_does_not_match_its_head() -> Result<(), Lo
     }
     Ok(())
 }
+
+#[test]
+fn reinit_entry_and_restore_refuse_repeats_stale_states_unrecorded_heads_and_exhaustion()
+-> Result<(), LogError> {
+    let mut log = SequencerLog::genesis(CONVERSATION, GENESIS);
+    log.enter_reinit(GENESIS)?;
+    assert_eq!(log.enter_reinit(GENESIS), Err(LogError::Closed));
+    let slot = log.record_attempt([10; 32])?;
+    // The durable accepted state must be the state the phase names.
+    let mut stale = SequencerLog::restore(CONVERSATION, log.head(), [9; 32], 0, log.phase());
+    assert_eq!(stale.restore_reinit(None, 0), Err(LogError::EpochStale));
+    // A slot needs a recorded head.
+    let unrecorded = Head {
+        recorded: false,
+        ..log.head()
+    };
+    let mut pending = SequencerLog::restore(CONVERSATION, unrecorded, GENESIS, 0, log.phase());
+    assert_eq!(
+        pending.restore_reinit(Some(slot), 0),
+        Err(LogError::EpochStale)
+    );
+    // A slot at the attempt ceiling is already exhausted.
+    let mut exhausted = SequencerLog::restore(CONVERSATION, log.head(), GENESIS, 0, log.phase());
+    let last = AttemptSlot {
+        attempt_sequence: MAX_CANDIDATE_ATTEMPTS_PER_EPOCH,
+        ..slot
+    };
+    assert_eq!(
+        exhausted.restore_reinit(Some(last), MAX_CANDIDATE_ATTEMPTS_PER_EPOCH),
+        Err(LogError::AttemptsExhausted)
+    );
+    Ok(())
+}

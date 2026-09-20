@@ -4970,6 +4970,55 @@ mod tests {
     }
 
     #[test]
+    fn a_restored_channel_row_must_carry_its_own_identity_and_revision() -> Result<(), StorageError>
+    {
+        for shift_revision in [false, true] {
+            let (file, path) = scratch_file("channel-identity")?;
+            let admission = scratch_admission(&file)?;
+            let mut builder = ConstructionPlanBuilder::start_streaming(
+                StorageConstructionKind::Restore,
+                file,
+                maximum_limits(),
+                admission,
+            )?;
+            let plaintext = domain_plaintext(TableId::Channel, 1)?;
+            let value = PersistentRecordValue::decode(TableId::Channel, &plaintext)?;
+            let channel = ChannelRecordBody::decode(value.body())?;
+            let key = if shift_revision {
+                StoredKey::new(channel.channel_id.as_bytes().to_vec())?
+            } else {
+                StoredKey::new(vec![200; 16])?
+            };
+            let plaintext = if shift_revision {
+                PersistentRecordValue::new(
+                    TableId::Channel,
+                    value.record_kind(),
+                    value
+                        .revision()
+                        .checked_add(1)
+                        .ok_or(StorageError::Overflow)?,
+                    value.generation(),
+                    value.expires_at(),
+                    value.references().to_vec(),
+                    value.body().to_vec(),
+                )?
+                .encode()?
+            } else {
+                plaintext
+            };
+            let source = backup_source(TableId::Channel, &key, 95)?;
+            let record = record(TableId::Channel, key, plaintext);
+            assert_eq!(
+                select_restore_record(&mut builder, &source, &record).map(|_| ()),
+                Err(StorageError::StaleState)
+            );
+            drop(builder);
+            std::fs::remove_file(path).map_err(crate::filesystem_rejected)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn restore_selection_covers_every_preserve_transform_and_omission_arm()
     -> Result<(), StorageError> {
         let (file, path) = scratch_file("selection")?;

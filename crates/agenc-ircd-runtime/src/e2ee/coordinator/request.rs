@@ -705,3 +705,7 @@ pub(crate) fn replay_write(
         state_row(TableId::E2eeState, REPLAY_ROW_KIND, stored_key, body)?,
     ))
 }
+
+#[cfg(test)]
+#[path = "tests/request_descriptors.rs"]
+mod descriptor_tests;

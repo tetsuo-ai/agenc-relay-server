@@ -610,9 +610,10 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        PhysicalDirectory, TRUSTED_SERVICE_UID, protected_ancestors, read_opened_protected_bytes,
-        read_protected_bytes, read_protected_bytes_with_hook, read_protected_text,
-        resolve_local_account, trust_service_uid, trusted_owner,
+        PhysicalDirectory, TRUSTED_SERVICE_UID, absolute_path, directory_metadata,
+        protected_ancestors, read_opened_protected_bytes, read_protected_bytes,
+        read_protected_bytes_with_hook, read_protected_text, resolve_local_account,
+        trust_service_uid, trusted_owner,
     };
     use crate::error::ConfigError;
 
@@ -973,6 +974,85 @@ mod tests {
         assert_eq!(
             read_protected_text(&path, 2),
             Err(ConfigError::FileRejected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_absolute_path_has_no_relative_or_parent_components() {
+        assert_eq!(
+            absolute_path("relative/state").err(),
+            Some(ConfigError::InvalidValue)
+        );
+        assert_eq!(
+            absolute_path("/var/lib/../agenc").err(),
+            Some(ConfigError::InvalidValue)
+        );
+        assert!(absolute_path("/var/lib/agenc").is_ok());
+    }
+
+    #[test]
+    fn a_directory_must_be_absolute_a_real_directory_and_closed_to_group_and_world() -> TestResult {
+        let directory = TestDirectory::create()?;
+        assert_eq!(
+            directory_metadata(Path::new("relative"), None).err(),
+            Some(ConfigError::FileRejected)
+        );
+        let file = directory.file("plain", b"x", 0o600)?;
+        assert_eq!(
+            directory_metadata(&file, None).err(),
+            Some(ConfigError::FileRejected),
+            "a regular file is not a directory"
+        );
+        let open = directory.path("open");
+        fs::create_dir(&open)?;
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o770))?;
+        assert_eq!(
+            directory_metadata(&open, None).err(),
+            Some(ConfigError::FileRejected),
+            "group write is refused"
+        );
+        let closed = directory.path("closed");
+        fs::create_dir(&closed)?;
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o750))?;
+        assert_eq!(
+            directory_metadata(&closed, Some(0o700)).err(),
+            Some(ConfigError::FileRejected),
+            "an exact mode is enforced"
+        );
+        assert!(directory_metadata(&closed, Some(0o750)).is_ok());
+        assert!(directory_metadata(&closed, None).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn directory_metadata_refuses_relative_unsafe_symlinked_file_and_loose_paths() -> TestResult {
+        let directory = TestDirectory::create()?;
+        assert!(directory_metadata(Path::new("relative/state"), None).is_err());
+        let unsafe_path = directory.root.join("..").join("state");
+        assert!(directory_metadata(&unsafe_path, None).is_err());
+        let file = directory.file("plain", b"x", 0o600)?;
+        assert!(directory_metadata(&file, None).is_err(), "a regular file");
+        let real = directory.path("real");
+        fs::create_dir(&real)?;
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700))?;
+        let link = directory.path("link");
+        symlink(&real, &link)?;
+        assert!(
+            directory_metadata(&link, None).is_err(),
+            "a symlink to a directory"
+        );
+        assert!(directory_metadata(&real, None).is_ok());
+        assert!(
+            directory_metadata(&real, Some(0o750)).is_err(),
+            "an exact mode that differs"
+        );
+        let loose = directory.path("loose");
+        fs::create_dir(&loose)?;
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o770))?;
+        assert!(
+            directory_metadata(&loose, None).is_err(),
+            "a group-writable directory"
         );
         Ok(())
     }

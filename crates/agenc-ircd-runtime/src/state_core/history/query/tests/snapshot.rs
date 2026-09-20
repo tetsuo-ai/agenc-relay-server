@@ -305,3 +305,174 @@ async fn restored_selections_reads_and_rechecks_are_bound_to_their_snapshot() ->
     assert!(context.history_recheck(&with_rows).is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_materialized_page_must_be_exactly_the_requested_rows() -> TestResult {
+    use agenc_ircd_storage::history_records::history_message_key;
+    use agenc_ircd_storage::{ReadRecord, ReadResult, StoredKey, TableId};
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let (identity, id) = install_reader(context)?;
+    let bound = crate::test_support::bound(identity);
+    let now = context.history_now()?;
+    let history = context.history.as_mut().ok_or("history")?;
+    let permit = history.reserve_index_entry()?;
+    let reference = HistoryRowReference {
+        channel_sequence: 5,
+        message_id: [7; 16],
+        received_unix_milliseconds: now,
+        expires_unix_milliseconds: now.checked_add(3_600_000).ok_or("expiry")?,
+    };
+    history.channels.get_mut(&id).ok_or("channel")?.rows.insert(
+        5,
+        crate::state_core::history::HistoryRow {
+            reference,
+            logical_bytes: 10,
+            _permit: permit,
+        },
+    );
+    let snapshot = context.history_select(bound, id, latest()?)?;
+    let position = HistoryPosition::new(5, agenc_ircd_types::MessageId::from_bytes([7; 16]), now)?;
+    let key = history_message_key(id, 5)?;
+    let row = |table: TableId, key: StoredKey| ReadRecord {
+        table,
+        key,
+        sealed_record: Vec::new(),
+    };
+    let page = |records: Vec<ReadRecord>, truncated: bool| ReadResult {
+        storage_commit_sequence: 1,
+        records,
+        truncated,
+    };
+    let expected = [position];
+    let cases: Vec<(&str, &[HistoryPosition], ReadResult)> = vec![
+        (
+            "truncated",
+            &expected,
+            page(vec![row(TableId::History, key.clone())], true),
+        ),
+        ("no positions", &[], page(Vec::new(), false)),
+        (
+            "row count",
+            &expected,
+            page(
+                vec![
+                    row(TableId::History, key.clone()),
+                    row(TableId::History, key.clone()),
+                ],
+                false,
+            ),
+        ),
+        (
+            "table",
+            &expected,
+            page(vec![row(TableId::Channel, key.clone())], false),
+        ),
+        (
+            "key",
+            &expected,
+            page(
+                vec![row(TableId::History, StoredKey::new(vec![9; 24])?)],
+                false,
+            ),
+        ),
+    ];
+    for (name, expected, result) in cases {
+        assert!(
+            context
+                .history_materialize(&snapshot, expected, &result)
+                .is_err(),
+            "{name}"
+        );
+    }
+    let too_many = vec![position; HISTORY_PAGE_MESSAGES + 1];
+    let rows = (0..=HISTORY_PAGE_MESSAGES)
+        .map(|_| row(TableId::History, key.clone()))
+        .collect();
+    assert!(
+        context
+            .history_materialize(&snapshot, &too_many, &page(rows, false))
+            .is_err(),
+        "over the page ceiling"
+    );
+    let unselected =
+        HistoryPosition::new(6, agenc_ircd_types::MessageId::from_bytes([8; 16]), now)?;
+    assert!(
+        context
+            .history_materialize(
+                &snapshot,
+                &[unselected],
+                &page(
+                    vec![row(TableId::History, history_message_key(id, 6)?)],
+                    false
+                )
+            )
+            .is_err(),
+        "a position the selection never held"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_authority_and_time_need_a_trusted_wall_clock() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let (identity, id) = install_reader(context)?;
+    let bound = crate::test_support::bound(identity);
+    context.history_select(bound, id, latest()?)?;
+    let trusted = context.history_now()?;
+    context.set_untrusted_wall_for_test(None);
+    assert!(!context.history_clock_safe());
+    assert!(context.history_select(bound, id, latest()?).is_err());
+    assert!(context.history_now().is_err());
+    // A wall clock that jumped far from the monotonic clock is not trusted either.
+    context.set_untrusted_wall_for_test(Some(trusted / 1_000 + 86_400 * 365));
+    assert!(
+        context.history_now().is_err() || context.history_select(bound, id, latest()?).is_err(),
+        "a wall clock adrift of the monotonic clock is refused"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_history_message_cannot_join_a_batch_that_is_already_pending() -> TestResult {
+    use crate::state_core::StageRefused;
+    use crate::state_core::fanout::FanoutRequest;
+    use crate::test_support::plan_live;
+    use agenc_ircd_domain::{
+        CanonicalCommand, MessageCommand, MessageKind, MessageTarget, MessageText, PlanDecision,
+    };
+    use agenc_ircd_storage::{StoredKey, TableId};
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let (identity, _id) = install_reader(context)?;
+    // One durable account-service write keeps a batch pending.
+    let checkpoint = context.domain().plan_account_service_checkpoint()?;
+    let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+    let write = crate::state_core::durable::AccountServiceDurableWrite::delete(
+        TableId::AuthTransaction,
+        StoredKey::new(vec![5; 16])?,
+    )?;
+    context
+        .stage_durable_with_account_service(checkpoint, fanout, None, 0, vec![write])
+        .map_err(|refused| format!("{refused:?}"))?;
+    assert_eq!(context.pending_len(), 1);
+    let privmsg = || {
+        Ok(CanonicalCommand::message(MessageCommand::new(
+            MessageKind::Privmsg,
+            vec![MessageTarget::Channel(ChannelNameValue::parse("#history")?)],
+            Some(MessageText::parse("captured")?),
+        )?))
+    };
+    let PlanDecision::Mutation(plan) = plan_live(context, identity, &privmsg)? else {
+        return Err("PRIVMSG was not a mutation".into());
+    };
+    let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+    let refused = context.stage_durable_with_account_service(plan, fanout, None, 0, Vec::new());
+    assert!(
+        matches!(refused, Err(StageRefused::Busy)),
+        "a captured message waits for the pending batch"
+    );
+    assert_eq!(context.pending_len(), 1);
+    Ok(())
+}

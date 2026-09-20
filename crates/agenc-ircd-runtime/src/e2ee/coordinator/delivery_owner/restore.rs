@@ -6,6 +6,9 @@ mod pending;
 pub(in crate::e2ee::coordinator) mod replay;
 mod replay_collection;
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 
 use agenc_ircd_e2ee::limits::MAX_FEDERATION_CONTROL_OBJECT;

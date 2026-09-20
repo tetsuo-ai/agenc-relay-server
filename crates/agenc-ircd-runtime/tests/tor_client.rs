@@ -35,8 +35,12 @@ enum ProxyBehavior {
     TlsSuccess(Arc<ServerConfig>),
     TlsRejection(Arc<ServerConfig>),
     InvalidSelection,
+    WrongMethod,
     AuthenticationRefused,
+    WrongAuthenticationVersion,
     TargetRefused,
+    /// Answers the CONNECT with these exact reply bytes, then closes.
+    RawReply(Vec<u8>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -154,6 +158,10 @@ async fn serve_connection(
         stream.write_all(&[4, 2]).await?;
         return Ok(None);
     }
+    if matches!(&behavior, ProxyBehavior::WrongMethod) {
+        stream.write_all(&[5, 0]).await?;
+        return Ok(None);
+    }
     stream.write_all(&[5, 2]).await?;
 
     let (username, password) = read_authentication(stream).await?;
@@ -161,11 +169,18 @@ async fn serve_connection(
         stream.write_all(&[1, 1]).await?;
         return Ok(None);
     }
+    if matches!(&behavior, ProxyBehavior::WrongAuthenticationVersion) {
+        stream.write_all(&[2, 0]).await?;
+        return Ok(None);
+    }
     stream.write_all(&[1, 0]).await?;
 
     let (hostname, port) = read_hostname_request(stream).await?;
     if matches!(&behavior, ProxyBehavior::TargetRefused) {
         stream.write_all(&[5, 5, 0, 1]).await?;
+    } else if let ProxyBehavior::RawReply(reply) = &behavior {
+        stream.write_all(reply).await?;
+        return Ok(None);
     } else {
         stream.write_all(&SOCKS_SUCCESS).await?;
     }
@@ -529,5 +544,132 @@ fn context_set_is_unique_and_hard_bounded() -> TestResult {
         &mut entropy,
     );
     assert!(matches!(duplicate, Err(TorConnectError::InvalidContexts)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_malformed_proxy_reply_ends_the_attempt() -> TestResult {
+    let fixture = TlsFixture::mint([33; 32], "chat.example")?;
+    let tls = client_tls(&fixture)?;
+    let cases: Vec<(&str, ProxyBehavior, Option<TorConnectError>)> = vec![
+        (
+            "an unsupported method",
+            ProxyBehavior::WrongMethod,
+            Some(TorConnectError::AuthenticationRefused),
+        ),
+        (
+            "another authentication version",
+            ProxyBehavior::WrongAuthenticationVersion,
+            Some(TorConnectError::InvalidProxyReply),
+        ),
+        (
+            "a reply of another version",
+            ProxyBehavior::RawReply(vec![4, 0, 0, 1, 127, 0, 0, 1, 26, 41]),
+            Some(TorConnectError::InvalidProxyReply),
+        ),
+        (
+            "a reserved byte set",
+            ProxyBehavior::RawReply(vec![5, 0, 1, 1, 127, 0, 0, 1, 26, 41]),
+            Some(TorConnectError::InvalidProxyReply),
+        ),
+        (
+            "a reply code out of range",
+            ProxyBehavior::RawReply(vec![5, 9, 0, 1, 127, 0, 0, 1, 26, 41]),
+            Some(TorConnectError::InvalidProxyReply),
+        ),
+        (
+            "an unknown address type",
+            ProxyBehavior::RawReply(vec![5, 0, 0, 9, 0, 0]),
+            Some(TorConnectError::InvalidProxyReply),
+        ),
+        (
+            "an empty domain reply",
+            ProxyBehavior::RawReply(vec![5, 0, 0, 3, 0, 0, 0]),
+            Some(TorConnectError::InvalidProxyReply),
+        ),
+        (
+            "a domain reply without a TLS peer",
+            ProxyBehavior::RawReply(vec![5, 0, 0, 3, 3, b'a', b'b', b'c', 26, 41]),
+            None,
+        ),
+    ];
+    for (name, behavior, expected) in cases {
+        let descriptor = descriptor(*fixture.leaf_spki_sha256())?;
+        let context = TorIsolationContext::network(descriptor.network_id);
+        let (listener, address) = listener().await?;
+        let server = tokio::spawn(proxy(listener, vec![behavior]));
+        let mut entropy = entropy_for(1)?;
+        let owner = TorClientOwner::new(
+            SocksEndpoint::Loopback(address),
+            vec![context],
+            Duration::from_secs(1),
+            &mut entropy,
+        )?;
+        let result = owner
+            .connect(context, TorClientProfile::TorExit, &descriptor, &tls)
+            .await;
+        match expected {
+            Some(error) => assert_eq!(result.as_ref().err(), Some(&error), "{name}"),
+            None => assert!(result.is_err(), "{name}"),
+        }
+        let _ = server.await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_zero_port_and_a_foreign_context_never_reach_the_proxy() -> TestResult {
+    let fixture = TlsFixture::mint([33; 32], "chat.example")?;
+    let tls = client_tls(&fixture)?;
+    let mut descriptor = descriptor(*fixture.leaf_spki_sha256())?;
+    let context = TorIsolationContext::network(descriptor.network_id);
+    let mut entropy = entropy_for(1)?;
+    let owner = TorClientOwner::new(
+        SocksEndpoint::Loopback(SocketAddr::from(([127, 0, 0, 1], 9))),
+        vec![context],
+        Duration::from_secs(1),
+        &mut entropy,
+    )?;
+    let foreign = TorIsolationContext::network(NetworkId::from_bytes([8; 32]));
+    let result = owner
+        .connect(foreign, TorClientProfile::TorExit, &descriptor, &tls)
+        .await;
+    assert!(matches!(result, Err(TorConnectError::InvalidContext)));
+    if let Some(dns) = descriptor.dns.as_mut() {
+        dns.port = 0;
+    }
+    let (listener, address) = listener().await?;
+    let owner = TorClientOwner::new(
+        SocksEndpoint::Loopback(address),
+        vec![context],
+        Duration::from_secs(1),
+        &mut entropy_for(1)?,
+    )?;
+    let server = tokio::spawn(proxy(listener, vec![ProxyBehavior::TargetRefused]));
+    let result = owner
+        .connect(context, TorClientProfile::TorExit, &descriptor, &tls)
+        .await;
+    assert_eq!(
+        result.as_ref().err(),
+        Some(&TorConnectError::InvalidProxyReply)
+    );
+    server.abort();
+    Ok(())
+}
+
+#[test]
+fn the_timeout_and_the_context_set_are_bounded_below_and_above() -> TestResult {
+    let network = TorIsolationContext::network(NetworkId::from_bytes([7; 32]));
+    let proxy = SocksEndpoint::Loopback(SocketAddr::from(([127, 0, 0, 1], 9050)));
+    let mut entropy = ScriptedEntropy::new(Vec::new())?;
+    for timeout in [Duration::ZERO, Duration::from_secs(31)] {
+        let refused = TorClientOwner::new(proxy.clone(), vec![network], timeout, &mut entropy);
+        assert!(
+            matches!(refused, Err(TorConnectError::InvalidTimeout)),
+            "{timeout:?}"
+        );
+    }
+    let empty = TorClientOwner::new(proxy, Vec::new(), Duration::from_secs(1), &mut entropy);
+    assert!(matches!(empty, Err(TorConnectError::InvalidContexts)));
     Ok(())
 }

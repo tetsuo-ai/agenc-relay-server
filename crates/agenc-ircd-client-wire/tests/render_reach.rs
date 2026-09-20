@@ -6,8 +6,8 @@ use std::error::Error;
 
 use agenc_ircd_client_wire::{
     BatchStack, CapRequestReply, CapabilityProfile, CapabilitySpec, CapabilityState,
-    MAX_BATCH_NESTING, MAX_PARAMETERS, RenderError, WireMessage, isupport_messages,
-    labeled_response,
+    MAX_BATCH_NESTING, MAX_COMMAND_BYTES, MAX_PARAMETERS, MAX_SERVER_TAG_DATA_BYTES, RenderError,
+    WireMessage, isupport_messages, labeled_response,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -140,6 +140,61 @@ fn batches_need_their_capabilities_unique_bounded_ids_and_nest_under_a_parent() 
     }
     assert_eq!(
         stack.open(&full, "s", "overflow", "label").err(),
+        Some(RenderError::InvalidBatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_command_over_its_byte_budget_is_refused_before_it_is_built() {
+    let long = "x".repeat(MAX_COMMAND_BYTES);
+    assert_eq!(
+        WireMessage::new("s", "NOTICE", &[long.as_str()], None).err(),
+        Some(RenderError::LineBudget)
+    );
+}
+
+#[test]
+fn tag_budgets_bound_a_server_tag_and_the_whole_physical_line() -> TestResult {
+    let mut message = WireMessage::new("s", "NOTICE", &["#chan"], Some("hello"))?;
+    let oversized = "v".repeat(MAX_SERVER_TAG_DATA_BYTES);
+    assert_eq!(
+        message
+            .add_server_tag("big", Some(oversized.as_str()))
+            .err(),
+        Some(RenderError::LineBudget)
+    );
+    // A near-maximal command plus one small tag crosses the physical line.
+    let body = "b".repeat(MAX_COMMAND_BYTES - ":s NOTICE #chan :".len());
+    let mut full = WireMessage::new("s", "NOTICE", &["#chan"], Some(body.as_str()))?;
+    assert!(full.measure().is_ok());
+    full.add_server_tag("a", Some("bc"))?;
+    assert_eq!(full.measure().err(), Some(RenderError::LineBudget));
+    Ok(())
+}
+
+#[test]
+fn a_history_batch_cannot_repeat_an_open_id_or_nest_beyond_the_ceiling() -> TestResult {
+    let (state, _) = capabilities(&[
+        "batch",
+        "labeled-response",
+        "server-time",
+        "message-ids",
+        "draft/chathistory",
+    ])?;
+    let mut stack = BatchStack::default();
+    let _first = stack.open_history(&state, "s", "h0", "#chan")?;
+    assert_eq!(
+        stack.open_history(&state, "s", "h0", "#chan").err(),
+        Some(RenderError::InvalidBatch)
+    );
+    for depth in 1..MAX_BATCH_NESTING {
+        let id = format!("h{depth}");
+        let _opened = stack.open_history(&state, "s", &id, "#chan")?;
+    }
+    assert_eq!(stack.depth(), MAX_BATCH_NESTING);
+    assert_eq!(
+        stack.open_history(&state, "s", "deep", "#chan").err(),
         Some(RenderError::InvalidBatch)
     );
     Ok(())

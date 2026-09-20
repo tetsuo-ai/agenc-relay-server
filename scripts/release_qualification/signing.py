@@ -44,8 +44,7 @@ def decision_record(candidate: dict[str, Any], summary: dict[str, Any], claims: 
     return {"schema_version": 1, "candidate_sha256": digest(canonical(candidate)),
             "source": candidate["source"], "claims": sorted(claims), "decided_at": utc_now(), "targets": targets,
             "artifacts": [artifact for artifact in candidate["artifacts"] if artifact["target"] in targets],
-            "qualification_sha256": digest(canonical(summary)),
-            "public_key_sha256": file_digest(public_key)}
+            "qualification_sha256": digest(canonical(summary)), "public_key_sha256": file_digest(public_key)}
 
 
 def close(root: Path, directory: Path, key: Path, public_key: Path, claims: list[str],

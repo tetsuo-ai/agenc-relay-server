@@ -100,3 +100,46 @@ async fn sealed_prefix_expiry_reads_beyond_the_cache_without_reloading_bodies_or
     assert_eq!(after.rows.iter().filter(|row| !row.acked()).count(), 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn an_ack_prefix_refuses_a_position_from_another_server_or_generation() -> TestResult {
+    let mut fixture = RestartFixture::new().await?;
+    let _seeded = seed_retained(&mut fixture).await?;
+    Box::pin(fixture.restart()).await?;
+    let context = fixture.storage.context_mut()?;
+    let backing = context.backing_reservations();
+    let commit = context.head().storage_commit_sequence;
+    let server_id = *fixture.storage.identity.server_id.as_bytes();
+    let stream = fixture
+        .coordinator
+        .state
+        .streams
+        .get(&home())
+        .ok_or("restored stream")?;
+    for (name, position) in [
+        (
+            "another coordinator",
+            DeliveryPosition {
+                server_id: [9; 16],
+                delivery_generation: 0,
+                delivery_sequence: 4097,
+                event_id: id(4097),
+            },
+        ),
+        (
+            "another delivery generation",
+            DeliveryPosition {
+                server_id,
+                delivery_generation: 1,
+                delivery_sequence: 4097,
+                event_id: id(4097),
+            },
+        ),
+    ] {
+        assert!(
+            Prefix::for_ack(stream, position, Some(86_500), None, Some(commit), &backing).is_err(),
+            "{name}"
+        );
+    }
+    Ok(())
+}

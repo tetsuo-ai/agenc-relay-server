@@ -637,3 +637,35 @@ fn a_restored_cut_over_the_entry_ceiling_is_an_admission_refusal() -> TestResult
     assert_eq!(cause, EdgeRestoreCause::PendingProjectionCeiling);
     Ok(())
 }
+
+#[test]
+fn a_snapshot_cannot_begin_over_an_open_barrier() -> TestResult {
+    use crate::e2ee::barrier::BarrierAssembly;
+    use agenc_ircd_storage::e2ee_records::barrier::BarrierIdentity;
+    let mut edge = edge();
+    let _queue = link(&mut edge, HUB_EPOCH);
+    edge.phase = Phase::Snapshot;
+    let identity_of_barrier = BarrierIdentity {
+        network_id: *NETWORK.as_bytes(),
+        coordinator_server_id: *HUB.as_bytes(),
+        coordinator_server_incarnation: *HUB_INCARNATION.as_bytes(),
+        coordinator_recovery_epoch: *HUB_EPOCH.as_bytes(),
+        target_server_id: *EDGE.as_bytes(),
+        target_server_incarnation: *EDGE_INCARNATION.as_bytes(),
+        mutation_id: [7; 16],
+        coordinator_state_generation: 5,
+        part_count: 2,
+    };
+    edge.barrier.open = Some(crate::federation::edge::barrier::OpenBarrier {
+        assembly: BarrierAssembly::open(identity_of_barrier)?,
+        base_events: std::collections::BTreeMap::new(),
+    });
+    assert_eq!(
+        snapshot_begin(&mut edge, identity(2), 0),
+        Err(Violation::Consistency)
+    );
+    assert!(edge.snapshot.is_none());
+    edge.barrier.open = None;
+    assert_eq!(snapshot_begin(&mut edge, identity(2), 0), Ok(()));
+    Ok(())
+}

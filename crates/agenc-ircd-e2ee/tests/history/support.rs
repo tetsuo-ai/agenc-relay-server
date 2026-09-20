@@ -250,6 +250,8 @@ pub(super) struct Log {
     pub(super) accepted_state_id: [u8; 32],
     pub(super) candidate_sequence: u32,
     pub(super) policy_id: [u8; 32],
+    /// The successor conversation every ReInit attempt names.
+    pub(super) new_conversation: [u8; 32],
 }
 
 /// One built record: its complete wire object and semantic identifier.
@@ -288,6 +290,7 @@ impl Log {
             accepted_state_id: genesis.genesis_id()?,
             candidate_sequence: 0,
             policy_id: policy_id_of(&genesis.bootstrap_policy)?,
+            new_conversation: [70; 32],
         })
     }
 
@@ -303,6 +306,7 @@ impl Log {
             accepted_state_id: self.accepted_state_id,
             candidate_sequence: self.candidate_sequence,
             policy_id: self.policy_id,
+            new_conversation: self.new_conversation,
         }
     }
 
@@ -611,7 +615,7 @@ impl Log {
             profile_version: 1,
             network_id: NETWORK,
             old_conversation_id: self.conversation,
-            new_conversation_id: [70; 32],
+            new_conversation_id: self.new_conversation,
             old_reinit_state_id,
             attempt_sequence,
             creator_old_leaf_index: 0,
@@ -800,6 +804,18 @@ impl Log {
         attempt: &IrcReInitAttempt,
         council: &Council<'_>,
     ) -> Result<Built, E2eeError> {
+        self.reinit_activation_with(receipt, attempt, council, |_| {})
+    }
+
+    /// [`Self::reinit_activation`] with `edit` applied to the activation core before it
+    /// is voted and signed, so a test can name a result the open attempt did not stage.
+    pub(super) fn reinit_activation_with(
+        &mut self,
+        receipt: &IrcReInitAttemptReceipt,
+        attempt: &IrcReInitAttempt,
+        council: &Council<'_>,
+        edit: fn(&mut IrcReInitActivationCoreTbs),
+    ) -> Result<Built, E2eeError> {
         let acks = attempt
             .key_package_plan
             .entries
@@ -811,7 +827,7 @@ impl Log {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let tbs: Vec<_> = acks.iter().map(|ack| ack.tbs.clone()).collect();
-        let core = IrcReInitActivationCoreTbs {
+        let mut core = IrcReInitActivationCoreTbs {
             profile_version: 1,
             network_id: NETWORK,
             old_conversation_id: self.conversation,
@@ -828,6 +844,7 @@ impl Log {
                 &tbs,
             )?,
         };
+        edit(&mut core);
         let activation_id = semantic_id_of(SemanticHashDomain::ReinitActivationId, &core)?;
         let vote = reinit_vote_tbs(
             &self.reinit_slot(receipt),
@@ -869,7 +886,20 @@ impl Log {
         reason_code: u16,
         council: &Council<'_>,
     ) -> Result<Built, E2eeError> {
-        let core = IrcReInitAbortCoreTbs {
+        self.reinit_abort_with(receipt, attempt, reason_code, council, |_| {})
+    }
+
+    /// [`Self::reinit_abort`] with `edit` applied to the abort core before it is voted
+    /// and signed, so a test can name a slot the open attempt does not occupy.
+    pub(super) fn reinit_abort_with(
+        &mut self,
+        receipt: &IrcReInitAttemptReceipt,
+        attempt: &IrcReInitAttempt,
+        reason_code: u16,
+        council: &Council<'_>,
+        edit: fn(&mut IrcReInitAbortCoreTbs),
+    ) -> Result<Built, E2eeError> {
+        let mut core = IrcReInitAbortCoreTbs {
             profile_version: 1,
             network_id: NETWORK,
             old_conversation_id: self.conversation,
@@ -880,6 +910,7 @@ impl Log {
             reason_code,
             evidence_digest: [94; 32],
         };
+        edit(&mut core);
         let abort_id = semantic_id_of(SemanticHashDomain::ReinitAbortId, &core)?;
         let vote = reinit_vote_tbs(
             &self.reinit_slot(receipt),

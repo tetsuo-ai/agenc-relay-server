@@ -8,7 +8,7 @@ tasks = [
   "S08-021", "S08-022", "S08-023", "S08-024", "S08-025",
   "S08-026", "S08-027", "S08-028", "S08-029", "S08-030",
   "S08-031", "S08-032", "S08-033", "S08-034", "S08-035",
-  "S08-036", "S08-037", "S08-038", "S08-039", "S08-040",
+  "S08-036", "S08-037", "S08-038", "S08-040",
   "S08-041", "S08-042", "S08-043", "S08-044",
 ]
 
@@ -99,12 +99,6 @@ reload_tables = [22, 23]
 [admin]
 stats_fields = 9
 stats_selector = "E2EE"
-
-[review]
-task = "S08-039"
-state = "internal-review-complete"
-package = "conformance/review"
-reason = "three independent reviewers with no context from the implementation examined main at 46840bd on 2026-09-18, reported nine findings (one high, seven medium, one low; none a confidentiality or authority break), and every finding is fixed, regression-tested and dispositioned in conformance/review/findings.md"
 
 [fuzz]
 targets = ["e2ee_object", "e2ee_mls_outer", "e2ee_fragment", "e2ee_identity_chain", "e2ee_tags"]

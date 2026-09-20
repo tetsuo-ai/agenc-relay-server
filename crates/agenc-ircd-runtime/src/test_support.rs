@@ -654,6 +654,33 @@ impl StateCoreFixture {
         Ok(())
     }
 
+    /// Seals one plaintext under the fixture's live storage keys, so a test can hand the core
+    /// a row that real storage would never have written.
+    pub(crate) fn seal_row_for_test(
+        &self,
+        table: TableId,
+        key: &StoredKey,
+        plaintext: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        let owner = self.owner.as_ref().ok_or("storage owner")?;
+        let recovered = owner.recovered_state();
+        let master = StorageMasterKey::from_bytes(STORAGE_MASTER);
+        let context = agenc_ircd_storage::StorageSealContext::new(
+            &master,
+            recovered.database_binding(),
+            recovered.storage_key_generation(),
+        )?;
+        Ok(context
+            .seal(
+                table,
+                crate::state_core::durable::DOMAIN_RECORD_SCHEMA,
+                [77; 24],
+                key,
+                plaintext,
+            )?
+            .encode()?)
+    }
+
     pub(crate) fn stored_row_exists(&self, table: TableId, key: StoredKey) -> TestResult<bool> {
         let owner = self.owner.as_ref().ok_or("storage owner")?;
         let result = crate::bridge::storage::read_blocking(
@@ -1207,6 +1234,7 @@ impl QueueReservationLedger for NoopLedger {
 pub(crate) struct FrameSink {
     generation: ConnectionGeneration,
     admit: bool,
+    congested: std::sync::atomic::AtomicBool,
     commits: AtomicUsize,
     lines: std::sync::Mutex<Vec<String>>,
 }
@@ -1216,9 +1244,15 @@ impl FrameSink {
         Arc::new(Self {
             generation,
             admit,
+            congested: std::sync::atomic::AtomicBool::new(false),
             commits: AtomicUsize::new(0),
             lines: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Makes the sink report a queue above half its capacity, or drained again.
+    pub(crate) fn set_congested(&self, congested: bool) {
+        self.congested.store(congested, Ordering::SeqCst);
     }
 
     pub(crate) fn commits(&self) -> usize {
@@ -1280,7 +1314,11 @@ impl ClientSink for FrameSink {
     }
 
     fn queue_snapshot(&self) -> ClientQueueSnapshot {
-        // Recorded frames have already drained from this nonblocking test sink.
+        // Recorded frames have already drained from this nonblocking test sink,
+        // unless a test holds it congested to keep a continuation waiting.
+        if self.congested.load(Ordering::SeqCst) {
+            return ClientQueueSnapshot::new(1_000_000, 1_048_576);
+        }
         ClientQueueSnapshot::new(0, 1_048_576)
     }
 }

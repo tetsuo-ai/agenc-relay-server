@@ -653,8 +653,8 @@ mod tests {
                 .is_none()
         );
         let every = "\"core-v1\",\"encrypted-v1\",\"federated-v1\",\"history\",\"wss\"";
-        let all_claims = document(every, &[X86]);
-        let parsed = ReleaseDecisionDocument::parse(all_claims.as_bytes())?;
+        let complete = document(every, &[X86]);
+        let parsed = ReleaseDecisionDocument::parse(complete.as_bytes())?;
         assert_eq!(parsed.claims, ReleaseClaim::ALL.to_vec());
         Ok(())
     }

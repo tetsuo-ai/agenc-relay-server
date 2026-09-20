@@ -107,3 +107,52 @@ fn assert_reloaded_validation_floor(
     );
     Ok(())
 }
+
+#[test]
+fn reload_refuses_retained_records_stored_under_each_others_positions() -> TestResult {
+    use crate::state_core::durable::AccountServiceDurableWrite as Write;
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
+    let (receipt, commit_id, candidate_id) = submit_candidate(&mut harness, conversation, 0, 20)?;
+    let ack = acknowledge(&mut harness, conversation, candidate_id, commit_id)?;
+    let request = finalization_request(
+        &harness,
+        conversation,
+        &receipt,
+        commit_id,
+        candidate_id,
+        &ack,
+        &[DEVICE],
+    )?;
+    ok(harness.run(Op::SubmitFinalization, &conversation, Some(&request))?)?;
+    let first = agenc_ircd_storage::e2ee_records::SequencerRow::record_key(&conversation, 0)?;
+    let second = agenc_ircd_storage::e2ee_records::SequencerRow::record_key(&conversation, 1)?;
+    let body_of = |wanted: &agenc_ircd_storage::StoredKey| {
+        harness.writes.iter().rev().find_map(|write| match write {
+            Write::Put {
+                table: agenc_ircd_storage::TableId::E2eeState,
+                key,
+                plaintext,
+            } if key == wanted => Some(plaintext.clone()),
+            _ => None,
+        })
+    };
+    let first_body = body_of(&first).ok_or("candidate record row")?;
+    let second_body = body_of(&second).ok_or("finalization record row")?;
+    for write in &mut harness.writes {
+        if let Write::Put {
+            table: agenc_ircd_storage::TableId::E2eeState,
+            key,
+            plaintext,
+        } = write
+        {
+            if *key == first {
+                *plaintext = second_body.clone();
+            } else if *key == second {
+                *plaintext = first_body.clone();
+            }
+        }
+    }
+    assert!(harness.reloaded().is_err());
+    Ok(())
+}

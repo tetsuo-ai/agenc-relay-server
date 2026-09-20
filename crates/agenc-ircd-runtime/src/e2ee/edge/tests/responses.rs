@@ -336,3 +336,63 @@ fn a_response_bound_violation_closes_the_companion_link() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn a_result_for_an_unknown_request_is_dropped_and_one_for_another_object_is_refused() -> TestResult
+{
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut edge = waiting();
+    let result = result(Vec::new(), 1)?;
+    let object_id = *ObjectId::compute(&result).as_bytes();
+    let stray = Correlation {
+        peer_server_id: [2; 16],
+        server_incarnation: [4; 16],
+        origin_id: [8; 16],
+        origin_generation: 0,
+        operation_sequence: 0,
+        request_id: [6; 16],
+    };
+    for fragment in fragment_object(&result)? {
+        let outputs = edge
+            .on_result_frame(
+                fixture.context_mut()?,
+                CompanionFrame::Result {
+                    correlation: stray,
+                    object_id,
+                    fragment,
+                },
+            )
+            .map_err(|error| error.code.to_string())?;
+        assert!(outputs.is_empty(), "a stray result answers nothing");
+    }
+    assert!(edge.pending.contains_key(&REQUEST));
+    // The result names a request object this request did not send.
+    let foreign = IrcFederationResult {
+        profile_version: 1,
+        network_id: [1; 32],
+        home_server_id: [2; 16],
+        server_incarnation: [4; 16],
+        origin_id: [8; 16],
+        origin_generation: 0,
+        operation_sequence: 0,
+        request_id: REQUEST,
+        request_object_id: [8; 32],
+        coordinator_state_generation: 1,
+        completion_event_id: Opaque::new(Vec::new())?,
+        result_kind: IrcFederationResultKind::ObjectPage,
+        encoded_result: Opaque::new(Vec::new())?,
+        snapshot_token: Opaque::new(vec![9; 32])?,
+        next_cursor: Opaque::new(Vec::new())?,
+        responses: TlsVec::new(Vec::new())?,
+    };
+    let bytes =
+        IrcWireObject::new(IrcWireObjectKind::FederationResult, foreign.encode()?)?.encode()?;
+    let mut refused = false;
+    for frame in frames(None, &bytes)? {
+        if edge.on_result_frame(fixture.context_mut()?, frame).is_err() {
+            refused = true;
+        }
+    }
+    assert!(refused, "a result for another request object is refused");
+    Ok(())
+}

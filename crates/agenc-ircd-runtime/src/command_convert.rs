@@ -913,6 +913,29 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn mode_and_message_shapes_outside_the_model_are_refused() -> Result<(), Box<dyn Error>> {
+        let domain = DomainState::new()?;
+        for line in [
+            "MODE Guest +i",
+            "MODE Guest +wx",
+            "MODE #room +m extra",
+            "PRIVMSG @#room :hello",
+            "PRIVMSG +#room :hello",
+        ] {
+            assert!(converted(&domain, line).is_err(), "{line}");
+        }
+        assert_eq!(
+            channel_key_parameter_positions(&parsed("MODE #room +k key extra")?).err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        assert_eq!(
+            channel_key_parameter_positions(&parsed("MODE #room +km key")?)?,
+            vec![(0, 2)]
+        );
+        Ok(())
+    }
+
     fn parsed(line: &str) -> Result<agenc_ircd_client_wire::ParsedMessage, Box<dyn Error>> {
         parse_message(FramedLine::new(line)?)?
             .ok_or_else(|| test_error("empty parsed message").into())

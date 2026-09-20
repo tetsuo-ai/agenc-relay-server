@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "gate": "stage-eight-implementation",
-  "gate_manifest_sha256": "11542580100ae55130590d58f94333ce483152b1039cdfe4dfb990b76cd30a96",
-  "toolchain_policy_sha256": "3f125bad8eeb2ef52f3cb49d2296e9453a76b14d6d288d75b3e3fdd2fbe13095",
+  "gate_manifest_sha256": "10cce73a6628b4ac9bcdf166d0ef85fc70a954923d5fd1171b1a078c76d9aead",
+  "toolchain_policy_sha256": "975452dacaa7c7be41e7fe2d712240b69668dd556f71bf6de5430b58b35a3d0e",
   "toolchain": [
     {
       "name": "rustc",
@@ -88,6 +88,15 @@
         "--version"
       ],
       "version": "cargo-llvm-cov 0.9.0"
+    },
+    {
+      "name": "cargo-nextest",
+      "argv": [
+        "cargo",
+        "nextest",
+        "-V"
+      ],
+      "version": "cargo-nextest 0.9.145 (00af4550e 2026-09-16)"
     },
     {
       "name": "rust-llvm-cov",
@@ -176,17 +185,17 @@
   ],
   "tool": {
     "name": "agenc-ircd-gate-runner",
-    "version": "9e4b4105c2f9d97ce1d960f748c91118eef91b374dad42d2109a15f97e751f4d"
+    "version": "480b567b78ac84d28388144e2fbac15ac0b855d8de25339cc82f2da229816143"
   },
-  "source_commit": "52c7ccb909ecd398853183ef3f11ffd2df251e08",
-  "source_sha256": "ddb217c014e983bcbddf60c0298c2dd8f5ba9bdb3d4d38ea30fc8c2c0e8a3fe5",
-  "lock_sha256": "41f2ebedc174db6d1facdc5e5eb39a3a93d3329f581311006f946b7fa733d3c2",
+  "source_commit": "26f0f8029dcad4aad27bff2706c4f0d255a555ba",
+  "source_sha256": "91c1a306c994e62ed360e1670e1fc2aecf59ff2852a5103a9eea63daa8af41de",
+  "lock_sha256": "ace013ca27b6a43ea36b7fb0c55768c00172ad610480517b331794ee97827d46",
   "target": "x86_64-unknown-linux-gnu",
   "features": [
     "all-features"
   ],
-  "started_at": "2026-09-04T04:12:21.723464Z",
-  "ended_at": "2026-09-04T04:21:01.850627Z",
+  "started_at": "2026-09-19T21:31:16.410826Z",
+  "ended_at": "2026-09-19T21:42:46.865389Z",
   "result": "passed",
   "exit_code": 0,
   "command_results": [
@@ -196,8 +205,8 @@
         "scripts/check-spec.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:21.724740Z",
-      "ended_at": "2026-09-04T04:12:21.826032Z",
+      "started_at": "2026-09-19T21:31:16.412869Z",
+      "ended_at": "2026-09-19T21:31:16.522982Z",
       "exit_code": 0
     },
     {
@@ -206,8 +215,8 @@
         "scripts/check-baseline.py"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:21.826146Z",
-      "ended_at": "2026-09-04T04:12:21.973173Z",
+      "started_at": "2026-09-19T21:31:16.523210Z",
+      "ended_at": "2026-09-19T21:31:16.675635Z",
       "exit_code": 0
     },
     {
@@ -217,8 +226,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:21.973263Z",
-      "ended_at": "2026-09-04T04:12:22.067461Z",
+      "started_at": "2026-09-19T21:31:16.675857Z",
+      "ended_at": "2026-09-19T21:31:16.768171Z",
       "exit_code": 0
     },
     {
@@ -228,8 +237,8 @@
         "check-stage-zero"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:22.067552Z",
-      "ended_at": "2026-09-04T04:12:22.160600Z",
+      "started_at": "2026-09-19T21:31:16.768281Z",
+      "ended_at": "2026-09-19T21:31:16.867418Z",
       "exit_code": 0
     },
     {
@@ -239,8 +248,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:22.160671Z",
-      "ended_at": "2026-09-04T04:12:22.269741Z",
+      "started_at": "2026-09-19T21:31:16.867681Z",
+      "ended_at": "2026-09-19T21:31:17.571519Z",
       "exit_code": 0
     },
     {
@@ -250,8 +259,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:22.269809Z",
-      "ended_at": "2026-09-04T04:12:22.332764Z",
+      "started_at": "2026-09-19T21:31:17.571811Z",
+      "ended_at": "2026-09-19T21:31:18.271009Z",
       "exit_code": 0
     },
     {
@@ -261,8 +270,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:22.332829Z",
-      "ended_at": "2026-09-04T04:12:22.402137Z",
+      "started_at": "2026-09-19T21:31:18.271284Z",
+      "ended_at": "2026-09-19T21:31:19.187728Z",
       "exit_code": 0
     },
     {
@@ -272,8 +281,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:22.402220Z",
-      "ended_at": "2026-09-04T04:12:29.198321Z",
+      "started_at": "2026-09-19T21:31:19.188029Z",
+      "ended_at": "2026-09-19T21:31:44.408882Z",
       "exit_code": 0
     },
     {
@@ -283,8 +292,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:29.198479Z",
-      "ended_at": "2026-09-04T04:12:29.233069Z",
+      "started_at": "2026-09-19T21:31:44.409091Z",
+      "ended_at": "2026-09-19T21:31:44.454147Z",
       "exit_code": 0
     },
     {
@@ -294,8 +303,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:29.233152Z",
-      "ended_at": "2026-09-04T04:12:36.141361Z",
+      "started_at": "2026-09-19T21:31:44.454393Z",
+      "ended_at": "2026-09-19T21:31:53.069630Z",
       "exit_code": 0
     },
     {
@@ -305,8 +314,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:36.141496Z",
-      "ended_at": "2026-09-04T04:12:37.462309Z",
+      "started_at": "2026-09-19T21:31:53.069895Z",
+      "ended_at": "2026-09-19T21:31:55.148241Z",
       "exit_code": 0
     },
     {
@@ -316,8 +325,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:37.462432Z",
-      "ended_at": "2026-09-04T04:12:37.516076Z",
+      "started_at": "2026-09-19T21:31:55.148502Z",
+      "ended_at": "2026-09-19T21:31:55.210594Z",
       "exit_code": 0
     },
     {
@@ -327,8 +336,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:37.516189Z",
-      "ended_at": "2026-09-04T04:12:37.827831Z",
+      "started_at": "2026-09-19T21:31:55.210860Z",
+      "ended_at": "2026-09-19T21:31:55.465759Z",
       "exit_code": 0
     },
     {
@@ -338,8 +347,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:37.827952Z",
-      "ended_at": "2026-09-04T04:12:38.853316Z",
+      "started_at": "2026-09-19T21:31:55.466020Z",
+      "ended_at": "2026-09-19T21:31:56.243767Z",
       "exit_code": 0
     },
     {
@@ -350,8 +359,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:38.853433Z",
-      "ended_at": "2026-09-04T04:12:40.098269Z",
+      "started_at": "2026-09-19T21:31:56.243995Z",
+      "ended_at": "2026-09-19T21:31:58.728619Z",
       "exit_code": 0
     },
     {
@@ -364,8 +373,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:40.098430Z",
-      "ended_at": "2026-09-04T04:12:40.229693Z",
+      "started_at": "2026-09-19T21:31:16.413285Z",
+      "ended_at": "2026-09-19T21:32:01.788202Z",
       "exit_code": 0
     },
     {
@@ -380,8 +389,8 @@
         "x86_64-unknown-linux-gnu"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:40.229763Z",
-      "ended_at": "2026-09-04T04:12:40.364637Z",
+      "started_at": "2026-09-19T21:31:16.413774Z",
+      "ended_at": "2026-09-19T21:32:01.869274Z",
       "exit_code": 0
     },
     {
@@ -396,8 +405,8 @@
         "aarch64-unknown-linux-gnu"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:40.364728Z",
-      "ended_at": "2026-09-04T04:12:40.509688Z",
+      "started_at": "2026-09-19T21:31:16.413944Z",
+      "ended_at": "2026-09-19T21:32:02.186589Z",
       "exit_code": 0
     },
     {
@@ -413,21 +422,22 @@
         "warnings"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:40.509813Z",
-      "ended_at": "2026-09-04T04:12:40.671164Z",
+      "started_at": "2026-09-19T21:31:16.414103Z",
+      "ended_at": "2026-09-19T21:32:03.313769Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "--workspace",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:12:40.671326Z",
-      "ended_at": "2026-09-04T04:14:23.669940Z",
+      "started_at": "2026-09-19T21:31:16.414349Z",
+      "ended_at": "2026-09-19T21:34:31.274320Z",
       "exit_code": 0
     },
     {
@@ -440,8 +450,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:14:23.670103Z",
-      "ended_at": "2026-09-04T04:14:25.150351Z",
+      "started_at": "2026-09-19T21:34:31.275016Z",
+      "ended_at": "2026-09-19T21:34:33.218545Z",
       "exit_code": 0
     },
     {
@@ -453,8 +463,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:14:25.150522Z",
-      "ended_at": "2026-09-04T04:14:25.241799Z",
+      "started_at": "2026-09-19T21:31:58.728911Z",
+      "ended_at": "2026-09-19T21:31:58.854258Z",
       "exit_code": 0
     },
     {
@@ -464,8 +474,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:14:25.241876Z",
-      "ended_at": "2026-09-04T04:14:25.902059Z",
+      "started_at": "2026-09-19T21:31:58.854618Z",
+      "ended_at": "2026-09-19T21:31:59.538207Z",
       "exit_code": 0
     },
     {
@@ -476,8 +486,8 @@
         "warnings"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:14:25.902199Z",
-      "ended_at": "2026-09-04T04:14:26.777605Z",
+      "started_at": "2026-09-19T21:31:59.538505Z",
+      "ended_at": "2026-09-19T21:32:00.699095Z",
       "exit_code": 0
     },
     {
@@ -488,14 +498,15 @@
         "conformance/critical-coverage.toml"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:14:26.777747Z",
-      "ended_at": "2026-09-04T04:14:26.925243Z",
+      "started_at": "2026-09-19T21:32:00.699325Z",
+      "ended_at": "2026-09-19T21:32:01.894874Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
         "llvm-cov",
+        "nextest",
         "--workspace",
         "--all-features",
         "--branch",
@@ -507,8 +518,8 @@
       "environment": {
         "RUSTC_BOOTSTRAP": "1"
       },
-      "started_at": "2026-09-04T04:14:26.925379Z",
-      "ended_at": "2026-09-04T04:16:37.389983Z",
+      "started_at": "2026-09-19T21:34:31.275067Z",
+      "ended_at": "2026-09-19T21:37:30.471368Z",
       "exit_code": 0
     },
     {
@@ -520,8 +531,8 @@
         "conformance/critical-coverage.toml"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:37.390145Z",
-      "ended_at": "2026-09-04T04:16:38.148846Z",
+      "started_at": "2026-09-19T21:37:30.472080Z",
+      "ended_at": "2026-09-19T21:37:32.265829Z",
       "exit_code": 0
     },
     {
@@ -531,8 +542,8 @@
         "check-stage-one"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.148993Z",
-      "ended_at": "2026-09-04T04:16:38.239419Z",
+      "started_at": "2026-09-19T21:32:01.895094Z",
+      "ended_at": "2026-09-19T21:32:02.003176Z",
       "exit_code": 0
     },
     {
@@ -542,8 +553,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.239582Z",
-      "ended_at": "2026-09-04T04:16:38.429840Z",
+      "started_at": "2026-09-19T21:32:02.003403Z",
+      "ended_at": "2026-09-19T21:32:02.218394Z",
       "exit_code": 0
     },
     {
@@ -553,8 +564,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.429990Z",
-      "ended_at": "2026-09-04T04:16:38.457841Z",
+      "started_at": "2026-09-19T21:32:02.218608Z",
+      "ended_at": "2026-09-19T21:32:02.247883Z",
       "exit_code": 0
     },
     {
@@ -564,8 +575,8 @@
         "check-stage-two"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.457926Z",
-      "ended_at": "2026-09-04T04:16:38.547846Z",
+      "started_at": "2026-09-19T21:32:02.248054Z",
+      "ended_at": "2026-09-19T21:32:02.351918Z",
       "exit_code": 0
     },
     {
@@ -575,8 +586,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.547927Z",
-      "ended_at": "2026-09-04T04:16:38.568121Z",
+      "started_at": "2026-09-19T21:32:02.352163Z",
+      "ended_at": "2026-09-19T21:32:02.372704Z",
       "exit_code": 0
     },
     {
@@ -586,8 +597,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.568194Z",
-      "ended_at": "2026-09-04T04:16:38.619233Z",
+      "started_at": "2026-09-19T21:32:02.372848Z",
+      "ended_at": "2026-09-19T21:32:02.427585Z",
       "exit_code": 0
     },
     {
@@ -597,8 +608,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.619315Z",
-      "ended_at": "2026-09-04T04:16:38.646580Z",
+      "started_at": "2026-09-19T21:32:02.427770Z",
+      "ended_at": "2026-09-19T21:32:02.455579Z",
       "exit_code": 0
     },
     {
@@ -612,8 +623,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.646639Z",
-      "ended_at": "2026-09-04T04:16:38.684644Z",
+      "started_at": "2026-09-19T21:31:16.414570Z",
+      "ended_at": "2026-09-19T21:31:16.454873Z",
       "exit_code": 0
     },
     {
@@ -627,8 +638,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.684708Z",
-      "ended_at": "2026-09-04T04:16:38.752329Z",
+      "started_at": "2026-09-19T21:31:16.455084Z",
+      "ended_at": "2026-09-19T21:31:37.728893Z",
       "exit_code": 0
     },
     {
@@ -640,8 +651,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:38.752430Z",
-      "ended_at": "2026-09-04T04:16:39.415597Z",
+      "started_at": "2026-09-19T21:31:37.729210Z",
+      "ended_at": "2026-09-19T21:31:38.466625Z",
       "exit_code": 0
     },
     {
@@ -650,8 +661,8 @@
         "scripts/run-stage-two-fuzz.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:16:39.415734Z",
-      "ended_at": "2026-09-04T04:17:21.865555Z",
+      "started_at": "2026-09-19T21:31:38.466919Z",
+      "ended_at": "2026-09-19T21:32:28.012488Z",
       "exit_code": 0
     },
     {
@@ -661,8 +672,8 @@
         "check-stage-three"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:21.865692Z",
-      "ended_at": "2026-09-04T04:17:21.956775Z",
+      "started_at": "2026-09-19T21:32:02.455720Z",
+      "ended_at": "2026-09-19T21:32:02.551536Z",
       "exit_code": 0
     },
     {
@@ -672,8 +683,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:21.956910Z",
-      "ended_at": "2026-09-04T04:17:21.971911Z",
+      "started_at": "2026-09-19T21:32:02.551758Z",
+      "ended_at": "2026-09-19T21:32:02.566928Z",
       "exit_code": 0
     },
     {
@@ -683,8 +694,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:21.972029Z",
-      "ended_at": "2026-09-04T04:17:22.017345Z",
+      "started_at": "2026-09-19T21:32:02.567006Z",
+      "ended_at": "2026-09-19T21:32:02.611279Z",
       "exit_code": 0
     },
     {
@@ -694,14 +705,15 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:22.017480Z",
-      "ended_at": "2026-09-04T04:17:22.042399Z",
+      "started_at": "2026-09-19T21:32:02.611390Z",
+      "ended_at": "2026-09-19T21:32:02.637609Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-testkit",
         "--test",
@@ -717,8 +729,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:22.042535Z",
-      "ended_at": "2026-09-04T04:17:28.324723Z",
+      "started_at": "2026-09-19T21:31:16.415203Z",
+      "ended_at": "2026-09-19T21:31:40.142123Z",
       "exit_code": 0
     },
     {
@@ -728,8 +740,8 @@
         "check-stage-four"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:28.324862Z",
-      "ended_at": "2026-09-04T04:17:28.412631Z",
+      "started_at": "2026-09-19T21:32:02.637741Z",
+      "ended_at": "2026-09-19T21:32:02.735728Z",
       "exit_code": 0
     },
     {
@@ -739,8 +751,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:28.412753Z",
-      "ended_at": "2026-09-04T04:17:28.448424Z",
+      "started_at": "2026-09-19T21:32:02.735862Z",
+      "ended_at": "2026-09-19T21:32:02.778372Z",
       "exit_code": 0
     },
     {
@@ -750,14 +762,15 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:28.448576Z",
-      "ended_at": "2026-09-04T04:17:28.471485Z",
+      "started_at": "2026-09-19T21:32:02.778531Z",
+      "ended_at": "2026-09-19T21:32:02.806747Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-auth",
         "--test",
@@ -765,14 +778,15 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:28.471609Z",
-      "ended_at": "2026-09-04T04:17:36.821551Z",
+      "started_at": "2026-09-19T21:31:40.142488Z",
+      "ended_at": "2026-09-19T21:31:53.262665Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-crypto",
         "--test",
@@ -780,14 +794,15 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:36.821690Z",
-      "ended_at": "2026-09-04T04:17:42.010864Z",
+      "started_at": "2026-09-19T21:31:53.262973Z",
+      "ended_at": "2026-09-19T21:31:59.123212Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-testkit",
         "--test",
@@ -795,8 +810,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:42.010998Z",
-      "ended_at": "2026-09-04T04:17:42.308823Z",
+      "started_at": "2026-09-19T21:31:59.123592Z",
+      "ended_at": "2026-09-19T21:31:59.731221Z",
       "exit_code": 0
     },
     {
@@ -805,8 +820,8 @@
         "scripts/run-stage-four-fuzz.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:42.308958Z",
-      "ended_at": "2026-09-04T04:17:48.070043Z",
+      "started_at": "2026-09-19T21:32:28.012882Z",
+      "ended_at": "2026-09-19T21:32:34.141244Z",
       "exit_code": 0
     },
     {
@@ -816,8 +831,8 @@
         "check-stage-five"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:48.070179Z",
-      "ended_at": "2026-09-04T04:17:48.170644Z",
+      "started_at": "2026-09-19T21:32:02.806891Z",
+      "ended_at": "2026-09-19T21:32:02.911098Z",
       "exit_code": 0
     },
     {
@@ -827,8 +842,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:48.170774Z",
-      "ended_at": "2026-09-04T04:17:48.195511Z",
+      "started_at": "2026-09-19T21:32:02.911279Z",
+      "ended_at": "2026-09-19T21:32:02.943230Z",
       "exit_code": 0
     },
     {
@@ -838,22 +853,40 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:48.195643Z",
-      "ended_at": "2026-09-04T04:17:48.217940Z",
+      "started_at": "2026-09-19T21:32:02.943341Z",
+      "ended_at": "2026-09-19T21:32:02.965654Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-storage",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:17:48.218052Z",
-      "ended_at": "2026-09-04T04:18:07.636642Z",
+      "started_at": "2026-09-19T21:31:16.415183Z",
+      "ended_at": "2026-09-19T21:33:12.515914Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-ircd-storage",
+        "--all-features",
+        "--locked",
+        "--profile",
+        "disk"
+      ],
+      "environment": {},
+      "started_at": "2026-09-19T21:42:10.953080Z",
+      "ended_at": "2026-09-19T21:42:46.865195Z",
       "exit_code": 0
     },
     {
@@ -867,8 +900,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:07.636786Z",
-      "ended_at": "2026-09-04T04:18:07.673277Z",
+      "started_at": "2026-09-19T21:32:34.141461Z",
+      "ended_at": "2026-09-19T21:32:34.183534Z",
       "exit_code": 0
     },
     {
@@ -882,8 +915,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:07.673402Z",
-      "ended_at": "2026-09-04T04:18:07.717649Z",
+      "started_at": "2026-09-19T21:32:34.183667Z",
+      "ended_at": "2026-09-19T21:32:34.242816Z",
       "exit_code": 0
     },
     {
@@ -895,8 +928,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:07.717790Z",
-      "ended_at": "2026-09-04T04:18:08.405558Z",
+      "started_at": "2026-09-19T21:32:34.243024Z",
+      "ended_at": "2026-09-19T21:32:34.875800Z",
       "exit_code": 0
     },
     {
@@ -905,8 +938,8 @@
         "scripts/run-stage-five-fuzz.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:08.405716Z",
-      "ended_at": "2026-09-04T04:18:09.538082Z",
+      "started_at": "2026-09-19T21:32:34.876068Z",
+      "ended_at": "2026-09-19T21:32:36.054864Z",
       "exit_code": 0
     },
     {
@@ -916,8 +949,8 @@
         "check-stage-six"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:09.538217Z",
-      "ended_at": "2026-09-04T04:18:09.630625Z",
+      "started_at": "2026-09-19T21:32:02.965755Z",
+      "ended_at": "2026-09-19T21:32:03.063462Z",
       "exit_code": 0
     },
     {
@@ -927,8 +960,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:09.630761Z",
-      "ended_at": "2026-09-04T04:18:09.666943Z",
+      "started_at": "2026-09-19T21:32:03.063548Z",
+      "ended_at": "2026-09-19T21:32:03.126547Z",
       "exit_code": 0
     },
     {
@@ -938,56 +971,60 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:09.667075Z",
-      "ended_at": "2026-09-04T04:18:09.695339Z",
+      "started_at": "2026-09-19T21:32:03.126823Z",
+      "ended_at": "2026-09-19T21:32:03.153842Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-config",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:09.695442Z",
-      "ended_at": "2026-09-04T04:18:11.964172Z",
+      "started_at": "2026-09-19T21:31:59.731572Z",
+      "ended_at": "2026-09-19T21:32:02.290201Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-admin",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:11.964305Z",
-      "ended_at": "2026-09-04T04:18:12.732252Z",
+      "started_at": "2026-09-19T21:32:02.290593Z",
+      "ended_at": "2026-09-19T21:32:06.789373Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-runtime",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:12.732412Z",
-      "ended_at": "2026-09-04T04:18:42.645101Z",
+      "started_at": "2026-09-19T21:32:06.789755Z",
+      "ended_at": "2026-09-19T21:33:31.168855Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-testkit",
         "--test",
@@ -995,8 +1032,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:42.645243Z",
-      "ended_at": "2026-09-04T04:18:43.089447Z",
+      "started_at": "2026-09-19T21:33:31.169364Z",
+      "ended_at": "2026-09-19T21:33:31.729501Z",
       "exit_code": 0
     },
     {
@@ -1005,8 +1042,8 @@
         "scripts/run-stage-six-loom.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:43.089614Z",
-      "ended_at": "2026-09-04T04:18:43.224996Z",
+      "started_at": "2026-09-19T21:31:16.415234Z",
+      "ended_at": "2026-09-19T21:31:56.948050Z",
       "exit_code": 0
     },
     {
@@ -1015,8 +1052,8 @@
         "scripts/run-stage-six-transcripts.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:18:43.225151Z",
-      "ended_at": "2026-09-04T04:19:22.508600Z",
+      "started_at": "2026-09-19T21:37:30.472112Z",
+      "ended_at": "2026-09-19T21:39:38.417023Z",
       "exit_code": 0
     },
     {
@@ -1025,8 +1062,8 @@
         "scripts/run-stage-six-soak.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:22.508781Z",
-      "ended_at": "2026-09-04T04:19:22.630702Z",
+      "started_at": "2026-09-19T21:39:38.417321Z",
+      "ended_at": "2026-09-19T21:39:38.965103Z",
       "exit_code": 0
     },
     {
@@ -1036,8 +1073,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:22.630867Z",
-      "ended_at": "2026-09-04T04:19:22.652697Z",
+      "started_at": "2026-09-19T21:32:03.153913Z",
+      "ended_at": "2026-09-19T21:32:03.172201Z",
       "exit_code": 0
     },
     {
@@ -1047,8 +1084,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:22.652795Z",
-      "ended_at": "2026-09-04T04:19:22.677373Z",
+      "started_at": "2026-09-19T21:32:03.172255Z",
+      "ended_at": "2026-09-19T21:32:03.199255Z",
       "exit_code": 0
     },
     {
@@ -1057,8 +1094,8 @@
         "scripts/qualify-stage-six.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:22.677472Z",
-      "ended_at": "2026-09-04T04:19:22.767871Z",
+      "started_at": "2026-09-19T21:32:03.199435Z",
+      "ended_at": "2026-09-19T21:32:03.290656Z",
       "exit_code": 0
     },
     {
@@ -1072,8 +1109,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:22.768006Z",
-      "ended_at": "2026-09-04T04:19:22.804614Z",
+      "started_at": "2026-09-19T21:32:36.055119Z",
+      "ended_at": "2026-09-19T21:32:36.098141Z",
       "exit_code": 0
     },
     {
@@ -1087,8 +1124,8 @@
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:22.804720Z",
-      "ended_at": "2026-09-04T04:19:22.852935Z",
+      "started_at": "2026-09-19T21:32:36.098346Z",
+      "ended_at": "2026-09-19T21:32:36.149444Z",
       "exit_code": 0
     },
     {
@@ -1100,8 +1137,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:22.853032Z",
-      "ended_at": "2026-09-04T04:19:23.698681Z",
+      "started_at": "2026-09-19T21:32:36.149683Z",
+      "ended_at": "2026-09-19T21:32:36.767588Z",
       "exit_code": 0
     },
     {
@@ -1110,8 +1147,8 @@
         "scripts/run-stage-six-fuzz.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:23.698826Z",
-      "ended_at": "2026-09-04T04:19:24.962206Z",
+      "started_at": "2026-09-19T21:32:36.767813Z",
+      "ended_at": "2026-09-19T21:32:38.053076Z",
       "exit_code": 0
     },
     {
@@ -1121,8 +1158,8 @@
         "check-stage-seven"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:24.962350Z",
-      "ended_at": "2026-09-04T04:19:25.050124Z",
+      "started_at": "2026-09-19T21:32:03.290841Z",
+      "ended_at": "2026-09-19T21:32:03.389400Z",
       "exit_code": 0
     },
     {
@@ -1132,8 +1169,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:25.050266Z",
-      "ended_at": "2026-09-04T04:19:25.081557Z",
+      "started_at": "2026-09-19T21:32:03.389611Z",
+      "ended_at": "2026-09-19T21:32:03.455594Z",
       "exit_code": 0
     },
     {
@@ -1143,42 +1180,45 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:25.081701Z",
-      "ended_at": "2026-09-04T04:19:25.103988Z",
+      "started_at": "2026-09-19T21:32:03.455708Z",
+      "ended_at": "2026-09-19T21:32:03.480170Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-federation-wire",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:25.104074Z",
-      "ended_at": "2026-09-04T04:19:26.635302Z",
+      "started_at": "2026-09-19T21:33:31.729772Z",
+      "ended_at": "2026-09-19T21:33:33.294086Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-domain",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:26.635459Z",
-      "ended_at": "2026-09-04T04:19:30.665806Z",
+      "started_at": "2026-09-19T21:33:33.294335Z",
+      "ended_at": "2026-09-19T21:33:38.776714Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-storage",
         "--test",
@@ -1187,22 +1227,23 @@
         "federation_records"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:30.665947Z",
-      "ended_at": "2026-09-04T04:19:30.736775Z",
+      "started_at": "2026-09-19T21:33:12.516232Z",
+      "ended_at": "2026-09-19T21:33:12.723311Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-crypto",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:30.736916Z",
-      "ended_at": "2026-09-04T04:19:35.762559Z",
+      "started_at": "2026-09-19T21:33:38.777018Z",
+      "ended_at": "2026-09-19T21:33:47.953151Z",
       "exit_code": 0
     },
     {
@@ -1211,8 +1252,8 @@
         "scripts/run-stage-seven-model.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:35.762699Z",
-      "ended_at": "2026-09-04T04:19:39.393231Z",
+      "started_at": "2026-09-19T21:39:38.965384Z",
+      "ended_at": "2026-09-19T21:39:47.553315Z",
       "exit_code": 0
     },
     {
@@ -1221,8 +1262,8 @@
         "scripts/run-stage-seven-transcripts.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:39.393405Z",
-      "ended_at": "2026-09-04T04:19:56.778258Z",
+      "started_at": "2026-09-19T21:39:47.553609Z",
+      "ended_at": "2026-09-19T21:40:24.035469Z",
       "exit_code": 0
     },
     {
@@ -1231,8 +1272,8 @@
         "scripts/run-stage-seven-fuzz.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:56.778396Z",
-      "ended_at": "2026-09-04T04:19:58.112854Z",
+      "started_at": "2026-09-19T21:32:38.053393Z",
+      "ended_at": "2026-09-19T21:32:39.219018Z",
       "exit_code": 0
     },
     {
@@ -1242,8 +1283,8 @@
         "check-stage-eight"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:58.112991Z",
-      "ended_at": "2026-09-04T04:19:58.203688Z",
+      "started_at": "2026-09-19T21:32:03.480243Z",
+      "ended_at": "2026-09-19T21:32:03.581402Z",
       "exit_code": 0
     },
     {
@@ -1253,8 +1294,8 @@
         "check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:58.203818Z",
-      "ended_at": "2026-09-04T04:19:58.251986Z",
+      "started_at": "2026-09-19T21:32:03.581641Z",
+      "ended_at": "2026-09-19T21:32:03.670571Z",
       "exit_code": 0
     },
     {
@@ -1264,8 +1305,8 @@
         "self-test"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:58.252125Z",
-      "ended_at": "2026-09-04T04:19:58.284304Z",
+      "started_at": "2026-09-19T21:32:03.670800Z",
+      "ended_at": "2026-09-19T21:32:03.707611Z",
       "exit_code": 0
     },
     {
@@ -1275,8 +1316,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:58.284418Z",
-      "ended_at": "2026-09-04T04:19:58.297199Z",
+      "started_at": "2026-09-19T21:32:03.707806Z",
+      "ended_at": "2026-09-19T21:32:03.721072Z",
       "exit_code": 0
     },
     {
@@ -1286,8 +1327,8 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:58.297260Z",
-      "ended_at": "2026-09-04T04:19:58.328350Z",
+      "started_at": "2026-09-19T21:32:03.721261Z",
+      "ended_at": "2026-09-19T21:32:03.774516Z",
       "exit_code": 0
     },
     {
@@ -1297,28 +1338,30 @@
         "--check"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:58.328432Z",
-      "ended_at": "2026-09-04T04:19:58.343304Z",
+      "started_at": "2026-09-19T21:32:39.219284Z",
+      "ended_at": "2026-09-19T21:32:39.235729Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-e2ee",
         "--all-features",
         "--locked"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:19:58.343381Z",
-      "ended_at": "2026-09-04T04:20:01.765192Z",
+      "started_at": "2026-09-19T21:33:47.953396Z",
+      "ended_at": "2026-09-19T21:33:55.137857Z",
       "exit_code": 0
     },
     {
       "argv": [
         "cargo",
-        "test",
+        "nextest",
+        "run",
         "-p",
         "agenc-ircd-storage",
         "--test",
@@ -1327,8 +1370,8 @@
         "e2ee_records"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:20:01.765334Z",
-      "ended_at": "2026-09-04T04:20:01.847863Z",
+      "started_at": "2026-09-19T21:33:12.723564Z",
+      "ended_at": "2026-09-19T21:33:12.942857Z",
       "exit_code": 0
     },
     {
@@ -1337,8 +1380,8 @@
         "scripts/run-stage-eight-model.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:20:01.848031Z",
-      "ended_at": "2026-09-04T04:20:02.115814Z",
+      "started_at": "2026-09-19T21:40:24.035840Z",
+      "ended_at": "2026-09-19T21:40:24.311113Z",
       "exit_code": 0
     },
     {
@@ -1347,8 +1390,8 @@
         "scripts/run-stage-eight-transcripts.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:20:02.115953Z",
-      "ended_at": "2026-09-04T04:20:28.194563Z",
+      "started_at": "2026-09-19T21:40:24.311425Z",
+      "ended_at": "2026-09-19T21:41:32.935295Z",
       "exit_code": 0
     },
     {
@@ -1357,8 +1400,8 @@
         "scripts/run-stage-eight-fuzz.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:20:28.194702Z",
-      "ended_at": "2026-09-04T04:20:31.130493Z",
+      "started_at": "2026-09-19T21:32:39.235926Z",
+      "ended_at": "2026-09-19T21:32:41.753738Z",
       "exit_code": 0
     },
     {
@@ -1367,8 +1410,8 @@
         "scripts/run-stage-eight-load.sh"
       ],
       "environment": {},
-      "started_at": "2026-09-04T04:20:31.130655Z",
-      "ended_at": "2026-09-04T04:21:01.850555Z",
+      "started_at": "2026-09-19T21:41:32.935681Z",
+      "ended_at": "2026-09-19T21:42:10.952763Z",
       "exit_code": 0
     }
   ],
@@ -1622,10 +1665,6 @@
       "kind": "normative-requirement"
     },
     {
-      "evidence_id": "EVID-E2EE-REQ-58217F311021E979779A",
-      "kind": "normative-requirement"
-    },
-    {
       "evidence_id": "EVID-E2EE-REQ-5B3475BE0506C311BEF2",
       "kind": "normative-requirement"
     },
@@ -1710,6 +1749,10 @@
       "kind": "normative-requirement"
     },
     {
+      "evidence_id": "EVID-E2EE-REQ-A119B1A71D9F208380BC",
+      "kind": "normative-requirement"
+    },
+    {
       "evidence_id": "EVID-E2EE-REQ-A141AC00A13A398685DC",
       "kind": "normative-requirement"
     },
@@ -1783,6 +1826,10 @@
     },
     {
       "evidence_id": "EVID-E2EE-REQ-D70B8B9850E29E082F85",
+      "kind": "normative-requirement"
+    },
+    {
+      "evidence_id": "EVID-E2EE-REQ-D8D8C1DBDAE5F09E95FD",
       "kind": "normative-requirement"
     },
     {
@@ -1982,8 +2029,24 @@
       "kind": "barrier-schedules"
     },
     {
-      "evidence_id": "EVID-S08-039-REVIEW",
-      "kind": "external-review"
+      "evidence_id": "EVID-S08-040-POLICY-PUBLICATION",
+      "kind": "policy-publication"
+    },
+    {
+      "evidence_id": "EVID-S08-041-QUORUM-GUARD",
+      "kind": "sequencer-quorum-guard"
+    },
+    {
+      "evidence_id": "EVID-S08-042-CHAIN-WITNESS",
+      "kind": "edge-chain-witness"
+    },
+    {
+      "evidence_id": "EVID-S08-043-CONTENT-PADDING",
+      "kind": "application-content-padding"
+    },
+    {
+      "evidence_id": "EVID-S08-044-REAL-CLIENTS",
+      "kind": "real-client-lifecycle"
     },
     {
       "evidence_id": "EVID-S08-900-STAGE-GATE",

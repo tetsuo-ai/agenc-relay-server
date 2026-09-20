@@ -19,16 +19,18 @@ use agenc_ircd_storage::e2ee_records::{
     DirectoryRow, KEYSET_ROW_KIND, KeySetRow, MAILBOX_ROW_KIND, MailboxKind, MailboxRow,
     OBJECT_RECORD_KIND, ObjectRow, PACKAGE_ROW_KIND, PENDING_ROUTE_ROW_KIND, PackageRow,
     PackageState, PendingRouteRow, ProofRole, RECOVERY_GATE_KIND, REPLAY_ROW_KIND, ROUTE_ROW_KIND,
-    ReplayKey, ReplayRow, RouteLifecycle, RouteRow, SEQUENCER_ROW_KIND, SNAPSHOT_MARKER_ROW_KIND,
-    SequencerRow, SnapshotMarkerRow, SnapshotPhase, check_state_key, object_key, prefix,
-    record_kind_for_key, recovery_gate_key, validate_object_body, validate_state_body,
+    ReplayKey, ReplayRow, RouteLifecycle, RouteRow, SEQUENCER_HISTORY_ROW_KIND, SEQUENCER_ROW_KIND,
+    SNAPSHOT_MARKER_ROW_KIND, SequencerHistoryRow, SequencerRow, SnapshotMarkerRow, SnapshotPhase,
+    check_state_key, object_key, prefix, record_kind_for_key, recovery_gate_key,
+    validate_object_body, validate_state_body,
 };
 use agenc_ircd_storage::{
     CommitOutcome, DatabaseHeaderTbs, InitialStorageRecord, LoginIndexKeyState,
-    PersistentRecordValue, ReadPlan, RecordMutation, SCHEMA_GENERATION, StateDirectory,
-    StorageAccountingLimits, StorageEngineLimits, StorageError, StorageInitializationConfig,
-    StorageInitializationMode, StorageInitializationOutcome, StorageMutationBatch,
-    StorageMutationHead, StorageOpenConfig, StorageOwner, StoredKey, TableId, initialize_storage,
+    PersistentRecordValue, ProtocolRecordBody, ReadPlan, RecordMutation, SCHEMA_GENERATION,
+    StateDirectory, StorageAccountingLimits, StorageEngineLimits, StorageError,
+    StorageInitializationConfig, StorageInitializationMode, StorageInitializationOutcome,
+    StorageMutationBatch, StorageMutationHead, StorageOpenConfig, StorageOwner, StoredKey, TableId,
+    initialize_storage,
 };
 use agenc_ircd_types::{
     DatabaseId, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation, TransactionId,
@@ -1700,5 +1702,62 @@ fn pending_snapshot_rows_round_trip_under_their_generation() -> TestResult {
     let flag_low = unflagged.len() - 32 - 1;
     *unflagged.get_mut(flag_low).ok_or("flag byte")? = 0;
     assert!(SnapshotMarkerRow::decode(&unflagged).is_err());
+    Ok(())
+}
+
+/// The canonical body inside one wrapped e2ee state row.
+fn inner_of(kind: u16, wrapped: &[u8]) -> Result<Vec<u8>, StorageError> {
+    Ok(
+        ProtocolRecordBody::decode(TableId::E2eeState, kind, wrapped)?
+            .canonical_object()
+            .to_vec(),
+    )
+}
+
+fn rewrap(kind: u16, inner: Vec<u8>) -> Result<Vec<u8>, StorageError> {
+    ProtocolRecordBody::new(TableId::E2eeState, kind, 1, inner)?.encode()
+}
+
+#[test]
+fn crafted_bodies_cannot_smuggle_empty_or_inconsistent_fields_past_the_decoders() -> TestResult {
+    // A route row whose route state is empty: the length word is zeroed and
+    // the three state bytes removed.
+    let inner = inner_of(ROUTE_ROW_KIND, &route_row().encode()?)?;
+    let mut empty_route = inner.get(..2).ok_or("version")?.to_vec();
+    empty_route.extend_from_slice(&[0; 4]);
+    empty_route.extend_from_slice(inner.get(9..).ok_or("tail")?);
+    assert_eq!(
+        RouteRow::decode(&rewrap(ROUTE_ROW_KIND, empty_route)?).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    // A key set row that names no credential.
+    let inner = inner_of(KEYSET_ROW_KIND, &keyset().encode()?)?;
+    let mut no_credentials = inner.get(..42).ok_or("generation and digest")?.to_vec();
+    no_credentials.extend_from_slice(&[0; 2]);
+    assert_eq!(
+        KeySetRow::decode(&rewrap(KEYSET_ROW_KIND, no_credentials)?).err(),
+        Some(StorageError::InvalidEncoding)
+    );
+    // A sequencer history row that carries a retirement generation while
+    // claiming it was never retired.
+    let history = SequencerHistoryRow {
+        key_generation: 1,
+        public_key: [1; 32],
+        interval: (1, 10),
+        previous_key_id: [0; 32],
+        introduced_set: 2,
+        retired_set: Some(6),
+        released: false,
+    };
+    let wrapped = history.encode()?;
+    assert_eq!(SequencerHistoryRow::decode(&wrapped)?, history);
+    let mut inner = inner_of(SEQUENCER_HISTORY_ROW_KIND, &wrapped)?;
+    for byte in inner.get_mut(98..100).ok_or("retired flag")? {
+        *byte = 0;
+    }
+    assert_eq!(
+        SequencerHistoryRow::decode(&rewrap(SEQUENCER_HISTORY_ROW_KIND, inner)?).err(),
+        Some(StorageError::InvalidEncoding)
+    );
     Ok(())
 }

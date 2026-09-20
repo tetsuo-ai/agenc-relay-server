@@ -1130,11 +1130,6 @@ claim_ids = ["S08-038"]
 kind = "barrier-schedules"
 
 [[evidence]]
-id = "EVID-S08-039-REVIEW"
-claim_ids = ["S08-039"]
-kind = "external-review"
-
-[[evidence]]
 id = "EVID-S08-040-POLICY-PUBLICATION"
 claim_ids = ["S08-040"]
 kind = "policy-publication"

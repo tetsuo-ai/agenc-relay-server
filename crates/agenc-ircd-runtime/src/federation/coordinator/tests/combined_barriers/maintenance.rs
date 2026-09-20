@@ -127,3 +127,74 @@ async fn offline_replay_expires_from_a_timer_without_a_new_acknowledgement() -> 
     assert!(stream.rows.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+async fn replay_maintenance_answers_only_its_own_global_timer() -> TestResult {
+    use crate::federation::coordinator::replay_maintenance;
+    use crate::state_core::timers::{TimedId, TimerKind};
+    let mut fixture = Box::pin(Fixture::new()).await?;
+    let context = fixture.core.context_mut()?;
+    let deadline = context.now();
+    // The coordinator's own maintenance timer may already be due on a slow
+    // host; only the timers this test schedules are popped below.
+    while context.timers_mut().pop_due(deadline).is_some() {}
+    context
+        .timers_mut()
+        .schedule(deadline, TimerKind::Batch, TimedId::Global)?;
+    let other_kind = context
+        .timers_mut()
+        .pop_due(deadline)
+        .ok_or("the batch timer")?;
+    assert!(!replay_maintenance::timer_fired(
+        &mut fixture.coordinator,
+        context,
+        other_kind
+    ));
+    context.timers_mut().schedule(
+        deadline,
+        TimerKind::CompanionReplayMaintenance,
+        TimedId::Peer(PEER),
+    )?;
+    let other_id = context
+        .timers_mut()
+        .pop_due(deadline)
+        .ok_or("the peer timer")?;
+    assert!(!replay_maintenance::timer_fired(
+        &mut fixture.coordinator,
+        context,
+        other_id
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_maintenance_waits_behind_a_staged_batch() -> TestResult {
+    use crate::federation::coordinator::replay_maintenance;
+    use crate::state_core::timers::{TimedId, TimerKind};
+    let mut fixture = Box::pin(Fixture::new()).await?;
+    fixture.core.context_mut()?.set_wall_for_test(100);
+    fixture.stage_base_ack()?;
+    let context = fixture.core.context_mut()?;
+    assert!(fixture.coordinator.pending.is_some());
+    let now = context.now().get();
+    replay_maintenance::advance(&mut fixture.coordinator, context);
+    let horizon = agenc_ircd_types::MonotonicTick::from_ticks(now.saturating_add(1_000_000_000));
+    let mut retry = None;
+    while let Some(entry) = context.timers_mut().pop_due(horizon) {
+        if entry.kind == TimerKind::CompanionReplayMaintenance && entry.id == TimedId::Global {
+            retry = Some(entry);
+            break;
+        }
+    }
+    let timer = retry.ok_or("the retry timer")?;
+    assert!(
+        timer.deadline.get() > now,
+        "a retry is scheduled behind the batch"
+    );
+    assert!(replay_maintenance::timer_fired(
+        &mut fixture.coordinator,
+        context,
+        timer
+    ));
+    Ok(())
+}

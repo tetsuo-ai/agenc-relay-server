@@ -590,6 +590,27 @@ mod tests {
     }
 
     #[test]
+    fn five_minutes_of_mild_disagreement_withdraw_trust() {
+        let mut monitor = DriftMonitor::new(tick(0), wall(5_000));
+        // Two seconds of skew: beyond the tolerance, below the severe bound.
+        assert_eq!(
+            monitor.observe(tick(60_000), Some(wall(5_062))),
+            DriftTransition::Unchanged
+        );
+        assert!(monitor.wall_trusted());
+        assert_eq!(
+            monitor.observe(tick(359_999), Some(wall(5_362))),
+            DriftTransition::Unchanged
+        );
+        assert!(monitor.wall_trusted());
+        assert_eq!(
+            monitor.observe(tick(360_000), Some(wall(5_362))),
+            DriftTransition::Distrusted
+        );
+        assert!(!monitor.wall_trusted());
+    }
+
+    #[test]
     fn recovery_restarts_on_disagreement_unreadable_clock_or_backward_wall() {
         let mut monitor = DriftMonitor::new(tick(0), wall(5_000));
         assert_eq!(

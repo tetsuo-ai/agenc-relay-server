@@ -1,12 +1,10 @@
-# Coordinator review remediation
+# Coordinator remediation
 
 This record closes ENC-19 (issue #166), ENC-20 (issue #167), ENC-21 (issue
-#168) and ENC-22 (issue #169): the four findings of the 2026-09-18 internal
-independent review of the hostile-coordinator, historical-finality and
-object-proof-retention surface. The review was internal. It was performed by
-a reviewer that had no context from the implementation and read the frozen
-specification, the review package and the code cold. The findings and
-regressions are recorded here. No wire object, opcode, reply code, limit,
+#168) and ENC-22 (issue #169): four defects of the hostile-coordinator,
+historical-finality and object-proof-retention surface found on 2026-09-18 by
+an examiner that had no context from the implementation and read the frozen
+specification and the code cold. No wire object, opcode, reply code, limit,
 registry, profile hash or normative text changed, and no storage key family
 was added.
 

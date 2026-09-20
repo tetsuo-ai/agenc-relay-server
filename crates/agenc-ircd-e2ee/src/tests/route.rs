@@ -588,3 +588,92 @@ fn successor_and_incarnation_rules_check_each_field() -> TestResult {
     assert!(!is_next_incarnation(&closed, [5; 32], &skipped));
     Ok(())
 }
+
+/// A principal whose roster holds `certificates` in place of the default ones.
+fn with_devices(
+    mut principal: Principal,
+    certificates: Vec<crate::objects::identity::IrcDeviceCertificate>,
+) -> Result<Principal, Box<dyn Error>> {
+    principal.roster = roster(
+        &principal.root_secret,
+        &principal.root,
+        0,
+        [0; 32],
+        (100, 100 + 6 * 24 * 3600),
+        certificates,
+        Vec::new(),
+    )?;
+    Ok(principal)
+}
+
+fn channel_spec<'a>(
+    principals: &'a [Principal],
+    device: u8,
+) -> Result<BindingSpec<'a>, Box<dyn Error>> {
+    let authority = root_fingerprint(&principals.first().ok_or("principal")?.root)?;
+    Ok(BindingSpec {
+        principals,
+        route: channel_route(b"#room", authority)?,
+        channel_instance_id: Some([1; 16]),
+        conversation_nonce: None,
+        group_id: [25; 32],
+        generation: 0,
+        previous_binding_id: [0; 32],
+        lock_sequence: 0,
+        plan_devices: vec![(&ACCOUNT, authority, device)],
+    })
+}
+
+#[test]
+fn a_binding_needs_a_device_that_may_bind_and_refuses_approvals_from_others() -> TestResult {
+    // A sole principal whose only device lacks binding authority.
+    let limited = principal(42, &ACCOUNT, &[11])?;
+    let observer = certificate(
+        &limited.root_secret,
+        &limited.root,
+        &DeviceSpec {
+            flags: 2,
+            ..DeviceSpec::new(11)
+        },
+    )?;
+    let principals = vec![with_devices(limited, vec![observer])?];
+    let sole = rosters(&principals)?;
+    let package = binding_package(&channel_spec(&principals, 11)?)?;
+    assert_eq!(
+        verify_binding_package(&NETWORK, &package, &sole),
+        Err(E2eeError::InvalidValue),
+        "no device may bind"
+    );
+    // A principal with one binding device and one observer: the observer's
+    // approval is refused, and without it the package is complete.
+    let mixed = principal(40, &ACCOUNT, &[7, 8])?;
+    let binder = certificate(&mixed.root_secret, &mixed.root, &DeviceSpec::new(7))?;
+    let observer = certificate(
+        &mixed.root_secret,
+        &mixed.root,
+        &DeviceSpec {
+            flags: 2,
+            ..DeviceSpec::new(8)
+        },
+    )?;
+    let principals = vec![with_devices(mixed, vec![binder, observer])?];
+    let mixed_rosters = rosters(&principals)?;
+    let package = binding_package(&channel_spec(&principals, 7)?)?;
+    assert_eq!(
+        verify_binding_package(&NETWORK, &package, &mixed_rosters),
+        Err(E2eeError::InvalidValue),
+        "an approval from a device that may not bind"
+    );
+    let mut honest = package;
+    let approvals: Vec<_> = honest
+        .binding
+        .approvals
+        .as_slice()
+        .iter()
+        .filter(|approval| approval.signer_device_id != [8; 16])
+        .cloned()
+        .collect();
+    honest.binding.approvals = TlsVec::new(approvals)?;
+    assert!(verify_binding_package(&NETWORK, &honest, &mixed_rosters).is_ok());
+    Ok(())
+}

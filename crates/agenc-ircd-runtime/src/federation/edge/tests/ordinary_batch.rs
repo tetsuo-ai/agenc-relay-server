@@ -6,6 +6,7 @@ mod admission;
 mod barrier;
 mod join;
 mod projection;
+mod refusals;
 mod replacement;
 mod resources;
 
@@ -411,4 +412,19 @@ async fn take_ack(queue: &mut LinkQueue) -> TestResult<FederationFrame> {
         .ok_or("expected FACK")?;
     parse_frame(line.as_str().trim_end_matches("\r\n"), EDGE_NAME)
         .map_err(|error| format!("FACK source: {error:?}").into())
+}
+
+#[tokio::test]
+async fn an_ordinary_event_that_skips_the_next_sequence_is_refused() -> TestResult {
+    let mut fixture = PrefixFixture::new()?;
+    fixture.receive(0)?;
+    let (descriptor, object) = ordinary_message(fixture.recipient, 2)?;
+    let refused = events::receive(
+        &mut fixture.edge,
+        fixture.core.context_mut()?,
+        descriptor,
+        &object,
+    );
+    assert_eq!(refused.err(), Some(Violation::Consistency));
+    Ok(())
 }

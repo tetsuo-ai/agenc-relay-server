@@ -1170,3 +1170,38 @@ fn a_route_restored_while_closing_resumes_with_its_close_intent() -> TestResult 
     );
     Ok(())
 }
+
+#[test]
+fn a_recovery_element_is_accepted_only_from_the_device_that_submitted_it() -> TestResult {
+    let source = source_with(&[DEVICE, super::super::SECOND_DEVICE])?;
+    let conversation = source.conversation;
+    let mut pending = pending_from(&source)?;
+    let (route_sequence, predecessor) = next_position(&pending, &conversation)?;
+    let (_, first) = source.records.first().ok_or("records")?;
+    let submission_id = accept_at(
+        &mut pending,
+        conversation,
+        route_sequence,
+        predecessor,
+        IrcRecoveryElementKind::RecordElement,
+        IrcWireObjectKind::SequencerRecord,
+        first,
+    )?;
+    let submitter = pending.device().ok_or("attached device")?;
+    if let Some(origin) = pending.coordinator.state.origins.get_mut(&origin_key()) {
+        origin.device = Some(([super::super::SECOND_DEVICE; 16], submitter.1));
+    }
+    assert_eq!(
+        code(element(&mut pending, conversation, submission_id, first)?),
+        Some(E2eeReplyCode::DeviceRequired)
+    );
+    assert_pending_unchanged(&pending, &conversation);
+    if let Some(origin) = pending.coordinator.state.origins.get_mut(&origin_key()) {
+        origin.device = Some(submitter);
+    }
+    assert!(matches!(
+        ok(element(&mut pending, conversation, submission_id, first)?)?.result,
+        ResultBody::RecoveryExtended(..)
+    ));
+    Ok(())
+}

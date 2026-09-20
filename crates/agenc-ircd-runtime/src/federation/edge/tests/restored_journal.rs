@@ -24,6 +24,7 @@ struct Image {
     origin_key: Option<StoredKey>,
     header: RequestHeader,
     request_row: EdgeRequestRecord,
+    request_key: Option<StoredKey>,
 }
 
 type Tamper = fn(&mut Image) -> TestResult;
@@ -83,6 +84,7 @@ fn image() -> TestResult<Image> {
             flags: 0,
         },
         origin_key: None,
+        request_key: None,
         header,
         request_row: EdgeRequestRecord {
             completion_coverage: None,
@@ -165,7 +167,10 @@ impl Image {
             (
                 TableId::RequestResult,
                 EDGE_REQUEST_KIND,
-                request_result_key(self.header.replay_key.to_bytes())?,
+                match self.request_key.take() {
+                    Some(key) => key,
+                    None => request_result_key(self.header.replay_key.to_bytes())?,
+                },
                 self.request_row.encode()?,
             ),
         ];
@@ -213,8 +218,12 @@ fn origin_tampers() -> [Tamper; 4] {
     ]
 }
 
-fn request_tampers() -> [Tamper; 6] {
+fn request_tampers() -> [Tamper; 7] {
     [
+        |image| {
+            image.request_key = Some(request_result_key([9; 64])?);
+            Ok(())
+        },
         |image| {
             image.header.replay_key.home_server_id = ServerId::from_bytes([99; 16]);
             image.rebuild_request()

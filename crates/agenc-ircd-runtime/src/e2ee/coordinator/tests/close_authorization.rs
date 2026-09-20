@@ -392,3 +392,114 @@ fn a_correctly_signed_close_cannot_change_the_finalized_intent() -> TestResult {
     );
     Ok(())
 }
+
+/// Replaces the retained finalization object the close names with an edited copy, keeping
+/// the proof index pointed at the new bytes, so only the terminal's own content disagrees.
+fn retain_edited_terminal(
+    fixture: &mut Fixture,
+    edit: fn(&mut agenc_ircd_e2ee::objects::sequencing::IrcFinalizationRequest),
+) -> TestResult {
+    let terminal = fixture.close.tbs.authorizing_terminal_id;
+    let state = fixture
+        .source
+        .coordinator
+        .state
+        .conversations
+        .get_mut(&fixture.conversation)
+        .ok_or("conversation")?;
+    let proof_id = *state.proofs.get(&terminal).ok_or("retained proof")?;
+    let bytes = fixture
+        .source
+        .coordinator
+        .state
+        .objects
+        .get(&proof_id)
+        .ok_or("retained terminal object")?
+        .clone();
+    let mut budget = DecodeBudget::new(1 << 20, 1 << 16);
+    let object = agenc_ircd_e2ee::object::IrcWireObject::decode_kind(
+        &bytes,
+        Some(IrcWireObjectKind::FinalizationRequest),
+        &mut budget,
+    )?;
+    let mut request = agenc_ircd_e2ee::objects::sequencing::IrcFinalizationRequest::decode_exact(
+        object.body(),
+        &mut budget,
+    )?;
+    edit(&mut request);
+    let edited = wire(IrcWireObjectKind::FinalizationRequest, &request)?;
+    let edited_id = object_id(&edited);
+    fixture
+        .source
+        .coordinator
+        .state
+        .objects
+        .insert(edited_id, edited);
+    fixture
+        .source
+        .coordinator
+        .state
+        .conversations
+        .get_mut(&fixture.conversation)
+        .ok_or("conversation")?
+        .proofs
+        .insert(terminal, edited_id);
+    Ok(())
+}
+
+type TerminalEdit = (
+    &'static str,
+    fn(&mut agenc_ircd_e2ee::objects::sequencing::IrcFinalizationRequest),
+);
+
+#[test]
+fn a_close_needs_a_retained_terminal_that_agrees_with_itself_and_the_intent() -> TestResult {
+    let edits: [TerminalEdit; 10] = [
+        ("core profile version", |request| {
+            request.proof.core.profile_version = 2
+        }),
+        ("core network", |request| {
+            request.proof.core.network_id = [9; 32]
+        }),
+        ("core conversation", |request| {
+            request.proof.core.conversation_id = [9; 32]
+        }),
+        ("core resulting epoch", |request| {
+            request.proof.core.resulting_epoch += 1
+        }),
+        ("core old policy", |request| {
+            request.proof.core.old_policy_id = [9; 32]
+        }),
+        ("authorization resulting policy", |request| {
+            request.proof.authorization.tbs.resulting_policy_id = [9; 32];
+        }),
+        ("authorization prior epoch", |request| {
+            request.proof.authorization.tbs.prior_epoch += 1;
+        }),
+        ("authorization ratchet digest", |request| {
+            request
+                .proof
+                .authorization
+                .tbs
+                .resulting_ratchet_tree_digest = [9; 32];
+        }),
+        ("core authenticator", |request| {
+            request.proof.core.finalization_authenticator = [9; 32];
+        }),
+        ("authorization validation time", |request| {
+            request.proof.authorization.tbs.canonical_validation_time += 1;
+        }),
+    ];
+    for (name, edit) in edits {
+        let mut fixture = Fixture::ready(true)?;
+        retain_edited_terminal(&mut fixture, edit)?;
+        assert!(fixture.evaluate()?.is_err(), "{name}");
+    }
+    let mut fixture = Fixture::ready(true)?;
+    retain_edited_terminal(&mut fixture, |_| {})?;
+    assert!(matches!(
+        ok(fixture.evaluate()?)?.result,
+        ResultBody::Closed { .. }
+    ));
+    Ok(())
+}

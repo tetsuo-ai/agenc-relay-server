@@ -97,8 +97,9 @@ fn metadata(conformance: Option<Option<&ReleaseCoverage>>) -> String {
     // All interpolated strings are Cargo constants, closed protocol constants,
     // ASCII values validated by build.rs, or decision fields the config crate
     // restricted to fixed hexadecimal, timestamp, and target alphabets.
+    let name = super::command_name();
     let mut output = format!(
-        "{{\"schema_version\":1,\"name\":\"agenc-ircd\",\"version\":\"{VERSION}\",\"source_commit\":\"{COMMIT}\",\"source_sha256\":\"{SOURCE}\",\"cargo_lock_sha256\":\"{LOCK}\",\"target\":\"{TARGET}\",\"compiler\":\"{COMPILER}\",\"features\":{{\"history\":{},\"wss\":{}}},\"storage_schema_generation\":{}",
+        "{{\"schema_version\":1,\"name\":\"{name}\",\"version\":\"{VERSION}\",\"source_commit\":\"{COMMIT}\",\"source_sha256\":\"{SOURCE}\",\"cargo_lock_sha256\":\"{LOCK}\",\"target\":\"{TARGET}\",\"compiler\":\"{COMPILER}\",\"features\":{{\"history\":{},\"wss\":{}}},\"storage_schema_generation\":{}",
         cfg!(feature = "history"),
         cfg!(feature = "wss"),
         agenc_ircd_storage::SCHEMA_GENERATION,

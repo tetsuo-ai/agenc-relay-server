@@ -54,6 +54,26 @@ fn identity_cases() -> Vec<Case> {
             SchemaKey::new("e2ee", "coordinator_server_id"),
         ),
         case(
+            "successor sequencer key on a node that is not the e2ee coordinator",
+            append_to_table(
+                &edge(),
+                "e2ee",
+                "sequencer_successor_private_key_file = \"/etc/agenc/keys/sequencer-next.key\"",
+            ),
+            stage,
+            SchemaKey::new("e2ee", "sequencer_successor_private_key_file"),
+        ),
+        case(
+            "retired sequencer key on a node that is not the e2ee coordinator",
+            append_to_table(
+                &edge(),
+                "e2ee",
+                "sequencer_retired_private_key_file = \"/etc/agenc/keys/sequencer-old.key\"",
+            ),
+            stage,
+            SchemaKey::new("e2ee", "sequencer_retired_private_key_file"),
+        ),
+        case(
             "federated server name over 127 bytes",
             mutate(
                 DUAL,
@@ -339,6 +359,16 @@ fn topology_cases() -> Vec<Case> {
             ),
             stage,
             SchemaKey::indexed("federation.peer", 0, "signing_public_key"),
+        ),
+        case(
+            "two peers sharing an endpoint",
+            mutate(
+                &edge(),
+                "[[federation.peer]]\n",
+                "[[federation.peer]]\nserver_id = \"BAQEBAQEBAQEBAQEBAQEBA\"\nserver_name = \"other.example\"\nrole = \"coordinator\"\nrecovery_epoch = \"CQkJCQkJCQkJCQkJCQkJCQ\"\nendpoints = [\"tcp:203.0.113.5:7000\"]\ncertificate_spki_sha256 = \"BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY\"\nsigning_public_key = \"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU\"\nenabled = true\n\n[[federation.peer]]\n",
+            ),
+            stage,
+            SchemaKey::indexed("federation.peer", 1, "endpoints"),
         ),
         case(
             "onion dial endpoint without a Tor SOCKS endpoint",

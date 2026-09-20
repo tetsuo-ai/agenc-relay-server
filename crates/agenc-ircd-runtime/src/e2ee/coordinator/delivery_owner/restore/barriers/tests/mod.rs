@@ -1,6 +1,8 @@
 //! Complete retained inventory and an incomplete cache have different admission rules.
 #![forbid(unsafe_code)]
 
+mod events;
+
 use super::*;
 use crate::test_support::TestResult;
 use agenc_ircd_storage::e2ee_records::delivery_recovery::outbox::replay::{

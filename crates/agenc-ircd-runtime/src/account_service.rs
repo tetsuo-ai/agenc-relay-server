@@ -7033,6 +7033,7 @@ mod tests {
     mod invitation_window;
     mod logout;
     mod open_refusals;
+    mod reach;
     mod replay;
     mod sasl_unavailable;
     mod shutdown;

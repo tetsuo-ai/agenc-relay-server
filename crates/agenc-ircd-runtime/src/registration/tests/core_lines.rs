@@ -223,3 +223,127 @@ async fn a_pending_channel_key_job_expires_at_its_deadline() -> TestResult {
     assert!(!saw(&sink, "+k"), "lines: {:?}", sink.lines());
     Ok(())
 }
+
+#[tokio::test]
+async fn commands_deferred_behind_a_join_stop_at_the_deferral_ceiling() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = core.open(1)?;
+    core.line(1, "NICK stacker")?;
+    core.line(1, "USER stacker 0 * :Stacker")?;
+    core.settle().await?;
+    core.line(1, "JOIN #stack")?;
+    for _ in 0..33 {
+        core.line(1, "TOPIC #stack")?;
+    }
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(!open, "the command over the ceiling closes the connection");
+    core.settle().await?;
+    let lines = sink.lines();
+    let topics = lines.iter().filter(|line| line.contains(" 331 ")).count();
+    assert!(topics <= 1, "deferred commands never answer: {lines:?}");
+    Ok(())
+}
+
+/// Registers one guest and joins it to a fresh channel while its sink reports a
+/// queue above half, so the NAMES continuation waits for the queue instead of
+/// delivering its page.
+async fn congested_join(core: &mut Core) -> TestResult<Arc<FrameSink>> {
+    let sink = core.open(1)?;
+    core.line(1, "NICK waiter")?;
+    core.line(1, "USER waiter 0 * :Waiter")?;
+    core.settle().await?;
+    sink.set_congested(true);
+    core.line(1, "JOIN #slow")?;
+    core.settle().await?;
+    assert!(saw(&sink, "JOIN"), "lines: {:?}", sink.lines());
+    assert!(
+        !saw(&sink, " 366 "),
+        "the names page waits: {:?}",
+        sink.lines()
+    );
+    Ok(sink)
+}
+
+#[tokio::test]
+async fn a_names_continuation_waiting_on_a_full_queue_expires_at_its_idle_deadline() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = congested_join(&mut core).await?;
+    let now = core.fixture.context_mut()?.now().get();
+    core.fixture.context_mut()?.set_monotonic_for_test(now + 50);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    assert!(!saw(&sink, " 366 "), "still waiting: {:?}", sink.lines());
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(open, "a waiting continuation keeps its connection");
+    core.fixture
+        .context_mut()?
+        .set_monotonic_for_test(now + 60_000);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(!open, "the idle deadline closes the connection");
+    assert!(!saw(&sink, " 366 "), "lines: {:?}", sink.lines());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_names_continuation_delivers_once_the_queue_drains() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = congested_join(&mut core).await?;
+    sink.set_congested(false);
+    let now = core.fixture.context_mut()?.now().get();
+    core.fixture.context_mut()?.set_monotonic_for_test(now + 50);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    assert!(
+        saw(&sink, " 366 waiter #slow "),
+        "lines: {:?}",
+        sink.lines()
+    );
+    let open = core
+        .fixture
+        .context_mut()?
+        .sessions()
+        .sink_for_generation(ConnectionGeneration::new(1))
+        .is_some();
+    assert!(open, "a delivered continuation keeps its connection");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_published_motd_is_rendered_line_by_line_after_the_welcome() -> TestResult {
+    let mut core = Core::new()?;
+    core.fixture
+        .context_mut()?
+        .set_motd_for_test(Some("first line\nsecond line"));
+    let sink = core.open(1)?;
+    core.line(1, "NICK reader")?;
+    core.line(1, "USER reader 0 * :Reader")?;
+    core.settle().await?;
+    let lines = sink.lines();
+    let welcome = lines.iter().position(|line| line.contains(" 001 reader "));
+    let start = lines.iter().position(|line| line.contains(" 375 reader "));
+    let first = lines
+        .iter()
+        .position(|line| line.contains(" 372 reader :first line"));
+    let second = lines
+        .iter()
+        .position(|line| line.contains(" 372 reader :second line"));
+    let end = lines.iter().position(|line| line.contains(" 376 reader "));
+    assert!(welcome < start && start < first, "lines: {lines:?}");
+    assert!(first < second && second < end, "lines: {lines:?}");
+    assert!(!saw(&sink, " 422 "), "lines: {lines:?}");
+    Ok(())
+}

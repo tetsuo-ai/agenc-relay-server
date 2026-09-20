@@ -286,3 +286,7 @@ impl E2eeEdge {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "tests/witness_failure_owner.rs"]
+mod owner_tests;

@@ -44,6 +44,7 @@ pub(super) mod recovery_pending;
 #[path = "ack_context.rs"]
 mod ack_context;
 
+mod core_bindings;
 mod leaf_membership;
 mod object_expiry;
 mod owners;
@@ -738,6 +739,7 @@ mod reinit {
     mod ack_context;
     mod admission;
     mod attempt_authority;
+    mod core_mismatch;
     mod leaf_membership;
     pub(in crate::e2ee::coordinator::tests::sequence) mod successor;
 

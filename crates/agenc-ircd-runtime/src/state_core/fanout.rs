@@ -764,4 +764,40 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn fanout_shapes_refuse_empty_duplicate_out_of_range_and_unbounded_batches()
+    -> Result<(), FanoutRefused> {
+        let first = RecordingSink::new(1, ReserveMode::Admit);
+        let second = RecordingSink::new(2, ReserveMode::Admit);
+        assert!(matches!(
+            FanoutFrame::new(message("none")?, Vec::new()),
+            Err(RuntimeError::InvalidValue)
+        ));
+        assert!(matches!(
+            FanoutFrame::new(message("twice")?, vec![0, 0]),
+            Err(RuntimeError::InvalidValue)
+        ));
+        assert!(matches!(
+            FanoutRequest::new(
+                vec![first.target()],
+                vec![FanoutFrame::new(message("beyond")?, vec![1])?],
+            ),
+            Err(RuntimeError::InvalidValue)
+        ));
+        let budget = MemoryBudget::new(4_096);
+        let single = FanoutRequest::new(
+            vec![first.target(), second.target()],
+            vec![FanoutFrame::new(message("single")?, vec![0, 1])?],
+        )?;
+        assert!(matches!(
+            reserve_bounded(&single, &budget, 0),
+            Err(FanoutRefused::Invalid(RuntimeError::InvalidValue))
+        ));
+        assert!(matches!(
+            reserve_bounded(&single, &budget, MAX_DEMAND_BYTES + 1),
+            Err(FanoutRefused::Invalid(RuntimeError::InvalidValue))
+        ));
+        Ok(())
+    }
 }

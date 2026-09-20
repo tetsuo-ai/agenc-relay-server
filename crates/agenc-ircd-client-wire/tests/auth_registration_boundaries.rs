@@ -524,3 +524,50 @@ fn auth_generation(
     }
     Ok(*generation)
 }
+
+#[test]
+fn a_commit_outcome_for_another_generation_is_ignored() -> Result<(), Box<dyn Error>> {
+    let profile = registration_capabilities()?;
+    let mut state = RegistrationState::new(0, AccessTokenPolicy::IgnoreCompatibilityPass)?;
+    state.message(parsed("CAP LS 302")?, 1, &profile)?;
+    let reservation =
+        reservation_generation(&state.message(parsed("NICK Alice")?, 3, &profile)?)?;
+    state.message(parsed("USER user 0 * :Real Name")?, 4, &profile)?;
+    assert!(
+        state
+            .event(
+                RegistrationEvent::NicknameReserved {
+                    generation: reservation,
+                    accepted: true,
+                },
+                4,
+            )?
+            .is_empty()
+    );
+    let commit = commit_generation(&state.message(parsed("CAP END")?, 5, &profile)?)?;
+    // Another generation's outcome changes nothing: the commit stays pending.
+    assert!(
+        state
+            .event(
+                RegistrationEvent::RegistrationCommitted {
+                    generation: commit + 1,
+                    accepted: false,
+                    authenticated: false,
+                },
+                5,
+            )?
+            .is_empty()
+    );
+    let phase = state.phase();
+    let welcome = state.event(
+        RegistrationEvent::RegistrationCommitted {
+            generation: commit,
+            accepted: true,
+            authenticated: false,
+        },
+        6,
+    )?;
+    assert!(!welcome.is_empty());
+    assert_ne!(state.phase(), phase);
+    Ok(())
+}

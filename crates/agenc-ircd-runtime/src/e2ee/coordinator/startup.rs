@@ -31,6 +31,10 @@ mod directory_tests;
 #[path = "tests/startup_routes.rs"]
 mod route_tests;
 
+#[cfg(test)]
+#[path = "tests/startup_heads.rs"]
+mod head_tests;
+
 use agenc_ircd_crypto::SemanticHashDomain;
 use agenc_ircd_domain::e2ee::directory::{
     AccountEntry, Attachment, CapabilityHead, Challenge, ClaimOutcome, ClaimParameters, Package,

@@ -1642,6 +1642,49 @@ mod tests {
     }
 
     #[test]
+    fn audit_retention_refuses_a_checkpoint_deleting_more_than_one_batch_holds()
+    -> Result<(), RuntimeError> {
+        let event = audit_event()?;
+        let audit_key = Ed25519SecretKey::from_bytes([22; 32]);
+        let key_id = *audit_signing_key_id(audit_key.public_key().as_bytes())
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .as_bytes();
+        let too_many = u64::try_from(MAX_AUDIT_RETENTION_EVENTS)
+            .map_err(|_| RuntimeError::Overflow)?
+            .saturating_add(1);
+        let checkpoint = AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                network_id: NetworkId::from_bytes([1; 32]),
+                server_id: ServerId::from_bytes([2; 16]),
+                audit_signing_key_id: key_id,
+                checkpoint_sequence: 0,
+                created_at: 100,
+                deleted_first_sequence: 0,
+                deleted_last_sequence: too_many.saturating_sub(1),
+                deleted_count: too_many,
+                deleted_last_event_hash: event.event_hash(),
+                next_retained_sequence: too_many,
+                previous_checkpoint_hash: [0; 32],
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let index = DurableIndex::new();
+        assert!(matches!(
+            project_admin_audit_retention(
+                TransactionId::from_bytes([32; 16]),
+                &checkpoint,
+                &index,
+                &keys()?,
+                head(100_000, 100_000),
+                ceilings(),
+            ),
+            Err(RuntimeError::LimitExceeded)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn audit_retention_deletes_prefix_and_puts_checkpoint_in_one_batch() -> Result<(), RuntimeError>
     {
         let event = audit_event()?;

@@ -66,3 +66,16 @@ async fn carrier_without_an_account_service_fails_unavailable_and_registration_c
     );
     Ok(())
 }
+
+#[test]
+fn a_connection_timer_that_cannot_be_placed_on_the_clock_closes_the_transport() -> TestResult {
+    let mut harness = Harness::new(Role::Hosted)?;
+    let _sink = harness.open(1, true)?;
+    let generation = ConnectionGeneration::new(1);
+    let context = harness.fixture.context_mut()?;
+    context.set_monotonic_for_test(u64::MAX);
+    assert!(context.sessions().sink_for_generation(generation).is_some());
+    schedule_connection_timer(context, generation, TimerKind::Ping, KEEPALIVE_IDLE_MILLIS);
+    assert!(context.sessions().sink_for_generation(generation).is_none());
+    Ok(())
+}

@@ -39,3 +39,20 @@ fn a_witness_request_from_an_active_edge_is_answered_not_refused() -> TestResult
     ));
     Ok(())
 }
+
+#[test]
+fn a_witness_resolved_without_an_open_resolution_is_a_violation() -> TestResult {
+    let mut sync = Sync::new()?;
+    let page = frames(&sync.resume(0, None).map_err(|fault| format!("{fault:?}"))?)?;
+    let (cut, _, _) = begin_cut(&page)?;
+    sync.ready(cut)?;
+    let result = sync.frame(CompanionFrame::WitnessResolved {
+        coordinator_server_id: super::super::COORDINATOR,
+        conversation_id: [9; 32],
+        resolution_token: [3; 16],
+        new_head_sequence: 1,
+        new_head_id: [8; 32],
+    });
+    assert_eq!(result.err(), Some(CompanionFault::Protocol));
+    Ok(())
+}

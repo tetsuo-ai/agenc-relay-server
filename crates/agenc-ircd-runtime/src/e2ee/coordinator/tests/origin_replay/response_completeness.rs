@@ -319,3 +319,130 @@ async fn a_retained_response_on_disk_remains_replayable_after_its_memory_copy_is
     );
     Ok(())
 }
+
+/// The read job of the retained page's reply, with the sealed object rows it must be fed.
+fn read_job(
+    coordinator: &CompanionCoordinator,
+    decoded: &Decoded,
+    responses: &[Vec<u8>],
+) -> TestResult<(
+    crate::e2ee::coordinator::response_read::Job,
+    Vec<(agenc_ircd_storage::StoredKey, PersistentRecordValue)>,
+)> {
+    let identity = crate::e2ee::coordinator::response_read::Identity {
+        peer: ServerId::from_bytes(HOME),
+        correlation: recent_correlation(decoded),
+        request_object_id: decoded.request_object_id,
+    };
+    let candidate = crate::e2ee::coordinator::response_read::Candidate::capture(
+        coordinator,
+        identity,
+        &backing(),
+    )
+    .map_err(|fault| format!("capture: {fault:?}"))?;
+    let job = candidate
+        .begin(7, &backing())
+        .map_err(|fault| format!("begin: {fault:?}"))?;
+    let mut rows = Vec::new();
+    for bytes in responses {
+        let crate::state_core::durable::AccountServiceDurableWrite::Put { key, plaintext, .. } =
+            CompanionCoordinator::object_write(bytes).map_err(|code| format!("{code:?}"))?
+        else {
+            return Err("object write".into());
+        };
+        rows.push((
+            key,
+            PersistentRecordValue::decode(agenc_ircd_storage::TableId::E2eeObject, &plaintext)?,
+        ));
+    }
+    Ok((job, rows))
+}
+
+type Row = (agenc_ircd_storage::StoredKey, PersistentRecordValue);
+
+/// Selects the page one fault feeds the job: its commit, truncation and rows.
+type Fault = fn(Vec<Row>) -> (u64, bool, Vec<Row>);
+
+#[test]
+fn a_reply_read_job_binds_every_body_before_it_renders() -> TestResult {
+    let (coordinator, decoded, responses) = retained_page()?;
+    let (mut job, rows) = read_job(&coordinator, &decoded, &responses)?;
+    assert_eq!(
+        job.admit(7, false, rows).err(),
+        Some(CompanionFault::Storage),
+        "a page nobody asked for"
+    );
+    assert_eq!(
+        job.next().err(),
+        Some(CompanionFault::Storage),
+        "a failed job reads nothing"
+    );
+    let (job, _) = read_job(&coordinator, &decoded, &responses)?;
+    assert_eq!(
+        job.finish(&coordinator).err(),
+        Some(CompanionFault::Storage),
+        "no body was bound"
+    );
+    let faults: [(&str, Fault); 5] = [
+        ("another commit", |rows| {
+            (8, false, rows.into_iter().take(1).collect())
+        }),
+        ("a truncated page", |rows| {
+            (7, true, rows.into_iter().take(1).collect())
+        }),
+        ("no row", |_| (7, false, Vec::new())),
+        ("two rows", |rows| {
+            (7, false, rows.into_iter().take(2).collect())
+        }),
+        ("another object", |rows| {
+            (7, false, rows.into_iter().skip(1).take(1).collect())
+        }),
+    ];
+    for (name, fault) in faults {
+        let (mut job, rows) = read_job(&coordinator, &decoded, &responses)?;
+        assert!(job.next()?.is_some(), "{name}");
+        let (commit, truncated, records) = fault(rows);
+        assert_eq!(
+            job.admit(commit, truncated, records).err(),
+            Some(CompanionFault::Storage),
+            "{name}"
+        );
+        assert_eq!(job.next().err(), Some(CompanionFault::Storage), "{name}");
+    }
+    let (mut job, rows) = read_job(&coordinator, &decoded, &responses)?;
+    assert!(job.next()?.is_some());
+    let (key, _) = rows.into_iter().next().ok_or("first row")?;
+    let foreign = PersistentRecordValue::new(
+        agenc_ircd_storage::TableId::E2eeObject,
+        2,
+        1,
+        0,
+        None,
+        Vec::new(),
+        agenc_ircd_storage::ProtocolRecordBody::new(
+            agenc_ircd_storage::TableId::E2eeObject,
+            2,
+            1,
+            vec![1, 2, 3],
+        )?
+        .encode()?,
+    );
+    if let Ok(foreign) = foreign {
+        assert_eq!(
+            job.admit(7, false, vec![(key, foreign)]).err(),
+            Some(CompanionFault::Storage),
+            "another record kind"
+        );
+    }
+    let (mut job, rows) = read_job(&coordinator, &decoded, &responses)?;
+    for row in rows {
+        assert!(job.next()?.is_some());
+        job.admit(7, false, vec![row])
+            .map_err(|fault| format!("honest body: {fault:?}"))?;
+    }
+    assert!(job.next()?.is_none());
+    let _output = job
+        .finish(&coordinator)
+        .map_err(|fault| format!("finish: {fault:?}"))?;
+    Ok(())
+}

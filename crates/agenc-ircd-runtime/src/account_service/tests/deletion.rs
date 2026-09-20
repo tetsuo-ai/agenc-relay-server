@@ -426,3 +426,19 @@ fn a_rejected_registration_queues_the_grant_row_it_could_not_consume() -> TestRe
     assert_eq!(context.pending_len(), 1);
     Ok(())
 }
+
+#[test]
+fn only_one_account_deletion_is_pending_at_a_time() -> TestResult {
+    let mut live = Live::open()?;
+    with_login(&mut live, account(3))?;
+    with_login(&mut live, account(4))?;
+    let (coordinator, context) = live.fixture.parts()?;
+    let writes = coordinator.begin_account_deletion(context, DELETER, account(3))?;
+    assert!(!writes.is_empty());
+    assert_eq!(coordinator.pending_account_deletions.len(), 1);
+    let refused = coordinator.begin_account_deletion(context, DELETER, account(4));
+    assert_eq!(refused.err(), Some(RuntimeError::LimitExceeded));
+    assert_eq!(coordinator.pending_account_deletions.len(), 1);
+    assert_eq!(coordinator.config.login_deletion_tombstones.len(), 1);
+    Ok(())
+}

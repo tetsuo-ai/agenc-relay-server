@@ -26,6 +26,26 @@ pub(crate) struct Request {
     cursor: [u8; 32],
 }
 
+#[cfg(test)]
+impl Request {
+    /// A page read over `owner`, for the federation read-path tests.
+    pub(crate) const fn for_test(
+        peer: ServerId,
+        link: LinkId,
+        owner: DeliveryOwner,
+        page: usize,
+        cursor: [u8; 32],
+    ) -> Self {
+        Self {
+            peer,
+            link,
+            owner,
+            page,
+            cursor,
+        }
+    }
+}
+
 /// Lines remain charged until the adapter transfers each one to the link queue.
 pub(crate) struct Output {
     lines: Vec<FederationLineText>,

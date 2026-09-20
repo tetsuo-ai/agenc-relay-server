@@ -4,6 +4,8 @@
 
 mod declared_recovery;
 pub(in crate::e2ee::coordinator::tests::sequence) mod reconstruction;
+mod row_mismatch;
+mod target_mismatch;
 
 use super::*;
 use agenc_ircd_domain::e2ee::ConversationId;
@@ -43,7 +45,17 @@ impl Fixture {
         Self::prepare_bound(harness, old)
     }
 
-    fn prepare_bound(mut harness: Harness, old: [u8; 32]) -> TestResult<Self> {
+    fn prepare_bound(harness: Harness, old: [u8; 32]) -> TestResult<Self> {
+        Self::prepare_bound_with(harness, old, |_, _| Ok(()))
+    }
+
+    /// [`Self::prepare_bound`] with `edit` applied to the successor package before the
+    /// attempt is built, so the activated attempt targets the edited binding exactly.
+    fn prepare_bound_with(
+        mut harness: Harness,
+        old: [u8; 32],
+        edit: fn(&mut IrcConversationBindingPackage, [u8; 32]) -> TestResult,
+    ) -> TestResult<Self> {
         let reservation = reserve(&mut harness)?;
         let old_state = *harness
             .coordinator
@@ -64,6 +76,8 @@ impl Fixture {
         package.binding.tbs.conversation_id = new;
         package.binding.approvals = TlsVec::new(Vec::new())?;
         package.root_binding_locks = TlsVec::new(Vec::new())?;
+        edit(&mut package, old)?;
+        let new = package.binding.tbs.conversation_id;
         let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &package.binding.tbs)?;
         let (mut attempt, _) = attempt(&harness, old, old_state, 0)?;
         attempt.tbs.new_conversation_id = new;
@@ -359,5 +373,65 @@ fn successor_reload_rejects_missing_activation_evidence() -> TestResult {
     // Both bound routes now declare their recovery epoch; missing activation
     // evidence refuses the whole reconstruction before either gate is installed.
     assert!(fixture.harness.reloaded().is_err());
+    Ok(())
+}
+
+/// One edit of the successor package before the attempt targets it.
+type PackageEdit = (
+    &'static str,
+    fn(&mut IrcConversationBindingPackage, [u8; 32]) -> TestResult,
+);
+
+#[test]
+fn successor_bind_rejects_a_targeted_package_that_does_not_continue_the_lineage() -> TestResult {
+    let edits: [PackageEdit; 6] = [
+        ("a skipped generation", |package, _| {
+            package.binding.tbs.binding_generation = 2;
+            Ok(())
+        }),
+        ("another predecessor", |package, _| {
+            package.binding.tbs.previous_binding_id = [93; 32];
+            Ok(())
+        }),
+        ("another route binding", |package, _| {
+            package.binding.tbs.route_binding = [95; 32];
+            Ok(())
+        }),
+        ("another channel instance", |package, _| {
+            package.binding.tbs.channel_instance_id = Opaque::from_slice(&[96; 16])?;
+            Ok(())
+        }),
+        ("another conversation nonce", |package, _| {
+            package.binding.tbs.conversation_nonce = Opaque::from_slice(&[97; 32])?;
+            Ok(())
+        }),
+        ("the old conversation itself", |package, old| {
+            package.binding.tbs.conversation_id = old;
+            Ok(())
+        }),
+    ];
+    let mut reached = 0;
+    for (name, edit) in edits {
+        let mut harness = Harness::new()?;
+        let old = harness.bind_channel()?;
+        let Ok(mut fixture) = Fixture::prepare_bound_with(harness, old, edit) else {
+            // The attempt itself refused the target; the bind is never reached.
+            continue;
+        };
+        if fixture.activate().is_err() {
+            continue;
+        }
+        reached += 1;
+        let package = fixture.package.clone();
+        assert_eq!(
+            code(fixture.bind(&package, CONTEXT)?),
+            Some(E2eeReplyCode::BindingAuthInvalid),
+            "{name}"
+        );
+    }
+    assert!(
+        reached >= 5,
+        "every lineage field but the old conversation reaches the bind"
+    );
     Ok(())
 }

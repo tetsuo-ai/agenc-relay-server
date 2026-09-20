@@ -496,3 +496,67 @@ mod gating;
 
 #[path = "witness_resolution.rs"]
 mod resolution;
+
+#[tokio::test]
+async fn a_resume_acknowledgement_outside_the_retained_cursor_is_refused() -> TestResult {
+    use crate::budget::{BackingReservationPort, MemoryBudget};
+    use crate::sync::Arc;
+    for (generation, next_sequence) in [(3, 7), (2, 8)] {
+        let mut fixture = WitnessFixture::new().await?;
+        fixture.companion = edge();
+        fixture
+            .companion
+            .install_snapshot_backing(BackingReservationPort::new(Arc::new(MemoryBudget::new(
+                1 << 20,
+            ))));
+        assert!(
+            fixture
+                .companion
+                .link_active(fixture.core.context_mut()?, &mut fixture.base)
+        );
+        assert_eq!(fixture.companion.phase, Phase::Resuming);
+        let before = fixture.companion.counters.violations;
+        assert!(
+            fixture
+                .companion
+                .handle_frames(
+                    fixture.core.context_mut()?,
+                    &mut fixture.base,
+                    vec![CompanionFrame::ResumeOk {
+                        target_server_id: [2; 16],
+                        server_incarnation: [4; 16],
+                        delivery_generation: generation,
+                        next_delivery_sequence: next_sequence,
+                    }],
+                )
+                .is_empty()
+        );
+        assert_ne!(fixture.companion.phase, Phase::Active);
+        assert_ne!(fixture.companion.phase, Phase::Origins);
+        assert_eq!(fixture.companion.counters.violations, before + 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_origin_ready_outside_the_origin_replay_is_a_violation() -> TestResult {
+    let mut fixture = WitnessFixture::new().await?;
+    assert_eq!(fixture.companion.phase, Phase::Active);
+    let before = fixture.companion.counters.violations;
+    assert!(
+        fixture
+            .companion
+            .handle_frames(
+                fixture.core.context_mut()?,
+                &mut fixture.base,
+                vec![CompanionFrame::OriginReady {
+                    home_server_id: [2; 16],
+                    server_incarnation: [4; 16],
+                }],
+            )
+            .is_empty()
+    );
+    assert_eq!(fixture.companion.counters.violations, before + 1);
+    assert_ne!(fixture.companion.phase, Phase::Active);
+    Ok(())
+}

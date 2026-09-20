@@ -57,7 +57,7 @@ move at READY.
 
 ## Base entitlement (ENC-15)
 
-The internal review of the encrypted profile found that the receiver staged
+The encrypted-profile defect sweep found that the receiver staged
 whatever route a cut named (issue #160), although companion 12.5 has the edge
 verify base channel and account entitlement before READY. `retain_entry` now
 asks `cut_route_entitled` (`crates/agenc-ircd-runtime/src/e2ee/edge/entitlement.rs`)
@@ -88,7 +88,7 @@ full cut and re-derives them from what the edge hosts, so an honest cut never
 restates a pair the edge cannot verify. A cut the edge hosted at the time but
 no longer does, republished after a link loss, is refused until its 15-minute
 token retires it and the next cut is taken. The remediation record is
-[the edge review remediation](stage-10-review-remediation-edge.md).
+[the edge remediation record](stage-10-edge-remediation.md).
 
 ## Activation and migration
 

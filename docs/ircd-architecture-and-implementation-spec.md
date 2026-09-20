@@ -7567,12 +7567,6 @@ as specified: suite selection, identities, contexts, domains, nonce/counter
 rules, replay handling, downgrade refusal, key lifecycle, persistent state,
 and published vectors. No novel security proof is a release requirement.
 
-There is no fixed reviewer count, signed-report format, degree or credential
-requirement. Core and base-federation qualification impose no external-review
-gate. An encrypted-v1 release also requires the external cryptographic and
-protocol review, remediation, and re-review in companion Section 21 gate 13.
-That requirement does not prevent implementation or testing of any profile.
-
 No unresolved critical or high finding is permitted. A medium finding needs a
 documented threat analysis, compensating control, owner, and expiry approved by
 the release owner; authentication, downgrade, authorization, durability,

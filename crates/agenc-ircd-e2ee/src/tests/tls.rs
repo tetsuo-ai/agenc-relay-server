@@ -101,6 +101,16 @@ fn bounds_are_enforced_on_both_sides() -> TestResult {
         Opaque::<1, 255>::new(vec![0; 256]),
         Err(E2eeError::LengthOutOfRange)
     );
+    assert_eq!(
+        TlsVec::<u16, 0, 4>::new(vec![1, 2, 3]).err(),
+        Some(E2eeError::LengthOutOfRange),
+        "three items encode past a four-byte vector bound"
+    );
+    assert_eq!(
+        TlsVec::<u16, 4, 8>::new(vec![1]).err(),
+        Some(E2eeError::LengthOutOfRange),
+        "one item stays under a four-byte minimum"
+    );
     // A zero-length prefix under a minimum of one is refused on decode.
     let mut budget = DecodeBudget::new(1 << 16, 64);
     assert_eq!(

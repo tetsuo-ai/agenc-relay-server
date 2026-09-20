@@ -134,10 +134,9 @@ contains 38 passed records for exact source commit
 Stage 08 adds the encrypted profile, object and wire vectors, durable E2EE
 records, bounded route model, transcripts, two-library MLS interoperability,
 load checks, and E2EE fuzz targets. The
-[Stage 08 manifest](evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
-contains 160 passed records for exact source commit
-`ae6457fb62fef8961d3caf904febed580e8b4a91`; its recorded gate ran 97 commands.
-The [review package](review/README.md) records the completed internal review.
+[Stage 08 manifest](evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json)
+contains 159 passed records for exact source commit
+`26f0f8029dcad4aad27bff2706c4f0d255a555ba`; its recorded gate ran 98 commands.
 No checkpoint claims that Stage 10 production qualification has passed.
 
 Stage 09 adds WSS, plaintext channel history, retained-row maintenance in

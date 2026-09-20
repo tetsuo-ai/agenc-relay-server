@@ -196,3 +196,39 @@ async fn mismatched_response_kind_and_size_refuse_after_loading_the_expected_obj
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn a_response_read_is_refused_for_another_peer_or_behind_a_pending_batch() -> TestResult {
+    let mut fixture = Box::pin(Fixture::new(None)).await?;
+    let foreign = identity(&fixture);
+    let context = fixture.core.context_mut()?;
+    assert!(matches!(
+        crate::federation::coordinator::response_read::submit(
+            &mut fixture.coordinator,
+            context,
+            LinkId::new(1),
+            ServerId::from_bytes([7; 16]),
+            foreign,
+        ),
+        Err(Violation::Ceiling)
+    ));
+    assert!(fixture.coordinator.companion_response_read.is_none());
+    let queued = identity(&fixture);
+    fixture.coordinator.pending = Some(PendingCommit::Acknowledged);
+    let context = fixture.core.context_mut()?;
+    assert!(matches!(
+        crate::federation::coordinator::response_read::submit(
+            &mut fixture.coordinator,
+            context,
+            LinkId::new(1),
+            PEER,
+            queued,
+        ),
+        Err(Violation::Ceiling)
+    ));
+    assert!(fixture.coordinator.companion_response_read.is_none());
+    fixture.coordinator.pending = None;
+    fixture.submit()?;
+    assert!(fixture.coordinator.companion_response_read.is_some());
+    Ok(())
+}

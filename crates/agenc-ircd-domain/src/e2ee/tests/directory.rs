@@ -146,6 +146,11 @@ fn attachment_is_a_compare_and_swap_on_the_session_generation() -> Result<(), Di
         directory.attach_begin(ACCOUNT, [12; 16], [1; 16], 100),
         Err(DirectoryError::DeviceInactive)
     );
+    assert_eq!(
+        directory.attach_finish(ACCOUNT, [12; 16], [1; 16], 1, 100),
+        Err(DirectoryError::DeviceInactive),
+        "a finish for a device the roster does not list"
+    );
     let first = directory.attach_begin(ACCOUNT, DEVICE_A, [1; 16], 100)?;
     assert_eq!(first.reserved_generation, 1);
     assert_eq!(first.expires_at, 160);

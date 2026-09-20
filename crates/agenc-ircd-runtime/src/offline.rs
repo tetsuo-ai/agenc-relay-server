@@ -2592,6 +2592,60 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_file_path_must_be_a_private_regular_file() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let directory = root.0.join("plain-directory");
+        create_private_directory(&directory)?;
+        assert_eq!(
+            validate_existing_file_path(&directory),
+            Err(OfflineError::Filesystem),
+            "a directory is not a descriptor file"
+        );
+        let file = root.0.join("descriptor");
+        write_secret(&file, b"descriptor")?;
+        validate_existing_file_path(&file)?;
+        let link = root.0.join("descriptor-link");
+        std::os::unix::fs::symlink(&file, &link).map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            validate_existing_file_path(&link),
+            Err(OfflineError::Filesystem),
+            "a symbolic link never stands in for its target"
+        );
+        let shared = root.0.join("shared");
+        write_secret(&shared, b"shared")?;
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o666))
+            .map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            validate_existing_file_path(&shared),
+            Err(OfflineError::Filesystem),
+            "a group or world writable descriptor is refused"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_precreated_target_that_is_a_file_or_a_link_is_refused() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let owner = owner_of(&root.0)?;
+        let file = root.0.join("precreated-file");
+        write_secret(&file, b"file")?;
+        assert_eq!(
+            inspect_precreated_directory(&file, owner),
+            Err(OfflineError::ExistingTarget)
+        );
+        let target = root.0.join("precreated-directory");
+        create_private_directory(&target)?;
+        let link = root.0.join("precreated-link");
+        std::os::unix::fs::symlink(&target, &link).map_err(|_| OfflineError::Filesystem)?;
+        assert_eq!(
+            inspect_precreated_directory(&link, owner),
+            Err(OfflineError::ExistingTarget)
+        );
+        assert!(inspect_precreated_directory(&target, owner)?.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn precreated_target_checks_reject_foreign_owner_replacement_and_entries()
     -> Result<(), OfflineError> {
         let root = TestDirectory::create()?;
