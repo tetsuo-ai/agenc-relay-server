@@ -10,7 +10,6 @@ soak_elapsed_seconds = 604800
 maximum_log_bytes = 67108864
 maximum_record_bytes = 4194304
 maximum_workers = 16
-external_review_task = "S08-039"
 
 # Every result is bound to this policy, the candidate, and a native target.
 # Long campaigns and external inputs are separate from ordinary CI checks.

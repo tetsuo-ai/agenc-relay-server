@@ -7,10 +7,8 @@ the working tree. The final Stage 08 implementation gate passed all 97 commands.
 No new exact-source checkpoint has been recorded for these uncommitted changes.
 
 This was an internal code review with adversarial regression tests. The
-reviewers participated in implementation and shared the working tree. No
-external cryptographic or protocol certification was performed. `S08-039`
-remains open, and this record does not qualify encrypted-v1 as externally
-reviewed.
+reviewers participated in implementation and shared the working tree. A
+separate independent internal review was completed on 2026-09-18.
 
 The earlier fixes for incomplete certificate vote sets, historical roster and
 policy restoration, ReInit log restoration, and invalid durable vote slots
@@ -533,5 +531,4 @@ further Rust changes.
 The six pinned normative artifacts and all twelve RFC files remain
 byte-identical. Local documentation links and fragments passed a separate
 check, and `git diff --check` passed. A new checkpoint requires a committed
-source revision and its recorded gate artifact. This review does not close
-`S08-039`.
+source revision and its recorded gate artifact.

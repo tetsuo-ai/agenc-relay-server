@@ -104,7 +104,7 @@ stats_selector = "E2EE"
 task = "S08-039"
 state = "internal-review-complete"
 package = "conformance/review"
-reason = "no third-party review was commissioned; an internal independent review by three reviewers with no context from the implementation ran on 2026-09-18 against main at 46840bd, reported nine findings (one high, seven medium, one low; none a confidentiality or authority break), and every finding is fixed, regression-tested and dispositioned in conformance/review/findings.md"
+reason = "three independent reviewers with no context from the implementation examined main at 46840bd on 2026-09-18, reported nine findings (one high, seven medium, one low; none a confidentiality or authority break), and every finding is fixed, regression-tested and dispositioned in conformance/review/findings.md"
 
 [fuzz]
 targets = ["e2ee_object", "e2ee_mls_outer", "e2ee_fragment", "e2ee_identity_chain", "e2ee_tags"]

@@ -106,9 +106,7 @@ EXPECTED_COORDINATOR = {
     "bootstrap_activation_rule": "BootstrapActivation",
     "reload_tables": [22, 23],
 }
-# The owner decided on 2026-09-18 that the review is performed internally, by reviewers with no
-# context from the implementation, and not by a paid third party. The state says exactly that:
-# it must never read as an external audit.
+# The completed internal review is recorded at its exact source revision.
 EXPECTED_REVIEW_STATE = "internal-review-complete"
 FUZZ_TARGETS = (
     "e2ee_object",

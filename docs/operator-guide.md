@@ -1,10 +1,18 @@
-# AgenC IRC operator guide
+# Agency Relay operator guide
+
+The `arcd` executable and the paths in this guide are for new installations.
+Existing `agenc-ircd` installations may continue using their current binary,
+service account, configuration, and state paths. Renaming an installed service
+or moving its state requires a stopped-node migration with a verified backup;
+do not point a fresh `arcd` service at an existing database through a partial
+path or ownership change. Both executables run the same server code and keep
+the same version-1 wire protocol and on-disk format.
 
 ## Install the service account and directories
 
-Install the records from `deploy/sysusers.d` and `deploy/tmpfiles.d` before initialization. The daemon runs as `agenc-ircd`. The sysusers record also creates `agenc-ircd-sockets`, the group used only to reach the runtime sockets. Tmpfiles creates the empty daemon-owned data layout and the root-owned `/var/lib/agenc-ircd-operator` directory. Initialization accepts those empty directories, preserves their ownership, and refuses any nonempty, replaced, or symlinked target. Keep `/var/lib/agenc-ircd`, its key directory, its state directory, its trust directory, and its backup directory at mode 0700. Secret files use mode 0600.
+Install the records from `deploy/sysusers.d` and `deploy/tmpfiles.d` before initialization. The daemon runs as `arcd`. The sysusers record also creates `arcd-sockets`, the group used only to reach the runtime sockets. Tmpfiles creates the empty daemon-owned data layout and the root-owned `/var/lib/arcd-operator` directory. Initialization accepts those empty directories, preserves their ownership, and refuses any nonempty, replaced, or symlinked target. Keep `/var/lib/arcd`, its key directory, its state directory, its trust directory, and its backup directory at mode 0700. Secret files use mode 0600.
 
-Install `deploy/systemd/agenc-ircd.service` under `/etc/systemd/system`. Install the host package that provides `/usr/bin/setfacl`. Choose the matching address-family file from `deploy/systemd/profiles` and install it as the service drop-in described in `deploy/README.md`. The daemon opens configured listeners directly; systemd socket activation is not supported. Review the executable and configuration paths before enabling the service. Run the deployment checker from the source tree:
+Install `deploy/systemd/arcd.service` under `/etc/systemd/system`. Install the host package that provides `/usr/bin/setfacl`. Choose the matching address-family file from `deploy/systemd/profiles` and install it as the service drop-in described in `deploy/README.md`. The daemon opens configured listeners directly; systemd socket activation is not supported. Review the executable and configuration paths before enabling the service. Run the deployment checker from the source tree:
 
 ```sh
 python3 scripts/check-deploy.py check
@@ -15,18 +23,18 @@ python3 scripts/check-deploy.py check
 Create a new stopped coordinator with one of the three listener templates:
 
 ```sh
-sudo agenc-ircd init \
-  --config /etc/agenc-ircd/config.toml \
+sudo arcd init \
+  --config /etc/arcd/config.toml \
   --profile public \
-  --data-dir /var/lib/agenc-ircd \
-  --runtime-dir /run/agenc-ircd \
-  --operator-signing-key-file /var/lib/agenc-ircd-operator/operator-signing.key \
+  --data-dir /var/lib/arcd \
+  --runtime-dir /run/arcd \
+  --operator-signing-key-file /var/lib/arcd-operator/operator-signing.key \
   --server-name chat.example \
   --display-name Example \
   --dns-name chat.example
 ```
 
-The `public`, `onion`, and `dual` profiles write a complete configuration with every listener disabled. Run initialization as root after applying the tmpfiles record. Root initialization refuses a missing data directory instead of creating root-owned state that the service cannot use. It installs daemon files with the ownership of the precreated data directories, keeps the operator signing key in the separate root-owned operator directory, and writes the configuration last. The command never replaces an existing operator key or durable identity. Save the printed operator signing-key path with the other protected operator credentials; do not copy it into `/var/lib/agenc-ircd`, the configuration directory, or the runtime directory.
+The `public`, `onion`, and `dual` profiles write a complete configuration with every listener disabled. Run initialization as root after applying the tmpfiles record. Root initialization refuses a missing data directory instead of creating root-owned state that the service cannot use. It installs daemon files with the ownership of the precreated data directories, keeps the operator signing key in the separate root-owned operator directory, and writes the configuration last. The command never replaces an existing operator key or durable identity. Save the printed operator signing-key path with the other protected operator credentials; do not copy it into `/var/lib/arcd`, the configuration directory, or the runtime directory.
 
 Initialization prints a Tor fragment, the service-unit reminder, and certificate enrollment instructions. It does not install them. It does not contact a certificate authority or bind a public socket.
 
@@ -42,20 +50,20 @@ it before expiry, and use `REHASH` to activate it. The daemon transports the
 response as opaque bytes; the setting does not verify revocation status or
 freshness. Onion, federation and admin listeners reject this field.
 
-For an onion listener, install `deploy/tor/agenc-ircd.torrc.snippet` after checking the hidden-service and Unix-socket paths. Tor creates the onion identity. Copy the resulting onion address and the certificate SPKI hash into the paired configuration fields.
+For an onion listener, install `deploy/tor/arcd.torrc.snippet` after checking the hidden-service and Unix-socket paths. Tor creates the onion identity. Copy the resulting onion address and the certificate SPKI hash into the paired configuration fields.
 
-Add the Tor service account to `agenc-ircd-sockets`, then restart Tor so its process receives the new supplementary group. Keep `/var/lib/tor/agenc-ircd` owned by the Tor service account and inaccessible to `agenc-ircd` and `agenc-ircd-sockets`. The shared group applies only to `/run/agenc-ircd` and the sockets below it.
+Add the Tor service account to `arcd-sockets`, then restart Tor so its process receives the new supplementary group. Keep `/var/lib/tor/arcd` owned by the Tor service account and inaccessible to `arcd` and `arcd-sockets`. The shared group applies only to `/run/arcd` and the sockets below it.
 
 Initialization puts its effective UID in both the local listener's `allowed_uids` and the generated operator's `local_uids`. Root initialization therefore selects UID 0. Add each approved local administrator login to the same group and start a new login session. Put each administrator's exact numeric UID in both admission lists, and keep the shared group GID out of `allowed_gids`. The group grants directory traversal and socket connection. Administrative access still requires UID admission and the configured Ed25519 operator proof.
 
-At each daemon start, the service gives `agenc-ircd-sockets` traverse access to the mode-0750 runtime directory and installs a default read-write ACL for new mode-0660 sockets. Verify the resulting modes and named ACL entries with the commands in `deploy/README.md` before enabling the onion listener or local administration.
+At each daemon start, the service gives `arcd-sockets` traverse access to the mode-0750 runtime directory and installs a default read-write ACL for new mode-0660 sockets. Verify the resulting modes and named ACL entries with the commands in `deploy/README.md` before enabling the onion listener or local administration.
 
 ## Check the stopped configuration
 
 Run the full stopped-node check before the first start and after changing keys, paths, listener identity, or storage settings:
 
 ```sh
-agenc-ircd check-config --config /etc/agenc-ircd/config.toml
+arcd check-config --config /etc/arcd/config.toml
 ```
 
 The command parses the complete document, opens every configured secret under the protected-file rules, reconstructs the authenticated database through a read-only handle, checks the database identity, and prints the observed host controls. It does not create the writer lock, repair the database, replace the rollback guard, or remove stale temporary files. Exit status 2 means at least one required control was observed absent. An unreadable control is reported as unknown instead of present.
@@ -74,17 +82,17 @@ A client reads the same bare failure (`904`, or `FAIL ... UNAVAILABLE`) whicheve
 | `unsafe_path` | the path, name, link count, type, or filesystem boundary is unsafe | remove the symlink, foreign file, or cross-filesystem layout; the daemon never follows or replaces it |
 | `unknown` | an operating-system error outside the classified set | read the kernel and service-manager logs; the daemon keeps no raw error text |
 
-Run the stopped-node commands either as the service account or as root. As the service account (for example through `runuser -u agenc-ircd -- agenc-ircd check-config --config /etc/agenc-ircd/config.toml`) the command trusts the account's own files. As root, name the service account explicitly so its material is trusted without weakening any other file check:
+Run the stopped-node commands either as the service account or as root. As the service account (for example through `runuser -u arcd -- arcd check-config --config /etc/arcd/config.toml`) the command trusts the account's own files. As root, name the service account explicitly so its material is trusted without weakening any other file check:
 
 ```sh
-agenc-ircd check-config --config /etc/agenc-ircd/config.toml --service-user agenc-ircd
-agenc-ircd print-onboarding --config /etc/agenc-ircd/config.toml --service-user agenc-ircd
-agenc-ircd account-invite create --descriptor /etc/agenc-ircd/onboarding.txt --signing-key-file /var/lib/agenc-ircd-operator/invite-signing.key --expires-in 86400 --service-user agenc-ircd
+arcd check-config --config /etc/arcd/config.toml --service-user arcd
+arcd print-onboarding --config /etc/arcd/config.toml --service-user arcd
+arcd account-invite create --descriptor /etc/arcd/onboarding.txt --signing-key-file /var/lib/arcd-operator/invite-signing.key --expires-in 86400 --service-user arcd
 ```
 
 `--service-user` names a local account from `/etc/passwd`; it is refused for an unknown name and for any caller other than root or that account. It never changes the daemon's refusal to start as root, and the host-control report still names the invoking identity. Root keeps its own operator-owned invitation signing key; the option only lets root read the service-owned keys, trust manifests, and directories that the daemon itself would read.
 
-The packaged tmpfiles and service records keep `/run/agenc-ircd` at mode 0750 while the daemon is stopped. This allows the same Host-depth path checks to run before the first start and between service runs.
+The packaged tmpfiles and service records keep `/run/arcd` at mode 0750 while the daemon is stopped. This allows the same Host-depth path checks to run before the first start and between service runs.
 
 The process cannot observe every service-manager restriction from inside its own namespace. Check the installed unit separately with `systemd-analyze security` and the deployment checker. `check-config` does not prove swap encryption, backup handling, certificate issuance, firewall rules, or Tor routing.
 
@@ -142,7 +150,7 @@ an edge with that policy.
 After enabling at least one reviewed client endpoint, print the canonical connection descriptor:
 
 ```sh
-agenc-ircd print-onboarding --config /etc/agenc-ircd/config.toml
+arcd print-onboarding --config /etc/arcd/config.toml
 ```
 
 The command reconstructs the database through the same read-only inspection path while it reads the authenticated recovery epoch. A running writer causes the read-only database open to fail.
@@ -150,7 +158,7 @@ The command reconstructs the database through the same read-only inspection path
 Create a time-limited account invitation with a separate offline Ed25519 invitation key:
 
 ```sh
-agenc-ircd account-invite create \
+arcd account-invite create \
   --descriptor ./connect.txt \
   --signing-key-file ./account-invite-signing.key \
   --expires-in 86400
@@ -172,7 +180,7 @@ The operator needs the `audit` permission.
 
 ## Qualify storage growth on a host
 
-`agenc-ircd storage qualify` measures the production storage engine on the
+`arcd storage qualify` measures the production storage engine on the
 filesystem that will hold the state directory. Give it two new directories on
 that filesystem and paths for the unsigned report, the raw log, and a JSON
 summary. It writes the report only when the largest observed growth stays at
@@ -184,16 +192,16 @@ on a live node.
 
 ## Inspect a signed release decision
 
-A binary reports its compiled profiles with `agenc-ircd conformance --json`
+A binary reports its compiled profiles with `arcd conformance --json`
 and leaves `qualified_claims` empty. Completed qualification is a detached
 directory signed by the release key, and the binary never bundles that key.
 To see which claims a decision grants the binary you deployed, pass the
 decision directory and the public key you obtained through a trusted channel:
 
 ```sh
-agenc-ircd conformance --json \
+arcd conformance --json \
   --release-decision /path/to/decision \
-  --trusted-public-key /etc/agenc-ircd/trusted-release-public.pem
+  --trusted-public-key /etc/arcd/trusted-release-public.pem
 ```
 
 The command verifies the signature with that key only, then compares the
@@ -267,26 +275,26 @@ Steady state:
 
 ```toml
 [e2ee]
-sequencer_private_key_file = "/etc/agenc-ircd/keys/sequencer-active.key"
-sequencer_credentials_file = "/etc/agenc-ircd/sequencer-credentials.bin"
+sequencer_private_key_file = "/etc/arcd/keys/sequencer-active.key"
+sequencer_credentials_file = "/etc/arcd/sequencer-credentials.bin"
 ```
 
 Overlap:
 
 ```toml
 [e2ee]
-sequencer_private_key_file = "/etc/agenc-ircd/keys/sequencer-active.key"
-sequencer_successor_private_key_file = "/etc/agenc-ircd/keys/sequencer-successor.key"
-sequencer_credentials_file = "/etc/agenc-ircd/sequencer-credentials.bin"
+sequencer_private_key_file = "/etc/arcd/keys/sequencer-active.key"
+sequencer_successor_private_key_file = "/etc/arcd/keys/sequencer-successor.key"
+sequencer_credentials_file = "/etc/arcd/sequencer-credentials.bin"
 ```
 
 Retirement with a retained signer:
 
 ```toml
 [e2ee]
-sequencer_private_key_file = "/etc/agenc-ircd/keys/sequencer-successor.key"
-sequencer_retired_private_key_file = "/etc/agenc-ircd/keys/sequencer-active.key"
-sequencer_credentials_file = "/etc/agenc-ircd/sequencer-credentials.bin"
+sequencer_private_key_file = "/etc/arcd/keys/sequencer-successor.key"
+sequencer_retired_private_key_file = "/etc/arcd/keys/sequencer-active.key"
+sequencer_credentials_file = "/etc/arcd/sequencer-credentials.bin"
 ```
 
 Startup refuses, without installing any signer: a key whose public key

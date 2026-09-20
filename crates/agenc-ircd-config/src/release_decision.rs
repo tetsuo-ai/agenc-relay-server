@@ -36,12 +36,11 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 const QUOTE: u8 = 0x22;
 const OPEN_BRACE: u8 = 0x7b;
 const CLOSE_BRACE: u8 = 0x7d;
-const DECISION_FIELDS: [&str; 10] = [
+const DECISION_FIELDS: [&str; 9] = [
     "artifacts",
     "candidate_sha256",
     "claims",
     "decided_at",
-    "external_review_sha256",
     "public_key_sha256",
     "qualification_sha256",
     "schema_version",
@@ -159,8 +158,6 @@ pub struct ReleaseDecisionDocument {
     pub decided_at: String,
     /// SHA-256 of the qualification summary the decision binds.
     pub qualification_sha256: [u8; 32],
-    /// SHA-256 of the external review record, when the decision needs one.
-    pub external_review_sha256: Option<[u8; 32]>,
     /// SHA-256 of the PEM public key that signed the decision.
     pub public_key_sha256: [u8; 32],
 }
@@ -194,10 +191,6 @@ impl ReleaseDecisionDocument {
             artifacts,
             decided_at: timestamp(text(field(members, "decided_at")?)?)?,
             qualification_sha256: hash(field(members, "qualification_sha256")?)?,
-            external_review_sha256: match field(members, "external_review_sha256")? {
-                Value::Null => None,
-                value => Some(hash(value)?),
-            },
             public_key_sha256: hash(field(members, "public_key_sha256")?)?,
         })
     }
@@ -603,7 +596,7 @@ mod tests {
         text
     }
 
-    fn document(claims: &str, review: &str, targets: &[&str]) -> String {
+    fn document(claims: &str, targets: &[&str]) -> String {
         let artifacts = targets
             .iter()
             .map(|target| artifact(target))
@@ -619,7 +612,6 @@ mod tests {
             "\"candidate_sha256\":\"{HEX64}\",\"claims\":[{claims}],"
         ));
         text.push_str(&format!("\"decided_at\":\"{STAMP}\","));
-        text.push_str(&format!("\"external_review_sha256\":{review},"));
         text.push_str(&format!("\"public_key_sha256\":\"{HEX64}\","));
         text.push_str(&format!(
             "\"qualification_sha256\":\"{HEX64}\",\"schema_version\":1,"
@@ -633,7 +625,7 @@ mod tests {
     }
 
     fn canonical() -> String {
-        document("\"core-v1\",\"wss\"", "null", &[ARM, X86])
+        document("\"core-v1\",\"wss\"", &[ARM, X86])
     }
 
     fn rejects(cases: &[(String, ReleaseDecisionError)]) {
@@ -652,7 +644,6 @@ mod tests {
         let parsed = ReleaseDecisionDocument::parse(canonical().as_bytes())?;
         assert_eq!(parsed.claims, vec![ReleaseClaim::CoreV1, ReleaseClaim::Wss]);
         assert_eq!(parsed.targets, vec![ARM.to_owned(), X86.to_owned()]);
-        assert!(parsed.external_review_sha256.is_none());
         assert_eq!(parsed.decided_at, STAMP);
         assert_eq!(parsed.source_commit[0], 0x01);
         assert!(parsed.artifact_digest(X86).is_some());
@@ -662,10 +653,9 @@ mod tests {
                 .is_none()
         );
         let every = "\"core-v1\",\"encrypted-v1\",\"federated-v1\",\"history\",\"wss\"";
-        let reviewed = document(every, &format!("\"{HEX64}\""), &[X86]);
-        let parsed = ReleaseDecisionDocument::parse(reviewed.as_bytes())?;
+        let all_claims = document(every, &[X86]);
+        let parsed = ReleaseDecisionDocument::parse(all_claims.as_bytes())?;
         assert_eq!(parsed.claims, ReleaseClaim::ALL.to_vec());
-        assert!(parsed.external_review_sha256.is_some());
         Ok(())
     }
 
@@ -740,10 +730,7 @@ mod tests {
                 schema,
             ),
             (
-                good.replace(
-                    "\"external_review_sha256\":null",
-                    "\"external_review_sha256\":\"x\"",
-                ),
+                good.replace("\"qualification_sha256\"", "\"qualification_sha255\""),
                 schema,
             ),
             ("{}\n".to_owned(), schema),

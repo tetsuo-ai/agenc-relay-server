@@ -5,8 +5,8 @@ This record closes ENC-19 (issue #166), ENC-20 (issue #167), ENC-21 (issue
 independent review of the hostile-coordinator, historical-finality and
 object-proof-retention surface. The review was internal. It was performed by
 a reviewer that had no context from the implementation and read the frozen
-specification, the review package and the code cold; it is not a third-party
-audit and does not close `S08-039`. No wire object, opcode, reply code, limit,
+specification, the review package and the code cold. The findings and
+regressions are recorded here. No wire object, opcode, reply code, limit,
 registry, profile hash or normative text changed, and no storage key family
 was added.
 

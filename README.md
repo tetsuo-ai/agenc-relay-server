@@ -1,14 +1,14 @@
 <p align="center">
-  <img src="assets/agenc-ircd-ansi.png" alt="agenc ircd rendered as late-1990s ANSI terminal art">
+  <img src="assets/arc-ansi.png" alt="ARC — Agency Relay Chat, rendered as late-1990s ANSI terminal art">
 </p>
 
 <p align="center">
-  <strong>Familiar chat. Modern trust boundaries.</strong><br>
-  A security-first federated chat daemon being built from scratch in safe Rust.
+  <strong>Agency Relay (ARCD) powers Agency Relay Chat (ARC).</strong><br>
+  A security-first federated chat relay built in safe Rust.
 </p>
 
 <p align="center">
-  <a href="https://github.com/tetsuo-ai/agenc-ircd/actions/workflows/ci.yml"><img alt="Stage checks" src="https://img.shields.io/github/actions/workflow/status/tetsuo-ai/agenc-ircd/ci.yml?branch=main&style=flat-square&label=checks"></a>
+  <a href="https://github.com/tetsuo-ai/agency-relay/actions/workflows/ci.yml"><img alt="Stage checks" src="https://img.shields.io/github/actions/workflow/status/tetsuo-ai/agency-relay/ci.yml?branch=main&style=flat-square&label=checks"></a>
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-ff2bd6?style=flat-square">
   <img alt="Rust 1.98" src="https://img.shields.io/badge/Rust-1.98.0-00d9e9?style=flat-square&logo=rust&logoColor=white">
   <img alt="Unsafe Rust forbidden" src="https://img.shields.io/badge/unsafe-forbidden-5234ff?style=flat-square">
@@ -20,11 +20,22 @@
 > [Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 > closes exact source commit `a93e53e71d22a6d5ec46bd749ec18068a9fa572b`.
 > The daemon implements TLS-only direct, Tor-exit, and onion profiles,
-> coordinator/edge federation, and the E2EE server adapter. The external
-> cryptographic and protocol review remains open. Stage 09 adds optional WebSocket transport and
+> coordinator/edge federation, and the E2EE server adapter. Stage 09 adds optional WebSocket transport and
 > plaintext channel history. Production
 > qualification is in progress for [Stage 10](docs/stage-10-qualification.md).
 > Checkpoints do not qualify later source changes.
+
+## Agency Relay
+
+Agency Relay is the ARCD server for ARC, Agency Relay Chat. Its client surface
+retains IRCv3-derived commands such as `/join`, while accounts, federation,
+and encrypted conversations follow the project's versioned profiles. The
+public names do not alter version-1 wire identifiers or existing deployments.
+The [naming decision](docs/rfcs/agency-relay-naming.md) records the migration
+boundary. The [Agency Relay SDK](https://github.com/tetsuo-ai/agency-relay-sdk)
+will provide the shared client engine, and
+[Agency Relay Chat](https://github.com/tetsuo-ai/agency-relay-chat) will own the
+terminal and desktop applications. Both repositories are private during setup.
 
 ## What is being built
 
@@ -57,7 +68,7 @@ Ed25519, and authenticated storage.
 | 05 | complete; checkpoint closed | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, full startup reconstruction, signed backup/restore, rekey construction, login-index transition, and native filesystem qualification |
 | 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
 | 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
-| 08 | implementation checkpoint closed; internally reviewed 2026-09-18, no external audit | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
+| 08 | implementation checkpoint closed; internally reviewed 2026-09-18 | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
 | 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, and purge |
 | 10 | in progress; no release decision | Production qualification and release evidence |
 
@@ -86,8 +97,7 @@ KeyPackage and mailbox delivery, route projection to edges with a
 record-chain witness at every edge, the cross-profile durable barrier, a
 coordinator reload from durable rows, the encrypted profile composed in the
 daemon, and a lifecycle driven by two independent MLS libraries; the
-review task was closed on 2026-09-18 by an internal independent review; no
-external audit was commissioned. Stage 09 adds optional WSS transport,
+review task was closed on 2026-09-18 by an internal independent review. Stage 09 adds optional WSS transport,
 plaintext history, bounded purge and expiry, and authenticated history replay. See the
 [Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
 [TODO.md](TODO.md). See the
@@ -102,7 +112,7 @@ plaintext history, bounded purge and expiry, and authenticated history replay. S
 [current Stage 04 checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json), the
 [previous Stage 04 checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json), the
 [historical Stage 04 checkpoint](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json), and the
-[latest CI runs](https://github.com/tetsuo-ai/agenc-ircd/actions).
+[latest CI runs](https://github.com/tetsuo-ai/agency-relay/actions).
 
 ## Trust shape
 
@@ -129,8 +139,8 @@ targets. Install the exact policy and evidence tool versions listed in the
 from a clean checkout:
 
 ```sh
-git clone https://github.com/tetsuo-ai/agenc-ircd.git
-cd agenc-ircd
+git clone https://github.com/tetsuo-ai/agency-relay.git
+cd agency-relay
 bash scripts/check-stage-nine.sh
 ```
 
@@ -186,9 +196,9 @@ Stage 06 checks.
 The [Stage 08 manifest](conformance/evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
 contains 160 passed records and closes exact source commit
 `ae6457fb62fef8961d3caf904febed580e8b4a91`. Its recorded gate ran 97 commands.
-The external cryptographic and protocol review (`S08-039`) remains open in the
-[review package](conformance/review/README.md). This checkpoint does not claim
-that review or Stage 10 production qualification has been completed.
+The [review package](conformance/review/README.md) records the completed
+internal review. This checkpoint does not claim Stage 10 production
+qualification has been completed.
 
 The [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 contains 10 passed records and closes exact source commit
@@ -207,8 +217,8 @@ notes also record the findings the drivers have surfaced so far, the campaigns
 that still have to run, and the external inputs that remain open. No release
 decision has been signed, and no Stage 10 claim applies to any build.
 
-The binary starts the node with `agenc-ircd serve --config <file>` after
-`agenc-ircd init` created the layout and `agenc-ircd check-config` verified the
+The ARCD binary starts the node with `arcd serve --config <file>` after
+`arcd init` created the layout and `arcd check-config` verified the
 host controls. Every command fails closed on a configuration, secret, or host
 problem; see [docs/operator-guide.md](docs/operator-guide.md).
 

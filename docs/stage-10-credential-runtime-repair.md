@@ -127,5 +127,5 @@ also remain open under CAP-101, CAP-86 and CAP-79.
 
 The remaining Stage 06 configuration, privacy, queue and shutdown findings stay
 listed in `TODO.md`. Production capacity, release coverage, both native-target
-qualification sets and the external encrypted-profile review are not closed by
+qualification sets are not closed by
 these repairs. The server is not yet fully production-qualified.

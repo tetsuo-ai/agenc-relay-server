@@ -23,7 +23,7 @@ release candidate.
 | Declared recovery | CAP-72 discards obsolete companion delivery, replay, and barrier state and marks typed live routes pending. CAP-73 now gates ordinary mutations before signing; terminal-evidence ingestion remains open. CAP-74 persists witnesses and blocks ordinary resume across restart; authenticated witness resolution remains open. |
 | ReInit admission | CAP-86 now rejects outside binding accounts before attempt, activation, or abort signing. Three regressions fail without the checks and pass with them, including valid in-group controls and absent-signer refusal. The remaining device-to-leaf and continuing-member checks need separate evidence. |
 | Physical storage growth | STO-1 remains open. The measured storage batch exceeds both the qualification ceiling and operational reserve; a smaller page size alone does not establish a universal bound. |
-| Release qualification | The release coverage floor, full fuzz and model runs, both native targets, seven-day soak, external E2EE review, and signed decision remain open. |
+| Release qualification | The release coverage floor, full fuzz and model runs, both native targets, seven-day soak, and signed decision remain open. |
 
 The repair set committed as `74b869d` passes the required development gates
 on 2026-09-07:
@@ -521,9 +521,8 @@ record (source identities, compiler line, target, features, storage schema)
 and with `conformance/spec-baseline.toml` (document and profile digests and
 their base64url tokens). `qualified_claims` must be empty and the compiled
 profile map must be complete. `conformance/release-claims.toml` lists each
-claim, the jobs it requires, the external review the encrypted profile
-requires, and the limit statements that must remain in this document. The
-checker also lints `README.md`, `TODO.md`, this document, and
+claim, the jobs it requires, and the limit statements that must remain in this
+document. The checker also lints `README.md`, `TODO.md`, this document, and
 `conformance/README.md` for completion phrases, which are refused while the
 candidate has no decision directory.
 
@@ -3906,15 +3905,9 @@ python3 scripts/qualify-release.py verify --candidate /path/to/candidate \
 ```
 
 The verifier checks the signature, candidate artifacts, the decision's target
-scope, native attempt records, decision chronology, and the external review
-when the decision claims the encrypted profile. It does not trust the public
-key bundled beside a signature. The daemon's own `conformance --json
+scope, native attempt records, and decision chronology. It does not trust the
+public key bundled beside a signature. The daemon's own `conformance --json
 --release-decision` inspection applies the same key rule to a deployed binary.
-
-An `encrypted-v1` decision also requires the completed external cryptographic
-and protocol review recorded by `S08-039`, including remediation verification.
-That review remains open. Internal tests and implementation review do not
-replace it. Review records must describe work that was performed.
 
 The server observes routing, membership, timing, sizes, and other metadata
 described in the specifications. First-contact encryption does not

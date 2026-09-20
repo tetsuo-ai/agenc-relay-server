@@ -871,6 +871,7 @@ def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]
         if not isinstance(targets, list):
             raise WorkspaceError(f"package {name} has invalid target metadata")
         product_kinds: list[str] = []
+        product_names: list[str] = []
         for target in targets:
             if not isinstance(target, dict):
                 continue
@@ -880,9 +881,12 @@ def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]
             for kind in kinds:
                 if kind in {"lib", "bin"}:
                     product_kinds.append(kind)
-        expected_kind = ["bin"] if name == "agenc-ircd" else ["lib"]
-        if product_kinds != expected_kind:
-            raise WorkspaceError(f"package {name} product target must be exactly {expected_kind}")
+                    product_names.append(target.get("name", ""))
+        expected_kinds = ["bin", "bin"] if name == "agenc-ircd" else ["lib"]
+        if sorted(product_kinds) != expected_kinds:
+            raise WorkspaceError(f"package {name} product targets must be exactly {expected_kinds}")
+        if name == "agenc-ircd" and set(product_names) != {"agenc-ircd", "arcd"}:
+            raise WorkspaceError("daemon package must expose exactly agenc-ircd and arcd binaries")
 
     graph = graph_from_packages(packages)
     if graph != EXPECTED_EDGES:

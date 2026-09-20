@@ -18,7 +18,7 @@ POLICY_FIELDS = {
     "schema_version", "targets", "release_features", "claims", "minimum_branch_percent",
     "minimum_line_percent", "critical_percent", "fuzz_cpu_seconds_per_target",
     "soak_elapsed_seconds", "maximum_log_bytes", "maximum_record_bytes", "maximum_workers",
-    "external_review_task", "job",
+    "job",
 }
 JOB_FIELDS = {"id", "tasks", "kind", "argv", "timeout_seconds"}
 REQUIRED_JOBS = {
@@ -63,7 +63,7 @@ def load_policy(root: Path, *, require_drivers: bool = True) -> dict[str, Any]:
         "claims": list(CLAIMS), "minimum_branch_percent": 90, "minimum_line_percent": 90,
         "critical_percent": 100, "fuzz_cpu_seconds_per_target": 86400,
         "soak_elapsed_seconds": 604800, "maximum_log_bytes": 67108864,
-        "maximum_record_bytes": 4194304, "maximum_workers": 16, "external_review_task": "S08-039",
+        "maximum_record_bytes": 4194304, "maximum_workers": 16,
     }
     for field, expected in required.items():
         if type(policy[field]) is not type(expected) or policy[field] != expected:

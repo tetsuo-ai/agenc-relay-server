@@ -137,11 +137,8 @@ load checks, and E2EE fuzz targets. The
 [Stage 08 manifest](evidence/stage-08-ae6457fb62fef8961d3caf904febed580e8b4a91.json)
 contains 160 passed records for exact source commit
 `ae6457fb62fef8961d3caf904febed580e8b4a91`; its recorded gate ran 97 commands.
-The external cryptographic and protocol review (`S08-039`) remains open under
-the explicit `blocked-external` state in `stage-eight-e2ee-profile.toml`. The
-[review package](review/README.md) identifies the remaining review scope. No
-checkpoint claims that external review or Stage 10 production qualification
-has passed.
+The [review package](review/README.md) records the completed internal review.
+No checkpoint claims that Stage 10 production qualification has passed.
 
 Stage 09 adds WSS, plaintext channel history, retained-row maintenance in
 disabled builds, metadata-only history replay, and the schema-generation 1-to-2

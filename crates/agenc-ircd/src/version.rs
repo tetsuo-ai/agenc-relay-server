@@ -25,7 +25,7 @@ const SELF_EXECUTABLE: &str = "/proc/self/exe";
 
 pub(super) fn version(arguments: &[OsString]) -> Result<(), CliFailure> {
     match arguments {
-        [] => println!("agenc-ircd {VERSION} ({COMMIT}; {TARGET})"),
+        [] => println!("{} {VERSION} ({COMMIT}; {TARGET})", super::command_name()),
         [argument] if argument == "--json" => println!("{}", metadata(None)),
         _ => return Err(CliFailure::usage("usage: agenc-ircd version [--json]")),
     }

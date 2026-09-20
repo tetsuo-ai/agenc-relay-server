@@ -7,7 +7,7 @@ production gate or qualify another source commit.
 ## Baseline
 
 The earlier Stage 10 implementation and repairs merged through
-[PR 27](https://github.com/tetsuo-ai/agenc-ircd/pull/27). The credential and
+[PR 27](https://github.com/tetsuo-ai/agency-relay/pull/27). The credential and
 runtime follow-up starts at merge commit
 `fd7d39476302caae385e69bdea126d0a54164233`.
 
@@ -226,7 +226,7 @@ The preceding operational changes are recorded in
 and runtime repairs are recorded in
 [the credential and runtime repair report](stage-10-credential-runtime-repair.md).
 Earlier test and coverage measurements apply to their recorded sources. The
-ignored qualification jobs and the external encrypted-profile review remain
+ignored qualification jobs remain
 separate from the default workspace tests.
 
 The accepted constraints are current-format storage only, published upstream
@@ -461,7 +461,6 @@ acceptance and a published dependency remain open under STO-1.
 - [ ] Default 50,000-connection capacity within 4 GiB, advertised active workloads and recorded hardware.
 - [ ] Each of the 21 fuzz targets for 24 CPU-hours per native target.
 - [ ] Seven-day sustained operation and all recovery, deletion, key-lifecycle and hardening drills.
-- [ ] Independent E2EE review for S08-039 with all findings resolved.
 - [ ] Reproducible binaries, SBOM and complete requirement evidence for the frozen candidate.
 - [ ] Signed release decision and independent verification of the exact artifact hashes.
 

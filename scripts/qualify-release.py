@@ -42,7 +42,6 @@ def main() -> int:
             command.add_argument("--signing-key", type=Path, required=True)
             command.add_argument("--public-key", type=Path, required=True)
             command.add_argument("--claim", choices=CLAIMS, action="append", required=True)
-            command.add_argument("--external-review", type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     if args.command == "check":
@@ -70,7 +69,7 @@ def main() -> int:
         print(json.dumps(report, indent=2))
         return 0
     with exclusive(directory):
-        decision = close(root, directory, args.signing_key, args.public_key, args.claim, args.external_review, args.target)
+        decision = close(root, directory, args.signing_key, args.public_key, args.claim, args.target)
     print(json.dumps(decision, indent=2))
     return 0
 

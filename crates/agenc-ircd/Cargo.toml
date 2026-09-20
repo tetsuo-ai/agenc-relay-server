@@ -5,6 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "agenc-ircd"
+path = "src/main.rs"
+
+[[bin]]
+name = "arcd"
+path = "src/bin/arcd.rs"
+
 [features]
 default = []
 wss = ["agenc-ircd-config/wss", "agenc-ircd-runtime/wss"]

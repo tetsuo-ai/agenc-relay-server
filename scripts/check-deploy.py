@@ -7,27 +7,27 @@ import argparse
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVICE = ROOT / "deploy/systemd/agenc-ircd.service"
-SOCKET = ROOT / "deploy/systemd/agenc-ircd.socket"
+SERVICE = ROOT / "deploy/systemd/arcd.service"
+SOCKET = ROOT / "deploy/systemd/arcd.socket"
 PROFILE_DIRECTORY = ROOT / "deploy/systemd/profiles"
-SYSUSERS = ROOT / "deploy/sysusers.d/agenc-ircd.conf"
-TMPFILES = ROOT / "deploy/tmpfiles.d/agenc-ircd.conf"
-TOR = ROOT / "deploy/tor/agenc-ircd.torrc.snippet"
+SYSUSERS = ROOT / "deploy/sysusers.d/arcd.conf"
+TMPFILES = ROOT / "deploy/tmpfiles.d/arcd.conf"
+TOR = ROOT / "deploy/tor/arcd.torrc.snippet"
 
-SOCKET_ACCESS_GROUP = "agenc-ircd-sockets"
-TOR_HIDDEN_SERVICE_DIRECTORY = "/var/lib/tor/agenc-ircd"
-OPERATOR_AUTHORITY_DIRECTORY = "/var/lib/agenc-ircd-operator"
+SOCKET_ACCESS_GROUP = "arcd-sockets"
+TOR_HIDDEN_SERVICE_DIRECTORY = "/var/lib/tor/arcd"
+OPERATOR_AUTHORITY_DIRECTORY = "/var/lib/arcd-operator"
 INACCESSIBLE_PATHS = (
     f"-{TOR_HIDDEN_SERVICE_DIRECTORY} {OPERATOR_AUTHORITY_DIRECTORY}"
 )
 SOCKET_ACCESS_COMMAND = (
     "/usr/bin/setfacl --modify "
     f"group:{SOCKET_ACCESS_GROUP}:r-x,"
-    f"default:group:{SOCKET_ACCESS_GROUP}:rw- /run/agenc-ircd"
+    f"default:group:{SOCKET_ACCESS_GROUP}:rw- /run/arcd"
 )
 SYSUSER_LINES = [
     f"g {SOCKET_ACCESS_GROUP} -",
-    'u agenc-ircd - "AgenC IRC daemon" /var/lib/agenc-ircd',
+    'u arcd - "Agency Relay daemon (ARCD)" /var/lib/arcd',
 ]
 
 PROFILE_FAMILIES = {
@@ -38,12 +38,12 @@ PROFILE_FAMILIES = {
 }
 
 SERVICE_VALUES = {
-    ("Unit", "Description"): "AgenC IRC daemon",
+    ("Unit", "Description"): "Agency Relay daemon (ARCD)",
     ("Unit", "After"): "network-online.target",
     ("Unit", "Wants"): "network-online.target",
     ("Service", "Type"): "simple",
-    ("Service", "User"): "agenc-ircd",
-    ("Service", "Group"): "agenc-ircd",
+    ("Service", "User"): "arcd",
+    ("Service", "Group"): "arcd",
     ("Service", "UMask"): "0077",
     ("Service", "NoNewPrivileges"): "yes",
     ("Service", "ProtectSystem"): "strict",
@@ -65,16 +65,16 @@ SERVICE_VALUES = {
     ("Service", "AmbientCapabilities"): "",
     ("Service", "LimitCORE"): "0",
     ("Service", "LimitMEMLOCK"): "infinity",
-    ("Service", "RuntimeDirectory"): "agenc-ircd",
+    ("Service", "RuntimeDirectory"): "arcd",
     ("Service", "RuntimeDirectoryMode"): "0750",
     ("Service", "RuntimeDirectoryPreserve"): "yes",
-    ("Service", "StateDirectory"): "agenc-ircd/state agenc-ircd/backups agenc-ircd/logs",
+    ("Service", "StateDirectory"): "arcd/state arcd/backups arcd/logs",
     ("Service", "StateDirectoryMode"): "0700",
-    ("Service", "LogsDirectory"): "agenc-ircd",
+    ("Service", "LogsDirectory"): "arcd",
     ("Service", "LogsDirectoryMode"): "0700",
-    ("Service", "ReadOnlyPaths"): "/var/lib/agenc-ircd/keys /var/lib/agenc-ircd/trust",
-    ("Service", "ReadWritePaths"): "/var/lib/agenc-ircd/state /var/lib/agenc-ircd/backups /var/lib/agenc-ircd/logs /var/log/agenc-ircd /run/agenc-ircd",
-    ("Service", "ExecStart"): "/usr/bin/agenc-ircd serve --config /etc/agenc-ircd/config.toml",
+    ("Service", "ReadOnlyPaths"): "/var/lib/arcd/keys /var/lib/arcd/trust",
+    ("Service", "ReadWritePaths"): "/var/lib/arcd/state /var/lib/arcd/backups /var/lib/arcd/logs /var/log/arcd /run/arcd",
+    ("Service", "ExecStart"): "/usr/bin/arcd serve --config /etc/arcd/config.toml",
     ("Service", "KillSignal"): "SIGTERM",
     ("Service", "TimeoutStopSec"): "120",
     ("Service", "Restart"): "on-failure",
@@ -84,7 +84,7 @@ SERVICE_VALUES = {
 SERVICE_MULTI_VALUES = {
     ("Service", "ExecStartPre"): [
         SOCKET_ACCESS_COMMAND,
-        "/usr/bin/agenc-ircd check-config --config /etc/agenc-ircd/config.toml",
+        "/usr/bin/arcd check-config --config /etc/arcd/config.toml",
     ],
     ("Service", "SystemCallFilter"): [
         "@system-service",
@@ -93,23 +93,23 @@ SERVICE_MULTI_VALUES = {
 }
 
 TMPFILE_VALUES = {
-    "/etc/agenc-ircd": ("d", "0750", "root", "agenc-ircd", "-"),
-    "/etc/agenc-ircd/tls": ("d", "0750", "root", "agenc-ircd", "-"),
+    "/etc/arcd": ("d", "0750", "root", "arcd", "-"),
+    "/etc/arcd/tls": ("d", "0750", "root", "arcd", "-"),
     OPERATOR_AUTHORITY_DIRECTORY: ("d", "0700", "root", "root", "-"),
-    "/run/agenc-ircd": ("d", "0750", "agenc-ircd", "agenc-ircd", "-"),
-    "/var/lib/agenc-ircd": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
-    "/var/lib/agenc-ircd/backups": (
+    "/run/arcd": ("d", "0750", "arcd", "arcd", "-"),
+    "/var/lib/arcd": ("d", "0700", "arcd", "arcd", "-"),
+    "/var/lib/arcd/backups": (
         "d",
         "0700",
-        "agenc-ircd",
-        "agenc-ircd",
+        "arcd",
+        "arcd",
         "-",
     ),
-    "/var/lib/agenc-ircd/keys": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
-    "/var/lib/agenc-ircd/logs": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
-    "/var/lib/agenc-ircd/state": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
-    "/var/lib/agenc-ircd/trust": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
-    "/var/log/agenc-ircd": ("d", "0700", "agenc-ircd", "agenc-ircd", "-"),
+    "/var/lib/arcd/keys": ("d", "0700", "arcd", "arcd", "-"),
+    "/var/lib/arcd/logs": ("d", "0700", "arcd", "arcd", "-"),
+    "/var/lib/arcd/state": ("d", "0700", "arcd", "arcd", "-"),
+    "/var/lib/arcd/trust": ("d", "0700", "arcd", "arcd", "-"),
+    "/var/log/arcd": ("d", "0700", "arcd", "arcd", "-"),
 }
 
 
@@ -250,7 +250,7 @@ def validate_tor(
     expected = {
         "HiddenServiceDir": [TOR_HIDDEN_SERVICE_DIRECTORY],
         "HiddenServiceVersion": ["3"],
-        "HiddenServicePort": ["6697 unix:/run/agenc-ircd/onion.sock"],
+        "HiddenServicePort": ["6697 unix:/run/arcd/onion.sock"],
     }
     if values != expected:
         errors.append("tor: hidden-service directives do not match the reviewed profile")
@@ -331,23 +331,23 @@ def self_test() -> list[str]:
         (service.replace(f" {OPERATOR_AUTHORITY_DIRECTORY}", ""), profiles, sysusers, tmpfiles, tor, False),
         (service.replace("RuntimeDirectoryPreserve=yes", "RuntimeDirectoryPreserve=no"), profiles, sysusers, tmpfiles, tor, False),
         (service.replace("@resources ", ""), profiles, sysusers, tmpfiles, tor, False),
-        (service.replace("StateDirectory=agenc-ircd/state agenc-ircd/backups agenc-ircd/logs", "StateDirectory=agenc-ircd"), profiles, sysusers, tmpfiles, tor, False),
-        (service.replace("/var/lib/agenc-ircd/state", "/var/lib"), profiles, sysusers, tmpfiles, tor, False),
+        (service.replace("StateDirectory=arcd/state arcd/backups arcd/logs", "StateDirectory=arcd"), profiles, sysusers, tmpfiles, tor, False),
+        (service.replace("/var/lib/arcd/state", "/var/lib"), profiles, sysusers, tmpfiles, tor, False),
         (service, profiles, sysusers, tmpfiles, tor, True),
         (service, profiles, "", tmpfiles, tor, False),
-        (service, profiles, sysusers, tmpfiles.replace("/var/lib/agenc-ircd/keys 0700", "/var/lib/agenc-ircd/keys 0755"), tor, False),
-        (service, profiles, sysusers, tmpfiles.replace("/var/lib/agenc-ircd/keys 0700 agenc-ircd agenc-ircd -", "/var/lib/agenc-ircd/keys 0700 agenc-ircd agenc-ircd 1s"), tor, False),
-        (service, profiles, sysusers, tmpfiles.replace(f"{OPERATOR_AUTHORITY_DIRECTORY} 0700 root root", f"{OPERATOR_AUTHORITY_DIRECTORY} 0700 agenc-ircd agenc-ircd"), tor, False),
-        (service, profiles, sysusers, tmpfiles.replace("/run/agenc-ircd 0750 agenc-ircd agenc-ircd", "/run/agenc-ircd 0700 agenc-ircd agenc-ircd"), tor, False),
+        (service, profiles, sysusers, tmpfiles.replace("/var/lib/arcd/keys 0700", "/var/lib/arcd/keys 0755"), tor, False),
+        (service, profiles, sysusers, tmpfiles.replace("/var/lib/arcd/keys 0700 arcd arcd -", "/var/lib/arcd/keys 0700 arcd arcd 1s"), tor, False),
+        (service, profiles, sysusers, tmpfiles.replace(f"{OPERATOR_AUTHORITY_DIRECTORY} 0700 root root", f"{OPERATOR_AUTHORITY_DIRECTORY} 0700 arcd arcd"), tor, False),
+        (service, profiles, sysusers, tmpfiles.replace("/run/arcd 0750 arcd arcd", "/run/arcd 0700 arcd arcd"), tor, False),
         (service, {**profiles, "direct.conf": profiles["direct.conf"].replace("AF_UNIX ", "")}, sysusers, tmpfiles, tor, False),
         (service, {**profiles, "onion-local-admin.conf": profiles["onion-local-admin.conf"].replace("AF_UNIX", "AF_UNIX AF_INET")}, sysusers, tmpfiles, tor, False),
-        (service, profiles, sysusers, tmpfiles, tor.replace("/var/lib/tor/agenc-ircd", "/var/lib/agenc-ircd/tor"), False),
-        (service, profiles, sysusers, tmpfiles + "\nd /var/lib/tor/agenc-ircd 0700 agenc-ircd agenc-ircd -\n", tor, False),
-        (service, profiles, sysusers, tmpfiles + "\nd /var/lib/tor/agenc-ircd 0700 root root -\n", tor, False),
-        (service, profiles, sysusers, tmpfiles + "\nd /run/other 0700 agenc-ircd agenc-ircd -\n", tor, False),
+        (service, profiles, sysusers, tmpfiles, tor.replace("/var/lib/tor/arcd", "/var/lib/arcd/tor"), False),
+        (service, profiles, sysusers, tmpfiles + "\nd /var/lib/tor/arcd 0700 arcd arcd -\n", tor, False),
+        (service, profiles, sysusers, tmpfiles + "\nd /var/lib/tor/arcd 0700 root root -\n", tor, False),
+        (service, profiles, sysusers, tmpfiles + "\nd /run/other 0700 arcd arcd -\n", tor, False),
         (service.replace(SOCKET_ACCESS_COMMAND, SOCKET_ACCESS_COMMAND.replace("r-x", "rwx", 1)), profiles, sysusers, tmpfiles, tor, False),
-        (service.replace(",default:group:agenc-ircd-sockets:rw-", ""), profiles, sysusers, tmpfiles, tor, False),
-        (service, profiles, sysusers.replace("g agenc-ircd-sockets -\n", ""), tmpfiles, tor, False),
+        (service.replace(",default:group:arcd-sockets:rw-", ""), profiles, sysusers, tmpfiles, tor, False),
+        (service, profiles, sysusers.replace("g arcd-sockets -\n", ""), tmpfiles, tor, False),
     ]
     for index, case in enumerate(cases):
         if not validate(*case):

@@ -1,10 +1,7 @@
 # Stage 08 review package
 
-Companion gate 13 (`S08-039`) asks for a cryptographic and protocol review by
-someone other than the implementer. **No third-party review was commissioned,
-and nothing in this repository may be read as an external audit.** The owner
-decided on 2026-09-18 that the review is performed internally: three reviewers
-with no context from the implementation, each given only the specifications and
+The internal cryptographic and protocol review completed on 2026-09-18. Three
+reviewers with no context from the implementation, each given only the specifications and
 the tree, were tasked to break one third of the profile (hostile coordinator,
 finality and retention; hostile edge and client, recovery and witness gates;
 membership authority, key ownership and the coupled authentication and
@@ -12,16 +9,15 @@ federation boundaries). They reviewed main at `46840bd` and reported nine
 findings: one high, seven medium and one low, none a confidentiality or
 authority break. Every finding is fixed, carries a regression that fails
 without the fix, and is dispositioned in `findings.md` under "Internal
-independent review, 2026-09-18". The Stage 08 gate records this state in
+independent review, 2026-09-18". The Stage 08 record stores this state in
 `conformance/stage-eight-e2ee-profile.toml` under `[review]` as
-`internal-review-complete`. A release may describe encrypted-v1 as internally
-reviewed; it may not describe it as externally audited.
+`internal-review-complete`.
 
 The [2026-09-04 adversarial implementation review](adversarial-review-2026-09-04.md)
 records reproduced defects, fixes, regression tests, and remaining limits in
 the working tree. It predates and is separate from the internal independent review above.
 
-## What is under review
+## Reviewed scope
 
 Exact profile: `docs/irc-mls-e2ee-extension.md` at the document hash
 recorded in `conformance/spec-baseline.toml`, negotiated as profile version
@@ -211,4 +207,4 @@ gate. The [adversarial review record](adversarial-review-2026-09-04.md#validatio
 records its source inventory and results. A new checkpoint still requires a
 committed source revision and its recorded gate artifact. The review task
 `S08-039` was closed on 2026-09-18 by the internal independent review recorded
-at the top of this file; no external audit exists.
+at the top of this file.

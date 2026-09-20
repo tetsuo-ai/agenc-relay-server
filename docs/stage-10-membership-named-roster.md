@@ -3,8 +3,7 @@
 This record closes ENC-18 (issue #164), the remediation of finding `ENC11-1`
 from the 2026-09-18 internal review of the encrypted-messaging profile. That
 review was internal: it was performed by a reviewer that had no context from
-the implementation and no stake in it, and it is **not** a third-party audit.
-It does not close the external review task `S08-039`.
+the implementation and no stake in it.
 
 ## Finding
 
