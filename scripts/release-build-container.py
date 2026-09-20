@@ -82,7 +82,7 @@ def main() -> None:
     environment = {"PATH": os.environ["PATH"], "HOME": "/tmp", "CARGO_HOME": "/tmp/cargo",
                    "CARGO_TARGET_DIR": "/build/target", "CARGO_INCREMENTAL": "0",
                    "CARGO_NET_OFFLINE": "true", "LC_ALL": "C", "TZ": "UTC",
-                   "RUSTFLAGS": "--remap-path-prefix=/source=/usr/src/agenc-ircd --remap-path-prefix=/dependencies=/usr/src/dependencies"}
+                   "RUSTFLAGS": "--remap-path-prefix=/source=/usr/src/agency-relay --remap-path-prefix=/dependencies=/usr/src/dependencies"}
     environment.update({key: os.environ[key] for key in ("SOURCE_DATE_EPOCH", "AGENC_BUILD_COMMIT", "AGENC_BUILD_SOURCE_SHA256", "AGENC_BUILD_LOCK_SHA256")})
     # Rustup images need their installed, read-only toolchain home.
     if "RUSTUP_HOME" in os.environ:
@@ -96,9 +96,9 @@ def main() -> None:
     rustc = run(["rustc", "-vV"])
     if f"host: {target}" not in rustc.splitlines() or not rustc.startswith("rustc 1.98.0 "):
         raise ValueError("release build requires the pinned compiler on its native target")
-    subprocess.run(["cargo", "build", "-p", "agenc-ircd", "--release", "--all-features", "--frozen", "--target", target], env=environment, check=True)
-    binary = output / "target" / target / "release/agenc-ircd"
-    shutil.copyfile(binary, output / "agenc-ircd")
+    subprocess.run(["cargo", "build", "-p", "agenc-ircd", "--bin", "arcd", "--release", "--all-features", "--frozen", "--target", target], env=environment, check=True)
+    binary = output / "target" / target / "release/arcd"
+    shutil.copyfile(binary, output / "arcd")
     decisions = tomllib.loads(DECISIONS_PATH.read_text(encoding="utf-8")) if DECISIONS_PATH.is_file() else {}
     libraries = []
     for line in run(["ldd", str(binary)]).splitlines():
@@ -130,9 +130,9 @@ def main() -> None:
         packages.append(native_spdx_package(index, library))
     created = datetime.fromtimestamp(int(environment["SOURCE_DATE_EPOCH"]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     sbom = {"spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0", "SPDXID": "SPDXRef-DOCUMENT",
-            "name": "agenc-ircd release dependencies including build and test tools",
+            "name": "Agency Relay release dependencies including build and test tools",
             "documentNamespace": f"https://agenc.ag/spdx/{environment['AGENC_BUILD_SOURCE_SHA256']}/{target}",
-            "creationInfo": {"creators": ["Tool: agenc-ircd-release-builder"], "created": created},
+            "creationInfo": {"creators": ["Tool: arcd-release-builder"], "created": created},
             "packages": packages, "relationships": [{"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": item["SPDXID"]} for item in packages]}
     write_once(output / "tools.json", canonical(tools))
     write_once(output / "sbom.spdx.json", canonical(sbom))

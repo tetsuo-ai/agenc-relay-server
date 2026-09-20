@@ -24,8 +24,8 @@ enabled = true
 purpose = "client_wss"
 bind = "203.0.113.1:443"
 max_connections = 1000
-tls_certificate_file = "/etc/agenc-ircd/tls/client-chain.pem"
-tls_private_key_file = "/etc/agenc-ircd/tls/client-key.pem"
+tls_certificate_file = "/etc/arcd/tls/client-chain.pem"
+tls_private_key_file = "/etc/arcd/tls/client-key.pem"
 allowed_origins = ["https://chat.example"]
 allow_missing_origin = false
 ```

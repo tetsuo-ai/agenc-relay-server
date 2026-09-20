@@ -22,7 +22,9 @@ class DaemonTests:
         self.output = attempt / "build"
         self.environment = {**os.environ, "CARGO_TARGET_DIR": str(self.output)}
         self.executables: dict[str, Path] = {}
-        self.installed = self.output / target / "release/agenc-ircd"
+        # Tests exercise both the current daemon name and the legacy entry point.
+        # Both paths must execute the immutable candidate, not a Cargo-built copy.
+        self.installed = [self.output / target / f"release/{name}" for name in ("arcd", "agenc-ircd")]
 
     def compile(self, suites: list[str]) -> None:
         argv = ["cargo", "test", "-p", "agenc-ircd", "--release", "--all-features", "--frozen",
@@ -48,11 +50,12 @@ class DaemonTests:
             raise QualificationError("Cargo omitted a requested integration-test executable")
         # CARGO_BIN_EXE in these executables points to this private target tree.
         # Cargo must not run again after installing the exact release artifact.
-        if self.installed.is_symlink():
-            raise QualificationError("daemon test output is a symlink")
-        self.installed.unlink(missing_ok=True)
-        shutil.copyfile(self.binary, self.installed)
-        self.installed.chmod(0o500)
+        for installed in self.installed:
+            if installed.is_symlink():
+                raise QualificationError("daemon test output is a symlink")
+            installed.unlink(missing_ok=True)
+            shutil.copyfile(self.binary, installed)
+            installed.chmod(0o500)
         self.verify_binary()
         write_once(self.attempt / "evidence/test-executables.json", canonical({
             "daemon_sha256": self.artifact["sha256"],
@@ -60,7 +63,7 @@ class DaemonTests:
         }))
 
     def verify_binary(self) -> None:
-        if file_digest(self.binary) != self.artifact["sha256"] or file_digest(self.installed) != self.artifact["sha256"]:
+        if file_digest(self.binary) != self.artifact["sha256"] or any(file_digest(path) != self.artifact["sha256"] for path in self.installed):
             raise QualificationError("integration test did not retain the frozen daemon binary")
 
     def run(self, name: str, suite: str, test: str, *, ignored: bool = False,

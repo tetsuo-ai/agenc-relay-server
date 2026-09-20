@@ -1,4 +1,4 @@
-# AgenC IRCD Implementation TODO
+# Agency Relay Implementation TODO
 
 Status: implementation roadmap for version 1. This file is nonnormative. The
 [architecture specification](docs/ircd-architecture-and-implementation-spec.md)

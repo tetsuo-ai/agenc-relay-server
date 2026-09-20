@@ -83,9 +83,9 @@ Local build information is available without starting a node or reading its
 secrets.
 
 ```sh
-agenc-ircd --version
-agenc-ircd version --json
-agenc-ircd conformance --json
+arcd --version
+arcd version --json
+arcd conformance --json
 ```
 
 The JSON reports the compiler, target, storage schema, compiled optional
@@ -252,7 +252,7 @@ response, resynchronization, host hardening, and observability.
 
 ## Storage qualification on the final binary
 
-`agenc-ircd storage qualify` is a stopped-daemon command. It creates a fresh
+`arcd storage qualify` is a stopped-daemon command. It creates a fresh
 database in a new state directory, opens the production storage owner with a
 measurement-only boundary probe attached, and commits every Section 28.7
 mutation shape through the production engine: empty, single, replaced, and
@@ -273,8 +273,8 @@ command fallocates a ballast file in the scratch directory for the duration of
 the boundary cases and removes it afterwards.
 
 ```sh
-agenc-ircd storage qualify --state-dir /var/lib/agenc-ircd/qualify/state \
-  --scratch-dir /var/lib/agenc-ircd/qualify/scratch \
+arcd storage qualify --state-dir /var/lib/arcd/qualify/state \
+  --scratch-dir /var/lib/arcd/qualify/scratch \
   --unsigned-report storage.unsigned --raw-log storage.log --json storage.json
 ```
 
@@ -529,7 +529,7 @@ candidate has no decision directory.
 The binary can inspect a signed decision without any bundled key:
 
 ```sh
-agenc-ircd conformance --json --release-decision /path/to/candidate/decision \
+arcd conformance --json --release-decision /path/to/candidate/decision \
   --trusted-public-key /path/to/trusted-release-public.pem
 ```
 

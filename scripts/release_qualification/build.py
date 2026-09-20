@@ -122,7 +122,7 @@ def validate_build(directory: Path, record: dict[str, Any], source: dict[str, st
     if record["target"] not in TARGETS or record["features"] != ["history", "wss"]:
         raise QualificationError("build has an undeclared target or feature set")
     immutable_image(record["image"])
-    if record["binary"] != "agenc-ircd" or record["sbom"] != "sbom.spdx.json" or record["notices"] != "THIRD-PARTY-NOTICES.txt":
+    if record["binary"] not in ("agenc-ircd", "arcd") or record["sbom"] != "sbom.spdx.json" or record["notices"] != "THIRD-PARTY-NOTICES.txt":
         raise QualificationError("noncanonical build artifact name")
     for name in ("binary", "sbom", "notices", "archive"):
         expected = require_hash(record[f"{name}_sha256"], name)
@@ -213,19 +213,19 @@ def build(root: Path, destination: Path, image: str) -> dict[str, Any]:
             logs.append({"path": log_path.name, "sha256": measured["log_sha256"]})
             if measured["exit_code"] != 0 or measured["failure"]:
                 raise QualificationError(f"native build {replica} failed; inspect {log_path.name}")
-            results.append((file_digest(output / "agenc-ircd"), read_record(output / "tools.json"),
+            results.append((file_digest(output / "arcd"), read_record(output / "tools.json"),
                             file_digest(output / "sbom.spdx.json"), file_digest(output / "THIRD-PARTY-NOTICES.txt")))
         if results[0] != results[1]:
             raise QualificationError("independent native binary or tool identities differ")
         primary = temporary / "a"
-        for name in ("agenc-ircd", "sbom.spdx.json", "THIRD-PARTY-NOTICES.txt"):
+        for name in ("arcd", "sbom.spdx.json", "THIRD-PARTY-NOTICES.txt"):
             shutil.copyfile(primary / name, destination / name)
-        (destination / "agenc-ircd").chmod(0o500)
-        archive_name = f"agenc-ircd-{source['commit'][:12]}-{target}.tar.gz"
-        binary = read_bytes(destination / "agenc-ircd", 256 * 1024 * 1024)
-        write_once(destination / archive_name, release_archive(binary, "agenc-ircd", epoch))
+        (destination / "arcd").chmod(0o500)
+        archive_name = f"arcd-{source['commit'][:12]}-{target}.tar.gz"
+        binary = read_bytes(destination / "arcd", 256 * 1024 * 1024)
+        write_once(destination / archive_name, release_archive(binary, "arcd", epoch))
         record = {"schema_version": 1, "source": source, "target": target, "features": ["history", "wss"],
-                  "image": image, "source_date_epoch": epoch, "binary": "agenc-ircd", "binary_sha256": results[0][0],
+                  "image": image, "source_date_epoch": epoch, "binary": "arcd", "binary_sha256": results[0][0],
                   "replica_sha256": results[1][0], "sbom": "sbom.spdx.json",
                   "sbom_sha256": file_digest(destination / "sbom.spdx.json"), "notices": "THIRD-PARTY-NOTICES.txt",
                   "notices_sha256": file_digest(destination / "THIRD-PARTY-NOTICES.txt"),

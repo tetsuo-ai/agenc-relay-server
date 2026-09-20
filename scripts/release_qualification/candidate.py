@@ -75,7 +75,7 @@ def prepare(root: Path, destination: Path, builds: list[Path], targets: list[str
         validate_build(record_path.parent, record, source)
         target = record["target"]
         binary = safe_path(record_path.parent, record["binary"])
-        artifacts.append({"target": target, "path": f"artifacts/{target}/agenc-ircd",
+        artifacts.append({"target": target, "path": f"artifacts/{target}/{record['binary']}",
                           "sha256": file_digest(binary), "build_record": f"artifacts/{target}/build.json",
                           "build_record_sha256": digest(canonical(record))})
     if sorted(item["target"] for item in artifacts) != scope:
@@ -101,7 +101,7 @@ def prepare(root: Path, destination: Path, builds: list[Path], targets: list[str
                 shutil.copyfileobj(source_file, output, 1024 * 1024)
                 output.flush()
                 os.fsync(output.fileno())
-        (target_directory / "agenc-ircd").chmod(0o500)
+        (target_directory / build["binary"]).chmod(0o500)
         write_once(target_directory / "build.json", canonical(build))
     if source_identity(root) != source:
         raise QualificationError("source changed while preparing the candidate")
@@ -136,7 +136,7 @@ def validate_candidate(root: Path, directory: Path, *, check_source: bool = True
         if target not in targets or target in seen:
             raise QualificationError("unknown or repeated artifact target")
         seen.append(target)
-        if artifact["path"] != f"artifacts/{target}/agenc-ircd" or artifact["build_record"] != f"artifacts/{target}/build.json":
+        if artifact["path"] not in (f"artifacts/{target}/agenc-ircd", f"artifacts/{target}/arcd") or artifact["build_record"] != f"artifacts/{target}/build.json":
             raise QualificationError("noncanonical artifact location")
         for path_key, hash_key in (("path", "sha256"), ("build_record", "build_record_sha256")):
             require_hash(artifact[hash_key], hash_key)
@@ -144,7 +144,10 @@ def validate_candidate(root: Path, directory: Path, *, check_source: bool = True
                 raise QualificationError(f"candidate artifact changed: {artifact[path_key]}")
         from .build import validate_build
         build_path = safe_path(directory, artifact["build_record"])
-        validate_build(build_path.parent, read_record(build_path), record["source"])
+        build_record = read_record(build_path)
+        validate_build(build_path.parent, build_record, record["source"])
+        if artifact["path"] != f"artifacts/{target}/{build_record['binary']}":
+            raise QualificationError("candidate artifact differs from its build record")
     tools = record["tools"]
     if not isinstance(tools, list) or [item.get("target") for item in tools if isinstance(item, dict)] != targets:
         raise QualificationError("candidate lacks one client tools record per target")

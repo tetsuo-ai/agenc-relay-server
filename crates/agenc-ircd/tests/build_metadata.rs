@@ -7,6 +7,25 @@ use std::process::Command;
 type TestResult = Result<(), Box<dyn core::error::Error>>;
 
 #[test]
+fn arcd_metadata_uses_current_command_name() -> TestResult {
+    let binary = env!("CARGO_BIN_EXE_arcd");
+    let output = Command::new(binary).arg("--version").output()?;
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout)?.starts_with("arcd "));
+    for command in ["version", "conformance"] {
+        let output = Command::new(binary).args([command, "--json"]).output()?;
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout)?;
+        assert!(text.contains("\"name\":\"arcd\""));
+        if command == "conformance" {
+            assert!(text.contains("\"qualified_claims\":[]"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn local_metadata_requires_exact_options_and_reports_optional_features() -> TestResult {
     for command in ["version", "conformance"] {
         let output = Command::new(env!("CARGO_BIN_EXE_agenc-ircd"))

@@ -91,9 +91,9 @@ class RecordTests(unittest.TestCase):
             pass
 
     def test_release_archives_are_byte_reproducible(self) -> None:
-        first = release_archive(b"binary", "agenc-ircd", 1234567890)
-        self.assertEqual(first, release_archive(b"binary", "agenc-ircd", 1234567890))
-        self.assertNotEqual(first, release_archive(b"changed", "agenc-ircd", 1234567890))
+        first = release_archive(b"binary", "arcd", 1234567890)
+        self.assertEqual(first, release_archive(b"binary", "arcd", 1234567890))
+        self.assertNotEqual(first, release_archive(b"changed", "arcd", 1234567890))
 
     def test_failed_child_retains_exit_code_and_raw_output(self) -> None:
         result = execute([sys.executable, "-c", "import sys; print('failure evidence'); sys.exit(7)"], self.root, dict(os.environ), self.root / "child.log", 2)
@@ -249,18 +249,19 @@ class SyntheticCandidate:
     SOURCE = {"commit": "f" * 40, "source_sha256": "1" * 64, "lock_sha256": "2" * 64}
     TARGETS = ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu")
 
-    def __init__(self, root: Path, directory: Path, targets: tuple[str, ...] = TARGETS) -> None:
+    def __init__(self, root: Path, directory: Path, targets: tuple[str, ...] = TARGETS, binary: str = "arcd") -> None:
         from release_qualification.policy import fuzz_jobs as jobs_of, load_policy as policy_of, policy_identity
 
         self.root = root
         self.directory = directory
+        self.binary = binary
         policy = policy_of(root, require_drivers=False)
         self.jobs = policy["job"] + jobs_of(root)
         artifacts = []
         tools = []
         for target in sorted(targets):
             build = self.synthetic_build(target)
-            artifacts.append({"target": target, "path": f"artifacts/{target}/agenc-ircd",
+            artifacts.append({"target": target, "path": f"artifacts/{target}/{binary}",
                               "sha256": build["binary_sha256"], "build_record": f"artifacts/{target}/build.json",
                               "build_record_sha256": digest(canonical(build))})
             tools_record = self.synthetic_tools(target)
@@ -276,15 +277,15 @@ class SyntheticCandidate:
     def synthetic_build(self, target: str) -> dict:
         directory = self.directory / "artifacts" / target
         directory.mkdir(parents=True)
-        files = {"agenc-ircd": f"binary for {target}".encode(), "sbom.spdx.json": b"{}\n",
+        files = {self.binary: f"binary for {target}".encode(), "sbom.spdx.json": b"{}\n",
                  "THIRD-PARTY-NOTICES.txt": b"notices\n", "build-a.log": b"a\n", "build-b.log": b"b\n"}
-        archive = f"agenc-ircd-{self.SOURCE['commit'][:12]}-{target}.tar.gz"
+        archive = f"{self.binary}-{self.SOURCE['commit'][:12]}-{target}.tar.gz"
         files[archive] = b"archive"
         for name, data in files.items():
             (directory / name).write_bytes(data)
         record = {"schema_version": 1, "source": self.SOURCE, "target": target, "features": ["history", "wss"],
-                  "image": "sha256:" + "3" * 64, "source_date_epoch": 1, "binary": "agenc-ircd",
-                  "binary_sha256": digest(files["agenc-ircd"]), "replica_sha256": digest(files["agenc-ircd"]),
+                  "image": "sha256:" + "3" * 64, "source_date_epoch": 1, "binary": self.binary,
+                  "binary_sha256": digest(files[self.binary]), "replica_sha256": digest(files[self.binary]),
                   "sbom": "sbom.spdx.json", "sbom_sha256": digest(files["sbom.spdx.json"]),
                   "notices": "THIRD-PARTY-NOTICES.txt", "notices_sha256": digest(files["THIRD-PARTY-NOTICES.txt"]),
                   "archive": archive, "archive_sha256": digest(files[archive]),
@@ -420,6 +421,15 @@ class RunnerTests(unittest.TestCase):
         directory = Path(self.temporary.name) / "single"
         directory.mkdir(mode=0o700)
         return SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",))
+
+    def test_legacy_candidate_artifact_path_remains_verifiable(self) -> None:
+        from release_qualification.candidate import validate_candidate
+
+        directory = Path(self.temporary.name) / "legacy"
+        directory.mkdir(mode=0o700)
+        legacy = SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",), binary="agenc-ircd")
+        validated = validate_candidate(self.root, directory, check_source=False)
+        self.assertEqual(validated["artifacts"], legacy.record["artifacts"])
 
     def test_prepare_records_only_the_named_targets(self) -> None:
         from unittest import mock

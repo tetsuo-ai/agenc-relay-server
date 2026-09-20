@@ -534,8 +534,10 @@ fn artifacts(
     for (element, expected) in elements.iter().zip(targets) {
         let members = object_with_fields(element, &ARTIFACT_FIELDS)?;
         let name = target(field(members, "target")?)?;
+        let path = text(field(members, "path")?)?;
         if name != *expected
-            || text(field(members, "path")?)? != format!("artifacts/{name}/agenc-ircd")
+            || (path != format!("artifacts/{name}/agenc-ircd")
+                && path != format!("artifacts/{name}/arcd"))
             || text(field(members, "build_record")?)? != format!("artifacts/{name}/build.json")
         {
             return Err(ReleaseDecisionError::InvalidSchema);
@@ -656,6 +658,10 @@ mod tests {
         let complete = document(every, &[X86]);
         let parsed = ReleaseDecisionDocument::parse(complete.as_bytes())?;
         assert_eq!(parsed.claims, ReleaseClaim::ALL.to_vec());
+        // Historical signed decisions use the old executable path. New
+        // decisions name ARCD while keeping the same v1 decision schema.
+        let current = canonical().replace("/agenc-ircd\"", "/arcd\"");
+        assert!(ReleaseDecisionDocument::parse(current.as_bytes()).is_ok());
         Ok(())
     }
 
