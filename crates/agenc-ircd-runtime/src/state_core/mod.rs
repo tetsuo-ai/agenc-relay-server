@@ -5829,6 +5829,11 @@ impl StateCoreContext {
         self.drift = DriftMonitor::new(self.now(), UtcSecond::from_unix_seconds(seconds));
     }
 
+    /// Installs the published MOTD text a fixture's registration burst renders.
+    pub(crate) fn set_motd_for_test(&mut self, motd: Option<&str>) {
+        self.motd = motd.map(Arc::from);
+    }
+
     /// Advances a fixture's timer clock without changing its wall-clock trust anchor.
     pub(crate) fn set_monotonic_for_test(&mut self, ticks: u64) {
         self.monotonic = Box::new(agenc_ircd_testkit::DeterministicMonotonicClock::at(ticks));
