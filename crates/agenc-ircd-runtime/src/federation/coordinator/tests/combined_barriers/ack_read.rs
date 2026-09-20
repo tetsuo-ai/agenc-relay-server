@@ -430,3 +430,68 @@ async fn a_replay_cutoff_inside_an_open_barrier_refuses_before_installing_a_stre
     );
     Ok(())
 }
+
+/// Every stream fact the request captured is re-checked when its page lands.
+#[tokio::test]
+async fn an_ack_read_whose_stream_or_link_drifted_fails_its_link_without_staging() -> TestResult {
+    for variant in 0..7 {
+        let (mut fixture, _queue) = Box::pin(pending()).await?;
+        let message = fixture.core.next_storage_read().await?;
+        {
+            let executor = fixture
+                .coordinator
+                .companion_exec
+                .as_mut()
+                .ok_or("executor")?;
+            let stream = executor.state.streams.get_mut(&PEER).ok_or("stream")?;
+            match variant {
+                0 => stream.owner = None,
+                1 => stream.next_sequence = stream.next_sequence.saturating_add(1),
+                2 => stream.replay = None,
+                3 => stream.barrier = Some((0, 0)),
+                4 => stream.hold_after = Some(0),
+                _ => {
+                    let sync = executor.peers.get_mut(&PEER).ok_or("peer sync")?;
+                    if variant == 5 {
+                        sync.link = Some(LinkId::new(9));
+                    } else {
+                        sync.active = !sync.active;
+                    }
+                }
+            }
+        }
+        fixture
+            .coordinator
+            .storage_read_completed(fixture.core.context_mut()?, message);
+        assert!(
+            fixture.coordinator.companion_ack_read.is_none(),
+            "variant {variant}"
+        );
+        assert!(
+            !fixture.coordinator.link_is_live(LinkId::new(1), PEER),
+            "variant {variant}"
+        );
+        assert!(fixture.coordinator.pending.is_none(), "variant {variant}");
+        assert_eq!(
+            fixture.core.context_mut()?.pending_len(),
+            0,
+            "variant {variant}"
+        );
+    }
+    Ok(())
+}
+
+/// A staged batch of the coordinator's own holds the completion back.
+#[tokio::test]
+async fn an_ack_read_completing_behind_a_staged_batch_fails_its_link() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(pending()).await?;
+    let message = fixture.core.next_storage_read().await?;
+    fixture.coordinator.pending = Some(PendingCommit::Cleanup { peer: PEER });
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, message);
+    assert!(fixture.coordinator.companion_ack_read.is_none());
+    assert!(!fixture.coordinator.link_is_live(LinkId::new(1), PEER));
+    fixture.coordinator.pending = None;
+    Ok(())
+}
