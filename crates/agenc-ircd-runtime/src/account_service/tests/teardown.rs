@@ -491,3 +491,39 @@ fn a_recovered_cleanup_beyond_the_startup_count_is_reported_as_invalid() -> Test
     assert_eq!(completed.err(), Some(RuntimeError::InvalidValue));
     Ok(())
 }
+
+#[test]
+fn a_transaction_timer_is_refused_at_capacity_or_for_an_owned_transaction() -> TestResult {
+    let mut live = Live::open()?;
+    let generation = live.generation;
+    let owned = TransactionId::from_bytes([8; 16]);
+    let fresh = TransactionId::from_bytes([9; 16]);
+    let deadline = MonotonicTick::from_ticks(10);
+    let (coordinator, context) = live.fixture.parts()?;
+    coordinator.install_transaction_timer(
+        context,
+        generation,
+        LiveTransactionClass::Authentication,
+        owned,
+        deadline,
+    )?;
+    let again = coordinator.install_transaction_timer(
+        context,
+        generation,
+        LiveTransactionClass::Authentication,
+        owned,
+        deadline,
+    );
+    assert_eq!(again.err(), Some(RuntimeError::LimitExceeded));
+    exhaust_transaction_capacity(coordinator);
+    let full = coordinator.install_transaction_timer(
+        context,
+        generation,
+        LiveTransactionClass::Authentication,
+        fresh,
+        deadline,
+    );
+    assert_eq!(full.err(), Some(RuntimeError::LimitExceeded));
+    assert!(!coordinator.transaction_owners.contains_key(&fresh));
+    Ok(())
+}

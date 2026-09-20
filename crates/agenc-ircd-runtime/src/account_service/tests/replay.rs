@@ -236,3 +236,105 @@ async fn a_storage_failure_during_replay_lookup_closes_the_waiting_carrier() -> 
     assert!(coordinator.reads.is_empty());
     Ok(())
 }
+
+#[test]
+fn a_request_result_with_a_zero_origin_generation_does_not_decode() -> TestResult {
+    let route = ConnectionRoute {
+        origin_id: OriginId::from_bytes([1; 16]),
+        origin_generation: Generation::new(2)?,
+        connection_id: ConnectionId::from_bytes([3; 16]),
+        connection_nonce: [4; 32],
+    };
+    let record = RequestResultRecord {
+        route,
+        terminal: RequestTerminal::Start,
+        terminal_account: None,
+        request: [5; agenc_ircd_auth::ACCOUNT_SERVICE_ENVELOPE_BYTES],
+        response: [6; agenc_ircd_auth::ACCOUNT_SERVICE_RESPONSE_BYTES],
+    };
+    let mut encoded = record.encode();
+    assert!(RequestResultRecord::decode(&encoded).is_ok());
+    encoded
+        .get_mut(2 + 16..2 + 16 + 8)
+        .ok_or("generation field")?
+        .copy_from_slice(&0_u64.to_be_bytes());
+    assert_eq!(
+        RequestResultRecord::decode(&encoded).err(),
+        Some(RuntimeError::InvalidValue)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_row_of_another_record_kind_is_refused_on_replay() -> TestResult {
+    let mut live = Live::open()?;
+    let (_, envelope) = authentication_start(&live.fixture.core.identity, 1, "replayer")?;
+    let (other, _) = unsealed_unknown_authentication(&mut live, 1, "replayer")?;
+    let other = other.seal(live.response_count()?)?;
+    let response = other.response_intent().response().as_bytes();
+    let request = live.sasl(AccountCarrierPhase::Start, clone_envelope(&envelope)?);
+    let record = RequestResultRecord {
+        route: request.route,
+        terminal: RequestTerminal::Start,
+        terminal_account: None,
+        request: *request.envelope.as_bytes(),
+        response: *response,
+    };
+    let context = live.fixture.core.context_mut()?;
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let revision = plan.resulting_revision().get();
+    let other_kind = 2;
+    let body = agenc_ircd_storage::ProtocolRecordBody::new(
+        TableId::RequestResult,
+        other_kind,
+        1,
+        record.encode(),
+    )?;
+    let value = agenc_ircd_storage::PersistentRecordValue::new(
+        TableId::RequestResult,
+        other_kind,
+        revision,
+        0,
+        None,
+        Vec::new(),
+        body.encode()?,
+    )?;
+    let write = crate::state_core::durable::AccountServiceDurableWrite::put(
+        TableId::RequestResult,
+        request_result_key(envelope.client_request_id())?,
+        value.encode()?,
+    )?;
+    let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+    let staged = context.stage_durable_with_account_service(plan, fanout, None, 0, vec![write]);
+    assert!(matches!(staged, Ok(StageAccepted::Staged { .. })));
+    live.fixture.core.commit_staged_batch().await?;
+    let result = stored_result(&live, &envelope)?;
+    let refused = replay(&mut live, request, result);
+    assert_eq!(refused.err(), Some(RuntimeError::InvalidValue));
+    Ok(())
+}
+
+#[test]
+fn an_unknown_login_fake_record_under_another_record_kind_is_refused() -> TestResult {
+    let mut live = Live::open()?;
+    let login = NormalizedLogin::prepare("nobody")?;
+    let body = live
+        .fixture
+        .core
+        .opaque
+        .expose_fake_record_for_persistence()
+        .to_vec();
+    let forged = agenc_ircd_storage::PersistentRecordValue::new(
+        TableId::OpaqueRecord,
+        agenc_ircd_storage::LIVE_RECORD_KIND + 1,
+        1,
+        0,
+        None,
+        Vec::new(),
+        body,
+    )?;
+    let (coordinator, context) = live.fixture.parts()?;
+    let lookup = coordinator.authentication_lookup(context, &login, None, None, None, &forged);
+    assert_eq!(lookup.err(), Some(RuntimeError::InvalidValue));
+    Ok(())
+}
