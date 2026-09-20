@@ -4,6 +4,7 @@
 
 mod declared_recovery;
 pub(in crate::e2ee::coordinator::tests::sequence) mod reconstruction;
+mod row_mismatch;
 mod target_mismatch;
 
 use super::*;
