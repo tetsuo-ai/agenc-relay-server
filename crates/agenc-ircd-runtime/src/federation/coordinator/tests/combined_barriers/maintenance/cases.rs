@@ -5,6 +5,7 @@ use super::*;
 use crate::state_core::timers::TimerKind;
 
 mod cleanup;
+mod faults;
 
 async fn expired(close_gate: bool, known_ack_time: bool) -> TestResult<Fixture> {
     let mut fixture = Box::pin(Fixture::new()).await?;
