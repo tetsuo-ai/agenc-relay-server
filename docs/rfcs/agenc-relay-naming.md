@@ -1,4 +1,4 @@
-# Project RFC: Agency Relay, ARC, and ARCD naming
+# Project RFC: AgenC Relay, ARC, and ARCD naming
 
 Status: Product naming accepted by the project owner on 2026-09-20. Packaging
 and deployment migration is in progress. Version-1 protocol identifiers are
@@ -12,8 +12,8 @@ IRC-MLS specifications, registries, released artifacts, or conformance claims.
 
 ## Summary
 
-Use **Agency Relay** for the server, **ARCD** for its daemon executable,
-**Agency Relay Chat (ARC)** for the client application, and **Agency Relay SDK**
+Use **AgenC Relay** for the server, **ARCD** for its daemon executable,
+**AgenC Relay Chat (ARC)** for the client application, and **AgenC Relay SDK**
 for the shared client engine. The server is a federated chat relay with an
 IRCv3-derived client interface and project-specific federation and MLS delivery
 profiles. Version 1 remains a suite of explicitly versioned client,
@@ -37,7 +37,7 @@ semantics. The current name therefore undersells what operators deploy and can
 create false expectations about compatibility with legacy IRC server links.
 
 The distinction matters for the planned shared client SDK. SDK users should
-understand which behavior is standard IRCv3, which is a version-1 Agency profile,
+understand which behavior is standard IRCv3, which is a version-1 AgenC profile,
 and which is local SDK behavior. The product name must not become a shortcut for
 wire compatibility.
 
@@ -45,17 +45,18 @@ wire compatibility.
 
 | Surface | Chosen name or description | Reason |
 | --- | --- | --- |
-| Server product and repository | **Agency Relay**; `tetsuo-ai/agency-relay` | Names the standalone or federated server. |
+| Server product and repository | **AgenC Relay**; `tetsuo-ai/agenc-relay-server` | Names the standalone or federated server. |
 | Daemon executable and new deployment | **ARCD**; `arcd` | Mirrors the familiar IRC/IRCD client-daemon distinction. |
-| Chat application | **Agency Relay Chat (ARC)**; `tetsuo-ai/agency-relay-chat` | Names the human-facing client. |
-| Client engine | **Agency Relay SDK**; `tetsuo-ai/agency-relay-sdk` | Serves CLI and GUI applications through one library. |
-| Version-1 protocol documentation | **Agency Relay version-1 profiles**; name each client, federation, and IRC-MLS profile explicitly | Avoids suggesting one replaceable protocol identifier or broad compatibility promise. |
+| Chat application | **AgenC Relay Chat (ARC)**; `tetsuo-ai/agenc-relay-chat` | Names the human-facing client. |
+| Client engine | **AgenC Relay SDK**; `tetsuo-ai/agenc-relay-sdk` | Serves CLI and GUI applications through one library. |
+| Version-1 protocol documentation | **AgenC Relay version-1 profiles**; name each client, federation, and IRC-MLS profile explicitly | Avoids suggesting one replaceable protocol identifier or broad compatibility promise. |
 | IRC compatibility claim | **IRCv3-derived client interface with stated limits** | The daemon still speaks an IRC-shaped client grammar, but does not support legacy server links or every IRC extension. |
 
-**Agency Relay Protocol** would require a separately specified and versioned
-protocol family; a product rename alone does not create one. The previous
-`AgenC` spelling remains in frozen wire labels, historical material, and
-compatibility entry points where changing it would break version 1.
+**AgenC Relay Protocol** would require a separately specified and versioned
+protocol family; a product rename alone does not create one. Existing
+`agenc-ircd` and IRC-derived spellings remain in frozen wire labels, historical
+material, and compatibility entry points where changing them would break
+version 1.
 
 The already existing private `tetsuo-ai/agenc-relay` repository is a different
 iOS/WebSocket bridge. It is not part of this rename.
@@ -94,8 +95,8 @@ pins must not be regenerated for branding.
 
 ## Rollout
 
-1. Publish a terminology map: Agency Relay is the server, ARCD is its daemon,
-   ARC is the chat client, and Agency Relay SDK is the shared engine. State the exact IRC
+1. Publish a terminology map: AgenC Relay is the server, ARCD is its daemon,
+   ARC is the chat client, and AgenC Relay SDK is the shared engine. State the exact IRC
    compatibility limits in README and onboarding text.
 2. Update unbound presentation surfaces first: repository description,
    marketing text, new docs, and release-note display name. Preserve historical

@@ -27,7 +27,7 @@ SOCKET_ACCESS_COMMAND = (
 )
 SYSUSER_LINES = [
     f"g {SOCKET_ACCESS_GROUP} -",
-    'u arcd - "Agency Relay daemon (ARCD)" /var/lib/arcd',
+    'u arcd - "AgenC Relay daemon (ARCD)" /var/lib/arcd',
 ]
 
 PROFILE_FAMILIES = {
@@ -38,7 +38,7 @@ PROFILE_FAMILIES = {
 }
 
 SERVICE_VALUES = {
-    ("Unit", "Description"): "Agency Relay daemon (ARCD)",
+    ("Unit", "Description"): "AgenC Relay daemon (ARCD)",
     ("Unit", "After"): "network-online.target",
     ("Unit", "Wants"): "network-online.target",
     ("Service", "Type"): "simple",

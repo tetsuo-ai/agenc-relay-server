@@ -1,6 +1,6 @@
 # Contributing
 
-Agency Relay (ARCD) is pre-alpha and follows a specification-first, evidence-gated
+AgenC Relay (ARCD) is pre-alpha and follows a specification-first, evidence-gated
 implementation roadmap. Contributions should make one roadmap stage more
 complete without weakening an existing boundary.
 

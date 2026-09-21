@@ -1,5 +1,5 @@
 [Unit]
-Description=Agency Relay daemon (ARCD)
+Description=AgenC Relay daemon (ARCD)
 After=network-online.target
 Wants=network-online.target
 

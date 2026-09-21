@@ -2,7 +2,7 @@
 
 ## Project status
 
-Agency Relay (ARCD) is pre-alpha and has no supported production release. Security
+AgenC Relay (ARCD) is pre-alpha and has no supported production release. Security
 reports against `main`, the specifications, test vectors, build policy, and
 implemented foundational crates are still welcome.
 

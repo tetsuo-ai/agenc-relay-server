@@ -7,7 +7,7 @@ production gate or qualify another source commit.
 ## Baseline
 
 The earlier Stage 10 implementation and repairs merged through
-[PR 27](https://github.com/tetsuo-ai/agency-relay/pull/27). The credential and
+[PR 27](https://github.com/tetsuo-ai/agenc-relay-server/pull/27). The credential and
 runtime follow-up starts at merge commit
 `fd7d39476302caae385e69bdea126d0a54164233`.
 

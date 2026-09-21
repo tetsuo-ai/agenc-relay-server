@@ -1,4 +1,4 @@
-# Agency Relay operator guide
+# AgenC Relay operator guide
 
 The `arcd` executable and the paths in this guide are for new installations.
 Existing `agenc-ircd` installations may continue using their current binary,

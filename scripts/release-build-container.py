@@ -82,7 +82,7 @@ def main() -> None:
     environment = {"PATH": os.environ["PATH"], "HOME": "/tmp", "CARGO_HOME": "/tmp/cargo",
                    "CARGO_TARGET_DIR": "/build/target", "CARGO_INCREMENTAL": "0",
                    "CARGO_NET_OFFLINE": "true", "LC_ALL": "C", "TZ": "UTC",
-                   "RUSTFLAGS": "--remap-path-prefix=/source=/usr/src/agency-relay --remap-path-prefix=/dependencies=/usr/src/dependencies"}
+                   "RUSTFLAGS": "--remap-path-prefix=/source=/usr/src/agenc-relay-server --remap-path-prefix=/dependencies=/usr/src/dependencies"}
     environment.update({key: os.environ[key] for key in ("SOURCE_DATE_EPOCH", "AGENC_BUILD_COMMIT", "AGENC_BUILD_SOURCE_SHA256", "AGENC_BUILD_LOCK_SHA256")})
     # Rustup images need their installed, read-only toolchain home.
     if "RUSTUP_HOME" in os.environ:
@@ -130,7 +130,7 @@ def main() -> None:
         packages.append(native_spdx_package(index, library))
     created = datetime.fromtimestamp(int(environment["SOURCE_DATE_EPOCH"]), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     sbom = {"spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0", "SPDXID": "SPDXRef-DOCUMENT",
-            "name": "Agency Relay release dependencies including build and test tools",
+            "name": "AgenC Relay release dependencies including build and test tools",
             "documentNamespace": f"https://agenc.ag/spdx/{environment['AGENC_BUILD_SOURCE_SHA256']}/{target}",
             "creationInfo": {"creators": ["Tool: arcd-release-builder"], "created": created},
             "packages": packages, "relationships": [{"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": item["SPDXID"]} for item in packages]}
