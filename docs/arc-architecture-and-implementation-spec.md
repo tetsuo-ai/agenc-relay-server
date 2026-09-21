@@ -7557,8 +7557,7 @@ dependency/source scan.
 
 ### 28.9 Release decision
 
-Implementation may begin once the specification and profile checks pass. It
-does not wait for an external document audit.
+Implementation may begin once the specification and profile checks pass.
 
 The project does not implement cryptographic primitives. Implementation and
 tests for the pinned TLS, HPKE, OPAQUE, MLS, AEAD, KDF, and signature libraries
@@ -7743,14 +7742,14 @@ These SHA-256 values identify the exact files read for this draft:
 | `rfcs/rfc9420-mls-protocol.txt` | `251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b` |
 | `rfcs/rfc9525-tls-service-identity.txt` | `ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5` |
 | `rfcs/rfc9750-mls-architecture.txt` | `6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd` |
-| `docs/arc-mls-e2ee-extension.md` | `0960d58205933a94e482be38469ebbfbc87dd3d5cdb2f8f241962fe9cf43d0b8` |
+| `docs/arc-mls-e2ee-extension.md` | `57d6d98df53ce8f738da463304fb47726c9133ef0bec5b268a8cadbc117405bc` |
 
 Changing a file without updating its hash, source decision, and affected
 vectors is a conformance-ledger failure.
 The companion's domain-separated version-1 profile hash is
-`c70f477beb9d143a16357cdf3850542143d327bc200b3cacf6a32fc94a5f9035`
+`c1b5313f8a7f196cda30eea797fb1ab65b004a55d71cf9a81071927046e5d395`
 (unpadded base64url
-`xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU`).
+`wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U`).
 
 ## Appendix A. Client wire registries
 
@@ -9645,7 +9644,7 @@ base-profile-sha256=ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=ARC-MLS/1
-e2ee-profile-sha256=xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU
+e2ee-profile-sha256=wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U
 sequencer-key-set-generation=<uint64-decimal>
 sequencer-key-set-hash=<43-char-hash>
 ```

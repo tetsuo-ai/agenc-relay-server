@@ -278,8 +278,7 @@ produces a different profile hash and is incompatible until both endpoints
 explicitly support that exact revision. References are not recursively hashed.
 The hash prevents accidental mixed-revision negotiation; it is not evidence
 that a peer implements the document faithfully and does not replace TLS peer
-authentication, object validation, conformance evidence, or independent
-review.
+authentication, object validation, or conformance evidence.
 
 The public-evidence revision that added Section 12.5.1 and Sections 13.7.2
 through 13.7.5 keeps profile version 1 and changes only this hash. A peer
@@ -528,7 +527,7 @@ when both suites target the same security level.
 Suite `0x0004`, every other registered suite, and custom/private-use cipher
 suites **MUST NOT** be enabled in the version-1 production profile. Adding one
 requires a new profile version, complete server/client verification support,
-new size proofs and vectors, and independent cryptographic review; accepting
+new size proofs and vectors; accepting
 an opaque unknown suite because the server does not hold MLS secrets is
 forbidden.
 
@@ -6327,12 +6326,10 @@ Before production use, an implementation requires:
 11. Load tests for maximum group size, fanout, Commit storms, slow consumers,
     offline queues, and authenticated fragment floods.
 12. A review that server logs and telemetry contain no forbidden material.
-13. External cryptographic and protocol review, followed by remediation and
-    re-review of material changes.
-14. ReInit race tests covering target-suite KeyPackage preflight, creator-local
+13. ReInit race tests covering target-suite KeyPackage preflight, creator-local
     ACK, all Welcome ACKs, attempt abort/retry, PSK deletion, and the invariant
     that the old group never reopens.
-15. Federation tests for ECAP's exact profile-document hash, 360/358-byte
+14. Federation tests for ECAP's exact profile-document hash, 360/358-byte
     maximum lines, five-second boundary, simultaneous OFFERs, each legal flag
     transition, duplicate and ACK-before-OFFER rejection, every mismatched
     tuple field, reconnect-only key-set succession/rollback/gap/exhaustion,
@@ -6341,11 +6338,11 @@ Before production use, an implementation requires:
     concrete/nonfinal and star/final cursor presence, every repeated cut field
     and exact arity, route changed/hidden events, ERESUME, mailbox ownership,
     idempotent retry, and deterministic channel-instance collision handling.
-16. A mechanically checked wire-budget table for every command, tag
+15. A mechanically checked wire-budget table for every command, tag
     combination, maximum decimal width, base64url expansion, and IRCv3 escape
     case in both client and server directions, separately enforcing 4094-byte
     client-added, 4094-byte server-added, and 8191-byte combined budgets.
-17. Semantic-ID malleability tests proving that alternative valid signature,
+16. Semantic-ID malleability tests proving that alternative valid signature,
     approval, and vote subsets retain one state ID, while any changed semantic
     TBS field changes it. ACK signatures over the identical mandated ACK-TBS
     vector retain one ID; a different ACK-TBS vector changes the terminal ID
@@ -6356,11 +6353,11 @@ Before production use, an implementation requires:
     any other content-address cycle. Wrapper construction tests prove that
     immutable MLS Welcome bytes exist first and are only then paired with the
     exact typed external proof references.
-18. Finality-council transition tests proving only retained, fully staged old
+17. Finality-council transition tests proving only retained, fully staged old
     principals can finalize a removal, removed or revoked principals cannot,
     and a council is rotated in an earlier epoch when a proposed removal would
     leave fewer than the old quorum.
-19. Federation tests covering every opcode/result/event selector arm, every
+18. Federation tests covering every opcode/result/event selector arm, every
     required and forbidden response descriptor, singleton snapshot-token
     presence, response index/kind/object/size/delivery mismatch, ReInit staged
     and ACK live/fetch/offline delivery, terminal close broadcast, origin
@@ -6368,14 +6365,14 @@ Before production use, an implementation requires:
     event ACK barriers, first login with arbitrarily many historical direct
     routes but no bulk route projection, and encrypted/plaintext route
     collisions.
-20. Crash-idempotency tests for KeyPackage claim operation IDs, package burns,
+19. Crash-idempotency tests for KeyPackage claim operation IDs, package burns,
     mailbox delivery-token ACK transactions, cursor replay, and response
     recovery after disconnect.
-21. Root-identity and binding-chain tests covering missing prefixes, alternate
+20. Root-identity and binding-chain tests covering missing prefixes, alternate
     proof subsets for one semantic binding, root rollback, semantic-route lock
     reuse, close/recreate incarnation continuity, and direct-account-pair
     downgrade blocking.
-22. Cross-profile barrier tests covering every permitted base/E2EE part
+21. Cross-profile barrier tests covering every permitted base/E2EE part
     interleaving, result-first and completion-first delivery, lost final FACK
     and EACK, complete replay, a crash before and after each staging/apply/
     fanout-visibility boundary, wrong ID/count/index/profile partition/state
@@ -6415,8 +6412,7 @@ Before interoperability outside this implementation family:
 - submit the capability, tag, commands, batch types, and reply codes to the
   IRCv3 process;
 - replace the private MLS extension value with an assigned value if available;
-- publish complete encodings and test vectors; and
-- obtain review from the MLS and IRC protocol communities.
+- publish complete encodings and test vectors.
 
 ## 23. Normative references
 
