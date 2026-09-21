@@ -1,28 +1,28 @@
-# IRC-MLS 1.0: End-to-End Encryption for IRC
+# ARC-MLS 1.0: End-to-End Encryption for AgenC Relay Chat
 
 Status: design draft 0.5
 
 Date: 2026-08-24
-Intended implementation: AgenC IRC client and server ecosystem
+Intended implementation: AgenC Relay Chat clients and AgenC Relay servers
 
 This document is an implementable protocol design, not an RFC, not a claim of
 IETF standardization, and not a completed security audit. The cryptographic
 core is the standardized Messaging Layer Security protocol. This document
-defines the missing IRC transport, identity, membership, ordering, replay, and
-resource policies needed to embed MLS safely in IRC.
+defines the ARC transport, identity, membership, ordering, replay, and
+resource policies needed to embed MLS safely in ARC.
 
-Production deployment requires independent cryptographic review,
-interoperability testing, parser fuzzing, published test vectors, and an audit
-of the chosen MLS implementation.
+Production deployment requires interoperability testing, parser fuzzing,
+published test vectors, and the release qualification specified by the
+AgenC Relay architecture.
 
 ## 1. Abstract
 
-IRC-MLS provides end-to-end encrypted direct conversations and channels over
-IRC. An IRC network acts as an untrusted MLS Delivery Service: it routes and
+ARC-MLS provides end-to-end encrypted direct conversations and channels over
+ARC. An ARC network acts as an untrusted MLS Delivery Service: it routes and
 optionally stores ciphertext, but it never receives conversation secrets or
 plaintext.
 
-One IRC conversation maps to one MLS group. Each user device is a separate MLS
+One ARC conversation maps to one MLS group. Each user device is a separate MLS
 member. Ordinary messages use one MLS ciphertext regardless of group size;
 the server performs normal fanout. Membership changes use MLS TreeKEM updates,
 giving forward secrecy and post-compromise recovery without a static shared
@@ -56,15 +56,15 @@ they appear in bold.
 
 The following terms are used throughout:
 
-- **Account**: a stable, authenticated IRC account. It is not a nickname.
+- **Account**: a stable, authenticated ARC account. It is not a nickname.
 - **Account ID**: the immutable, canonical, user-visible identifier for an
-account within one IRC network.
+account within one ARC network.
 - **Device**: one client installation with independent keys and durable MLS
   state.
-- **Conversation**: one encrypted IRC channel or one encrypted direct-message
+- **Conversation**: one encrypted ARC channel or one encrypted direct-message
   relationship.
 - **Group**: the MLS group protecting one conversation.
-- **Delivery Service (DS)**: the IRC network, including federated servers,
+- **Delivery Service (DS)**: the ARC network, including federated servers,
   which distributes KeyPackages and ciphertext.
 - **Authentication Service (AS)**: the application mechanism that binds
   accounts, devices, and MLS signature keys.
@@ -80,8 +80,7 @@ account within one IRC network.
 - **Verified**: the account root and semantic account binding have been
   authenticated out of band. Version 1 does not let an experimental
   key-transparency service confer this state.
-- **Unverified**: the root is known only through first-use trust or the IRC
-  service.
+- **Unverified**: the root is known only through first-use trust or the relay service.
 
 All multi-byte integers in structures defined by this document use network
 byte order. Structures use the TLS presentation language conventions used by
@@ -97,7 +96,7 @@ Every non-MLS signature defined by this document signs the TLS encoding of:
 struct {
     opaque label<1..255>;
     opaque content<0..16777215>;
-} IrcSignatureInput;
+} ArcSignatureInput;
 ```
 
 `label` is the exact ASCII label stated for that signature, without a trailing
@@ -106,7 +105,7 @@ Signature fields are never part of their own TBS. Root, device-authorization,
 and sequencer signatures use Ed25519 and are exactly 64 bytes. Signatures made
 with an MLS leaf signature key use the signature scheme and exact encoded
 length of the current MLS cipher suite. Native MLS signatures continue to use
-RFC 9420 `SignWithLabel`; they are not wrapped in `IrcSignatureInput`.
+RFC 9420 `SignWithLabel`; they are not wrapped in `ArcSignatureInput`.
 
 Ed25519 verification follows RFC 8032 in strict mode: public keys and `R`
 values use canonical encodings, `S` is less than the group order, small-order
@@ -129,43 +128,43 @@ but never choose between competing Commit histories.
 
 The following registry is exhaustive for profile version 1. “Device” means
 an Ed25519 device-authorization key; “old leaf” means the MLS signature scheme
-of the pre-transition tree. Every row uses `IrcSignatureInput` as specified
+of the pre-transition tree. Every row uses `ArcSignatureInput` as specified
 above.
 
 | Label | TBS content | Signing key |
 | --- | --- | --- |
-| `IRC-MLS/1 root identity` | `IrcRootIdentityTBS` | new root |
-| `IRC-MLS/1 root continuity` | successor `IrcRootIdentityTBS` | previous root |
-| `IRC-MLS/1 device enrollment possession` | `IrcDeviceEnrollmentTBS` | new device |
-| `IRC-MLS/1 device enrollment approval` | `IrcDeviceEnrollmentTBS` | root |
-| `IRC-MLS/1 device certificate` | `IrcDeviceCertificateTBS` | root |
-| `IRC-MLS/1 device roster` | `IrcDeviceRosterTBS` | root |
-| `IRC-MLS/1 device capabilities` | `IrcDeviceCapabilitiesTBS` | device |
-| `IRC-MLS/1 leaf authorization` | `IrcLeafAuthorizationTBS` | device |
-| `IRC-MLS/1 sequencer continuity` | `IrcSequencerCredentialTBS` | previous sequencer |
-| `IRC-MLS/1 policy approval` | `IrcPolicyTBS` | device |
-| `IRC-MLS/1 conversation binding` | `IrcConversationBindingTBS` | device |
-| `IRC-MLS/1 root binding lock` | `IrcRootBindingLockTBS` | root |
-| `IRC-MLS/1 commit authorization` | `IrcCommitAuthorizationTBS` | controller device |
-| `IRC-MLS/1 reinit attempt authorization` | `IrcReInitAttemptAuthorizationTBS` | controller device |
-| `IRC-MLS/1 reservation` | `IrcReservationTBS` | sequencer |
-| `IRC-MLS/1 close authorization` | `IrcCloseAuthorizationTBS` | controller device |
-| `IRC-MLS/1 device attach challenge` | `IrcDeviceAttachTBS` | sequencer |
-| `IRC-MLS/1 device attach possession` | `IrcDeviceAttachTBS` | device |
-| `IRC-MLS/1 candidate receipt` | `IrcCandidateReceiptTBS` | sequencer |
-| `IRC-MLS/1 commit processed` | `IrcCommitAckTBS` | old leaf |
-| `IRC-MLS/1 disposition vote` | `IrcDispositionVoteTBS` | finality device |
-| `IRC-MLS/1 commit finalization` | `IrcCommitFinalizationTBS` | sequencer |
-| `IRC-MLS/1 candidate abort` | `IrcCommitAbortTBS` | sequencer |
-| `IRC-MLS/1 reinit attempt` | `IrcReInitAttemptTBS` | old leaf |
-| `IRC-MLS/1 reinit attempt receipt` | `IrcReInitAttemptReceiptTBS` | sequencer |
-| `IRC-MLS/1 reinit processed` | `IrcReInitAckTBS` | old leaf |
-| `IRC-MLS/1 reinit disposition` | `IrcReInitDispositionVoteTBS` | finality device |
-| `IRC-MLS/1 reinit activation` | `IrcReInitActivationTBS` | sequencer |
-| `IRC-MLS/1 reinit attempt abort` | `IrcReInitAbortTBS` | sequencer |
-| `IRC-MLS/1 recovery submission` | `IrcRecoverySubmissionTBS` | device |
-| `IRC-MLS/1 leaf membership` | `IrcLeafMembershipProofTBS` | device |
-| `IRC-MLS/1 leaf membership possession` | `IrcLeafMembershipProofTBS` | old leaf |
+| `ARC-MLS/1 root identity` | `ArcRootIdentityTBS` | new root |
+| `ARC-MLS/1 root continuity` | successor `ArcRootIdentityTBS` | previous root |
+| `ARC-MLS/1 device enrollment possession` | `ArcDeviceEnrollmentTBS` | new device |
+| `ARC-MLS/1 device enrollment approval` | `ArcDeviceEnrollmentTBS` | root |
+| `ARC-MLS/1 device certificate` | `ArcDeviceCertificateTBS` | root |
+| `ARC-MLS/1 device roster` | `ArcDeviceRosterTBS` | root |
+| `ARC-MLS/1 device capabilities` | `ArcDeviceCapabilitiesTBS` | device |
+| `ARC-MLS/1 leaf authorization` | `ArcLeafAuthorizationTBS` | device |
+| `ARC-MLS/1 sequencer continuity` | `ArcSequencerCredentialTBS` | previous sequencer |
+| `ARC-MLS/1 policy approval` | `ArcPolicyTBS` | device |
+| `ARC-MLS/1 conversation binding` | `ArcConversationBindingTBS` | device |
+| `ARC-MLS/1 root binding lock` | `ArcRootBindingLockTBS` | root |
+| `ARC-MLS/1 commit authorization` | `ArcCommitAuthorizationTBS` | controller device |
+| `ARC-MLS/1 reinit attempt authorization` | `ArcReInitAttemptAuthorizationTBS` | controller device |
+| `ARC-MLS/1 reservation` | `ArcReservationTBS` | sequencer |
+| `ARC-MLS/1 close authorization` | `ArcCloseAuthorizationTBS` | controller device |
+| `ARC-MLS/1 device attach challenge` | `ArcDeviceAttachTBS` | sequencer |
+| `ARC-MLS/1 device attach possession` | `ArcDeviceAttachTBS` | device |
+| `ARC-MLS/1 candidate receipt` | `ArcCandidateReceiptTBS` | sequencer |
+| `ARC-MLS/1 commit processed` | `ArcCommitAckTBS` | old leaf |
+| `ARC-MLS/1 disposition vote` | `ArcDispositionVoteTBS` | finality device |
+| `ARC-MLS/1 commit finalization` | `ArcCommitFinalizationTBS` | sequencer |
+| `ARC-MLS/1 candidate abort` | `ArcCommitAbortTBS` | sequencer |
+| `ARC-MLS/1 reinit attempt` | `ArcReInitAttemptTBS` | old leaf |
+| `ARC-MLS/1 reinit attempt receipt` | `ArcReInitAttemptReceiptTBS` | sequencer |
+| `ARC-MLS/1 reinit processed` | `ArcReInitAckTBS` | old leaf |
+| `ARC-MLS/1 reinit disposition` | `ArcReInitDispositionVoteTBS` | finality device |
+| `ARC-MLS/1 reinit activation` | `ArcReInitActivationTBS` | sequencer |
+| `ARC-MLS/1 reinit attempt abort` | `ArcReInitAbortTBS` | sequencer |
+| `ARC-MLS/1 recovery submission` | `ArcRecoverySubmissionTBS` | device |
+| `ARC-MLS/1 leaf membership` | `ArcLeafMembershipProofTBS` | device |
+| `ARC-MLS/1 leaf membership possession` | `ArcLeafMembershipProofTBS` | old leaf |
 
 An implementation **MUST NOT** infer raw-TBS signing for an omitted case. A
 future signature adds a new profile version or an explicitly registered label.
@@ -176,7 +175,7 @@ A protocol-state ID is never a hash of a signature, approval vector, vote
 vector, proof wrapper, or sequencer certificate. Those bytes are evidence for
 an ID, not part of its identity. This prevents two valid quorum subsets for
 one decision from creating two successor heads. `object-id` remains the only
-transport identifier: it is SHA-256 over the complete encoded `IrcWireObject`
+transport identifier: it is SHA-256 over the complete encoded `ArcWireObject`
 and **MUST NOT** be used as a protocol-state head.
 
 The following registry is exhaustive for every profile-defined in-protocol
@@ -190,53 +189,53 @@ backslash is not part of any hashed input:
 
 | ID or digest | Exact formula |
 | --- | --- |
-| `root_fingerprint` | `SHA256("IRC-MLS/1 root fingerprint" \|\| encoded_IrcRootDescriptor)` |
-| `account_id_digest` | `SHA256("IRC-MLS/1 account id" \|\| TLS-encode(network_id, account_id))` |
-| `enrollment_id` | `SHA256("IRC-MLS/1 enrollment id" \|\| encoded_IrcDeviceEnrollmentTBS)` |
-| `device_certificate_id` | `SHA256("IRC-MLS/1 device certificate id" \|\| encoded_IrcDeviceCertificateTBS)` |
-| `roster_id` | `SHA256("IRC-MLS/1 roster id" \|\| encoded_IrcDeviceRosterTBS)` |
-| `capability_id` | `SHA256("IRC-MLS/1 capability id" \|\| encoded_IrcDeviceCapabilitiesTBS)` |
-| `leaf_signature_key_digest` | `SHA256("IRC-MLS/1 leaf signature key" \|\| TLS-encode(leaf_signature_scheme, leaf_signature_key))` |
-| `leaf_capabilities_digest` | `SHA256("IRC-MLS/1 leaf capabilities" \|\| encoded_LeafNode_capabilities)` |
-| `safety_number` | `SHA256("IRC-MLS/1 safety number" \|\| encoded_IrcRootDescriptor)` |
-| `conversation_id` | `SHA256("IRC-MLS/1 conversation" \|\| TLS-encode(network_id, group_id))` |
-| channel `route_binding` | `SHA256("IRC-MLS/1 channel route" \|\| encoded_IrcChannelRouteTBS)` |
-| direct `route_binding` | `SHA256("IRC-MLS/1 direct route" \|\| encoded_IrcDirectRouteTBS)` |
-| `policy_id` | `SHA256("IRC-MLS/1 policy id" \|\| encoded_IrcPolicyTBS)` |
-| `binding_id` | `SHA256("IRC-MLS/1 binding id" \|\| encoded_IrcConversationBindingTBS)` |
-| `root_binding_lock_id` | `SHA256("IRC-MLS/1 root binding lock id" \|\| encoded_IrcRootBindingLockTBS)` |
-| `semantic_route_lock_id` | `SHA256("IRC-MLS/1 semantic route lock" \|\| encoded_IrcSemanticRouteTBS)` |
-| `sequencer_credential_id` | `SHA256("IRC-MLS/1 sequencer key" \|\| encoded_IrcSequencerCredentialTBS)` |
-| `sequencer_key_set_digest` | `SHA256("IRC-MLS/1 sequencer key set" \|\| TLS-encode(credential_ids))` |
-| `initial_member_plan_id` | `SHA256("IRC-MLS/1 initial member plan id" \|\| encoded_IrcInitialMemberPlan)` |
-| `key_package_plan_id` | `SHA256("IRC-MLS/1 key package plan id" \|\| encoded_IrcKeyPackagePlan)` |
-| `context_core_id` | `SHA256("IRC-MLS/1 context core id" \|\| encoded_IrcContextCoreTBS)` |
-| `context_digest` | `SHA256("IRC-MLS/1 context hash" \|\| encoded_IrcMlsContext)` |
-| `close_intent_id` | `SHA256("IRC-MLS/1 close intent id" \|\| encoded_IrcCloseIntent)` |
-| `close_id` | `SHA256("IRC-MLS/1 close authorization id" \|\| encoded_IrcCloseAuthorizationTBS)` |
-| `commit_authorization_id` | `SHA256("IRC-MLS/1 commit authorization id" \|\| encoded_IrcCommitAuthorizationTBS)` |
-| `genesis_state_id` | `SHA256("IRC-MLS/1 group genesis id" \|\| encoded_IrcGroupGenesisTBS)` |
-| `candidate_id` | `SHA256("IRC-MLS/1 candidate id" \|\| encoded_IrcCandidateReceiptTBS)` |
-| `group_context_digest` | `SHA256("IRC-MLS/1 group context digest" \|\| encoded_IrcGroupContextDigestTBS)` |
-| `ratchet_tree_digest` | `SHA256("IRC-MLS/1 ratchet tree digest" \|\| encoded_IrcRatchetTreeDigestTBS)` |
-| `group_info_digest` | `SHA256("IRC-MLS/1 group info digest" \|\| encoded_IrcGroupInfoDigestTBS)` |
-| `old_credential_hash` | `SHA256("IRC-MLS/1 old credential hash" \|\| encoded_BasicCredential)` |
-| `resulting_leaf_credential_hash` | `SHA256("IRC-MLS/1 resulting leaf credential" \|\| TLS-encode(resulting_leaf_index, encoded_BasicCredential))` |
-| `finalization_id` | `SHA256("IRC-MLS/1 finalization id" \|\| encoded_IrcFinalizationCoreTBS)` |
-| `abort_id` | `SHA256("IRC-MLS/1 abort id" \|\| encoded_IrcAbortCoreTBS)` |
-| `target_context_digest` | `SHA256("IRC-MLS/1 reinit target" \|\| encoded_IrcReInitTargetTBS)` |
-| `initial_commit_digest` | `SHA256("IRC-MLS/1 reinit initial commit" \|\| initial_commit_bytes)` |
-| `reinit_attempt_authorization_id` | `SHA256("IRC-MLS/1 reinit attempt authorization id" \|\| encoded_IrcReInitAttemptAuthorizationTBS)` |
-| `reinit_attempt_id` | `SHA256("IRC-MLS/1 reinit attempt id" \|\| encoded_IrcReInitAttemptTBS)` |
-| `reinit_activation_id` | `SHA256("IRC-MLS/1 reinit activation id" \|\| encoded_IrcReInitActivationCoreTBS)` |
-| `reinit_abort_id` | `SHA256("IRC-MLS/1 reinit abort id" \|\| encoded_IrcReInitAbortCoreTBS)` |
-| `federation_origin_state_id` | `SHA256("IRC-MLS/1 federation origin state" \|\| encoded_IrcFederationOrigin)` |
-| `canonical_channel_name_hash` | `SHA256("IRC-MLS/1 canonical channel name" \|\| TLS-encode(canonical_irc_name))` |
-| `federation_snapshot_digest` | `SHA256("IRC-MLS/1 federation snapshot" \|\| TLS-encode(state_generation, delivery_generation, ordered_state_object_ids))` |
-| `acknowledgement_set_digest` | `SHA256("IRC-MLS/1 commit acknowledgement set" \|\| TLS-encode(canonical_IrcCommitAckTBS_vector))` |
-| `reinit_acknowledgement_set_digest` | `SHA256("IRC-MLS/1 reinit acknowledgement set" \|\| TLS-encode(canonical_IrcReInitAckTBS_vector))` |
-| `recovery_submission_id` | `SHA256("IRC-MLS/1 recovery submission id" \|\| encoded_IrcRecoverySubmissionTBS)` |
-| `leaf_membership_id` | `SHA256("IRC-MLS/1 leaf membership id" \|\| encoded_IrcLeafMembershipProofTBS)` |
+| `root_fingerprint` | `SHA256("ARC-MLS/1 root fingerprint" \|\| encoded_ArcRootDescriptor)` |
+| `account_id_digest` | `SHA256("ARC-MLS/1 account id" \|\| TLS-encode(network_id, account_id))` |
+| `enrollment_id` | `SHA256("ARC-MLS/1 enrollment id" \|\| encoded_ArcDeviceEnrollmentTBS)` |
+| `device_certificate_id` | `SHA256("ARC-MLS/1 device certificate id" \|\| encoded_ArcDeviceCertificateTBS)` |
+| `roster_id` | `SHA256("ARC-MLS/1 roster id" \|\| encoded_ArcDeviceRosterTBS)` |
+| `capability_id` | `SHA256("ARC-MLS/1 capability id" \|\| encoded_ArcDeviceCapabilitiesTBS)` |
+| `leaf_signature_key_digest` | `SHA256("ARC-MLS/1 leaf signature key" \|\| TLS-encode(leaf_signature_scheme, leaf_signature_key))` |
+| `leaf_capabilities_digest` | `SHA256("ARC-MLS/1 leaf capabilities" \|\| encoded_LeafNode_capabilities)` |
+| `safety_number` | `SHA256("ARC-MLS/1 safety number" \|\| encoded_ArcRootDescriptor)` |
+| `conversation_id` | `SHA256("ARC-MLS/1 conversation" \|\| TLS-encode(network_id, group_id))` |
+| channel `route_binding` | `SHA256("ARC-MLS/1 channel route" \|\| encoded_ArcChannelRouteTBS)` |
+| direct `route_binding` | `SHA256("ARC-MLS/1 direct route" \|\| encoded_ArcDirectRouteTBS)` |
+| `policy_id` | `SHA256("ARC-MLS/1 policy id" \|\| encoded_ArcPolicyTBS)` |
+| `binding_id` | `SHA256("ARC-MLS/1 binding id" \|\| encoded_ArcConversationBindingTBS)` |
+| `root_binding_lock_id` | `SHA256("ARC-MLS/1 root binding lock id" \|\| encoded_ArcRootBindingLockTBS)` |
+| `semantic_route_lock_id` | `SHA256("ARC-MLS/1 semantic route lock" \|\| encoded_ArcSemanticRouteTBS)` |
+| `sequencer_credential_id` | `SHA256("ARC-MLS/1 sequencer key" \|\| encoded_ArcSequencerCredentialTBS)` |
+| `sequencer_key_set_digest` | `SHA256("ARC-MLS/1 sequencer key set" \|\| TLS-encode(credential_ids))` |
+| `initial_member_plan_id` | `SHA256("ARC-MLS/1 initial member plan id" \|\| encoded_ArcInitialMemberPlan)` |
+| `key_package_plan_id` | `SHA256("ARC-MLS/1 key package plan id" \|\| encoded_ArcKeyPackagePlan)` |
+| `context_core_id` | `SHA256("ARC-MLS/1 context core id" \|\| encoded_ArcContextCoreTBS)` |
+| `context_digest` | `SHA256("ARC-MLS/1 context hash" \|\| encoded_ArcMlsContext)` |
+| `close_intent_id` | `SHA256("ARC-MLS/1 close intent id" \|\| encoded_ArcCloseIntent)` |
+| `close_id` | `SHA256("ARC-MLS/1 close authorization id" \|\| encoded_ArcCloseAuthorizationTBS)` |
+| `commit_authorization_id` | `SHA256("ARC-MLS/1 commit authorization id" \|\| encoded_ArcCommitAuthorizationTBS)` |
+| `genesis_state_id` | `SHA256("ARC-MLS/1 group genesis id" \|\| encoded_ArcGroupGenesisTBS)` |
+| `candidate_id` | `SHA256("ARC-MLS/1 candidate id" \|\| encoded_ArcCandidateReceiptTBS)` |
+| `group_context_digest` | `SHA256("ARC-MLS/1 group context digest" \|\| encoded_ArcGroupContextDigestTBS)` |
+| `ratchet_tree_digest` | `SHA256("ARC-MLS/1 ratchet tree digest" \|\| encoded_ArcRatchetTreeDigestTBS)` |
+| `group_info_digest` | `SHA256("ARC-MLS/1 group info digest" \|\| encoded_ArcGroupInfoDigestTBS)` |
+| `old_credential_hash` | `SHA256("ARC-MLS/1 old credential hash" \|\| encoded_BasicCredential)` |
+| `resulting_leaf_credential_hash` | `SHA256("ARC-MLS/1 resulting leaf credential" \|\| TLS-encode(resulting_leaf_index, encoded_BasicCredential))` |
+| `finalization_id` | `SHA256("ARC-MLS/1 finalization id" \|\| encoded_ArcFinalizationCoreTBS)` |
+| `abort_id` | `SHA256("ARC-MLS/1 abort id" \|\| encoded_ArcAbortCoreTBS)` |
+| `target_context_digest` | `SHA256("ARC-MLS/1 reinit target" \|\| encoded_ArcReInitTargetTBS)` |
+| `initial_commit_digest` | `SHA256("ARC-MLS/1 reinit initial commit" \|\| initial_commit_bytes)` |
+| `reinit_attempt_authorization_id` | `SHA256("ARC-MLS/1 reinit attempt authorization id" \|\| encoded_ArcReInitAttemptAuthorizationTBS)` |
+| `reinit_attempt_id` | `SHA256("ARC-MLS/1 reinit attempt id" \|\| encoded_ArcReInitAttemptTBS)` |
+| `reinit_activation_id` | `SHA256("ARC-MLS/1 reinit activation id" \|\| encoded_ArcReInitActivationCoreTBS)` |
+| `reinit_abort_id` | `SHA256("ARC-MLS/1 reinit abort id" \|\| encoded_ArcReInitAbortCoreTBS)` |
+| `federation_origin_state_id` | `SHA256("ARC-MLS/1 federation origin state" \|\| encoded_ArcFederationOrigin)` |
+| `canonical_channel_name_hash` | `SHA256("ARC-MLS/1 canonical channel name" \|\| TLS-encode(canonical_irc_name))` |
+| `federation_snapshot_digest` | `SHA256("ARC-MLS/1 federation snapshot" \|\| TLS-encode(state_generation, delivery_generation, ordered_state_object_ids))` |
+| `acknowledgement_set_digest` | `SHA256("ARC-MLS/1 commit acknowledgement set" \|\| TLS-encode(canonical_ArcCommitAckTBS_vector))` |
+| `reinit_acknowledgement_set_digest` | `SHA256("ARC-MLS/1 reinit acknowledgement set" \|\| TLS-encode(canonical_ArcReInitAckTBS_vector))` |
+| `recovery_submission_id` | `SHA256("ARC-MLS/1 recovery submission id" \|\| encoded_ArcRecoverySubmissionTBS)` |
+| `leaf_membership_id` | `SHA256("ARC-MLS/1 leaf membership id" \|\| encoded_ArcLeafMembershipProofTBS)` |
 
 Every carried ID is recomputed. Parsed structures consume all input and
 re-encode to identical bytes. Two records are the same record exactly when
@@ -253,15 +252,15 @@ invalid.
 ### 2.3 Exact profile revision
 
 The normative version-1 profile document is the exact byte sequence of this
-file, `docs/irc-mls-e2ee-extension.md`, in the release source artifact. Those
+file, `docs/arc-mls-e2ee-extension.md`, in the release source artifact. Those
 bytes **MUST** be UTF-8 without a byte-order mark, use LF line endings only,
 and end in exactly one LF. Implementations do not normalize Unicode, render
 Markdown, rewrite links, add a path, or include archive metadata before
 hashing. The negotiated digest is:
 
 ```text
-irc_mls_profile_hash = SHA256(
-    "agenc-chat IRC-MLS specification profile v1\0" ||
+arc_mls_profile_hash = SHA256(
+    "agenc-chat ARC-MLS specification profile v1\0" ||
     exact_profile_document_bytes
 )
 ```
@@ -273,7 +272,7 @@ a mutable documentation file at runtime. The raw document SHA-256 and this
 domain-separated hash are published in the release manifest and the companion
 source-hash table in the daemon architecture specification.
 
-The numeric profile version and `irc_mls_profile_hash` jointly identify the
+The numeric profile version and `arc_mls_profile_hash` jointly identify the
 profile. Any byte change to this document, including an editorial change,
 produces a different profile hash and is incompatible until both endpoints
 explicitly support that exact revision. References are not recursively hashed.
@@ -291,7 +290,7 @@ reinterpreted under this one.
 
 ## 3. Goals
 
-IRC-MLS is designed to provide:
+ARC-MLS is designed to provide:
 
 1. Message confidentiality and integrity against network observers, IRC
    servers, federation peers, and compromised ciphertext stores.
@@ -306,7 +305,7 @@ IRC-MLS is designed to provide:
    ciphertext, followed by server fanout.
 7. Efficient membership changes using the MLS ratchet tree rather than
    encrypting a new channel key separately for every message.
-8. Safe operation across IRC federation, reconnects, delayed delivery, and
+8. Safe operation across ARC federation, reconnects, delayed delivery, and
    netsplits: while the configured finality fault bound and durable-state
    assumptions hold, two conflicting membership histories cannot both obtain
    a valid finality quorum; otherwise clients halt and expose evidence.
@@ -317,7 +316,7 @@ IRC-MLS is designed to provide:
 
 ## 4. Non-goals and unavoidable limits
 
-IRC-MLS does not provide:
+ARC-MLS does not provide:
 
 - availability against a malicious server, which can disconnect, censor,
   delay, or permanently partition users;
@@ -326,7 +325,7 @@ IRC-MLS does not provide:
 - protection from a legitimate group member copying plaintext;
 - anonymity or complete metadata privacy;
 - trustworthy first contact when the only identity channel is a malicious
-  IRC server;
+  AgenC Relay server;
 - revocation of plaintext or keys already received by an authorized member;
 - invisible server-side moderation, search, previews, logging, or bots; or
 - post-quantum security in the production version of this profile.
@@ -347,7 +346,7 @@ required policy-controller threshold can authorize a fork. Availability
 additionally requires a finality quorum to be online. Version 1 favors a
 visible halt over weakening either rule.
 
-IRC servers continue to observe IP connections, authenticated accounts,
+AgenC Relay servers continue to observe IP connections, authenticated accounts,
 channel and direct-message routing, online membership, public credential and
 KeyPackage fields, device counts, directory queries, Welcome references,
 group and epoch activity, membership-change timing, ciphertext sizes,
@@ -360,7 +359,7 @@ and the fault bound to every server that retains the conversation. The server
 already sees rosters and device attachments, so the added exposure is which
 devices hold council and controller roles. Private MLS handshake messages still
 hide Proposal bodies, target credentials, path secrets, and the resulting
-group secrets, but do not hide IRC channel membership from the IRC
+group secrets, but do not hide ARC channel membership from the IRC
 infrastructure. TLS is still required on every client-server and server-server
 connection.
 
@@ -368,13 +367,13 @@ connection.
 
 The attacker may:
 
-- control the network and any subset of IRC delivery or federation servers;
+- control the network and any subset of ARC delivery or federation servers;
 - read, inject, alter, replay, suppress, delay, and reorder IRC frames;
 - provide stale KeyPackages or inconsistent directory answers;
 - strip IRC capabilities or falsely claim that encryption is unavailable;
 - present different conversation bindings or Commit histories to different
   users;
-- control an IRC account database and create arbitrary server-authenticated
+- control an ARC account database and create arbitrary server-authenticated
   accounts; and
 - join an encrypted conversation legitimately and then behave maliciously.
 
@@ -419,11 +418,11 @@ verified encryption.
 
 ## 6. Architecture
 
-The cryptographic endpoint is the client device. The IRCD is not an MLS
+The cryptographic endpoint is the client device. The ARCD is not an MLS
 member and holds no group secret.
 
 ```text
-client device ── TLS ── IRC server/federation ── TLS ── client device
+client device ── TLS ── AgenC Relay server/federation ── TLS ── client device
      │                        │                            │
      └──── MLS ciphertext ────┴──── opaque fanout ────────┘
 
@@ -458,7 +457,7 @@ The client has all cryptographic roles:
 
 ### 7.1 Transport security
 
-Every client-server and server-server hop carrying IRC-MLS **MUST** use TLS 1.3
+Every client-server and server-server hop carrying ARC-MLS **MUST** use TLS 1.3
 as specified by RFC 9846, with certificate and service-identity validation
 under RFC 9525. Deployments
 follow RFC 9325, as updated by RFC 9852, for algorithm and operational policy.
@@ -467,13 +466,13 @@ opportunistic TLS are not valid transports for this profile.
 
 Federation TLS is mutually authenticated: each peer proves a configured
 certificate-bound server identity in both directions, and that identity must
-match the IRC server route used by ECAP. A client connection authenticates the
+match the AgenC Relay server route used by ECAP. A client connection authenticates the
 server before account login; its later Account-ID authentication and device
 attachment are separate application checks. Anonymous TLS, certificate
-warning bypass, and unauthenticated resumption never carry IRC-MLS.
+warning bypass, and unauthenticated resumption never carry ARC-MLS.
 
 TLS early data **MUST NOT** carry `CAP`, `EGROUP`, `EKEY`, encrypted `TAGMSG`,
-`EDIRECT`, or any other state-changing IRC-MLS operation because early data is
+`EDIRECT`, or any other state-changing ARC-MLS operation because early data is
 replayable. E2EE does not remove the need for authenticated transport: TLS
 limits metadata exposure to intermediate networks and protects non-MLS IRC
 control traffic.
@@ -491,7 +490,7 @@ or MLS state machine ad hoc inside the IRC parser.
 
 ### 7.3 Cipher suites
 
-| MLS value | Name | IRC-MLS requirement |
+| MLS value | Name | ARC-MLS requirement |
 | --- | --- | --- |
 | `0x0001` | `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` | **MUST** implement; interoperable default |
 | `0x0003` | `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` | **MUST** implement; fixed alternative where ChaCha20 is faster than AES-GCM |
@@ -557,8 +556,8 @@ and a normal Add Commit.
 Padding is applied to the application content before MLS encryption, not to
 the MLS `PrivateMessageContent`, because no independent MLS implementation
 exposes exact control over the RFC 9420 padding field. Every
-`IrcEncryptedContent` (Section 10) ends in a `zero_padding` vector. Let `L` be
-the complete TLS encoding length of the `IrcEncryptedContent` with an empty
+`ArcEncryptedContent` (Section 10) ends in a `zero_padding` vector. Let `L` be
+the complete TLS encoding length of the `ArcEncryptedContent` with an empty
 `zero_padding` vector, including that vector's own two length bytes. If
 `L <= 4096`, the target is the least multiple of 256 no smaller than `L`;
 otherwise it is the least multiple of 1024 no smaller than `L`. The sender
@@ -568,7 +567,7 @@ allocation. If the resulting `PrivateMessage` or containing typed object would
 exceed its command-specific maximum, the content is too large and is rejected
 before encryption; the sender never omits or shortens padding to make it fit.
 
-The receiver decodes the `IrcEncryptedContent`, computes `L` as the encoded
+The receiver decodes the `ArcEncryptedContent`, computes `L` as the encoded
 length minus the padding octets, computes the same target with checked
 addition and division before comparing lengths, and rejects a padding length
 other than `target - L`, any nonzero padding octet, arithmetic overflow,
@@ -599,7 +598,7 @@ Implementations **MUST NOT** describe padding as anonymity.
 ### 7.6 Compression
 
 Plaintext compression before encryption is forbidden in version 1. It creates
-length side channels and complicates decompression bounds. IRC-MLS object and
+length side channels and complicates decompression bounds. ARC-MLS object and
 fragment bytes are not compressed above TLS on client or federation links;
 ciphertext is effectively incompressible, and a second decompression parser
 adds resource-exhaustion risk without useful bandwidth savings.
@@ -607,7 +606,7 @@ adds resource-exhaustion risk without useful bandwidth savings.
 ### 7.7 Post-quantum position
 
 As of this draft, MLS integration for ML-KEM and hybrid post-quantum suites is
-still an IETF Internet-Draft, not an RFC. IRC-MLS 1.0 therefore makes no
+still an IETF Internet-Draft, not an RFC. ARC-MLS 1.0 therefore makes no
 post-quantum claim.
 
 Clients **MUST** preserve algorithm agility and `ReInit` support so groups can
@@ -643,8 +642,7 @@ Account ID.
 ### 8.2 Account root and signatures
 
 The account owner generates an Ed25519 root identity key locally. The private
-key **MUST NOT** be generated, received, escrowed, or recoverable by the IRC
-service, and **SHOULD** remain in dedicated recovery storage rather than on
+key **MUST NOT** be generated, received, escrowed, or recoverable by the relay service, and **SHOULD** remain in dedicated recovery storage rather than on
 every chat device.
 
 ```text
@@ -657,20 +655,20 @@ struct {
     uint64 not_before;
     uint64 not_after;
     opaque previous_root_fingerprint[32];
-} IrcRootIdentityTBS;
+} ArcRootIdentityTBS;
 
 struct {
-    IrcRootIdentityTBS tbs;
+    ArcRootIdentityTBS tbs;
     opaque self_signature[64];
     opaque continuity_signature<0..64>;
-} IrcRootIdentity;
+} ArcRootIdentity;
 ```
 
-The self-signature label is `IRC-MLS/1 root identity`. For generation zero,
+The self-signature label is `ARC-MLS/1 root identity`. For generation zero,
 the previous fingerprint is all zero and the continuity signature is empty.
 Every successor increments generation by exactly one. For every later
 generation, `continuity_signature` is an old-root signature over the same TBS
-with label `IRC-MLS/1 root continuity`, and has length 64.
+with label `ARC-MLS/1 root continuity`, and has length 64.
 Any other encoding is invalid.
 
 The semantic descriptor and fingerprint are:
@@ -685,9 +683,9 @@ struct {
     uint64 not_before;
     uint64 not_after;
     opaque previous_root_fingerprint[32];
-} IrcRootDescriptor;
+} ArcRootDescriptor;
 
-SHA256("IRC-MLS/1 root fingerprint" || encoded_IrcRootDescriptor)
+SHA256("ARC-MLS/1 root fingerprint" || encoded_ArcRootDescriptor)
 ```
 
 The descriptor repeats every root TBS field, so its fingerprint cannot be
@@ -725,13 +723,13 @@ struct {
     opaque device_authorization_key[32];
     uint64 issued_at;
     uint64 expires_at;
-} IrcDeviceEnrollmentTBS;
+} ArcDeviceEnrollmentTBS;
 
 struct {
-    IrcDeviceEnrollmentTBS tbs;
+    ArcDeviceEnrollmentTBS tbs;
     opaque new_device_signature[64];
     opaque root_signature[64];
-} IrcDeviceEnrollment;
+} ArcDeviceEnrollment;
 
 struct {
     uint16 profile_version;
@@ -748,26 +746,26 @@ struct {
     uint32 authorization_flags;
     uint64 not_before;
     uint64 not_after;
-} IrcDeviceCertificateTBS;
+} ArcDeviceCertificateTBS;
 
 struct {
-    IrcDeviceCertificateTBS tbs;
-    IrcDeviceEnrollment enrollment_proof;
+    ArcDeviceCertificateTBS tbs;
+    ArcDeviceEnrollment enrollment_proof;
     opaque root_signature[64];
-} IrcDeviceCertificate;
+} ArcDeviceCertificate;
 ```
 
 The root holder creates the 32-byte enrollment challenge and displays the
 exact network, account, target roster generation, Device ID, and device-key
 fingerprint for explicit user confirmation. The new device first proves
 possession by signing the enrollment TBS with label
-`IRC-MLS/1 device enrollment possession`; the root then signs the same TBS
-with label `IRC-MLS/1 device enrollment approval`. `enrollment_id` is the
+`ARC-MLS/1 device enrollment possession`; the root then signs the same TBS
+with label `ARC-MLS/1 device enrollment approval`. `enrollment_id` is the
 Section 2.2 TBS-only ID. The
 certificate copies the root generation, target roster generation, challenge,
 Device ID, device key, account, network, and root fingerprint exactly from
 `enrollment_proof`, and binds that proof's recomputed TBS-only ID. Its root
-signature uses label `IRC-MLS/1 device certificate`.
+signature uses label `ARC-MLS/1 device certificate`.
 
 `issued_at <= expires_at` and
 `expires_at - issued_at <= ENROLLMENT_CHALLENGE_TIMEOUT`. The challenge
@@ -783,7 +781,7 @@ checks the certificate and roster intervals against the candidate's canonical
 validation time. A client rejects a challenge, Device ID, certificate serial,
 or target generation already used under that root.
 The enrollment root generation and fingerprint must equal the supplied
-`IrcRootIdentity`; the certificate repeats both and the target roster repeats
+`ArcRootIdentity`; the certificate repeats both and the target roster repeats
 them again. Root generation zero may target initial roster generation zero.
 Every later new-device enrollment targets exactly the next roster generation
 after the client's pinned head. None of these values is inferred from mutable
@@ -804,15 +802,15 @@ therefore signs a complete, monotonic roster:
 ```text
 struct {
     opaque device_id[16];
-    IrcDeviceCertificate certificate;
-} IrcActiveDevice;
+    ArcDeviceCertificate certificate;
+} ArcActiveDevice;
 
 struct {
     opaque device_id[16];
     uint64 certificate_serial;
     uint64 revoked_in_generation;
     uint16 reason_code;
-} IrcDeviceRevocation;
+} ArcDeviceRevocation;
 
 struct {
     uint16 profile_version;
@@ -824,14 +822,14 @@ struct {
     uint64 not_before;
     uint64 not_after;
     opaque previous_roster_id[32];
-    IrcActiveDevice active_devices<0..65535>;
-    IrcDeviceRevocation revocations<0..65535>;
-} IrcDeviceRosterTBS;
+    ArcActiveDevice active_devices<0..65535>;
+    ArcDeviceRevocation revocations<0..65535>;
+} ArcDeviceRosterTBS;
 
 struct {
-    IrcDeviceRosterTBS tbs;
+    ArcDeviceRosterTBS tbs;
     opaque root_signature[64];
-} IrcDeviceRoster;
+} ArcDeviceRoster;
 ```
 
 Both vectors are canonical by Device ID; `(Device ID, certificate_serial)` is
@@ -848,7 +846,7 @@ roster. Absence means revoked even if an old certificate has not expired.
 Revocation entries are append-only within a root generation and are not
 silently compacted; approaching the vector bound requires a continuous root
 rotation and group ReInit.
-The roster signature label is `IRC-MLS/1 device roster`; its `roster_id` is
+The roster signature label is `ARC-MLS/1 device roster`; its `roster_id` is
 defined in Section 2.2 over the roster TBS. The root signature is mandatory
 evidence but does not change that ID.
 
@@ -908,17 +906,17 @@ struct {
     ExtensionType extensions<0..128>;
     ProposalType proposals<0..128>;
     CredentialType credentials<2..32>;
-} IrcDeviceCapabilitiesTBS;
+} ArcDeviceCapabilitiesTBS;
 
 struct {
-    IrcDeviceCapabilitiesTBS tbs;
+    ArcDeviceCapabilitiesTBS tbs;
     opaque device_signature[64];
-} IrcDeviceCapabilities;
+} ArcDeviceCapabilities;
 ```
 
 Vectors are canonical, duplicate-free numeric sets; policy preference lives in
-`IrcPolicy`, not their order. The signature label is
-`IRC-MLS/1 device capabilities`. A capability object is valid only for the
+`ArcPolicy`, not their order. The signature label is
+`ARC-MLS/1 device capabilities`. A capability object is valid only for the
 same highest roster in which the signing device is active. Its `capability_id`
 is defined in Section 2.2.
 Generation zero has an all-zero predecessor. Every successor increments by
@@ -957,22 +955,22 @@ struct {
     uint8 last_resort;                   // MUST be 0 in profile version 1
     uint64 not_before;
     uint64 not_after;
-} IrcLeafAuthorizationTBS;
+} ArcLeafAuthorizationTBS;
 
 struct {
-    IrcLeafAuthorizationTBS tbs;
+    ArcLeafAuthorizationTBS tbs;
     opaque device_signature[64];
-} IrcLeafAuthorization;
+} ArcLeafAuthorization;
 
 struct {
-    IrcRootIdentity root;
-    IrcDeviceCertificate device_certificate;
-    IrcLeafAuthorization leaf_authorization;
-} IrcCredentialBundle;
+    ArcRootIdentity root;
+    ArcDeviceCertificate device_certificate;
+    ArcLeafAuthorization leaf_authorization;
+} ArcCredentialBundle;
 ```
 
-The signature label is `IRC-MLS/1 leaf authorization`.
-`BasicCredential.identity` contains the exact `IrcCredentialBundle`. The
+The signature label is `ARC-MLS/1 leaf authorization`.
+`BasicCredential.identity` contains the exact `ArcCredentialBundle`. The
 authorization deliberately contains neither a future `group_id` nor a hash
 of the KeyPackage that contains it; either would make offline publication
 impossible or self-referential. The MLS KeyPackage signature already
@@ -999,7 +997,7 @@ authorizations is a fatal reuse error.
 A receiver validates the embedded root, device certificate, leaf
 authorization, the exact root-signed roster proof named by its generation and
 ID, lifetime, suite, version, exact LeafNode signature key, and
-`SHA256("IRC-MLS/1 leaf capabilities" || encoded_LeafNode_capabilities)`. It also verifies the
+`SHA256("ARC-MLS/1 leaf capabilities" || encoded_LeafNode_capabilities)`. It also verifies the
 normal RFC 9420 KeyPackage signature and `KeyPackageRef`. The KeyPackage
 top-level version and suite must equal the authorization and, for an Add, the
 current group. Credential bundles larger than `MAX_CREDENTIAL_BUNDLE` are
@@ -1014,7 +1012,7 @@ cross-group replay exception from the initial profile.
 The roster is deliberately not duplicated inside every ratchet-tree leaf. A
 KeyPackage claim is used only after fetching that exact roster, every Add
 Commit carries it once as the inline roster proposal in Section 9.3, and every
-Welcome carries it in `IrcJoinAuthBundle`. Missing roster bytes make a
+Welcome carries it in `ArcJoinAuthBundle`. Missing roster bytes make a
 candidate pending or blocked, never locally skippable. This keeps large group
 trees compact without trusting directory delivery.
 
@@ -1056,7 +1054,7 @@ On first contact, a client may pin a root using trust on first use, but it
 **MUST** mark the identity unverified. The safety-number and QR input is:
 
 ```text
-SHA256("IRC-MLS/1 safety number" || encoded_IrcRootDescriptor)
+SHA256("ARC-MLS/1 safety number" || encoded_ArcRootDescriptor)
 ```
 
 The UI displays the network and Account ID beside the number. A pairwise QR
@@ -1078,14 +1076,14 @@ state; it **MUST NOT** convert that state to Verified.
 A future normative profile must name its log format, inclusion and consistency
 proofs, maximum proof age, monitor behavior, persistent tree-head storage,
 gossip or independent witnesses, and state-loss recovery. A log operated only
-by the same malicious IRC service cannot prevent a permanent split view
+by the same malicious relay service cannot prevent a permanent split view
 without those mechanisms.
 
 ## 9. Conversation identity, policy, and group binding
 
 ### 9.1 Identifiers and route binding
 
-- `network_id` is a random 32-byte value created with the IRC network and
+- `network_id` is a random 32-byte value created with the ARC network and
   shared by every federation server. Clients pin it in network configuration;
   it is not derived only from a mutable hostname. It is durable and
   rollback-protected; replacing it creates a visibly new cryptographic network
@@ -1094,7 +1092,7 @@ without those mechanisms.
   **MUST NOT** be reused; the variable-length RFC 9420 encoding still carries
   those 32 bytes.
 - `conversation_id` is
-  `SHA256("IRC-MLS/1 conversation" || TLS-encode(network_id, group_id))`.
+  `SHA256("ARC-MLS/1 conversation" || TLS-encode(network_id, group_id))`.
 - `channel_instance_id` is a random 16-byte value allocated when a channel is
   created. Destroying and recreating a name creates a new instance.
 - `conversation_nonce` is a random 32-byte value generated by the coordinator
@@ -1117,9 +1115,9 @@ For a channel, `route_binding` is:
 struct {
     opaque network_id[32];
     opaque channel_instance_id[16];
-} IrcChannelRouteTBS;
+} ArcChannelRouteTBS;
 
-SHA256("IRC-MLS/1 channel route" || encoded_IrcChannelRouteTBS)
+SHA256("ARC-MLS/1 channel route" || encoded_ArcChannelRouteTBS)
 ```
 
 The current channel name is display and routing metadata. A supported rename
@@ -1131,16 +1129,16 @@ struct {
     opaque conversation_nonce[32];
     opaque account_id_a<1..255>;
     opaque account_id_b<1..255>;
-} IrcDirectRouteTBS;
+} ArcDirectRouteTBS;
 
-SHA256("IRC-MLS/1 direct route" || encoded_IrcDirectRouteTBS)
+SHA256("ARC-MLS/1 direct route" || encoded_ArcDirectRouteTBS)
 ```
 
 where Account IDs are in canonical bytewise order. Binary IRC parameters use
 unpadded base64url. Account IDs use base64url `account-token` parameters so
 Unicode, spaces, case mapping, and delimiters cannot alter command parsing.
 The semantic anti-fork route is the separately signed
-`IrcSemanticRouteTBS` in Section 9.4; neither a server-chosen channel instance
+`ArcSemanticRouteTBS` in Section 9.4; neither a server-chosen channel instance
 nor this fresh nonce can create another semantic lock slot.
 
 ### 9.2 Sequencer credential
@@ -1156,32 +1154,32 @@ struct {
     uint64 not_before;
     uint64 not_after;
     opaque previous_key_id[32];
-} IrcSequencerCredentialTBS;
+} ArcSequencerCredentialTBS;
 
 struct {
-    IrcSequencerCredentialTBS tbs;
+    ArcSequencerCredentialTBS tbs;
     opaque continuity_signature<0..64>;
-} IrcSequencerCredential;
+} ArcSequencerCredential;
 ```
 
 Its `sequencer_credential_id` (also called its key ID on the wire) is
-`SHA256("IRC-MLS/1 sequencer key" || encoded_IrcSequencerCredentialTBS)`.
+`SHA256("ARC-MLS/1 sequencer key" || encoded_ArcSequencerCredentialTBS)`.
 Generation zero has an all-zero previous ID and empty signature. Later
 credentials increment generation by exactly one, name the exact previous key
 ID, and require that previous sequencer key's 64-byte signature with label
-`IRC-MLS/1 sequencer continuity`. Every interval has
+`ARC-MLS/1 sequencer continuity`. Every interval has
 `not_before < not_after`; the new `not_before` lies within the old interval,
 and a receipt key must cover the Commit's canonical validation time.
 
-Version 1 uses one logical sequencer credential per IRC network and separate
+Version 1 uses one logical sequencer credential per ARC network and separate
 logs per conversation. The service may be replicated or sharded internally,
 but every shard produces one continuous signed record namespace under that
-credential. An individual edge IRCD does not invent a replacement key during
+credential. An individual edge ARCD does not invent a replacement key during
 failover.
 
 The federation key set contains at most the current credential and its direct
 successor, sorted by generation. Its monotonic set generation and
-`SHA256("IRC-MLS/1 sequencer key set" || TLS-encode(credential_ids))` are
+`SHA256("ARC-MLS/1 sequencer key set" || TLS-encode(credential_ids))` are
 the ECAP values. Overlap ends after every live group transitions or
 `MAX_SEQUENCER_KEY_OVERLAP`, whichever comes first; a group still pinned to the retired key then
 blocks rather than accepting receipts under another key.
@@ -1204,7 +1202,7 @@ reuse the active credential's public key, and membership in the advertised
 ECAP key set is a separate fact from credential identity: a set that names a
 credential neither proves possession of its private key nor changes any
 conversation's pin. The per-conversation pin is the `sequencer` credential of
-the conversation's current accepted `IrcMlsContext`. The finalized transition
+the conversation's current accepted `ArcMlsContext`. The finalized transition
 instant of a conversation is the finalization certificate of the
 GroupContextExtensions Commit whose resulting context names the successor.
 That Commit's candidate receipt, its disposition votes, and its finalization
@@ -1287,14 +1285,14 @@ phase does:
 ### 9.3 Canonical policy and roster transitions
 
 ```text
-enum { channel(1), direct(2) } IrcConversationKind;
-enum { open_visible(1), moderated(2), fixed_direct(3) } IrcMembershipPolicy;
+enum { channel(1), direct(2) } ArcConversationKind;
+enum { open_visible(1), moderated(2), fixed_direct(3) } ArcMembershipPolicy;
 
 struct {
     opaque root_fingerprint[32];
     opaque device_id[16];
     opaque device_certificate_id[32];
-} IrcFinalityPrincipal;
+} ArcFinalityPrincipal;
 
 struct {
     uint16 profile_version;
@@ -1302,34 +1300,34 @@ struct {
     opaque conversation_id[32];
     uint64 policy_generation;
     opaque previous_policy_id[32];
-    IrcConversationKind kind;
-    IrcMembershipPolicy membership_policy;
+    ArcConversationKind kind;
+    ArcMembershipPolicy membership_policy;
     ProtocolVersion mls_version;
     CipherSuite selected_suite;
     CipherSuite allowed_suites<2..32>;
     opaque controller_root_fingerprints<0..2048>;
     uint16 controller_threshold;
-    IrcFinalityPrincipal finality_principals<80..5120>;
+    ArcFinalityPrincipal finality_principals<80..5120>;
     uint16 finality_fault_bound;
     uint8 require_oob_verified_roots;
     uint16 max_devices_per_account;
     uint32 max_group_leaves;
-} IrcPolicyTBS;
+} ArcPolicyTBS;
 
 struct {
     opaque signer_root_fingerprint[32];
     opaque signer_device_id[16];
     opaque signer_device_certificate_id[32];
     opaque device_signature[64];
-} IrcPolicyApproval;
+} ArcPolicyApproval;
 
 struct {
-    IrcPolicyTBS tbs;
-    IrcPolicyApproval approvals<144..16384>;
-} IrcPolicy;
+    ArcPolicyTBS tbs;
+    ArcPolicyApproval approvals<144..16384>;
+} ArcPolicy;
 ```
 
-The `policy_id` is defined in Section 2.2 over `IrcPolicyTBS`. Its network and
+The `policy_id` is defined in Section 2.2 over `ArcPolicyTBS`. Its network and
 conversation IDs must equal the bound MLS group, so even a byte-identical role
 configuration cannot be replayed into another conversation. Controller fingerprints
 are concatenated 32-byte values in canonical order. Approvals are canonical
@@ -1376,7 +1374,7 @@ finalizer requires at least four independently protected council devices.
 
 `signer_device_certificate_id` is the Section 2.2
 `device_certificate_id` recomputed from the exact certificate TBS.
-Each approval signs `IrcPolicyTBS` with label `IRC-MLS/1 policy approval` and
+Each approval signs `ArcPolicyTBS` with label `ARC-MLS/1 policy approval` and
 is made by a device present in the named highest roster whose root-signed
 certificate grants policy authority. The initial fixed-direct policy needs one
 approval under each of the two bound roots. An initial moderated channel policy needs its declared
@@ -1395,7 +1393,7 @@ generation-zero root locks and renewed verification, not an unauthenticated
 checkpoint.
 
 Policy bytes are never sent as an application message. The complete new
-`IrcPolicy` is inside the replacement context extension described below, and
+`ArcPolicy` is inside the replacement context extension described below, and
 that Commit-bound copy is the one endpoints enforce. The identical canonical
 bytes are also published to the server as a public `policy` object with
 `EGROUP SUBMIT POLICY` (Section 11.5) so the sequencer can verify finality
@@ -1431,7 +1429,7 @@ candidate gets one candidate-specific authorization:
 enum {
     routine_self_update(1), open_visible_add(2), controlled_transition(3),
     roster_recovery(4), join_confirmation(5), bootstrap_activation(6)
-} IrcCommitAuthorizationRule;
+} ArcCommitAuthorizationRule;
 
 struct {
     uint16 profile_version;
@@ -1443,30 +1441,30 @@ struct {
     opaque commit_object_id[32];
     uint64 canonical_validation_time;
     opaque old_policy_id[32];
-    IrcCommitAuthorizationRule authorization_rule;
+    ArcCommitAuthorizationRule authorization_rule;
     uint32 action_bits;
     opaque resulting_policy_id[32];
     opaque resulting_group_context_digest[32];
     opaque resulting_ratchet_tree_digest[32];
     opaque transition_target_digest[32];
-} IrcCommitAuthorizationTBS;
+} ArcCommitAuthorizationTBS;
 
 struct {
     opaque signer_root_fingerprint[32];
     opaque signer_device_id[16];
     opaque signer_device_certificate_id[32];
     opaque device_signature[64];
-} IrcCommitApproval;
+} ArcCommitApproval;
 
 struct {
-    IrcCommitAuthorizationTBS tbs;
-    IrcCommitApproval approvals<0..16384>;
-} IrcCommitAuthorization;
+    ArcCommitAuthorizationTBS tbs;
+    ArcCommitApproval approvals<0..16384>;
+} ArcCommitAuthorization;
 
 struct {
-    IrcCommitAuthorizationTBS tbs;
-    IrcCommitApproval approval;
-} IrcCommitApprovalEnvelope;
+    ArcCommitAuthorizationTBS tbs;
+    ArcCommitApproval approval;
+} ArcCommitApprovalEnvelope;
 ```
 
 `action_bits` is derived mechanically from the decoded Commit and old and
@@ -1499,7 +1497,7 @@ assigned a best-fit label.
 The authorization is a separate post-receipt proof object; it is never inside
 the MLS Commit or its AAD. Its candidate and Commit object IDs therefore do
 not create a content-hash cycle. Each approval signs the authorization TBS with label
-`IRC-MLS/1 commit authorization`. The receipt and object ID bind the exact
+`ARC-MLS/1 commit authorization`. The receipt and object ID bind the exact
 encrypted Commit; the two result digests bind the fully parsed state that the
 approver reviewed. `transition_target_digest` is all zero except that a ReInit
 uses its `target_context_digest`, a same-group route migration uses the
@@ -1508,7 +1506,7 @@ resulting `binding_id`, and an active-to-closing transition uses the resulting
 action bit to any of them is invalid; each carries only its required inline
 Proposal, context replacement, and populated UpdatePath.
 `canonical_validation_time` **MUST** equal
-`IrcCommitAad.validation_time`. An approval credential must be active in the
+`ArcCommitAad.validation_time`. An approval credential must be active in the
 old context-committed roster, represented by an old leaf, and carry policy
 authority. Approvals are canonical and count at most one device per controller
 root or public key. Before signing, an honest controller device durably locks the
@@ -1519,7 +1517,7 @@ needs no controller approval, but every endpoint still validates the exact Add
 and the finality council attests that validation. A `roster_recovery` uses the
 narrow root-signed successor rule in Section 8.4 and the finality quorum;
 expired controller credentials do not gain general approval authority.
-Every finalization proof carries exactly one `IrcCommitAuthorization`. Its TBS
+Every finalization proof carries exactly one `ArcCommitAuthorization`. Its TBS
 is derived from the candidate receipt, Commit AAD, decoded Commit, and fully
 staged result; every endpoint recomputes every field. The finalization core
 commits its semantic ID, so action bits and result digests cannot be swapped
@@ -1540,8 +1538,8 @@ Device-roster changes use private-use proposal type `0xF1C2`,
 
 ```text
 struct {
-    IrcDeviceRoster roster;
-} IrcDeviceRosterUpdate;
+    ArcDeviceRoster roster;
+} ArcDeviceRosterUpdate;
 ```
 
 The proposal is always inline and doubles as a roster proof. Every Commit with
@@ -1558,7 +1556,7 @@ successor. The custom proposal and context extension are
 both listed in MLS `required_capabilities`.
 
 Every roster reaffirmation or update is accompanied by an inline
-GroupContextExtensions proposal whose resulting `IrcMlsContext.roster_heads`
+GroupContextExtensions proposal whose resulting `ArcMlsContext.roster_heads`
 names the exact roster generation and ID. The roster Proposal, required
 Removes or Adds, and context-head replacement are one atomic candidate. A
 roster object carried only in GroupInfo or directory metadata never changes
@@ -1571,12 +1569,12 @@ Policy meanings are:
   every server-reported JOIN is forbidden.
 - `moderated`: the encrypted controller threshold authorizes membership,
   role, policy, route, and recovery changes. This is the default for a group
-  claiming resistance to a malicious IRC operator.
+  claiming resistance to a malicious relay operator.
 - `fixed_direct`: leaves resolve to exactly the two bound continuous account
   roots; one valid policy approval from each side is required for membership
   and policy changes.
 
-IRC operator status has no cryptographic controller authority. Operators can
+relay operator status has no cryptographic controller authority. Operators can
 still deny service, kick at the IRC layer, or censor ciphertext.
 
 ### 9.4 Binding authorization
@@ -1590,11 +1588,11 @@ struct {
     opaque root_fingerprint[32];
     opaque device_id[16];
     opaque capability_id[32];
-} IrcInitialMemberPlanEntry;
+} ArcInitialMemberPlanEntry;
 
 struct {
-    IrcInitialMemberPlanEntry entries<1..1048576>;
-} IrcInitialMemberPlan;
+    ArcInitialMemberPlanEntry entries<1..1048576>;
+} ArcInitialMemberPlan;
 
 struct {
     opaque account_id<1..255>;
@@ -1605,23 +1603,23 @@ struct {
     SignatureScheme leaf_signature_scheme;
     opaque leaf_signature_key_digest[32];
     uint8 creator;
-} IrcKeyPackagePlanEntry;
+} ArcKeyPackagePlanEntry;
 
 struct {
-    IrcKeyPackagePlanEntry entries<1..1048576>;
-} IrcKeyPackagePlan;
+    ArcKeyPackagePlanEntry entries<1..1048576>;
+} ArcKeyPackagePlan;
 
 struct {
     uint16 profile_version;
     opaque network_id[32];
-    IrcConversationKind kind;
+    ArcConversationKind kind;
     opaque direct_account_a<0..24>;
     opaque direct_account_b<0..24>;
     opaque canonical_channel_name<0..255>;
     opaque channel_authority_root_fingerprint[32];
     uint64 semantic_incarnation;
     opaque predecessor_close_id[32];
-} IrcSemanticRouteTBS;
+} ArcSemanticRouteTBS;
 
 struct {
     uint16 profile_version;
@@ -1630,7 +1628,7 @@ struct {
     opaque group_id<1..255>;
     opaque network_id[32];
     opaque conversation_id[32];
-    IrcConversationKind kind;
+    ArcConversationKind kind;
     opaque semantic_route_lock_id[32];
     opaque route_binding[32];
     uint64 initial_validation_time;
@@ -1640,22 +1638,22 @@ struct {
     opaque initial_member_plan_id[32];
     opaque sequencer_credential_id[32];
     opaque encoded_required_capabilities<1..65535>;
-} IrcContextCoreTBS;
+} ArcContextCoreTBS;
 
 struct {
     opaque account_id<1..255>;
     opaque root_fingerprint[32];
     uint64 roster_generation;
     opaque roster_id[32];
-} IrcBindingPrincipal;
+} ArcBindingPrincipal;
 
 struct {
     uint16 profile_version;
     opaque network_id[32];
-    IrcConversationKind kind;
+    ArcConversationKind kind;
     uint64 binding_generation;
     opaque previous_binding_id[32];
-    IrcSemanticRouteTBS semantic_route;
+    ArcSemanticRouteTBS semantic_route;
     opaque semantic_route_lock_id[32];
     opaque channel_instance_id<0..16>;
     opaque conversation_nonce<0..32>;
@@ -1669,20 +1667,20 @@ struct {
     opaque initial_member_plan_id[32];
     opaque context_core_id[32];
     opaque sequencer_credential_id[32];
-    IrcBindingPrincipal principals<1..65535>;
-} IrcConversationBindingTBS;
+    ArcBindingPrincipal principals<1..65535>;
+} ArcConversationBindingTBS;
 
 struct {
     opaque signer_root_fingerprint[32];
     opaque signer_device_id[16];
     opaque signer_device_certificate_id[32];
     opaque device_signature[64];
-} IrcBindingApproval;
+} ArcBindingApproval;
 
 struct {
-    IrcConversationBindingTBS tbs;
-    IrcBindingApproval approvals<0..65535>;
-} IrcConversationBinding;
+    ArcConversationBindingTBS tbs;
+    ArcBindingApproval approvals<0..65535>;
+} ArcConversationBinding;
 
 struct {
     uint16 profile_version;
@@ -1695,38 +1693,38 @@ struct {
     opaque binding_id[32];
     uint64 roster_generation;
     opaque roster_id[32];
-} IrcRootBindingLockTBS;
+} ArcRootBindingLockTBS;
 
 struct {
-    IrcRootBindingLockTBS tbs;
+    ArcRootBindingLockTBS tbs;
     opaque root_signature[64];
-} IrcRootBindingLock;
+} ArcRootBindingLock;
 
 struct {
-    IrcConversationBinding binding;
-    IrcInitialMemberPlan initial_member_plan;
-    IrcRootBindingLock root_binding_locks<0..65535>;
-} IrcConversationBindingPackage;
+    ArcConversationBinding binding;
+    ArcInitialMemberPlan initial_member_plan;
+    ArcRootBindingLock root_binding_locks<0..65535>;
+} ArcConversationBindingPackage;
 
 enum {
     root_locked_genesis(1), commit_finalized_transition(2),
     reinit_target_transition(3)
-} IrcBindingProofKind;
+} ArcBindingProofKind;
 
 struct {
-    IrcConversationBindingPackage package;
-    IrcBindingProofKind proof_kind;
-} IrcBindingChainEntry;
+    ArcConversationBindingPackage package;
+    ArcBindingProofKind proof_kind;
+} ArcBindingChainEntry;
 ```
 
-An approval signs the TBS with label `IRC-MLS/1 conversation binding` using a
+An approval signs the TBS with label `ARC-MLS/1 conversation binding` using a
 current device key authorized for bindings. `context_core_id` covers the MLS
 version, suite, group ID, complete `required_capabilities`, network, semantic
 and concrete routes, initial validation time, bootstrap and required
 operational policy IDs, exact initial member plan, and sequencer credential ID
 using the Section 2.2 formula. It excludes approvals that would otherwise be
 circular. The binding ID is likewise the Section 2.2 TBS-only ID.
-The transport always carries `IrcConversationBindingPackage`; verifiers
+The transport always carries `ArcConversationBindingPackage`; verifiers
 recompute its plan ID before considering the approvals.
 For a channel binding, `channel_instance_id` is exactly 16 bytes and
 `conversation_nonce` is empty; for a direct binding, the instance is empty and
@@ -1756,7 +1754,7 @@ planned device is an active, non-pending leaf and no unplanned device exists.
 This permits a failed Add to be retried with fresh key material without asking
 account roots to sign a different semantic conversation.
 
-An `IrcKeyPackagePlan` is attempt-specific. It is canonical by the same device
+An `ArcKeyPackagePlan` is attempt-specific. It is canonical by the same device
 tuple, has exactly one `creator=1` entry with an empty KeyPackageRef, and every
 other entry has `creator=0` and a fresh, reserved KeyPackageRef. Its device set
 and capability IDs must equal the applicable semantic plan. Each leaf-key
@@ -1778,9 +1776,9 @@ On first contact a malicious service can still substitute an entirely
 different channel-authority root; that is the identity-substitution limit in
 Section 4. Verified mode requires the authority root to be pinned out of band.
 
-It additionally requires one `IrcRootBindingLock` from every principal root.
+It additionally requires one `ArcRootBindingLock` from every principal root.
 `semantic_route_lock_id` is
-`SHA256("IRC-MLS/1 semantic route lock" || encoded_IrcSemanticRouteTBS)`.
+`SHA256("ARC-MLS/1 semantic route lock" || encoded_ArcSemanticRouteTBS)`.
 For a direct conversation, the two Account IDs are canonical and non-empty;
 the channel name is empty, and the channel-authority fingerprint is all zero.
 For a channel, the canonical channel name and a nonzero, locally pinned
@@ -1800,7 +1798,7 @@ sequence zero uses an all-zero predecessor; every later lock increments by one
 and names the prior
 Section 2.2 `root_binding_lock_id`.
 It signs with label
-`IRC-MLS/1 root binding lock` and **MUST NOT** sign two binding IDs for
+`ARC-MLS/1 root binding lock` and **MUST NOT** sign two binding IDs for
 one semantic route lock. For a generation-zero binding the package contains
 exactly one canonical lock per principal, and each lock names that principal's
 exact roster head. A later binding continued by an old-group-finalized route
@@ -1835,7 +1833,7 @@ migration is instead authorized and finalized inside the existing group,
 increments the binding generation, and names the exact old binding ID.
 Same-name channel instances never imply the same binding.
 
-`IrcBindingChainEntry` makes that continuity available to a later joiner. A
+`ArcBindingChainEntry` makes that continuity available to a later joiner. A
 genesis entry validates its approvals and root locks. A same-group entry is
 authorized by the exact retained finalization object whose verified result
 contains that binding. A ReInit entry is first authorized by the finalized old
@@ -1844,7 +1842,7 @@ that binding, and becomes live only when a later matching activation
 certificate finalizes one attempt for that target and binding.
 
 Those post-Commit record and object IDs are deliberately absent from
-`IrcBindingChainEntry`: the chain is inside GroupInfo and therefore must be
+`ArcBindingChainEntry`: the chain is inside GroupInfo and therefore must be
 known before the Commit, receipt, finalization, and ReInit activation exist.
 The typed Welcome wrapper carries the exact external proof references defined
 below. A verifier fetches every referenced object, recomputes its semantic
@@ -1855,7 +1853,7 @@ is gapless, oldest-to-newest, and ends at the context's current binding.
 ### 9.5 Required MLS context extension
 
 Every group carries private-use extension `0xF1C1`,
-`IRC_MLS_CONTEXT_EXTENSION`, and lists it, join extension `0xF1C3`, and
+`ARC_MLS_CONTEXT_EXTENSION`, and lists it, join extension `0xF1C3`, and
 proposal `0xF1C2` in `required_capabilities`:
 
 ```text
@@ -1865,88 +1863,88 @@ struct {
     opaque root_fingerprint[32];
     uint64 roster_generation;
     opaque roster_id[32];
-} IrcRosterHead;
+} ArcRosterHead;
 
 struct {
     uint32 leaf_index;
     opaque key_package_ref<1..255>;
-} IrcPendingJoin;
+} ArcPendingJoin;
 
 struct {
     uint16 reason_code;
     uint64 validation_time;
-} IrcCloseIntent;
+} ArcCloseIntent;
 
 enum { active_conversation(1), closing_conversation(2) }
-    IrcConversationLifecycleKind;
+    ArcConversationLifecycleKind;
 
 struct {
-    IrcConversationLifecycleKind kind;
+    ArcConversationLifecycleKind kind;
     opaque close_intent_id[32];           // zero only while active
-} IrcConversationLifecycle;
+} ArcConversationLifecycle;
 
 struct {
     opaque account_id<1..255>;
-    IrcRootIdentity roots<1..1048576>;
-} IrcAccountRootChain;
+    ArcRootIdentity roots<1..1048576>;
+} ArcAccountRootChain;
 
 enum {
     policy_root_locked_genesis(1), policy_commit_finalized_transition(2),
     policy_reinit_target_transition(3)
-} IrcPolicyProofKind;
+} ArcPolicyProofKind;
 
 struct {
-    IrcPolicy policy;
-    IrcPolicyProofKind proof_kind;
-} IrcPolicyChainEntry;
+    ArcPolicy policy;
+    ArcPolicyProofKind proof_kind;
+} ArcPolicyChainEntry;
 
 enum { binding_subject(1), policy_subject(2) }
-    IrcJoinTransitionSubject;
+    ArcJoinTransitionSubject;
 
 enum {
     finalized_group_transition(1), reinit_target_authorization(2),
     reinit_activation(3)
-} IrcJoinTransitionProofRole;
+} ArcJoinTransitionProofRole;
 
 struct {
-    IrcJoinTransitionSubject subject_kind;
+    ArcJoinTransitionSubject subject_kind;
     opaque subject_id[32];
-    IrcJoinTransitionProofRole proof_role;
+    ArcJoinTransitionProofRole proof_role;
     opaque record_conversation_id[32];
     opaque authorizing_record_id[32];
     opaque authorizing_object_id[32];
-} IrcJoinTransitionProofReference;
+} ArcJoinTransitionProofReference;
 
 struct {
-    IrcJoinTransitionProofReference references<0..262144>;
-} IrcJoinTransitionProofBundle;
+    ArcJoinTransitionProofReference references<0..262144>;
+} ArcJoinTransitionProofBundle;
 
 struct {
     uint16 profile_version;
     opaque network_id[32];
     opaque conversation_id[32];
-    IrcConversationKind kind;
+    ArcConversationKind kind;
     opaque route_binding[32];
     uint64 initial_validation_time;
-    IrcPolicy policy;
-    IrcSequencerCredential sequencer;
-    IrcConversationBinding current_binding;
-    IrcConversationLifecycle lifecycle;
+    ArcPolicy policy;
+    ArcSequencerCredential sequencer;
+    ArcConversationBinding current_binding;
+    ArcConversationLifecycle lifecycle;
     opaque private_topic<0..4096>;
     uint8 bootstrap_pending;
-    IrcRosterHead roster_heads<1..65535>;
-    IrcPendingJoin pending_joins<0..65535>;
-} IrcMlsContext;
+    ArcRosterHead roster_heads<1..65535>;
+    ArcPendingJoin pending_joins<0..65535>;
+} ArcMlsContext;
 
 struct {
-    IrcAccountRootChain root_chains<1..1048576>;
-    IrcBindingChainEntry binding_chain<1..1048576>;
-    IrcPolicyChainEntry policy_chain<1..1048576>;
-    IrcDeviceRoster roster_chain<1..3145728>;
-} IrcJoinAuthBundle;
+    ArcAccountRootChain root_chains<1..1048576>;
+    ArcBindingChainEntry binding_chain<1..1048576>;
+    ArcPolicyChainEntry policy_chain<1..1048576>;
+    ArcDeviceRoster roster_chain<1..3145728>;
+} ArcJoinAuthBundle;
 ```
 
-`IrcJoinAuthBundle` is GroupInfo extension `0xF1C3`,
+`ArcJoinAuthBundle` is GroupInfo extension `0xF1C3`,
 `IRC_JOIN_AUTH_BUNDLE_EXTENSION`. Root chains are canonical and
 duplicate-free by Account ID. Each is strictly consecutive, verifies every
 root-continuity signature, and ends at the exact root referenced by current
@@ -1957,25 +1955,25 @@ a directory jump.
 
 The binding chain follows Section 9.4, includes the complete generation-zero
 binding package and semantic member plan, and ends at bytes exactly equal to
-`current_binding`. Its concrete route equals `IrcMlsContext.route_binding`.
+`current_binding`. Its concrete route equals `ArcMlsContext.route_binding`.
 The policy chain is oldest-to-newest and begins at the original
 generation-zero policy authenticated by the root-locked genesis binding. That
 entry has `policy_root_locked_genesis`. Within one MLS group it has no
 generation gap. Every later in-group entry has
 `policy_commit_finalized_transition` and exactly one matching
 `finalized_group_transition` proof reference in the Welcome wrapper. The
-referenced `IrcCommitFinalizationCertificate` must recompute to the stated
+referenced `ArcCommitFinalizationCertificate` must recompute to the stated
 record ID, and its verified authorization and resulting context must name the
 entry's exact policy ID.
 
 A reset to generation zero is legal only at a `reinit_target_transition` in
 the binding chain. Its policy entry has `policy_reinit_target_transition` and
-must match the policy inside the exact reconstructed `IrcReInitTargetTBS`. The
+must match the policy inside the exact reconstructed `ArcReInitTargetTBS`. The
 preceding entry is the old terminal policy used to verify the old ReInit
 Commit. The wrapper supplies a `reinit_target_authorization` reference to that
 Commit's finalization certificate and, once the successor is live, a
 `reinit_activation` reference to the matching activation certificate. A
-preactivation `IrcStagedReInit` omits only that not-yet-created activation
+preactivation `ArcStagedReInit` omits only that not-yet-created activation
 reference; the recipient remains staged until it later verifies the
 certificate. The chain ends at bytes exactly equal to the policy in
 GroupContext.
@@ -1986,11 +1984,11 @@ contains exactly the references required by every non-genesis chain entry.
 `record_conversation_id` identifies the log used by `EGROUP FETCH OBJECT` and
 must equal the conversation ID inside the fetched record; that record's
 network ID must equal the wrapper and bound context. The object ID is the hash
-of the complete fetched `IrcWireObject`, and the semantic record ID is
+of the complete fetched `ArcWireObject`, and the semantic record ID is
 recomputed from its TBS. `finalized_group_transition` requires an
-`IrcCommitFinalizationCertificate`; `reinit_target_authorization` requires the
-old ReInit Commit's `IrcCommitFinalizationCertificate`; and
-`reinit_activation` requires an `IrcReInitActivationCertificate`. No other
+`ArcCommitFinalizationCertificate`; `reinit_target_authorization` requires the
+old ReInit Commit's `ArcCommitFinalizationCertificate`; and
+`reinit_activation` requires an `ArcReInitActivationCertificate`. No other
 wire kind satisfies the role.
 
 A genesis entry has no reference. A same-group entry has exactly the
@@ -2024,10 +2022,10 @@ principal. The digest is recomputed from each authenticated root descriptor;
 collisions are fatal. A root discontinuity requires ReInit rather than a same-group head
 replacement.
 
-The canonical encoding of each `IrcPolicy` is at most `MAX_POLICY_BYTES`, the
+The canonical encoding of each `ArcPolicy` is at most `MAX_POLICY_BYTES`, the
 binding-chain vector is at most `MAX_BINDING_CHAIN_BYTES`, the policy-chain
 vector is at most `MAX_POLICY_CHAIN_BYTES`, and the complete
-`IrcMlsContext` extension is at most `MAX_IRC_MLS_CONTEXT_EXTENSION`.
+`ArcMlsContext` extension is at most `MAX_ARC_MLS_CONTEXT_EXTENSION`.
 Length-prefix maxima in the presentation structures never override these
 smaller profile limits.
 
@@ -2042,7 +2040,7 @@ becoming an ACK dependency in an unrelated transition.
 `lifecycle` begins active. The only permitted transition is active to closing,
 made by a controlled Commit that sets the close-intent action bit and carries
 a populated UpdatePath. `close_intent_id` is
-`SHA256("IRC-MLS/1 close intent id" || encoded_IrcCloseIntent)`. Reopening is
+`SHA256("ARC-MLS/1 close intent id" || encoded_ArcCloseIntent)`. Reopening is
 forbidden. Once that transition finalizes, endpoints stop all application and
 handshake sending and the server may install the corresponding encrypted
 tombstone through `EGROUP CLOSE`.
@@ -2060,7 +2058,7 @@ council and the resulting operational council. Resulting-council devices
 durably sign at most one bootstrap activation per binding ID, regardless of
 candidate history. Quorum intersection therefore prevents two creator-forked
 bootstrap histories from both becoming message-bearing conversations. BIND
-may reserve/enforce encrypted-only routing earlier, but the IRCD returns
+may reserve/enforce encrypted-only routing earlier, but the ARCD returns
 `E2EE_FINALITY_REQUIRED` for application traffic until this certificate.
 The private-use values are experiments, not IANA allocations, and must be
 replaced if standardized values are assigned.
@@ -2077,7 +2075,7 @@ arrival-order-dependent chat message.
 
 The complete policy is therefore atomic with the MLS GroupContext and its
 confirmation tag. A Welcome **MUST** contain the full `ratchet_tree` GroupInfo
-extension and the complete `IrcJoinAuthBundle` inside its encrypted GroupInfo.
+extension and the complete `ArcJoinAuthBundle` inside its encrypted GroupInfo.
 That bundle contains only trust material known when the Commit and Welcome are
 created. Later receipt, finalization, and activation references are carried
 beside the immutable Welcome in the typed delivery wrappers from Sections
@@ -2104,7 +2102,7 @@ enum {
     action(3),
     policy_notice(4),
     security_event(5)
-} IrcEncryptedContentType;
+} ArcEncryptedContentType;
 
 struct {
     uint16 profile_version;              // 1
@@ -2116,14 +2114,14 @@ struct {
     uint64 sender_sequence;
     opaque message_id[16];
     opaque sequencer_record_chain_head[32];
-    IrcEncryptedContentType content_type;
+    ArcEncryptedContentType content_type;
     opaque body<0..32768>;
     opaque zero_padding<0..65535>;
-} IrcEncryptedContent;
+} ArcEncryptedContent;
 ```
 
 `leaf_credential_generation` must equal the generation in the authenticated
-leaf's `IrcLeafAuthorizationTBS`; it is never accepted from message contents
+leaf's `ArcLeafAuthorizationTBS`; it is never accepted from message contents
 alone and is zero in version 1. `sender_sequence` is a persistent, monotonically increasing counter scoped to
 `(group_id, authenticated leaf signature key)`, across
 all epochs in which that leaf is retained. The first value is zero and each
@@ -2166,13 +2164,13 @@ struct {
     opaque conversation_id[32];
     opaque route_binding[32];
     opaque latest_state_id[32];
-} IrcApplicationAad;
+} ArcApplicationAad;
 ```
 
 `latest_state_id` is the exact accepted MLS-state anchor: the current
 finalization ID, or the binding's genesis/activation anchor before the first
 finalization. It is distinct from
-`IrcEncryptedContent.sequencer_record_chain_head`, which is the newest ordered
+`ArcEncryptedContent.sequencer_record_chain_head`, which is the newest ordered
 record the sender has observed and may temporarily name a pending candidate or
 abort. The AAD route fields equal the decrypted envelope and current context;
 any mismatch is fatal.
@@ -2187,7 +2185,7 @@ struct {
     opaque route_binding[32];
     uint64 validation_time;
     opaque prior_state_id[32];
-} IrcCommitAad;
+} ArcCommitAad;
 ```
 
 `validation_time` is application consensus input, not trustworthy wall-clock
@@ -2202,7 +2200,7 @@ use this one value.
 AAD is visible to the server. No private topic, nickname, reply text, account
 roster, or message body belongs in AAD.
 
-## 11. IRC capability and wire transport
+## 11. ARC capabilities and IRCv3 wire transport
 
 ### 11.1 Dependencies
 
@@ -2340,7 +2338,7 @@ agenc.ag/e2ee-receipt=v1.<candidate-id>.<receipt-bytes>
 
 Both variable fields are unpadded base64url; `candidate-id` is exactly 43
 characters and names the `candidate_id` defined in Section 12.2, while
-`receipt-bytes` is the exact encoded `IrcCandidateReceipt`. It appears only on
+`receipt-bytes` is the exact encoded `ArcCandidateReceipt`. It appears only on
 live-forwarded candidate part zero and must fit the 4094-byte server-added
 budget independently of the preserved client tags. Stored and fetched
 receipts are separate `SEQUENCER-RECORD` objects and never use this tag. A client
@@ -2366,9 +2364,9 @@ On a bound channel, the server rejects every user-originated `TAGMSG` that is
 not exactly this E2EE application-frame production, including a frame with an
 unrelated client-only tag. It also rejects plaintext `PRIVMSG` and `NOTICE`.
 The public IRC topic is fixed to the literal UTF-8 text
-`Encrypted channel - topic protected by IRC-MLS`; user `TOPIC` changes are
+`Encrypted channel - topic protected by ARC-MLS`; user `TOPIC` changes are
 rejected, and the authenticated private topic exists only in the committed
-`IrcMlsContext`. User-supplied `PART`, `KICK`, and `QUIT` reasons are never
+`ArcMlsContext`. User-supplied `PART`, `KICK`, and `QUIT` reasons are never
 forwarded onto a bound route: the server omits them or substitutes the fixed
 public text `encrypted conversation event`. Clients do not render either
 placeholder as authenticated conversation content.
@@ -2397,7 +2395,7 @@ Direct groups use the alphabetic extension command:
 
 `EDIRECT` routes to every current device session belonging to the two accounts
 bound to the conversation, including the submitting connection and the
-sender's other devices. An IRCD may
+sender's other devices. An ARCD may
 queue complete opaque objects for offline delivery under a bounded retention
 policy.
 
@@ -2429,17 +2427,17 @@ enum {
     federation_request(31), federation_result(32), federation_event(33),
     policy(34), recovery_submission(35), witness_resolution(36),
     leaf_membership_proof(37)
-} IrcWireObjectKind;
+} ArcWireObjectKind;
 
 struct {
     uint16 profile_version;
-    IrcWireObjectKind kind;
+    ArcWireObjectKind kind;
     opaque body<1..4194298>;
-} IrcWireObject;
+} ArcWireObject;
 ```
 
 `body` is exactly one TLS encoding of the type named in the matrix below, with
-no trailing byte. `object-id` hashes the complete encoded `IrcWireObject`.
+no trailing byte. `object-id` hashes the complete encoded `ArcWireObject`.
 Cheap envelope kind and length validation occurs before storage or MLS
 processing. An object on any other carrier is rejected; in particular, a
 Commit sent as ordinary channel `TAGMSG` or `EDIRECT` application traffic
@@ -2449,41 +2447,41 @@ never reaches fanout or sequencing.
 | --- | --- | ---: | --- | --- |
 | bound-channel `TAGMSG` / `EDIRECT` | `application_mls`: one MLS `PrivateMessage` with `application` content | `MAX_APPLICATION_MLS_OBJECT` | attached, roster-active bound device; endpoint leaf auth | exact live echo/fanout |
 | `EGROUP SUBMIT CANDIDATE` | `commit_mls`: one MLS `PrivateMessage` with `commit` content | `MAX_LIVE_OBJECT` | attached, roster-active bound device; endpoint leaf auth | candidate echo plus receipt |
-| `EGROUP SUBMIT AUTHORIZATION` | `commit_approval`: `IrcCommitApprovalEnvelope` | `MAX_COMMIT_APPROVAL_OBJECT` | attached device matching approval signer | `STORED` |
-| `EGROUP SUBMIT ACK` | `commit_ack`: `IrcCommitAck` | `MAX_COMMIT_ACK_OBJECT` | attached device matching signer | `ACKED` |
-| `EGROUP SUBMIT FINALIZATION` | `finalization_request`: `IrcFinalizationRequest` | `MAX_FINALIZATION_OBJECT` | attached roster-active device; the server certifies only at the retained old policy's quorum, and endpoint quorum checks remain authoritative | `FINALIZED` or `PENDING` |
-| `EGROUP SUBMIT ABORT` | `abort_request`: `IrcAbortRequest` | `MAX_ABORT_OBJECT` | attached roster-active device; the server certifies only at the retained old policy's quorum, and endpoint quorum checks remain authoritative | `ABORTED` or `PENDING` |
-| `EGROUP SUBMIT REINIT ATTEMPT` | `reinit_attempt`: `IrcReInitAttempt` | `MAX_REINIT_OBJECT` | attached old-group device | `REINIT-STAGED` or `PENDING` |
-| `EGROUP SUBMIT REINIT ACK` | `reinit_ack`: `IrcReInitAck` | `MAX_REINIT_ACK_OBJECT` | attached device matching signer | `REINIT-ACKED` |
-| `EGROUP SUBMIT REINIT ACTIVATE` | `reinit_activation_request`: `IrcReInitActivationRequest` | `MAX_REINIT_OBJECT` | attached continuing old-group device | `REINIT-ACTIVATED` or `PENDING` |
-| `EGROUP SUBMIT REINIT ABORT` | `reinit_abort_request`: `IrcReInitAbortRequest` | `MAX_REINIT_OBJECT` | attached old-group device | `REINIT-ABORTED` or `PENDING` |
-| `EGROUP SUBMIT POLICY` | `policy`: `IrcPolicy` | `MAX_POLICY_OBJECT` | attached, roster-active bound device; approvals verified against retained rosters and the binding's policy chain | `STORED POLICY` |
-| `EGROUP SUBMIT MEMBERSHIP` | `leaf_membership_proof`: `IrcLeafMembershipProof` | `MAX_LEAF_MEMBERSHIP_OBJECT` | attached device whose Device ID equals the proof's and whose account is a principal of the current binding | `STORED MEMBERSHIP` |
-| `EGROUP SUBMIT RECOVERY` | `recovery_submission`: `IrcRecoverySubmission` | `MAX_RECOVERY_SUBMISSION_OBJECT` | attached device of a binding-principal account while the Section 13.7.1 gate is `pending` | `RECOVERY-ACCEPTED` |
+| `EGROUP SUBMIT AUTHORIZATION` | `commit_approval`: `ArcCommitApprovalEnvelope` | `MAX_COMMIT_APPROVAL_OBJECT` | attached device matching approval signer | `STORED` |
+| `EGROUP SUBMIT ACK` | `commit_ack`: `ArcCommitAck` | `MAX_COMMIT_ACK_OBJECT` | attached device matching signer | `ACKED` |
+| `EGROUP SUBMIT FINALIZATION` | `finalization_request`: `ArcFinalizationRequest` | `MAX_FINALIZATION_OBJECT` | attached roster-active device; the server certifies only at the retained old policy's quorum, and endpoint quorum checks remain authoritative | `FINALIZED` or `PENDING` |
+| `EGROUP SUBMIT ABORT` | `abort_request`: `ArcAbortRequest` | `MAX_ABORT_OBJECT` | attached roster-active device; the server certifies only at the retained old policy's quorum, and endpoint quorum checks remain authoritative | `ABORTED` or `PENDING` |
+| `EGROUP SUBMIT REINIT ATTEMPT` | `reinit_attempt`: `ArcReInitAttempt` | `MAX_REINIT_OBJECT` | attached old-group device | `REINIT-STAGED` or `PENDING` |
+| `EGROUP SUBMIT REINIT ACK` | `reinit_ack`: `ArcReInitAck` | `MAX_REINIT_ACK_OBJECT` | attached device matching signer | `REINIT-ACKED` |
+| `EGROUP SUBMIT REINIT ACTIVATE` | `reinit_activation_request`: `ArcReInitActivationRequest` | `MAX_REINIT_OBJECT` | attached continuing old-group device | `REINIT-ACTIVATED` or `PENDING` |
+| `EGROUP SUBMIT REINIT ABORT` | `reinit_abort_request`: `ArcReInitAbortRequest` | `MAX_REINIT_OBJECT` | attached old-group device | `REINIT-ABORTED` or `PENDING` |
+| `EGROUP SUBMIT POLICY` | `policy`: `ArcPolicy` | `MAX_POLICY_OBJECT` | attached, roster-active bound device; approvals verified against retained rosters and the binding's policy chain | `STORED POLICY` |
+| `EGROUP SUBMIT MEMBERSHIP` | `leaf_membership_proof`: `ArcLeafMembershipProof` | `MAX_LEAF_MEMBERSHIP_OBJECT` | attached device whose Device ID equals the proof's and whose account is a principal of the current binding | `STORED MEMBERSHIP` |
+| `EGROUP SUBMIT RECOVERY` | `recovery_submission`: `ArcRecoverySubmission` | `MAX_RECOVERY_SUBMISSION_OBJECT` | attached device of a binding-principal account while the Section 13.7.1 gate is `pending` | `RECOVERY-ACCEPTED` |
 | `EGROUP SUBMIT RECOVERY-ELEMENT` | the kind named by the accepted submission: `sequencer_record`, `close_authorization`, or the referenced object's existing kind | that kind's existing limit | the submitting device of the named open submission | `RECOVERY-EXTENDED`, `RECOVERY-CLOSED`, or `RECOVERY-CONFLICT` |
-| `EGROUP BIND` | `conversation_binding`: `IrcConversationBindingPackage` | `MAX_BINDING_OBJECT` | reservation owner and complete binding approvals | `BOUND` |
-| `EGROUP CLOSE` | `close_authorization`: `IrcCloseAuthorization` | `MAX_CLOSE_OBJECT` | old-policy authorization and finality reference | `CLOSED` |
-| `EKEY PUBLISH IDENTITY` | `root_identity`: `IrcRootIdentity` | `MAX_IDENTITY_OBJECT` | same authenticated Account ID | `STORED` |
-| `EKEY PUBLISH ROSTER` | `device_roster`: `IrcDeviceRoster` | `MAX_ROSTER_OBJECT` | same authenticated Account ID | `STORED` |
-| `EKEY PUBLISH CAPABILITIES` | `device_capabilities`: `IrcDeviceCapabilities` | `MAX_CAPABILITY_OBJECT` | attached matching Device ID | `STORED` |
+| `EGROUP BIND` | `conversation_binding`: `ArcConversationBindingPackage` | `MAX_BINDING_OBJECT` | reservation owner and complete binding approvals | `BOUND` |
+| `EGROUP CLOSE` | `close_authorization`: `ArcCloseAuthorization` | `MAX_CLOSE_OBJECT` | old-policy authorization and finality reference | `CLOSED` |
+| `EKEY PUBLISH IDENTITY` | `root_identity`: `ArcRootIdentity` | `MAX_IDENTITY_OBJECT` | same authenticated Account ID | `STORED` |
+| `EKEY PUBLISH ROSTER` | `device_roster`: `ArcDeviceRoster` | `MAX_ROSTER_OBJECT` | same authenticated Account ID | `STORED` |
+| `EKEY PUBLISH CAPABILITIES` | `device_capabilities`: `ArcDeviceCapabilities` | `MAX_CAPABILITY_OBJECT` | attached matching Device ID | `STORED` |
 | `EKEY PUBLISH PACKAGE` | `key_package_mls`: one MLS `KeyPackage` | `MAX_KEY_PACKAGE_OBJECT` | attached matching Device ID | `STORED` |
 | `EKEY REVOKE PACKAGE` | no object; exact KeyPackageRef parameter | none | attached matching publishing Device ID | `REVOKED` |
-| `EKEY DELIVER BINDING` | `conversation_binding`: `IrcConversationBindingPackage` | `MAX_BINDING_OBJECT` | approved binding participant | `STORED` |
-| `EKEY DELIVER WELCOME` | `welcome_mls`: `IrcDeliveredWelcome`, or `staged_reinit`: `IrcStagedReInit` | `MAX_WELCOME_MAILBOX_OBJECT` | finalized conversation member | `STORED` |
-| `EKEY ATTACH FINISH` | `device_attach`: `IrcDeviceAttach` | `MAX_DEVICE_ATTACH_OBJECT` | same authenticated Account ID and challenge | `ATTACHED` |
+| `EKEY DELIVER BINDING` | `conversation_binding`: `ArcConversationBindingPackage` | `MAX_BINDING_OBJECT` | approved binding participant | `STORED` |
+| `EKEY DELIVER WELCOME` | `welcome_mls`: `ArcDeliveredWelcome`, or `staged_reinit`: `ArcStagedReInit` | `MAX_WELCOME_MAILBOX_OBJECT` | finalized conversation member | `STORED` |
+| `EKEY ATTACH FINISH` | `device_attach`: `ArcDeviceAttach` | `MAX_DEVICE_ATTACH_OBJECT` | same authenticated Account ID and challenge | `ATTACHED` |
 | `EKEY ACK MAILBOX` | no object; exact delivery token and object ID | none | attached target Device ID | `ACKED` |
 
 Response-only kinds have these one-to-one bodies: `reservation` is
-`IrcReservation`; `finalization_certificate` is
-`IrcCommitFinalizationCertificate`; `abort_certificate` is
-`IrcCommitAbortCertificate`; `root_identity_chain` is `IrcAccountRootChain`;
+`ArcReservation`; `finalization_certificate` is
+`ArcCommitFinalizationCertificate`; `abort_certificate` is
+`ArcCommitAbortCertificate`; `root_identity_chain` is `ArcAccountRootChain`;
 `reinit_activation_certificate` and `reinit_abort_certificate` are their
-exact named certificate types; `sequencer_record` is `IrcSequencerRecord`;
-`device_attach_challenge` is `IrcDeviceAttachChallenge`; and
-`root_binding_lock` is `IrcRootBindingLock`. S2S-only kinds map exactly to
-`IrcFederationRouteState`, `IrcFederationOrigin`, `IrcFederationRequest`,
-`IrcFederationResult`, `IrcFederationEvent`, and, for `witness_resolution`,
-the Section 12.5.1 `IrcFederationWitnessResolution`. No other type-to-kind
+exact named certificate types; `sequencer_record` is `ArcSequencerRecord`;
+`device_attach_challenge` is `ArcDeviceAttachChallenge`; and
+`root_binding_lock` is `ArcRootBindingLock`. S2S-only kinds map exactly to
+`ArcFederationRouteState`, `ArcFederationOrigin`, `ArcFederationRequest`,
+`ArcFederationResult`, `ArcFederationEvent`, and, for `witness_resolution`,
+the Section 12.5.1 `ArcFederationWitnessResolution`. No other type-to-kind
 mapping is legal; each S2S control envelope is bounded by
 `MAX_FEDERATION_CONTROL_OBJECT` and transports any larger payload as its
 separately bounded referenced object. `reservation` uses
@@ -2494,7 +2492,7 @@ finalization, abort, or ReInit limit; and `sequencer_record` uses
 `MAX_SEQUENCER_RECORD_OBJECT`. The smaller 4,190,000-byte terminal bound leaves
 space for the tagged-union record wrapper inside the 4,194,304-byte record
 limit. Every `MAX_*_OBJECT` in this document measures the complete encoded
-`IrcWireObject`, including its six-byte version/kind/vector envelope, never
+`ArcWireObject`, including its six-byte version/kind/vector envelope, never
 only `body`.
 
 Profile version 1 accepts no standalone MLS Proposal object. A standalone
@@ -2552,11 +2550,11 @@ struct {
     uint16 profile_version;
     opaque network_id[32];
     opaque reservation_id[16];
-    IrcConversationKind kind;
+    ArcConversationKind kind;
     opaque route_binding[32];
     opaque channel_instance_id<0..16>;
     opaque conversation_nonce<0..32>;
-    IrcSequencerCredential sequencer;
+    ArcSequencerCredential sequencer;
     uint32 application_object_limit;
     uint32 live_object_limit;
     uint32 key_package_object_limit;
@@ -2575,12 +2573,12 @@ struct {
     uint16 live_part_limit;
     uint16 mailbox_part_limit;
     uint64 expires_at;
-} IrcReservationTBS;
+} ArcReservationTBS;
 
 struct {
-    IrcReservationTBS tbs;
+    ArcReservationTBS tbs;
     opaque sequencer_signature[64];
-} IrcReservation;
+} ArcReservation;
 
 struct {
     uint16 profile_version;
@@ -2588,31 +2586,31 @@ struct {
     opaque conversation_id[32];
     opaque binding_id[32];
     opaque authorizing_terminal_id[32];
-    IrcCloseIntent close_intent;
+    ArcCloseIntent close_intent;
     opaque close_intent_id[32];
-} IrcCloseAuthorizationTBS;
+} ArcCloseAuthorizationTBS;
 
 struct {
-    IrcCloseAuthorizationTBS tbs;
-    IrcCommitApproval approvals<144..16384>;
-} IrcCloseAuthorization;
+    ArcCloseAuthorizationTBS tbs;
+    ArcCommitApproval approvals<144..16384>;
+} ArcCloseAuthorization;
 ```
 
 `channel_instance_id` has length 16 only for a channel and
 `conversation_nonce` has length 32 only for a direct reservation; the other
 field is empty. The sequencer signs a reservation with label
-`IRC-MLS/1 reservation`. Close approvals sign with label
-`IRC-MLS/1 close authorization`, satisfy the last finalized policy's
+`ARC-MLS/1 reservation`. Close approvals sign with label
+`ARC-MLS/1 close authorization`, satisfy the last finalized policy's
 controller rule, and reference the finalization ID of the exact in-group
 active-to-closing transition. The close intent and its ID must equal the
 resulting committed lifecycle value. The semantic close ID is
-`SHA256("IRC-MLS/1 close authorization id" ||
-encoded_IrcCloseAuthorizationTBS)`; approval subsets do not alter it.
+`SHA256("ARC-MLS/1 close authorization id" ||
+encoded_ArcCloseAuthorizationTBS)`; approval subsets do not alter it.
 Closing does not make a live channel plaintext-capable.
 
-A reservation returns the exact signed/typed `IrcReservation` object.
+A reservation returns the exact signed/typed `ArcReservation` object.
 `context-digest` is
-`SHA256("IRC-MLS/1 context hash" || encoded_IrcMlsContext)`; the BIND line also
+`SHA256("ARC-MLS/1 context hash" || encoded_ArcMlsContext)`; the BIND line also
 carries the independently verifiable signed binding as a tagged object. The
 creator constructs both before the reservation expires.
 
@@ -2680,17 +2678,17 @@ struct {
     uint64 session_generation;
     uint64 issued_at;
     uint64 expires_at;
-} IrcDeviceAttachTBS;
+} ArcDeviceAttachTBS;
 
 struct {
-    IrcDeviceAttachTBS tbs;
+    ArcDeviceAttachTBS tbs;
     opaque sequencer_signature[64];
-} IrcDeviceAttachChallenge;
+} ArcDeviceAttachChallenge;
 
 struct {
-    IrcDeviceAttachChallenge challenge;
+    ArcDeviceAttachChallenge challenge;
     opaque device_signature[64];
-} IrcDeviceAttach;
+} ArcDeviceAttach;
 ```
 
 The edge creates a fresh 32-byte `connection_nonce` when TLS authentication
@@ -2698,10 +2696,10 @@ completes and registers it with the coordinator's origin state. The
 coordinator creates an independent 32-byte `server_challenge` for each
 `BEGIN`; neither value is client-selected or reusable.
 
-`BEGIN` returns a typed `IrcDeviceAttachChallenge` whose sequencer signature uses label
-`IRC-MLS/1 device attach challenge`. The device adds a signature over the same
-TBS with label `IRC-MLS/1 device attach possession` and returns the exact
-challenge inside `IrcDeviceAttach` with
+`BEGIN` returns a typed `ArcDeviceAttachChallenge` whose sequencer signature uses label
+`ARC-MLS/1 device attach challenge`. The device adds a signature over the same
+TBS with label `ARC-MLS/1 device attach possession` and returns the exact
+challenge inside `ArcDeviceAttach` with
 `FINISH` within `ATTACH_CHALLENGE_TIMEOUT`. The server checks the immutable authenticated
 Account ID, current context-independent root roster, active certificate, exact
 connection nonce, and unused challenge, then binds that Device ID and the next
@@ -2739,9 +2737,9 @@ key and binds its supported MLS versions, suites, credential types,
 extensions, proposal types, generation, and roster ID. Fetching it never
 consumes a KeyPackage.
 
-For a normal `IrcDeliveredWelcome`, the command Account ID, Device ID,
+For a normal `ArcDeliveredWelcome`, the command Account ID, Device ID,
 conversation ID, and authorization ID match the wrapper target, conversation,
-and finalization ID exactly. For `IrcStagedReInit`, they match the wrapper
+and finalization ID exactly. For `ArcStagedReInit`, they match the wrapper
 target, new conversation, and ReInit attempt ID. A mismatch is rejected before
 mailbox insertion.
 
@@ -3186,7 +3184,7 @@ promise, supplies the security invariant:
    never permits local skipping. An irreconcilable client halts and rejoins.
 5. Required controllers publish candidate-specific approval envelopes. Valid
    continuing endpoints produce processing ACKs. An endpoint assembles a
-   bounded `IrcFinalizationRequest`; finality principals independently
+   bounded `ArcFinalizationRequest`; finality principals independently
    validate its authorization, approvals, and ACKs and issue durable sign-once
    disposition votes.
 6. The staged state becomes live only after a finalization certificate carries
@@ -3209,7 +3207,7 @@ struct {
     opaque group_id<1..255>;
     opaque binding_id[32];
     opaque context_core_id[32];
-} IrcGroupGenesisTBS;
+} ArcGroupGenesisTBS;
 
 struct {
     uint16 profile_version;
@@ -3224,21 +3222,21 @@ struct {
     opaque predecessor_record_id[32];
     uint64 sequenced_at;
     opaque sequencer_key_id[32];
-} IrcCandidateReceiptTBS;
+} ArcCandidateReceiptTBS;
 
 struct {
-    IrcCandidateReceiptTBS tbs;
+    ArcCandidateReceiptTBS tbs;
     opaque sequencer_signature[64];
-} IrcCandidateReceipt;
+} ArcCandidateReceipt;
 ```
 
 `genesis_state_id` is
-`SHA256("IRC-MLS/1 group genesis id" || encoded_IrcGroupGenesisTBS)`. A new
+`SHA256("ARC-MLS/1 group genesis id" || encoded_ArcGroupGenesisTBS)`. A new
 binding uses it as both its accepted state ID and external record-head anchor.
 A ReInit successor instead uses the verified `reinit_activation_id` as both
 anchors.
 
-The sequencer signs the TBS with label `IRC-MLS/1 candidate receipt`.
+The sequencer signs the TBS with label `ARC-MLS/1 candidate receipt`.
 `candidate_id` is the Section 2.2 hash of the receipt TBS, excluding the
 signature. For a fresh epoch, `candidate_sequence` is zero and
 `predecessor_record_id` equals `prior_state_id`; its route sequence is zero for
@@ -3269,19 +3267,19 @@ enum {
     candidate_record(1), finalization_record(2), abort_record(3),
     reinit_attempt_record(4), reinit_activation_record(5),
     reinit_abort_record(6)
-} IrcSequencerRecordKind;
+} ArcSequencerRecordKind;
 
 struct {
-    IrcSequencerRecordKind kind;
+    ArcSequencerRecordKind kind;
     select (kind) {
-        case candidate_record: IrcCandidateReceipt candidate;
-        case finalization_record: IrcCommitFinalizationCertificate finalization;
-        case abort_record: IrcCommitAbortCertificate abort;
-        case reinit_attempt_record: IrcReInitAttemptReceipt reinit_attempt;
-        case reinit_activation_record: IrcReInitActivationCertificate reinit;
-        case reinit_abort_record: IrcReInitAbortCertificate reinit_abort;
+        case candidate_record: ArcCandidateReceipt candidate;
+        case finalization_record: ArcCommitFinalizationCertificate finalization;
+        case abort_record: ArcCommitAbortCertificate abort;
+        case reinit_attempt_record: ArcReInitAttemptReceipt reinit_attempt;
+        case reinit_activation_record: ArcReInitActivationCertificate reinit;
+        case reinit_abort_record: ArcReInitAbortCertificate reinit_abort;
     } record;
-} IrcSequencerRecord;
+} ArcSequencerRecord;
 ```
 
 Unknown union arms and trailing bytes are rejected in profile version 1.
@@ -3289,12 +3287,12 @@ The record ID, sequence, and predecessor are read as follows:
 
 | Kind | Semantic record ID | Sequence/predecessor source |
 | --- | --- | --- |
-| candidate | `candidate_id` | `IrcCandidateReceiptTBS` |
-| finalization | `finalization_id` | `IrcCommitFinalizationTBS` |
-| abort | `abort_id` | `IrcCommitAbortTBS` |
-| ReInit attempt | `reinit_attempt_id` | `IrcReInitAttemptReceiptTBS` |
-| ReInit activation | `reinit_activation_id` | `IrcReInitActivationTBS` |
-| ReInit abort | `reinit_abort_id` | `IrcReInitAbortTBS` |
+| candidate | `candidate_id` | `ArcCandidateReceiptTBS` |
+| finalization | `finalization_id` | `ArcCommitFinalizationTBS` |
+| abort | `abort_id` | `ArcCommitAbortTBS` |
+| ReInit attempt | `reinit_attempt_id` | `ArcReInitAttemptReceiptTBS` |
+| ReInit activation | `reinit_activation_id` | `ArcReInitActivationTBS` |
+| ReInit abort | `reinit_abort_id` | `ArcReInitAbortTBS` |
 
 For every row the asserted ID is recomputed, the sequencer key ID equals the
 credential committed for that log position, and exact predecessor equality is
@@ -3309,22 +3307,22 @@ when the selected MLS suite uses a 64-byte hash:
 struct {
     CipherSuite cipher_suite;
     opaque encoded_group_context<1..1048576>;
-} IrcGroupContextDigestTBS;
+} ArcGroupContextDigestTBS;
 
 struct {
     CipherSuite cipher_suite;
     opaque encoded_ratchet_tree<1..4194304>;
-} IrcRatchetTreeDigestTBS;
+} ArcRatchetTreeDigestTBS;
 
 struct {
     CipherSuite cipher_suite;
     opaque encoded_group_info<1..4194304>;
-} IrcGroupInfoDigestTBS;
+} ArcGroupInfoDigestTBS;
 ```
 
 The formulas are respectively SHA-256 with labels
-`IRC-MLS/1 group context digest`, `IRC-MLS/1 ratchet tree digest`, and
-`IRC-MLS/1 group info digest` over the exact TBS encoding. GroupContext and
+`ARC-MLS/1 group context digest`, `ARC-MLS/1 ratchet tree digest`, and
+`ARC-MLS/1 group info digest` over the exact TBS encoding. GroupContext and
 GroupInfo use their RFC 9420 TLS encodings. `encoded_ratchet_tree` is the exact
 canonical TLS encoding of the complete RatchetTree value, not an MLS
 suite-hash output. Implementations reject a non-canonical re-encoding.
@@ -3345,22 +3343,22 @@ struct {
     opaque resulting_group_context_digest[32];
     opaque resulting_ratchet_tree_digest[32];
     opaque finalization_authenticator[32];
-} IrcCommitAckTBS;
+} ArcCommitAckTBS;
 
 struct {
-    IrcCommitAckTBS tbs;
+    ArcCommitAckTBS tbs;
     opaque old_leaf_signature<1..255>;
-} IrcCommitAck;
+} ArcCommitAck;
 ```
 
-The ACK signs the Section 2 `IrcSignatureInput` with label
-`IRC-MLS/1 commit processed` and the encoded ACK TBS as content. The signature uses the ACKing
+The ACK signs the Section 2 `ArcSignatureInput` with label
+`ARC-MLS/1 commit processed` and the encoded ACK TBS as content. The signature uses the ACKing
 member's signature key in the old, still-live tree and the signature length
 must match that MLS suite. `old_credential_hash` is
-`SHA256("IRC-MLS/1 old credential hash" || encoded_BasicCredential)`. The
+`SHA256("ARC-MLS/1 old credential hash" || encoded_BasicCredential)`. The
 32-byte `finalization_authenticator` is exported from
 the staged new state using the MLS exporter label
-`IRC-MLS/1 commit finalization`, the candidate ID as exporter
+`ARC-MLS/1 commit finalization`, the candidate ID as exporter
 context, and output length 32. This purpose-scoped value may be exposed to the
 sequencer; the underlying epoch authenticator and other MLS secrets may not.
 
@@ -3422,16 +3420,16 @@ struct {
     opaque resulting_group_context_digest[32];
     opaque resulting_ratchet_tree_digest[32];
     opaque finalization_authenticator[32];
-} IrcFinalizationCoreTBS;
+} ArcFinalizationCoreTBS;
 
 struct {
-    IrcFinalizationCoreTBS core;
-    IrcCandidateReceipt receipt;
-    IrcCommitAuthorization authorization;
-    IrcCommitAck acknowledgements<1..262144>;
-} IrcFinalizationProof;
+    ArcFinalizationCoreTBS core;
+    ArcCandidateReceipt receipt;
+    ArcCommitAuthorization authorization;
+    ArcCommitAck acknowledgements<1..262144>;
+} ArcFinalizationProof;
 
-enum { finalize(1), abort(2) } IrcDisposition;
+enum { finalize(1), abort(2) } ArcDisposition;
 
 struct {
     uint16 profile_version;
@@ -3442,22 +3440,22 @@ struct {
     uint32 candidate_sequence;
     opaque slot_predecessor_record_id[32];
     opaque candidate_id[32];
-    IrcDisposition disposition;
+    ArcDisposition disposition;
     opaque terminal_id[32];
     uint16 reason_code;                  // zero for FINALIZE
-} IrcDispositionVoteTBS;
+} ArcDispositionVoteTBS;
 
 struct {
     opaque signer_root_fingerprint[32];
     opaque signer_device_id[16];
     opaque signer_device_certificate_id[32];
     opaque device_signature[64];
-} IrcFinalityVote;
+} ArcFinalityVote;
 
 struct {
-    IrcFinalizationProof proof;
-    IrcFinalityVote votes<0..16384>;
-} IrcFinalizationRequest;
+    ArcFinalizationProof proof;
+    ArcFinalityVote votes<0..16384>;
+} ArcFinalizationRequest;
 
 struct {
     uint16 profile_version;
@@ -3467,13 +3465,13 @@ struct {
     opaque predecessor_record_id[32];
     opaque finalization_id[32];
     opaque sequencer_key_id[32];
-    IrcFinalizationRequest request;
-} IrcCommitFinalizationTBS;
+    ArcFinalizationRequest request;
+} ArcCommitFinalizationTBS;
 
 struct {
-    IrcCommitFinalizationTBS tbs;
+    ArcCommitFinalizationTBS tbs;
     opaque sequencer_signature[64];
-} IrcCommitFinalizationCertificate;
+} ArcCommitFinalizationCertificate;
 
 struct {
     opaque finalization_id[32];
@@ -3481,7 +3479,7 @@ struct {
     opaque added_key_package_ref<1..255>;
     uint32 resulting_leaf_index;
     opaque resulting_leaf_credential_hash[32];
-} IrcNormalJoinAuthorizationProof;
+} ArcNormalJoinAuthorizationProof;
 
 struct {
     uint16 profile_version;
@@ -3489,10 +3487,10 @@ struct {
     opaque conversation_id[32];
     opaque target_account_id_digest[32];
     opaque target_device_id[16];
-    IrcNormalJoinAuthorizationProof authorization;
-    IrcJoinTransitionProofBundle transition_proofs;
+    ArcNormalJoinAuthorizationProof authorization;
+    ArcJoinTransitionProofBundle transition_proofs;
     opaque welcome_bytes<1..4190000>;
-} IrcDeliveredWelcome;
+} ArcDeliveredWelcome;
 ```
 
 `commit_authorization_id` is the Section 2.2 ID over the authorization TBS.
@@ -3500,7 +3498,7 @@ Its proof always appears; only its approval vector may be empty under the
 rules in Section 9.3. `acknowledgement_set_digest` uses the Section 2.2
 canonical ACK-TBS formula. ACKs are canonical by old leaf index,
 duplicate-free, individually verified, and must match that digest.
-`finalization_id` is the Section 2.2 ID over `IrcFinalizationCoreTBS`.
+`finalization_id` is the Section 2.2 ID over `ArcFinalizationCoreTBS`.
 
 Each finality principal independently verifies the exact receipt and Commit,
 required controller authorization, inline proposals, roster/context
@@ -3511,8 +3509,8 @@ resulting state, its certificate remains active in the resulting committed
 roster, and that device personally staged the common context, tree, and
 exporter result. A removed or newly revoked principal may perform the
 public-only checks in Section 12.3 and vote `ABORT`, but **MUST NOT** vote
-`FINALIZE`. It then signs `IrcDispositionVoteTBS` with label
-`IRC-MLS/1 disposition vote` using its device-authorization key. All FINALIZE
+`FINALIZE`. It then signs `ArcDispositionVoteTBS` with label
+`ARC-MLS/1 disposition vote` using its device-authorization key. All FINALIZE
 votes use `finalization_id` as `terminal_id` and reason zero.
 
 The quorum `q` is still derived from the complete old council. Therefore a
@@ -3531,7 +3529,7 @@ creating an alternative proof for the same receipt is invalid. This choice
 can sacrifice liveness if the sender disappears, in which case the council
 must abort rather than invent another finalization transcript.
 
-Controller devices submit individual `IrcCommitApprovalEnvelope` objects keyed
+Controller devices submit individual `ArcCommitApprovalEnvelope` objects keyed
 by the identical authorization TBS ID. Endpoints fetch and verify them; the
 deterministic assembler takes at most one valid approval per root, ordered by
 root fingerprint and then Device ID, until the required threshold is met.
@@ -3551,7 +3549,7 @@ not current fails with `E2EE_EPOCH_STALE`, and the authorization's
 the retained policy whose `previous_policy_id` is the old policy at the next
 generation; an older or skipped generation fails with
 `E2EE_BINDING_AUTH_INVALID`. The sequencer reconstructs the exact
-`IrcDispositionVoteTBS` for the slot from its own receipt and verifies each
+`ArcDispositionVoteTBS` for the slot from its own receipt and verifies each
 vote's device signature with the device-authorization key of the retained
 roster certificate named by `signer_device_certificate_id`. A vote vector that
 is not canonical fails with `E2EE_INVALID_FRAGMENT`; a vote whose signer is
@@ -3564,7 +3562,7 @@ need only add the missing votes (each counted vote is recorded durably per
 principal, and a reloaded coordinator rebuilds the count from those records
 and the retained requests they name), and signs the bounded proof snapshot
 with
-label `IRC-MLS/1 commit finalization` only when at least `q` distinct valid
+label `ARC-MLS/1 commit finalization` only when at least `q` distinct valid
 FINALIZE votes stand. A request below `q` is retained and returns `PENDING`.
 Certification makes the authorization's resulting policy the current policy.
 The sequencer does not know the old tree, ACK coverage, or staged result, so
@@ -3593,9 +3591,9 @@ Welcomes are forbidden before this point. If a recipient first sees
 new-epoch traffic, it fetches the certificate and does not speculate.
 
 A new Add recipient cannot decrypt the predecessor Commit or verify old-tree
-copath coverage. Its `IrcDeliveredWelcome` therefore carries the immutable
+copath coverage. Its `ArcDeliveredWelcome` therefore carries the immutable
 MLS Welcome beside the exact post-finalization
-`IrcNormalJoinAuthorizationProof` and the external transition-proof bundle
+`ArcNormalJoinAuthorizationProof` and the external transition-proof bundle
 required by Section 9.5. Before consuming the Welcome it verifies
 the wrapper's profile, network, conversation, target account digest, and
 Device ID, fetches the referenced finalization object, verifies that its
@@ -3607,7 +3605,7 @@ chains. Copath verification remains a continuing-member duty; under the
 declared `f` bound, the joiner relies on at least one honest finality voter
 having performed it. A delivery wrapper without this exact proof is rejected.
 `resulting_leaf_credential_hash` is
-`SHA256("IRC-MLS/1 resulting leaf credential" ||
+`SHA256("ARC-MLS/1 resulting leaf credential" ||
 TLS-encode(resulting_leaf_index, encoded_BasicCredential))` and must equal the
 credential at that exact leaf in the authenticated resulting ratchet tree;
 that credential must resolve to the wrapper's target account digest and Device
@@ -3625,7 +3623,7 @@ enum {
     definitively_invalid(3),
     local_state_unavailable(4),
     staging_timeout(5)
-} IrcCommitAbortReason;
+} ArcCommitAbortReason;
 
 struct {
     uint16 profile_version;
@@ -3634,15 +3632,15 @@ struct {
     opaque prior_state_id[32];
     opaque candidate_id[32];
     uint64 prior_epoch;
-    IrcCommitAbortReason reason;
+    ArcCommitAbortReason reason;
     opaque evidence_digest[32];
-} IrcAbortCoreTBS;
+} ArcAbortCoreTBS;
 
 struct {
-    IrcAbortCoreTBS core;
-    IrcCandidateReceipt receipt;
-    IrcFinalityVote votes<0..16384>;
-} IrcAbortRequest;
+    ArcAbortCoreTBS core;
+    ArcCandidateReceipt receipt;
+    ArcFinalityVote votes<0..16384>;
+} ArcAbortRequest;
 
 struct {
     uint16 profile_version;
@@ -3652,22 +3650,22 @@ struct {
     opaque predecessor_record_id[32];
     opaque abort_id[32];
     opaque sequencer_key_id[32];
-    IrcAbortRequest request;
-} IrcCommitAbortTBS;
+    ArcAbortRequest request;
+} ArcCommitAbortTBS;
 
 struct {
-    IrcCommitAbortTBS tbs;
+    ArcCommitAbortTBS tbs;
     opaque sequencer_signature[64];
-} IrcCommitAbortCertificate;
+} ArcCommitAbortCertificate;
 ```
 
-`abort_id` is the Section 2.2 ID over `IrcAbortCoreTBS`.
-Each council signer uses the same `IrcDispositionVoteTBS`, with disposition
+`abort_id` is the Section 2.2 ID over `ArcAbortCoreTBS`.
+Each council signer uses the same `ArcDispositionVoteTBS`, with disposition
 ABORT, that abort ID as `terminal_id`, and the matching non-zero reason. Votes are canonical
 by finality principal. Sender withdrawal is a request, not unilateral power;
 every abort requires the same derived old-policy quorum `q`. The sequencer
 verifies ABORT votes exactly as it verifies FINALIZE votes and signs the abort
-TBS with label `IRC-MLS/1 candidate abort` only at `q` or more distinct valid
+TBS with label `ARC-MLS/1 candidate abort` only at `q` or more distinct valid
 votes; a request below `q` returns `PENDING`. No valid
 finalization and valid abort can coexist under the fault bound because their
 quorums intersect in an honest sign-once device. The wrapper's route sequence
@@ -3713,7 +3711,7 @@ anything.
 
 ### 12.5 Federation
 
-All servers in one IRC network share the network ID and route each encrypted
+All servers in one ARC network share the network ID and route each encrypted
 operation to one logical E2EE coordinator named by `coordinator-server-id`.
 That service owns the sequencer, directory, device mailboxes, and authoritative
 E2EE state/event log; it may use replicated consensus internally, but exposes one
@@ -3722,12 +3720,12 @@ and fanout events. Federation peers never decrypt, normalize, translate,
 refragment, or re-encrypt complete object bytes.
 
 Every link carrying encrypted conversations **MUST** negotiate the exact
-IRC-MLS link profile and limits immediately after server registration and
+ARC-MLS link profile and limits immediately after server registration and
 before an E2EE route is introduced:
 
 ```text
-:<server-name> ECAP IRCMLS OFFER 1 <profile-hash> <network-id> <coordinator-server-id> 2940 262144 4194304 4094 4094 8191 <key-set-generation> <key-set-hash>
-:<server-name> ECAP IRCMLS ACK 1 <profile-hash> <network-id> <coordinator-server-id> 2940 262144 4194304 4094 4094 8191 <key-set-generation> <key-set-hash>
+:<server-name> ECAP ARCMLS OFFER 1 <profile-hash> <network-id> <coordinator-server-id> 2940 262144 4194304 4094 4094 8191 <key-set-generation> <key-set-hash>
+:<server-name> ECAP ARCMLS ACK 1 <profile-hash> <network-id> <coordinator-server-id> 2940 262144 4194304 4094 4094 8191 <key-set-generation> <key-set-hash>
 ```
 
 Both lines are untagged, have exactly the shown 14 parameters after `ECAP`,
@@ -3765,7 +3763,7 @@ TCP ordering means an honest ACK cannot arrive before the OFFER that caused
 it. A duplicate OFFER or ACK, ACK-before-OFFER, unknown subcommand, wrong
 arity, tag, prefix mismatch, field mismatch, timeout at or after the deadline,
 or any E2EE frame before `profile_active` sends at most
-`ERROR :IRC-MLS profile mismatch` and closes the link. No differing field is
+`ERROR :ARC-MLS profile mismatch` and closes the link. No differing field is
 reported, no partial state is retained, and negotiation is never downgraded.
 Simultaneous OFFERs follow the same transitions and cannot loop.
 
@@ -3810,7 +3808,7 @@ client tag:
 :<coordinator-sid> ERESUME OK <target-server-id> <server-incarnation> <delivery-generation> <next-delivery-sequence>
 ```
 
-Every prefix is the standard authenticated IRC server identity. Home-origin
+Every prefix is the standard authenticated AgenC Relay server identity. Home-origin
 commands are accepted only from the named home route; coordinator results,
 events, and state are accepted only from the configured coordinator route;
 target and coordinator IDs must equal link configuration. A direction or
@@ -3855,7 +3853,7 @@ enum {
     deliver_welcome(38), fetch_mailbox(39), acknowledge_mailbox(40),
     submit_policy(41), submit_recovery(42), submit_recovery_element(43),
     submit_membership(44)
-} IrcFederationOpcode;
+} ArcFederationOpcode;
 
 struct {
     uint16 profile_version;
@@ -3866,10 +3864,10 @@ struct {
     uint64 origin_generation;
     uint64 operation_sequence;
     opaque request_id[16];
-    IrcFederationOpcode opcode;
+    ArcFederationOpcode opcode;
     opaque encoded_parameters<0..1024>;
     opaque payload_object_id<0..32>;
-} IrcFederationRequest;
+} ArcFederationRequest;
 ```
 
 `encoded_parameters` is exactly one canonical TLS encoding from this table;
@@ -3923,7 +3921,7 @@ forbidden:
 | `revoke_package` | KeyPackageRef | none |
 | `deliver_binding` | Account ID, Device ID | `conversation_binding` |
 | `deliver_welcome` | Account ID, Device ID, conversation ID, authorization ID | `welcome_mls` or `staged_reinit` |
-| `fetch_mailbox` | `IrcFederationMailboxKind`, cursor | none |
+| `fetch_mailbox` | `ArcFederationMailboxKind`, cursor | none |
 | `acknowledge_mailbox` | delivery token, object ID | none |
 
 An empty payload ID is legal only for a `none` row; otherwise it is 32 bytes
@@ -3935,13 +3933,13 @@ enum {
     store_capabilities(4), store_package(5), store_application(6),
     store_binding(7), store_welcome(8), store_staged_reinit(9),
     store_policy(10), store_membership(11)
-} IrcFederationStoreKind;
+} ArcFederationStoreKind;
 
 enum {
     pending_finalization(1), pending_abort(2),
     pending_reinit_attempt(3), pending_reinit_activate(4),
     pending_reinit_abort(5)
-} IrcFederationPendingKind;
+} ArcFederationPendingKind;
 
 enum {
     empty_authorizations(1), empty_acks(2), empty_receipts(3),
@@ -3949,14 +3947,14 @@ enum {
     empty_roster(7), empty_capabilities(8), empty_package(9),
     empty_application(10), empty_binding(11), empty_binding_lock(12),
     empty_welcome(13), empty_staged_reinit(14)
-} IrcFederationEmptyKind;
+} ArcFederationEmptyKind;
 
-enum { normal_package(1) } IrcFederationPackageKind;
+enum { normal_package(1) } ArcFederationPackageKind;
 
 enum {
     mailbox_application(1), mailbox_binding(2), mailbox_welcome(3),
     mailbox_staged_reinit(4)
-} IrcFederationMailboxKind;
+} ArcFederationMailboxKind;
 
 enum {
     failed(1), accepted_event(2), bound(3), closed(4), stored(5),
@@ -3966,16 +3964,16 @@ enum {
     reinit_staged(19), reinit_acked(20), reinit_activated(21),
     reinit_aborted(22), mailbox_acked(23), recovery_accepted(24),
     recovery_extended(25), recovery_closed(26), recovery_conflict(27)
-} IrcFederationResultKind;
+} ArcFederationResultKind;
 
 struct {
     uint16 response_index;
-    IrcWireObjectKind wire_kind;
+    ArcWireObjectKind wire_kind;
     opaque object_id[32];
     uint32 total_size;
     opaque delivery_token<0..32>;
     opaque target_device_id<0..16>;
-} IrcFederationResponseDescriptor;
+} ArcFederationResponseDescriptor;
 
 struct {
     uint16 profile_version;
@@ -3989,12 +3987,12 @@ struct {
     opaque request_object_id[32];
     uint64 coordinator_state_generation;
     opaque completion_event_id<0..16>;
-    IrcFederationResultKind result_kind;
+    ArcFederationResultKind result_kind;
     opaque encoded_result<0..1024>;
     opaque snapshot_token<0..32>;
     opaque next_cursor<0..32>;
-    IrcFederationResponseDescriptor responses<0..32>;
-} IrcFederationResult;
+    ArcFederationResponseDescriptor responses<0..32>;
+} ArcFederationResult;
 ```
 
 The home Server ID, incarnation, Origin ID, origin generation, operation
@@ -4012,10 +4010,10 @@ field conflict is a fatal peer violation.
 | `accepted_event` | event ID |
 | `bound` | conversation ID, binding ID, binding-package object ID |
 | `closed` | conversation ID, close ID |
-| `stored` | `IrcFederationStoreKind`, object ID |
+| `stored` | `ArcFederationStoreKind`, object ID |
 | `commit_acked` | conversation ID, candidate ID, ACK object ID |
-| `pending` | conversation ID, `IrcFederationPendingKind`, request object ID |
-| `empty` | `IrcFederationEmptyKind` |
+| `pending` | conversation ID, `ArcFederationPendingKind`, request object ID |
+| `empty` | `ArcFederationEmptyKind` |
 | `account` | Account ID, session generation |
 | `attached` | Device ID, session generation |
 | `attach_challenge` | Device ID, challenge object ID |
@@ -4023,7 +4021,7 @@ field conflict is a fatal peer violation.
 | `reserved` | reservation ID, reservation object ID |
 | `finalized` | conversation ID, resulting epoch, finalization ID, certificate object ID |
 | `aborted` | conversation ID, candidate ID, abort ID, certificate object ID |
-| `claimed` | Device ID, `IrcFederationPackageKind`, KeyPackageRef, object ID |
+| `claimed` | Device ID, `ArcFederationPackageKind`, KeyPackageRef, object ID |
 | `object_page` / `mailbox_page` | empty tuple |
 | `reinit_staged` | old conversation ID, ReInit attempt ID, ReInit-attempt object ID |
 | `reinit_acked` | old conversation ID, ReInit attempt ID, ACK object ID |
@@ -4131,7 +4129,7 @@ result to another connection.
 
 Each selector maps one-to-one to the corresponding uppercase client result in
 Section 11.7; profile version 1 adds no unknown arm. The
-`IrcFederationMailboxKind` is the exact `fetch_mailbox` parameter selector. A
+`ArcFederationMailboxKind` is the exact `fetch_mailbox` parameter selector. A
 failed code is from Section 11.9 and the context is
 empty or copied byte-for-byte from the request. Unknown result kinds, reply
 codes, extra fields, or trailing bytes are invalid. Descriptors are canonical
@@ -4176,7 +4174,7 @@ enum {
     reinit_activated_event(7), reinit_aborted_event(8), closed_event(9),
     route_state_changed(10), request_completed(11), route_state_hidden(12),
     reinit_staged_event(13), reinit_ack_event(14)
-} IrcFederationEventKind;
+} ArcFederationEventKind;
 
 struct {
     opaque user_id[16];
@@ -4184,7 +4182,7 @@ struct {
     opaque public_user_component[10];
     opaque public_host_component[16];
     opaque account_label<0..32>;
-} IrcFederationSourceView;
+} ArcFederationSourceView;
 
 struct {
     uint16 profile_version;
@@ -4194,7 +4192,7 @@ struct {
     uint64 coordinator_state_generation;
     uint64 delivery_sequence;
     opaque event_id[16];
-    IrcFederationEventKind event_kind;
+    ArcFederationEventKind event_kind;
     opaque cross_profile_mutation_id<0..16>;
     uint16 cross_profile_part_index;
     uint16 cross_profile_part_count;
@@ -4211,7 +4209,7 @@ struct {
     opaque request_id<0..16>;
     opaque payload_object_id<0..32>;
     opaque encoded_event_result<0..1024>;
-} IrcFederationEvent;
+} ArcFederationEvent;
 ```
 
 The three cross-profile fields use the base specification's Section-20.8
@@ -4234,7 +4232,7 @@ The tuple equals the complete retained request, and the event's coordinator
 state generation and ID equal its result. Channel application, direct
 application, candidate, Commit-ACK, and ReInit-ACK events require a 16-byte `origin_id`
 and its currently ACKed generation plus the exact 45..108-byte TLS encoding of
-one `IrcFederationSourceView`. Its encoding and semantic fields are byte-for-
+one `ArcFederationSourceView`. Its encoding and semantic fields are byte-for-
 byte identical to the base specification's Appendix-B
 `FederationSourceView`. The view is captured from the coordinator's matching
 base session at acceptance. Its nickname and public-cloak components obey the
@@ -4267,7 +4265,7 @@ exact:
 | Event kind | Required data object | `encoded_event_result` |
 | --- | --- | --- |
 | `channel_application` / `direct_application` | `application_mls` | empty tuple |
-| `candidate_event` | `commit_mls` | exact `IrcCandidateReceipt` |
+| `candidate_event` | `commit_mls` | exact `ArcCandidateReceipt` |
 | `commit_ack_event` | `commit_ack` | candidate ID |
 | `finalized_event` | none | resulting epoch, finalization ID, certificate object ID |
 | `aborted_event` | none | candidate ID, abort ID, certificate object ID |
@@ -4444,15 +4442,15 @@ struct {
     opaque connection_nonce[32];
     opaque attached_device_id<0..16>;
     uint64 device_session_generation;
-} IrcFederationOrigin;
+} ArcFederationOrigin;
 ```
 
 `ADD` requires the same generation-zero base origin and an all-zero
 predecessor. It is accepted only after the corresponding base FORIGIN ADD is
 ACKed. `UPDATE` increments by one, is accepted only after the corresponding
 base FORIGIN UPDATE is ACKed, and names
-`SHA256("IRC-MLS/1 federation origin state" ||
-encoded_IrcFederationOrigin)` for the accepted predecessor. Network, home
+`SHA256("ARC-MLS/1 federation origin state" ||
+encoded_ArcFederationOrigin)` for the accepted predecessor. Network, home
 server, incarnation, Origin ID, Connection ID, and connection nonce equal the
 base object byte-for-byte. Session/User IDs are both empty or both 16 bytes.
 Account ID is empty exactly for an unauthenticated/guest origin and then
@@ -4476,11 +4474,11 @@ zero and each new logical request increments it by one. An origin update resets
 the companion operation sequence to zero exactly as the base profile resets its
 own counter. The base and companion counters are independent contiguous
 namespaces, domain-separated in storage by profile (`base-v1` versus
-`irc-mls-v1`); a request in one neither consumes nor fills a gap in the other.
+`arc-mls-v1`); a request in one neither consumes nor fills a gap in the other.
 FORIGIN DEL carries the next base value and EORIGIN DEL the next companion
 value, and both fences must commit before the shared origin is fully retired.
 The coordinator's companion replay key is exactly
-`(irc-mls-v1, home_server_id, server_incarnation, origin_id,
+`(arc-mls-v1, home_server_id, server_incarnation, origin_id,
 origin_generation, operation_sequence)`, mapped
 to one request ID and request-object hash. Exact duplicates return the stored
 result; different bytes at that key, a reused request ID, or a sequence gap are
@@ -4496,14 +4494,14 @@ retention.
 Authoritative route state is encoded as:
 
 ```text
-enum { active_route(1), encrypted_tombstone(2) } IrcRouteStateKind;
+enum { active_route(1), encrypted_tombstone(2) } ArcRouteStateKind;
 
 struct {
     uint16 profile_version;
     opaque network_id[32];
     uint64 state_generation;
     opaque conversation_id[32];
-    IrcConversationKind conversation_kind;
+    ArcConversationKind conversation_kind;
     opaque route_binding[32];
     opaque semantic_route_lock_id[32];
     opaque channel_instance_id<0..16>;
@@ -4515,8 +4513,8 @@ struct {
     opaque accepted_state_id[32];
     uint64 sequencer_record_head_sequence;
     opaque sequencer_record_head_id[32];
-    IrcRouteStateKind state;
-} IrcFederationRouteState;
+    ArcRouteStateKind state;
+} ArcFederationRouteState;
 ```
 
 After the first sequencer record,
@@ -4535,7 +4533,7 @@ fatal. The numeric field exists so an edge can validate and order events
 without guessing a sequence from a 32-byte semantic ID.
 
 For a channel, the instance field is 16 bytes and the name hash is
-`SHA256("IRC-MLS/1 canonical channel name" || TLS-encode(canonical_irc_name))`;
+`SHA256("ARC-MLS/1 canonical channel name" || TLS-encode(canonical_irc_name))`;
 the direct-account fields are empty. For a direct route the instance is empty,
 the name hash is all zero, and the two Account IDs are non-empty and canonical.
 Edges use those authenticated route-state accounts for plaintext downgrade
@@ -4566,7 +4564,7 @@ pairs, or a global encrypted-channel index.
 
 The first entitlement sends `route_state_changed` before any application or
 security event requiring that route. A later route transition replaces the
-exact prior state. Every change to a serialized `IrcFederationRouteState`
+exact prior state. Every change to a serialized `ArcFederationRouteState`
 field, including accepted-state or sequencer-record head, emits that changed
 object to each then-entitled edge; an authoritative route transition sets its
 `state_generation` to the event's coordinator state generation. A first or
@@ -4607,7 +4605,7 @@ complete objects is at most `MAX_BATCH_DECODED_BYTES`. The complete
 snapshot has at most `MAX_FEDERATION_STATE_ENTRIES_PER_EDGE` entries and
 `MAX_FEDERATION_STATE_SNAPSHOT_BYTES_PER_EDGE` encoded object bytes.
 `snapshot-digest` is
-`SHA256("IRC-MLS/1 federation snapshot" ||
+`SHA256("ARC-MLS/1 federation snapshot" ||
 TLS-encode(state_generation, delivery_generation,
 ordered_state_object_ids))`.
 
@@ -4655,7 +4653,7 @@ reconnect uses ERESUME and never substitutes a state image for missing events.
 A state/event gap blocks affected routes rather than triggering an implicit
 cursor jump.
 
-Until `STATE_ACTIVE`, no IRC-MLS request or event crosses that edge; global-channel
+Until `STATE_ACTIVE`, no ARC-MLS request or event crosses that edge; global-channel
 netburst state is quarantined from client-visible merge or fanout; and affected
 JOIN, TOPIC, PRIVMSG, NOTICE, TAGMSG, and collision processing pauses or fails
 with `E2EE_SYNCING`. Plaintext is never accepted merely because the encrypted
@@ -4733,7 +4731,7 @@ struct {
     uint64 new_head_sequence;
     opaque new_head_id[32];
     opaque record_object_ids<0..32768>;
-} IrcFederationWitnessResolution;
+} ArcFederationWitnessResolution;
 ```
 
 `record_object_ids` is exactly `record_count` concatenated 32-byte object IDs
@@ -4857,8 +4855,8 @@ server never dispenses the same KeyPackage twice or extends its lifetime.
 6. For the next planned device only, it claims and validates one fresh
    KeyPackage, submits one Add Commit, stages it, collects required ACKs,
    controller authorization and finality votes, and waits for an
-   `IrcCommitFinalizationCertificate`.
-7. Only then is `IrcDeliveredWelcome` sent: its immutable encrypted Welcome
+   `ArcCommitFinalizationCertificate`.
+7. Only then is `ArcDeliveredWelcome` sent: its immutable encrypted Welcome
    contains the full ratchet tree and policy/roster chains, while its outer
    sidecar contains the now-known finalization proof. The added leaf remains
    context-marked `pending` until Section 13.4 completes; initial devices are
@@ -4893,7 +4891,7 @@ server, and any ordinary server topic is a non-secret placeholder.
 4. It initializes itself as the one-member group. It never Adds its
    already-present creator credential.
 5. It claims one fresh package, commits, finalizes, delivers, and confirms each inline Add serially.
-   Each `IrcDeliveredWelcome` carries the immutable Welcome and exact
+   Each `ArcDeliveredWelcome` carries the immutable Welcome and exact
    post-finalization sidecar.
 6. All planned devices must be active and non-pending before the dual-council
    bootstrap activation; only the exact old and resulting policy councils
@@ -4917,7 +4915,7 @@ must:
 5. create one inline Add proposal, including a full roster-update proposal when
    required;
 6. submit, stage, and finalize the Commit; and
-7. deliver the exact `IrcDeliveredWelcome` tied to that finalization ID.
+7. deliver the exact `ArcDeliveredWelcome` tied to that finalization ID.
 
 The new device validates the full Welcome, tree, committed roster heads,
 old-policy finality quorum, its pending leaf entry, and package reference;
@@ -5016,7 +5014,7 @@ before committing the database and requires exact equality on startup. A
 counter ahead of the database or a database behind the counter makes the leaf
 unusable and triggers rejoin.
 
-A remote high-water mark controlled only by the malicious IRC service is not
+A remote high-water mark controlled only by the malicious relay service is not
 an anti-rollback anchor. When no reliable OS or hardware anchor exists, the
 live MLS database **MUST** be excluded from restore/import workflows. After a
 filesystem or device-image restore, every group state is discarded and the
@@ -5087,13 +5085,13 @@ of an object, or of a matching digest, never implies adoption:
 
 | Transition | Public proof inputs | Authorizing prior state |
 | --- | --- | --- |
-| initial authority at the pinned genesis binding | the `conversation_binding` package, its exact context-core bytes named by `context_core_id`, the generation-zero `policy` object, the exact `IrcSequencerCredential` bytes, and one `root_identity` plus `device_roster` object per binding principal | the independently pinned source binding of the restore: `restored_binding_id` and `source_rollback_guard_hash` of the durable gate, never the objects themselves |
+| initial authority at the pinned genesis binding | the `conversation_binding` package, its exact context-core bytes named by `context_core_id`, the generation-zero `policy` object, the exact `ArcSequencerCredential` bytes, and one `root_identity` plus `device_roster` object per binding principal | the independently pinned source binding of the restore: `restored_binding_id` and `source_rollback_guard_hash` of the durable gate, never the objects themselves |
 | bootstrap activation | the genesis-epoch `candidate_record` and `finalization_record` at route sequences zero and one with the finalization's complete ACK-set digest | the initial-authority row: the receipt and certificate verify under the pinned sequencer credential at exactly the next position |
 | policy transition | the `policy` object with its approvals and the `candidate_record` and `finalization_record` that commit it | the retained finalized policy chain head and the roster heads at the record's validation time |
 | roster transition | the `device_roster` object and the finalized record committing the roster head | the previous root-signed roster and the retained root identity chain |
 | root continuity transition | the successor `root_identity` in the account root chain and the finalized record | the previous root's continuity signature over the successor |
 | binding transition | the successor `conversation_binding` package and the finalized record | the retained current binding and its approvals under the current policy |
-| sequencer credential transition | the successor `IrcSequencerCredential` and the finalized GroupContextExtensions record | the previous credential's continuity signature and the old-policy-authorized finalization |
+| sequencer credential transition | the successor `ArcSequencerCredential` and the finalized GroupContextExtensions record | the previous credential's continuity signature and the old-policy-authorized finalization |
 | ReInit target authorization | the `reinit_attempt_record` and the authorizing old-group finalization | the retained old finalized state and the `reinit_attempt_authorization_id` it names |
 | ReInit activation | the `reinit_activation_record` with its complete ReInit ACK set and disposition votes | the retained ReInit attempt receipt and the old-policy finality council |
 | terminal close | the `close_authorization` object | the finalized record named by `authorizing_terminal_id` and the last finalized policy's controller rule |
@@ -5112,22 +5110,22 @@ check is one no server can perform and none claims:
 
 | Requirement | Carrier field or object | Validation owner | Evidence class |
 | --- | --- | --- | --- |
-| submission names this network and conversation | `IrcRecoverySubmissionTBS` `profile_version`, `network_id`, `conversation_id` | coordinator | server-visible attestation |
-| submission targets the exact restored route | `IrcRecoverySubmissionTBS` `recovery_epoch`, `restored_binding_id`, `restored_accepted_state_id`, `restored_sequencer_head_id`, `source_rollback_guard_hash` equal the durable gate | coordinator | server-visible attestation |
-| submission extends the stored head | `IrcRecoverySubmissionTBS` `route_sequence`, `predecessor_record_id` | coordinator | server-visible attestation |
-| submission names one element | `IrcRecoverySubmissionTBS` `element_kind`, `element_object_kind`, `element_object_id`; the element hashes to that ID | coordinator | server-visible attestation |
-| submitter is an authorized principal device | `IrcRecoverySubmissionTBS` `account_id`, `device_id`, and `IrcRecoverySubmission` `device_signature` under the retained roster | coordinator | server-visible attestation |
+| submission names this network and conversation | `ArcRecoverySubmissionTBS` `profile_version`, `network_id`, `conversation_id` | coordinator | server-visible attestation |
+| submission targets the exact restored route | `ArcRecoverySubmissionTBS` `recovery_epoch`, `restored_binding_id`, `restored_accepted_state_id`, `restored_sequencer_head_id`, `source_rollback_guard_hash` equal the durable gate | coordinator | server-visible attestation |
+| submission extends the stored head | `ArcRecoverySubmissionTBS` `route_sequence`, `predecessor_record_id` | coordinator | server-visible attestation |
+| submission names one element | `ArcRecoverySubmissionTBS` `element_kind`, `element_object_kind`, `element_object_id`; the element hashes to that ID | coordinator | server-visible attestation |
+| submitter is an authorized principal device | `ArcRecoverySubmissionTBS` `account_id`, `device_id`, and `ArcRecoverySubmission` `device_signature` under the retained roster | coordinator | server-visible attestation |
 | record element continues the chain | `record_element`: the `sequencer_record` verifies under the credential committed for its position | coordinator | cryptographic finality |
 | close element closes the chain | `close_element`: the `close_authorization` approvals satisfy the retained old policy and name the head finalization | coordinator | cryptographic finality |
 | referenced object supports a record | `reference_element`: the object hashes to the ID the referencing record names | coordinator | server-visible attestation |
-| resolution is addressed to this link | `IrcFederationWitnessResolution` `coordinator_server_id`, `target_server_id`, `conversation_id`, `resolution_token` | edge | server-visible attestation |
-| resolution starts at the witnessed head | `IrcFederationWitnessResolution` `expected_sequence`, `expected_head_id` equal the durable row | edge | server-visible attestation |
-| delivered records continue the chain | `IrcFederationWitnessResolution` `record_count`, `record_object_ids` and each delivered `sequencer_record` under the negotiated key set | edge | cryptographic finality |
-| resolution ends at the claimed head | `IrcFederationWitnessResolution` `new_head_sequence`, `new_head_id` equal the last verified record | edge | cryptographic finality |
-| proof names this network and conversation | `IrcLeafMembershipProofTBS` `profile_version`, `network_id`, `conversation_id` | coordinator | server-visible attestation |
-| proof identifies one old leaf | `IrcLeafMembershipProofTBS` `epoch`, `leaf_index`, `old_credential_hash`, `leaf_signature_scheme`, `leaf_signature_key` | coordinator against the ACK TBS and the possession signature | server-visible attestation |
-| proof binds an active device | `IrcLeafMembershipProofTBS` `account_id`, `device_id`, `root_generation`, `root_fingerprint`, `roster_generation`, `roster_id`, `credential_generation` and `IrcLeafMembershipProof` `device_signature` | coordinator against the retained roster and root chain | server-visible attestation |
-| proof states a disposition | `IrcLeafMembershipProofTBS` `disposition`, `removal_finalization_id` and `IrcLeafMembershipProof` `possession_signature` | coordinator against retained finalized records | server-visible attestation |
+| resolution is addressed to this link | `ArcFederationWitnessResolution` `coordinator_server_id`, `target_server_id`, `conversation_id`, `resolution_token` | edge | server-visible attestation |
+| resolution starts at the witnessed head | `ArcFederationWitnessResolution` `expected_sequence`, `expected_head_id` equal the durable row | edge | server-visible attestation |
+| delivered records continue the chain | `ArcFederationWitnessResolution` `record_count`, `record_object_ids` and each delivered `sequencer_record` under the negotiated key set | edge | cryptographic finality |
+| resolution ends at the claimed head | `ArcFederationWitnessResolution` `new_head_sequence`, `new_head_id` equal the last verified record | edge | cryptographic finality |
+| proof names this network and conversation | `ArcLeafMembershipProofTBS` `profile_version`, `network_id`, `conversation_id` | coordinator | server-visible attestation |
+| proof identifies one old leaf | `ArcLeafMembershipProofTBS` `epoch`, `leaf_index`, `old_credential_hash`, `leaf_signature_scheme`, `leaf_signature_key` | coordinator against the ACK TBS and the possession signature | server-visible attestation |
+| proof binds an active device | `ArcLeafMembershipProofTBS` `account_id`, `device_id`, `root_generation`, `root_fingerprint`, `roster_generation`, `roster_id`, `credential_generation` and `ArcLeafMembershipProof` `device_signature` | coordinator against the retained roster and root chain | server-visible attestation |
+| proof states a disposition | `ArcLeafMembershipProofTBS` `disposition`, `removal_finalization_id` and `ArcLeafMembershipProof` `possession_signature` | coordinator against retained finalized records | server-visible attestation |
 | leaf is actually in the tree at that epoch | the MLS ratchet tree | endpoint | endpoint-only MLS check |
 | ACK set covers every UpdatePath copath | the old tree and staged Commit | endpoint | endpoint-only MLS check |
 | exact continuing set of a ReInit | the old tree, the successor tree, and the Welcome set | endpoint | endpoint-only MLS check |
@@ -5145,7 +5143,7 @@ public, device-attested mapping from an attached device to that leaf so the
 ACK signer can be identified without any private MLS state:
 
 ```text
-enum { continuing(1), removed(2) } IrcLeafDispositionKind;
+enum { continuing(1), removed(2) } ArcLeafDispositionKind;
 
 struct {
     uint16 profile_version;
@@ -5163,15 +5161,15 @@ struct {
     uint64 roster_generation;
     opaque roster_id[32];
     uint64 credential_generation;
-    IrcLeafDispositionKind disposition;
+    ArcLeafDispositionKind disposition;
     opaque removal_finalization_id[32];
-} IrcLeafMembershipProofTBS;
+} ArcLeafMembershipProofTBS;
 
 struct {
-    IrcLeafMembershipProofTBS tbs;
+    ArcLeafMembershipProofTBS tbs;
     opaque device_signature[64];
     opaque possession_signature<0..255>;
-} IrcLeafMembershipProof;
+} ArcLeafMembershipProof;
 ```
 
 `epoch` is read against the disposition. A `continuing` proof names the MLS
@@ -5186,9 +5184,9 @@ replacement rule below always admits a member's own removal and no removal
 is lost because the leaf does not survive into the epoch it would otherwise
 have to name. In both dispositions the account, device, root, roster, and
 credential generation fields equal the leaf authorization of that
-credential. The device signs with label `IRC-MLS/1 leaf membership`. A
+credential. The device signs with label `ARC-MLS/1 leaf membership`. A
 `continuing` proof also carries a nonempty `possession_signature` by the old
-leaf key with label `IRC-MLS/1 leaf membership possession`, verifiable under
+leaf key with label `ARC-MLS/1 leaf membership possession`, verifiable under
 the carried public key, and has an all-zero `removal_finalization_id`. A
 `removed` proof carries an empty possession field and names the retained
 finalized record after which the leaf is gone. `leaf_membership_id` is the
@@ -5236,14 +5234,14 @@ The server applies these rules:
   and no proof it holds at that epoch is `removed`; a duplicate continuing
   leaf is already refused, so at most one such proof exists.
 - The expected continuing set of one ReInit attempt is every continuing
-  claim whose device the attempt's `IrcKeyPackagePlan` carries into the
+  claim whose device the attempt's `ArcKeyPackagePlan` carries into the
   successor. A `reinit_activation_request` that lacks a proof-backed ACK for
   a member of that set is refused as a missing continuing leaf with
   `E2EE_BINDING_AUTH_INVALID`, so a planned device acknowledges through the
   exact leaf it last proved and an attempt cannot quietly substitute another.
 - A continuing claim the plan does not carry is outside that set and never
   blocks an activation. `key_package_plan_id` is committed by the
-  `IrcReInitAttemptAuthorization` the old controller threshold signs, so the
+  `ArcReInitAttemptAuthorization` the old controller threshold signs, so the
   authority that decides membership has already answered that claim, and no
   one device holds the conversation's migration open with a leaf key no
   server can place in the ratchet tree. The claim stays stored and readable
@@ -5289,7 +5287,7 @@ route:
 ```text
 enum {
     record_element(1), close_element(2), reference_element(3)
-} IrcRecoveryElementKind;
+} ArcRecoveryElementKind;
 
 struct {
     uint16 profile_version;
@@ -5302,25 +5300,25 @@ struct {
     opaque source_rollback_guard_hash[32];
     uint64 route_sequence;
     opaque predecessor_record_id[32];
-    IrcRecoveryElementKind element_kind;
-    IrcWireObjectKind element_object_kind;
+    ArcRecoveryElementKind element_kind;
+    ArcWireObjectKind element_object_kind;
     opaque element_object_id[32];
     opaque account_id<1..255>;
     opaque device_id[16];
-} IrcRecoverySubmissionTBS;
+} ArcRecoverySubmissionTBS;
 
 struct {
-    IrcRecoverySubmissionTBS tbs;
+    ArcRecoverySubmissionTBS tbs;
     opaque device_signature[64];
-} IrcRecoverySubmission;
+} ArcRecoverySubmission;
 ```
 
-The device signs with label `IRC-MLS/1 recovery submission`;
+The device signs with label `ARC-MLS/1 recovery submission`;
 `recovery_submission_id` is the Section 2.2 hash of the TBS. The wire kind is
 `recovery_submission` and the object is at most
 `MAX_RECOVERY_SUBMISSION_OBJECT`. A `record_element` names a
 `sequencer_record`; a `close_element` names a `close_authorization`, because
-`IrcSequencerRecordKind` has no close arm and the Section 12.5 rule makes the
+`ArcSequencerRecordKind` has no close arm and the Section 12.5 rule makes the
 close ID the head at the route sequence after its authorizing record; a
 `reference_element` names an object of its existing kind that a submitted
 record references. The element is uploaded under
@@ -5417,7 +5415,7 @@ group as specified by RFC 9420, then creates and quorum-activates one exact
 successor. The preparation order is security-critical:
 
 1. Before the old ReInit Commit, controllers precompute the exact immutable
-   `IrcReInitTargetTBS`: target version, suite, group ID, complete extension
+   `ArcReInitTargetTBS`: target version, suite, group ID, complete extension
    bytes, generation-zero policy, roster heads, new binding, finality council,
    and semantic initial member plan. The old candidate authorization commits
    its target digest. It does not commit one-use KeyPackages. Offline leaves
@@ -5434,18 +5432,18 @@ successor. The preparation order is security-critical:
    it can never be reactivated. The post-Commit `reinit` resumption PSK is
    retained only for bounded successor attempts.
 3. For one attempt, controllers choose the creator and approve an exact fresh
-   `IrcKeyPackagePlan`. The creator initializes itself with its fresh target-suite leaf,
+   `ArcKeyPackagePlan`. The creator initializes itself with its fresh target-suite leaf,
    constructs the exact initial Commit, Adds every other continuing leaf using
    the reserved KeyPackages, and injects the `reinit` resumption PSK. The new
    GroupContext exactly matches the ReInit parameters and reaches epoch 1.
    The creator is not a Welcome recipient.
 4. The sequencer accepts one active attempt receipt. Every other continuing
-   leaf receives a full-tree Welcome in `IrcStagedReInit`; the creator stages
+   leaf receives a full-tree Welcome in `ArcStagedReInit`; the creator stages
    its locally constructed state. No staged endpoint sends new-group traffic.
 5. The creator issues a `creator_state` ACK; every other continuing leaf
    validates and consumes its one-use Welcome and issues a `welcome_join` ACK.
    Version 1 requires exactly one ACK for every continuing old leaf. The
-   server counts that set against the approved `IrcKeyPackagePlan` and
+   server counts that set against the approved `ArcKeyPackagePlan` and
    against the Section 13.7.3 expected continuing set the same plan bounds,
    so a published continuing claim the approved plan does not carry is a
    disagreement the controllers settled in step 1, never a reason to refuse
@@ -5463,7 +5461,7 @@ successor. The preparation order is security-critical:
 The exact structures are:
 
 ```text
-enum { creator_state(1), welcome_join(2) } IrcReInitAckKind;
+enum { creator_state(1), welcome_join(2) } ArcReInitAckKind;
 
 struct {
     uint16 profile_version;
@@ -5478,7 +5476,7 @@ struct {
     opaque target_binding_id[32];
     opaque initial_member_plan_id[32];
     opaque encoded_target_extensions<1..1048576>;
-} IrcReInitTargetTBS;
+} ArcReInitTargetTBS;
 
 struct {
     uint16 profile_version;
@@ -5502,7 +5500,7 @@ struct {
     opaque new_group_context_digest[32];
     opaque new_ratchet_tree_digest[32];
     opaque new_exporter_authenticator[32];
-} IrcReInitAttemptTBS;
+} ArcReInitAttemptTBS;
 
 struct {
     uint16 profile_version;
@@ -5522,20 +5520,20 @@ struct {
     opaque new_group_context_digest[32];
     opaque new_ratchet_tree_digest[32];
     opaque new_exporter_authenticator[32];
-} IrcReInitAttemptAuthorizationTBS;
+} ArcReInitAttemptAuthorizationTBS;
 
 struct {
-    IrcReInitAttemptAuthorizationTBS tbs;
-    IrcCommitApproval approvals<144..16384>;
-} IrcReInitAttemptAuthorization;
+    ArcReInitAttemptAuthorizationTBS tbs;
+    ArcCommitApproval approvals<144..16384>;
+} ArcReInitAttemptAuthorization;
 
 struct {
-    IrcReInitAttemptTBS tbs;
-    IrcKeyPackagePlan key_package_plan;
+    ArcReInitAttemptTBS tbs;
+    ArcKeyPackagePlan key_package_plan;
     opaque initial_commit_bytes<1..3145728>;
-    IrcReInitAttemptAuthorization authorization;
+    ArcReInitAttemptAuthorization authorization;
     opaque creator_old_leaf_signature<1..255>;
-} IrcReInitAttempt;
+} ArcReInitAttempt;
 
 struct {
     uint16 profile_version;
@@ -5549,23 +5547,23 @@ struct {
     opaque attempt_object_id[32];
     uint64 sequenced_at;
     opaque sequencer_key_id[32];
-} IrcReInitAttemptReceiptTBS;
+} ArcReInitAttemptReceiptTBS;
 
 struct {
-    IrcReInitAttemptReceiptTBS tbs;
+    ArcReInitAttemptReceiptTBS tbs;
     opaque sequencer_signature[64];
-} IrcReInitAttemptReceipt;
+} ArcReInitAttemptReceipt;
 
 struct {
     opaque old_reinit_state_id[32];
     opaque old_reinit_finalization_object_id[32];
-    IrcReInitAttemptReceipt receipt;
+    ArcReInitAttemptReceipt receipt;
     opaque new_conversation_id[32];
     opaque target_account_id_digest[32];
     opaque target_device_id[16];
-    IrcJoinTransitionProofBundle transition_proofs;
+    ArcJoinTransitionProofBundle transition_proofs;
     opaque welcome_bytes<1..4190000>;
-} IrcStagedReInit;
+} ArcStagedReInit;
 
 struct {
     uint16 profile_version;
@@ -5574,7 +5572,7 @@ struct {
     opaque new_conversation_id[32];
     opaque old_reinit_state_id[32];
     opaque reinit_attempt_id[32];
-    IrcReInitAckKind ack_kind;
+    ArcReInitAckKind ack_kind;
     opaque new_group_info_digest[32];
     opaque new_group_context_digest[32];
     opaque new_ratchet_tree_digest[32];
@@ -5583,14 +5581,14 @@ struct {
     opaque old_credential_hash[32];
     uint32 new_leaf_index;
     opaque key_package_ref<0..255>;       // empty only for creator_state
-} IrcReInitAckTBS;
+} ArcReInitAckTBS;
 
 struct {
-    IrcReInitAckTBS tbs;
+    ArcReInitAckTBS tbs;
     opaque old_leaf_signature<1..255>;
-} IrcReInitAck;
+} ArcReInitAck;
 
-enum { activate_reinit(1), abort_reinit_attempt(2) } IrcReInitDisposition;
+enum { activate_reinit(1), abort_reinit_attempt(2) } ArcReInitDisposition;
 
 struct {
     uint16 profile_version;
@@ -5600,10 +5598,10 @@ struct {
     uint32 attempt_sequence;
     opaque slot_predecessor_record_id[32];
     opaque reinit_attempt_id[32];
-    IrcReInitDisposition disposition;
+    ArcReInitDisposition disposition;
     opaque terminal_id[32];
     uint16 reason_code;
-} IrcReInitDispositionVoteTBS;
+} ArcReInitDispositionVoteTBS;
 
 struct {
     uint16 profile_version;
@@ -5618,15 +5616,15 @@ struct {
     opaque new_ratchet_tree_digest[32];
     opaque new_exporter_authenticator[32];
     opaque acknowledgement_set_digest[32];
-} IrcReInitActivationCoreTBS;
+} ArcReInitActivationCoreTBS;
 
 struct {
-    IrcReInitActivationCoreTBS core;
-    IrcReInitAttemptReceipt receipt;
-    IrcReInitAttempt attempt;
-    IrcReInitAck acknowledgements<1..1048576>;
-    IrcFinalityVote votes<0..16384>;
-} IrcReInitActivationRequest;
+    ArcReInitActivationCoreTBS core;
+    ArcReInitAttemptReceipt receipt;
+    ArcReInitAttempt attempt;
+    ArcReInitAck acknowledgements<1..1048576>;
+    ArcFinalityVote votes<0..16384>;
+} ArcReInitActivationRequest;
 
 struct {
     uint16 profile_version;
@@ -5636,13 +5634,13 @@ struct {
     opaque predecessor_record_id[32];
     opaque reinit_activation_id[32];
     opaque sequencer_key_id[32];
-    IrcReInitActivationRequest request;
-} IrcReInitActivationTBS;
+    ArcReInitActivationRequest request;
+} ArcReInitActivationTBS;
 
 struct {
-    IrcReInitActivationTBS tbs;
+    ArcReInitActivationTBS tbs;
     opaque sequencer_signature[64];
-} IrcReInitActivationCertificate;
+} ArcReInitActivationCertificate;
 
 struct {
     uint16 profile_version;
@@ -5654,14 +5652,14 @@ struct {
     opaque reinit_attempt_id[32];
     uint16 reason_code;
     opaque evidence_digest[32];
-} IrcReInitAbortCoreTBS;
+} ArcReInitAbortCoreTBS;
 
 struct {
-    IrcReInitAbortCoreTBS core;
-    IrcReInitAttemptReceipt receipt;
-    IrcReInitAttempt attempt;
-    IrcFinalityVote votes<0..16384>;
-} IrcReInitAbortRequest;
+    ArcReInitAbortCoreTBS core;
+    ArcReInitAttemptReceipt receipt;
+    ArcReInitAttempt attempt;
+    ArcFinalityVote votes<0..16384>;
+} ArcReInitAbortRequest;
 
 struct {
     uint16 profile_version;
@@ -5671,21 +5669,21 @@ struct {
     opaque predecessor_record_id[32];
     opaque reinit_abort_id[32];
     opaque sequencer_key_id[32];
-    IrcReInitAbortRequest request;
-} IrcReInitAbortTBS;
+    ArcReInitAbortRequest request;
+} ArcReInitAbortTBS;
 
 struct {
-    IrcReInitAbortTBS tbs;
+    ArcReInitAbortTBS tbs;
     opaque sequencer_signature[64];
-} IrcReInitAbortCertificate;
+} ArcReInitAbortCertificate;
 ```
 
 `target_context_digest` is
-`SHA256("IRC-MLS/1 reinit target" || encoded_IrcReInitTargetTBS)`. Its fields
+`SHA256("ARC-MLS/1 reinit target" || encoded_ArcReInitTargetTBS)`. Its fields
 must equal the finalized old ReInit Proposal, the old candidate
 `transition_target_digest`, and the target binding/context core. The
 `initial_commit_digest` is
-`SHA256("IRC-MLS/1 reinit initial commit" || initial_commit_bytes)`; the bytes
+`SHA256("ARC-MLS/1 reinit initial commit" || initial_commit_bytes)`; the bytes
 are the complete canonical MLS message containing the successor initial
 Commit, not an IRC wire wrapper. Its parsed group, Add set, KeyPackageRefs,
 leaf keys, resumption PSK usage, GroupContext, tree, and GroupInfo must match
@@ -5694,22 +5692,22 @@ the target and key-package plans and every result digest.
 The attempt authorization TBS repeats every attempt field a controller must
 review. Its fields must equal the attempt TBS exactly, and its Section 2.2 ID
 must equal `attempt_authorization_id`. Its approvals use label
-`IRC-MLS/1 reinit attempt authorization`, are canonical, come from active old
+`ARC-MLS/1 reinit attempt authorization`, are canonical, come from active old
 policy-authority devices, and meet the old controller threshold. A different
 attempt sequence, creator, leaf key, KeyPackageRef, initial Commit, or staged
 result requires a new authorization. The attempt creator then signs
-`IrcReInitAttemptTBS` with label `IRC-MLS/1 reinit attempt` using its old leaf
+`ArcReInitAttemptTBS` with label `ARC-MLS/1 reinit attempt` using its old leaf
 key. `reinit_attempt_id` is recomputed from that TBS, while
 `attempt_object_id` addresses the complete proof-bearing wire object.
 
 The sequencer receipt is signed with label
-`IRC-MLS/1 reinit attempt receipt`. The first attempt has sequence zero,
+`ARC-MLS/1 reinit attempt receipt`. The first attempt has sequence zero,
 predecessor equal to `old_reinit_state_id`, and route sequence exactly one
 after the finalized old ReInit record. After a valid attempt abort, the next
 attempt increments its sequence, names that `reinit_abort_id` as predecessor,
 and uses the next route sequence. `old_reinit_state_id` must be the semantic
 finalization ID of the old ReInit Commit. A staged recipient fetches and
-verifies both object IDs in `IrcStagedReInit` and every required transition
+verifies both object IDs in `ArcStagedReInit` and every required transition
 proof reference before consuming its Welcome.
 The wrapper's new conversation ID equals the fetched attempt, and its target
 account digest and Device ID equal exactly one non-creator key-package-plan
@@ -5722,17 +5720,17 @@ normal and ReInit wrapper `welcome_bytes` fields are at most
 `MAX_JOIN_TRANSITION_PROOF_BUNDLE_BYTES`, and the complete wire object must
 still fit `MAX_WELCOME_MAILBOX_OBJECT`.
 
-Each old leaf signs its ACK with label `IRC-MLS/1 reinit processed`. ACKs are
+Each old leaf signs its ACK with label `ARC-MLS/1 reinit processed`. ACKs are
 canonical by old leaf index and match the exact old-to-new credential and
 key-package-plan entry. The creator ACK has an empty KeyPackageRef; every
 Welcome ACK names its reserved ref. Exactly one ACK is required for every plan
-entry. The exporter uses label `IRC-MLS/1 reinit activation`, the old ReInit
+entry. The exporter uses label `ARC-MLS/1 reinit activation`, the old ReInit
 state ID as context, and a 32-byte output.
 
 The ACK-set digest uses the Section 2.2 ReInit ACK-TBS formula.
 `reinit_activation_id` and `reinit_abort_id` use the Section 2.2 core-TBS
 formulas. Finality devices sign the reconstructed
-`IrcReInitDispositionVoteTBS` with label `IRC-MLS/1 reinit disposition`.
+`ArcReInitDispositionVoteTBS` with label `ARC-MLS/1 reinit disposition`.
 An activation vote counts only from an old-policy finality principal that has
 an equivalent successor leaf, supplied the matching ACK, and personally
 staged the exact successor state. At least the unchanged old-policy quorum
@@ -5746,8 +5744,8 @@ one after the attempt receipt, `predecessor_record_id` exactly equal to
 `reinit_attempt_id`, the current sequencer key ID, and a recomputed semantic
 terminal ID. Variable valid vote subsets are alternative evidence for that
 same ID. The sequencer signs activation with label
-`IRC-MLS/1 reinit activation` or abort with
-`IRC-MLS/1 reinit attempt abort` only after it has verified at least `q`
+`ARC-MLS/1 reinit activation` or abort with
+`ARC-MLS/1 reinit attempt abort` only after it has verified at least `q`
 distinct valid votes under the old conversation's current policy over the
 attempt's slot, exactly as in Section 12.4; endpoints still validate the
 quorum and the staged result themselves.
@@ -5778,8 +5776,8 @@ scope and advancement rule:
 | `roster_generation` | root fingerprint | 0 | exactly +1 |
 | `capability_generation` | root fingerprint and Device ID | 0 | exactly +1 |
 | `credential_generation` | one fresh leaf signature key | 0 | fixed at zero in version 1 |
-| sequencer `key_generation` | IRC network sequencer lineage | 0 | exactly +1 per continuous key rotation |
-| federation key-set generation | IRC network link profile | 0 | exactly +1 per accepted active-key-set change |
+| sequencer `key_generation` | ARC network sequencer lineage | 0 | exactly +1 per continuous key rotation |
+| federation key-set generation | ARC network link profile | 0 | exactly +1 per accepted active-key-set change |
 | `policy_generation` | MLS group | 0 | exactly +1 |
 | `binding_generation` | semantic conversation lineage | 0 | exactly +1 |
 | `root_binding_sequence` | root fingerprint, globally | 0 | exactly +1 per lock object |
@@ -5873,7 +5871,7 @@ A future archive-key extension may intentionally trade forward secrecy for
 cross-device history. It is outside version 1 and must be labeled as a weaker
 security profile rather than silently exporting live MLS secrets.
 
-Terminal records referenced by an `IrcJoinTransitionProofBundle`, every
+Terminal records referenced by an `ArcJoinTransitionProofBundle`, every
 root-binding lock, and the root, roster, binding, and policy ancestry needed
 to verify a live semantic lineage are security proofs, not ordinary message
 history. The responsible servers retain those exact objects for
@@ -5916,7 +5914,7 @@ The profile limits and operational defaults are:
 | `MAX_POLICY_OBJECT` | 32,774 bytes |
 | `MAX_BINDING_OBJECT` | 262,144 bytes |
 | `MAX_BINDING_CHAIN_BYTES` | 1,048,576 bytes |
-| `MAX_IRC_MLS_CONTEXT_EXTENSION` | 196,608 bytes |
+| `MAX_ARC_MLS_CONTEXT_EXTENSION` | 196,608 bytes |
 | `MAX_POLICY_CHAIN_BYTES` | 1,048,576 bytes |
 | `MAX_LIVE_OBJECT` | 262,144 bytes |
 | `MAX_COMMIT_APPROVAL_OBJECT` | 65,536 bytes |
@@ -6039,7 +6037,7 @@ epoch. Exhaustion blocks that group for explicit security recovery or fresh
 generation-zero recreation; it never wraps or opens an unsequenced bypass.
 
 For an E2EE edge-event quota, one row charges the complete encoded
-`IrcFederationEvent` plus the declared complete payload-object length when
+`ArcFederationEvent` plus the declared complete payload-object length when
 present, even when immutable payload storage is physically shared by several
 outbox references. The process-global disk counter charges the actual sealed
 object once and each sealed outbox/reference row once; the conservative
@@ -6047,7 +6045,7 @@ per-edge charge is a separate admission limit, not permission to double-count
 free space. ACK moves a row from the unacknowledged to acknowledged replay
 class atomically. Trimming an ACKed row never trims an object or proof whose
 independent retention has not expired. ESTATE counts the sum of complete
-encoded `IrcFederationRouteState` wire objects, and both snapshot maxima are
+encoded `ArcFederationRouteState` wire objects, and both snapshot maxima are
 verified before staging disk extents or allocating page state.
 
 Live objects use at most `MAX_LIVE_FRAGMENT_COUNT` fragments and mailbox/control
@@ -6069,17 +6067,17 @@ continuing device. If recovery headroom is unavailable, the Add is invalid;
 members reduce membership or proof sizes without discarding ancestry before
 the group becomes cryptographically unmigratable.
 
-Every `MAX_*_OBJECT` above applies to the complete encoded `IrcWireObject`,
+Every `MAX_*_OBJECT` above applies to the complete encoded `ArcWireObject`,
 including its six-byte envelope. Fragment `total` and capability/reservation
 limits use that same measure. `MAX_CREDENTIAL_BUNDLE`, `MAX_POLICY_BYTES`,
-`MAX_BINDING_CHAIN_BYTES`, `MAX_IRC_MLS_CONTEXT_EXTENSION`,
+`MAX_BINDING_CHAIN_BYTES`, `MAX_ARC_MLS_CONTEXT_EXTENSION`,
 `MAX_POLICY_CHAIN_BYTES`, and `MAX_EMBEDDED_MLS_WELCOME_BYTES` instead bound
 the canonical encoded embedded value named by the constant, without an IRC
 wire envelope. `MAX_JOIN_TRANSITION_PROOF_BUNDLE_BYTES` includes the bundle's
 three-byte TLS vector length; its `references` payload is therefore at most
 262,144 bytes. The embedded Welcome and proof bundle maxima are independent
 field ceilings, not additive permission: every complete typed Welcome wrapper
-still fits `MAX_WELCOME_MAILBOX_OBJECT`. `IrcWireObject.body` is capped at
+still fits `MAX_WELCOME_MAILBOX_OBJECT`. `ArcWireObject.body` is capped at
 4,194,298 bytes even before the smaller per-kind limit is applied.
 
 Large Welcome, ReInit staging, finalization-proof, and policy-chain objects use
@@ -6133,7 +6131,7 @@ so requires a new negotiated profile.
 
 Before decoding vectors or allocating payload-sized buffers, parsers validate
 the declared limit, fragment count, and remaining connection/account quota.
-Expensive operations occur only after IRC account authentication and cheap
+Expensive operations occur only after ARC account authentication and cheap
 syntax checks. Servers rate-limit group reservations, KeyPackage claims,
 identity publication, Commits, ACKs, Welcomes, signature-verification work,
 and failed reassemblies separately by connection, Account ID, attached device,
@@ -6190,7 +6188,7 @@ service that reads plaintext is an MLS leaf and appears in the device roster.
 Removing it advances the epoch. A ciphertext-only bouncer may store and relay
 without group membership.
 
-A gateway from IRC-MLS to plaintext IRC terminates E2EE. Clients must display
+A gateway from ARC-MLS to plaintext IRC terminates E2EE. Clients must display
 that gateway as a decrypting member and security boundary.
 
 The server can enforce metadata-level policy: authentication, channel access,
@@ -6239,7 +6237,7 @@ Failures shown to users distinguish:
 
 ## 20. Implementation separation
 
-The IRCD implementation should keep these surfaces separate:
+The ARCD implementation should keep these surfaces separate:
 
 - bounded IRC line and tag parsing;
 - fragment validation and reassembly;
@@ -6260,7 +6258,7 @@ The client or client SDK owns:
 - policy validation; and
 - security UI.
 
-No IRC-MLS server code path should accept decrypted application content or an
+No ARC-MLS server code path should accept decrypted application content or an
 MLS epoch secret; ordinary unbound IRC remains a separate plaintext feature.
 No production API or carrier in this document, including the recovery
 submission, witness resolution, and leaf-membership proof of Sections 12.5.1
@@ -6295,7 +6293,7 @@ Before production use, an implementation requires:
    bound encrypted target.
 5. Boundary tests at every named resource limit and one unit over it. The
    application-padding suite includes every Section-7.5 vector over
-   `IrcEncryptedContent`, checked-arithmetic overflow, exact outer-object limit
+   `ArcEncryptedContent`, checked-arithmetic overflow, exact outer-object limit
    fit/overflow, nonzero padding, one byte too little/much padding, and the
    zero-padding boundary case.
 6. Parser fuzzing for IRC tags, decimal fields, base64url, reassembly, TLS
@@ -6459,7 +6457,7 @@ Before interoperability outside this implementation family:
 
 For an ordinary encrypted channel message:
 
-1. The client creates `IrcEncryptedContent` with a durable sequence and random
+1. The client creates `ArcEncryptedContent` with a durable sequence and random
    message ID.
 2. It derives one padded MLS PrivateMessage and the next sender state without
    exposing either to the network.
@@ -6469,24 +6467,24 @@ For an ordinary encrypted channel message:
    reuse them unchanged.
 5. Usually one or a small number of 2940-byte fragments are sent as tagged
    `TAGMSG` lines.
-6. The IRCD performs bounded reassembly and one opaque fanout.
+6. The ARCD performs bounded reassembly and one opaque fanout.
 7. Each recipient validates, decrypts, replay-checks, and renders locally.
 
 There is no per-recipient application encryption, no server decryption, no
 shared static channel password, and no plaintext content processing in the
-IRCD.
+ARCD.
 
 ## Appendix B. Security claim template
 
 An implementation may accurately state:
 
-> IRC-MLS uses standardized MLS 1.0 to provide authenticated end-to-end
+> ARC-MLS uses standardized MLS 1.0 to provide authenticated end-to-end
 > encryption for messages among the devices shown in the encrypted roster.
 > It provides forward secrecy when old secrets are deleted and
 > post-compromise recovery after attacker access ends, controlled leaves are
 > removed, and an honest fresh-path Commit is finalized. Conflicting group
 > histories cannot both finalize while the configured endpoint finality fault
-> bound and durable sign-once state hold. IRC servers still observe routing
+> bound and durable sign-once state hold. AgenC Relay servers still observe routing
 > metadata and can deny service. In version 1, identity is resistant to server
 > substitution only after users verify account keys out of band; experimental
 > transparency supplies observation and evidence, not Verified status. The

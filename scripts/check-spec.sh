@@ -13,8 +13,8 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-spec = root / "docs/ircd-architecture-and-implementation-spec.md"
-e2ee = root / "docs/irc-mls-e2ee-extension.md"
+spec = root / "docs/arc-architecture-and-implementation-spec.md"
+e2ee = root / "docs/arc-mls-e2ee-extension.md"
 registry = root / "docs/federation-v1-profile.registry"
 sources = root / "docs/protocol-sources-and-decisions.md"
 manifest = root / "docs/specification-manifest.txt"
@@ -32,7 +32,7 @@ expected_files = {
     "rfcs/rfc9420-mls-protocol.txt": "251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b",
     "rfcs/rfc9525-tls-service-identity.txt": "ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5",
     "rfcs/rfc9750-mls-architecture.txt": "6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd",
-    "docs/irc-mls-e2ee-extension.md": "b2716e8e7a5531ed0e6f23455d45e51e81c8f901a0ef9a2b5ad3d471f059bf23",
+    "docs/arc-mls-e2ee-extension.md": "0960d58205933a94e482be38469ebbfbc87dd3d5cdb2f8f241962fe9cf43d0b8",
     "docs/federation-v1-profile.registry": "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411",
 }
 
@@ -436,14 +436,14 @@ if profile_hash != expected_profile_hash:
 
 e2ee_bytes = e2ee.read_bytes()
 e2ee_profile_digest = hashlib.sha256(
-    b"agenc-chat IRC-MLS specification profile v1\0" + e2ee_bytes
+    b"agenc-chat ARC-MLS specification profile v1\0" + e2ee_bytes
 ).digest()
 e2ee_profile_hash = e2ee_profile_digest.hex()
 e2ee_profile_token = base64.urlsafe_b64encode(
     e2ee_profile_digest
 ).rstrip(b"=").decode("ascii")
 expected_e2ee_profile_hash = (
-    "3771bab2f09024644d0468d004af30fba3d00403e4dc6f0205aea20a75265e45"
+    "c70f477beb9d143a16357cdf3850542143d327bc200b3cacf6a32fc94a5f9035"
 )
 if e2ee_profile_hash != expected_e2ee_profile_hash:
     errors.append(
@@ -457,8 +457,8 @@ profile_digest = bytes.fromhex(profile_hash)
 profile_token = base64.urlsafe_b64encode(profile_digest).rstrip(b"=").decode("ascii")
 manifest_raw_targets = (
     "docs/federation-v1-profile.registry",
-    "docs/irc-mls-e2ee-extension.md",
-    "docs/ircd-architecture-and-implementation-spec.md",
+    "docs/arc-mls-e2ee-extension.md",
+    "docs/arc-architecture-and-implementation-spec.md",
     "docs/protocol-sources-and-decisions.md",
     "scripts/check-spec.sh",
 )
@@ -919,10 +919,10 @@ for match in re.finditer(r"\bSection (\d+)(?:\.\d+)*", e2ee_text):
 required_e2ee_phrases = (
     "RFC 9852",
     "Suite `0x0004`, every other registered suite",
-    '"agenc-chat IRC-MLS specification profile v1\\0"',
+    '"agenc-chat ARC-MLS specification profile v1\\0"',
     "agenc.ag/e2ee-mls=v1,profile=<profile-hash>,seg=2940,obj=262144,parts=90,welcome=4194304",
-    ":<server-name> ECAP IRCMLS OFFER 1 <profile-hash>",
-    ":<server-name> ECAP IRCMLS ACK 1 <profile-hash>",
+    ":<server-name> ECAP ARCMLS OFFER 1 <profile-hash>",
+    ":<server-name> ECAP ARCMLS ACK 1 <profile-hash>",
     "maximum generation width, and",
     "the OFFER is exactly at most 360 bytes and the ACK at most 358 bytes",
     "close the old link without draining its",
@@ -940,12 +940,12 @@ if "agenc.ag/e2ee-mls=v1,seg=2940" in e2ee_text:
 
 ecap_templates = {
     "OFFER": (
-        ":<server-name> ECAP IRCMLS OFFER 1 <profile-hash> <network-id> "
+        ":<server-name> ECAP ARCMLS OFFER 1 <profile-hash> <network-id> "
         "<coordinator-server-id> 2940 262144 4194304 4094 4094 8191 "
         "<key-set-generation> <key-set-hash>"
     ),
     "ACK": (
-        ":<server-name> ECAP IRCMLS ACK 1 <profile-hash> <network-id> "
+        ":<server-name> ECAP ARCMLS ACK 1 <profile-hash> <network-id> "
         "<coordinator-server-id> 2940 262144 4194304 4094 4094 8191 "
         "<key-set-generation> <key-set-hash>"
     ),
@@ -964,7 +964,7 @@ ecap_common = (
 )
 expected_ecap_lengths = {"OFFER": 360, "ACK": 358}
 for subcommand, expected_length in expected_ecap_lengths.items():
-    rendered = max_prefix + " ECAP IRCMLS " + subcommand + ecap_common
+    rendered = max_prefix + " ECAP ARCMLS " + subcommand + ecap_common
     if len(rendered.encode("ascii")) != expected_length:
         errors.append(
             f"validator ECAP {subcommand} length is "
@@ -977,7 +977,7 @@ def numbered(names: list[str]) -> list[tuple[str, int]]:
 
 
 expected_companion_enums = {
-    "IrcWireObjectKind": numbered([
+    "ArcWireObjectKind": numbered([
         "application_mls", "commit_mls", "commit_approval", "commit_ack",
         "finalization_request", "finalization_certificate", "abort_request",
         "abort_certificate", "welcome_mls", "root_identity",
@@ -992,7 +992,7 @@ expected_companion_enums = {
         "policy", "recovery_submission", "witness_resolution",
         "leaf_membership_proof",
     ]),
-    "IrcFederationOpcode": numbered([
+    "ArcFederationOpcode": numbered([
         "application_channel", "application_direct", "reserve_channel",
         "reserve_direct", "bind_group", "query_channel", "query_direct",
         "close_group", "submit_candidate", "submit_authorization",
@@ -1009,29 +1009,29 @@ expected_companion_enums = {
         "submit_policy", "submit_recovery", "submit_recovery_element",
         "submit_membership",
     ]),
-    "IrcFederationStoreKind": numbered([
+    "ArcFederationStoreKind": numbered([
         "store_authorization", "store_identity", "store_roster",
         "store_capabilities", "store_package", "store_application",
         "store_binding", "store_welcome", "store_staged_reinit",
         "store_policy", "store_membership",
     ]),
-    "IrcFederationPendingKind": numbered([
+    "ArcFederationPendingKind": numbered([
         "pending_finalization", "pending_abort", "pending_reinit_attempt",
         "pending_reinit_activate", "pending_reinit_abort",
     ]),
-    "IrcFederationEmptyKind": numbered([
+    "ArcFederationEmptyKind": numbered([
         "empty_authorizations", "empty_acks", "empty_receipts",
         "empty_objects", "empty_identity", "empty_root_chain",
         "empty_roster", "empty_capabilities", "empty_package",
         "empty_application", "empty_binding", "empty_binding_lock",
         "empty_welcome", "empty_staged_reinit",
     ]),
-    "IrcFederationPackageKind": [("normal_package", 1)],
-    "IrcFederationMailboxKind": numbered([
+    "ArcFederationPackageKind": [("normal_package", 1)],
+    "ArcFederationMailboxKind": numbered([
         "mailbox_application", "mailbox_binding", "mailbox_welcome",
         "mailbox_staged_reinit",
     ]),
-    "IrcFederationResultKind": numbered([
+    "ArcFederationResultKind": numbered([
         "failed", "accepted_event", "bound", "closed", "stored",
         "commit_acked", "pending", "empty", "account", "attached",
         "attach_challenge", "revoked", "reserved", "finalized", "aborted",
@@ -1040,14 +1040,14 @@ expected_companion_enums = {
         "mailbox_acked", "recovery_accepted", "recovery_extended",
         "recovery_closed", "recovery_conflict",
     ]),
-    "IrcFederationEventKind": numbered([
+    "ArcFederationEventKind": numbered([
         "channel_application", "direct_application", "candidate_event",
         "commit_ack_event", "finalized_event", "aborted_event",
         "reinit_activated_event", "reinit_aborted_event", "closed_event",
         "route_state_changed", "request_completed", "route_state_hidden",
         "reinit_staged_event", "reinit_ack_event",
     ]),
-    "IrcRouteStateKind": [
+    "ArcRouteStateKind": [
         ("active_route", 1), ("encrypted_tombstone", 2),
     ],
 }
@@ -1086,14 +1086,14 @@ for enum_name, expected_items in expected_companion_enums.items():
         )
 
 defined_irc_types = set(re.findall(
-    r"}\s*(Irc[A-Z][A-Za-z0-9_]*)\s*;", e2ee_text
+    r"}\s*(Arc[A-Z][A-Za-z0-9_]*)\s*;", e2ee_text
 ))
 referenced_irc_types = set(re.findall(
-    r"\b(Irc[A-Z][A-Za-z0-9_]*)\b", e2ee_text
+    r"\b(Arc[A-Z][A-Za-z0-9_]*)\b", e2ee_text
 ))
 if referenced_irc_types != defined_irc_types:
     errors.append(
-        "companion Irc type definition/reference mismatch: undefined "
+        "companion Arc type definition/reference mismatch: undefined "
         f"{sorted(referenced_irc_types - defined_irc_types)!r}, unreferenced "
         f"{sorted(defined_irc_types - referenced_irc_types)!r}"
     )
@@ -1152,34 +1152,34 @@ def require_exact_table_coverage(
 
 
 expected_signature_labels = {
-    "IRC-MLS/1 root identity", "IRC-MLS/1 root continuity",
-    "IRC-MLS/1 device enrollment possession",
-    "IRC-MLS/1 device enrollment approval", "IRC-MLS/1 device certificate",
-    "IRC-MLS/1 device roster", "IRC-MLS/1 device capabilities",
-    "IRC-MLS/1 leaf authorization", "IRC-MLS/1 sequencer continuity",
-    "IRC-MLS/1 policy approval", "IRC-MLS/1 conversation binding",
-    "IRC-MLS/1 root binding lock", "IRC-MLS/1 commit authorization",
-    "IRC-MLS/1 reinit attempt authorization", "IRC-MLS/1 reservation",
-    "IRC-MLS/1 close authorization", "IRC-MLS/1 device attach challenge",
-    "IRC-MLS/1 device attach possession", "IRC-MLS/1 candidate receipt",
-    "IRC-MLS/1 commit processed", "IRC-MLS/1 disposition vote",
-    "IRC-MLS/1 commit finalization", "IRC-MLS/1 candidate abort",
-    "IRC-MLS/1 reinit attempt", "IRC-MLS/1 reinit attempt receipt",
-    "IRC-MLS/1 reinit processed", "IRC-MLS/1 reinit disposition",
-    "IRC-MLS/1 reinit activation", "IRC-MLS/1 reinit attempt abort",
-    "IRC-MLS/1 recovery submission", "IRC-MLS/1 leaf membership",
-    "IRC-MLS/1 leaf membership possession",
+    "ARC-MLS/1 root identity", "ARC-MLS/1 root continuity",
+    "ARC-MLS/1 device enrollment possession",
+    "ARC-MLS/1 device enrollment approval", "ARC-MLS/1 device certificate",
+    "ARC-MLS/1 device roster", "ARC-MLS/1 device capabilities",
+    "ARC-MLS/1 leaf authorization", "ARC-MLS/1 sequencer continuity",
+    "ARC-MLS/1 policy approval", "ARC-MLS/1 conversation binding",
+    "ARC-MLS/1 root binding lock", "ARC-MLS/1 commit authorization",
+    "ARC-MLS/1 reinit attempt authorization", "ARC-MLS/1 reservation",
+    "ARC-MLS/1 close authorization", "ARC-MLS/1 device attach challenge",
+    "ARC-MLS/1 device attach possession", "ARC-MLS/1 candidate receipt",
+    "ARC-MLS/1 commit processed", "ARC-MLS/1 disposition vote",
+    "ARC-MLS/1 commit finalization", "ARC-MLS/1 candidate abort",
+    "ARC-MLS/1 reinit attempt", "ARC-MLS/1 reinit attempt receipt",
+    "ARC-MLS/1 reinit processed", "ARC-MLS/1 reinit disposition",
+    "ARC-MLS/1 reinit activation", "ARC-MLS/1 reinit attempt abort",
+    "ARC-MLS/1 recovery submission", "ARC-MLS/1 leaf membership",
+    "ARC-MLS/1 leaf membership possession",
 }
 signature_rows = markdown_table("| Label | TBS content | Signing key |")
 signature_labels: list[str] = []
 for row in signature_rows:
-    label_match = re.fullmatch(r"`(IRC-MLS/1 [a-z][a-z0-9 ]*)`", row[0])
+    label_match = re.fullmatch(r"`(ARC-MLS/1 [a-z][a-z0-9 ]*)`", row[0])
     if label_match is None:
         errors.append(f"companion signature registry has malformed label {row[0]!r}")
         continue
     label = label_match.group(1)
     signature_labels.append(label)
-    tbs_types = re.findall(r"`(Irc[A-Z][A-Za-z0-9_]*)`", row[1])
+    tbs_types = re.findall(r"`(Arc[A-Z][A-Za-z0-9_]*)`", row[1])
     if len(tbs_types) != 1 or tbs_types[0] not in defined_irc_types:
         errors.append(
             f"companion signature label {label!r} has invalid TBS cell {row[1]!r}"
@@ -1230,7 +1230,7 @@ for row in semantic_rows:
             f"companion semantic ID {identifiers[0]!r} lacks one exact SHA256 formula"
         )
     semantic_sha_labels.update(re.findall(
-        r'SHA256\("(IRC-MLS/1 [^"]+)"', rendered_formula
+        r'SHA256\("(ARC-MLS/1 [^"]+)"', rendered_formula
     ))
 if semantic_ids != expected_semantic_ids:
     errors.append(
@@ -1238,7 +1238,7 @@ if semantic_ids != expected_semantic_ids:
         f"{expected_semantic_ids!r}"
     )
 all_companion_sha_labels = set(re.findall(
-    r'SHA256\("(IRC-MLS/1 [^"]+)"', e2ee_text
+    r'SHA256\("(ARC-MLS/1 [^"]+)"', e2ee_text
 ))
 if semantic_sha_labels != all_companion_sha_labels:
     errors.append(
@@ -1263,10 +1263,10 @@ if companion_limit_references != companion_limit_definitions:
         f"{sorted(companion_limit_definitions - companion_limit_references)!r}"
     )
 
-opcode_names = {name for name, _ in expected_companion_enums["IrcFederationOpcode"]}
-result_names = {name for name, _ in expected_companion_enums["IrcFederationResultKind"]}
-event_names = {name for name, _ in expected_companion_enums["IrcFederationEventKind"]}
-wire_kind_names = {name for name, _ in expected_companion_enums["IrcWireObjectKind"]}
+opcode_names = {name for name, _ in expected_companion_enums["ArcFederationOpcode"]}
+result_names = {name for name, _ in expected_companion_enums["ArcFederationResultKind"]}
+event_names = {name for name, _ in expected_companion_enums["ArcFederationEventKind"]}
+wire_kind_names = {name for name, _ in expected_companion_enums["ArcWireObjectKind"]}
 
 operation_rows = markdown_table(
     "| Opcode | Parameter fields in exact order | Required payload kind |"

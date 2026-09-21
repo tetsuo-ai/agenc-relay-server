@@ -1,4 +1,4 @@
-# Secure IRC Daemon Architecture and Implementation Specification
+# AgenC Relay Architecture and Implementation Specification
 
 Version 1.0-draft.1, 2026-08-24
 
@@ -11,7 +11,7 @@ release tests. An implementation is not conforming merely because it accepts
 traditional IRC commands; it is conforming only when every requirement and
 release gate in this document and the referenced E2EE profile is satisfied.
 
-The companion [IRC-MLS E2EE specification](irc-mls-e2ee-extension.md) is
+The companion [ARC-MLS E2EE specification](arc-mls-e2ee-extension.md) is
 normative for encrypted conversations. This document owns the surrounding
 daemon. The E2EE document owns cryptographic identity, MLS group state,
 encrypted object formats, the published conversation policy, the E2EE
@@ -31,7 +31,7 @@ Version 1 has three additive conformance targets:
    moderation, persistence, and the complete client profile.
 2. **Federated node**: a core node plus the version-1 coordinator/edge
    federation protocol.
-3. **Encrypted node**: a federated node plus the complete IRC-MLS profile.
+3. **Encrypted node**: a federated node plus the complete ARC-MLS profile.
 
 A release advertised as the full daemon MUST satisfy all three. An optional
 WebSocket listener does not define a fourth target; when enabled, it MUST have
@@ -54,7 +54,7 @@ and close the transport. A malformed message never causes a panic.
 Conflicts are resolved in this order, highest first:
 
 1. this document;
-2. `docs/irc-mls-e2ee-extension.md` for an encrypted operation;
+2. `docs/arc-mls-e2ee-extension.md` for an encrypted operation;
 3. ratified IRCv3 specifications explicitly named here;
 4. the Modern IRC Client Protocol snapshot fetched for the implementation;
 5. RFC 2812 for client behavior not resolved above;
@@ -585,7 +585,7 @@ version-3 onion service and maps virtual port 6697 to the daemon's Unix socket:
 
 ```text
 HiddenServiceDir /var/lib/tor/agenc-chat/
-HiddenServicePort 6697 unix:/run/agenc-ircd/onion.sock
+HiddenServicePort 6697 unix:/run/arcd/onion.sock
 ```
 
 The key directory MUST be owned by the Tor service account and inaccessible
@@ -2672,7 +2672,7 @@ finality votes against it before signing a terminal certificate, and every
 edge witnesses the sequencer record chain it projects; both use public objects
 only. Client crypto is not linked into the daemon.
 
-The companion `IrcFederationOrigin` is a subordinate mirror of the exact base
+The companion `ArcFederationOrigin` is a subordinate mirror of the exact base
 Server Incarnation, Origin ID/generation, Connection/Session/User IDs, Account
 ID/session generation, and connection nonce; only its device attachment is
 additional. The two profiles cannot advance those shared fields independently.
@@ -2680,7 +2680,7 @@ They do maintain separate, explicitly domain-separated contiguous operation
 sequence counters inside one shared origin generation; neither profile can
 fill the other's gap, and origin deletion commits both declared next values.
 For recipient rendering, the coordinator derives the companion's bounded
-`IrcFederationSourceView` from that same base session revision; its complete
+`ArcFederationSourceView` from that same base session revision; its complete
 encoding is byte-for-byte identical to Appendix-B `FederationSourceView`.
 This avoids
 projecting an unrelated session directory merely to render one encrypted
@@ -3271,7 +3271,7 @@ later duplicate; the edge cancels any superseded socket as soon as one FREADY
 succeeds. A coordinator never dials an edge, so no symmetric connection tie
 break is implied.
 
-After FREADY, the companion `ECAP IRCMLS` negotiation runs. Its OFFER and ACK
+After FREADY, the companion `ECAP ARCMLS` negotiation runs. Its OFFER and ACK
 bind the exact domain-separated companion-document hash as well as the
 network, coordinator, limits, and sequencer key set. Base state synchronization
 follows Section 20.8. The link becomes `ACTIVE` only after both base and, for
@@ -3993,11 +3993,11 @@ struct {
 the E2EE delivery generation for a companion part. A base part's encoded event
 is the complete canonical `FederationEvent`, and its Event Object ID is the
 Section-20.4 hash; it has an empty payload ID and zero payload bytes. A
-companion part's encoded event is the complete canonical `IrcWireObject` of
+companion part's encoded event is the complete canonical `ArcWireObject` of
 kind `federation_event`, and its ID is the companion object hash. Its payload
 fields are empty/zero exactly for an event whose selector has no data object;
 otherwise the ID is 32 bytes, the length is `1..4,194,304`, and table 22
-contains the byte-identical validated `IrcWireObject` under that ID before the
+contains the byte-identical validated `ArcWireObject` under that ID before the
 part is marked received. An otherwise-unused staged payload is inert: no
 route, mailbox, result, fetch, or client output may reference it until apply.
 The payload row is inserted only if absent; an existing row must match kind,
@@ -4652,7 +4652,7 @@ secret path's contents.
 The operator workflow is one explicit command:
 
 ```text
-agenc-ircd init --config /etc/agenc-ircd/config.toml
+arcd init --config /etc/arcd/config.toml
 ```
 
 It refuses to overwrite any existing file. It creates a Network ID for a new
@@ -4668,8 +4668,8 @@ contact a CA, enable a public bind, register a peer, or transmit keys.
 Edge initialization imports the trusted onboarding descriptor and public HPKE
 pin but never creates or requests the recipient private key.
 
-`agenc-ircd check-config` performs every startup validation without opening
-listeners or mutating storage. `agenc-ircd print-onboarding` emits the public
+`arcd check-config` performs every startup validation without opening
+listeners or mutating storage. `arcd print-onboarding` emits the public
 DNS/onion/pin descriptor and contains no private material.
 
 Offline commands trust file ownership by an explicit identity, never by
@@ -4975,7 +4975,7 @@ prepended to redb's own file format:
 
 ```text
 struct {
-    opaque magic[16];                       // "AGENC-IRCD-DB\0\0\0"
+    opaque magic[16];                       // "AGENC-ARCD-DB\0\0\0"
     uint16 database_format;                 // 1
     opaque network_id[32];
     opaque server_id[16];
@@ -5566,7 +5566,7 @@ generation or any semantic side effect.
 cut will have:
 
 ```text
-len("AGENC-IRCD-BACKUP-V1\0") + 4 + len(BackupHeader) +
+len("AGENC-ARCD-BACKUP-V1\0") + 4 + len(BackupHeader) +
 sum(4 + len(BackupRecord) for every numbered-table row) +
 4 + len(BackupTrailer)
 ```
@@ -5676,7 +5676,7 @@ struct {
 } NonceReservationState;
 
 struct {
-    opaque magic[20];                       // "AGENC-IRCD-GUARD-V1\0"
+    opaque magic[20];                       // "AGENC-ARCD-GUARD-V1\0"
     uint16 guard_format;                    // 1
     opaque network_id[32];
     opaque server_id[16];
@@ -5950,7 +5950,7 @@ startup is forbidden.
 
 ### 23.6 Storage format admission
 
-The current database schema generation is 4. Initialization, service startup,
+The current database schema generation is 5. Initialization, service startup,
 inspection, backup verification, restore, and rekey MUST accept only that
 generation. Earlier development formats are unsupported. Restore and rekey
 preserve the schema generation and validate every record under the current
@@ -5966,7 +5966,7 @@ long-lived snapshot permit is occupied, it returns `SERVER_BUSY` without
 opening another read transaction:
 
 ```text
-magic "AGENC-IRCD-BACKUP-V1\0"
+magic "AGENC-ARCD-BACKUP-V1\0"
 uint32 header_length || canonical BackupHeader
 repeat: uint32 record_length || canonical BackupRecord
 uint32 trailer_length || canonical BackupTrailer
@@ -6375,7 +6375,7 @@ never accepted as authority, and are deleted before the completed directory
 is installed.
 
 Restore is
-`agenc-ircd storage restore --config <file> --backup <file>
+`arcd storage restore --config <file> --backup <file>
 --source-master-key-file <file> --source-rollback-guard-key-file <file>
 --output-state-directory <new-directory>
 --target-rollback-guard-key-file <file>
@@ -6497,7 +6497,7 @@ file rewriting is not secure erasure on snapshots, copy-on-write filesystems,
 SSDs, or backups.
 
 Key rotation is the offline, copy-on-write command
-`agenc-ircd storage rekey --config <file>
+`arcd storage rekey --config <file>
 --output-state-directory <new-directory>
 [--new-master-key-file <file>]
 [--new-rollback-guard-key-file <file>] [--resume]`; at least one new key is
@@ -6633,7 +6633,7 @@ an unregistered generation, or an incorrect count is storage corruption.
 Rotation start is the stopped-daemon command:
 
 ```text
-agenc-ircd storage login-index-rotate-start --config <file>
+arcd storage login-index-rotate-start --config <file>
     --new-key-file <file>
 ```
 
@@ -6666,7 +6666,7 @@ buckets.
 Finalization is the stopped-daemon command:
 
 ```text
-agenc-ircd storage login-index-rotate-finish --config <file>
+arcd storage login-index-rotate-finish --config <file>
 ```
 
 It succeeds only when an exact scan and key state both report zero previous
@@ -6692,21 +6692,21 @@ forbidden. This graph is checked in CI from `cargo metadata`.
 
 | Crate | Owns | May depend on workspace crates |
 | --- | --- | --- |
-| `agenc-ircd-types` | typed IDs, bounded text/bytes, enums, constants, public error codes | none |
-| `agenc-ircd-client-wire` | incremental client framing, syntax parser, tag codec, capability-aware renderer | `types` |
-| `agenc-ircd-federation-wire` | Appendix-B codecs, object IDs, fragment assembly | `types` |
-| `agenc-ircd-crypto` | domain-separated hashes/KDFs, AEAD, signature and exporter adapters, secret wrappers | `types` |
-| `agenc-ircd-auth` | HPKE account-service envelopes, OPAQUE/SASL, account creation, and credential-change state machines | `types`, `crypto` |
-| `agenc-ircd-domain` | validated commands, authorization, state, plans, events, projections, rate policy | `types` |
-| `agenc-ircd-e2ee` | companion-profile public-object validation and base/E2EE transaction plans | `types`, `crypto`, `domain`, `federation-wire` |
-| `agenc-ircd-storage` | record codecs, redb owner, backups, recovery validation | `types`, `crypto`, `domain`, `e2ee` |
-| `agenc-ircd-config` | strict TOML schema, path/permission validation, typed configuration | `types` |
-| `agenc-ircd-admin` | admin command parser, challenge verification, permission mapping | `types`, `crypto`, `domain` |
-| `agenc-ircd-runtime` | Tokio supervisors, listeners, `StateCore`, federation/link state, queue plumbing | every production library above |
-| `agenc-ircd-testkit` | deterministic clocks/RNGs, reference model, fault stores, transcript drivers | any production crate; dev-only |
-| `agenc-ircd` | binary composition and subcommand selection only | `runtime`, `config`, `storage` |
+| `agenc-relay-types` | typed IDs, bounded text/bytes, enums, constants, public error codes | none |
+| `agenc-relay-client-wire` | incremental client framing, syntax parser, tag codec, capability-aware renderer | `types` |
+| `agenc-relay-federation-wire` | Appendix-B codecs, object IDs, fragment assembly | `types` |
+| `agenc-relay-crypto` | domain-separated hashes/KDFs, AEAD, signature and exporter adapters, secret wrappers | `types` |
+| `agenc-relay-auth` | HPKE account-service envelopes, OPAQUE/SASL, account creation, and credential-change state machines | `types`, `crypto` |
+| `agenc-relay-domain` | validated commands, authorization, state, plans, events, projections, rate policy | `types` |
+| `agenc-relay-e2ee` | companion-profile public-object validation and base/E2EE transaction plans | `types`, `crypto`, `domain`, `federation-wire` |
+| `agenc-relay-storage` | record codecs, redb owner, backups, recovery validation | `types`, `crypto`, `domain`, `e2ee` |
+| `agenc-relay-config` | strict TOML schema, path/permission validation, typed configuration | `types` |
+| `agenc-relay-admin` | admin command parser, challenge verification, permission mapping | `types`, `crypto`, `domain` |
+| `agenc-relay-runtime` | Tokio supervisors, listeners, `StateCore`, federation/link state, queue plumbing | every production library above |
+| `agenc-relay-testkit` | deterministic clocks/RNGs, reference model, fault stores, transcript drivers | any production crate; dev-only |
+| `agenc-relay-server` | binary composition and subcommand selection only | `runtime`, `config`, `storage` |
 
-The short name in the dependency column means the same `agenc-ircd-*` prefix.
+The short name in the dependency column means the same `agenc-relay-*` prefix.
 No library depends on the binary, `testkit` is absent from release dependency
 graphs, and no dependency cycle is accepted. Wire crates contain no sockets,
 policy, database calls, or Tokio tasks. `domain` contains no concrete clock,
@@ -7718,14 +7718,12 @@ vectors in [`draft-irtf-cfrg-xchacha-03`](https://datatracker.ietf.org/doc/html/
 plus RFC 8439 for its ChaCha20-Poly1305 component. That Internet-Draft expired
 and the datatracker records it as a dead IRTF document; this specification does
 not mislabel XChaCha as an RFC or IETF standard. Its use is local at-rest
-format, not a negotiated wire algorithm, and release requires the pinned draft
-vectors, independent library vectors, the `2^40` key-generation usage cap, and
-specialist cryptographic review. The reservation-record/guard/manifest
-composition is likewise a project storage construction rather than a standard
-cryptographic protocol; its domain/key separation, crash-state proof,
-rollback limits, nonce accounting, and every serialized transition require an
-independent cryptographic review before implementation freeze and again before
-a conformance release.
+format, not a negotiated wire algorithm. Release requires the pinned draft
+vectors, independent library vectors, and the `2^40` key-generation usage cap.
+The reservation-record/guard/manifest composition is a project storage
+construction. Its domain/key separation, crash-state proof, rollback limits,
+nonce accounting, and serialized transitions are covered by the storage tests
+and release qualification gates.
 
 ### 30.3 Local immutable-source hashes
 
@@ -7745,14 +7743,14 @@ These SHA-256 values identify the exact files read for this draft:
 | `rfcs/rfc9420-mls-protocol.txt` | `251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b` |
 | `rfcs/rfc9525-tls-service-identity.txt` | `ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5` |
 | `rfcs/rfc9750-mls-architecture.txt` | `6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd` |
-| `docs/irc-mls-e2ee-extension.md` | `b2716e8e7a5531ed0e6f23455d45e51e81c8f901a0ef9a2b5ad3d471f059bf23` |
+| `docs/arc-mls-e2ee-extension.md` | `0960d58205933a94e482be38469ebbfbc87dd3d5cdb2f8f241962fe9cf43d0b8` |
 
 Changing a file without updating its hash, source decision, and affected
 vectors is a conformance-ledger failure.
 The companion's domain-separated version-1 profile hash is
-`3771bab2f09024644d0468d004af30fba3d00403e4dc6f0205aea20a75265e45`
+`c70f477beb9d143a16357cdf3850542143d327bc200b3cacf6a32fc94a5f9035`
 (unpadded base64url
-`N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU`).
+`xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU`).
 
 ## Appendix A. Client wire registries
 
@@ -9524,7 +9522,7 @@ admission.
 | `e2ee.federation_peer_burst_bytes` | integer, 33,554,432 | 4 MiB..4 GiB and no more than ten seconds of the configured peer rate |
 
 `e2ee.sequencer_credentials_file` is the TLS encoding of
-`struct { uint64 set_generation; IrcSequencerCredential credentials<1..4096>; }`
+`struct { uint64 set_generation; ArcSequencerCredential credentials<1..4096>; }`
 holding one or two companion Section-9.2 credentials in key-generation
 order, active first, in at most 4,096 bytes; the set digest is recomputed from
 the verified credentials and never read from the file. Every sequencer
@@ -9646,8 +9644,8 @@ recovery-epoch=<22-char-random-recovery-epoch>
 base-profile-sha256=ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
-e2ee-profile=IRC-MLS/1
-e2ee-profile-sha256=N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU
+e2ee-profile=ARC-MLS/1
+e2ee-profile-sha256=xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU
 sequencer-key-set-generation=<uint64-decimal>
 sequencer-key-set-hash=<43-char-hash>
 ```
@@ -9677,7 +9675,7 @@ The descriptor is an onboarding pin conveyed by the user's trusted invitation
 channel, not a substitute for WebPKI or E2EE identity verification.
 
 For invite registration, the offline command
-`agenc-ircd account-invite create --descriptor <file> --signing-key-file
+`arcd account-invite create --descriptor <file> --signing-key-file
 <file> --expires-in <seconds> [--service-user <name>]` verifies the
 descriptor and key, accepts 1 through 2,592,000 seconds, generates a fresh
 Invite ID, and emits exactly:

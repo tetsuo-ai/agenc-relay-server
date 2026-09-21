@@ -2,7 +2,7 @@
 
 Status: research and review evidence for the version-1 specifications. This
 file is not a third normative protocol document. The precedence rules in
-`ircd-architecture-and-implementation-spec.md` remain authoritative.
+`arc-architecture-and-implementation-spec.md` remain authoritative.
 
 Last source-status check: 2026-09-05.
 
