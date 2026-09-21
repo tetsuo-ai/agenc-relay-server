@@ -49,7 +49,7 @@ def validate_wss(profile: dict[str, object]) -> None:
     upgrade = profile.get("upgrade")
     require(isinstance(upgrade, dict), "missing WSS upgrade limits")
     require(all(upgrade.get(key) == value for key, value in WSS_LIMITS.items()), "WSS upgrade limits changed")
-    require([upgrade.get(key) for key in ("tls", "alpn", "method", "path", "http_version")] == ["1.3", "http/1.1", "GET", "/irc", "1.1"], "WSS transport profile changed")
+    require([upgrade.get(key) for key in ("tls", "alpn", "method", "path", "http_version")] == ["1.3", "http/1.1", "GET", "/arc", "1.1"], "WSS transport profile changed")
     framing = profile.get("framing", {})
     require(framing.get("message_bytes") == 8701 and framing.get("utf8_for_both_subprotocols") is True, "WSS line semantics changed")
     matrix = profile.get("matrix", {})

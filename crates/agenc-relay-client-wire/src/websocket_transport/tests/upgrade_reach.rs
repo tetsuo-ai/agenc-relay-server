@@ -12,7 +12,7 @@ const VERSION: &str = "Sec-WebSocket-Version: 13";
 const PROTOCOL: &str = "Sec-WebSocket-Protocol: text.ircv3.net";
 
 fn request(headers: &[&str]) -> Vec<u8> {
-    let mut bytes = b"GET /irc HTTP/1.1\r\n".to_vec();
+    let mut bytes = b"GET /arc HTTP/1.1\r\n".to_vec();
     for header in headers.iter().chain(&[PROTOCOL]) {
         bytes.extend_from_slice(header.as_bytes());
         bytes.extend_from_slice(b"\r\n");
@@ -43,19 +43,19 @@ fn complete_requests_parse_and_tolerate_tabs_and_trailing_blanks() -> Result<(),
 
 #[test]
 fn request_lines_are_bounded_and_exact() {
-    let mut long = b"GET /irc HTTP/1.1 ".to_vec();
+    let mut long = b"GET /arc HTTP/1.1 ".to_vec();
     long.extend(std::iter::repeat_n(b'x', REQUEST_LINE_BYTES + 10));
     long.extend_from_slice(b"\r\n\r\n");
     assert_eq!(outcome(&long), Err(UpgradeError::RequestLine));
     assert_eq!(
-        outcome(b"GET /irc HTTP/1.1 extra\r\n\r\n"),
+        outcome(b"GET /arc HTTP/1.1 extra\r\n\r\n"),
         Err(UpgradeError::Malformed)
     );
 }
 
 #[test]
 fn header_lines_are_bounded_even_before_their_line_end() {
-    let mut partial = b"GET /irc HTTP/1.1\r\nX: ".to_vec();
+    let mut partial = b"GET /arc HTTP/1.1\r\nX: ".to_vec();
     partial.extend(std::iter::repeat_n(b'a', HEADER_LINE_BYTES + 10));
     assert_eq!(outcome(&partial), Err(UpgradeError::Headers));
 }

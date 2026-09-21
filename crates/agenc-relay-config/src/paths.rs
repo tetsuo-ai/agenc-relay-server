@@ -988,7 +988,7 @@ mod tests {
             absolute_path("/var/lib/../agenc").err(),
             Some(ConfigError::InvalidValue)
         );
-        assert!(absolute_path("/var/lib/agenc").is_ok());
+        assert!(absolute_path("/var/lib/arcd").is_ok());
     }
 
     #[test]

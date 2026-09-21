@@ -5,7 +5,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-const REQUEST: &[u8] = b"GET /irc HTTP/1.1\r\nHost: chat.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: text.ircv3.net\r\nOrigin: https://chat.example\r\n\r\n";
+const REQUEST: &[u8] = b"GET /arc HTTP/1.1\r\nHost: chat.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: text.ircv3.net\r\nOrigin: https://chat.example\r\n\r\n";
 
 #[tokio::test]
 async fn origin_is_checked_at_completed_upgrade_and_cannot_escape_exact_matching() -> TestResult {

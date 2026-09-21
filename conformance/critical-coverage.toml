@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 998
-reviewed_source_sha256 = "4c1d689824a2d167e42dbfbeb6274cdb0603493ece935d0cddefc5b4eae822f7"
+reviewed_source_sha256 = "f6314b666d63375cad4b4415c73bf5a03950e05535deaf79aab307551c4e4ec4"
 deferred = []
 
 [[region]]
@@ -96,7 +96,7 @@ id = "wss-upgrade-error-responses"
 category = "parser-error-discriminants"
 file = "crates/agenc-relay-client-wire/src/websocket_transport/upgrade.rs"
 item = "response"
-source_sha256 = "c10c392485b0e182b85e498bbbd4f3814984ee7ef1e6636c0cdd6e68733eb782"
+source_sha256 = "725d9bb815f63872d8228da724e5de726f4c4d4f607f11d78b0e87d8c2816524"
 start_line = 37
 end_line = 48
 span_sha256 = "7f6725bebbba0c03b49ce7878dee0c8a31eb6a240a7f4c5ff7cb9d4682bebb41"

@@ -9,7 +9,7 @@ mod tests {
     };
     use agenc_relay_client_wire::{WebSocketOpcode, WebSocketSubprotocol};
 
-    const BASE: &str = "GET /irc HTTP/1.1\r\nHost: chat.example\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: text.ircv3.net\r\nOrigin: https://chat.example\r\n";
+    const BASE: &str = "GET /arc HTTP/1.1\r\nHost: chat.example\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: text.ircv3.net\r\nOrigin: https://chat.example\r\n";
     fn request(extra: &str) -> String {
         format!("{BASE}{extra}\r\n")
     }
@@ -64,7 +64,7 @@ mod tests {
             );
         }
         assert_eq!(
-            parse_upgrade(format!("{}GET /irc HTTP/1.1\r\n", request("")).as_bytes()).err(),
+            parse_upgrade(format!("{}GET /arc HTTP/1.1\r\n", request("")).as_bytes()).err(),
             Some(UpgradeError::Malformed)
         );
         assert_eq!(
@@ -78,7 +78,7 @@ mod tests {
         let original = request("");
         for (from, to, expected) in [
             ("GET", "POST", UpgradeError::Method),
-            ("/irc", "/irc?canary=1", UpgradeError::Endpoint),
+            ("/arc", "/arc?canary=1", UpgradeError::Endpoint),
             ("HTTP/1.1", "HTTP/1.0", UpgradeError::Malformed),
             ("Version: 13", "Version: 12", UpgradeError::Version),
             ("text.ircv3.net", "unknown", UpgradeError::Malformed),

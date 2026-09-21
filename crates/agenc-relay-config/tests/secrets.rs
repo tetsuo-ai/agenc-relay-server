@@ -20,7 +20,7 @@ fn disabled_listener_material_is_not_required_until_enablement() -> TestResult {
     let sandbox = Sandbox::create()?;
     sandbox.populate_host_layout()?;
     let text = format!(
-        "{PUBLIC}\n[[listeners.endpoint]]\nname = \"dormant\"\nenabled = false\npurpose = \"client_tls\"\nbind = \"127.0.0.1:6698\"\nmax_connections = 1\ntls_certificate_file = \"/etc/agenc/tls/dormant.crt\"\ntls_private_key_file = \"/etc/agenc/tls/dormant.key\"\n"
+        "{PUBLIC}\n[[listeners.endpoint]]\nname = \"dormant\"\nenabled = false\npurpose = \"client_tls\"\nbind = \"127.0.0.1:6698\"\nmax_connections = 1\ntls_certificate_file = \"/etc/arcd/tls/dormant.crt\"\ntls_private_key_file = \"/etc/arcd/tls/dormant.key\"\n"
     );
     let config = host_config(&sandbox, &text)?;
     let secrets = SecretSet::load(&config)?;
@@ -42,11 +42,7 @@ fn disabled_listener_material_is_not_required_until_enablement() -> TestResult {
 fn same_class_tls_key_aliases_preserve_cross_purpose_secret_separation() -> TestResult {
     let sandbox = Sandbox::create()?;
     sandbox.populate_host_layout()?;
-    let text = mutate(
-        DUAL,
-        "/etc/agenc/tls/onion.key",
-        "/etc/agenc/tls/server.key",
-    );
+    let text = mutate(DUAL, "/etc/arcd/tls/onion.key", "/etc/arcd/tls/server.key");
     let config = host_config(&sandbox, &text)?;
     let secrets = SecretSet::load(&config)?;
     let public = agenc_relay_config::ListenerName::parse("public")?;

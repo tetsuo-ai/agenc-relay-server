@@ -1053,7 +1053,7 @@ mod tests {
                 &[0; 32],
                 None,
                 limits,
-                ConstructionSchema::Four
+                ConstructionSchema::Five
             )
             .map(|facts| facts.is_some()),
             Ok(false)
@@ -1068,7 +1068,7 @@ mod tests {
                 &[0; 32],
                 None,
                 limits,
-                ConstructionSchema::Four
+                ConstructionSchema::Five
             )
             .map(|facts| facts.is_some()),
             Err(StorageError::FilesystemRejected(_))
@@ -1090,7 +1090,7 @@ mod tests {
                 &[0; 32],
                 None,
                 limits,
-                ConstructionSchema::Four
+                ConstructionSchema::Five
             )
             .map(|facts| facts.is_some()),
             Err(StorageError::FilesystemRejected(_))

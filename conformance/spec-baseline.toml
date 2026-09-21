@@ -1,23 +1,23 @@
 schema_version = 1
-frozen_at_commit = "2e13fab121efcdf3128eb1ce8a5b3577f95b8e25"
+frozen_at_commit = "5bc7baba944fcb4166281eedca3d92e875a88946"
 
 [profiles.base_federation_v1]
 sha256 = "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
 base64url = "ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M"
 
 [profiles.e2ee_mls_v1]
-sha256 = "c70f477beb9d143a16357cdf3850542143d327bc200b3cacf6a32fc94a5f9035"
-base64url = "xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU"
+sha256 = "c1b5313f8a7f196cda30eea797fb1ab65b004a55d71cf9a81071927046e5d395"
+base64url = "wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U"
 
 [[artifacts]]
 path = "docs/arc-architecture-and-implementation-spec.md"
 role = "architecture"
-sha256 = "96b571532b3c886f055eaaaecc0fadee2d17d02b7c9bb3f480e12c0023faf6c7"
+sha256 = "46f2924279daa9d68347112748ab08b4850a74508fa05841c3fd45f5dbf66e81"
 
 [[artifacts]]
 path = "docs/arc-mls-e2ee-extension.md"
 role = "e2ee-companion"
-sha256 = "0960d58205933a94e482be38469ebbfbc87dd3d5cdb2f8f241962fe9cf43d0b8"
+sha256 = "57d6d98df53ce8f738da463304fb47726c9133ef0bec5b268a8cadbc117405bc"
 
 [[artifacts]]
 path = "docs/federation-v1-profile.registry"
@@ -32,9 +32,9 @@ sha256 = "23a20cb38c7918d8488403fc780fc1eba14c647d187548f921cee4cdad4635ac"
 [[artifacts]]
 path = "docs/specification-manifest.txt"
 role = "specification-manifest"
-sha256 = "59e2345d2e293cf38cba53c3c9e68a07305fd4475a2505dfb73da611e0bc64f9"
+sha256 = "fd79b41f0a42aa38b23e2383225eaf9189d4f0b06dab00ee3d99e88a7df1d1f4"
 
 [[artifacts]]
 path = "scripts/check-spec.sh"
 role = "specification-validator"
-sha256 = "b56e787159e0aa5990feb0f79e1b63029d8eedca1c46aaa26d3c0d752d99ed77"
+sha256 = "9f52553174e8f190020a76ffa002d30c55cdd4b21ea0f24ab314386798efd29a"

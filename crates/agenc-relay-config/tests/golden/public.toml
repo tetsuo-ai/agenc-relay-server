@@ -14,7 +14,7 @@ dns_port = 6697
 server_id = "AgICAgICAgICAgICAgICAg"
 name = "chat.example"
 data_dir = "/srv/agenc"
-runtime_dir = "/run/agenc"
+runtime_dir = "/run/arcd"
 memory_budget_bytes = 6442450944
 tokio_worker_threads = 4
 crypto_worker_threads = 4
@@ -32,14 +32,14 @@ enabled = true
 purpose = "client_tls"
 bind = "203.0.113.1:6697"
 max_connections = 50000
-tls_certificate_file = "/etc/agenc/tls/server.crt"
-tls_private_key_file = "/etc/agenc/tls/server.key"
+tls_certificate_file = "/etc/arcd/tls/server.crt"
+tls_private_key_file = "/etc/arcd/tls/server.key"
 
 [[listeners.endpoint]]
 name = "admin"
 enabled = true
 purpose = "admin_local"
-bind = "/run/agenc/admin.sock"
+bind = "/run/arcd/admin.sock"
 max_connections = 4
 allowed_uids = [1000]
 allowed_gids = []
@@ -59,12 +59,12 @@ max_peers = 64
 
 [storage]
 state_dir = "/srv/agenc/state"
-master_key_file = "/etc/agenc/keys/storage-master.key"
-rollback_guard_key_file = "/etc/agenc/keys/rollback-guard.key"
-login_index_key_file = "/etc/agenc/keys/login-index-g1.key"
+master_key_file = "/etc/arcd/keys/storage-master.key"
+rollback_guard_key_file = "/etc/arcd/keys/rollback-guard.key"
+login_index_key_file = "/etc/arcd/keys/login-index-g1.key"
 backup_dir = "/srv/agenc-backups"
-backup_signing_private_key_file = "/etc/agenc/keys/backup-signing.key"
-backup_trust_manifest_file = "/etc/agenc/trust/backup-trust.toml"
+backup_signing_private_key_file = "/etc/arcd/keys/backup-signing.key"
+backup_trust_manifest_file = "/etc/arcd/trust/backup-trust.toml"
 database_max_bytes = 85899345920
 backup_max_bytes = 107374182400
 disk_reserve_bytes = 1073741824
@@ -74,11 +74,11 @@ integrity_checkpoint_manifests = 100000
 [accounts]
 accept_clients = true
 registration = "invite"
-invite_verification_key_file = "/etc/agenc/keys/invite-verification.pub"
+invite_verification_key_file = "/etc/arcd/keys/invite-verification.pub"
 account_service_hpke_public_key = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"
-account_service_hpke_private_key_file = "/etc/agenc/keys/account-service-hpke.key"
-opaque_server_setup_file = "/etc/agenc/keys/opaque-server-setup.key"
-opaque_fake_credential_key_file = "/etc/agenc/keys/opaque-fake-credential.key"
+account_service_hpke_private_key_file = "/etc/arcd/keys/account-service-hpke.key"
+opaque_server_setup_file = "/etc/arcd/keys/opaque-server-setup.key"
+opaque_fake_credential_key_file = "/etc/arcd/keys/opaque-fake-credential.key"
 allow_guests = true
 default_public_presence = false
 default_allow_guest_dm = false
@@ -186,8 +186,8 @@ whowas_retention_seconds = 900
 whowas_records = 10000
 
 [moderation]
-audit_signing_private_key_file = "/etc/agenc/keys/audit-signing.key"
-audit_trust_manifest_file = "/etc/agenc/trust/audit-trust.toml"
+audit_signing_private_key_file = "/etc/arcd/keys/audit-signing.key"
+audit_trust_manifest_file = "/etc/arcd/trust/audit-trust.toml"
 audit_retention_days = 30
 session_sanction_hours = 24
 account_sanction_days = 30

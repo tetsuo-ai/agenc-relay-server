@@ -49,32 +49,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenc-relay-server"
-version = "1.0.0-rc.3"
-dependencies = [
- "agenc-relay-admin",
- "agenc-relay-auth",
- "agenc-relay-config",
- "agenc-relay-crypto",
- "agenc-relay-runtime",
- "agenc-relay-storage",
- "agenc-relay-testkit",
- "agenc-relay-types",
- "argon2",
- "base64",
- "mls-rs",
- "mls-rs-crypto-rustcrypto",
- "opaque-ke",
- "openmls",
- "openmls_basic_credential",
- "openmls_rust_crypto",
- "rustix",
- "rustls",
- "sha2 0.10.9",
- "tokio",
-]
-
-[[package]]
 name = "agenc-relay-admin"
 version = "1.0.0-rc.3"
 dependencies = [
@@ -190,6 +164,32 @@ dependencies = [
  "subtle",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "agenc-relay-server"
+version = "1.0.0-rc.3"
+dependencies = [
+ "agenc-relay-admin",
+ "agenc-relay-auth",
+ "agenc-relay-config",
+ "agenc-relay-crypto",
+ "agenc-relay-runtime",
+ "agenc-relay-storage",
+ "agenc-relay-testkit",
+ "agenc-relay-types",
+ "argon2",
+ "base64",
+ "mls-rs",
+ "mls-rs-crypto-rustcrypto",
+ "opaque-ke",
+ "openmls",
+ "openmls_basic_credential",
+ "openmls_rust_crypto",
+ "rustix",
+ "rustls",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]

@@ -425,9 +425,9 @@ class RunnerTests(unittest.TestCase):
     def test_candidate_rejects_a_noncanonical_artifact_path(self) -> None:
         from release_qualification.candidate import validate_candidate
 
-        directory = Path(self.temporary.name) / "legacy"
+        directory = Path(self.temporary.name) / "noncanonical"
         directory.mkdir(mode=0o700)
-        legacy = SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",), binary="agenc-relay-server")
+        SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",), binary="agenc-relay-server")
         with self.assertRaises(QualificationError):
             validate_candidate(self.root, directory, check_source=False)
 

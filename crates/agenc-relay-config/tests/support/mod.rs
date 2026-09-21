@@ -127,14 +127,14 @@ impl Sandbox {
         Ok(path)
     }
 
-    /// Rewrites the golden `/srv/agenc`, `/srv/agenc-backups`, `/run/agenc`, and
-    /// `/etc/agenc` prefixes to live under this sandbox.
+    /// Rewrites the golden `/srv/agenc`, `/srv/agenc-backups`, `/run/arcd`, and
+    /// `/etc/arcd` prefixes to live under this sandbox.
     pub(crate) fn localize(&self, text: &str) -> String {
         let root = self.root.display().to_string();
         text.replace("/srv/agenc-backups", &format!("{root}/backups"))
             .replace("/srv/agenc", &format!("{root}/data"))
-            .replace("/run/agenc", &format!("{root}/run"))
-            .replace("/etc/agenc", &format!("{root}/etc"))
+            .replace("/run/arcd", &format!("{root}/run"))
+            .replace("/etc/arcd", &format!("{root}/etc"))
     }
 
     /// Materializes the host layout the golden documents name: directories, secret
@@ -245,12 +245,12 @@ pub(crate) fn edge() -> String {
     );
     let text = mutate(
         &text,
-        "coordinator_server_id = \"AgICAgICAgICAgICAgICAg\"\nsequencer_private_key_file = \"/etc/agenc/keys/sequencer.key\"\n",
+        "coordinator_server_id = \"AgICAgICAgICAgICAgICAg\"\nsequencer_private_key_file = \"/etc/arcd/keys/sequencer.key\"\n",
         &format!("coordinator_server_id = \"{SRV3}\"\n"),
     );
     let text = mutate(
         &text,
-        "account_service_hpke_private_key_file = \"/etc/agenc/keys/account-service-hpke.key\"\nopaque_server_setup_file = \"/etc/agenc/keys/opaque-server-setup.key\"\nopaque_fake_credential_key_file = \"/etc/agenc/keys/opaque-fake-credential.key\"\n",
+        "account_service_hpke_private_key_file = \"/etc/arcd/keys/account-service-hpke.key\"\nopaque_server_setup_file = \"/etc/arcd/keys/opaque-server-setup.key\"\nopaque_fake_credential_key_file = \"/etc/arcd/keys/opaque-fake-credential.key\"\n",
         "",
     );
     let text = mutate(

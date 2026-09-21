@@ -36,7 +36,7 @@ fn maintenance_audit_records_require_the_current_schema() -> Result<(), StorageE
         1,
         &plaintext,
     )?;
-    for generation in [1, 2, 3, 5] {
+    for generation in [0, 1, 2, 3, 4, 6] {
         assert_eq!(
             crate::AuthenticatedSourceRecord::checked(
                 generation,

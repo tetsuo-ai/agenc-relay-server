@@ -17,7 +17,7 @@ pub const BASE_PROFILE_SHA256_TOKEN: &str = "ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pd
 /// E2EE profile name token (spec 9308).
 pub const E2EE_PROFILE_TOKEN: &str = "ARC-MLS/1";
 /// E2EE profile hash token (spec 9309).
-pub const E2EE_PROFILE_SHA256_TOKEN: &str = "xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU";
+pub const E2EE_PROFILE_SHA256_TOKEN: &str = "wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U";
 
 /// One fully parsed canonical onboarding descriptor.
 #[derive(Clone, Debug, Eq, PartialEq)]

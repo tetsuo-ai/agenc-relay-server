@@ -22,7 +22,7 @@ impl WebSocketClient {
                 return Err(failure("WebSocket constructor requires its profile"));
             }
         };
-        stream.write_all(format!("GET /irc HTTP/1.1\r\nHost: {DNS_NAME}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {protocol}\r\nOrigin: https://chat.example\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n").as_bytes())?;
+        stream.write_all(format!("GET /arc HTTP/1.1\r\nHost: {DNS_NAME}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {protocol}\r\nOrigin: https://chat.example\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n").as_bytes())?;
         stream.flush()?;
         let mut response = Vec::new();
         while !response.ends_with(b"\r\n\r\n") && response.len() < 1024 {
@@ -164,7 +164,7 @@ fn tls_stream(fixture: &LiveFixture) -> TestResult<TlsClient> {
 fn upgrade_status(fixture: &LiveFixture, origin: Option<&str>) -> TestResult<String> {
     let mut stream = tls_stream(fixture)?;
     let origin = origin.map_or(String::new(), |value| format!("Origin: {value}\r\n"));
-    stream.write_all(format!("GET /irc HTTP/1.1\r\nHost: {DNS_NAME}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary.ircv3.net\r\n{origin}\r\n").as_bytes())?;
+    stream.write_all(format!("GET /arc HTTP/1.1\r\nHost: {DNS_NAME}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary.ircv3.net\r\n{origin}\r\n").as_bytes())?;
     stream.flush()?;
     read_line(&mut BufReader::new(stream))
 }

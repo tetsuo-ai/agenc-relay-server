@@ -22,7 +22,7 @@ class DaemonTests:
         self.output = attempt / "build"
         self.environment = {**os.environ, "CARGO_TARGET_DIR": str(self.output)}
         self.executables: dict[str, Path] = {}
-        # Tests exercise both the current daemon name and the legacy entry point.
+        # Tests exercise the sole installed arcd executable.
         # Both paths must execute the immutable candidate, not a Cargo-built copy.
         self.installed = [self.output / target / "release/arcd"]
 

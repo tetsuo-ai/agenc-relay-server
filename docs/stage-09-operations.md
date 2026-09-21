@@ -36,7 +36,7 @@ and requires the prepared OCSP response when public certificate stapling is
 required. WSS clients share direct-client host/prefix admission quotas and
 the global client limit.
 
-Browsers connect to `wss://<server>/irc` and offer `text.ircv3.net`,
+Browsers connect to `wss://<server>/arc` and offer `text.ircv3.net`,
 `binary.ircv3.net`, or both. The first supported offered protocol wins.
 Each WebSocket message contains one IRC line without CR or LF. Both
 subprotocols require UTF-8. CAP negotiation, OPAQUE authentication, account
@@ -51,7 +51,7 @@ allowlist. Origin allowlist reloads take effect when an in-flight upgrade
 finishes parsing, immediately before its response is prepared. An accepted
 connection keeps its established admission after later reloads.
 
-The endpoint accepts only `GET /irc HTTP/1.1`, WebSocket version 13, one
+The endpoint accepts only `GET /arc HTTP/1.1`, WebSocket version 13, one
 valid Host, and a canonical padded base64 key encoding 16 bytes. It rejects
 cookies, HTTP authentication, bodies, transfer coding, folded fields,
 duplicate singleton fields, and a buffered second request. Extension offers

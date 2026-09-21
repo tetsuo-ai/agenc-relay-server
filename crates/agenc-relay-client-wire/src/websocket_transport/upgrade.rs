@@ -17,7 +17,7 @@ pub enum UpgradeError {
     Malformed,
     /// Origin policy refused the request.
     Origin,
-    /// Request target differs from `/irc`.
+    /// Request target differs from `/arc`.
     Endpoint,
     /// The request method is not GET.
     Method,
@@ -143,7 +143,7 @@ fn request_line(input: &[u8]) -> Result<Option<usize>, UpgradeError> {
     if parts.next() != Some(b"GET".as_slice()) {
         return Err(UpgradeError::Method);
     }
-    if parts.next() != Some(b"/irc".as_slice()) {
+    if parts.next() != Some(b"/arc".as_slice()) {
         return Err(UpgradeError::Endpoint);
     }
     if parts.next() != Some(b"HTTP/1.1".as_slice()) || parts.next().is_some() {

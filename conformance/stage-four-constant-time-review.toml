@@ -1,6 +1,6 @@
 schema_version = 1
 evidence_id = "EVID-S04-014-CONSTANT-TIME"
-reviewed_revision = "8daac95edcf5d7ba253ebeef66f41c40d5d39bdc"
+reviewed_revision = "5bc7baba944fcb4166281eedca3d92e875a88946"
 worktree_state = "dirty-source-hash-bound"
 conclusion = "Known and unknown account inputs converge on one OPAQUE server-start implementation with equal-size credential IDs and records. Secret digest and OPAQUE MAC comparisons use constant-time library operations."
 limit = "This review does not claim resistance to global timing analysis. The full account lookup path requires separate Stage 05 evidence for the fixed storage lookup schedule before AUTH-01 can close."
@@ -47,8 +47,10 @@ sha256 = "d767a3f7bc734562582a23dbca8be90cd607819fb1cdc2d69d7a599bbacdaa8f"
 symbols = ["TripleDh::finish_ke"]
 review = "TripleDH compares the expected and supplied KE3 MAC with ConstantTimeEq before selecting the session key. Context and identifiers are committed when KE2 state is created."
 
-# ARC rebaseline: import and protocol-label edits preserve the reviewed
-# constant-time comparisons and the real/fake OPAQUE work schedule.
+# ARC rebaseline on 2026-09-21: comparison with the pre-rename source
+# confirms only imports, public ARC labels, ARCD database magic and formatting
+# changed in the four project-owned surfaces. Secret comparisons and the
+# real/fake OPAQUE work schedule are unchanged; the vendored sources are exact.
 [gate]
 status = "evidence-only"
 reason = "The 2026-09-10 implementation re-review binds the two changed crypto files by their source hashes. The four auth and vendored OPAQUE source hashes remain unchanged. The 2026-09-13 ciphertext-ownership re-review updates only the storage adapter binding; all other source hashes remain unchanged. This artifact does not claim gate closure or replace any qualification for an exact source revision."

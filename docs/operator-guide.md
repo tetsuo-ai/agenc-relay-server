@@ -92,54 +92,20 @@ The packaged tmpfiles and service records keep `/run/arcd` at mode 0750 while th
 
 The process cannot observe every service-manager restriction from inside its own namespace. Check the installed unit separately with `systemd-analyze security` and the deployment checker. `check-config` does not prove swap encryption, backup handling, certificate issuance, firewall rules, or Tor routing.
 
-## Upgrade to schema generation 2
+## Storage and federation baseline
 
-Stage 09 requires schema generation 2 in every feature combination. Stop the
-daemon and migrate existing generation-1 state before starting the new binary.
-The base federation profile also changes, so coordinate the upgrade across
-coordinator and edge nodes. Follow the migration, backup, resume, and rollback
-steps in [Stage 09 operations](stage-09-operations.md). That guide also covers
-the independently optional WSS listener and plaintext history service.
+This ARC baseline uses schema generation 5 and exact ARC profile negotiation.
+Initialize fresh private development state. Earlier schema generations are
+rejected, and no stopped migration command is provided. Preserve older state
+separately; never remove authenticated records to bypass an admission failure.
 
-## Upgrade encrypted federation state
+Use matching ARC profile hashes on coordinator, edge, and client builds.
+Encrypted origin floors, witnessed checkpoints, and durable barrier records
+are part of the current schema from initialization onward. Restore and recovery
+must preserve their authenticated relationships.
 
-The review changes add a durable operation-sequence floor for each companion
-origin. The floor is written with a committed request result and survives
-replay-result expiry. It uses a new typed record under E2EE state table 23,
-record kind 9. Earlier binaries do not understand this record; keep a stopped-node
-backup from before upgrading if a rollback to an earlier binary is required.
-
-An origin created by an earlier build has no floor until this build commits a
-request for it. After restart, retained replay history without a matching
-floor causes the daemon to refuse that generation's `EORIGIN ADD` or `UPDATE`.
-Reconnect the affected client with a fresh origin or establish a new
-authenticated origin generation before continuing. Earlier retained results
-cannot prove the latest sequence because their retention periods differ.
-
-If all legacy replay history has expired, the daemon cannot distinguish a
-previously used generation from one that never committed a request. Replace
-legacy origins with uncertain history during upgrade, even if their
-declarations are accepted. Deleted sequence history cannot be reconstructed.
-
-Edge checkpoints now use the typed `WitnessedCursor` delivery-row arm (tag 4)
-under the existing `delivery/v1/` key. It records that the cursor committed
-with the latest record-chain witness heads. Earlier binaries reject this arm
-as well as the new origin-floor record. Keep the pre-upgrade backup until the
-upgrade is accepted.
-
-An older or missing edge checkpoint automatically requests fresh base and
-companion snapshots. An unfinished legacy barrier without a durable coordinator
-identity fence stops startup and leaves its sealed state intact. Applied
-legacy receipts with missing required retention evidence also fail closed.
-Completing a pending barrier with the earlier binary can delete its immutable
-parts, so that action alone does not produce a compatible checkpoint. Recovery
-requires the stopped-daemon restore procedure with a backup free of these
-incompatible barrier states. Do not delete barrier rows to bypass the check.
-
-The outbound federation connection now enforces `tls.group_policy`. A node
-configured with `hybrid_required` refuses a coordinator offering only
-classical key exchange. Check both peers' TLS configuration before restarting
-an edge with that policy.
+Optional WSS and plaintext history settings are described in
+[Stage 09 operations](stage-09-operations.md).
 
 ## Print onboarding data and account invitations
 

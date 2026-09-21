@@ -445,7 +445,7 @@ images, the ext4 tuple, the campaign isolation runbook and the AArch64
 external blocker (REL-01, issue #43) are recorded in
 [the qualification hosts record](stage-10-qualification-hosts.md).
 
-The isolated [upstream allocation probe](upstream/redb-allocation-probe/README.md)
+The isolated [upstream allocation probe](https://github.com/tetsuo-ai/agenc-relay-server/blob/66ef11a03d18571ba745c9c19540feb0f5abe0be/docs/upstream/redb-allocation-probe/README.md)
 passes 424 host tests but cannot publish a transaction. Its required upstream
 container gates stop because Podman is unavailable. The normal-API fuzz smoke
 does not exercise the new probe API. Full bounded commit support, upstream

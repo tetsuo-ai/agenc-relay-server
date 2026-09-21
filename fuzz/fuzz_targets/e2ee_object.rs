@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 use agenc_relay_e2ee::objects::{TypedBody, decode_body};
-use agenc_relay_e2ee::{DecodeBudget, ArcWireObject, ObjectId, TlsDecode as _, TlsEncode as _};
+use agenc_relay_e2ee::{ArcWireObject, DecodeBudget, ObjectId, TlsDecode as _, TlsEncode as _};
 use libfuzzer_sys::fuzz_target;
 
 const BUDGET_BYTES: usize = 8 * 1024 * 1024;

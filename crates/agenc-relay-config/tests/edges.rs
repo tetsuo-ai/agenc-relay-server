@@ -128,7 +128,7 @@ fn peer_records_reject_every_duplicate_identity() {
     );
     let no_signing = mutate(
         DUAL,
-        "signing_private_key_file = \"/etc/agenc/keys/federation-signing.key\"\n",
+        "signing_private_key_file = \"/etc/arcd/keys/federation-signing.key\"\n",
         "",
     );
     assert!(has_issue(
@@ -224,11 +224,11 @@ fn operator_records_reject_every_duplicate_identity() {
 
 #[test]
 fn listener_unions_cover_the_remaining_shapes() {
-    let second_admin_tls = "[[listeners.endpoint]]\nname = \"admin-tls-2\"\nenabled = false\npurpose = \"admin_tls\"\nbind = \"203.0.113.1:7002\"\nmax_connections = 4\ntls_certificate_file = \"/etc/agenc/tls/admin.crt\"\ntls_private_key_file = \"/etc/agenc/tls/admin.key\"\nclient_ca_file = \"/etc/agenc/tls/admin-ca.pem\"\n";
+    let second_admin_tls = "[[listeners.endpoint]]\nname = \"admin-tls-2\"\nenabled = false\npurpose = \"admin_tls\"\nbind = \"203.0.113.1:7002\"\nmax_connections = 4\ntls_certificate_file = \"/etc/arcd/tls/admin.crt\"\ntls_private_key_file = \"/etc/arcd/tls/admin.key\"\nclient_ca_file = \"/etc/arcd/tls/admin-ca.pem\"\n";
     let text = mutate(
         DUAL,
-        "client_ca_file = \"/etc/agenc/tls/admin-ca.pem\"\n",
-        &format!("client_ca_file = \"/etc/agenc/tls/admin-ca.pem\"\n\n{second_admin_tls}"),
+        "client_ca_file = \"/etc/arcd/tls/admin-ca.pem\"\n",
+        &format!("client_ca_file = \"/etc/arcd/tls/admin-ca.pem\"\n\n{second_admin_tls}"),
     );
     assert!(has_issue(
         &text,
@@ -241,7 +241,7 @@ fn listener_unions_cover_the_remaining_shapes() {
             PUBLIC,
             "allowed_gids = []\n",
             &format!(
-                "allowed_gids = []\n\n[[listeners.endpoint]]\nname = \"browser\"\nenabled = false\npurpose = \"client_wss\"\nbind = \"203.0.113.1:443\"\nmax_connections = 100\ntls_certificate_file = \"/etc/agenc/tls/server.crt\"\ntls_private_key_file = \"/etc/agenc/tls/server.key\"\n{extra}"
+                "allowed_gids = []\n\n[[listeners.endpoint]]\nname = \"browser\"\nenabled = false\npurpose = \"client_wss\"\nbind = \"203.0.113.1:443\"\nmax_connections = 100\ntls_certificate_file = \"/etc/arcd/tls/server.crt\"\ntls_private_key_file = \"/etc/arcd/tls/server.key\"\n{extra}"
             ),
         )
     };
@@ -281,14 +281,14 @@ fn listener_unions_cover_the_remaining_shapes() {
         &mutate(
             PUBLIC,
             "allowed_uids = [1000]",
-            "allowed_uids = [1000]\ntls_certificate_file = \"/etc/agenc/tls/a.crt\"\ntls_private_key_file = \"/etc/agenc/tls/a.key\""
+            "allowed_uids = [1000]\ntls_certificate_file = \"/etc/arcd/tls/a.crt\"\ntls_private_key_file = \"/etc/arcd/tls/a.key\""
         ),
         "tls_certificate_file"
     ));
     assert!(has_field(
         &mutate(
             PUBLIC,
-            "tls_private_key_file = \"/etc/agenc/tls/server.key\"\n",
+            "tls_private_key_file = \"/etc/arcd/tls/server.key\"\n",
             ""
         ),
         "tls_certificate_file"
@@ -358,7 +358,7 @@ fn identity_rules_cover_edge_and_directory_edges() {
         &mutate(
             PUBLIC,
             "backup_dir = \"/srv/agenc-backups\"",
-            "backup_dir = \"/run/agenc/backups\""
+            "backup_dir = \"/run/arcd/backups\""
         ),
         "backup_dir"
     ));
@@ -436,7 +436,7 @@ fn optional_rows_and_registration_fall_back_to_defaults() -> TestResult {
             "coordinator_server_id",
         ),
         (
-            "sequencer_credentials_file = \"/etc/agenc/trust/sequencer-credentials.toml\"\n",
+            "sequencer_credentials_file = \"/etc/arcd/trust/sequencer-credentials.toml\"\n",
             "sequencer_credentials_file",
         ),
     ] {
@@ -625,12 +625,12 @@ fn scalar_literals_cover_ipv6_origins_socks_and_base64_lengths() {
 fn path_resolution_rejects_relative_and_dotted_input() -> TestResult {
     assert!(PathResolver::with_base(PathBuf::from("relative")).is_err());
     assert!(PathResolver::with_base(PathBuf::from("/tmp/../x")).is_err());
-    let resolver = PathResolver::with_base(PathBuf::from("/etc/agenc"))?;
+    let resolver = PathResolver::with_base(PathBuf::from("/etc/arcd"))?;
     assert!(resolver.resolve("../x").is_err());
     assert!(resolver.resolve("/abs/../x").is_err());
     assert_eq!(
         resolver.resolve("keys/x")?,
-        PathBuf::from("/etc/agenc/keys/x")
+        PathBuf::from("/etc/arcd/keys/x")
     );
     assert_eq!(resolver.resolve("/abs/x")?, PathBuf::from("/abs/x"));
     let none = PathResolver::none();

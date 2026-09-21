@@ -6,7 +6,7 @@ use crate::PersistentRecordValue;
 use crate::e2ee_records::DELIVERY_RECOVERY_ROW_KIND;
 
 #[test]
-fn replay_ledger_is_admitted_only_under_generation_four() -> TestResult {
+fn replay_ledger_is_admitted_only_under_generation_five() -> TestResult {
     for row in [
         ReplayLedgerRow::Owner(ReplayOwner::new(owner()?)?),
         ReplayLedgerRow::Range(AckRange::new(range()?)?),
@@ -22,8 +22,8 @@ fn replay_ledger_is_admitted_only_under_generation_four() -> TestResult {
             row.encode()?,
         )?;
         let plaintext = value.encode()?;
-        crate::AuthenticatedSourceRecord::checked(4, TableId::E2eeState, &key, 1, &plaintext)?;
-        for generation in [1, 2, 3, 5] {
+        crate::AuthenticatedSourceRecord::checked(5, TableId::E2eeState, &key, 1, &plaintext)?;
+        for generation in [0, 1, 2, 3, 4, 6] {
             assert!(
                 crate::AuthenticatedSourceRecord::checked(
                     generation,

@@ -19,6 +19,8 @@
 AgenC Relay is the server for AgenC Relay Chat (ARC). **ARCD** is the daemon;
 `arcd` is its sole executable. This is private, pre-alpha infrastructure.
 Production qualification is incomplete; no release decision has been signed.
+The [baseline validation record](docs/arc-baseline-validation.md) identifies
+the remaining native qualification work.
 
 The `1.0.0-rc.3` development baseline uses ARC protocol labels and storage
 schema generation 5. Initialize fresh development data. Earlier development
@@ -104,7 +106,6 @@ configuration, certificates, and host controls. The standard layout is
 
 ```sh
 cargo run -p agenc-relay-server --bin arcd --locked -- --help
-arcd init --help
 arcd check-config --config /etc/arcd/config.toml
 arcd serve --config /etc/arcd/config.toml
 ```

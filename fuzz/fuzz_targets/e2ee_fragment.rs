@@ -1,7 +1,9 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, E2eeAssembler, QuotaScopes, Sender};
+use agenc_relay_e2ee::wire::assembly::{
+    AssemblyKey, Direction, E2eeAssembler, QuotaScopes, Sender,
+};
 use agenc_relay_e2ee::wire::carrier::CarrierCommand;
 use agenc_relay_e2ee::wire::command::parse_command;
 use agenc_relay_e2ee::wire::fragment::{FragmentTag, ReceiptTag};

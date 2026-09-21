@@ -58,7 +58,7 @@ fn identity_cases() -> Vec<Case> {
             append_to_table(
                 &edge(),
                 "e2ee",
-                "sequencer_successor_private_key_file = \"/etc/agenc/keys/sequencer-next.key\"",
+                "sequencer_successor_private_key_file = \"/etc/arcd/keys/sequencer-next.key\"",
             ),
             stage,
             SchemaKey::new("e2ee", "sequencer_successor_private_key_file"),
@@ -68,7 +68,7 @@ fn identity_cases() -> Vec<Case> {
             append_to_table(
                 &edge(),
                 "e2ee",
-                "sequencer_retired_private_key_file = \"/etc/agenc/keys/sequencer-old.key\"",
+                "sequencer_retired_private_key_file = \"/etc/arcd/keys/sequencer-old.key\"",
             ),
             stage,
             SchemaKey::new("e2ee", "sequencer_retired_private_key_file"),
@@ -112,7 +112,7 @@ fn identity_cases() -> Vec<Case> {
             "invite registration without a verification key",
             mutate(
                 PUBLIC,
-                "invite_verification_key_file = \"/etc/agenc/keys/invite-verification.pub\"\n",
+                "invite_verification_key_file = \"/etc/arcd/keys/invite-verification.pub\"\n",
                 "",
             ),
             stage,
@@ -123,7 +123,7 @@ fn identity_cases() -> Vec<Case> {
             mutate(
                 &edge(),
                 "account_service_hpke_public_key = ",
-                "opaque_server_setup_file = \"/etc/agenc/keys/opaque-server-setup.key\"\naccount_service_hpke_public_key = ",
+                "opaque_server_setup_file = \"/etc/arcd/keys/opaque-server-setup.key\"\naccount_service_hpke_public_key = ",
             ),
             stage,
             SchemaKey::new("accounts", "opaque_server_setup_file"),
@@ -132,7 +132,7 @@ fn identity_cases() -> Vec<Case> {
             "coordinator without its HPKE private key",
             mutate(
                 PUBLIC,
-                "account_service_hpke_private_key_file = \"/etc/agenc/keys/account-service-hpke.key\"\n",
+                "account_service_hpke_private_key_file = \"/etc/arcd/keys/account-service-hpke.key\"\n",
                 "",
             ),
             stage,
@@ -143,7 +143,7 @@ fn identity_cases() -> Vec<Case> {
             mutate(
                 &edge(),
                 "[e2ee]\nenabled = true\n",
-                "[e2ee]\nenabled = true\nsequencer_private_key_file = \"/etc/agenc/keys/sequencer.key\"\n",
+                "[e2ee]\nenabled = true\nsequencer_private_key_file = \"/etc/arcd/keys/sequencer.key\"\n",
             ),
             stage,
             SchemaKey::new("e2ee", "sequencer_private_key_file"),
@@ -172,7 +172,7 @@ fn identity_cases() -> Vec<Case> {
             "runtime directory equals the data directory",
             mutate(
                 PUBLIC,
-                "runtime_dir = \"/run/agenc\"",
+                "runtime_dir = \"/run/arcd\"",
                 "runtime_dir = \"/srv/agenc\"",
             ),
             stage,
@@ -182,7 +182,7 @@ fn identity_cases() -> Vec<Case> {
             "secret inside the state directory",
             mutate(
                 PUBLIC,
-                "master_key_file = \"/etc/agenc/keys/storage-master.key\"",
+                "master_key_file = \"/etc/arcd/keys/storage-master.key\"",
                 "master_key_file = \"/srv/agenc/state/master.key\"",
             ),
             stage,
@@ -204,8 +204,8 @@ fn listener_cases() -> Vec<Case> {
             "duplicate binds",
             mutate(
                 DUAL,
-                "bind = \"/run/agenc/admin.sock\"",
-                "bind = \"/run/agenc/onion.sock\"",
+                "bind = \"/run/arcd/admin.sock\"",
+                "bind = \"/run/arcd/onion.sock\"",
             ),
             stage,
             SchemaKey::indexed("listeners.endpoint", 3, "bind"),
@@ -242,8 +242,8 @@ fn listener_cases() -> Vec<Case> {
             "private key reused across the admin and federation classes",
             mutate(
                 DUAL,
-                "tls_private_key_file = \"/etc/agenc/tls/admin.key\"",
-                "tls_private_key_file = \"/etc/agenc/tls/federation.key\"",
+                "tls_private_key_file = \"/etc/arcd/tls/admin.key\"",
+                "tls_private_key_file = \"/etc/arcd/tls/federation.key\"",
             ),
             stage,
             SchemaKey::indexed("listeners.endpoint", 4, "tls_private_key_file"),
@@ -253,7 +253,7 @@ fn listener_cases() -> Vec<Case> {
             mutate(
                 PUBLIC,
                 "allowed_gids = []\n",
-                "allowed_gids = []\n\n[[listeners.endpoint]]\nname = \"admin2\"\nenabled = true\npurpose = \"admin_local\"\nbind = \"/run/agenc/admin2.sock\"\nmax_connections = 4\nallowed_uids = [1000]\n",
+                "allowed_gids = []\n\n[[listeners.endpoint]]\nname = \"admin2\"\nenabled = true\npurpose = \"admin_local\"\nbind = \"/run/arcd/admin2.sock\"\nmax_connections = 4\nallowed_uids = [1000]\n",
             ),
             stage,
             SchemaKey::new("listeners", "endpoint"),
@@ -288,7 +288,7 @@ fn topology_cases() -> Vec<Case> {
             "federation enabled without a private CA",
             mutate(
                 DUAL,
-                "private_ca_file = \"/etc/agenc/tls/federation-ca.pem\"\n",
+                "private_ca_file = \"/etc/arcd/tls/federation-ca.pem\"\n",
                 "",
             ),
             stage,
@@ -557,17 +557,17 @@ fn required_ocsp_staples_are_explicit_and_public_tls_only() {
 
     let configured = mutate(
         &required,
-        "tls_certificate_file = \"/etc/agenc/tls/server.crt\"",
-        "tls_certificate_file = \"/etc/agenc/tls/server.crt\"\n\
-         tls_ocsp_staple_file = \"/etc/agenc/tls/server.ocsp\"",
+        "tls_certificate_file = \"/etc/arcd/tls/server.crt\"",
+        "tls_certificate_file = \"/etc/arcd/tls/server.crt\"\n\
+         tls_ocsp_staple_file = \"/etc/arcd/tls/server.ocsp\"",
     );
     assert!(parse(&configured).is_ok());
 
     let onion = mutate(
         DUAL,
-        "tls_certificate_file = \"/etc/agenc/tls/onion.crt\"",
-        "tls_certificate_file = \"/etc/agenc/tls/onion.crt\"\n\
-         tls_ocsp_staple_file = \"/etc/agenc/tls/onion.ocsp\"",
+        "tls_certificate_file = \"/etc/arcd/tls/onion.crt\"",
+        "tls_certificate_file = \"/etc/arcd/tls/onion.crt\"\n\
+         tls_ocsp_staple_file = \"/etc/arcd/tls/onion.ocsp\"",
     );
     let report = parse(&onion).err();
     assert!(report.as_ref().is_some_and(|report| {
@@ -601,9 +601,9 @@ fn required_ocsp_staples_support_enabled_websocket_listeners() {
     for text in [&wss, &required] {
         let configured = mutate(
             text,
-            "tls_certificate_file = \"/etc/agenc/tls/server.crt\"",
-            "tls_certificate_file = \"/etc/agenc/tls/server.crt\"\n\
-             tls_ocsp_staple_file = \"/etc/agenc/tls/server.ocsp\"",
+            "tls_certificate_file = \"/etc/arcd/tls/server.crt\"",
+            "tls_certificate_file = \"/etc/arcd/tls/server.crt\"\n\
+             tls_ocsp_staple_file = \"/etc/arcd/tls/server.ocsp\"",
         );
         let parsed = parse(&configured);
         assert!(parsed.is_ok(), "WSS staple rejected: {parsed:?}");
@@ -611,7 +611,7 @@ fn required_ocsp_staples_support_enabled_websocket_listeners() {
             config.listeners.first().is_some_and(|listener| {
                 listener.tls.as_ref().is_some_and(|tls| {
                     tls.ocsp_staple_file.as_deref()
-                        == Some(std::path::Path::new("/etc/agenc/tls/server.ocsp"))
+                        == Some(std::path::Path::new("/etc/arcd/tls/server.ocsp"))
                 })
             })
         }));
@@ -625,7 +625,7 @@ fn ocsp_staples_remain_forbidden_for_non_public_listener_purposes() {
             PUBLIC,
             "purpose = \"client_tls\"",
             &format!(
-                "purpose = \"{purpose}\"\ntls_ocsp_staple_file = \"/etc/agenc/tls/server.ocsp\""
+                "purpose = \"{purpose}\"\ntls_ocsp_staple_file = \"/etc/arcd/tls/server.ocsp\""
             ),
         );
         let report = parse(&text).err();

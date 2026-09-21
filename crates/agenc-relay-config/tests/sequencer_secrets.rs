@@ -21,7 +21,7 @@ fn fixture(
     let text = append_to_table(
         DUAL,
         "e2ee",
-        "sequencer_successor_private_key_file = \"/etc/agenc/keys/sequencer-successor.key\"\nsequencer_retired_private_key_file = \"/etc/agenc/keys/sequencer-retired.key\"",
+        "sequencer_successor_private_key_file = \"/etc/arcd/keys/sequencer-successor.key\"\nsequencer_retired_private_key_file = \"/etc/arcd/keys/sequencer-retired.key\"",
     );
     let resolver = PathResolver::with_base(sandbox.root().join("etc"))?;
     let config = Config::parse_text(&sandbox.localize(&text), &resolver, ValidationDepth::Host)?;

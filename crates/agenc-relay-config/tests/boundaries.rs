@@ -435,7 +435,7 @@ fn onion_and_origin_grammars_are_exact() {
     for bad in [
         "\"http://chat.example\"",
         "\"https://Chat.example\"",
-        "\"https://chat.example/irc\"",
+        "\"https://chat.example/arc\"",
         "\"https://chat.example:0\"",
         "\"https://user@chat.example\"",
         "\"https://chat.example\", \"https://chat.example\"",

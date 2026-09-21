@@ -128,12 +128,12 @@ fn listener_and_tls_fields_classify_exactly() -> TestResult {
         .first_mut()
         .and_then(|listener| listener.tls.as_mut())
     {
-        tls.private_key_file = "/etc/agenc/tls/new.key".into();
+        tls.private_key_file = "/etc/arcd/tls/new.key".into();
     }
     restart_only(&active, &candidate, RestartOnlyField::ListenerKeyMaterial);
     let mut candidate = active.clone();
     if let Some(listener) = candidate.listeners.get_mut(2) {
-        listener.client_ca_file = Some("/etc/agenc/tls/new-ca.pem".into());
+        listener.client_ca_file = Some("/etc/arcd/tls/new-ca.pem".into());
     }
     restart_only(&active, &candidate, RestartOnlyField::ListenerKeyMaterial);
     let mut candidate = active.clone();
@@ -165,7 +165,7 @@ fn listener_and_tls_fields_classify_exactly() -> TestResult {
         .first_mut()
         .and_then(|listener| listener.tls.as_mut())
     {
-        tls.certificate_file = "/etc/agenc/tls/renewed.crt".into();
+        tls.certificate_file = "/etc/arcd/tls/renewed.crt".into();
     }
     reloadable(&active, &candidate, |change| {
         matches!(change, ReloadableChange::CertificateChain { .. })
@@ -235,7 +235,7 @@ fn storage_accounts_and_limits_classify_exactly() -> TestResult {
     candidate.storage.state_dir = "/srv/agenc/state2".into();
     restart_only(&active, &candidate, RestartOnlyField::StateDir);
     let mut candidate = active.clone();
-    candidate.storage.master_key_file = "/etc/agenc/keys/new.key".into();
+    candidate.storage.master_key_file = "/etc/arcd/keys/new.key".into();
     restart_only(&active, &candidate, RestartOnlyField::StorageKeys);
     let mut candidate = active.clone();
     candidate.storage.backup_dir = "/srv/backups2".into();
@@ -343,8 +343,8 @@ fn privacy_moderation_and_e2ee_fields_classify_exactly() -> TestResult {
     restart_only(&active, &candidate, RestartOnlyField::LogRetentionRaised);
     let mut candidate = active.clone();
     candidate.privacy.log_retention_hours -= 1;
-    candidate.privacy.motd_file = Some("/etc/agenc/motd.txt".into());
-    candidate.privacy.public_info_file = Some("/etc/agenc/info.txt".into());
+    candidate.privacy.motd_file = Some("/etc/arcd/motd.txt".into());
+    candidate.privacy.public_info_file = Some("/etc/arcd/info.txt".into());
     let diff = ConfigDiff::compute(&active, &candidate);
     assert!(diff.restart_only.is_empty());
     assert_eq!(diff.reloadable.len(), 3);
@@ -419,7 +419,7 @@ fn every_remaining_restart_only_field_is_detected_alone() -> TestResult {
     let mut candidate = dual.clone();
     for listener in candidate.listeners.iter_mut().take(2) {
         if let Some(tls) = listener.tls.as_mut() {
-            tls.private_key_file = "/etc/agenc/tls/rotated.key".into();
+            tls.private_key_file = "/etc/arcd/tls/rotated.key".into();
         }
     }
     let diff = ConfigDiff::compute(&dual, &candidate);
@@ -433,10 +433,10 @@ fn every_remaining_restart_only_field_is_detected_alone() -> TestResult {
     assert!(!diff.is_empty());
 
     let mut candidate = dual.clone();
-    candidate.federation.private_ca_file = Some("/etc/agenc/tls/other-ca.pem".into());
+    candidate.federation.private_ca_file = Some("/etc/arcd/tls/other-ca.pem".into());
     restart_only(&dual, &candidate, RestartOnlyField::FederationProfile);
     let mut candidate = dual.clone();
-    candidate.federation.signing_private_key_file = Some("/etc/agenc/keys/other.key".into());
+    candidate.federation.signing_private_key_file = Some("/etc/arcd/keys/other.key".into());
     restart_only(&dual, &candidate, RestartOnlyField::FederationProfile);
     let mut candidate = dual.clone();
     candidate.federation.reconnect_max_seconds += 1;
@@ -462,13 +462,13 @@ fn every_remaining_restart_only_field_is_detected_alone() -> TestResult {
 
     let active = parse(PUBLIC)?;
     let mut candidate = active.clone();
-    candidate.storage.rollback_guard_key_file = "/etc/agenc/keys/other.key".into();
+    candidate.storage.rollback_guard_key_file = "/etc/arcd/keys/other.key".into();
     restart_only(&active, &candidate, RestartOnlyField::StorageKeys);
     let mut candidate = active.clone();
-    candidate.storage.login_index_key_file = "/etc/agenc/keys/other.key".into();
+    candidate.storage.login_index_key_file = "/etc/arcd/keys/other.key".into();
     restart_only(&active, &candidate, RestartOnlyField::StorageKeys);
     let mut candidate = active.clone();
-    candidate.storage.backup_signing_private_key_file = "/etc/agenc/keys/other.key".into();
+    candidate.storage.backup_signing_private_key_file = "/etc/arcd/keys/other.key".into();
     restart_only(&active, &candidate, RestartOnlyField::BackupProfile);
     let mut candidate = active.clone();
     candidate.storage.disk_reserve_bytes += 1;
@@ -478,7 +478,7 @@ fn every_remaining_restart_only_field_is_detected_alone() -> TestResult {
     candidate.accounts.invite_verification_key_file = None;
     restart_only(&active, &candidate, RestartOnlyField::AccountMaterial);
     let mut candidate = active.clone();
-    candidate.accounts.access_token_key_file = Some("/etc/agenc/keys/token.key".into());
+    candidate.accounts.access_token_key_file = Some("/etc/arcd/keys/token.key".into());
     restart_only(&active, &candidate, RestartOnlyField::AccountMaterial);
     let mut candidate = active.clone();
     candidate.accounts.account_service_hpke_private_key_file = None;
@@ -501,10 +501,10 @@ fn every_remaining_restart_only_field_is_detected_alone() -> TestResult {
     restart_only(&active, &candidate, RestartOnlyField::PrivacyPolicy);
 
     let mut candidate = active.clone();
-    candidate.moderation.audit_signing_private_key_file = "/etc/agenc/keys/other.key".into();
+    candidate.moderation.audit_signing_private_key_file = "/etc/arcd/keys/other.key".into();
     restart_only(&active, &candidate, RestartOnlyField::AuditProfile);
     let mut candidate = active.clone();
-    candidate.moderation.audit_trust_manifest_file = "/etc/agenc/trust/other.toml".into();
+    candidate.moderation.audit_trust_manifest_file = "/etc/arcd/trust/other.toml".into();
     restart_only(&active, &candidate, RestartOnlyField::AuditProfile);
     let mut candidate = active.clone();
     if let Some(operator) = candidate.moderation.operators.first_mut() {
