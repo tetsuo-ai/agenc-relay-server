@@ -27,6 +27,7 @@ aliases, old installation paths, or automatic database migrations.
 
 Project-owned encrypted protocol labels use `ARC-MLS/1`, `ARCMLS`,
 `arc-mls-v1`, `Arc*` canonical object names, and `arc_mls` extension names.
+The project-owned WebSocket endpoint is `/arc`.
 These labels participate in signatures, hashes, negotiated profiles, and MLS
 extensions. Their fixtures and profile hashes must be regenerated from the
 specifications. Cryptographic algorithms, field encodings, and ordering stay

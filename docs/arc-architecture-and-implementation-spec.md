@@ -529,7 +529,7 @@ Exhaustion pauses accepts; it does not create unbounded tasks or queues.
 
 ### 8.4 WebSocket listener
 
-When enabled, the endpoint is exactly `/irc`, requires WSS, HTTP method `GET`,
+When enabled, the endpoint is exactly `/arc`, requires WSS, HTTP method `GET`,
 WebSocket version 13, and a configured exact Origin allowlist. Missing Origin
 is accepted only from a separately configured non-browser listener. Cookies,
 HTTP authentication, redirects, per-message compression, and unnegotiated
