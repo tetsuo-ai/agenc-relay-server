@@ -279,14 +279,14 @@ def render_registry_round_trip_tests(registry: str) -> str:
         for entry_name, value in entries:
             variant = upper_camel(entry_name)
             lines.append(
-                f"    assert_eq!(agenc_ircd_types::{enum_name}::{variant}.wire_value(), {value});"
+                f"    assert_eq!(agenc_relay_types::{enum_name}::{variant}.wire_value(), {value});"
             )
             lines.append(
-                f"    assert_eq!(agenc_ircd_types::{enum_name}::from_wire({value})?, "
-                f"agenc_ircd_types::{enum_name}::{variant});"
+                f"    assert_eq!(agenc_relay_types::{enum_name}::from_wire({value})?, "
+                f"agenc_relay_types::{enum_name}::{variant});"
             )
         lines.append(
-            f"    assert!(agenc_ircd_types::{enum_name}::from_wire(u16::MAX).is_err());"
+            f"    assert!(agenc_relay_types::{enum_name}::from_wire(u16::MAX).is_err());"
         )
         lines.extend(["    Ok(())", "}", ""])
     return "\n".join(lines)
@@ -676,7 +676,7 @@ def minimal_schema_vectors(registry: str) -> list[tuple[str, bytes]]:
 def render_vectors(registry: str) -> str:
     """Render independently generated golden vectors with provenance hashes."""
     lines = [
-        "# agenc-ircd federation vector manifest v1",
+        "# agenc-relay-server federation vector manifest v1",
         "# id|schema|lowercase-hex|decoded-sha256|provenance",
     ]
     for index, (schema, encoded) in enumerate(minimal_schema_vectors(registry), 1):
@@ -703,7 +703,7 @@ def render_hash_bindings(
         b"agenc-chat base federation profile registry v1\0" + registry
     ).digest()
     e2ee_profile = hashlib.sha256(
-        b"agenc-chat IRC-MLS specification profile v1\0" + e2ee
+        b"agenc-chat ARC-MLS specification profile v1\0" + e2ee
     ).digest()
     values = (
         ("ARCHITECTURE_DOCUMENT_SHA256", hashlib.sha256(architecture).digest()),
@@ -745,8 +745,8 @@ def format_rust_source(source: str) -> str:
 
 def generated_outputs(root: Path) -> dict[Path, str]:
     """Build every generated Stage-01 artifact in memory."""
-    architecture_path = root / "docs/ircd-architecture-and-implementation-spec.md"
-    e2ee_path = root / "docs/irc-mls-e2ee-extension.md"
+    architecture_path = root / "docs/arc-architecture-and-implementation-spec.md"
+    e2ee_path = root / "docs/arc-mls-e2ee-extension.md"
     registry_path = root / "docs/federation-v1-profile.registry"
     sources_path = root / "docs/protocol-sources-and-decisions.md"
     architecture_bytes = architecture_path.read_bytes()
@@ -756,21 +756,21 @@ def generated_outputs(root: Path) -> dict[Path, str]:
     architecture = architecture_bytes.decode("utf-8")
     registry = registry_bytes.decode("ascii")
     outputs = {
-        root / "crates/agenc-ircd-types/src/generated_registry.rs": render_types_registry(
+        root / "crates/agenc-relay-types/src/generated_registry.rs": render_types_registry(
             architecture, registry
         ),
-        root / "crates/agenc-ircd-types/tests/generated_registry_roundtrip.rs": (
+        root / "crates/agenc-relay-types/tests/generated_registry_roundtrip.rs": (
             render_registry_round_trip_tests(registry)
         ),
         root
-        / "crates/agenc-ircd-federation-wire/src/generated_schema.rs": render_schema_registry(
+        / "crates/agenc-relay-federation-wire/src/generated_schema.rs": render_schema_registry(
             registry
         ),
         root
-        / "crates/agenc-ircd-federation-wire/src/generated_text_registry.rs": (
+        / "crates/agenc-relay-federation-wire/src/generated_text_registry.rs": (
             render_federation_text_registry(registry)
         ),
-        root / "crates/agenc-ircd-federation-wire/src/generated_hashes.rs": render_hash_bindings(
+        root / "crates/agenc-relay-federation-wire/src/generated_hashes.rs": render_hash_bindings(
             architecture_bytes, e2ee_bytes, registry_bytes, sources_bytes
         ),
         root / "test-data/vectors/base-federation-v1.vectors": render_vectors(registry),

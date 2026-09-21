@@ -37,7 +37,7 @@ the reviewed gate invocation keeps its exact argument vector:
 ```sh
 source_commit="$(git rev-parse HEAD)"
 env -u GIT_PAGER -u LD_LIBRARY_PATH -u PYTHONPATH \
-  AGENC_IRCD_RECORD_GATE=1 \
+  AGENC_RELAY_RECORD_GATE=1 \
   bash scripts/check-stage-nine.sh
 
 python3 scripts/generate-gate-evidence.py \
@@ -55,7 +55,7 @@ The wrapper performs its normal preflight. The recorder independently probes
 the exact ordered toolchain before and after the gate, derives the artifact
 name from the gate and full source commit, verifies tracked worktree bytes and
 modes directly against `HEAD`, rejects hidden index flags and unexpected
-ignored inputs, and strips `AGENC_IRCD_RECORD_GATE` from every child command.
+ignored inputs, and strips `AGENC_RELAY_RECORD_GATE` from every child command.
 It records real start and end times around each command and writes an artifact
 only after the full gate and both probes pass. The manifest generator uses the
 checked-in catalog and validator, refuses to overwrite a file, and validates

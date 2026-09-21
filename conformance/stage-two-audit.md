@@ -41,9 +41,9 @@ targets, formatting, Clippy with warnings denied, tests, documentation tests,
 dependency policy, advisories, generated artifacts, and four fuzz targets at
 10,000 runs each. Coverage reached 90.01% of branches and 95.59% of lines, with
 all five critical regions at 100%. The current schema version 2
-[manifest](evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+[manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json)
 and checked-in
-[artifact](evidence/artifacts/stage-two-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+[artifact](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/artifacts/stage-two-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json)
 close Stage 02. The schema version 1 manifest for commit
 `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` and the 2026-08-26 manifest remain
 archive-only.

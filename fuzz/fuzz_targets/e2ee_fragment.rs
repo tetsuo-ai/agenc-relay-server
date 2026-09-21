@@ -1,10 +1,10 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_e2ee::wire::assembly::{AssemblyKey, Direction, E2eeAssembler, QuotaScopes, Sender};
-use agenc_ircd_e2ee::wire::carrier::CarrierCommand;
-use agenc_ircd_e2ee::wire::command::parse_command;
-use agenc_ircd_e2ee::wire::fragment::{FragmentTag, ReceiptTag};
+use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, E2eeAssembler, QuotaScopes, Sender};
+use agenc_relay_e2ee::wire::carrier::CarrierCommand;
+use agenc_relay_e2ee::wire::command::parse_command;
+use agenc_relay_e2ee::wire::fragment::{FragmentTag, ReceiptTag};
 use libfuzzer_sys::fuzz_target;
 
 // Tag values, receipt values, and command lines never panic; a parsed

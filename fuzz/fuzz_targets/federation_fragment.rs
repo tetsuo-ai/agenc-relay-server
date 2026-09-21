@@ -1,7 +1,7 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_federation_wire::{
+use agenc_relay_federation_wire::{
     AssemblyProgress, FederationCommandTag, FederationFragment, FederationFrame, FederationLine,
     FragmentAssembler, FragmentDescriptorKey, federation_object_id, split_fragments,
 };

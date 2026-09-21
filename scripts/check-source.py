@@ -47,8 +47,8 @@ POLICY = {
 # Companion Section 20 and architecture Section 18: the server-side E2EE
 # surfaces never name an MLS secret, plaintext, decryption, or a private key.
 # The e2ee crate additionally never signs; the runtime's sequencer does.
-E2EE_CRATE_ROOT = ("crates", "agenc-ircd-e2ee", "src")
-E2EE_RUNTIME_ROOT = ("crates", "agenc-ircd-runtime", "src", "e2ee")
+E2EE_CRATE_ROOT = ("crates", "agenc-relay-e2ee", "src")
+E2EE_RUNTIME_ROOT = ("crates", "agenc-relay-runtime", "src", "e2ee")
 E2EE_CRATE_FORBIDDEN_RE = re.compile(
     r"\b(?:epoch_secret|init_key_private|private_key|plaintext|decrypt\w*|"
     r"Ed25519SecretKey|SecretBytes|OpenedStoragePlaintext|sign_canonical|SigningKey)\b"
@@ -503,7 +503,7 @@ def self_test(root: Path) -> int:
     if harmless_errors:
         raise SourcePolicyError(f"comment/string false-positive guard failed: {harmless_errors}")
     cases += 1
-    e2ee_root = Path("crates/agenc-ircd-e2ee/src/lib.rs")
+    e2ee_root = Path("crates/agenc-relay-e2ee/src/lib.rs")
     e2ee_secret = valid + "fn bad(epoch_secret: &[u8]) -> usize { epoch_secret.len() }\n"
     if not any("E2EE separation" in error for error in scan_source(e2ee_root, e2ee_secret)):
         raise SourcePolicyError("self-test 'e2ee secret surface' was not rejected")
@@ -513,7 +513,7 @@ def self_test(root: Path) -> int:
     e2ee_test = valid + "#[cfg(test)]\nmod tests { fn ok(epoch_secret: u8) -> u8 { epoch_secret } }\n"
     if any("E2EE separation" in error for error in scan_source(e2ee_root, e2ee_test)):
         raise SourcePolicyError("self-test 'e2ee test surface' was rejected")
-    runtime_root = Path("crates/agenc-ircd-runtime/src/e2ee/mod.rs")
+    runtime_root = Path("crates/agenc-relay-runtime/src/e2ee/mod.rs")
     runtime_signing = valid + "fn ok() { let _ = sign_canonical; }\n"
     if any("E2EE separation" in error for error in scan_source(runtime_root, runtime_signing)):
         raise SourcePolicyError("self-test 'runtime sequencer signing' was rejected")

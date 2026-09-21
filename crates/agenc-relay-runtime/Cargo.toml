@@ -1,0 +1,36 @@
+[package]
+name = "agenc-relay-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+history = ["agenc-relay-domain/history", "agenc-relay-federation-wire/history", "agenc-relay-config/history", "agenc-relay-client-wire/history"]
+wss = ["agenc-relay-client-wire/wss", "agenc-relay-config/wss", "agenc-relay-crypto/wss"]
+
+[dependencies]
+agenc-relay-admin.workspace = true
+agenc-relay-auth.workspace = true
+agenc-relay-client-wire.workspace = true
+agenc-relay-config.workspace = true
+agenc-relay-crypto.workspace = true
+agenc-relay-domain.workspace = true
+agenc-relay-e2ee.workspace = true
+agenc-relay-federation-wire.workspace = true
+agenc-relay-storage.workspace = true
+agenc-relay-types.workspace = true
+rustls.workspace = true
+rustix = { workspace = true, features = ["time"] }
+subtle.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+agenc-relay-testkit.workspace = true
+loom.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -6,7 +6,7 @@
 //! The strict parser must be total over arbitrary bytes: it never panics, and any
 //! document it accepts re-parses to an identical typed configuration.
 
-use agenc_ircd_config::{Config, PathResolver, ValidationDepth};
+use agenc_relay_config::{Config, PathResolver, ValidationDepth};
 use libfuzzer_sys::fuzz_target;
 
 /// The fuzz harness admits at most 64 KiB, well inside the 1 MiB file ceiling.

@@ -76,7 +76,7 @@ capability, and the edge that holds the real client renders the line itself.
 
 The frame is built exactly as `account_failure` builds the sibling carriers'
 line, and `standard_reply`'s applicability table in
-`crates/agenc-ircd-client-wire/src/render.rs` gained the same row the document
+`crates/agenc-relay-client-wire/src/render.rs` gained the same row the document
 did, so the public renderer recognizes the shape with an empty context and
 refuses it with any context at all.
 
@@ -202,32 +202,32 @@ failing a node that would have served it a second later.
 
 Sources:
 
-- `docs/ircd-architecture-and-implementation-spec.md` Sections 9.5 and 11.4
-- `crates/agenc-ircd-client-wire/src/auth_transport.rs`
+- `docs/arc-architecture-and-implementation-spec.md` Sections 9.5 and 11.4
+- `crates/agenc-relay-client-wire/src/auth_transport.rs`
   (`SaslAction::AuthorityUnavailable`, `SaslTransport::unavailable`,
   `unavailable_actions`)
-- `crates/agenc-ircd-client-wire/src/render.rs`
+- `crates/agenc-relay-client-wire/src/render.rs`
   (`failed_standard_reply_is_applicable`)
-- `crates/agenc-ircd-runtime/src/account_service.rs`
+- `crates/agenc-relay-runtime/src/account_service.rs`
   (`render_sasl_action`, `render_sasl_actions`, `sasl_action_result`,
   `route_sasl`, `fail_route`, `AccountConnection::standard_replies`)
-- `crates/agenc-ircd-runtime/src/registration.rs`
+- `crates/agenc-relay-runtime/src/registration.rs`
   (`edge_sasl_line`, `edge_sasl_answer`, `route_edge_carrier`,
   `edge_carrier_answered`)
-- `crates/agenc-ircd-runtime/src/remote_accounts.rs` (the virtual connection)
-- `crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_drills.rs`
+- `crates/agenc-relay-runtime/src/remote_accounts.rs` (the virtual connection)
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_drills.rs`
   (`deletion_session`, the live precondition test)
-- `crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_capacity.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_capacity.rs`
   (`AUTHORITY_UNAVAILABLE`, `transient_transport`)
 
 Commands and results at this branch (Rust 1.98.0, from the repository root):
 
 ```sh
-cargo test -p agenc-ircd-runtime --all-features
+cargo test -p agenc-relay-runtime --all-features
 # 1564 passed; 0 failed; 1 ignored (lib) and every integration target green
-cargo test -p agenc-ircd-client-wire --all-features
+cargo test -p agenc-relay-client-wire --all-features
 # every target green, including the new sasl_authority_unavailable (4 passed)
-cargo test -p agenc-ircd --test stage_eight_e2ee --all-features
+cargo test -p agenc-relay-server --test stage_eight_e2ee --all-features
 # 36 passed; 0 failed; 16 ignored; 47.20s
 
 # the deletion drill, whose workaround this removes

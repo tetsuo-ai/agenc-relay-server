@@ -77,7 +77,7 @@ def load_policy(root: Path) -> dict[str, object]:
     """Load the checked-in evidence validator as the generation authority."""
     return runpy.run_path(
         str(root / "scripts/check-evidence.py"),
-        run_name="agenc_ircd_evidence_policy",
+        run_name="agenc_relay_evidence_policy",
     )
 
 

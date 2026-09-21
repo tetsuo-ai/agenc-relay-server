@@ -24,7 +24,7 @@ CATALOG_PATH = "conformance/evidence-catalog.toml"
 LEDGER_PATH = "conformance/requirements.toml"
 SCHEMA_PATH = "conformance/evidence-manifest.schema.json"
 EXAMPLE_PATH = "conformance/evidence-manifest.example.json"
-SCHEMA_SHA256 = "b0e137647d8ce7d999f13a1e5cae1008476d3fc850ad006d77bf6627c8540470"
+SCHEMA_SHA256 = "a7e3397345cf0397df3c71724ff6bba5abe54b904b27a6c087acd6842a90cd46"
 TOOLCHAIN_POLICY_PATH = "conformance/toolchain-policy.toml"
 TOOLCHAIN_POLICY_SHA256 = "975452dacaa7c7be41e7fe2d712240b69668dd556f71bf6de5430b58b35a3d0e"
 REGULAR_INDEX_MODE = "100644"
@@ -381,14 +381,14 @@ NORMATIVE_BINDINGS = {
     "EVID-E2EE-REQ-0EE614CD32C84FA9F408": (["E2EE-REQ-0EE614CD32C84FA9F408"], "normative-requirement"),
     "EVID-E2EE-REQ-1AB78DA63741FF0B38CF": (["E2EE-REQ-1AB78DA63741FF0B38CF"], "normative-requirement"),
     "EVID-E2EE-REQ-1BFDC5AC26176497302E": (["E2EE-REQ-1BFDC5AC26176497302E"], "normative-requirement"),
-    "EVID-E2EE-REQ-208C5CAB7399B4AC15B8": (["E2EE-REQ-208C5CAB7399B4AC15B8"], "normative-requirement"),
+    "EVID-E2EE-REQ-FC9468555542933311EE": (["E2EE-REQ-FC9468555542933311EE"], "normative-requirement"),
     "EVID-E2EE-REQ-21F466D08365E6787EFF": (["E2EE-REQ-21F466D08365E6787EFF"], "normative-requirement"),
     "EVID-E2EE-REQ-28CC5A2874FBFEDC8694": (["E2EE-REQ-28CC5A2874FBFEDC8694"], "normative-requirement"),
     "EVID-E2EE-REQ-2F0777EEA2E2B0559F6D": (["E2EE-REQ-2F0777EEA2E2B0559F6D"], "normative-requirement"),
     "EVID-E2EE-REQ-37736EFE55D201CBE671": (["E2EE-REQ-37736EFE55D201CBE671"], "normative-requirement"),
     "EVID-E2EE-REQ-37CAE24A086303163D86": (["E2EE-REQ-37CAE24A086303163D86"], "normative-requirement"),
     "EVID-E2EE-REQ-3AE1FE848688A346F9F1": (["E2EE-REQ-3AE1FE848688A346F9F1"], "normative-requirement"),
-    "EVID-E2EE-REQ-3DDAFB884DFFB22C1F74": (["E2EE-REQ-3DDAFB884DFFB22C1F74"], "normative-requirement"),
+    "EVID-E2EE-REQ-10F776460FE3B0DD1DCD": (["E2EE-REQ-10F776460FE3B0DD1DCD"], "normative-requirement"),
     "EVID-E2EE-REQ-3DFFF778DA62F4CEEF8F": (["E2EE-REQ-3DFFF778DA62F4CEEF8F"], "normative-requirement"),
     "EVID-E2EE-REQ-3F31F96A8E03DA4C101C": (["E2EE-REQ-3F31F96A8E03DA4C101C"], "normative-requirement"),
     "EVID-E2EE-REQ-3F6EB7E7803E9A17D029": (["E2EE-REQ-3F6EB7E7803E9A17D029"], "normative-requirement"),
@@ -402,7 +402,7 @@ NORMATIVE_BINDINGS = {
     "EVID-E2EE-REQ-4EFBE464A39690115414": (["E2EE-REQ-4EFBE464A39690115414"], "normative-requirement"),
     "EVID-E2EE-REQ-532CF56360A03DCF3C39": (["E2EE-REQ-532CF56360A03DCF3C39"], "normative-requirement"),
     "EVID-E2EE-REQ-54D3BF177A5D79854AEC": (["E2EE-REQ-54D3BF177A5D79854AEC"], "normative-requirement"),
-    "EVID-E2EE-REQ-5B3475BE0506C311BEF2": (["E2EE-REQ-5B3475BE0506C311BEF2"], "normative-requirement"),
+    "EVID-E2EE-REQ-9C64A30F28B449358D6C": (["E2EE-REQ-9C64A30F28B449358D6C"], "normative-requirement"),
     "EVID-E2EE-REQ-5B7791BEAEA4EF6B0D60": (["E2EE-REQ-5B7791BEAEA4EF6B0D60"], "normative-requirement"),
     "EVID-E2EE-REQ-67059195AB3AA10AAD9B": (["E2EE-REQ-67059195AB3AA10AAD9B"], "normative-requirement"),
     "EVID-E2EE-REQ-6A1A40DF827404DFC2E0": (["E2EE-REQ-6A1A40DF827404DFC2E0"], "normative-requirement"),
@@ -432,22 +432,22 @@ NORMATIVE_BINDINGS = {
     "EVID-E2EE-REQ-B73C16A97C1278CDDE0B": (["E2EE-REQ-B73C16A97C1278CDDE0B"], "normative-requirement"),
     "EVID-E2EE-REQ-B8F44A765000AE5B6944": (["E2EE-REQ-B8F44A765000AE5B6944"], "normative-requirement"),
     "EVID-E2EE-REQ-B93A7B094027B1B00105": (["E2EE-REQ-B93A7B094027B1B00105"], "normative-requirement"),
-    "EVID-E2EE-REQ-B99A6DD4949FED0CE02A": (["E2EE-REQ-B99A6DD4949FED0CE02A"], "normative-requirement"),
+    "EVID-E2EE-REQ-2D4AECA63BE39613CF13": (["E2EE-REQ-2D4AECA63BE39613CF13"], "normative-requirement"),
     "EVID-E2EE-REQ-BFA20A50D15399A2F088": (["E2EE-REQ-BFA20A50D15399A2F088"], "normative-requirement"),
     "EVID-E2EE-REQ-C345CFA457EB0B500D2A": (["E2EE-REQ-C345CFA457EB0B500D2A"], "normative-requirement"),
-    "EVID-E2EE-REQ-C8997B4345158FD54D44": (["E2EE-REQ-C8997B4345158FD54D44"], "normative-requirement"),
+    "EVID-E2EE-REQ-4E5001A4DC4E7E0D12A2": (["E2EE-REQ-4E5001A4DC4E7E0D12A2"], "normative-requirement"),
     "EVID-E2EE-REQ-CA268835A931F5051D79": (["E2EE-REQ-CA268835A931F5051D79"], "normative-requirement"),
     "EVID-E2EE-REQ-CED437B1C62CF9CD0A79": (["E2EE-REQ-CED437B1C62CF9CD0A79"], "normative-requirement"),
-    "EVID-E2EE-REQ-D07C2C1AA58D16CA582D": (["E2EE-REQ-D07C2C1AA58D16CA582D"], "normative-requirement"),
+    "EVID-E2EE-REQ-7DF536DF685CBA18FC96": (["E2EE-REQ-7DF536DF685CBA18FC96"], "normative-requirement"),
     "EVID-E2EE-REQ-D150C4C93D931F51EE12": (["E2EE-REQ-D150C4C93D931F51EE12"], "normative-requirement"),
     "EVID-E2EE-REQ-D2C711B6BB260BFB72FD": (["E2EE-REQ-D2C711B6BB260BFB72FD"], "normative-requirement"),
     "EVID-E2EE-REQ-D70B8B9850E29E082F85": (["E2EE-REQ-D70B8B9850E29E082F85"], "normative-requirement"),
-    "EVID-E2EE-REQ-DB900449D8D52DA92117": (["E2EE-REQ-DB900449D8D52DA92117"], "normative-requirement"),
-    "EVID-E2EE-REQ-DF1E11F99D8CA9C38917": (["E2EE-REQ-DF1E11F99D8CA9C38917"], "normative-requirement"),
+    "EVID-E2EE-REQ-45AD6D0BCA78DC42EFD7": (["E2EE-REQ-45AD6D0BCA78DC42EFD7"], "normative-requirement"),
+    "EVID-E2EE-REQ-80E07C3BFD96B7F73087": (["E2EE-REQ-80E07C3BFD96B7F73087"], "normative-requirement"),
     "EVID-E2EE-REQ-DFF4835BF134E29328E1": (["E2EE-REQ-DFF4835BF134E29328E1"], "normative-requirement"),
     "EVID-E2EE-REQ-E84E3DF2CF6A849CCBA8": (["E2EE-REQ-E84E3DF2CF6A849CCBA8"], "normative-requirement"),
     "EVID-E2EE-REQ-E9D6A931BDD262B08F93": (["E2EE-REQ-E9D6A931BDD262B08F93"], "normative-requirement"),
-    "EVID-E2EE-REQ-EC03C8374D88E32F6776": (["E2EE-REQ-EC03C8374D88E32F6776"], "normative-requirement"),
+    "EVID-E2EE-REQ-675C5F4ED330BC9F24B5": (["E2EE-REQ-675C5F4ED330BC9F24B5"], "normative-requirement"),
     "EVID-E2EE-REQ-ED359F4450E30FD76278": (["E2EE-REQ-ED359F4450E30FD76278"], "normative-requirement"),
     "EVID-E2EE-REQ-EFECC9F9EB196FD2CF16": (["E2EE-REQ-EFECC9F9EB196FD2CF16"], "normative-requirement"),
     "EVID-E2EE-REQ-F14B7B01F4CFF98A804E": (["E2EE-REQ-F14B7B01F4CFF98A804E"], "normative-requirement"),
@@ -1669,7 +1669,7 @@ def validate_run_artifact(
     expected_argv = ["python3", "scripts/run-gate.py", gate_name]
     if artifact.get("argv") != expected_argv:
         raise EvidenceError("closure artifact did not invoke the reviewed gate runner")
-    expected_tool = {"name": "agenc-ircd-gate-runner", "version": runner_hash}
+    expected_tool = {"name": "agenc-relay-gate-runner", "version": runner_hash}
     if artifact.get("tool") != expected_tool:
         raise EvidenceError("closure artifact is not bound to the committed gate runner")
     if artifact.get("toolchain_policy_sha256") != toolchain_policy_hash:
@@ -1753,7 +1753,7 @@ def validate_run_artifact(
     # Lanes run concurrently, so only commands of one lane are ordered against each other.
     # The exclusive lane runs alone: nothing else may still be running when it starts.
     runner = runpy.run_path(
-        str(Path(__file__).with_name("run-gate.py")), run_name="agenc_ircd_gate_runner"
+        str(Path(__file__).with_name("run-gate.py")), run_name="agenc_relay_gate_runner"
     )
     gate_lane = runner["gate_lane"]
     exclusive_lane = runner["EXCLUSIVE_LANE"]
@@ -2440,7 +2440,7 @@ kind = "normative-requirement"
 
         baseline_policy = runpy.run_path(
             str(root / "scripts/check-baseline.py"),
-            run_name="agenc_ircd_baseline_policy",
+            run_name="agenc_relay_baseline_policy",
         )
         baseline_blob = baseline_policy.get("frozen_blob")
         baseline_validate_commit = baseline_policy.get("validate_frozen_commit")
@@ -2633,7 +2633,7 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
             "limitations": limitations,
             "argv": ["python3", "scripts/run-gate.py", gate_name],
             "tool": {
-                "name": "agenc-ircd-gate-runner",
+                "name": "agenc-relay-gate-runner",
                 "version": runner_hash,
             },
             "source_commit": closure_commit,
@@ -2675,7 +2675,7 @@ argv = ["python3", "scripts/check-evidence.py", "check"]
         closure_entry = copy.deepcopy(valid["entries"][0])  # type: ignore[index]
         closure_entry["command"] = f"python3 scripts/run-gate.py {gate_name}"
         closure_entry["tool"] = {
-            "name": "agenc-ircd-gate-runner",
+            "name": "agenc-relay-gate-runner",
             "version": runner_hash,
         }
         closure_entry["toolchain_policy_sha256"] = policy_hash

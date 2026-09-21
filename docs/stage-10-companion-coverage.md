@@ -20,7 +20,7 @@ moves. No span was narrowed, widened or re-scored, and no `reason` changed.
 One whole-workspace all-target report per measurement, on the pinned nightly
 that carries `-C instrument-coverage` branch support, with `cargo-llvm-cov
 0.9.0`. A `--lib` report cannot be used here: it omits
-`crates/agenc-ircd/src/main.rs` entirely and `check-coverage.py check` refuses
+`crates/agenc-relay-server/src/main.rs` entirely and `check-coverage.py check` refuses
 before scoring anything.
 
 ```sh
@@ -84,7 +84,7 @@ exercised by the same cases.
 
 ### The two expiry timers, off the owner's own heap
 
-`crates/agenc-ircd-runtime/src/federation/coordinator/companion/tests/timers.rs`
+`crates/agenc-relay-runtime/src/federation/coordinator/companion/tests/timers.rs`
 
 Every case arms a real heap entry, pops it with `TimerHeap::pop_due` the way
 `StateCore::step_wake` does, and hands it to
@@ -114,7 +114,7 @@ handlers, and not merely that the handler computes.
 
 ### The fetch continuation, through the owner's commit receipt
 
-`crates/agenc-ircd-runtime/src/federation/coordinator/companion/tests/fetch.rs`
+`crates/agenc-relay-runtime/src/federation/coordinator/companion/tests/fetch.rs`
 
 Each case opens a real multi-page cut over `ERESUME`, sends `ESTATE FETCH`
 quoting the cursor the previous page ended on, and settles the staged
@@ -140,7 +140,7 @@ batch_applied`, which is the only path that reaches `continue_fetch`.
 
 ### The startup retirement refusal side
 
-`crates/agenc-ircd-runtime/src/federation/coordinator/startup/retirement/tests/refusal.rs`
+`crates/agenc-relay-runtime/src/federation/coordinator/startup/retirement/tests/refusal.rs`
 and its `boundaries.rs` and `pacing.rs`
 
 The fixture runs the real reload — `FederationCoordinator::startup` driven by
@@ -263,12 +263,12 @@ below 100 percent.
 
 New test sources, all under a `tests` path component:
 
-- `crates/agenc-ircd-runtime/src/federation/coordinator/companion/tests/transfer.rs`
-- `crates/agenc-ircd-runtime/src/federation/coordinator/companion/tests/timers.rs`
-- `crates/agenc-ircd-runtime/src/federation/coordinator/companion/tests/fetch.rs`
-- `crates/agenc-ircd-runtime/src/federation/coordinator/startup/retirement/tests/refusal.rs`
-- `crates/agenc-ircd-runtime/src/federation/coordinator/startup/retirement/tests/boundaries.rs`
-- `crates/agenc-ircd-runtime/src/federation/coordinator/startup/retirement/tests/pacing.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/companion/tests/transfer.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/companion/tests/timers.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/companion/tests/fetch.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/startup/retirement/tests/refusal.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/startup/retirement/tests/boundaries.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/startup/retirement/tests/pacing.rs`
 
 plus the two `mod` lines that admit them, each appended at the end of its file
 so no reviewed span moves. No production handler changed, so this work adds no
@@ -277,7 +277,7 @@ wire or storage format, no dependency pin and no limit.
 Commands and results at this branch:
 
 ```sh
-cargo test -p agenc-ircd-runtime --all-features
+cargo test -p agenc-relay-runtime --all-features
 # 1,579 unit tests pass with one ignored, and every integration target passes:
 # bridge_crypto 8, bridge_storage 6, e2ee_load 1, federation_link 16,
 # idle_connection_memory 2 with one ignored, listener_accept 22,

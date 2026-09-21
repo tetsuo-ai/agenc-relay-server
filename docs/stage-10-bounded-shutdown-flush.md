@@ -59,7 +59,7 @@ a restart.
 
 ## Regressions
 
-`crates/agenc-ircd-runtime/src/admin/audit/tests/mixed/bounded_retention.rs`:
+`crates/agenc-relay-runtime/src/admin/audit/tests/mixed/bounded_retention.rs`:
 
 - `a_node_with_a_large_expired_audit_log_stops_inside_its_plan` runs the real
   `AdminOwner` with 20,000 expired audit events in sealed storage, a live

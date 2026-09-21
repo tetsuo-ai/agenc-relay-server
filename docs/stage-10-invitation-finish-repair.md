@@ -82,16 +82,16 @@ Phase 2 (runtime durable admission and its tests) is commit `d5d5f06`.
 Failing-before, fixed-after:
 
 1. `invited_finish_at_or_after_expiry_is_rejected_inside_the_transaction_ttl`
-   in `crates/agenc-ircd-auth/tests/stage_four.rs` uses only APIs that exist
+   in `crates/agenc-relay-auth/tests/stage_four.rs` uses only APIs that exist
    on the base commit. Appended unchanged to the base commit's `stage_four.rs`
-   and run with `cargo test -p agenc-ircd-auth --test stage_four --locked`
+   and run with `cargo test -p agenc-relay-auth --test stage_four --locked`
    at `8429902`, it fails with
    `assertion left == right failed: FINISH at UTC 20 must reject the expired
    invitation; left: None, right: Some(InvitationRejected)`. On the phase-1
    source it passes.
 2. `durable_admission_refuses_a_valid_worker_finish_whose_wall_clock_passed_expiry`
    and `durable_admission_refuses_a_wall_clock_before_not_before_or_no_trusted_clock`
-   in `crates/agenc-ircd-runtime/src/account_service/tests/invitation_window.rs`
+   in `crates/agenc-relay-runtime/src/account_service/tests/invitation_window.rs`
    were run against the phase-2 source with the durable-admission predicate
    disabled (`if false && !invitation_interval_admits(...)`), the only
    textual difference. Both fail with
@@ -132,7 +132,7 @@ clocks:
 
 Restart of a sealed invitation-admitted START is covered by
 `restored_invited_creation_rechecks_the_invitation_interval_at_finish` in
-`crates/agenc-ircd-auth/tests/stage_four_restart_records.rs`: the 361-byte
+`crates/agenc-relay-auth/tests/stage_four_restart_records.rs`: the 361-byte
 record restores with its exact interval, a restored FINISH commits inside the
 interval and rejects at or after `expires_at` and before `not_before`, and
 interval corruption fails restore and restart-cleanup decoding. The runtime's
@@ -160,10 +160,10 @@ that `begin_authentication` is byte-for-byte unchanged by the auth changes.
 ## Validation
 
 ```sh
-cargo test -p agenc-ircd-auth --locked
-cargo test -p agenc-ircd-runtime --lib account_service --locked
-cargo test -p agenc-ircd-runtime --lib --locked -- account_service state_core::reconstruct daemon::login_index
-cargo test -p agenc-ircd --test stage_eight_e2ee --locked
+cargo test -p agenc-relay-auth --locked
+cargo test -p agenc-relay-runtime --lib account_service --locked
+cargo test -p agenc-relay-runtime --lib --locked -- account_service state_core::reconstruct daemon::login_index
+cargo test -p agenc-relay-server --test stage_eight_e2ee --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 python3 scripts/check-stage-four.py check

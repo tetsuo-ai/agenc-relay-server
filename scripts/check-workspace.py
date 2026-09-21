@@ -20,100 +20,100 @@ EDITION = "2024"
 RUST_VERSION = "1.98"
 TARGETS = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 CRATE_NAMES = {
-    "agenc-ircd",
-    "agenc-ircd-admin",
-    "agenc-ircd-auth",
-    "agenc-ircd-client-wire",
-    "agenc-ircd-config",
-    "agenc-ircd-crypto",
-    "agenc-ircd-domain",
-    "agenc-ircd-e2ee",
-    "agenc-ircd-federation-wire",
-    "agenc-ircd-runtime",
-    "agenc-ircd-storage",
-    "agenc-ircd-testkit",
-    "agenc-ircd-types",
+    "agenc-relay-server",
+    "agenc-relay-admin",
+    "agenc-relay-auth",
+    "agenc-relay-client-wire",
+    "agenc-relay-config",
+    "agenc-relay-crypto",
+    "agenc-relay-domain",
+    "agenc-relay-e2ee",
+    "agenc-relay-federation-wire",
+    "agenc-relay-runtime",
+    "agenc-relay-storage",
+    "agenc-relay-testkit",
+    "agenc-relay-types",
 }
-EXPECTED_FEATURES = {'agenc-ircd': {'default': [],
-                'wss': ['agenc-ircd-config/wss', 'agenc-ircd-runtime/wss'],
-                'history': ['agenc-ircd-config/history', 'agenc-ircd-runtime/history']},
- 'agenc-ircd-client-wire': {'default': [], 'wss': [], 'history': []},
- 'agenc-ircd-config': {'default': [], 'wss': [], 'history': []},
- 'agenc-ircd-crypto': {'default': [], 'wss': ['dep:aws-lc-rs']},
- 'agenc-ircd-domain': {'default': [], 'history': []},
- 'agenc-ircd-federation-wire': {'default': [], 'history': []},
- 'agenc-ircd-runtime': {'default': [],
-                        'wss': ['agenc-ircd-client-wire/wss',
-                                'agenc-ircd-config/wss',
-                                'agenc-ircd-crypto/wss'],
-                        'history': ['agenc-ircd-domain/history',
-                                    'agenc-ircd-federation-wire/history',
-                                    'agenc-ircd-config/history',
-                                    'agenc-ircd-client-wire/history']}}
+EXPECTED_FEATURES = {'agenc-relay-server': {'default': [],
+                'wss': ['agenc-relay-config/wss', 'agenc-relay-runtime/wss'],
+                'history': ['agenc-relay-config/history', 'agenc-relay-runtime/history']},
+ 'agenc-relay-client-wire': {'default': [], 'wss': [], 'history': []},
+ 'agenc-relay-config': {'default': [], 'wss': [], 'history': []},
+ 'agenc-relay-crypto': {'default': [], 'wss': ['dep:aws-lc-rs']},
+ 'agenc-relay-domain': {'default': [], 'history': []},
+ 'agenc-relay-federation-wire': {'default': [], 'history': []},
+ 'agenc-relay-runtime': {'default': [],
+                        'wss': ['agenc-relay-client-wire/wss',
+                                'agenc-relay-config/wss',
+                                'agenc-relay-crypto/wss'],
+                        'history': ['agenc-relay-domain/history',
+                                    'agenc-relay-federation-wire/history',
+                                    'agenc-relay-config/history',
+                                    'agenc-relay-client-wire/history']}}
 
 EXPECTED_EDGES = {
-    "agenc-ircd-types": set(),
-    "agenc-ircd-client-wire": {"agenc-ircd-types"},
-    "agenc-ircd-federation-wire": {"agenc-ircd-types"},
-    "agenc-ircd-crypto": {"agenc-ircd-types"},
-    "agenc-ircd-auth": {"agenc-ircd-types", "agenc-ircd-crypto"},
-    "agenc-ircd-domain": {"agenc-ircd-types"},
-    "agenc-ircd-e2ee": {
-        "agenc-ircd-types",
-        "agenc-ircd-crypto",
-        "agenc-ircd-domain",
-        "agenc-ircd-federation-wire",
+    "agenc-relay-types": set(),
+    "agenc-relay-client-wire": {"agenc-relay-types"},
+    "agenc-relay-federation-wire": {"agenc-relay-types"},
+    "agenc-relay-crypto": {"agenc-relay-types"},
+    "agenc-relay-auth": {"agenc-relay-types", "agenc-relay-crypto"},
+    "agenc-relay-domain": {"agenc-relay-types"},
+    "agenc-relay-e2ee": {
+        "agenc-relay-types",
+        "agenc-relay-crypto",
+        "agenc-relay-domain",
+        "agenc-relay-federation-wire",
     },
-    "agenc-ircd-storage": {
-        "agenc-ircd-types",
-        "agenc-ircd-crypto",
-        "agenc-ircd-domain",
-        "agenc-ircd-e2ee",
+    "agenc-relay-storage": {
+        "agenc-relay-types",
+        "agenc-relay-crypto",
+        "agenc-relay-domain",
+        "agenc-relay-e2ee",
     },
-    "agenc-ircd-config": {"agenc-ircd-types"},
-    "agenc-ircd-admin": {
-        "agenc-ircd-types",
-        "agenc-ircd-crypto",
-        "agenc-ircd-domain",
+    "agenc-relay-config": {"agenc-relay-types"},
+    "agenc-relay-admin": {
+        "agenc-relay-types",
+        "agenc-relay-crypto",
+        "agenc-relay-domain",
     },
-    "agenc-ircd-runtime": {
-        "agenc-ircd-types",
-        "agenc-ircd-client-wire",
-        "agenc-ircd-federation-wire",
-        "agenc-ircd-crypto",
-        "agenc-ircd-auth",
-        "agenc-ircd-domain",
-        "agenc-ircd-e2ee",
-        "agenc-ircd-storage",
-        "agenc-ircd-config",
-        "agenc-ircd-admin",
+    "agenc-relay-runtime": {
+        "agenc-relay-types",
+        "agenc-relay-client-wire",
+        "agenc-relay-federation-wire",
+        "agenc-relay-crypto",
+        "agenc-relay-auth",
+        "agenc-relay-domain",
+        "agenc-relay-e2ee",
+        "agenc-relay-storage",
+        "agenc-relay-config",
+        "agenc-relay-admin",
     },
-    "agenc-ircd-testkit": {
-        "agenc-ircd-client-wire",
-        "agenc-ircd-crypto",
-        "agenc-ircd-domain",
-        "agenc-ircd-e2ee",
-        "agenc-ircd-federation-wire",
-        "agenc-ircd-types",
+    "agenc-relay-testkit": {
+        "agenc-relay-client-wire",
+        "agenc-relay-crypto",
+        "agenc-relay-domain",
+        "agenc-relay-e2ee",
+        "agenc-relay-federation-wire",
+        "agenc-relay-types",
     },
-    "agenc-ircd": {"agenc-ircd-runtime", "agenc-ircd-config", "agenc-ircd-storage"},
+    "agenc-relay-server": {"agenc-relay-runtime", "agenc-relay-config", "agenc-relay-storage"},
 }
 BINARY_TEST_WORKSPACE_DEPENDENCIES = frozenset(
     {
-        "agenc-ircd-admin",
-        "agenc-ircd-auth",
-        "agenc-ircd-crypto",
-        "agenc-ircd-testkit",
-        "agenc-ircd-types",
+        "agenc-relay-admin",
+        "agenc-relay-auth",
+        "agenc-relay-crypto",
+        "agenc-relay-testkit",
+        "agenc-relay-types",
     }
 )
 # Package-name prefixes of MLS client engines. Companion Section 20 and
 # architecture Section 24.1 forbid any production daemon crate from depending
 # on one; only the dev-only testkit may, for cross-implementation tests.
 MLS_CLIENT_ENGINE_PREFIXES = ("openmls", "mls-rs", "mls_rs")
-MLS_CLIENT_ALLOWED_PACKAGE = "agenc-ircd-testkit"
+MLS_CLIENT_ALLOWED_PACKAGE = "agenc-relay-testkit"
 # The daemon binary crate; its integration tests may link MLS client engines.
-BINARY_PACKAGE = "agenc-ircd"
+BINARY_PACKAGE = "agenc-relay-server"
 BINARY_TEST_EXTERNAL_DEPENDENCIES = frozenset(
     {
         "argon2",
@@ -207,11 +207,11 @@ LATER_STAGE_DEPENDENCIES = {
 }
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
-    "agenc-ircd-types": {"base64", "precis-profiles", "subtle", "zeroize"},
-    "agenc-ircd-client-wire": {"base64", "zeroize"},
-    "agenc-ircd-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
-    "agenc-ircd-e2ee": {"sha2"},
-    "agenc-ircd-crypto": {
+    "agenc-relay-types": {"base64", "precis-profiles", "subtle", "zeroize"},
+    "agenc-relay-client-wire": {"base64", "zeroize"},
+    "agenc-relay-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
+    "agenc-relay-e2ee": {"sha2"},
+    "agenc-relay-crypto": {
         "aws-lc-rs",
         "chacha20poly1305",
         "ed25519-dalek",
@@ -224,7 +224,7 @@ EXPECTED_EXTERNAL_EDGES = {
         "tokio",
         "zeroize",
     },
-    "agenc-ircd-auth": {
+    "agenc-relay-auth": {
         "argon2",
         "opaque-ke",
         "opaque-sha2",
@@ -233,11 +233,11 @@ EXPECTED_EXTERNAL_EDGES = {
         "tokio",
         "zeroize",
     },
-    "agenc-ircd-storage": {"redb", "rustix", "subtle", "zeroize"},
-    "agenc-ircd-config": {"base64", "rustix", "toml", "zeroize"},
-    "agenc-ircd-admin": {"base64", "subtle", "zeroize"},
-    "agenc-ircd-runtime": {"loom", "rustix", "rustls", "subtle", "tokio", "zeroize"},
-    "agenc-ircd-testkit": {
+    "agenc-relay-storage": {"redb", "rustix", "subtle", "zeroize"},
+    "agenc-relay-config": {"base64", "rustix", "toml", "zeroize"},
+    "agenc-relay-admin": {"base64", "subtle", "zeroize"},
+    "agenc-relay-runtime": {"loom", "rustix", "rustls", "subtle", "tokio", "zeroize"},
+    "agenc-relay-testkit": {
         "ed25519-dalek",
         "mls-rs",
         "mls-rs-crypto-rustcrypto",
@@ -395,7 +395,7 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
     if not isinstance(package, dict):
         raise WorkspaceError("workspace.package is missing")
     expected_package = {
-        "version": "1.0.0-rc.2",
+        "version": "1.0.0-rc.3",
         "edition": EDITION,
         "rust-version": RUST_VERSION,
         "publish": False,
@@ -417,7 +417,7 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
 
 def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
     """Validate every root dependency declaration exactly."""
-    expected_names = CRATE_NAMES - {"agenc-ircd"}
+    expected_names = CRATE_NAMES - {"agenc-relay-server"}
     if set(dependencies) != expected_names | set(EXTERNAL_DEPENDENCIES):
         raise WorkspaceError("workspace dependency names differ from the frozen closed set")
 
@@ -425,7 +425,7 @@ def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
         declaration = dependencies.get(name)
         if not isinstance(declaration, dict):
             raise WorkspaceError(f"workspace dependency {name} must be a table")
-        expected = {"version": "=1.0.0-rc.2", "path": f"crates/{name}"}
+        expected = {"version": "=1.0.0-rc.3", "path": f"crates/{name}"}
         if declaration != expected:
             raise WorkspaceError(f"workspace dependency {name} has a forbidden declaration")
 
@@ -524,16 +524,16 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
         for dependency_name, declaration in table.items():
             expected_declaration = {"workspace": True}
             if (package_name, table_name, dependency_name) == (
-                "agenc-ircd-crypto", "dependencies", "aws-lc-rs"
+                "agenc-relay-crypto", "dependencies", "aws-lc-rs"
             ):
                 expected_declaration["optional"] = True
             if (package_name, table_name, dependency_name) == (
-                "agenc-ircd-runtime", "dev-dependencies", "tokio"
+                "agenc-relay-runtime", "dev-dependencies", "tokio"
             ):
                 # Paused clocks make connection deadline tests deterministic.
                 expected_declaration["features"] = ["test-util"]
             if (package_name, table_name, dependency_name) == (
-                "agenc-ircd-runtime", "dependencies", "rustix"
+                "agenc-relay-runtime", "dependencies", "rustix"
             ):
                 # Durable snapshot deadlines use the pinned Linux monotonic
                 # clock with a separately verified boot/time-namespace identity.
@@ -554,7 +554,7 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
                         f"{manifest_path} places {dependency_name} in an invalid dependency table"
                     )
                 if (
-                    package_name == "agenc-ircd"
+                    package_name == "agenc-relay-server"
                     and dependency_name in BINARY_TEST_EXTERNAL_DEPENDENCIES
                     and table_name != "dev-dependencies"
                 ):
@@ -567,11 +567,11 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
                 raise WorkspaceError(
                     f"{manifest_path} names unknown dependency {dependency_name}"
                 )
-            if dependency_name == "agenc-ircd-testkit" and table_name == "dependencies":
+            if dependency_name == "agenc-relay-testkit" and table_name == "dependencies":
                 raise WorkspaceError(
                     f"{manifest_path} has a production dependency on testkit"
                 )
-            if package_name == "agenc-ircd" and dependency_name in (
+            if package_name == "agenc-relay-server" and dependency_name in (
                 BINARY_TEST_WORKSPACE_DEPENDENCIES
             ):
                 if table_name != "dev-dependencies":
@@ -581,13 +581,13 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
                 continue
             if table_name == "dependencies":
                 continue
-            if table_name == "dev-dependencies" and dependency_name == "agenc-ircd-testkit":
+            if table_name == "dev-dependencies" and dependency_name == "agenc-relay-testkit":
                 continue
             raise WorkspaceError(
                 f"{manifest_path} has forbidden {table_name}.{dependency_name} edge"
             )
     expected_external = set(EXPECTED_EXTERNAL_EDGES.get(package_name, set()))
-    if package_name == "agenc-ircd":
+    if package_name == "agenc-relay-server":
         expected_external.update(BINARY_TEST_EXTERNAL_DEPENDENCIES)
     if actual_external != expected_external:
         raise WorkspaceError(
@@ -833,10 +833,10 @@ def graph_from_packages(packages: dict[str, dict[str, object]]) -> dict[str, set
                 continue
             kind = dependency.get("kind")
             if kind == "dev":
-                allowed = dependency_name == "agenc-ircd-testkit" or (
-                    name == "agenc-ircd"
+                allowed = dependency_name == "agenc-relay-testkit" or (
+                    name == "agenc-relay-server"
                     and dependency_name in BINARY_TEST_WORKSPACE_DEPENDENCIES
-                    | {"agenc-ircd-storage"}
+                    | {"agenc-relay-storage"}
                 )
                 if not allowed:
                     raise WorkspaceError(
@@ -861,8 +861,8 @@ def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]
     for name, package in packages.items():
         if package.get("edition") != EDITION or package.get("rust_version") != RUST_VERSION:
             raise WorkspaceError(f"package {name} has stale edition or rust-version metadata")
-        if package.get("version") != "1.0.0-rc.2":
-            raise WorkspaceError(f"package {name} version differs from required 1.0.0-rc.2")
+        if package.get("version") != "1.0.0-rc.3":
+            raise WorkspaceError(f"package {name} version differs from required 1.0.0-rc.3")
         features = package.get("features")
         if features != EXPECTED_FEATURES.get(name, {}):
             raise WorkspaceError(f"package {name} exposes an unexpected production feature")
@@ -882,11 +882,11 @@ def validate_graph(packages: dict[str, dict[str, object]]) -> dict[str, set[str]
                 if kind in {"lib", "bin"}:
                     product_kinds.append(kind)
                     product_names.append(target.get("name", ""))
-        expected_kinds = ["bin", "bin"] if name == "agenc-ircd" else ["lib"]
+        expected_kinds = ["bin"] if name == "agenc-relay-server" else ["lib"]
         if sorted(product_kinds) != expected_kinds:
             raise WorkspaceError(f"package {name} product targets must be exactly {expected_kinds}")
-        if name == "agenc-ircd" and set(product_names) != {"agenc-ircd", "arcd"}:
-            raise WorkspaceError("daemon package must expose exactly agenc-ircd and arcd binaries")
+        if name == "agenc-relay-server" and set(product_names) != {"arcd"}:
+            raise WorkspaceError("daemon package must expose exactly the arcd binary")
 
     graph = graph_from_packages(packages)
     if graph != EXPECTED_EDGES:
@@ -927,22 +927,22 @@ def validate_acyclic(graph: dict[str, set[str]]) -> None:
 def validate_release_closure(graph: dict[str, set[str]]) -> None:
     """Prove testkit is absent and every production library is composed."""
     closure: set[str] = set()
-    pending = ["agenc-ircd"]
+    pending = ["agenc-relay-server"]
     while pending:
         name = pending.pop()
         if name in closure:
             continue
         closure.add(name)
         pending.extend(graph.get(name, set()))
-    if "agenc-ircd-testkit" in closure:
-        raise WorkspaceError("agenc-ircd-testkit entered the release dependency closure")
-    expected_closure = CRATE_NAMES - {"agenc-ircd-testkit"}
+    if "agenc-relay-testkit" in closure:
+        raise WorkspaceError("agenc-relay-testkit entered the release dependency closure")
+    expected_closure = CRATE_NAMES - {"agenc-relay-testkit"}
     if closure != expected_closure:
         raise WorkspaceError("release binary does not compose every production library")
     for owner, dependencies in graph.items():
-        if owner != "agenc-ircd-testkit" and "agenc-ircd-testkit" in dependencies:
+        if owner != "agenc-relay-testkit" and "agenc-relay-testkit" in dependencies:
             raise WorkspaceError(f"production package {owner} depends on testkit")
-        if "agenc-ircd" in dependencies:
+        if "agenc-relay-server" in dependencies:
             raise WorkspaceError(f"library package {owner} depends on the binary")
 
 
@@ -1061,46 +1061,46 @@ def self_test(root: Path) -> int:
     validate_dependency_exception(root)
     cases = 0
 
-    e2ee_manifest_path = root / "crates/agenc-ircd-e2ee/Cargo.toml"
+    e2ee_manifest_path = root / "crates/agenc-relay-e2ee/Cargo.toml"
     engine_manifest = copy.deepcopy(load_toml(e2ee_manifest_path))
     engine_manifest["dependencies"]["openmls"] = {"workspace": True}  # type: ignore[index]
     expect_rejection(
         "MLS client engine in a production manifest",
         lambda: validate_package_manifest(e2ee_manifest_path, engine_manifest),
-        "MLS client engine openmls reaches production crate agenc-ircd-e2ee",
+        "MLS client engine openmls reaches production crate agenc-relay-e2ee",
     )
     cases += 1
 
     engine_metadata = copy.deepcopy(packages)
-    engine_metadata["agenc-ircd-runtime"]["dependencies"].append(  # type: ignore[index]
+    engine_metadata["agenc-relay-runtime"]["dependencies"].append(  # type: ignore[index]
         {"name": "mls-rs", "kind": None}
     )
     expect_rejection(
         "MLS client engine in production metadata",
         lambda: validate_mls_client_separation(engine_metadata),
-        "MLS client engine mls-rs reaches production crate agenc-ircd-runtime",
+        "MLS client engine mls-rs reaches production crate agenc-relay-runtime",
     )
     cases += 1
 
     baseline_edges = validate_mls_client_separation(packages)
     testkit_metadata = copy.deepcopy(packages)
-    testkit_metadata["agenc-ircd-testkit"]["dependencies"].append(  # type: ignore[index]
+    testkit_metadata["agenc-relay-testkit"]["dependencies"].append(  # type: ignore[index]
         {"name": "openmls", "kind": None}
     )
     if validate_mls_client_separation(testkit_metadata) != baseline_edges + 1:
         raise WorkspaceError("self-test: testkit MLS client edge was not counted")
     cases += 1
 
-    binary_manifest_path = root / "crates/agenc-ircd/Cargo.toml"
+    binary_manifest_path = root / "crates/agenc-relay-server/Cargo.toml"
     binary_manifest = load_toml(binary_manifest_path)
     extra_internal_dev = copy.deepcopy(binary_manifest)
-    extra_internal_dev["dev-dependencies"]["agenc-ircd-domain"] = {  # type: ignore[index]
+    extra_internal_dev["dev-dependencies"]["agenc-relay-domain"] = {  # type: ignore[index]
         "workspace": True
     }
     expect_rejection(
         "unreviewed binary workspace dev dependency",
         lambda: validate_package_manifest(binary_manifest_path, extra_internal_dev),
-        "forbidden dev-dependencies.agenc-ircd-domain edge",
+        "forbidden dev-dependencies.agenc-relay-domain edge",
     )
     cases += 1
 
@@ -1115,7 +1115,7 @@ def self_test(root: Path) -> int:
     )
     cases += 1
 
-    runtime_manifest_path = root / "crates/agenc-ircd-runtime/Cargo.toml"
+    runtime_manifest_path = root / "crates/agenc-relay-runtime/Cargo.toml"
     runtime_manifest = load_toml(runtime_manifest_path)
     production_clock = copy.deepcopy(runtime_manifest)
     production_clock["dependencies"]["tokio"] = {  # type: ignore[index]
@@ -1149,7 +1149,7 @@ def self_test(root: Path) -> int:
             "dependencies.rustix must inherit the root pin",
         )
         cases += 1
-    config_manifest_path = root / "crates/agenc-ircd-config/Cargo.toml"
+    config_manifest_path = root / "crates/agenc-relay-config/Cargo.toml"
     unrelated_clock = copy.deepcopy(load_toml(config_manifest_path))
     unrelated_clock["dependencies"]["rustix"] = {  # type: ignore[index]
         "workspace": True, "features": ["time"]
@@ -1173,52 +1173,52 @@ def self_test(root: Path) -> int:
     cases += 1
 
     forbidden = copy.deepcopy(packages)
-    forbidden["agenc-ircd-types"]["dependencies"].append(
-        copy.deepcopy(forbidden["agenc-ircd-client-wire"]["dependencies"][0])
+    forbidden["agenc-relay-types"]["dependencies"].append(
+        copy.deepcopy(forbidden["agenc-relay-client-wire"]["dependencies"][0])
     )
     expect_rejection("forbidden edge", lambda: validate_graph(forbidden), "graph differs")
     cases += 1
 
     cycle_graph = copy.deepcopy(EXPECTED_EDGES)
-    cycle_graph["agenc-ircd-types"] = {"agenc-ircd-runtime"}
+    cycle_graph["agenc-relay-types"] = {"agenc-relay-runtime"}
     expect_rejection("cycle", lambda: validate_acyclic(cycle_graph), "cycle")
     cases += 1
 
     testkit_graph = copy.deepcopy(EXPECTED_EDGES)
-    testkit_graph["agenc-ircd-runtime"] = set(testkit_graph["agenc-ircd-runtime"])
-    testkit_graph["agenc-ircd-runtime"].add("agenc-ircd-testkit")
+    testkit_graph["agenc-relay-runtime"] = set(testkit_graph["agenc-relay-runtime"])
+    testkit_graph["agenc-relay-runtime"].add("agenc-relay-testkit")
     expect_rejection(
         "testkit release edge", lambda: validate_release_closure(testkit_graph), "testkit"
     )
     cases += 1
 
     missing = copy.deepcopy(packages)
-    missing.pop("agenc-ircd-types")
+    missing.pop("agenc-relay-types")
     expect_rejection("missing crate", lambda: validate_graph(missing), "package set differs")
     cases += 1
 
     stale_metadata = copy.deepcopy(packages)
-    stale_metadata["agenc-ircd-types"]["rust_version"] = "1.97"
+    stale_metadata["agenc-relay-types"]["rust_version"] = "1.97"
     expect_rejection("MSRV", lambda: validate_graph(stale_metadata), "stale edition")
     cases += 1
 
     feature = copy.deepcopy(packages)
-    feature["agenc-ircd-runtime"]["features"] = {"deterministic-entropy": []}
+    feature["agenc-relay-runtime"]["features"] = {"deterministic-entropy": []}
     expect_rejection("production feature", lambda: validate_graph(feature), "unexpected production feature")
     cases += 1
 
     for feature_name in ("wss", "history"):
         enabled = copy.deepcopy(packages)
-        enabled["agenc-ircd"]["features"]["default"] = [feature_name]
+        enabled["agenc-relay-server"]["features"]["default"] = [feature_name]
         expect_rejection("default optional profile", lambda: validate_graph(enabled),
                          "unexpected production feature")
         cases += 1
     coupled = copy.deepcopy(packages)
-    coupled["agenc-ircd"]["features"]["wss"].append("history")
+    coupled["agenc-relay-server"]["features"]["wss"].append("history")
     expect_rejection("coupled profiles", lambda: validate_graph(coupled),
                      "unexpected production feature")
     cases += 1
-    crypto_path = root / "crates/agenc-ircd-crypto/Cargo.toml"
+    crypto_path = root / "crates/agenc-relay-crypto/Cargo.toml"
     unconditional = copy.deepcopy(load_toml(crypto_path))
     unconditional["dependencies"]["aws-lc-rs"].pop("optional")
     expect_rejection("unconditional handshake provider",

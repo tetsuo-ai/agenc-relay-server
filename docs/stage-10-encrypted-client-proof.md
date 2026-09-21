@@ -45,7 +45,7 @@ therefore never the admission bucket.
 
 ## Scenario A — recovery
 
-`crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/recovery.rs`,
+`crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/recovery.rs`,
 `a_recovering_member_rejoins_and_reads_only_the_history_it_is_entitled_to`.
 
 alice runs openmls and creates the channel group; bob runs mls-rs. A signed
@@ -85,7 +85,7 @@ What it proves:
 
 ## Scenario B — rotation and retirement
 
-`crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/rotation.rs`,
+`crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/rotation.rs`,
 `sequencer_rotation_and_leaf_retirement_hold_the_encrypted_channel`.
 
 The advertised sequencer key set moves through three generations while the
@@ -126,7 +126,7 @@ What it proves:
 
 ## Scenario C — ReInit
 
-`crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/reinit.rs`,
+`crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/reinit.rs`,
 `a_reinit_activates_only_with_every_continuing_leaf_acknowledged`.
 
 A real RFC 9420 ReInit. alice's old group is an mls-rs group; an openmls leaf
@@ -137,7 +137,7 @@ no API that creates a ReInit proposal or a resumption successor. The old group
 reaches its ReInit through four certified real Commits, then a fifth whose
 inline proposal is a genuine `ReInitProposal` and whose authorization carries
 `action_bits::REINIT` and the Section 2.2 target digest of the immutable
-`IrcReInitTargetTBS`.
+`ArcReInitTargetTBS`.
 
 What it proves:
 
@@ -152,7 +152,7 @@ What it proves:
   successor suite, alice builds the resumption successor with it, and bob
   consumes the one-use Welcome and reaches new epoch one. The attempt object
   carries that plan, the successor's initial state bytes, the exporter
-  authenticator the companion fixes (`IRC-MLS/1 reinit activation` over the old
+  authenticator the companion fixes (`ARC-MLS/1 reinit activation` over the old
   ReInit state), and the old-policy controller authorization whose every field
   the attempt repeats. `EGROUP SUBMIT REINIT ATTEMPT` stages it and the
   coordinator's `reinit_attempt` receipt names it.
@@ -197,7 +197,7 @@ What it proves:
   exporter authenticator, uses the label and context the companion fixes.
 - The successor route of the ReInit is not bound, so successor traffic is
   exchanged between the two endpoints rather than carried by the daemon. The
-  `IrcStagedReInit` mailbox carrier is not exercised; the normal Welcome mailbox
+  `ArcStagedReInit` mailbox carrier is not exercised; the normal Welcome mailbox
   carrier is, in scenarios A and B.
 - The two endpoints that continue through the ReInit are both mls-rs, for the
   library reason above; openmls participates in scenario C only as the leaf
@@ -213,27 +213,27 @@ What it proves:
 
 Sources:
 
-- `crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients.rs`
-- `crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/recovery.rs`
-- `crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/rotation.rs`
-- `crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/reinit.rs`
-- `crates/agenc-ircd/tests/stage_eight_e2ee.rs` (real-leaf evidence, the
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/recovery.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/rotation.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/reinit.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee.rs` (real-leaf evidence, the
   paced client, the shared certification helpers)
-- `crates/agenc-ircd/tests/stage_eight_e2ee/close_authority.rs`
-- `crates/agenc-ircd-testkit/src/e2ee_client.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/close_authority.rs`
+- `crates/agenc-relay-testkit/src/e2ee_client.rs`
   (`sequencer_retirement_document`)
 - `conformance/e2ee-interop-matrix.toml`
 
 Commands and results at this branch (Rust 1.98.0, from the repository root):
 
 ```sh
-cargo test -p agenc-ircd --test stage_eight_e2ee --all-features
+cargo test -p agenc-relay-server --test stage_eight_e2ee --all-features
 # 34 passed; 0 failed; 16 ignored (the Stage 10 drills); 72.26s
-cargo test -p agenc-ircd --test stage_eight_e2ee --all-features -- encrypted_clients
+cargo test -p agenc-relay-server --test stage_eight_e2ee --all-features -- encrypted_clients
 # 4 passed; 0 failed; 46 filtered out; 45.55s
-cargo test -p agenc-ircd-e2ee --all-features
+cargo test -p agenc-relay-e2ee --all-features
 # 210 passed; 0 failed across eleven result groups
-cargo test -p agenc-ircd-testkit --all-features
+cargo test -p agenc-relay-testkit --all-features
 # 0 failed across twenty-two result groups
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 # clean

@@ -2,11 +2,11 @@
 
 Status: implementation complete; checkpoint closed for exact source commit
 `1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
-[manifest](evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+[manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json)
 binds 14 passed records to one clean Stage 01 gate run and its checked-in
-[artifact](evidence/artifacts/stage-one-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+[artifact](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/artifacts/stage-one-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
 The [schema version 1
-manifest](evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
 for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
 The 2026-08-24 pass for commit
 `7ae6439b472521d3c23fb99261deaf8964a70c5a` remains historical evidence.

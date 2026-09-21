@@ -1,9 +1,13 @@
 # AgenC Relay Implementation TODO
 
+The stage completion entries below describe implementation history. Previous
+exact-revision checkpoints remain in Git history and do not qualify the ARC
+baseline. New source-bound evidence is recorded after its gates pass.
+
 Status: implementation roadmap for version 1. This file is nonnormative. The
-[architecture specification](docs/ircd-architecture-and-implementation-spec.md)
+[architecture specification](docs/arc-architecture-and-implementation-spec.md)
 and, for encrypted operations, the
-[E2EE companion](docs/irc-mls-e2ee-extension.md) remain authoritative.
+[E2EE companion](docs/arc-mls-e2ee-extension.md) remain authoritative.
 
 ## How to use this roadmap
 
@@ -40,26 +44,26 @@ and, for encrypted operations, the
   allowlists and never expose user content, network addresses, identities, or
   secret material.
 
-References: [Architecture §§1.2–4](docs/ircd-architecture-and-implementation-spec.md#12-requirements-language),
-[§§24.1–24.5](docs/ircd-architecture-and-implementation-spec.md#24-rust-workspace-and-module-boundaries),
-[§27](docs/ircd-architecture-and-implementation-spec.md#27-security-and-correctness-invariants),
-[E2EE §20](docs/irc-mls-e2ee-extension.md#20-implementation-separation), and
+References: [Architecture §§1.2–4](docs/arc-architecture-and-implementation-spec.md#12-requirements-language),
+[§§24.1–24.5](docs/arc-architecture-and-implementation-spec.md#24-rust-workspace-and-module-boundaries),
+[§27](docs/arc-architecture-and-implementation-spec.md#27-security-and-correctness-invariants),
+[E2EE §20](docs/arc-mls-e2ee-extension.md#20-implementation-separation), and
 [the contributor guide](AGENTS.md).
 
 ## Stage status
 
 | Stage | Outcome | Implementation | Latest local gate | Revision-bound evidence |
 | --- | --- | --- | --- | --- |
-| 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-00-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 02 | Bounded client wire implementation | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Current checkpoint](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
-| 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
-| 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Current checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
-| 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Current checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
-| 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Current checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
-| 08 | Conforming E2EE server adapter | Complete | Pass, 2026-09-19 | [Current checkpoint](conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json) |
-| 09 | Optional WSS and history profiles | Complete | Pass, 2026-09-05, exact checkpoint source | [Current checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json) |
+| 00 | Reproducible workspace and traceability foundation | Complete | Pass, 2026-08-27 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-00-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
+| 01 | Registries, validated types, and canonical codecs | Complete | Pass, 2026-08-27 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
+| 02 | Bounded client wire implementation | Complete | Pass, 2026-08-27 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
+| 03 | Pure deterministic domain model | Complete | Pass, 2026-08-27 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) |
+| 04 | Crypto adapters and account authentication | Complete | Pass, 2026-08-29 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
+| 05 | Durable and recoverable persistence | Complete | Pass, 2026-08-29 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json) |
+| 06 | Conforming single-node daemon | Complete | Pass, 2026-09-01 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json) |
+| 07 | Conforming base federation | Complete | Pass, 2026-09-03 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json) |
+| 08 | Conforming E2EE server adapter | Complete | Pass, 2026-09-19 | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json) |
+| 09 | Optional WSS and history profiles | Complete | Pass, 2026-09-05, exact checkpoint source | [Historical checkpoint](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json) |
 | 10 | Production qualification and release evidence | In progress | Runner, drivers, release image, and x86_64 reproduction done; jobs running | Absent |
 
 ## Coverage and ownership maps
@@ -71,21 +75,21 @@ later stage may silently move an authority across the crate graph.
 
 | Crate | First functional stage | Governing tasks |
 | --- | --- | --- |
-| `agenc-ircd-types` | 01 | `S01-001`–`S01-006` |
-| `agenc-ircd-client-wire` | 01/02 | `S01-009`, `S02-001`–`S02-011` |
-| `agenc-ircd-federation-wire` | 01/07 | `S01-007`–`S01-009`, `S07-002`, `S07-005`, `S07-008`–`S07-009` |
-| `agenc-ircd-crypto` | 04 | `S04-001`–`S04-006`, `S04-012`–`S04-013` |
-| `agenc-ircd-auth` | 04 | `S04-006`–`S04-011` |
-| `agenc-ircd-domain` | 03 | `S03-001`–`S03-010` |
-| `agenc-ircd-e2ee` | 08 | `S08-001`–`S08-017` |
-| `agenc-ircd-storage` | 05 | `S05-001`–`S05-014` |
-| `agenc-ircd-config` | 06 | `S06-001`–`S06-002`, `S06-013` |
-| `agenc-ircd-admin` | 06 | `S06-012` |
-| `agenc-ircd-runtime` | 06 | `S06-003`–`S06-015`; extended by Stages 07–09 |
-| `agenc-ircd-testkit` | 00 | `S00-007`–`S00-008`; extended by every test stage |
-| `agenc-ircd` | 06 | composition in `S06-002`, `S06-009`–`S06-015` only |
+| `agenc-relay-types` | 01 | `S01-001`–`S01-006` |
+| `agenc-relay-client-wire` | 01/02 | `S01-009`, `S02-001`–`S02-011` |
+| `agenc-relay-federation-wire` | 01/07 | `S01-007`–`S01-009`, `S07-002`, `S07-005`, `S07-008`–`S07-009` |
+| `agenc-relay-crypto` | 04 | `S04-001`–`S04-006`, `S04-012`–`S04-013` |
+| `agenc-relay-auth` | 04 | `S04-006`–`S04-011` |
+| `agenc-relay-domain` | 03 | `S03-001`–`S03-010` |
+| `agenc-relay-e2ee` | 08 | `S08-001`–`S08-017` |
+| `agenc-relay-storage` | 05 | `S05-001`–`S05-014` |
+| `agenc-relay-config` | 06 | `S06-001`–`S06-002`, `S06-013` |
+| `agenc-relay-admin` | 06 | `S06-012` |
+| `agenc-relay-runtime` | 06 | `S06-003`–`S06-015`; extended by Stages 07–09 |
+| `agenc-relay-testkit` | 00 | `S00-007`–`S00-008`; extended by every test stage |
+| `agenc-relay-server` | 06 | composition in `S06-002`, `S06-009`–`S06-015` only |
 
-Reference: [Architecture §24.1](docs/ircd-architecture-and-implementation-spec.md#241-crate-graph).
+Reference: [Architecture §24.1](docs/arc-architecture-and-implementation-spec.md#241-crate-graph).
 
 ### Invariant primary ownership
 
@@ -103,7 +107,7 @@ Reference: [Architecture §24.1](docs/ircd-architecture-and-implementation-spec.
 | `CON-01`–`CON-05` | crate/task ownership foundation in Stage 00; runtime realization in Stage 06 |
 | `OPS-01`–`OPS-05` | administration, observability, shutdown, and host policy in Stage 06; release qualification in Stage 10 |
 
-Reference: [Architecture §27](docs/ircd-architecture-and-implementation-spec.md#27-security-and-correctness-invariants).
+Reference: [Architecture §27](docs/arc-architecture-and-implementation-spec.md#27-security-and-correctness-invariants).
 
 ### Appendix-D surface ownership
 
@@ -136,7 +140,7 @@ Reference: [Architecture §27](docs/ircd-architecture-and-implementation-spec.md
 | Compatibility/versioning | `S01-010`, `S02-005`, `S08-001`, `S10-012` |
 | Exhaustive release testing | `S10-001`–`S10-900` |
 
-Reference: [Architecture Appendix D](docs/ircd-architecture-and-implementation-spec.md#appendix-d-requirement-traceability).
+Reference: [Architecture Appendix D](docs/arc-architecture-and-implementation-spec.md#appendix-d-requirement-traceability).
 
 ## Stage 00 — Workspace, policy, and traceability
 
@@ -148,7 +152,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   profile hashes without changing normative bytes. ([evidence](conformance/stage-zero-evidence.md#s00-001))
   - After: none.
   - Targets: `docs/`, `scripts/check-spec.sh`, repository evidence.
-  - References: [Architecture §§2 and 30](docs/ircd-architecture-and-implementation-spec.md#2-normative-document-order), [source ledger §1](docs/protocol-sources-and-decisions.md#1-purpose), [manifest](docs/specification-manifest.txt).
+  - References: [Architecture §§2 and 30](docs/arc-architecture-and-implementation-spec.md#2-normative-document-order), [source ledger §1](docs/protocol-sources-and-decisions.md#1-purpose), [manifest](docs/specification-manifest.txt).
   - Invariants: `E2E-07`, `FED-02`.
   - Evidence: `bash scripts/check-spec.sh` passes and recorded hashes equal the manifest.
 
@@ -157,7 +161,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   source section/hash, target crate, evidence IDs, and initial status. ([evidence](conformance/stage-zero-evidence.md#s00-002))
   - After: `S00-001`.
   - Targets: `conformance/requirements.toml` and its validator.
-  - References: [Architecture §28.1](docs/ircd-architecture-and-implementation-spec.md#281-requirement-ledger-and-evidence), [Appendix D](docs/ircd-architecture-and-implementation-spec.md#appendix-d-requirement-traceability).
+  - References: [Architecture §28.1](docs/arc-architecture-and-implementation-spec.md#281-requirement-ledger-and-evidence), [Appendix D](docs/arc-architecture-and-implementation-spec.md#appendix-d-requirement-traceability).
   - Invariants: every Section-27 invariant and every E2EE requirement.
   - Evidence: validator proves unique IDs, valid source hashes, valid crate names, and no unmapped normative requirement.
 
@@ -166,7 +170,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   Linux targets exactly as specified. ([evidence](conformance/stage-zero-evidence.md#s00-003))
   - After: `S00-001`.
   - Targets: `rust-toolchain.toml`, root and package manifests.
-  - References: [Architecture §4](docs/ircd-architecture-and-implementation-spec.md#4-fixed-version-1-decisions), [§24.5](docs/ircd-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
+  - References: [Architecture §4](docs/arc-architecture-and-implementation-spec.md#4-fixed-version-1-decisions), [§24.5](docs/arc-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
   - Invariants: `OPS-02`.
   - Evidence: host and cross-target `cargo check --locked` use the pinned compiler and declared package metadata.
 
@@ -174,8 +178,8 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   the Section-24 graph with only its declared dependency direction; empty crate
   roots must not expose placeholder protocol or cryptographic behavior. ([evidence](conformance/stage-zero-evidence.md#s00-004))
   - After: `S00-003`.
-  - Targets: all `agenc-ircd-*` libraries, `agenc-ircd-testkit`, and the `agenc-ircd` binary crate.
-  - References: [Architecture §24.1](docs/ircd-architecture-and-implementation-spec.md#241-crate-graph).
+  - Targets: all `agenc-relay-*` libraries, `agenc-relay-testkit`, and the `agenc-relay-server` binary crate.
+  - References: [Architecture §24.1](docs/arc-architecture-and-implementation-spec.md#241-crate-graph).
   - Invariants: `CON-01`, `CON-04`.
   - Evidence: a `cargo metadata` graph check rejects forbidden edges, cycles, production use of `testkit`, and library dependency on the binary.
 
@@ -184,7 +188,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   focused-function review triggers, and narrowly documented lint exceptions. ([evidence](conformance/stage-zero-evidence.md#s00-005))
   - After: `S00-004`.
   - Targets: workspace lint tables, crate roots, lint/source-scan tooling.
-  - References: [Architecture §21.4](docs/ircd-architecture-and-implementation-spec.md#214-input-pipeline), [§24.3](docs/ircd-architecture-and-implementation-spec.md#243-safe-rust-and-code-shape-policy), [AGENTS.md](AGENTS.md).
+  - References: [Architecture §21.4](docs/arc-architecture-and-implementation-spec.md#214-input-pipeline), [§24.3](docs/arc-architecture-and-implementation-spec.md#243-safe-rust-and-code-shape-policy), [AGENTS.md](AGENTS.md).
   - Invariants: `TRN-05`, `CON-04`, `OPS-01`.
   - Evidence: formatting, Clippy, unsafe-source, panic-path, and unbounded-channel checks fail on seeded violations.
 
@@ -193,7 +197,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   rules, and document the one reviewed duplicate-crypto dependency generation. ([evidence](conformance/stage-zero-evidence.md#s00-006))
   - After: `S00-003`.
   - Targets: workspace dependency table, `Cargo.lock`, `deny.toml`, audit policy.
-  - References: [Architecture §§24.4–24.5](docs/ircd-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [source ledger §§5–6](docs/protocol-sources-and-decisions.md#5-initial-rust-dependency-evidence).
+  - References: [Architecture §§24.4–24.5](docs/arc-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [source ledger §§5–6](docs/protocol-sources-and-decisions.md#5-initial-rust-dependency-evidence).
   - Invariants: `OPS-02`.
   - Evidence: `cargo deny check`, `cargo audit --deny warnings`, feature-tree inspection, and checksum comparison pass.
 
@@ -203,7 +207,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   name a stable evidence ID. ([evidence](conformance/stage-zero-evidence.md#s00-007))
   - After: `S00-002`, `S00-004`.
   - Targets: test directories, corpus/vector directories, evidence schema.
-  - References: [Architecture §§28.1–28.8](docs/ircd-architecture-and-implementation-spec.md#28-verification-conformance-and-security-testing).
+  - References: [Architecture §§28.1–28.8](docs/arc-architecture-and-implementation-spec.md#28-verification-conformance-and-security-testing).
   - Invariants: all invariant families.
   - Evidence: a schema check rejects missing, duplicate, stale, or unbound evidence IDs.
 
@@ -211,8 +215,8 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   clocks, entropy, reference models, fault stores, and transcript drivers that
   cannot enter a release dependency graph or production configuration. ([evidence](conformance/stage-zero-evidence.md#s00-008))
   - After: `S00-004`, `S00-007`.
-  - Targets: `agenc-ircd-testkit` and dependency-graph checks.
-  - References: [Architecture §§24.1–24.2](docs/ircd-architecture-and-implementation-spec.md#241-crate-graph), [§29](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
+  - Targets: `agenc-relay-testkit` and dependency-graph checks.
+  - References: [Architecture §§24.1–24.2](docs/arc-architecture-and-implementation-spec.md#241-crate-graph), [§29](docs/arc-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `CON-01`, `CON-02`.
   - Evidence: release metadata contains no testkit edge or deterministic entropy/clock feature.
 
@@ -221,7 +225,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   dependency policy, audit, and coverage under the pinned toolchain. ([evidence](conformance/stage-zero-evidence.md#s00-009))
   - After: `S00-005` through `S00-008`.
   - Targets: CI workflows and reusable validation commands.
-  - References: [Architecture §28.8](docs/ircd-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates), [§24.5](docs/ircd-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
+  - References: [Architecture §28.8](docs/arc-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates), [§24.5](docs/arc-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
   - Invariants: `OPS-02`.
   - Evidence: every mandatory command runs from a clean checkout and failures block the build.
 
@@ -231,7 +235,7 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   test execution with a security claim. ([evidence](conformance/stage-zero-evidence.md#s00-010))
   - After: `S00-002`, `S00-007`.
   - Targets: conformance evidence schema and validation tooling.
-  - References: [Architecture §§26.4 and 28.1](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims).
+  - References: [Architecture §§26.4 and 28.1](docs/arc-architecture-and-implementation-spec.md#264-conformance-claims).
   - Invariants: all invariant families.
   - Evidence: positive and malformed sample manifests exercise every validation branch.
 
@@ -240,9 +244,9 @@ source baseline, and evidence model are fixed before protocol behavior lands.
   mistaken for implemented behavior. ([evidence](conformance/stage-zero-evidence.md#s00-900))
   - After: `S00-001` through `S00-010`.
   - Targets: entire repository.
-  - References: [Architecture §§24, 28.1, 28.8, and 29](docs/ircd-architecture-and-implementation-spec.md#24-rust-workspace-and-module-boundaries).
+  - References: [Architecture §§24, 28.1, 28.8, and 29](docs/arc-architecture-and-implementation-spec.md#24-rust-workspace-and-module-boundaries).
   - Invariants: `CON-01`, `CON-02`, `OPS-02`.
-  - Evidence: the [current schema version 2 manifest](conformance/evidence/stage-00-1e5b738468f88b238061cc6e84b732176f5cae65.json) closes the gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`; the [schema version 1 manifest](conformance/evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
+  - Evidence: the [historical schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-00-1e5b738468f88b238061cc6e84b732176f5cae65.json) closes the gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`; the [schema version 1 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-00-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
 
 ## Stage 01 — Registries, validated types, and canonical codecs
 
@@ -253,8 +257,8 @@ stages exist as bounded, private-field types with independent vectors.
   every Appendix-A command/numeric/capability/mode entry and Appendix-B closed
   value without using declaration order as a wire discriminant.
   - After: `S00-900`.
-  - Targets: `agenc-ircd-types`; registry-consistency tests.
-  - References: [Architecture Appendix A](docs/ircd-architecture-and-implementation-spec.md#appendix-a-client-wire-registries), [Appendix B.2](docs/ircd-architecture-and-implementation-spec.md#b2-closed-enum-registry), [federation registry](docs/federation-v1-profile.registry).
+  - Targets: `agenc-relay-types`; registry-consistency tests.
+  - References: [Architecture Appendix A](docs/arc-architecture-and-implementation-spec.md#appendix-a-client-wire-registries), [Appendix B.2](docs/arc-architecture-and-implementation-spec.md#b2-closed-enum-registry), [federation registry](docs/federation-v1-profile.registry).
   - Invariants: `TRN-06`, `FED-08`.
   - Evidence: [EVID-S01-001-REGISTRIES](conformance/stage-one-evidence.md#s01-001) proves no missing, duplicate, reordered, or differently encoded entry.
 
@@ -263,8 +267,8 @@ stages exist as bounded, private-field types with independent vectors.
   generations, sequence numbers, and quotas with checked construction and
   arithmetic.
   - After: `S01-001`.
-  - Targets: `agenc-ircd-types`.
-  - References: [Architecture §§19.2 and 24.2–24.3](docs/ircd-architecture-and-implementation-spec.md#192-hard-resource-maxima).
+  - Targets: `agenc-relay-types`.
+  - References: [Architecture §§19.2 and 24.2–24.3](docs/arc-architecture-and-implementation-spec.md#192-hard-resource-maxima).
   - Invariants: `TRN-04`, `CON-05`, `DUR-11`.
   - Evidence: [EVID-S01-002-QUANTITIES](conformance/stage-one-evidence.md#s01-002) covers empty/one/maximum/maximum-plus-one, underflow, and overflow for every quantity family.
 
@@ -273,8 +277,8 @@ stages exist as bounded, private-field types with independent vectors.
   transaction, database, and recovery identities with explicit parsing and
   generation/incarnation rules.
   - After: `S01-002`.
-  - Targets: `agenc-ircd-types`.
-  - References: [Architecture §7](docs/ircd-architecture-and-implementation-spec.md#7-typed-identifiers-and-canonical-names), [Appendix B.3](docs/ircd-architecture-and-implementation-spec.md#b3-common-validated-values-and-control-arms).
+  - Targets: `agenc-relay-types`.
+  - References: [Architecture §7](docs/arc-architecture-and-implementation-spec.md#7-typed-identifiers-and-canonical-names), [Appendix B.3](docs/arc-architecture-and-implementation-spec.md#b3-common-validated-values-and-control-arms).
   - Invariants: `ID-01`, `ID-02`, `FED-04`.
   - Evidence: [EVID-S01-003-IDENTITIES](conformance/stage-one-evidence.md#s01-003) covers construction, canonical text/binary round-trip, domain confusion, and entropy injection.
 
@@ -282,8 +286,8 @@ stages exist as bounded, private-field types with independent vectors.
   invalid UTF-8, forbidden controls, overlength input, lossy conversion, and
   allocation before bound validation.
   - After: `S01-002`.
-  - Targets: `agenc-ircd-types`.
-  - References: [Architecture §§4, 7, and 9.1](docs/ircd-architecture-and-implementation-spec.md#4-fixed-version-1-decisions).
+  - Targets: `agenc-relay-types`.
+  - References: [Architecture §§4, 7, and 9.1](docs/arc-architecture-and-implementation-spec.md#4-fixed-version-1-decisions).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`.
   - Evidence: [EVID-S01-004-BOUNDED-VALUES](conformance/stage-one-evidence.md#s01-004) covers byte boundaries, Unicode, invalid encoding, controls, and allocation-before-validation negatives.
 
@@ -291,8 +295,8 @@ stages exist as bounded, private-field types with independent vectors.
   nickname, account, channel, server, user-mask, case mapping, PRECIS, prefix,
   and comparison rules while preserving presentation separately from identity.
   - After: `S01-003`, `S01-004`.
-  - Targets: `agenc-ircd-types`.
-  - References: [Architecture §§7.1–7.4 and 13.4](docs/ircd-architecture-and-implementation-spec.md#71-account-identity).
+  - Targets: `agenc-relay-types`.
+  - References: [Architecture §§7.1–7.4 and 13.4](docs/arc-architecture-and-implementation-spec.md#71-account-identity).
   - Invariants: `ID-01`, `STA-01`, `STA-02`.
   - Evidence: [EVID-S01-005-NAMES-MASKS](conformance/stage-one-evidence.md#s01-005) covers canonicalization, collisions, PRECIS rejection, prefixes, masks, and profile boundaries.
 
@@ -300,8 +304,8 @@ stages exist as bounded, private-field types with independent vectors.
   enums and exact public mappings without carrying raw input or internal error
   chains into replies, logs, or metrics.
   - After: `S01-001`, `S01-004`.
-  - Targets: `agenc-ircd-types`.
-  - References: [Architecture §9.5](docs/ircd-architecture-and-implementation-spec.md#95-errors), [§24.3](docs/ircd-architecture-and-implementation-spec.md#243-safe-rust-and-code-shape-policy), [Appendix A.2](docs/ircd-architecture-and-implementation-spec.md#a2-server-command-and-numeric-registry).
+  - Targets: `agenc-relay-types`.
+  - References: [Architecture §9.5](docs/arc-architecture-and-implementation-spec.md#95-errors), [§24.3](docs/arc-architecture-and-implementation-spec.md#243-safe-rust-and-code-shape-policy), [Appendix A.2](docs/arc-architecture-and-implementation-spec.md#a2-server-command-and-numeric-registry).
   - Invariants: `PRV-01`, `PRV-02`, `OPS-01`.
   - Evidence: [EVID-S01-006-PROTOCOL-ERRORS](conformance/stage-one-evidence.md#s01-006) uses exhaustive mapping tests and safe fixed descriptions with no input-bearing implicit rendering.
 
@@ -309,8 +313,8 @@ stages exist as bounded, private-field types with independent vectors.
   integers, lengths, options, vectors, enums, and structures with full
   consumption, checked allocation, explicit discriminants, and no Serde.
   - After: `S01-001` through `S01-004`.
-  - Targets: `agenc-ircd-federation-wire`.
-  - References: [Architecture §§24.4 and Appendix B.1](docs/ircd-architecture-and-implementation-spec.md#b1-encoding-notation).
+  - Targets: `agenc-relay-federation-wire`.
+  - References: [Architecture §§24.4 and Appendix B.1](docs/arc-architecture-and-implementation-spec.md#b1-encoding-notation).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `FED-08`.
   - Evidence: [EVID-S01-007-BINARY-CODEC](conformance/stage-one-evidence.md#s01-007) covers canonical round-trip, trailing bytes, truncation, bounds, allocation budgets, nesting, and every discriminant.
 
@@ -318,8 +322,8 @@ stages exist as bounded, private-field types with independent vectors.
   arms, projections, events, deltas, requests, results, origins, delivery,
   snapshots, descriptors, and cross-reference validation at the codec layer.
   - After: `S01-003`, `S01-007`.
-  - Targets: `agenc-ircd-federation-wire`.
-  - References: [Architecture Appendices B.3–B.7](docs/ircd-architecture-and-implementation-spec.md#b3-common-validated-values-and-control-arms).
+  - Targets: `agenc-relay-federation-wire`.
+  - References: [Architecture Appendices B.3–B.7](docs/arc-architecture-and-implementation-spec.md#b3-common-validated-values-and-control-arms).
   - Invariants: `FED-03` through `FED-13` at the representation boundary.
   - Evidence: [EVID-S01-008-APPENDIX-B](conformance/stage-one-evidence.md#s01-008) provides all 128 arm vectors plus presence, count, order, substitution, and malformed-cross-reference negatives.
 
@@ -327,8 +331,8 @@ stages exist as bounded, private-field types with independent vectors.
   uppercase tokens, decimal forms, unpadded URL-safe base64, arity, and exact
   decode/re-encode equality without yet implementing connection state.
   - After: `S01-004`, `S01-007`.
-  - Targets: `agenc-ircd-client-wire`, `agenc-ircd-federation-wire`.
-  - References: [Architecture Appendix B.8](docs/ircd-architecture-and-implementation-spec.md#b8-text-carrier-tokens-and-command-arity), [E2EE §§11.2 and 11.10](docs/irc-mls-e2ee-extension.md#112-fragment-tag).
+  - Targets: `agenc-relay-client-wire`, `agenc-relay-federation-wire`.
+  - References: [Architecture Appendix B.8](docs/arc-architecture-and-implementation-spec.md#b8-text-carrier-tokens-and-command-arity), [E2EE §§11.2 and 11.10](docs/arc-mls-e2ee-extension.md#112-fragment-tag).
   - Invariants: `TRN-06`, `FED-08`.
   - Evidence: [EVID-S01-009-TEXT-CARRIERS](conformance/stage-one-evidence.md#s01-009) covers alternate alphabets, padding, width, sign, leading zero, case, arity, fragments, and overflow.
 
@@ -337,7 +341,7 @@ stages exist as bounded, private-field types with independent vectors.
   of production codecs and fail on any changed byte.
   - After: `S01-001`, `S01-007`.
   - Targets: conformance tests and source-hash tooling.
-  - References: [Architecture §§30.2–30.3 and Appendix B.9](docs/ircd-architecture-and-implementation-spec.md#302-living-protocol-and-implementation-sources), [E2EE §2.3](docs/irc-mls-e2ee-extension.md#23-exact-profile-revision), [manifest](docs/specification-manifest.txt).
+  - References: [Architecture §§30.2–30.3 and Appendix B.9](docs/arc-architecture-and-implementation-spec.md#302-living-protocol-and-implementation-sources), [E2EE §2.3](docs/arc-mls-e2ee-extension.md#23-exact-profile-revision), [manifest](docs/specification-manifest.txt).
   - Invariants: `E2E-07`, `FED-02`.
   - Evidence: [EVID-S01-010-PROFILE-HASHES](conformance/stage-one-evidence.md#s01-010) binds all known hashes and rejects independent single-byte changes.
 
@@ -345,8 +349,8 @@ stages exist as bounded, private-field types with independent vectors.
   small implementation that does not reuse production derive or codec logic
   must generate or verify every stable byte representation.
   - After: `S01-007` through `S01-010`.
-  - Targets: `agenc-ircd-testkit`, checked-in vector corpus.
-  - References: [Architecture §28.2](docs/ircd-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests).
+  - Targets: `agenc-relay-testkit`, checked-in vector corpus.
+  - References: [Architecture §28.2](docs/arc-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests).
   - Invariants: all representation-bound invariants.
   - Evidence: [EVID-S01-011-REFERENCE-VECTORS](conformance/stage-one-evidence.md#s01-011) records independent byte-for-byte agreement, provenance, and SHA-256 for every schema.
 
@@ -355,7 +359,7 @@ stages exist as bounded, private-field types with independent vectors.
   without panic, recursion, trailing acceptance, or pre-validation growth.
   - After: `S01-011`.
   - Targets: type and wire test suites.
-  - References: [Architecture §§19.4, 27.1, and 28.2](docs/ircd-architecture-and-implementation-spec.md#194-parser-and-algorithmic-defenses).
+  - References: [Architecture §§19.4, 27.1, and 28.2](docs/arc-architecture-and-implementation-spec.md#194-parser-and-algorithmic-defenses).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: [EVID-S01-012-TOTALITY](conformance/stage-one-evidence.md#s01-012) covers the hostile corpus, every truncation, explicit depth/value budgets, nonrecursion, and parser-error negatives.
 
@@ -363,10 +367,10 @@ stages exist as bounded, private-field types with independent vectors.
   validated foundational types, canonical codecs, source checks, and independent
   vectors are complete before client behavior begins.
   - After: `S01-001` through `S01-012`.
-  - Targets: `agenc-ircd-types`, foundational wire code, testkit vectors.
-  - References: [Architecture §29 phase 1](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
+  - Targets: `agenc-relay-types`, foundational wire code, testkit vectors.
+  - References: [Architecture §29 phase 1](docs/arc-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `TRN-04` through `TRN-06`, applicable identity and federation representation invariants.
-  - Evidence: [EVID-S01-900-STAGE-GATE](conformance/stage-one-evidence.md#s01-900) and the [current schema version 2 manifest](conformance/evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json) close the pinned, locked, dual-target gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`; the [schema version 1 manifest](conformance/evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
+  - Evidence: [EVID-S01-900-STAGE-GATE](conformance/stage-one-evidence.md#s01-900) and the [historical schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-01-1e5b738468f88b238061cc6e84b732176f5cae65.json) close the pinned, locked, dual-target gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`; the [schema version 1 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-01-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
 
 ## Stage 02 — Bounded client wire
 
@@ -375,7 +379,7 @@ through a total, resource-bounded wire layer with no sockets, policy, or state
 mutation inside the crate.
 
 Stage 02 task work is complete. The [current schema version 2
-manifest](conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json)
 binds the 2026-08-27 run and its checked-in artifact to exact source commit
 `1e5b738468f88b238061cc6e84b732176f5cae65` and closes the gate. The schema
 version 1 manifest for commit
@@ -388,8 +392,8 @@ wire-size, reply-shape, and traceability issues.
   coalesced reads, CRLF, EOF, timeouts, and exact physical-line limits without
   scanning or allocating beyond admitted bounds. ([evidence](conformance/stage-two-evidence.md#s02-001))
   - After: `S01-900`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §§8.3 and 9.1](docs/ircd-architecture-and-implementation-spec.md#83-time-and-resource-bounds).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §§8.3 and 9.1](docs/arc-architecture-and-implementation-spec.md#83-time-and-resource-bounds).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`.
   - Evidence: every split/coalesce boundary, empty/equal/plus-one length, CRLF, timeout, and EOF transcript passes.
 
@@ -397,16 +401,16 @@ wire-size, reply-shape, and traceability issues.
   IRC-over-WebSocket message boundary, UTF-8, compression prohibition, size,
   and close behavior independently of the optional network listener. ([evidence](conformance/stage-two-evidence.md#s02-002))
   - After: `S02-001`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §8.4](docs/ircd-architecture-and-implementation-spec.md#84-websocket-listener), [RFC 6455 decision](docs/protocol-sources-and-decisions.md#2-published-standards).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §8.4](docs/arc-architecture-and-implementation-spec.md#84-websocket-listener), [RFC 6455 decision](docs/protocol-sources-and-decisions.md#2-published-standards).
   - Invariants: `TRN-02`, `TRN-04`, `TRN-05`.
   - Evidence: fragmented-message, binary-frame, invalid-UTF-8, extension, multi-line, and oversize negatives.
 
 - [x] `S02-003` **Implement IRCv3 tags.** Parse and render tag names, values,
   escapes, duplicates, client-only tags, and budgets canonically. ([evidence](conformance/stage-two-evidence.md#s02-003))
   - After: `S02-001`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §9.2](docs/ircd-architecture-and-implementation-spec.md#92-tag-handling), [Appendix A](docs/ircd-architecture-and-implementation-spec.md#appendix-a-client-wire-registries).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §9.2](docs/arc-architecture-and-implementation-spec.md#92-tag-handling), [Appendix A](docs/arc-architecture-and-implementation-spec.md#appendix-a-client-wire-registries).
   - Invariants: `TRN-04`, `TRN-06`.
   - Evidence: ratified IRCv3 vectors plus all escape, duplicate, boundary, and malformed cases.
 
@@ -414,8 +418,8 @@ wire-size, reply-shape, and traceability issues.
   framed line with exact prefix, command, parameter, trailing, and UTF-8 rules;
   do not perform authorization or mutation. ([evidence](conformance/stage-two-evidence.md#s02-004))
   - After: `S02-001`, `S02-003`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §§9 and Appendix A.1](docs/ircd-architecture-and-implementation-spec.md#9-client-wire-format), [RFC 2812](rfcs/rfc2812-irc-client-protocol.txt).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §§9 and Appendix A.1](docs/arc-architecture-and-implementation-spec.md#9-client-wire-format), [RFC 2812](rfcs/rfc2812-irc-client-protocol.txt).
   - Invariants: `TRN-05`, `TRN-06`.
   - Evidence: every grammar arm and arity, prefix rejection, malformed command, parameter boundary, and differential transcript passes.
 
@@ -423,8 +427,8 @@ wire-size, reply-shape, and traceability issues.
   NAK, END, NEW, DEL, dependencies, line splitting, and reconnect-only profile
   transitions without silently enabling unsupported drafts. ([evidence](conformance/stage-two-evidence.md#s02-005))
   - After: `S02-004`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §§2.1, 9.3, and Appendix A.3](docs/ircd-architecture-and-implementation-spec.md#21-adopted-client-specifications).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §§2.1, 9.3, and Appendix A.3](docs/arc-architecture-and-implementation-spec.md#21-adopted-client-specifications).
   - Invariants: `E2E-07`, `TRN-04`, `TRN-06`.
   - Evidence: capability dependency, simultaneous change, unknown capability, line-budget, and downgrade transcripts.
 
@@ -433,17 +437,17 @@ wire-size, reply-shape, and traceability issues.
   burst ordering, keepalive, and bounded close output without implementing auth
   internals. ([evidence](conformance/stage-two-evidence.md#s02-006))
   - After: `S02-004`, `S02-005`.
-  - Targets: `agenc-ircd-client-wire` and transcript model.
-  - References: [Architecture §10](docs/ircd-architecture-and-implementation-spec.md#10-connection-and-registration-state-machine).
+  - Targets: `agenc-relay-client-wire` and transcript model.
+  - References: [Architecture §10](docs/arc-architecture-and-implementation-spec.md#10-connection-and-registration-state-machine).
   - Invariants: `TRN-05`, `AUTH-02`, `OPS-04` at the wire boundary.
   - Evidence: every registration transition, invalid ordering, timeout, ping/pong, and close transcript.
 
 - [x] `S02-007` **Implement SASL transport framing.** Handle AUTHENTICATE
   chunking, mechanism selection surface, abort, timeout, and fixed public
-  replies while leaving OPAQUE processing to `agenc-ircd-auth`. ([evidence](conformance/stage-two-evidence.md#s02-007))
+  replies while leaving OPAQUE processing to `agenc-relay-auth`. ([evidence](conformance/stage-two-evidence.md#s02-007))
   - After: `S02-005`, `S02-006`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §§11.2–11.6](docs/ircd-architecture-and-implementation-spec.md#112-opaque-profile).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §§11.2–11.6](docs/arc-architecture-and-implementation-spec.md#112-opaque-profile).
   - Invariants: `AUTH-01`, `AUTH-02`, `AUTH-10` at the carrier boundary.
   - Evidence: chunk width, plus marker, abort, unsupported mechanism, timeout, and response-shape transcripts.
 
@@ -451,8 +455,8 @@ wire-size, reply-shape, and traceability issues.
   from encoding, enforce exact client/server/combined line budgets, preserve
   canonical ordering, and never allocate before a matching permit is supplied. ([evidence](conformance/stage-two-evidence.md#s02-008))
   - After: `S02-003` through `S02-006`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §§9.4–9.5, 21.3, and 24.2](docs/ircd-architecture-and-implementation-spec.md#94-rpl_isupport).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §§9.4–9.5, 21.3, and 24.2](docs/arc-architecture-and-implementation-spec.md#94-rpl_isupport).
   - Invariants: `TRN-04`, `STA-08`, `CON-05`.
   - Evidence: mechanical wire-budget table, measure/encode equality, exact-capacity allocation tests, and every capability combination.
 
@@ -460,8 +464,8 @@ wire-size, reply-shape, and traceability issues.
   Render standard errors, numerics, labeled-response groups, and batch nesting
   exactly once and in the required order. ([evidence](conformance/stage-two-evidence.md#s02-009))
   - After: `S02-005`, `S02-008`.
-  - Targets: `agenc-ircd-client-wire`.
-  - References: [Architecture §§9.3–9.5 and 14.1](docs/ircd-architecture-and-implementation-spec.md#93-advertised-capabilities).
+  - Targets: `agenc-relay-client-wire`.
+  - References: [Architecture §§9.3–9.5 and 14.1](docs/arc-architecture-and-implementation-spec.md#93-advertised-capabilities).
   - Invariants: `STA-06`, `STA-08`, `PRV-02`.
   - Evidence: traditional/standard reply, partial-success, nested-batch, label, and ordering golden transcripts.
 
@@ -469,8 +473,8 @@ wire-size, reply-shape, and traceability issues.
   parsing, capability state, registration, and rendering with deterministic
   time and byte-exact expectations. ([evidence](conformance/stage-two-evidence.md#s02-010))
   - After: `S02-001` through `S02-009`.
-  - Targets: `agenc-ircd-testkit`, client-wire integration tests.
-  - References: [Architecture §§28.2 and 28.6](docs/ircd-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests), [Appendix E](docs/ircd-architecture-and-implementation-spec.md#appendix-e-worked-protocol-flows).
+  - Targets: `agenc-relay-testkit`, client-wire integration tests.
+  - References: [Architecture §§28.2 and 28.6](docs/arc-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests), [Appendix E](docs/arc-architecture-and-implementation-spec.md#appendix-e-worked-protocol-flows).
   - Invariants: `TRN-*`, applicable `AUTH-*` and `STA-*` wire invariants.
   - Evidence: pinned base-client transcript corpus runs byte-identically.
 
@@ -479,7 +483,7 @@ wire-size, reply-shape, and traceability issues.
   fragmented/coalesced input with explicit memory and time envelopes. ([evidence](conformance/stage-two-evidence.md#s02-011))
   - After: `S02-010`.
   - Targets: client-wire fuzz targets and regression corpus.
-  - References: [Architecture §28.4](docs/ircd-architecture-and-implementation-spec.md#284-parser-and-fuzz-testing).
+  - References: [Architecture §28.4](docs/arc-architecture-and-implementation-spec.md#284-parser-and-fuzz-testing).
   - Invariants: `TRN-04`, `TRN-05`, `TRN-06`, `CON-05`.
   - Evidence: reproducible fuzz records plus minimized failures promoted to ordinary tests.
 
@@ -487,10 +491,10 @@ wire-size, reply-shape, and traceability issues.
   must be total, bounded, capability-correct, and transcript-compatible before
   domain state consumes a parsed command. ([evidence](conformance/stage-two-evidence.md#s02-900))
   - After: `S02-001` through `S02-011`.
-  - Targets: `agenc-ircd-client-wire`, testkit transcripts and fuzz corpus.
-  - References: [Architecture §29 phase 2](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
+  - Targets: `agenc-relay-client-wire`, testkit transcripts and fuzz corpus.
+  - References: [Architecture §29 phase 2](docs/arc-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `TRN-04` through `TRN-06`.
-  - Evidence: parser fuzzing and every wire boundary and registration transcript passed with the mandatory workspace gates; the [current schema version 2 manifest](conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json) closes the gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`, and the [schema version 1 manifest](conformance/evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
+  - Evidence: parser fuzzing and every wire boundary and registration transcript passed with the mandatory workspace gates; the [historical schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-02-1e5b738468f88b238061cc6e84b732176f5cae65.json) closes the gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`, and the [schema version 1 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-02-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
 
 ## Stage 03 — Pure domain model
 
@@ -502,8 +506,8 @@ filesystem calls, concrete clocks, or random generators.
   Keep account, E2EE, nickname, presentation, cloak, and transport identities
   separate with explicit generation fencing.
   - After: `S02-900`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §§7, 11.1, and 12](docs/ircd-architecture-and-implementation-spec.md#7-typed-identifiers-and-canonical-names).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §§7, 11.1, and 12](docs/arc-architecture-and-implementation-spec.md#7-typed-identifiers-and-canonical-names).
   - Invariants: `ID-01` through `ID-07`, `AUTH-04`, `AUTH-05`.
   - Evidence: lifecycle, account-switch, nickname reuse, cloak independence, and stale-generation property tests.
 
@@ -511,8 +515,8 @@ filesystem calls, concrete clocks, or random generators.
   Enforce recreation isolation, owner continuity, role ordering, mandatory and
   mutually exclusive modes, typed masks, and revision-bound decisions.
   - After: `S03-001`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §13](docs/ircd-architecture-and-implementation-spec.md#13-channel-model).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §13](docs/arc-architecture-and-implementation-spec.md#13-channel-model).
   - Invariants: `STA-02` through `STA-05`.
   - Evidence: generated membership/role/mode sequences and every boundary/collision transition.
 
@@ -520,8 +524,8 @@ filesystem calls, concrete clocks, or random generators.
   recipient-authorized views for public, unlisted, secret, invisible, offline,
   account, channel, query, and presence state.
   - After: `S03-001`, `S03-002`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §§6, 13.5, 14.3, and 14.5](docs/ircd-architecture-and-implementation-spec.md#6-privacy-and-anonymity-profiles).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §§6, 13.5, 14.3, and 14.5](docs/arc-architecture-and-implementation-spec.md#6-privacy-and-anonymity-profiles).
   - Invariants: `PRV-01`, `PRV-02`, `STA-10`, `ID-04`, `ID-05`.
   - Evidence: authorization matrices, projection diffs, equal-error tests, and forbidden-field canaries.
 
@@ -529,8 +533,8 @@ filesystem calls, concrete clocks, or random generators.
   into `CanonicalCommand` only after semantic bounds, target resolution rules,
   mode vectors, and all-or-none command-level validation succeed.
   - After: `S03-001` through `S03-003`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §§14 and 21.4](docs/ircd-architecture-and-implementation-spec.md#14-base-command-behavior).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §§14 and 21.4](docs/arc-architecture-and-implementation-spec.md#14-base-command-behavior).
   - Invariants: `STA-04`, `STA-05`, `STA-06`, `TRN-05`.
   - Evidence: every Appendix-A command arm has success, rejection, multi-target, and unchanged-state tests.
 
@@ -538,8 +542,8 @@ filesystem calls, concrete clocks, or random generators.
   `AuthorizedCommand` only after current principal, generation, role, target
   revision, policy, and hierarchical budget checks pass.
   - After: `S03-004`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §§16 and 19.1](docs/ircd-architecture-and-implementation-spec.md#16-moderation-and-user-safety).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §§16 and 19.1](docs/arc-architecture-and-implementation-spec.md#16-moderation-and-user-safety).
   - Invariants: `ID-01`, `STA-03`, `STA-05`, `STA-07`, `CON-05`.
   - Evidence: privilege-transition, stale-identity, confused-deputy, exhaustion, and charge-before-ID tests.
 
@@ -547,8 +551,8 @@ filesystem calls, concrete clocks, or random generators.
   PART, TOPIC, NAMES, LIST, INVITE, KICK, direct/channel messaging, echo,
   recipient derivation, and atomic authorized-success subsets.
   - After: `S03-005`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §§14.1–15.3](docs/ircd-architecture-and-implementation-spec.md#141-atomic-multi-target-rules).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §§14.1–15.3](docs/arc-architecture-and-implementation-spec.md#141-atomic-multi-target-rules).
   - Invariants: `STA-01` through `STA-10`.
   - Evidence: deterministic two-client/multi-target flows, ordering tests, secret-target privacy, and rollback-free pure plans.
 
@@ -556,8 +560,8 @@ filesystem calls, concrete clocks, or random generators.
   bans, exceptions, sanctions, role-gated actions, removal consequences, and
   auditable operator decisions without inspecting encrypted content.
   - After: `S03-005`, `S03-006`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §16](docs/ircd-architecture-and-implementation-spec.md#16-moderation-and-user-safety).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §16](docs/arc-architecture-and-implementation-spec.md#16-moderation-and-user-safety).
   - Invariants: `STA-03`, `STA-04`, `STA-05`, `OPS-03`.
   - Evidence: role/sanction matrix, appeal-state transitions, E2EE-removal intent tests, and audit-field allowlist tests.
 
@@ -565,8 +569,8 @@ filesystem calls, concrete clocks, or random generators.
   ephemerality, optional plaintext channel history, offline account state, and
   E2EE opacity as explicit mutually constrained policies.
   - After: `S03-002`, `S03-006`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §17](docs/ircd-architecture-and-implementation-spec.md#17-persistence-and-history-visible-to-users), [§18](docs/ircd-architecture-and-implementation-spec.md#18-e2ee-integration-contract).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §17](docs/arc-architecture-and-implementation-spec.md#17-persistence-and-history-visible-to-users), [§18](docs/arc-architecture-and-implementation-spec.md#18-e2ee-integration-contract).
   - Invariants: `STA-09`, `E2E-01`, `E2E-02`.
   - Evidence: default-no-history, opt-in scope, encrypted-target refusal, deletion, and visibility tests.
 
@@ -574,8 +578,8 @@ filesystem calls, concrete clocks, or random generators.
   validation, authorization, deterministic state transition, storage
   projection, recipient projection, and later runtime reservations.
   - After: `S03-004` through `S03-008`.
-  - Targets: `agenc-ircd-domain`.
-  - References: [Architecture §§21.1, 21.5, and 24.2](docs/ircd-architecture-and-implementation-spec.md#211-ownership-rule).
+  - Targets: `agenc-relay-domain`.
+  - References: [Architecture §§21.1, 21.5, and 24.2](docs/arc-architecture-and-implementation-spec.md#211-ownership-rule).
   - Invariants: `CON-01`, `CON-03`, `DUR-01`, `STA-08`.
   - Evidence: plans are deterministic from one revision, contain no runtime/storage handles, and apply once in the reference model.
 
@@ -583,8 +587,8 @@ filesystem calls, concrete clocks, or random generators.
   through monotonic/wall-clock values and requested entropy operations without
   calling system clocks or RNGs in domain code.
   - After: `S03-009`.
-  - Targets: `agenc-ircd-domain`, type-level clock/entropy request interfaces.
-  - References: [Architecture §§21.6 and 24.2](docs/ircd-architecture-and-implementation-spec.md#216-timers-and-clocks).
+  - Targets: `agenc-relay-domain`, type-level clock/entropy request interfaces.
+  - References: [Architecture §§21.6 and 24.2](docs/arc-architecture-and-implementation-spec.md#216-timers-and-clocks).
   - Invariants: `CON-01`, `AUTH-02`, `FED-09`.
   - Evidence: deterministic boundary tests for expiry, clock failure/jump, timer replacement, and entropy-request identity.
 
@@ -592,8 +596,8 @@ filesystem calls, concrete clocks, or random generators.
   command and planned federation-domain operation against simple value state,
   checking invariants after every generated step.
   - After: `S03-001` through `S03-010`.
-  - Targets: `agenc-ircd-testkit` reference model.
-  - References: [Architecture §28.3](docs/ircd-architecture-and-implementation-spec.md#283-state-machine-and-model-tests).
+  - Targets: `agenc-relay-testkit` reference model.
+  - References: [Architecture §28.3](docs/arc-architecture-and-implementation-spec.md#283-state-machine-and-model-tests).
   - Invariants: all applicable `ID-*`, `PRV-*`, `STA-*`, `CON-*`.
   - Evidence: model covers every command registry arm and exports deterministic snapshots for implementation comparison.
 
@@ -603,7 +607,7 @@ filesystem calls, concrete clocks, or random generators.
   transitions.
   - After: `S03-011`.
   - Targets: property/state-machine test suites.
-  - References: [Architecture §§27 and 28.3](docs/ircd-architecture-and-implementation-spec.md#27-security-and-correctness-invariants).
+  - References: [Architecture §§27 and 28.3](docs/arc-architecture-and-implementation-spec.md#27-security-and-correctness-invariants).
   - Invariants: every applicable Stage-03 invariant.
   - Evidence: generated sequences preserve invariants and rejected steps leave the reference state unchanged.
 
@@ -611,10 +615,10 @@ filesystem calls, concrete clocks, or random generators.
   independent reference model must agree for all generated sequences before
   cryptographic, storage, or runtime side effects are introduced.
   - After: `S03-001` through `S03-012`.
-  - Targets: `agenc-ircd-domain`, testkit reference model.
-  - References: [Architecture §29 phase 3](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
+  - Targets: `agenc-relay-domain`, testkit reference model.
+  - References: [Architecture §29 phase 3](docs/arc-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: applicable `ID-*`, `PRV-*`, `STA-*`, `CON-*`.
-  - Evidence: generated sequence tests, privacy matrices, model equality, and mandatory workspace gates passed; the [current schema version 2 manifest](conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) closes the gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`, and the [schema version 1 manifest](conformance/evidence/stage-03-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
+  - Evidence: generated sequence tests, privacy matrices, model equality, and mandatory workspace gates passed; the [historical schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-03-1e5b738468f88b238061cc6e84b732176f5cae65.json) closes the gate for exact source commit `1e5b738468f88b238061cc6e84b732176f5cae65`, and the [schema version 1 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-03-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remains archive-only.
 
 ## Stage 04 — Cryptographic adapters and account authentication
 
@@ -626,8 +630,8 @@ credential change have complete protocol state machines and vectors.
   `Display`, `Clone`, Serde, implicit string conversion, and accidental log or
   error exposure; zeroize owned buffers where the selected library supports it.
   - After: `S03-900`.
-  - Targets: `agenc-ircd-crypto`.
-  - References: [Architecture §§22.2 and 24.3](docs/ircd-architecture-and-implementation-spec.md#222-secret-material), [§25.2](docs/ircd-architecture-and-implementation-spec.md#252-logging).
+  - Targets: `agenc-relay-crypto`.
+  - References: [Architecture §§22.2 and 24.3](docs/arc-architecture-and-implementation-spec.md#222-secret-material), [§25.2](docs/arc-architecture-and-implementation-spec.md#252-logging).
   - Invariants: `ID-05`, `AUTH-03`, `OPS-01`.
   - Evidence: compile-fail trait checks, secret-canary scans, drop tests, and explicit exposure-path review.
 
@@ -635,8 +639,8 @@ credential change have complete protocol state machines and vectors.
   exact features, require complete output, expose failure, and provide no
   production fallback or deterministic mode.
   - After: `S04-001`.
-  - Targets: `agenc-ircd-crypto`.
-  - References: [Architecture §§24.2 and 24.4](docs/ircd-architecture-and-implementation-spec.md#242-core-interfaces-and-ownership).
+  - Targets: `agenc-relay-crypto`.
+  - References: [Architecture §§24.2 and 24.4](docs/arc-architecture-and-implementation-spec.md#242-core-interfaces-and-ownership).
   - Invariants: `ID-02`, `ID-03`, `DUR-06` at the entropy boundary.
   - Evidence: full/partial/failure adapter tests and release-graph proof that deterministic entropy is unreachable.
 
@@ -644,8 +648,8 @@ credential change have complete protocol state machines and vectors.
   Accept typed contexts and inputs, expose only registered algorithms, and
   prevent cross-domain or truncated-output substitution.
   - After: `S04-001`.
-  - Targets: `agenc-ircd-crypto`.
-  - References: [Architecture §24.4](docs/ircd-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [E2EE §§2.2 and 7](docs/irc-mls-e2ee-extension.md#22-semantic-id-and-digest-registry).
+  - Targets: `agenc-relay-crypto`.
+  - References: [Architecture §24.4](docs/arc-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [E2EE §§2.2 and 7](docs/arc-mls-e2ee-extension.md#22-semantic-id-and-digest-registry).
   - Invariants: `AUTH-08`, `DUR-03`, `E2E-05`.
   - Evidence: RFC/project vectors, domain-substitution negatives, length checks, and differential library tests where available.
 
@@ -653,8 +657,8 @@ credential change have complete protocol state machines and vectors.
   algorithm, key/nonce sizes, AAD domains, full-tag verification, and failure
   behavior; nonce allocation remains a Stage-05 storage responsibility.
   - After: `S04-001`, `S04-003`.
-  - Targets: `agenc-ircd-crypto`.
-  - References: [Architecture §§23.3 and 24.4](docs/ircd-architecture-and-implementation-spec.md#233-record-encryption), [source ledger §3](docs/protocol-sources-and-decisions.md#3-work-in-progress-and-deliberately-excluded-algorithms).
+  - Targets: `agenc-relay-crypto`.
+  - References: [Architecture §§23.3 and 24.4](docs/arc-architecture-and-implementation-spec.md#233-record-encryption), [source ledger §3](docs/protocol-sources-and-decisions.md#3-work-in-progress-and-deliberately-excluded-algorithms).
   - Invariants: `DUR-03`, `DUR-06`.
   - Evidence: XChaCha/project vectors and wrong-key, nonce, AAD, tag, truncation, and tamper negatives.
 
@@ -662,8 +666,8 @@ credential change have complete protocol state machines and vectors.
   typed signing domains, exact encodings, no batch/hazmat/legacy surface, and
   secret-key wrappers.
   - After: `S04-001`, `S04-003`.
-  - Targets: `agenc-ircd-crypto`.
-  - References: [Architecture §24.4](docs/ircd-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [E2EE §2.1](docs/irc-mls-e2ee-extension.md#21-signature-registry).
+  - Targets: `agenc-relay-crypto`.
+  - References: [Architecture §24.4](docs/arc-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [E2EE §2.1](docs/arc-mls-e2ee-extension.md#21-signature-registry).
   - Invariants: `TRN-03`, `E2E-05`, `OPS-05`.
   - Evidence: signature/domain vectors, malleability and wrong-domain negatives, and secret-exposure scans.
 
@@ -672,8 +676,8 @@ credential change have complete protocol state machines and vectors.
   operation kind, exact 4,726-byte wrapper, all-zero padding, and one-use
   exporter material.
   - After: `S04-002`, `S04-003`.
-  - Targets: `agenc-ircd-auth`, `agenc-ircd-crypto`.
-  - References: [Architecture §11.2.1](docs/ircd-architecture-and-implementation-spec.md#1121-end-to-end-account-service-envelope), [RFC 9180](rfcs/rfc9180-hpke.txt).
+  - Targets: `agenc-relay-auth`, `agenc-relay-crypto`.
+  - References: [Architecture §11.2.1](docs/arc-architecture-and-implementation-spec.md#1121-end-to-end-account-service-envelope), [RFC 9180](rfcs/rfc9180-hpke.txt).
   - Invariants: `ID-05`, `ID-06`, `AUTH-08`, `AUTH-10`.
   - Evidence: fixed-wrapper vectors plus pin, epoch, kind, context, length, padding, salt, and replay negatives.
 
@@ -681,8 +685,8 @@ credential change have complete protocol state machines and vectors.
   suite, identities, context, Argon2id KSF, private credential IDs, record
   lengths, real and fake records, and dummy KE3 work without Serde.
   - After: `S04-001` through `S04-003`.
-  - Targets: `agenc-ircd-auth`, `agenc-ircd-crypto`.
-  - References: [Architecture §11.2](docs/ircd-architecture-and-implementation-spec.md#112-opaque-profile), [source ledger §2](docs/protocol-sources-and-decisions.md#2-published-standards).
+  - Targets: `agenc-relay-auth`, `agenc-relay-crypto`.
+  - References: [Architecture §11.2](docs/arc-architecture-and-implementation-spec.md#112-opaque-profile), [source ledger §2](docs/protocol-sources-and-decisions.md#2-published-standards).
   - Invariants: `AUTH-01`, `AUTH-03`, `AUTH-09`, `AUTH-10`.
   - Evidence: RFC 9807/project vectors, exact serialized lengths, fake-record equivalence, dummy-KE3 work, and unsupported-suite rejection.
 
@@ -690,8 +694,8 @@ credential change have complete protocol state machines and vectors.
   credential identity, HPKE context, OPAQUE registration, expiry, connection,
   and one-use transaction state without creating an E2EE identity.
   - After: `S04-006`, `S04-007`.
-  - Targets: `agenc-ircd-auth`, domain authorization interfaces.
-  - References: [Architecture §11.3](docs/ircd-architecture-and-implementation-spec.md#113-account-creation).
+  - Targets: `agenc-relay-auth`, domain authorization interfaces.
+  - References: [Architecture §11.3](docs/arc-architecture-and-implementation-spec.md#113-account-creation).
   - Invariants: `AUTH-02`, `AUTH-04`, `AUTH-08`, `AUTH-09`.
   - Evidence: success, unknown/duplicate login, invitation substitution, expiry, replay, disconnect, and output-shape tests.
 
@@ -699,8 +703,8 @@ credential change have complete protocol state machines and vectors.
   origin connection, edge/coordinator routing, account-service HPKE, fake-record
   behavior, session generation, and final public replies.
   - After: `S04-006` through `S04-008`.
-  - Targets: `agenc-ircd-auth`, client-wire auth interface, domain session interface.
-  - References: [Architecture §11.4](docs/ircd-architecture-and-implementation-spec.md#114-opaque-login-over-sasl).
+  - Targets: `agenc-relay-auth`, client-wire auth interface, domain session interface.
+  - References: [Architecture §11.4](docs/arc-architecture-and-implementation-spec.md#114-opaque-login-over-sasl).
   - Invariants: `AUTH-01`, `AUTH-02`, `AUTH-05`, `AUTH-06`, `AUTH-08` through `AUTH-10`.
   - Evidence: known/unknown parity, malicious-edge, stale completion, replay, session-fence, timeout, and wire-transcript tests.
 
@@ -708,8 +712,8 @@ credential change have complete protocol state machines and vectors.
   independent salted one-use exporter material, operation/request binding,
   recovery epoch, response count, exact response kind, and idempotent replay.
   - After: `S04-006`, `S04-009`.
-  - Targets: `agenc-ircd-auth`, `agenc-ircd-crypto`.
-  - References: [Architecture §§11.2.1 and 11.4](docs/ircd-architecture-and-implementation-spec.md#1121-end-to-end-account-service-envelope), [source ledger §2](docs/protocol-sources-and-decisions.md#2-published-standards).
+  - Targets: `agenc-relay-auth`, `agenc-relay-crypto`.
+  - References: [Architecture §§11.2.1 and 11.4](docs/arc-architecture-and-implementation-spec.md#1121-end-to-end-account-service-envelope), [source ledger §2](docs/protocol-sources-and-decisions.md#2-published-standards).
   - Invariants: `AUTH-06`, `AUTH-08`, `DUR-12`.
   - Evidence: forgery, substitution, bare-success, collision fixture, changed-outcome replay, and `u64::MAX` refusal tests.
 
@@ -718,8 +722,8 @@ credential change have complete protocol state machines and vectors.
   credential-identity reuse, atomic record intent, and complete old-session
   fencing; provide no server-assisted recovery path.
   - After: `S04-009`, `S04-010`.
-  - Targets: `agenc-ircd-auth`, domain mutation plans.
-  - References: [Architecture §§11.5, 14.6, and 23.8](docs/ircd-architecture-and-implementation-spec.md#115-credential-change-and-non-recovery).
+  - Targets: `agenc-relay-auth`, domain mutation plans.
+  - References: [Architecture §§11.5, 14.6, and 23.8](docs/arc-architecture-and-implementation-spec.md#115-credential-change-and-non-recovery).
   - Invariants: `AUTH-05`, `AUTH-07`, `AUTH-11`.
   - Evidence: fresh/stale proof, wrong account, revision replacement, replay, precondition, tombstone intent, and session-fence tests.
 
@@ -727,8 +731,8 @@ credential change have complete protocol state machines and vectors.
   and blocking work off Tokio workers, bound queue/in-flight work, preserve
   job ownership, propagate cancellation outcomes, and never log job contents.
   - After: `S04-003` through `S04-011`.
-  - Targets: `agenc-ircd-crypto`, runtime-facing port implementation.
-  - References: [Architecture §§19.1, 21.7, and 24.2](docs/ircd-architecture-and-implementation-spec.md#191-hierarchical-admission).
+  - Targets: `agenc-relay-crypto`, runtime-facing port implementation.
+  - References: [Architecture §§19.1, 21.7, and 24.2](docs/arc-architecture-and-implementation-spec.md#191-hierarchical-admission).
   - Invariants: `CON-02`, `CON-04`, `CON-05`, `OPS-01`.
   - Evidence: queue-full, worker panic, cancellation, overload, timing-class, secret-canary, and joined-shutdown tests.
 
@@ -737,7 +741,7 @@ credential change have complete protocol state machines and vectors.
   generations, no Git source, and no unexpected algorithm reachability.
   - After: `S04-003` through `S04-012`.
   - Targets: Cargo manifests/lockfile and dependency evidence.
-  - References: [Architecture §§24.4–24.5](docs/ircd-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [source ledger §5](docs/protocol-sources-and-decisions.md#5-initial-rust-dependency-evidence).
+  - References: [Architecture §§24.4–24.5](docs/arc-architecture-and-implementation-spec.md#244-serialization-and-crypto-libraries), [source ledger §5](docs/protocol-sources-and-decisions.md#5-initial-rust-dependency-evidence).
   - Invariants: `OPS-02`.
   - Evidence: feature tree, duplicate/reachability report, checksum verification, `cargo deny`, and `cargo audit` pass.
 
@@ -747,7 +751,7 @@ credential change have complete protocol state machines and vectors.
   tests without claiming the primitives themselves were re-proved.
   - After: `S04-001` through `S04-013`.
   - Targets: crypto/auth test and evidence suites.
-  - References: [Architecture §§28.2, 28.4, and 29 phase 4](docs/ircd-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests).
+  - References: [Architecture §§28.2, 28.4, and 29 phase 4](docs/arc-architecture-and-implementation-spec.md#282-deterministic-unit-and-vector-tests).
   - Invariants: `ID-05` through `ID-07`, `AUTH-*`, applicable `DUR-*`, `OPS-01`.
   - Evidence: complete evidence manifest for every crypto/auth requirement and dependency configuration.
 
@@ -755,10 +759,10 @@ credential change have complete protocol state machines and vectors.
   advances state without the exact standardized/library-backed validation,
   context binding, resource admission, and completion evidence.
   - After: `S04-001` through `S04-014`.
-  - Targets: `agenc-ircd-crypto`, `agenc-ircd-auth`, affected testkit surfaces.
-  - References: [Architecture §29 phase 4](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
+  - Targets: `agenc-relay-crypto`, `agenc-relay-auth`, affected testkit surfaces.
+  - References: [Architecture §29 phase 4](docs/arc-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `AUTH-*`, `ID-05` through `ID-07`, `CON-02`, `CON-04`, `CON-05`.
-  - Evidence: all named acceptance evidence and mandatory workspace gates passed under the pinned lockfile; the [current schema version 2 manifest](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) closes the gate for exact source commit `4040796f2c21774d58ea7ce54e70a080678e83ac` after the Stage 04 and 05 legibility review; the [previous schema version 2 manifest](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json) and the [schema version 1 manifest](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remain archive-only.
+  - Evidence: all named acceptance evidence and mandatory workspace gates passed under the pinned lockfile; the [historical schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json) closes the gate for exact source commit `4040796f2c21774d58ea7ce54e70a080678e83ac` after the Stage 04 and 05 legibility review; the [previous schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json) and the [schema version 1 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json) remain archive-only.
 
 ## Stage 05 — Persistence, recovery, and durable construction
 
@@ -773,8 +777,8 @@ durability or rollback outcome.
     table-and-arm-bound federation/E2EE object wrapper, and E2EE recovery gate
     are implemented with full-consumption decoding and bounded bodies.
   - After: `S04-900`.
-  - Targets: `agenc-ircd-storage`.
-  - References: [Architecture §§23.1–23.2 and Appendix C.5](docs/ircd-architecture-and-implementation-spec.md#231-engine-and-durability).
+  - Targets: `agenc-relay-storage`.
+  - References: [Architecture §§23.1–23.2 and Appendix C.5](docs/arc-architecture-and-implementation-spec.md#231-engine-and-durability).
   - Invariants: `DUR-02`, `DUR-03`, `DUR-10`, `DUR-11`.
   - Evidence: golden record vectors, full-consumption negatives, schema/keyspace inventory, and charge-boundary tests.
 
@@ -782,8 +786,8 @@ durability or rollback outcome.
   schema, key generation, and AAD before parsing plaintext; reject corruption,
   substitution, unknown generation, and partial values.
   - After: `S05-001`, `S04-004`.
-  - Targets: `agenc-ircd-storage`, crypto adapter integration.
-  - References: [Architecture §23.3](docs/ircd-architecture-and-implementation-spec.md#233-record-encryption).
+  - Targets: `agenc-relay-storage`, crypto adapter integration.
+  - References: [Architecture §23.3](docs/arc-architecture-and-implementation-spec.md#233-record-encryption).
   - Invariants: `DUR-03`, `DUR-06`, `DUR-07`.
   - Evidence: known vectors and wrong key/type/AAD/generation/nonce/tag/truncation/substitution tests.
 
@@ -792,8 +796,8 @@ durability or rollback outcome.
   database bytes, backup-stream bytes, and integrity roots with checked
   arithmetic.
   - After: `S05-001`, `S05-002`.
-  - Targets: `agenc-ircd-storage`.
-  - References: [Architecture §§23.2–23.5](docs/ircd-architecture-and-implementation-spec.md#232-database-identity-and-schema).
+  - Targets: `agenc-relay-storage`.
+  - References: [Architecture §§23.2–23.5](docs/arc-architecture-and-implementation-spec.md#232-database-identity-and-schema).
   - Invariants: `DUR-04`, `DUR-06`, `DUR-10` through `DUR-12`.
   - Evidence: full-scan equality, overflow, edge-zero, response-count, and nonce-boundary tests.
 
@@ -801,8 +805,8 @@ durability or rollback outcome.
   record, byte, seal, and accounting limits; bind one transaction ID; exclude
   closures, runtime handles, borrowed StateCore data, and rendered bytes.
   - After: `S03-009`, `S05-001` through `S05-003`.
-  - Targets: `agenc-ircd-storage`, domain-to-storage conversion boundary.
-  - References: [Architecture §§21.5, 23.4, and 24.2](docs/ircd-architecture-and-implementation-spec.md#215-durable-mutation-batches).
+  - Targets: `agenc-relay-storage`, domain-to-storage conversion boundary.
+  - References: [Architecture §§21.5, 23.4, and 24.2](docs/arc-architecture-and-implementation-spec.md#215-durable-mutation-batches).
   - Invariants: `CON-03`, `DUR-01`, `DUR-02`, `CON-05`.
   - Evidence: mismatch, over-limit, stale-revision, cross-transaction, and ownership compile-fail tests.
 
@@ -810,8 +814,8 @@ durability or rollback outcome.
   blocking thread, accept only complete batches/read plans, return bounded
   completions, and consume every result even after request cancellation.
   - After: `S05-004`.
-  - Targets: `agenc-ircd-storage` and runtime-facing port.
-  - References: [Architecture §§21.1, 21.7, and 24.2](docs/ircd-architecture-and-implementation-spec.md#211-ownership-rule).
+  - Targets: `agenc-relay-storage` and runtime-facing port.
+  - References: [Architecture §§21.1, 21.7, and 24.2](docs/arc-architecture-and-implementation-spec.md#211-ownership-rule).
   - Invariants: `CON-01` through `CON-04`.
   - Evidence: ownership, cancellation, worker failure, queue-full, late-receipt, and joined-shutdown tests.
 
@@ -820,8 +824,8 @@ durability or rollback outcome.
   `Indeterminate` closure without reporting guessed success or retrying a
   non-idempotent mutation blindly.
   - After: `S05-003` through `S05-005`.
-  - Targets: `agenc-ircd-storage`.
-  - References: [Architecture §§23.1 and 23.4](docs/ircd-architecture-and-implementation-spec.md#231-engine-and-durability).
+  - Targets: `agenc-relay-storage`.
+  - References: [Architecture §§23.1 and 23.4](docs/arc-architecture-and-implementation-spec.md#231-engine-and-durability).
   - Invariants: `DUR-01`, `DUR-02`, `OPS-04`, `CON-03`.
   - Evidence: injected failure before/after every write, commit, sync, and receipt boundary proves the specified outcome.
 
@@ -829,8 +833,8 @@ durability or rollback outcome.
   fresh 192-bit nonce block in both authenticated control state and rollback
   guard before use; burn aborted/uncertain slots and enforce the `2^40` limit.
   - After: `S05-002`, `S05-003`, `S05-006`.
-  - Targets: `agenc-ircd-storage`, entropy adapter.
-  - References: [Architecture §§23.3 and 23.5](docs/ircd-architecture-and-implementation-spec.md#233-record-encryption).
+  - Targets: `agenc-relay-storage`, entropy adapter.
+  - References: [Architecture §§23.3 and 23.5](docs/arc-architecture-and-implementation-spec.md#233-record-encryption).
   - Invariants: `DUR-06`, `DUR-08`.
   - Evidence: crash tests for every reservation state, collision fixtures, high-water boundaries, and no-reuse reconstruction.
 
@@ -838,8 +842,8 @@ durability or rollback outcome.
   sealed record insertion/deletion/substitution in an authenticated bounded
   ledger and produce independently verifiable checkpoints.
   - After: `S05-002`, `S05-003`, `S05-006`.
-  - Targets: `agenc-ircd-storage`.
-  - References: [Architecture §§23.5 and 23.5.2](docs/ircd-architecture-and-implementation-spec.md#235-authenticated-integrity-rollback-guard-and-recovery).
+  - Targets: `agenc-relay-storage`.
+  - References: [Architecture §§23.5 and 23.5.2](docs/arc-architecture-and-implementation-spec.md#235-authenticated-integrity-rollback-guard-and-recovery).
   - Invariants: `DUR-04`, `DUR-07`, `DUR-09`.
   - Evidence: vector, insertion/deletion/substitution, chain-gap, checkpoint-cut, and bounded-ledger tests.
 
@@ -847,8 +851,8 @@ durability or rollback outcome.
   database identity, generation, StateMeta, manifest/checkpoint state, and
   reservation authority using separately keyed, atomically replaced files.
   - After: `S05-003`, `S05-007`, `S05-008`.
-  - Targets: `agenc-ircd-storage`, platform filesystem adapter.
-  - References: [Architecture §23.5.1](docs/ircd-architecture-and-implementation-spec.md#2351-external-rollback-guard).
+  - Targets: `agenc-relay-storage`, platform filesystem adapter.
+  - References: [Architecture §23.5.1](docs/arc-architecture-and-implementation-spec.md#2351-external-rollback-guard).
   - Invariants: `DUR-04`, `DUR-05`, `DUR-08`.
   - Evidence: stale/ahead/missing/torn/substituted guard, rename/sync failure, permission, symlink, and lock tests.
 
@@ -860,16 +864,16 @@ durability or rollback outcome.
     bindings, revisions, and cursors before exposing a validated
     `StateCoreSeed`. Stage 06 owns creation of the live `StateCore` actor.
   - After: `S05-007` through `S05-009`.
-  - Targets: `agenc-ircd-storage`.
-  - References: [Architecture §23.5.3](docs/ircd-architecture-and-implementation-spec.md#2353-startup-integrity-reconstruction).
+  - Targets: `agenc-relay-storage`.
+  - References: [Architecture §23.5.3](docs/arc-architecture-and-implementation-spec.md#2353-startup-integrity-reconstruction).
   - Invariants: `DUR-03`, `DUR-04`, `DUR-07`, `DUR-08`.
   - Evidence: complete corruption/recovery matrix and reconstructed-state comparison with the reference model.
 
 - [x] `S05-011` **Enforce current storage format admission.** Reject obsolete
   formats before startup, backup restore, or key rotation can write output.
   - After: `S05-010`.
-  - Targets: `agenc-ircd-storage`.
-  - References: [Architecture §23.6](docs/ircd-architecture-and-implementation-spec.md#236-storage-format-admission).
+  - Targets: `agenc-relay-storage`.
+  - References: [Architecture §23.6](docs/arc-architecture-and-implementation-spec.md#236-storage-format-admission).
   - Invariants: `DUR-04`, `DUR-09`, `DUR-11`, `DUR-12`.
   - Evidence: current-format round trips and unsupported-format refusal tests.
 
@@ -881,8 +885,8 @@ durability or rollback outcome.
     configuration parser and the stopped-daemon `storage restore` binary
     command compose the executor without starting the Stage 06 daemon.
   - After: `S05-010`, `S05-011`.
-  - Targets: `agenc-ircd-storage`, binary maintenance commands.
-  - References: [Architecture §23.7](docs/ircd-architecture-and-implementation-spec.md#237-backup-format-and-restore).
+  - Targets: `agenc-relay-storage`, binary maintenance commands.
+  - References: [Architecture §23.7](docs/arc-architecture-and-implementation-spec.md#237-backup-format-and-restore).
   - Invariants: `DUR-05`, `DUR-09`, `DUR-11`.
   - Evidence: exact/current, refused stale/divergent, disaster recovery, tamper, truncation, space, crash, and credential-generation tests.
 
@@ -891,8 +895,8 @@ durability or rollback outcome.
   with fresh generation, nonce authority, integrity state, and construction
   evidence.
   - After: `S05-010` through `S05-012`.
-  - Targets: `agenc-ircd-storage`, domain deletion plans.
-  - References: [Architecture §23.8](docs/ircd-architecture-and-implementation-spec.md#238-deletion-and-key-rotation).
+  - Targets: `agenc-relay-storage`, domain deletion plans.
+  - References: [Architecture §23.8](docs/arc-architecture-and-implementation-spec.md#238-deletion-and-key-rotation).
   - Invariants: `FED-07`, `DUR-05` through `DUR-09`.
   - Evidence: erasure-before-ACK, interruption, stale-key, generation, residual-record, rollback, and resumed-rekey tests.
 
@@ -901,8 +905,8 @@ durability or rollback outcome.
   OPAQUE input, verify duplicate ownership and counts, and fail on missing or
   third-generation state.
   - After: `S04-009`, `S05-010`, `S05-013`.
-  - Targets: `agenc-ircd-storage`, auth/storage integration.
-  - References: [Architecture §23.9](docs/ircd-architecture-and-implementation-spec.md#239-login-index-key-transition).
+  - Targets: `agenc-relay-storage`, auth/storage integration.
+  - References: [Architecture §23.9](docs/arc-architecture-and-implementation-spec.md#239-login-index-key-transition).
   - Invariants: `ID-07`, `DUR-10`.
   - Evidence: zero/one/two/third generation, duplicate, lazy migration, dormant invalidation, crash, and rekey/migration tests.
 
@@ -914,7 +918,7 @@ durability or rollback outcome.
     measurements cover every declared case and are bound into signed reports.
   - After: `S05-001` through `S05-014`.
   - Targets: fault store, filesystem harness, release storage evidence.
-  - References: [Architecture §§28.5 and 28.7](docs/ircd-architecture-and-implementation-spec.md#285-crash-storage-and-fault-injection).
+  - References: [Architecture §§28.5 and 28.7](docs/arc-architecture-and-implementation-spec.md#285-crash-storage-and-fault-injection).
   - Invariants: `DUR-*`, `CON-03`, `OPS-04`.
   - Evidence: complete crash/fault/corruption matrix and signed per-tuple growth report with boundary cases.
 
@@ -925,14 +929,14 @@ durability or rollback outcome.
     95.65% of lines, with all six critical regions at 100%. The complete
     implementation gate passes.
   - After: `S05-001` through `S05-015`.
-  - Targets: `agenc-ircd-storage` and all storage evidence.
-  - References: [Architecture §29 phase 5](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
+  - Targets: `agenc-relay-storage` and all storage evidence.
+  - References: [Architecture §29 phase 5](docs/arc-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: `DUR-01` through `DUR-12`, applicable `CON-*` and `OPS-*`.
   - Evidence: all storage acceptance evidence and mandatory workspace gates
-    pass from clean state; the [current schema version 2 manifest](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
+    pass from clean state; the [historical schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
     closes the gate for exact source commit
     `4040796f2c21774d58ea7ce54e70a080678e83ac` after the Stage 04 and 05 legibility
-    review, and the [previous schema version 2 manifest](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
+    review, and the [previous schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json)
     remains archive-only.
 
 ## Stage 06 — Single-node runtime and operations
@@ -963,7 +967,7 @@ on the closure branch. The exact-revision checkpoint closes source commit
 #### Branch and worktree control
 
 - [x] Keep the Stage 06 implementation in the existing
-  `/home/tetsuo/git/AgenC/agenc-ircd` worktree.
+  `/home/tetsuo/git/AgenC/agenc-relay-server` worktree.
 - [x] Keep all Stage 06 commits on `stage-06-runtime` and push them to
   `origin/stage-06-runtime`.
 - [x] Remove the obsolete Stage 06 worktrees and branch pointers.
@@ -1475,12 +1479,12 @@ Commit point 9
 - [x] Create one temporary detached checkout at the exact source commit. Do
   not create a branch and do not edit source in that checkout.
 - [x] Run the recorded gate from the clean detached checkout with
-  `AGENC_IRCD_RECORD_GATE=1`.
+  `AGENC_RELAY_RECORD_GATE=1`.
 
   ```sh
   source_commit="$(git rev-parse HEAD)"
   env -u GIT_PAGER -u LD_LIBRARY_PATH -u PYTHONPATH \
-    AGENC_IRCD_RECORD_GATE=1 \
+    AGENC_RELAY_RECORD_GATE=1 \
     bash scripts/check-stage-six.sh
   ```
 
@@ -1536,7 +1540,7 @@ Commit point 10
 - [x] Merge PR #14 as
   `3a517e9482fe51d7983dc5b9c998fd472e41c600`.
 - [x] Fix the failed cloud gate. It stopped at `check-source` because
-  `crates/agenc-ircd-config/src/paths.rs` has a lint allowance without the
+  `crates/agenc-relay-config/src/paths.rs` has a lint allowance without the
   required review annotation.
 - [x] Repeat exact-SHA evidence after any source fix.
 - [ ] Leave the pull request open for the cloud-agent and repository-owner
@@ -1653,8 +1657,8 @@ the closure branch at review time.
   Appendix-C union and cross-field rules, paths, permissions, bounds, roles,
   targets, and unsafe combinations before listeners open.
   - After: `S05-900`.
-  - Targets: `agenc-ircd-config`.
-  - References: [Architecture §22.1 and Appendix C](docs/ircd-architecture-and-implementation-spec.md#221-configuration-document).
+  - Targets: `agenc-relay-config`.
+  - References: [Architecture §22.1 and Appendix C](docs/arc-architecture-and-implementation-spec.md#221-configuration-document).
   - Invariants: `OPS-02`, `PRV-03`, `TRN-02`.
   - Evidence: golden configuration, unknown/duplicate field, every scalar boundary, cross-field matrix, permission, symlink, and fuzz tests.
 
@@ -1663,8 +1667,8 @@ the closure branch at review time.
   onboarding pins safely, validate host controls, and never regenerate durable
   identity implicitly.
   - After: `S06-001`.
-  - Targets: `agenc-ircd-config`, binary initialization/check commands.
-  - References: [Architecture §§22.2–22.3 and Appendix C.8](docs/ircd-architecture-and-implementation-spec.md#222-secret-material).
+  - Targets: `agenc-relay-config`, binary initialization/check commands.
+  - References: [Architecture §§22.2–22.3 and Appendix C.8](docs/arc-architecture-and-implementation-spec.md#222-secret-material).
   - Invariants: `ID-06`, `OPS-02`, `OPS-03`.
   - Evidence: clean/partial/repeated initialization, permissions, existing-key, pin, and failure-atomicity tests.
 
@@ -1673,8 +1677,8 @@ the closure branch at review time.
   no early data/renegotiation/post-handshake auth, exact ALPN, and correct DNS
   or onion identity validation.
   - After: `S06-001`, `S04-013`.
-  - Targets: `agenc-ircd-runtime`, TLS configuration adapter.
-  - References: [Architecture §§8.1–8.3](docs/ircd-architecture-and-implementation-spec.md#81-tls-configuration).
+  - Targets: `agenc-relay-runtime`, TLS configuration adapter.
+  - References: [Architecture §§8.1–8.3](docs/arc-architecture-and-implementation-spec.md#81-tls-configuration).
   - Invariants: `TRN-01`, `TRN-02`, `TRN-03`.
   - Evidence: positive and negative TLS matrix, hybrid/fallback negotiation, scanner output, ALPN, certificate/pin, and pre-handshake-byte tests.
 
@@ -1682,8 +1686,8 @@ the closure branch at review time.
   Tor-exit, and onion listeners explicit; forbid reverse DNS, ident, profile
   fallback, address propagation, and unsafe Tor DNS/proxy behavior.
   - After: `S06-002`, `S06-003`.
-  - Targets: `agenc-ircd-runtime`, deployment profiles.
-  - References: [Architecture §§6.1–6.4 and 8.5](docs/ircd-architecture-and-implementation-spec.md#61-direct).
+  - Targets: `agenc-relay-runtime`, deployment profiles.
+  - References: [Architecture §§6.1–6.4 and 8.5](docs/arc-architecture-and-implementation-spec.md#61-direct).
   - Invariants: `ID-04`, `PRV-03`, `PRV-04`.
   - Evidence: profile-mismatch, real onion, SafeSocks/TestSocks, DNS-leak, packet-capture, and forbidden-field tests.
 
@@ -1692,8 +1696,8 @@ the closure branch at review time.
   signals with finite children, propagated failures, cancellation, and joined
   shutdown.
   - After: `S06-003`, `S06-004`.
-  - Targets: `agenc-ircd-runtime`.
-  - References: [Architecture §§21.1–21.2 and 21.8](docs/ircd-architecture-and-implementation-spec.md#211-ownership-rule).
+  - Targets: `agenc-relay-runtime`.
+  - References: [Architecture §§21.1–21.2 and 21.8](docs/arc-architecture-and-implementation-spec.md#211-ownership-rule).
   - Invariants: `CON-01`, `CON-02`, `CON-04`, `OPS-04`.
   - Evidence: task panic, start failure, connection churn, cancellation at each phase, idle/load shutdown, and no-leak tests.
 
@@ -1702,8 +1706,8 @@ the closure branch at review time.
   buffers and reservations, isolate fixed headroom, and reject exhaustion
   before side effects.
   - After: `S06-005`.
-  - Targets: `agenc-ircd-runtime`, `MemoryBudgetPort`.
-  - References: [Architecture §§19.1–19.3 and 24.2](docs/ircd-architecture-and-implementation-spec.md#191-hierarchical-admission).
+  - Targets: `agenc-relay-runtime`, `MemoryBudgetPort`.
+  - References: [Architecture §§19.1–19.3 and 24.2](docs/arc-architecture-and-implementation-spec.md#191-hierarchical-admission).
   - Invariants: `CON-05`, `STA-08`, `TRN-04`.
   - Evidence: exact permit accounting, split/drop/rollback, exhaustion, allocation-failure proxy, and high-water tests.
 
@@ -1712,8 +1716,8 @@ the closure branch at review time.
   reservations, slow-consumer close, exact ordering, and infallible allocation-
   free commit after preparation.
   - After: `S06-005`, `S06-006`.
-  - Targets: `agenc-ircd-runtime`, client sink implementation.
-  - References: [Architecture §§15.3, 21.3, and 24.2](docs/ircd-architecture-and-implementation-spec.md#153-backpressure-and-fanout).
+  - Targets: `agenc-relay-runtime`, client sink implementation.
+  - References: [Architecture §§15.3, 21.3, and 24.2](docs/arc-architecture-and-implementation-spec.md#153-backpressure-and-fanout).
   - Invariants: `STA-08`, `CON-02`, `CON-05`.
   - Evidence: whole-sink exclusion, queue full/close, generation reuse, shared-buffer charging, ordering, and exact permit-return tests.
 
@@ -1722,8 +1726,8 @@ the closure branch at review time.
   resources, submit complete storage batches, consume matching receipts, apply
   once, and only then render success.
   - After: `S06-005` through `S06-007`.
-  - Targets: `agenc-ircd-runtime`.
-  - References: [Architecture §§21.1, 21.4–21.5, and 24.2](docs/ircd-architecture-and-implementation-spec.md#211-ownership-rule).
+  - Targets: `agenc-relay-runtime`.
+  - References: [Architecture §§21.1, 21.4–21.5, and 24.2](docs/arc-architecture-and-implementation-spec.md#211-ownership-rule).
   - Invariants: `CON-01`, `CON-03`, `DUR-01`, `STA-06`, `STA-08`, `OPS-04`.
   - Evidence: cancellation/disconnect before and after every reservation/commit/receipt/apply/render boundary.
 
@@ -1731,8 +1735,8 @@ the closure branch at review time.
   Connect TLS, client wire, account-service jobs, SASL, domain plans, storage,
   welcome state, account switches, logout, keepalive, and connection closure.
   - After: `S04-900`, `S06-008`.
-  - Targets: `agenc-ircd-runtime`.
-  - References: [Architecture §§10–12](docs/ircd-architecture-and-implementation-spec.md#10-connection-and-registration-state-machine).
+  - Targets: `agenc-relay-runtime`.
+  - References: [Architecture §§10–12](docs/arc-architecture-and-implementation-spec.md#10-connection-and-registration-state-machine).
   - Invariants: `ID-*`, `AUTH-*`, `TRN-*`.
   - Evidence: complete registration/account lifecycle transcripts, malicious-edge cases, restart, and generation-fence integration tests.
 
@@ -1741,8 +1745,8 @@ the closure branch at review time.
   messages, recipient reservations, ephemeral defaults, and optional-policy
   refusal exactly as the domain model specifies.
   - After: `S06-007` through `S06-009`.
-  - Targets: `agenc-ircd-runtime`, `agenc-ircd` integration tests.
-  - References: [Architecture §§13–17](docs/ircd-architecture-and-implementation-spec.md#13-channel-model).
+  - Targets: `agenc-relay-runtime`, `agenc-relay-server` integration tests.
+  - References: [Architecture §§13–17](docs/arc-architecture-and-implementation-spec.md#13-channel-model).
   - Invariants: `PRV-*`, `STA-*`, applicable `E2E-02`.
   - Evidence: core-v1 transcripts, model/implementation snapshot equality, overload, slow consumer, and privacy tests.
 
@@ -1751,8 +1755,8 @@ the closure branch at review time.
   maintenance, overload classes, and cleanup with explicit clock inputs and
   bounded timer ownership.
   - After: `S06-005`, `S06-006`, `S06-008`.
-  - Targets: `agenc-ircd-runtime`.
-  - References: [Architecture §§19 and 21.6](docs/ircd-architecture-and-implementation-spec.md#19-abuse-resistance-and-resource-limits).
+  - Targets: `agenc-relay-runtime`.
+  - References: [Architecture §§19 and 21.6](docs/arc-architecture-and-implementation-spec.md#19-abuse-resistance-and-resource-limits).
   - Invariants: `AUTH-02`, `CON-02`, `CON-05`, `FED-09` where applicable.
   - Evidence: paused-time boundary, replacement/cancellation, slowloris, churn, exhaustion, and post-quiescence recovery tests.
 
@@ -1761,8 +1765,8 @@ the closure branch at review time.
   permission mapping, exact read-only batches, mutation authorization, and
   chained audit records; expose no admin authority through client IRC.
   - After: `S06-002`, `S06-003`, `S06-008`.
-  - Targets: `agenc-ircd-admin`, runtime admin owner.
-  - References: [Architecture §§22.4–22.6](docs/ircd-architecture-and-implementation-spec.md#224-administrative-transports).
+  - Targets: `agenc-relay-admin`, runtime admin owner.
+  - References: [Architecture §§22.4–22.6](docs/arc-architecture-and-implementation-spec.md#224-administrative-transports).
   - Invariants: `TRN-03`, `OPS-03`, `OPS-05`.
   - Evidence: transport/pin/signature/counter/permission/replay/batch/audit/privacy matrix.
 
@@ -1770,8 +1774,8 @@ the closure branch at review time.
   configuration before atomic activation, reject immutable or unsafe changes,
   and retain the prior configuration on every failure.
   - After: `S06-001`, `S06-012`.
-  - Targets: `agenc-ircd-config`, runtime configuration owner.
-  - References: [Architecture §22.6](docs/ircd-architecture-and-implementation-spec.md#226-reload-behavior).
+  - Targets: `agenc-relay-config`, runtime configuration owner.
+  - References: [Architecture §22.6](docs/arc-architecture-and-implementation-spec.md#226-reload-behavior).
   - Invariants: `OPS-02`, `OPS-04`.
   - Evidence: every reloadable/immutable field, concurrent request, allocation, listener, and rollback case.
 
@@ -1780,7 +1784,7 @@ the closure branch at review time.
   process correlation IDs, bounded retention, and explicit readiness/liveness.
   - After: `S06-005`, `S06-008`, `S06-012`.
   - Targets: runtime observability adapters.
-  - References: [Architecture §§25.2–25.3](docs/ircd-architecture-and-implementation-spec.md#252-logging).
+  - References: [Architecture §§25.2–25.3](docs/arc-architecture-and-implementation-spec.md#252-logging).
   - Invariants: `OPS-01`, `PRV-02`, `ID-04`, `ID-05`.
   - Evidence: forbidden-value canaries, label-cardinality checks, endpoint exposure, retention, and error-format scans.
 
@@ -1790,7 +1794,7 @@ the closure branch at review time.
   unavailable controls honestly.
   - After: `S06-002` through `S06-014`.
   - Targets: service definition, deployment checks, operator documentation.
-  - References: [Architecture §§25.1 and 25.4–25.5](docs/ircd-architecture-and-implementation-spec.md#251-process-and-filesystem-isolation).
+  - References: [Architecture §§25.1 and 25.4–25.5](docs/arc-architecture-and-implementation-spec.md#251-process-and-filesystem-isolation).
   - Invariants: `OPS-01`, `OPS-02`, `OPS-04`.
   - Evidence: host-hardening checks, permissions, locked-secret modes, crash behavior, signal shutdown, and incident-mode tests.
 
@@ -1800,7 +1804,7 @@ the closure branch at review time.
   behavior falsely advertised.
   - After: `S06-001` through `S06-015`.
   - Targets: full single-node release binary and deployment profile.
-  - References: [Architecture §§1.1 and 29 phase 6](docs/ircd-architecture-and-implementation-spec.md#11-conformance-targets).
+  - References: [Architecture §§1.1 and 29 phase 6](docs/arc-architecture-and-implementation-spec.md#11-conformance-targets).
   - Invariants: applicable `TRN-*`, `ID-*`, `AUTH-*`, `PRV-*`, `STA-*`, `DUR-*`, `CON-*`, `OPS-*`.
   - Evidence: core-v1 transcripts, Loom models, shutdown/overload/soak tests, host checks, and mandatory build gates pass.
 
@@ -1915,7 +1919,7 @@ None blocks the core-v1 gate.
   in `apply_close_session`, and the `DeleteAccount` touched-entity walk scan
   their maps linearly per command (`domain/decision.rs`). Fine at Stage 06
   scale; index them before the limits table is raised.
-- [x] `agenc-ircd init` writes its effective UID into both the local listener's
+- [x] `arcd init` writes its effective UID into both the local listener's
   `allowed_uids` and the operator's `local_uids`. Root initialization still
   selects UID 0. Template and real initialization regressions check matching
   admission identities while preserving signing-key proof requirements.
@@ -1933,8 +1937,8 @@ partitions, and recovery.
   TLS 1.3, exact ALPN, static certificate/application-signature pins, exporter
   binding, bounded framing, and independent peer authorization before role use.
   - After: `S06-900`.
-  - Targets: `agenc-ircd-runtime`, federation-link owner.
-  - References: [Architecture §20.2](docs/ircd-architecture-and-implementation-spec.md#202-link-transport-and-trust).
+  - Targets: `agenc-relay-runtime`, federation-link owner.
+  - References: [Architecture §20.2](docs/arc-architecture-and-implementation-spec.md#202-link-transport-and-trust).
   - Invariants: `TRN-01`, `TRN-03`, `FED-02`, `FED-10`.
   - Evidence: TLS/pin/exporter/ALPN/role/recovery-epoch positive and negative matrices.
 
@@ -1942,8 +1946,8 @@ partitions, and recovery.
   identity, incarnation, recovery epoch, base profile hash, features, cursors,
   and readiness state; block activation until required synchronization finishes.
   - After: `S07-001`.
-  - Targets: `agenc-ircd-federation-wire`, federation-link state machine.
-  - References: [Architecture §20.3](docs/ircd-architecture-and-implementation-spec.md#203-authenticated-hello), [Appendix B.9](docs/ircd-architecture-and-implementation-spec.md#b9-federation-profile-hash).
+  - Targets: `agenc-relay-federation-wire`, federation-link state machine.
+  - References: [Architecture §20.3](docs/arc-architecture-and-implementation-spec.md#203-authenticated-hello), [Appendix B.9](docs/arc-architecture-and-implementation-spec.md#b9-federation-profile-hash).
   - Invariants: `FED-02`, `FED-10`, `E2E-07`.
   - Evidence: every tuple mismatch, stale/gap/exhausted incarnation/epoch, early READY, and reconnect transition test.
 
@@ -1952,7 +1956,7 @@ partitions, and recovery.
   edge-to-edge transit, state merge, and guessed partition outcomes.
   - After: `S07-002`.
   - Targets: federation runtime and domain planning.
-  - References: [Architecture §§20.1 and 20.10](docs/ircd-architecture-and-implementation-spec.md#201-logical-topology).
+  - References: [Architecture §§20.1 and 20.10](docs/arc-architecture-and-implementation-spec.md#201-logical-topology).
   - Invariants: `FED-01`, `FED-02`, `OPS-04`.
   - Evidence: topology, partition, coordinator loss/restart, role-conflict, and no-merge model tests.
 
@@ -1960,8 +1964,8 @@ partitions, and recovery.
   origin incarnations, contiguous operation sequences, expiry, deletion
   tombstones, recovery-epoch changes, and permanent fencing of earlier states.
   - After: `S07-002`, `S07-003`.
-  - Targets: `agenc-ircd-domain`, `agenc-ircd-storage`, federation runtime.
-  - References: [Architecture §20.7](docs/ircd-architecture-and-implementation-spec.md#207-origin-lifecycle).
+  - Targets: `agenc-relay-domain`, `agenc-relay-storage`, federation runtime.
+  - References: [Architecture §20.7](docs/arc-architecture-and-implementation-spec.md#207-origin-lifecycle).
   - Invariants: `FED-03`, `FED-04`, `FED-09`, `FED-10`.
   - Evidence: duplicate/gap/conflict, incarnation replacement, expiry boundary, tombstone, restart, and replay tests.
 
@@ -1971,7 +1975,7 @@ partitions, and recovery.
   replaying it.
   - After: `S07-004`.
   - Targets: federation wire/domain/storage/runtime.
-  - References: [Architecture §§20.5–20.6 and Appendix B.6](docs/ircd-architecture-and-implementation-spec.md#205-requests-and-idempotency).
+  - References: [Architecture §§20.5–20.6 and Appendix B.6](docs/arc-architecture-and-implementation-spec.md#205-requests-and-idempotency).
   - Invariants: `FED-03`, `FED-04`, `FED-12`, `DUR-01`.
   - Evidence: every opcode/result arm, exact retry, conflicting reuse, gap, crash, descriptor mismatch, and original-sink test.
 
@@ -1981,7 +1985,7 @@ partitions, and recovery.
   secrets, auth state, or unrelated channels.
   - After: `S07-003` through `S07-005`.
   - Targets: domain projection model, storage outbox, federation runtime.
-  - References: [Architecture §20.8 and Appendices B.4–B.5](docs/ircd-architecture-and-implementation-spec.md#208-events-projection-and-acknowledgments).
+  - References: [Architecture §20.8 and Appendices B.4–B.5](docs/arc-architecture-and-implementation-spec.md#208-events-projection-and-acknowledgments).
   - Invariants: `PRV-02`, `FED-05`, `FED-07`.
   - Evidence: multi-edge projection diffs, grant/revoke, secret-channel, deletion-before-ACK, and forbidden-field canaries.
 
@@ -1990,7 +1994,7 @@ partitions, and recovery.
   render a committed result only after its completion is durably covered.
   - After: `S07-005`, `S07-006`.
   - Targets: federation runtime/storage barrier.
-  - References: [Architecture §20.8](docs/ircd-architecture-and-implementation-spec.md#208-events-projection-and-acknowledgments).
+  - References: [Architecture §20.8](docs/arc-architecture-and-implementation-spec.md#208-events-projection-and-acknowledgments).
   - Invariants: `FED-05`, `FED-12`, `DUR-01`, `DUR-02`.
   - Evidence: result-first/completion-first, lost ACK, duplicate, crash at each boundary, and successor-snapshot coverage tests.
 
@@ -1998,8 +2002,8 @@ partitions, and recovery.
   direction, authenticated prefix, descriptor, carrier, length, object hash,
   fragment order/count, reassembly budget, and typed payload before dispatch.
   - After: `S07-001`, `S07-005`.
-  - Targets: `agenc-ircd-federation-wire`, federation runtime.
-  - References: [Architecture §§20.4 and Appendix B.8](docs/ircd-architecture-and-implementation-spec.md#204-canonical-federation-objects).
+  - Targets: `agenc-relay-federation-wire`, federation runtime.
+  - References: [Architecture §§20.4 and Appendix B.8](docs/arc-architecture-and-implementation-spec.md#204-canonical-federation-objects).
   - Invariants: `TRN-04`, `TRN-05`, `FED-08`, `CON-05`.
   - Evidence: fragment flood, collision, direction/prefix/descriptor/hash/length/count mismatch, timeout, and budget tests.
 
@@ -2008,7 +2012,7 @@ partitions, and recovery.
   replay, ACTIVE authorization, atomic swap, and old-generation quarantine.
   - After: `S07-006` through `S07-008`.
   - Targets: federation wire/domain/storage/runtime.
-  - References: [Architecture §20.9 and Appendix B.7](docs/ircd-architecture-and-implementation-spec.md#209-snapshot-and-resume-protocol).
+  - References: [Architecture §20.9 and Appendix B.7](docs/arc-architecture-and-implementation-spec.md#209-snapshot-and-resume-protocol).
   - Invariants: `FED-05`, `FED-06`, `FED-07`, `FED-10`.
   - Evidence: empty/one/maximum pages, reorder/duplicate/missing/cross-reference failures, crash, stale ACTIVE, and atomic-swap tests.
 
@@ -2018,7 +2022,7 @@ partitions, and recovery.
   never drop durable state.
   - After: `S07-004`, `S07-007`, `S07-009`.
   - Targets: federation runtime/storage maintenance.
-  - References: [Architecture §§20.10, 21.6, and 24.2](docs/ircd-architecture-and-implementation-spec.md#2010-partitions-and-coordinator-recovery).
+  - References: [Architecture §§20.10, 21.6, and 24.2](docs/arc-architecture-and-implementation-spec.md#2010-partitions-and-coordinator-recovery).
   - Invariants: `FED-01`, `FED-09`, `CON-02`, `OPS-04`.
   - Evidence: silent/lost/slow peer, grace boundaries, full outbox, dropped notification, restart, and resynchronization tests.
 
@@ -2028,7 +2032,7 @@ partitions, and recovery.
   invalid, consumed, restarted, or mismatched cursors.
   - After: `S07-005`, `S07-006`.
   - Targets: domain/query model, storage/runtime query state.
-  - References: [Architecture §§20.5.2 and Appendix B.6](docs/ircd-architecture-and-implementation-spec.md#2052-closed-operation-table).
+  - References: [Architecture §§20.5.2 and Appendix B.6](docs/arc-architecture-and-implementation-spec.md#2052-closed-operation-table).
   - Invariants: `FED-13`, `PRV-02`, `STA-10`.
   - Evidence: page size/cut, expiry, consume, restart, wrong binding, mutation between pages, and no-splice tests.
 
@@ -2036,8 +2040,8 @@ partitions, and recovery.
   multiple edges, origins, requests, results, events, snapshots, ACKs,
   partitions, recovery, storage failures, and privacy projections deterministically.
   - After: `S07-003` through `S07-011`.
-  - Targets: `agenc-ircd-testkit` federation model/simulator.
-  - References: [Architecture §§28.3, 28.5, and 28.6](docs/ircd-architecture-and-implementation-spec.md#283-state-machine-and-model-tests).
+  - Targets: `agenc-relay-testkit` federation model/simulator.
+  - References: [Architecture §§28.3, 28.5, and 28.6](docs/arc-architecture-and-implementation-spec.md#283-state-machine-and-model-tests).
   - Invariants: `FED-*`, applicable `PRV-*`, `DUR-*`, `CON-*`.
   - Evidence: bounded formal model, generated fault schedules, model/implementation equality, and exact replay convergence.
 
@@ -2047,7 +2051,7 @@ partitions, and recovery.
   changes across real multi-process nodes.
   - After: `S07-001` through `S07-012`.
   - Targets: multi-node integration and interoperability suites.
-  - References: [Architecture §§28.6–28.7 and Appendix D](docs/ircd-architecture-and-implementation-spec.md#286-network-interoperability-and-privacy-tests).
+  - References: [Architecture §§28.6–28.7 and Appendix D](docs/arc-architecture-and-implementation-spec.md#286-network-interoperability-and-privacy-tests).
   - Invariants: `FED-*`, `PRV-*`, `TRN-*`, `DUR-*`.
   - Evidence: multi-edge test matrix, packet/log/database canaries, capacity limits, and pinned transcript outputs.
 
@@ -2056,7 +2060,7 @@ partitions, and recovery.
   and recovery without leaking unauthorized projected state.
   - After: `S07-001` through `S07-013`.
   - Targets: federated release topology and complete evidence set.
-  - References: [Architecture §§1.1 and 29 phase 7](docs/ircd-architecture-and-implementation-spec.md#11-conformance-targets).
+  - References: [Architecture §§1.1 and 29 phase 7](docs/arc-architecture-and-implementation-spec.md#11-conformance-targets).
   - Invariants: `FED-01` through `FED-13` and all coupled privacy/durability/concurrency invariants.
   - Evidence: bounded model, multi-edge fault simulation, replay, privacy scans, and mandatory workspace gates pass.
 
@@ -2116,8 +2120,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   dependencies and timeout, and fail closed on absent, malformed, stale,
   mismatched, rolled-back, or exhausted transitions.
   - After: `S07-900`.
-  - Targets: `agenc-ircd-e2ee`, client/federation negotiation state.
-  - References: [Architecture §§18.2 and 26.3](docs/ircd-architecture-and-implementation-spec.md#182-cross-document-precedence), [E2EE §§2.3 and 11.1](docs/irc-mls-e2ee-extension.md#23-exact-profile-revision).
+  - Targets: `agenc-relay-e2ee`, client/federation negotiation state.
+  - References: [Architecture §§18.2 and 26.3](docs/arc-architecture-and-implementation-spec.md#182-cross-document-precedence), [E2EE §§2.3 and 11.1](docs/arc-mls-e2ee-extension.md#23-exact-profile-revision).
   - Invariants: `E2E-07`, `FED-02`, `FED-10`.
   - Evidence: exact match plus every tuple, ordering, timeout, reconnect, rollback, gap, and downgrade negative.
 
@@ -2126,8 +2130,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   planning; forbid production dependency on an MLS client state machine or any
   API accepting epoch secrets, plaintext, root private keys, or device keys.
   - After: `S08-001`.
-  - Targets: `agenc-ircd-e2ee`, Cargo graph/source checks.
-  - References: [Architecture §§18 and 24.1](docs/ircd-architecture-and-implementation-spec.md#18-e2ee-integration-contract), [E2EE §20](docs/irc-mls-e2ee-extension.md#20-implementation-separation).
+  - Targets: `agenc-relay-e2ee`, Cargo graph/source checks.
+  - References: [Architecture §§18 and 24.1](docs/arc-architecture-and-implementation-spec.md#18-e2ee-integration-contract), [E2EE §20](docs/arc-mls-e2ee-extension.md#20-implementation-separation).
   - Invariants: `E2E-01`, `E2E-02`.
   - Evidence: dependency/API/source scans and compile-fail tests reject MLS-client or secret-bearing production surfaces.
 
@@ -2136,8 +2140,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   complete rosters, revocation, leaf authorization, generations, signatures,
   semantic IDs, and canonical encodings without resolving private keys.
   - After: `S08-002`.
-  - Targets: `agenc-ircd-e2ee`, crypto/type adapters.
-  - References: [E2EE §§2.1–2.2 and 8](docs/irc-mls-e2ee-extension.md#21-signature-registry).
+  - Targets: `agenc-relay-e2ee`, crypto/type adapters.
+  - References: [E2EE §§2.1–2.2 and 8](docs/arc-mls-e2ee-extension.md#21-signature-registry).
   - Invariants: `E2E-01`, `E2E-05`, `ID-01`, `ID-02`.
   - Evidence: independent vectors and missing/duplicate/stale/rollback/equivocation/signature/capability-chain negatives.
 
@@ -2146,8 +2150,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   root continuity, close/recreate isolation, encrypted/plaintext collision
   refusal, and tombstones.
   - After: `S08-003`.
-  - Targets: `agenc-ircd-e2ee`, domain route model.
-  - References: [Architecture §§18.1, 18.3–18.4](docs/ircd-architecture-and-implementation-spec.md#181-channel-binding), [E2EE §9.1](docs/irc-mls-e2ee-extension.md#91-identifiers-and-route-binding).
+  - Targets: `agenc-relay-e2ee`, domain route model.
+  - References: [Architecture §§18.1, 18.3–18.4](docs/arc-architecture-and-implementation-spec.md#181-channel-binding), [E2EE §9.1](docs/arc-mls-e2ee-extension.md#91-identifiers-and-route-binding).
   - Invariants: `E2E-02`, `E2E-06`, `STA-02`.
   - Evidence: bind/rebind/close/recreate/root rollback/collision/tombstone/restoration vectors.
 
@@ -2156,8 +2160,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   roster heads, candidate authorization, quorum/fault math, council transition,
   revocation, and non-circular approval sets.
   - After: `S08-003`, `S08-004`.
-  - Targets: `agenc-ircd-e2ee`.
-  - References: [E2EE §§9.2–9.4](docs/irc-mls-e2ee-extension.md#92-sequencer-credential).
+  - Targets: `agenc-relay-e2ee`.
+  - References: [E2EE §§9.2–9.4](docs/arc-mls-e2ee-extension.md#92-sequencer-credential).
   - Invariants: `E2E-03` through `E2E-05`.
   - Evidence: exhaustive `(n,f,q)` cases, authority/approval substitution, council rotation, and conflicting-candidate tests.
 
@@ -2167,8 +2171,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   message IDs, durable sequences, and exact size arithmetic while treating
   MLS ciphertext as opaque.
   - After: `S08-003` through `S08-005`.
-  - Targets: `agenc-ircd-e2ee`.
-  - References: [E2EE §§9.5 and 10](docs/irc-mls-e2ee-extension.md#95-required-mls-context-extension).
+  - Targets: `agenc-relay-e2ee`.
+  - References: [E2EE §§9.5 and 10](docs/arc-mls-e2ee-extension.md#95-required-mls-context-extension).
   - Invariants: `E2E-01`, `E2E-05`, `TRN-04`, `CON-05`.
   - Evidence: context, binding, envelope, padding, under/equal/over limit, nonzero-padding, overflow, and semantic-ID vectors.
 
@@ -2177,8 +2181,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   Welcome, exact success/object responses, standard errors, tokens, arity,
   direction, timeout, and authenticated resource budgets.
   - After: `S08-001`, `S08-004`, `S08-006`.
-  - Targets: `agenc-ircd-e2ee`, `agenc-ircd-client-wire`, runtime reassembly owner.
-  - References: [E2EE §§11.2–11.10](docs/irc-mls-e2ee-extension.md#112-fragment-tag).
+  - Targets: `agenc-relay-e2ee`, `agenc-relay-client-wire`, runtime reassembly owner.
+  - References: [E2EE §§11.2–11.10](docs/arc-mls-e2ee-extension.md#112-fragment-tag).
   - Invariants: `TRN-04` through `TRN-06`, `E2E-05`, `CON-05`.
   - Evidence: every carrier/object/response arm, wire-budget table, fragment flood, duplicate/conflict, collision, expiry, and allocation tests.
 
@@ -2187,8 +2191,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   signatures/TBS, recipient-dependent disposition, finality proofs, terminal
   IDs, deterministic coverage, and byte-identical replay.
   - After: `S08-005` through `S08-007`.
-  - Targets: `agenc-ircd-e2ee`, domain/storage transaction plans.
-  - References: [E2EE §§12.1–12.4](docs/irc-mls-e2ee-extension.md#121-one-active-candidate-no-local-skipping).
+  - Targets: `agenc-relay-e2ee`, domain/storage transaction plans.
+  - References: [E2EE §§12.1–12.4](docs/arc-mls-e2ee-extension.md#121-one-active-candidate-no-local-skipping).
   - Invariants: `E2E-03` through `E2E-06`.
   - Evidence: success and every lost/duplicate/reordered/conflicting/stale/malicious receipt, ACK, finalization, abort, and content-cycle test.
 
@@ -2197,8 +2201,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   ESTATE pages, ACTIVE, ERESUME, sequencer-set transitions, mailbox ownership,
   and exact replay under the base federation authority model.
   - After: `S08-001`, `S08-007`, `S08-008`.
-  - Targets: `agenc-ircd-e2ee`, `agenc-ircd-federation-wire`, federation runtime.
-  - References: [E2EE §12.5](docs/irc-mls-e2ee-extension.md#125-federation), [Architecture §20](docs/ircd-architecture-and-implementation-spec.md#20-federation-architecture-and-wire-protocol).
+  - Targets: `agenc-relay-e2ee`, `agenc-relay-federation-wire`, federation runtime.
+  - References: [E2EE §12.5](docs/arc-mls-e2ee-extension.md#125-federation), [Architecture §20](docs/arc-architecture-and-implementation-spec.md#20-federation-architecture-and-wire-protocol).
   - Invariants: `FED-*`, `E2E-05`, `E2E-07`.
   - Evidence: every opcode/result/event/descriptor arm, snapshot page boundary, cursor form, retry, incarnation, collision, and synchronization test.
 
@@ -2207,8 +2211,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   KeyPackage claim/burn, Welcome delivery, committed roster and pending-join
   state, while keeping all client MLS processing outside production crates.
   - After: `S08-003` through `S08-009`.
-  - Targets: `agenc-ircd-e2ee`, domain/storage/runtime integration.
-  - References: [E2EE §§13.1–13.4](docs/irc-mls-e2ee-extension.md#131-device-provisioning).
+  - Targets: `agenc-relay-e2ee`, domain/storage/runtime integration.
+  - References: [E2EE §§13.1–13.4](docs/arc-mls-e2ee-extension.md#131-device-provisioning).
   - Invariants: `E2E-01`, `E2E-03`, `E2E-05`.
   - Evidence: provisioning/create/join/add-device, package replay/burn, Welcome, crash, retry, and full-roster tests using test-only clients.
 
@@ -2218,8 +2222,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   restored routes until exact evidence establishes a new lineage or permanent
   tombstone.
   - After: `S08-008`, `S08-010`.
-  - Targets: `agenc-ircd-e2ee`, domain/storage/runtime integration.
-  - References: [E2EE §§13.5–13.7.1](docs/irc-mls-e2ee-extension.md#135-part-kick-revocation-and-removal), [Architecture §18.4](docs/ircd-architecture-and-implementation-spec.md#184-server-recovery-gate-for-encrypted-routes).
+  - Targets: `agenc-relay-e2ee`, domain/storage/runtime integration.
+  - References: [E2EE §§13.5–13.7.1](docs/arc-mls-e2ee-extension.md#135-part-kick-revocation-and-removal), [Architecture §18.4](docs/arc-architecture-and-implementation-spec.md#184-server-recovery-gate-for-encrypted-routes).
   - Invariants: `E2E-04`, `E2E-06`, `STA-09`.
   - Evidence: part/kick/revoke, delayed/failed finality, state loss, exact/conflicting recovery evidence, restore, and tombstone tests.
 
@@ -2228,8 +2232,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   closure, PSK deletion, abort/retry, races, and non-reopening of the prior
   lineage.
   - After: `S08-010`, `S08-011`.
-  - Targets: `agenc-ircd-e2ee`, joint domain/storage plans.
-  - References: [E2EE §13.8](docs/irc-mls-e2ee-extension.md#138-full-reinit-and-route-migration).
+  - Targets: `agenc-relay-e2ee`, joint domain/storage plans.
+  - References: [E2EE §13.8](docs/arc-mls-e2ee-extension.md#138-full-reinit-and-route-migration).
   - Invariants: `E2E-03`, `E2E-05`, `E2E-06`.
   - Evidence: preflight, every ACK/activation boundary, abort, retry, crash, race, PSK-erasure, and old-lineage-refusal tests.
 
@@ -2238,8 +2242,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   offline delivery tokens, mailbox ownership/ACK, retention, deletion, and
   opaque-history rules.
   - After: `S08-008` through `S08-012`.
-  - Targets: `agenc-ircd-e2ee`, storage/runtime mailboxes and outboxes.
-  - References: [E2EE §§14–15](docs/irc-mls-e2ee-extension.md#14-replay-ordering-and-persistence).
+  - Targets: `agenc-relay-e2ee`, storage/runtime mailboxes and outboxes.
+  - References: [E2EE §§14–15](docs/arc-mls-e2ee-extension.md#14-replay-ordering-and-persistence).
   - Invariants: `E2E-01`, `E2E-05`, `DUR-01`, `DUR-02`, `FED-03`.
   - Evidence: duplicate/gap/conflict, disconnect, crash, restart, token ACK, cursor replay, retention, deletion, and byte-identical retry tests.
 
@@ -2248,8 +2252,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   fragments, candidates, rosters, groups, mailboxes, queues, timeouts, and
   amplification.
   - After: `S08-007` through `S08-013`.
-  - Targets: `agenc-ircd-e2ee`, runtime admission and workers.
-  - References: [E2EE §16](docs/irc-mls-e2ee-extension.md#16-resource-and-timing-limits), [Architecture §19](docs/ircd-architecture-and-implementation-spec.md#19-abuse-resistance-and-resource-limits).
+  - Targets: `agenc-relay-e2ee`, runtime admission and workers.
+  - References: [E2EE §16](docs/arc-mls-e2ee-extension.md#16-resource-and-timing-limits), [Architecture §19](docs/arc-architecture-and-implementation-spec.md#19-abuse-resistance-and-resource-limits).
   - Invariants: `TRN-04`, `TRN-05`, `CON-02`, `CON-05`.
   - Evidence: every limit at below/equal/above, authenticated flood, fanout, slow consumer, queue, timeout, and recovery-after-quiescence tests.
 
@@ -2258,8 +2262,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   mismatched profiles, ambiguous resets, stale roots, partial finality, and any
   fallback that could hide an encrypted-state failure.
   - After: `S08-001`, `S08-004`, `S08-011` through `S08-014`.
-  - Targets: `agenc-ircd-e2ee`, domain/client/federation error mapping.
-  - References: [E2EE §§17 and 19](docs/irc-mls-e2ee-extension.md#17-downgrade-and-reset-behavior), [Architecture §18](docs/ircd-architecture-and-implementation-spec.md#18-e2ee-integration-contract).
+  - Targets: `agenc-relay-e2ee`, domain/client/federation error mapping.
+  - References: [E2EE §§17 and 19](docs/arc-mls-e2ee-extension.md#17-downgrade-and-reset-behavior), [Architecture §18](docs/arc-architecture-and-implementation-spec.md#18-e2ee-integration-contract).
   - Invariants: `E2E-02`, `E2E-06`, `E2E-07`, `PRV-01`.
   - Evidence: plaintext injection, profile mismatch, reset/recreate/root rollback, partial-state, retry, and exact public-error tests.
 
@@ -2268,8 +2272,8 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   receipts, cursor coverage, and one visibility point; neither profile may ACK,
   swap, render, or advance alone.
   - After: `S08-009`, `S08-011` through `S08-015`.
-  - Targets: `agenc-ircd-e2ee`, domain, storage, federation runtime.
-  - References: [Architecture §§20.8, 23.4, and Appendix B](docs/ircd-architecture-and-implementation-spec.md#208-events-projection-and-acknowledgments), [E2EE §12.5](docs/irc-mls-e2ee-extension.md#125-federation).
+  - Targets: `agenc-relay-e2ee`, domain, storage, federation runtime.
+  - References: [Architecture §§20.8, 23.4, and Appendix B](docs/arc-architecture-and-implementation-spec.md#208-events-projection-and-acknowledgments), [E2EE §12.5](docs/arc-mls-e2ee-extension.md#125-federation).
   - Invariants: `E2E-03`, `FED-11`, `FED-12`, `DUR-01`, `DUR-02`.
   - Evidence: every permitted interleaving and crash boundary, 2,047/2,048/2,049 parts, aggregate byte boundaries, wrong metadata, full outbox, and replay tests.
 
@@ -2279,21 +2283,21 @@ atomically while remaining unable to decrypt content or operate an MLS client.
   administration, metrics, and shutdown without widening any crate authority.
   - After: `S08-001` through `S08-016`.
   - Targets: all server-side E2EE integration surfaces and release binary.
-  - References: [Architecture §§18, 24.1, and 27.4](docs/ircd-architecture-and-implementation-spec.md#18-e2ee-integration-contract), [E2EE §20](docs/irc-mls-e2ee-extension.md#20-implementation-separation).
+  - References: [Architecture §§18, 24.1, and 27.4](docs/arc-architecture-and-implementation-spec.md#18-e2ee-integration-contract), [E2EE §20](docs/arc-mls-e2ee-extension.md#20-implementation-separation).
   - Invariants: `E2E-*`, coupled `FED-*`, `DUR-*`, `CON-*`, `OPS-*`.
   - Evidence: full encrypted-channel/direct-message flows with test-only clients, plus restart/partition/overload/privacy/shutdown tests.
 
 ### Stage 08 companion verification matrix
 
 The following tasks correspond one-for-one with the numbered gates in
-[E2EE §21](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+[E2EE §21](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
 Task IDs follow executable dependency order.
 
 - [x] `S08-018` **Pin the MLS WG interoperability corpus.** Record immutable
   revision and content hashes for every enabled suite.
   - After: `S08-017`.
   - Targets: test-only MLS corpus and conformance evidence.
-  - References: [E2EE §21 gate 1](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 1](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-05`.
   - Evidence: corpus hash verification and suite coverage manifest.
 
@@ -2302,7 +2306,7 @@ Task IDs follow executable dependency order.
   receipt, ACK, finalization, abort, and ReInit public object.
   - After: `S08-003` through `S08-017`.
   - Targets: checked-in E2EE vector corpus and reference validator.
-  - References: [E2EE §21 gate 2](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 2](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-05`.
   - Evidence: independent generator provenance, hashes, and production/reference agreement.
 
@@ -2310,7 +2314,7 @@ Task IDs follow executable dependency order.
   independent libraries or clients in test-only tooling for each enabled suite.
   - After: `S08-018`, `S08-019`.
   - Targets: interoperability harness; never a production daemon dependency.
-  - References: [E2EE §21 gate 3](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 3](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-01`, `E2E-05`.
   - Evidence: versioned cross-implementation matrix and byte/state comparison results.
 
@@ -2319,7 +2323,7 @@ Task IDs follow executable dependency order.
   binding or tombstoning.
   - After: `S08-015`, `S08-017`.
   - Targets: client/federation integration tests.
-  - References: [E2EE §21 gate 4](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 4](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-02`, `STA-09`.
   - Evidence: complete command/target/history/topic/fallback rejection matrix.
 
@@ -2328,7 +2332,7 @@ Task IDs follow executable dependency order.
   short/long padding, and zero-padding edge cases.
   - After: `S08-006`, `S08-014`.
   - Targets: E2EE boundary suites.
-  - References: [E2EE §21 gate 5](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 5](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `TRN-04`, `CON-05`, `E2E-05`.
   - Evidence: mechanically generated boundary table with exact expected outcomes.
 
@@ -2337,7 +2341,7 @@ Task IDs follow executable dependency order.
   under fixed time/memory/output bounds.
   - After: `S08-003`, `S08-006`, `S08-007`, `S08-014`.
   - Targets: E2EE fuzz targets and regression corpus.
-  - References: [E2EE §21 gate 6](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 6](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `TRN-04` through `TRN-06`, `CON-05`.
   - Evidence: reproducible fuzz manifests and minimized regression tests.
 
@@ -2346,7 +2350,7 @@ Task IDs follow executable dependency order.
   Commits, including recipient-dependent corrupt UpdatePaths.
   - After: `S08-008`, `S08-017`.
   - Targets: test-only client/reference model and server integration.
-  - References: [E2EE §21 gate 7](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 7](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-03` through `E2E-06`.
   - Evidence: no endpoint applies before finality and no failed endpoint skips candidates.
 
@@ -2355,7 +2359,7 @@ Task IDs follow executable dependency order.
   ACK, or vote-lock rollback; exact retries remain byte-identical.
   - After: `S08-013`, `S08-016`, `S08-017`.
   - Targets: storage/federation/E2EE fault harness.
-  - References: [E2EE §21 gate 8](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 8](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-05`, `E2E-06`, `DUR-*`, `FED-03`.
   - Evidence: crash before/after every named durable and visibility boundary.
 
@@ -2364,7 +2368,7 @@ Task IDs follow executable dependency order.
   report fault-bound violations outside the claim.
   - After: `S08-005`, `S08-008`.
   - Targets: finality model and property tests.
-  - References: [E2EE §21 gate 9](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 9](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-04`, `E2E-05`.
   - Evidence: exhaustive bounded-state result set and conflicting-finality refusal.
 
@@ -2375,7 +2379,7 @@ Task IDs follow executable dependency order.
   controller binding, and idle-device reminders.
   - After: `S08-003`, `S08-005`, `S08-010`, `S08-011`.
   - Targets: E2EE vector/state-machine suites.
-  - References: [E2EE §21 gate 10](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 10](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-03` through `E2E-06`.
   - Evidence: every listed transition has success, rejection, replay, rollback, and state-equality coverage.
 
@@ -2384,7 +2388,7 @@ Task IDs follow executable dependency order.
   fragment floods.
   - After: `S08-014`, `S08-017`.
   - Targets: release-mode load harness.
-  - References: [E2EE §21 gate 11](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 11](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `CON-02`, `CON-05`, `STA-08`.
   - Evidence: latency, high-water memory/descriptor/queue, rejection, and post-quiescence reports.
 
@@ -2393,7 +2397,7 @@ Task IDs follow executable dependency order.
   content, address, and route canaries.
   - After: `S08-017`.
   - Targets: logs, metrics, health, errors, crash identifiers, audit output.
-  - References: [E2EE §21 gate 12](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates), [Architecture §25](docs/ircd-architecture-and-implementation-spec.md#25-operations-observability-and-host-security).
+  - References: [E2EE §21 gate 12](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates), [Architecture §25](docs/arc-architecture-and-implementation-spec.md#25-operations-observability-and-host-security).
   - Invariants: `E2E-01`, `OPS-01`, `PRV-02`.
   - Evidence: automated canary scan plus closed-field review records no forbidden value.
 
@@ -2402,7 +2406,7 @@ Task IDs follow executable dependency order.
   activation, crash, and permanent old-group closure.
   - After: `S08-012`, `S08-017`.
   - Targets: test-only clients and server ReInit integration.
-  - References: [E2EE §21 gate 14](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 14](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-03`, `E2E-05`, `E2E-06`.
   - Evidence: deterministic interleaving matrix proves the old group never reopens.
 
@@ -2413,7 +2417,7 @@ Task IDs follow executable dependency order.
   and channel-instance collision handling.
   - After: `S08-001`, `S08-009`, `S08-017`.
   - Targets: E2EE federation model/integration suites.
-  - References: [E2EE §21 gate 15](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 15](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-07`, `FED-02` through `FED-10`.
   - Evidence: complete transition and boundary matrix with canonical page/state comparisons.
 
@@ -2422,7 +2426,7 @@ Task IDs follow executable dependency order.
   in client and server directions against 4,094/4,094/8,191-byte budgets.
   - After: `S08-007`, `S08-022`.
   - Targets: generated wire-budget table and renderer tests.
-  - References: [E2EE §21 gate 16](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 16](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `TRN-04`, `STA-08`, `CON-05`.
   - Evidence: generated maximum forms fit exactly and every plus-one form rejects before allocation.
 
@@ -2432,7 +2436,7 @@ Task IDs follow executable dependency order.
   Welcome, GroupInfo, binding, or policy object contains a future/self ID.
   - After: `S08-003`, `S08-005`, `S08-008`.
   - Targets: semantic-ID vector/property suites.
-  - References: [E2EE §21 gate 17](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 17](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-05`.
   - Evidence: alternative-subset equality, changed-field inequality, cycle rejection, and immutable-MLS-bytes-first construction tests.
 
@@ -2442,7 +2446,7 @@ Task IDs follow executable dependency order.
   below the old quorum.
   - After: `S08-005`, `S08-008`, `S08-026`.
   - Targets: finality transition model.
-  - References: [E2EE §21 gate 18](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 18](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-04`, `E2E-05`.
   - Evidence: exhaustive retained/revoked/removed membership and quorum transition cases.
 
@@ -2453,7 +2457,7 @@ Task IDs follow executable dependency order.
   projection, and encrypted/plaintext collision.
   - After: `S08-009`, `S08-013`, `S08-016`, `S08-031`.
   - Targets: federation wire/model/fault integration suites.
-  - References: [E2EE §21 gate 19](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 19](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-*`, `FED-*`, `PRV-02`.
   - Evidence: exhaustive registry-arm matrix with mismatch, crash, replay, privacy, and recovery cases.
 
@@ -2462,7 +2466,7 @@ Task IDs follow executable dependency order.
   result recovery after disconnect.
   - After: `S08-010`, `S08-013`, `S08-025`.
   - Targets: E2EE storage/runtime fault harness.
-  - References: [E2EE §21 gate 20](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 20](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-05`, `DUR-01`, `DUR-02`, `FED-03`.
   - Evidence: crash at every transaction boundary yields exact replay, burn, or refusal—never duplicate use.
 
@@ -2471,7 +2475,7 @@ Task IDs follow executable dependency order.
   close/recreate continuity, and direct-account-pair downgrade blocking.
   - After: `S08-003`, `S08-004`, `S08-033`.
   - Targets: identity/binding vector and state suites.
-  - References: [E2EE §21 gate 21](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 21](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-02`, `E2E-05`, `E2E-06`.
   - Evidence: positive continuity plus every rollback/reuse/substitution/recreation/downgrade negative.
 
@@ -2481,7 +2485,7 @@ Task IDs follow executable dependency order.
   boundaries, either outbox full, and snapshot replacement.
   - After: `S08-016`, `S08-025`, `S08-035`.
   - Targets: joint transaction model, storage/federation/runtime fault harness.
-  - References: [E2EE §21 gate 22](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 22](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-03`, `FED-11`, `FED-12`, `DUR-01`, `DUR-02`.
   - Evidence: one combined state cut, both cumulative ACKs or neither, no duplicate frame, and exact original-sink result convergence.
 
@@ -2491,8 +2495,8 @@ Task IDs follow executable dependency order.
   retain it by content identifier, answer identical resubmissions, and
   restore the chain on reload.
   - After: `S08-006`, `S08-017`.
-  - Targets: `agenc-ircd-e2ee`, `agenc-ircd-domain`, `agenc-ircd-storage`, coordinator policy handler and startup restore, edge router.
-  - References: [E2EE §§9.3, 11.5, 11.7](docs/irc-mls-e2ee-extension.md#93-canonical-policy-and-roster-transitions).
+  - Targets: `agenc-relay-e2ee`, `agenc-relay-domain`, `agenc-relay-storage`, coordinator policy handler and startup restore, edge router.
+  - References: [E2EE §§9.3, 11.5, 11.7](docs/arc-mls-e2ee-extension.md#93-canonical-policy-and-roster-transitions).
   - Invariants: `E2E-02`, `E2E-04`.
   - Evidence: chain-order, wrong-initial, idempotent, and reload tests; the three-process test publishes both bootstrap policies.
 
@@ -2503,8 +2507,8 @@ Task IDs follow executable dependency order.
   or ReInit terminal only at `q`; keep the route row and route-state object
   at the current head after every terminal.
   - After: `S08-040`.
-  - Targets: coordinator sequence handlers, `agenc-ircd-e2ee` finality ledger.
-  - References: [E2EE §§12.4 and 13.8](docs/irc-mls-e2ee-extension.md#124-finalization-and-abort-certificates).
+  - Targets: coordinator sequence handlers, `agenc-relay-e2ee` finality ledger.
+  - References: [E2EE §§12.4 and 13.8](docs/arc-mls-e2ee-extension.md#124-finalization-and-abort-certificates).
   - Invariants: `E2E-02`, `E2E-03`.
   - Evidence: `PENDING` below `q`, certification at `q`, `E2EE_POLICY_REQUIRED` without a policy, discarded conflicting votes, refused forged votes.
 
@@ -2513,17 +2517,17 @@ Task IDs follow executable dependency order.
   ReInit-staged, terminal, and close event to extend it, refuse and record a
   fork or skipped position durably, and close the link.
   - After: `S08-014`, `S08-041`.
-  - Targets: edge event router, `agenc-ircd-storage` witness row.
-  - References: [E2EE §12.5](docs/irc-mls-e2ee-extension.md#125-federation).
+  - Targets: edge event router, `agenc-relay-storage` witness row.
+  - References: [E2EE §12.5](docs/arc-mls-e2ee-extension.md#125-federation).
   - Invariants: `E2E-03`, `FED-11`.
   - Evidence: extension, fork, skip, already-installed, and cut-order tests; the three-process test runs under the witness.
 
 - [x] `S08-043` **Pad application content before encryption.** Define
-  `IrcEncryptedContent.zero_padding`, apply the Section 7.5 bucket table to
+  `ArcEncryptedContent.zero_padding`, apply the Section 7.5 bucket table to
   the content encoding, and reject a wrong length or nonzero octet.
   - After: `S08-004`.
-  - Targets: `agenc-ircd-e2ee` content module and padding vectors.
-  - References: [E2EE §§7.5 and 10](docs/irc-mls-e2ee-extension.md#75-padding).
+  - Targets: `agenc-relay-e2ee` content module and padding vectors.
+  - References: [E2EE §§7.5 and 10](docs/arc-mls-e2ee-extension.md#75-padding).
   - Invariants: `E2E-05`.
   - Evidence: every boundary vector over the content structure plus one-over, short, long, nonzero, and NUL refusals.
 
@@ -2534,7 +2538,7 @@ Task IDs follow executable dependency order.
   delivered Welcome joined by the other library, and close.
   - After: `S08-020`, `S08-040`, `S08-041`, `S08-043`.
   - Targets: integration test with real MLS libraries as test-only dependencies.
-  - References: [E2EE §21 gate 3](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [E2EE §21 gate 3](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-01`, `E2E-05`.
   - Evidence: per-rule outcomes recorded in `conformance/e2ee-interop-matrix.toml`.
 
@@ -2544,7 +2548,7 @@ Task IDs follow executable dependency order.
   can be advertised.
   - After: `S08-001` through `S08-038` and `S08-040` through `S08-044`.
   - Targets: encrypted-node release topology, complete companion evidence.
-  - References: [Architecture §§1.1 and 29 phase 8](docs/ircd-architecture-and-implementation-spec.md#11-conformance-targets), [E2EE §21](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [Architecture §§1.1 and 29 phase 8](docs/arc-architecture-and-implementation-spec.md#11-conformance-targets), [E2EE §21](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: `E2E-01` through `E2E-07` and all coupled invariant families.
   - Evidence: every companion gate, collision/reset/downgrade test, mandatory workspace check, and finding disposition passes.
 
@@ -2562,7 +2566,7 @@ recorded here so a later reviewer does not have to rediscover them.
   and the public `KeyPackage`. Everything inside a ciphertext is opaque.
 - NFC normalization of the private topic literal is an endpoint matter;
   the server compares the exact literal
-  `Encrypted channel - topic protected by IRC-MLS`.
+  `Encrypted channel - topic protected by ARC-MLS`.
 - The home copy of a semantic event is its request's completion (companion
   12.5), so the edge matches completions by event identity for every kind.
 - A channel must be registered (`CHANCTL REGISTER`, history off, no topic)
@@ -2680,8 +2684,8 @@ independently without changing the disabled core, federation, or E2EE behavior.
   plaintext upgrades and compression, and hand accepted messages to the
   Stage-02 WebSocket framing semantics.
   - After: `S08-900`, `S02-002`.
-  - Targets: `agenc-ircd-runtime`, strict WSS configuration.
-  - References: [Architecture §§8.4 and Appendix C.3](docs/ircd-architecture-and-implementation-spec.md#84-websocket-listener).
+  - Targets: `agenc-relay-runtime`, strict WSS configuration.
+  - References: [Architecture §§8.4 and Appendix C.3](docs/arc-architecture-and-implementation-spec.md#84-websocket-listener).
   - Invariants: `TRN-01`, `TRN-02`, `TRN-04`, `TRN-05`.
   - Evidence: upgrade/header/subprotocol/origin/extension/size/timeout/TLS matrix and resource tests.
 
@@ -2690,7 +2694,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   both transports with transport-only differences excluded from protocol state.
   - After: `S09-001`.
   - Targets: client interoperability suites.
-  - References: [Architecture §§1.1 and 8.4](docs/ircd-architecture-and-implementation-spec.md#11-conformance-targets).
+  - References: [Architecture §§1.1 and 8.4](docs/arc-architecture-and-implementation-spec.md#11-conformance-targets).
   - Invariants: all applicable core invariants.
   - Evidence: byte/semantic transcript comparison and identical state snapshots.
 
@@ -2700,7 +2704,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   behavior.
   - After: `S08-900`, `S03-008`, `S05-013`.
   - Targets: domain, storage, client wire, runtime, configuration.
-  - References: [Architecture §17.2](docs/ircd-architecture-and-implementation-spec.md#172-optional-plaintext-channel-history), [source ledger §4](docs/protocol-sources-and-decisions.md#4-living-protocol-sources).
+  - References: [Architecture §17.2](docs/arc-architecture-and-implementation-spec.md#172-optional-plaintext-channel-history), [source ledger §4](docs/protocol-sources-and-decisions.md#4-living-protocol-sources).
   - Invariants: `STA-05`, `STA-09`, `PRV-02`, `FED-07`.
   - Evidence: retention/authorization/order/deletion/recreation/federation/privacy and boundary tests against the pinned draft.
 
@@ -2709,7 +2713,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   configuration combination, and post-restore ambiguity.
   - After: `S09-003`.
   - Targets: history/E2EE integration tests.
-  - References: [Architecture §§17.2 and 18](docs/ircd-architecture-and-implementation-spec.md#172-optional-plaintext-channel-history), [E2EE §§15 and 17](docs/irc-mls-e2ee-extension.md#15-history-and-offline-delivery).
+  - References: [Architecture §§17.2 and 18](docs/arc-architecture-and-implementation-spec.md#172-optional-plaintext-channel-history), [E2EE §§15 and 17](docs/arc-mls-e2ee-extension.md#15-history-and-offline-delivery).
   - Invariants: `E2E-02`, `STA-09`.
   - Evidence: complete target/state/config/restore downgrade-refusal matrix.
 
@@ -2720,7 +2724,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   maintenance remain common to every build.
   - After: `S09-001` through `S09-004`.
   - Targets: configuration, release metadata, integration matrices.
-  - References: [Architecture §§26.4 and 29 phase 9](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims).
+  - References: [Architecture §§26.4 and 29 phase 9](docs/arc-architecture-and-implementation-spec.md#264-conformance-claims).
   - Invariants: `OPS-02`, `E2E-02`, `PRV-03`.
   - Evidence: four-mode matrix (neither/WSS/history/both), dependency graph, listener scan, database diff, and capability diff.
 
@@ -2729,7 +2733,7 @@ independently without changing the disabled core, federation, or E2EE behavior.
   disabled-equivalence suite without weakening any prior conformance target.
   - After: `S09-001` through `S09-005`.
   - Targets: optional-profile release configurations and evidence.
-  - References: [Architecture §29 phase 9](docs/ircd-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
+  - References: [Architecture §29 phase 9](docs/arc-architecture-and-implementation-spec.md#29-implementation-sequence-and-acceptance-gates).
   - Invariants: all affected prior invariants.
   - Evidence: complete optional-mode matrix and mandatory workspace gates pass.
 
@@ -2737,7 +2741,7 @@ Stage 09 implementation includes strict WSS framing and Origin/ALPN policy,
 authorization-fenced history paging, metadata-only replay, immutable message
 identities and retention, and signed resumable purge. The independent build/runtime matrix and
 live capture, disabled restart, and purge lifecycles pass. The
-[Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
+[Stage 09 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 closes exact source commit `a93e53e71d22a6d5ec46bd749ec18068a9fa572b` with 10
 passed records from the recorded 103-command gate. Stage 10 production
 qualification is next.
@@ -2789,7 +2793,7 @@ alone.
   waived.
   - After: `S10-002` through `S10-012`.
   - Targets: `conformance/requirements.toml` and evidence validator.
-  - References: [Architecture §§28.1 and Appendix D](docs/ircd-architecture-and-implementation-spec.md#281-requirement-ledger-and-evidence).
+  - References: [Architecture §§28.1 and Appendix D](docs/arc-architecture-and-implementation-spec.md#281-requirement-ledger-and-evidence).
   - Invariants: all invariant families.
   - Evidence: completeness validator reports zero missing/stale/failed/waived mandatory requirements.
   - Progress: the requirement ledger validator is unchanged; closure waits for every candidate result below.
@@ -2799,7 +2803,7 @@ alone.
   coverage commands under the pinned release toolchain and lockfile.
   - After: `S10-010`.
   - Targets: entire workspace and CI evidence.
-  - References: [Architecture §28.8](docs/ircd-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates).
+  - References: [Architecture §28.8](docs/arc-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates).
   - Invariants: all source- and build-enforced invariants.
   - Evidence: command manifests and artifacts for both initial targets; zero warnings, unsafe source, or unbounded Tokio channel findings.
   - Progress: `scripts/run-stage-ten-workspace.py` runs the format, source, workspace, requirement, inherited Stage 09, runner, doc-test, audit, and deny checks, the four-combination check, clippy, and test matrix, and the branch coverage report; it cannot pass until the coverage floor is met.
@@ -2810,7 +2814,7 @@ alone.
   invariant checkers without treating coverage as replacement for other gates.
   - After: `S10-002`.
   - Targets: coverage corpus/report.
-  - References: [Architecture §28.8](docs/ircd-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates).
+  - References: [Architecture §28.8](docs/arc-architecture-and-implementation-spec.md#288-mandatory-build-and-analysis-gates).
   - Invariants: all invariant families.
   - Evidence: source/lock-bound branch report with justified unreachable-code handling.
   - Progress: `conformance/release-critical-coverage.toml` records the complete critical inventory with the 90 percent floor; branch coverage is below that floor, and the per-file gap is listed in the qualification notes.
@@ -2821,7 +2825,7 @@ alone.
   recorded corpora and envelopes.
   - After: `S10-002`, `S10-003`.
   - Targets: fuzz/model/Loom/runtime evidence.
-  - References: [Architecture §§28.3–28.4](docs/ircd-architecture-and-implementation-spec.md#283-state-machine-and-model-tests), [§21](docs/ircd-architecture-and-implementation-spec.md#21-state-ownership-and-concurrency).
+  - References: [Architecture §§28.3–28.4](docs/arc-architecture-and-implementation-spec.md#283-state-machine-and-model-tests), [§21](docs/arc-architecture-and-implementation-spec.md#21-state-ownership-and-concurrency).
   - Invariants: `TRN-*`, `STA-*`, `FED-*`, `CON-*`, `OPS-04`.
   - Evidence: tool/version/duration/corpus/schedule manifests and zero unresolved failures.
   - Progress: `scripts/run-stage-ten-fuzz.py` runs bounded parallel segments per target until 86,400 CPU seconds with retained corpora, and `scripts/run-stage-ten-models.sh` runs the Loom, cancellation, overload, panic, and shutdown suites; no campaign has reached its budget yet.
@@ -2835,7 +2839,7 @@ alone.
   HTML, and command prefixes without interpreting it as active content.
   - After: `S10-002`, `S10-004`.
   - Targets: network/interoperability/privacy evidence and the test-only encrypted-client harness.
-  - References: [Architecture §28.6](docs/ircd-architecture-and-implementation-spec.md#286-network-interoperability-and-privacy-tests).
+  - References: [Architecture §28.6](docs/arc-architecture-and-implementation-spec.md#286-network-interoperability-and-privacy-tests).
   - Invariants: `TRN-*`, `PRV-*`, `FED-*`, `E2E-07`, `OPS-01`.
   - Evidence: versioned client/server/topology and client-policy matrices, safe-rendering outputs, scanner reports, captures, canary scans, and documented privacy limits.
   - Progress: `scripts/qualify-stage-ten-network.py` drives WeeChat, Irssi, OpenMLS, mls-rs, federation, TLS, WSS, an isolated Tor network, packet capture, and the client-policy tests; development runs passed on x86_64.
@@ -2846,10 +2850,10 @@ alone.
   growth reserve and backup/construction space boundaries.
   - After: `S05-015`, `S10-002`.
   - Targets: storage qualification rigs and signed reports.
-  - References: [Architecture §§28.5 and 28.7](docs/ircd-architecture-and-implementation-spec.md#285-crash-storage-and-fault-injection).
+  - References: [Architecture §§28.5 and 28.7](docs/arc-architecture-and-implementation-spec.md#285-crash-storage-and-fault-injection).
   - Invariants: `DUR-*`, `OPS-04`.
   - Evidence: per-tuple release/profile/corpus/raw-log hashes, maximum deltas, and all boundary/failure outcomes.
-  - Progress: `agenc-ircd storage qualify` and `scripts/qualify-stage-ten-storage.py` measure the production engine on the final binary; finding STO-1 is open.
+  - Progress: `arcd storage qualify` and `scripts/qualify-stage-ten-storage.py` measure the production engine on the final binary; finding STO-1 is open.
 
 - [ ] `S10-007` **Qualify capacity and sustained operation.** Demonstrate the
   advertised connection/member/channel limits on named hardware and run the
@@ -2857,7 +2861,7 @@ alone.
   backups, disk pressure, and peer loss.
   - After: `S10-004` through `S10-006`.
   - Targets: release-mode load/soak environments.
-  - References: [Architecture §28.7](docs/ircd-architecture-and-implementation-spec.md#287-abuse-and-capacity-tests).
+  - References: [Architecture §28.7](docs/arc-architecture-and-implementation-spec.md#287-abuse-and-capacity-tests).
   - Invariants: `CON-02`, `CON-05`, `FED-09`, `DUR-11`.
   - Evidence: p50/p95/p99 latency, memory/task/descriptor/queue high-water reports, missed-event checks, and return-to-envelope evidence.
   - Progress: the capacity engine and `scripts/qualify-stage-ten-capacity.py` run the 300-second capacity demonstration; the 64-client development runs found the per-address admission ceilings, the refused snapshot marker, request, and origin acknowledgement batches (CAP-12), and the stale-revision refusals, busy-staging refusals, request-queue ordering, drain, and fairness faults, and origin deletions overtaking queued session closes behind CAP-6, all fixed in the coordinator; the seven-day soak has not run; findings CAP-1 through CAP-8 and CAP-12 through CAP-17 are recorded, CAP-15 and CAP-16 fixed (a batch gathered during the index read-back, and a standing key removed before its snapshot cut row landed, each stopped the coordinator as corrupt), CAP-17 fixed (a refused snapshot cut page was skipped), CAP-18 fixed (a client that left while the link was down kept its nickname at the coordinator; the edge now replays retained origin deletions after a reset, and the campaign requires the whole population back at every quiescence check), CAP-19 has a worktree fix and regression (a process action's confirmation had been refused by any intervening commit). A separate federation resynchronization review (`docs/federation-resync-review.md`) found R01 to R21, fixed as CAP-20 to CAP-40 with 52 regressions (`docs/federation-resync-fixes.md`); qualification acceptance remains pending; CAP-41 fixed (the reload after that change rejected the account service's result rows and quarantined every peer at any coordinator restart), CAP-42 fixed (a deletion behind an unacknowledged update named the old generation and retired the link), CAP-43 fixed (recovery after a link retirement under disk pressure looped on an origin violation: a closed client's unfinished request replayed under the origin the coordinator had dropped and pinned that origin against retirement; the edge now abandons such a request instead of replaying it, and the 300-second campaign passes end to end). CAP-19 uses a stable live-process revision; final validation remains pending. CAP-44 fixed (snapshot activation preserves the durable Clean phase so a replacement incarnation is accepted after cleanup, and preserves Suspended until origin replay). CAP-45 fixed (client close journals the changed request sink flags so a covering snapshot can activate and retire the result after disk-pressure recovery). CAP-46 fixed (the final campaign wait rounds its remaining fractional second upward to meet the configured duration). CAP-7 still exhausted the post-restart login grace in the first release-profile development run; the second completed every scenario and drained federation but recorded 299.392 seconds, below the 300-second qualification minimum.
@@ -2941,7 +2945,7 @@ alone.
   compromise response, rollback, and client-visible resynchronization.
   - After: `S10-006`, `S10-007`.
   - Targets: operational drill evidence and runbooks.
-  - References: [Architecture §§23.6–23.9 and 25.4–25.5](docs/ircd-architecture-and-implementation-spec.md#236-storage-format-admission).
+  - References: [Architecture §§23.6–23.9 and 25.4–25.5](docs/arc-architecture-and-implementation-spec.md#236-storage-format-admission).
   - Invariants: `DUR-04` through `DUR-12`, `FED-10`, `OPS-04`.
   - Evidence: timed drills, artifact/state hashes, failure injection, operator steps, and verified post-drill conformance.
   - Progress: sixteen drills run through `scripts/qualify-stage-ten-drills.py`; twelve pass and four fail on findings CAP-5, CAP-9, and CAP-11.
@@ -2952,7 +2956,7 @@ alone.
   health, retention, crash handling, and incident modes.
   - After: `S10-005`, `S10-008`.
   - Targets: shipped service profile and production configuration.
-  - References: [Architecture §25](docs/ircd-architecture-and-implementation-spec.md#25-operations-observability-and-host-security).
+  - References: [Architecture §25](docs/arc-architecture-and-implementation-spec.md#25-operations-observability-and-host-security).
   - Invariants: `OPS-01` through `OPS-04`, `ID-04`, `ID-05`, `PRV-02`.
   - Evidence: host-policy tests, port/filesystem scans, secret canaries, retention checks, and incident simulation.
   - Progress: the host hardening and observability drills run in the same driver together with the deployment checker, systemd-analyze, and Tor configuration verification.
@@ -2963,7 +2967,7 @@ alone.
   SPDX or CycloneDX, and sign artifacts from an isolated release identity.
   - After: `S09-900`, `S10-011`.
   - Targets: release pipeline, binaries, packages, SBOM, signatures.
-  - References: [Architecture §24.5](docs/ircd-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
+  - References: [Architecture §24.5](docs/arc-architecture-and-implementation-spec.md#245-dependency-and-build-integrity).
   - Invariants: `OPS-02`.
   - Evidence: independently reproduced hashes or documented deterministic differences, SBOM validation, and signature verification.
   - Progress: the release image, the two-container reproduction, the SBOM with reviewed native package licenses, and the aarch64 build workflow exist; x86_64 reproduced bit for bit; the aarch64 build record still has to be produced on a hosted ARM runner.
@@ -2974,7 +2978,7 @@ alone.
   supersede, or reject every detected change.
   - After: `S09-900`; repeat before `S10-013`.
   - Targets: source-decision ledger, lockfile review, affected vectors/requirements.
-  - References: [source ledger §6](docs/protocol-sources-and-decisions.md#6-update-and-review-procedure), [Architecture §30](docs/ircd-architecture-and-implementation-spec.md#30-sources-and-pinned-research-baseline).
+  - References: [source ledger §6](docs/protocol-sources-and-decisions.md#6-update-and-review-procedure), [Architecture §30](docs/arc-architecture-and-implementation-spec.md#30-sources-and-pinned-research-baseline).
   - Invariants: all affected invariants.
   - Evidence: primary-source checks, exact diffs, decision records, updated hashes/vectors when adopted, and rerun gates.
   - Progress: `scripts/check-release-sources.py` compares structured status records with `conformance/release-source-decisions.toml`; the 2026-09-05 decisions are recorded in the source ledger.
@@ -2985,7 +2989,7 @@ alone.
   privacy/security limits without exaggeration.
   - After: `S10-002` through `S10-011`.
   - Targets: binary version/conformance output, release notes, operator documentation.
-  - References: [Architecture §26.4](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims), [E2EE Appendix B](docs/irc-mls-e2ee-extension.md#appendix-b-security-claim-template).
+  - References: [Architecture §26.4](docs/arc-architecture-and-implementation-spec.md#264-conformance-claims), [E2EE Appendix B](docs/arc-mls-e2ee-extension.md#appendix-b-security-claim-template).
   - Invariants: `PRV-04`, all claimed invariant families.
   - Evidence: claim/document review and automated comparison with completed evidence manifests.
   - Progress: `scripts/check-release-claims.py` compares the binary metadata with the candidate and baseline, lints the ledgers, and exercises decision inspection with disposable keys; finding CLM-1 was fixed.
@@ -2996,7 +3000,7 @@ alone.
   blocks only the claim or release it governs and is never hidden.
   - After: `S10-001` through `S10-012`.
   - Targets: signed release decision and immutable evidence index.
-  - References: [Architecture §§28.9 and 29 phase 10](docs/ircd-architecture-and-implementation-spec.md#289-release-decision), [E2EE §21](docs/irc-mls-e2ee-extension.md#21-verification-and-release-gates).
+  - References: [Architecture §§28.9 and 29 phase 10](docs/arc-architecture-and-implementation-spec.md#289-release-decision), [E2EE §21](docs/arc-mls-e2ee-extension.md#21-verification-and-release-gates).
   - Invariants: all invariant families.
   - Evidence: signed decision enumerates passed, failed, nonapplicable, and limited evidence for the exact build.
   - Progress: `qualify-release.py close` and `verify` and the binary's decision inspection exist; there is no signing key and no complete evidence set, so no decision has been made.
@@ -3007,7 +3011,7 @@ alone.
   inherits its claims automatically.
   - After: `S10-001` through `S10-013`.
   - Targets: release artifact, signatures, SBOM, conformance/evidence manifests.
-  - References: [Architecture §§26.4, 28.9, and 29](docs/ircd-architecture-and-implementation-spec.md#264-conformance-claims).
+  - References: [Architecture §§26.4, 28.9, and 29](docs/arc-architecture-and-implementation-spec.md#264-conformance-claims).
   - Invariants: all invariant families.
   - Evidence: independent artifact/signature/hash verification and zero incomplete applicable roadmap or conformance-ledger task.
   - Progress: not started; it depends on every task above.
@@ -3018,7 +3022,7 @@ Do not implement these as hidden extensions or convenient fallbacks. A future
 change requires the versioning, source-update, vector, migration, and
 negotiation process defined by the specifications.
 
-- Legacy plaintext listeners, STARTTLS, TLS 1.2, spanning-tree IRC server
+- Legacy plaintext listeners, STARTTLS, TLS 1.2, spanning-tree AgenC Relay server
   links, collision merging, reverse DNS, ident, SASL PLAIN, password escrow,
   account recovery, address-derived cloaks, or public-session administration.
 - Work-in-progress multiline, generic chathistory, metadata, account
@@ -3033,8 +3037,8 @@ negotiation process defined by the specifications.
 - Unsupported platforms or filesystems presented as conforming merely because
   they compile.
 
-References: [Architecture §§2.1, 3.2, 4, and 26](docs/ircd-architecture-and-implementation-spec.md#21-adopted-client-specifications),
-[E2EE §§4 and 22](docs/irc-mls-e2ee-extension.md#4-non-goals-and-unavoidable-limits),
+References: [Architecture §§2.1, 3.2, 4, and 26](docs/arc-architecture-and-implementation-spec.md#21-adopted-client-specifications),
+[E2EE §§4 and 22](docs/arc-mls-e2ee-extension.md#4-non-goals-and-unavoidable-limits),
 and [source ledger §3](docs/protocol-sources-and-decisions.md#3-work-in-progress-and-deliberately-excluded-algorithms).
 
 ## Final completion conditions
@@ -3060,11 +3064,11 @@ and [source ledger §3](docs/protocol-sources-and-decisions.md#3-work-in-progres
   - ENC-04 edge witness resolution (2026-09-17, issue #62 under master #35): a durable `witness/v1` row (kind 13, now carrying a permanent `conflict` mark) resolves only under an authenticated continuation. The companion 12.5.1 `witness_resolution(36)` object and the five `EWITNESS` frames are implemented on the edge with `MAX_WITNESS_RESOLUTION_RECORDS`, `MAX_WITNESS_RESOLUTION_BYTES` and `MAX_WITNESS_RESOLUTION_SECONDS`: the blocked edge now sends its ordinary ERESUME, answers `ERESUME OK` with one `EWITNESS REQUEST` per unresolved row in conversation order, reads only the resume and the EWITNESS family while any row stands, and validates each delivered `sequencer_record` at the next contiguous position under the predecessor the verified prefix reached and a credential of the negotiated sequencer key set (the active credential or its overlapping successor) through the ENC-02 authenticator, requiring the last record's recomputed semantic ID to equal the declared new head. One durable transaction then installs that head in `route/v1/` and deletes the row, and only its receipt sends `EWITNESS RESOLVED` and replays the origins; a zero record count retains the row and repeats the request on a reserved wake; a record that authenticates at the expected position under another predecessor marks the row `conflict` durably, blocks that one conversation for good through the client router and resumes the others; every other failure closes the link and retains the row. Evidence: seven focused edge resolution tests, the rewritten gating controls, the e2ee frame, object and kind tests and the storage witness body test; recorded in [the edge witness resolution record](docs/stage-10-edge-witness-resolution.md). Limitations recorded there: the edge side only (no coordinator publication), no clock-derived overlap window, no `reinit_attempt` record through this carrier, one open resolution per link, and the witness still cannot detect a record the coordinator never delivers. The evidence fixed two owner defects in `witness_failure.rs`: a retained durable record claimed every later frame failure as its own witness close and every later durable batch as its own receipt.
   - ENC-14 edge snapshot generations (2026-09-17, issue #59 under master #35): the edge's ESTATE receiver stages every page as one bounded batch of `pending-route/v1/` rows (kind 20) under the pending delivery generation with an `edge-snapshot/v1/` marker (kind 21), refuses over-ceiling declarations before allocation and wrong partitions, order, object identity, digest, cut changes and token expiry retaining nothing, charges every retained body against the backing reservation port, records READY durably before sending it and resends the identical READY after reconnect, swaps the generation only at ACTIVE (with the new cursor in the same batch), migrates the rows into `route/v1/` in bounded batches while live route changes refresh their pending rows, cleans up abandoned generations the same way, and restores READY, ACTIVE (mid-migration) and abandoned generations exactly from sealed storage. Evidence: eleven edge receiver tests, storage row tests, the projection and rollback tests, and the federation edge harness; recorded in [the edge snapshot generations record](docs/stage-10-edge-snapshot-generations.md). Limitations recorded there: no edge-side entitlement check, the byte ceilings are structural guards, native ext4 growth qualification stays REL-08.
   - Secondary 2026-09-01 audit findings (2026-09-17, issue #13, umbrella of master #35): ZDH-C3, C4, C5 and A1 were each re-read against the current tree at `fb618ab` before any change was considered, and all four no longer apply. The mask-list entry setter is the acting operator, and its creation-time fallback is unreachable because a vector containing `+b`, `+e` or `+I` always requests a trusted UTC read that the plan validator then requires (`cc57214`, PR #17). The executable JOIN outcome matrix disposes the creation/discovery ambiguity, and the member ceiling, `+l`, `+i`, key and E2EE outcomes all sit behind hidden-channel authorization (`2eb0ae3` and `539bf24`, PRs #101 and #107). The named LIST selector resolves each name inside the Listed gate, so absent, secret and unlisted names produce the same omission and the same scan charge (`c93ccf3`, PR #110). The invitation interval is rechecked at FINISH and again with a fresh trusted read at durable admission (`6b07e2e` and `d5d5f06`, PR #93). No production source changed. Two regressions pin the assertions the findings named that had no test of their own: `hidden_invite_only_and_banned_joins_report_only_unavailability` covers the `+i` and ban rows of the matrix, and the daemon regression `named_list_answers_a_secret_name_exactly_like_an_absent_name` proves that a named LIST of a secret channel returns exactly the frames of a named LIST of an absent name through the real binary. Every finding's regression was confirmed to fail against a temporary local mutation restoring the audited behaviour and to pass on the unmodified source; recorded in [the secondary audit findings record](docs/stage-10-audit-secondary-findings.md). Limitation recorded there: the Section 13.5 secret-lookup response floor still has no runtime owner and remains RUN-06 (#60).
-  - ENC-05 follow-up leaf-membership decisions (2026-09-17, issue #111 under master #35): companion Section 13.7.3 now reads `epoch` against the disposition, so a `removed` proof names the first epoch in which the leaf is gone (the epoch its `removal_finalization_id` establishes) and a leaf removed by the finalization of epoch `e` states `removed` at `e+1`, above its own `continuing` proof, under the unchanged higher-epoch replacement rule; one device states one claim, its stored proofs at the highest epoch it has reached, continuing only while the device is roster-active and no proof at that epoch is `removed`, so a rotated credential and a superseded leaf both leave the expected set while earlier proofs still identify the ACKs of their own epoch; the expected continuing set of a ReInit attempt counts only claims whose device the approved `IrcKeyPackagePlan` carries into the successor, since `key_package_plan_id` is committed by the `IrcReInitAttemptAuthorization` the old controller threshold signs, so an unplanned claim is answered by the authority that decides membership and no one device can hold a migration open with a leaf key no server can place in the tree; and the failure table gains the `E2EE_EPOCH_STALE` future-epoch row and the `E2EE_BINDING_AUTH_INVALID` row for a `removed` proof naming no retained finalization, with the revoked-device exclusion stated in the expected-set text. Section 13.8 step 5 ties the ACK count to the same approved plan and the `E2EE_EPOCH_STALE` meaning now covers a proof. No BCP 14 clause was added, so the requirement ledger keeps its 251 records. The companion raw SHA-256 moved from `0620b993c63529dca24cc7b2e54eba158ebdf5401ecf54dc081ded73501a76f6` to `b2716e8e7a5531ed0e6f23455d45e51e81c8f901a0ef9a2b5ad3d471f059bf23`; the profile hash moved from `618080b4c92aa6b92196ce823369e5c0dd36b4916049670fd82bdabb09f78f07` (token `YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc`) to `3771bab2f09024644d0468d004af30fba3d00403e4dc6f0205aea20a75265e45` (token `N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU`), the architecture raw SHA-256 moved from `f542c23cab2724a88476d4650a501043bc367c71c66d45dfac676362f1fb0958` to `36d9dd0c2e917dcef49ba6de03ba4fe256c3e61945283a3e7fc4dae80046cd77`, and every pin moved with it. The implementation delta landed with the specification rather than being left open: `expected_continuing` in `crates/agenc-ircd-e2ee/src/membership.rs` returns the highest-epoch claim per device, `activation_coverage` in `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/ack_context.rs` intersects that set with the attempt's approved KeyPackage plan, and `old_group_device` keeps the unbounded claim set it checks before any plan exists. Evidence: the rewritten claim-rule unit test, an excluded leaf whose unplanned claim no longer blocks activation, and a planned device that rotated its leaf key, refused through the superseded credential and admitted through the one it last proved; three release critical regions in `membership.rs` and seven in `ack_context.rs` moved with the code.
+  - ENC-05 follow-up leaf-membership decisions (2026-09-17, issue #111 under master #35): companion Section 13.7.3 now reads `epoch` against the disposition, so a `removed` proof names the first epoch in which the leaf is gone (the epoch its `removal_finalization_id` establishes) and a leaf removed by the finalization of epoch `e` states `removed` at `e+1`, above its own `continuing` proof, under the unchanged higher-epoch replacement rule; one device states one claim, its stored proofs at the highest epoch it has reached, continuing only while the device is roster-active and no proof at that epoch is `removed`, so a rotated credential and a superseded leaf both leave the expected set while earlier proofs still identify the ACKs of their own epoch; the expected continuing set of a ReInit attempt counts only claims whose device the approved `ArcKeyPackagePlan` carries into the successor, since `key_package_plan_id` is committed by the `ArcReInitAttemptAuthorization` the old controller threshold signs, so an unplanned claim is answered by the authority that decides membership and no one device can hold a migration open with a leaf key no server can place in the tree; and the failure table gains the `E2EE_EPOCH_STALE` future-epoch row and the `E2EE_BINDING_AUTH_INVALID` row for a `removed` proof naming no retained finalization, with the revoked-device exclusion stated in the expected-set text. Section 13.8 step 5 ties the ACK count to the same approved plan and the `E2EE_EPOCH_STALE` meaning now covers a proof. No BCP 14 clause was added, so the requirement ledger keeps its 251 records. The companion raw SHA-256 moved from `0620b993c63529dca24cc7b2e54eba158ebdf5401ecf54dc081ded73501a76f6` to `b2716e8e7a5531ed0e6f23455d45e51e81c8f901a0ef9a2b5ad3d471f059bf23`; the profile hash moved from `618080b4c92aa6b92196ce823369e5c0dd36b4916049670fd82bdabb09f78f07` (token `YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc`) to `3771bab2f09024644d0468d004af30fba3d00403e4dc6f0205aea20a75265e45` (token `N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU`), the architecture raw SHA-256 moved from `f542c23cab2724a88476d4650a501043bc367c71c66d45dfac676362f1fb0958` to `36d9dd0c2e917dcef49ba6de03ba4fe256c3e61945283a3e7fc4dae80046cd77`, and every pin moved with it. The implementation delta landed with the specification rather than being left open: `expected_continuing` in `crates/agenc-relay-e2ee/src/membership.rs` returns the highest-epoch claim per device, `activation_coverage` in `crates/agenc-relay-runtime/src/e2ee/coordinator/ops/ack_context.rs` intersects that set with the attempt's approved KeyPackage plan, and `old_group_device` keeps the unbounded claim set it checks before any plan exists. Evidence: the rewritten claim-rule unit test, an excluded leaf whose unplanned claim no longer blocks activation, and a planned device that rotated its leaf key, refused through the superseded credential and admitted through the one it last proved; three release critical regions in `membership.rs` and seven in `ack_context.rs` moved with the code.
   - ENC-09 expired object collection (2026-09-17, issue #67 under master #35): an idle `CompanionObjectMaintenance` owner now physically deletes expired unowned table-22 bodies, deciding only from the ENC-08 accounts (no owning `owner/v1/` reference, a trusted acceptance second, a trusted retirement second, and `now >= retired_at + retention`, where a security proof and ordinary material serve `SEQUENCER_RECORD_RETENTION`, a mailbox payload `WELCOME_RETENTION` and replay state `ACKED_E2EE_EVENT_REPLAY_TARGET_SECONDS`); no uploaded or row-supplied time can accelerate it, and an undated or unaged account is retained rather than collected. One pass charges its work buffer, walks at most 64 accounts and 4 MiB of bodies from a durable `object-expiry/v1` continuation (state record kind 20, E2EE state ceiling 19 to 20), and stages the object delete, its `owner/v1/` account and the advanced continuation in one storage transaction; a candidate crossing the byte budget stops the pass before the cursor names it, and resident bodies and their backing are released only against the receipt. Every candidate is revalidated at capture and again at the receipt against the live account, its retirement second and the resident body's exact content identifier, so a reference accepted after the capture wins and the body stays; a determinate refusal, an indeterminate write, a lost callback and a restart all resume at the last committed page without skipping an undeleted account or charging one twice. Evidence: one storage codec test, fourteen in-process coordinator tests and four sealed-storage federation tests through the real timer, staging and receipt path; recorded in [the object expiry record](docs/stage-10-object-expiry.md). Limitations recorded there: deleting a logical redb row enables reuse without shrinking the file, and native ext4 growth, reuse and cleanup qualification stays owned by STO-03 (#61) and REL-08 (#81).
   - CAP-01 advertised capacity workload (2026-09-17, issue #56 under master #35): the campaign no longer sums its population across the three daemons. Every sample carries per-node `live_client_connections`, `memory_charged_bytes` and `memory_budget_bytes` triples, the record carries the selected workload matrix and the node budget, and the driver, the verifier and their negative fixtures require the smallest client-admitting edge to have held the per-node population against the unchanged default live pool `P = 3,338,666,016`, so clients spread over several nodes can no longer substitute for a per-node limit. The production launcher now selects the Section 19.2 default of 50,000 clients on each client-admitting edge instead of 64 in total; the 4,096-connection harness ceiling is replaced by the published hard maximum; the load population is partitioned into `#load<n>` channels under the 4,096-member default; the generator binds 196 loopback source addresses per edge over 25 /24s so the per-/32 ceiling stays at its hard maximum instead of being raised, and paces registration per source address, which cuts a production warm-up from about eleven hours to about 102 seconds. The campaign also restores the Appendix C.2 four-GiB budget that the Stage 08 fixture lowers to one GiB, which no advertised claim could rest on. Evidence: twelve workload-matrix tests, the runtime occupancy measurement of 50,000 simultaneous idle TLS connections on one node (exactly 65,536 charged bytes each, 3,278,897,152 of `P`, 37,207 resident bytes per connection, every permit returned), the advertised-population profiling matrix for the six linear domain scans, the release qualification fixtures and a 64-client development pilot of the whole campaign; recorded in [the capacity workload record](docs/stage-10-capacity-workload.md). Limitations recorded there: the production campaign, the seven-day soak and the six latency classes at the advertised population were not run, and no production population can qualify until the Section 19.3 conflict in #113 is decided, because the connection-stop class refuses the 45,850th idle client the four-GiB budget admits. The pilot also found a second blocker: with the restored default budget, the peer-loss scenario's SIGKILL left edge B unable to reopen its storage (`storage state is stale or inconsistent` from `verify_guard_pair`, which requires exact repetition between the in-database reservation record and the on-disk rollback guard), while one control run at the fixture's one-GiB budget survived the same kill and completed all eight scenarios; that needs its own prerequisite issue against the storage open path. Neither 300-second pilot finished: the control failed afterwards in the final settle when one admin `STATS` read timed out under concurrent host load, which the controller treats as fatal instead of counting a sample failure.
   - RUN-05 shutdown during active federation recovery (2026-09-17, issue #64 under master #35): three regressions stop a coordinator and an edge through the real four-phase driver while the network is deliberately not drained, so no test needs `wait_for_federation_drain` to reach a clean stop. The coordinator case retains three unacknowledged `edge_outbox` deliveries for an absent edge, holds that edge inside an unfinished FRESUME origin replay, and leaves an abandoned virtual account carrier; `run_shutdown` under a tightened 2/5/5/2 plan completes every phase with no retained problem, no stop-deadline expiry, no stranded session and no invented account-service response, and the sealed database reopens with every retained delivery byte-identical, its keys strictly ordered so no delivery sequence is reused, and no orphaned `auth_transaction` row. A second case withholds a commit receipt so a committed outcome still owes its index readback: the coordinator sends nothing, drain refuses to acknowledge, and both the phase and the committed result arrive only after the receipt. The edge case stops with an unanswered `JOIN` request, a lost link and an armed journal recovery, reporting the physical close from drain, and reopens with every `federation_origin` and `request_result` row byte-identical. Evidence: three in-process tests plus the existing shutdown, `account_shutdown`, `ordinary_batch` and `combined_barriers` suites; recorded in [the shutdown-during-recovery record](docs/stage-10-shutdown-during-recovery.md). No production source changed and no defect was demonstrated. Limitations recorded there: the native ext4 stop deadline and the final physical-allowance guarantee stay bound to STO-03 (#61) and REL-10 (#84), the budgets are proved against a tightened plan rather than the 5/20/10/5 defaults, and the unsubmitted-gathering-batch and cross-profile barrier boundaries stay with their existing step-mode suites.
-  - STO-10 storage guard pair after a kill (2026-09-17, issue #124 under master #35): CAP-01 attributed a killed edge's failed restart to `verify_guard_pair` refusing the database/guard pair. It did not, and this withdraws that attribution: the daemon prints `agenc-ircd: {DaemonError}`, a refusal from `StorageOwner::start` is `DaemonError::Storage` and renders `storage owner failed: ...` alone, and the captured line also carries the `runtime startup failed: ` prefix that only `DaemonError::Runtime` adds, so the storage opened and reconstructed and the runtime refused afterwards. The publication order is also already correct in both directions: every durable operation makes the in-database reservation record durable before it replaces the guard file it names (`write_meta` then `install_reserved_guard`, then `commit_records` then `replace_guard`), so a guard can only lag its record, only by one publication step, and the record stays authoritative while `verify_guard_pair` stays an exact-equality fence. Evidence: a new on-disk crash matrix that abandons a real storage owner at all five `replace_guard` boundaries, on both sides, at both guard publications of a commit and of a checkpoint (40 abandonments) and requires the exact prior or successor state; the reconcilable one-step lag, the same window pushed one step further back which must still refuse, the clean control, and a daemon test pinning both printed lines; recorded in [the storage guard reopen record](docs/stage-10-storage-guard-reopen.md). No production source changed. Limitations recorded there: the CAP-01 failure itself is not reproduced or fixed here and needs a new issue against the edge startup reconstruction (`state_core/reconstruct.rs` alone holds 82 of the runtime's `StaleState` sites), the abandonment is an injected indeterminate failure at a durable boundary rather than a signal, and the offline construction, restore and login-index directories keep their own existing fault campaigns.
+  - STO-10 storage guard pair after a kill (2026-09-17, issue #124 under master #35): CAP-01 attributed a killed edge's failed restart to `verify_guard_pair` refusing the database/guard pair. It did not, and this withdraws that attribution: the daemon prints `agenc-relay-server: {DaemonError}`, a refusal from `StorageOwner::start` is `DaemonError::Storage` and renders `storage owner failed: ...` alone, and the captured line also carries the `runtime startup failed: ` prefix that only `DaemonError::Runtime` adds, so the storage opened and reconstructed and the runtime refused afterwards. The publication order is also already correct in both directions: every durable operation makes the in-database reservation record durable before it replaces the guard file it names (`write_meta` then `install_reserved_guard`, then `commit_records` then `replace_guard`), so a guard can only lag its record, only by one publication step, and the record stays authoritative while `verify_guard_pair` stays an exact-equality fence. Evidence: a new on-disk crash matrix that abandons a real storage owner at all five `replace_guard` boundaries, on both sides, at both guard publications of a commit and of a checkpoint (40 abandonments) and requires the exact prior or successor state; the reconcilable one-step lag, the same window pushed one step further back which must still refuse, the clean control, and a daemon test pinning both printed lines; recorded in [the storage guard reopen record](docs/stage-10-storage-guard-reopen.md). No production source changed. Limitations recorded there: the CAP-01 failure itself is not reproduced or fixed here and needs a new issue against the edge startup reconstruction (`state_core/reconstruct.rs` alone holds 82 of the runtime's `StaleState` sites), the abandonment is an injected indeterminate failure at a durable boundary rather than a signal, and the offline construction, restore and login-index directories keep their own existing fault campaigns.
   - Overload thresholds and the funded default budget (2026-09-17, issue #113, RUN-04 prerequisite under master #35): Section 19.3 classifies overload against the same live protocol permit pool `P` that admission charges, so the four-GiB default's 50,000 idle client base charges were 98.1% of `P` and a default daemon refused its 45,850th client and entered the eviction class with every charge admitted. Widening the classified quantity to `B - H` or `B` is refused: admission already fails at `P`, so a threshold beyond `P` retires the class it names, which would have left only the 80% class against `B - H` and none against `B`. Weakening Section 28.7 to require only memory admission is refused because eviction selects by descending charged queue bytes and an idle client's queue is empty, so the server would have closed its longest-standing connections to recover a threshold its own configured count defined. The default `server.memory_budget_bytes` is now 6,442,450,944, giving `H = 805,306,368`, `D = 117,440,480`, `C = 301,989,888` and `P = 5,217,714,208`: the default population holds 3,276,800,000 bytes, 62.8% of `P`, in the normal class, and the 80%, 90% and 95% classes admit 63,692, 71,654 and 75,635 base charges. The advertised count, the 250,000 hard maximum and the configurable budget range are unchanged, and a lowered budget stays legal with its population bounded by Section 19.3 rather than by `client_connections`. Section 19.2 states the funding rule and Section 19.3 now names `P`. The same work fixed a second defect in that sentence: `select_evictions` projected only a candidate's queue bytes against the recovery mark although closing the connection also returns its base charge, so an empty-queued population was selected without bound and never reached recovery; the projection now subtracts both, and still omits backing beyond them so it can only select one connection too many. Evidence: 1,532 runtime tests including three rewritten eviction cases and two pinned arithmetic cases, the config template, golden and cross-field fixtures, and 56 release-qualification tests with the raised-pool negative fixture; recorded in [the overload threshold record](docs/stage-10-overload-threshold-defaults.md). Limitations recorded there: no production population has run against the new default, and re-running the capacity campaign's peer-loss scenario at 6,442,450,944 belongs to RUN-08 (#134), the successor to the disproved #124.
   - ENC-11 encrypted-profile defect sweep (2026-09-18, issue #76 under master #35): three examiners with no context from the implementation, given only the specifications and the tree at `46840bd`, each attacked one third of the encrypted profile and reported nine findings, one high, seven medium and one low, none a confidentiality or authority break: the coordinator never answered `EWITNESS REQUEST`, so a witnessed skip closed the federation link on every reconnect (#166, high); the edge installed snapshot entries without an entitlement check (#160); E2EE ingress was charged per fragment line (#161); a successor credential was accepted outside its overlap window (#162); live leaf-membership admission verified against the current roster instead of the named one (#164); reload promoted a pending finalization (#167), dropped resulting-council votes (#168) and left pending requests uncharged (#169); and the coordinator never released direct-route references (#173). All nine are fixed with regressions that fail without the fix (PRs #170, #171, #172, #181). Large areas were examined and found sound, including sequencer signer roles and rotation, quorum and sign-once voting, terminal-proof binding, signature and hash domain separation, secret handling, the account carriers, fragment reassembly and the recovery submission carrier.
   - Project-owned redb fork (2026-09-17, issue #55 withdrawn under master #35): the STO-01 bounded write transaction is now a reviewed local source patch vendored at `vendor/redb-4.2.0` from the published 4.2.0 archive, selected by `[patch.crates-io]`, recorded in `conformance/vendored-dependencies.toml` with the published checksum as provenance and the complete patched-tree digest `5e61f6ded5791fac67267a03ed774d96c1057e5f2a3ad2aa8e12b5a321bdbbba`, and verified by `scripts/check-workspace.py`, which now validates every reviewed patch from one table instead of assuming a single one. Section 24.5 states what a reviewed local source patch is, the persistence row names the fork, and the source ledger carries the paragraph; both documents refrozen. Upstream submission is withdrawn: asking a third party to take 2,100 lines of allocator and commit-path change built around this project's disk-reserve rule placed twenty issues behind a decision nobody here can make. Evidence: the storage crate builds and passes 337 tests against the fork with its ordinary API unchanged, the workspace checker and its 26 self-test cases pass; recorded in [the redb fork record](docs/stage-10-redb-fork.md). STO-03 (#61) is unblocked and integrates the bounded API from the fork.
@@ -3072,15 +3076,15 @@ and [source ledger §3](docs/protocol-sources-and-decisions.md#3-work-in-progres
   - ENC-19 to ENC-22 coordinator remediation (2026-09-18, issues #166, #167, #168 and #169 under master #35): four defects of the hostile-coordinator, historical-finality and proof-retention surface, found by an examiner with no context from the implementation. The coordinator now answers `EWITNESS REQUEST` from its retained chain with `EWITNESS BEGIN`, `ENTRY` and `END` (an empty set when it holds nothing, one open resolution per link, bounded by the `MAX_WITNESS_RESOLUTION_*` limits and by the first event the edge has not acknowledged) instead of closing the link as a protocol violation; reload rebuilds terminal proofs from certified sequencer records only, so a request below quorum is no longer a retained finalization and certified aborts and ReInit terminals come back; bootstrap-activation votes replay under the council their signer sits on and an uncountable vote row is reported; and every retained below-quorum terminal request has a row that charges it to its conversation, is refused whole over the quota, and ages out through the ENC-09 collector once its slot is certified. Evidence: bridged real-edge tests for a resolved skip, a confined fork and the pending-event bound, and seven reload and ownership regressions that failed before their fixes; recorded in [the coordinator remediation record](docs/stage-10-coordinator-remediation.md).
   - COV-01 base runtime, domain and wire critical-branch coverage (2026-09-17, issue #66 under master #35): a fresh source-bound branch report over the base slice — StateCore, connections, registration, account routing, administration, reload and shutdown, federation receipts and projections, history and WSS, domain authorization and the wire parser and enum boundaries — identified the uncovered executable decisions this issue owns, and eight new test modules close forty-one critical regions that were below 100 percent at `165570e`, with none regressed. The domain cases prove the suspended-home-peer fence refuses execution and direct targeting without deleting the grace-visible session, that a repeated public cloak refuses a fresh session seed, that a `Deny` direct-message policy outranks the recipient's contact set, that a permanent channel ban needs owner authority and never reaches the kick-only role comparison, and that a mask removal by value resolves only the addition its own mode vector staged; the model cases pair the channel key mode with its verifier, refuse a pending encrypted removal outside its membership, and prove suspension and restoration advance both revisions together or change nothing at all; the replica cases refuse a membership without its session, an invite without its channel and an `Invited` copy that names another channel, and deliver a remote-sender direct message to its hosted recipient alone. The administration cases prove every maintenance key-state field boundary refuses a truncation, that an unassigned operation discriminator is refused before either tuple is read, that the transition checker re-validates both tuples rather than trusting its caller, that twelve administrative arguments are each refused on their own, that `RESTART` reports its own verb, that a maintenance body exports under `NOTE AUDIT MAINTENANCE` with its exact bytes, that an unreconciled audit authority refuses both retention steps without moving the chain, that a frozen export is released only by its own `Observed` event, and that only the three assigned table and record-kind pairs are readable back into the verified chain. Overall workspace branches move from 65.6883 percent to 65.8097 percent and lines from 81.9556 percent to 82.0065 percent under the same `--lib` command; the aggregate 90 percent floor stays with COV-04 (#73). Evidence: recorded in [the base coverage record](docs/stage-10-base-coverage.md). No production source changed and no implementation defect was demonstrated. The evidence did expose a coverage-policy declaration defect: forty regions in this slice declared `metric = "branches"` over spans that emit no branch records at all, so `check-coverage.py` failed them with "matched no executable coverage data" however they were tested. Twenty-four were re-scored to the `regions` metric and now reach 100 percent with their category, span and reason unchanged; the remaining sixteen cannot reach 100 percent under either metric because their only uncovered entries are `?` unwinds on paths that cannot fail, and they are listed for review rather than changed. Limitations recorded there: the workspace figures use `--lib` and so exclude every `crates/*/tests/` target, with per-crate all-target reports supplied for the three wire crates where that matters; `admin-session-check-repeat` stays at 19/20 because its last entry needs the signed administrative handshake driven at a monotonic clock within the confirmation TTL of `u64::MAX`; the six `login_index` rotation regions belong to COV-03 (#70) and were not touched; and 238 regions in this slice, concentrated in the federation coordinator and edge owners, remain below 100 percent for the COV-04 (#73) integrated verdict.
   - RUN-08 edge startup reconstruction after a kill (2026-09-17, issue #134 under master #35): CAP-01's SIGKILL of edge B refused runtime startup with `runtime startup failed: storage owner failed: storage state is stale or inconsistent`, and STO-10 (#124, PR #132) already proved the refusal cannot come from the storage open. **The defect stays unreproduced.** A prefix sweep drives a live edge synchronously through the real writers and reconstructs a fresh `EdgeFederation` from exactly the rows storage holds after **every** commit, which is every durable prefix a kill can leave: 40 connection origins with a federated session-open request on each, so 80 dirty journal identities tear the drain across commits against the 64-row `BATCH_ROWS` bound, and a 40-entry standing projection built out of delivered events plus eight further projection events. Every prefix reconstructs. The sweep also rules the durable reconstruction out by inspection: `state_core/reconstruct.rs` admits `request_result`, `federation_peer`, `federation_origin`, `edge_outbox`, `edge_projection`, `e2ee_object` and `e2ee_state` for identity and sizing only, so none of the four shapes #134 names is visible to it, and every cross-kind coupling the edge restore checks (coverage row with its delivery cursor, barrier head with its part and payload, ACTIVE marker with the peer row that counts its entries) is written in one batch while the three multi-commit drains are same-kind with explicit prefix ordering. No writer ordering changed and no reconciliation was added; every state the reconstruction cannot prove still refuses. What did change is the identification the daemon prints, which is why #124 went to the wrong component: `DaemonError::Reconstruction(ReconstructionSurface, RuntimeError)` keeps the error's meaning and renders `runtime startup failed: {surface} refused the recovered state: {error}`, naming the durable state reconstruction, the recovered session reconciliation, the history reconstruction, or the edge federation restore at one of nine `EdgeRestoreStep` record families (`companion-witness-backing`, `federation-peer-record`, `edge-projection-rows`, `edge-projection-install`, `federation-origin-journal`, `request-result-journal`, `e2ee-state-rows`, `companion-snapshot-restore`, `barrier-install`). Evidence: two prefix sweeps, one end-to-end refusal-naming test that pins the whole operator-visible line, two daemon line tests, and the existing `restart` crash-image suite for the barrier windows; recorded in [the edge startup reconstruction record](docs/stage-10-edge-startup-reconstruction.md). Limitations recorded there: the pilot's own conditions were not reproduced (40 connections, not the advertised 50,000-client population, and the writers are driven directly rather than through TLS links), the peer-loss acceptance re-run needs the production campaign that #113 still blocks, and two arms (`Restore::install_projection`'s `edge.replica.install(...).map_err(|_| invalid())` and `E2eeEdge::finish_snapshot_restore`) swallow an allocation refusal into a stale-state refusal, which the pilot's budget observation does not rule out; the new step label narrows that to `edge-projection-install` or `companion-snapshot-restore` if it recurs.
-  - COV-02 encrypted lifecycle, authentication and crypto critical-branch coverage (2026-09-17, issue #72 under master #35): a fresh source-bound branch report over the encrypted slice — runtime E2EE including the companion loader that pages the E2EE tables at startup, `agenc-ircd-e2ee`, `agenc-ircd-auth` and `agenc-ircd-crypto` — identified the uncovered executable decisions this issue owns, and eight new test modules close eighteen critical regions that were below 100 percent at `ce98ea0`, with none regressed. The crypto case proves one key and one content produce forty-four distinct signatures, one per registered `SignatureDomain`, each verifying only under its own domain and each label unique, non-empty and carrying the prefix its declared encoding requires. The policy cases refuse a later profile version, a later MLS version, a foreign network and one disabled suite in an otherwise well-formed allowed set; they prove generation zero names no previous policy, that a successor must name the identifier it replaces and never changes the conversation kind, and that the device and leaf caps admit exactly their declared ranges with the same two fields accepted at the bottom of those ranges under re-signed approvals. The route cases refuse a later profile before the kind is read, refuse either direct account on a channel route and a pinned authority root on a direct route, and accept a replacement binding carrying no proof of its own while refusing the same binding carrying the initial unanimous approvals. The authorization cases refuse one controller root approving twice through two of its own devices although the list is already canonical, and refuse two distinct controller roots that enrolled one device signature key. The membership case proves a device that states its own removal at the epoch it reached claims nothing while both proofs stay retained and the continuing proof still identifies the ACKs of its own epoch. The finality cases prove a council seat is pinned to one certificate: a device the root dropped from its republished roster cannot vote, and a re-enrolled device does not inherit the seat. The runtime cases check each of the six gated fields of one companion part on its own, admit an ungated sequence only outside the gate's own mutation, require an open gate's rows contiguous from its first sequence, require a READY owner that still owes one profile, refuse to install a gate whose peer stream is incomplete, and prove a barrier resume recovers a lost ordinary prefix only through the exact gate end and only under an acknowledgement that is really one. Overall workspace branches move from 65.8418 percent to 65.9793 percent and lines from 82.0205 percent to 82.0265 percent under the same `--lib` command; the aggregate 90 percent floor stays with COV-04 (#73). Evidence: recorded in [the encrypted coverage record](docs/stage-10-encrypted-coverage.md). No production source changed and no implementation defect was demonstrated. The evidence did expose more of the coverage-policy declaration defect COV-01 recorded: five regions in this slice declared `metric = "branches"` over spans that emit no branch records at all, so `check-coverage.py` failed them with "matched no executable coverage data" however they were tested; all five are re-scored to the `regions` metric and now reach 100 percent with their category, file, span and reason unchanged. Limitations recorded there: the workspace figures use `--lib` and so exclude every `crates/*/tests/` target, with per-crate all-target reports supplied for the three encrypted crates where that matters; `e2ee-verify-policy` stays at 1/2 because its `MAX_POLICY_BYTES` guard cannot be reached while the TLS field bounds cap a constructible policy at about 23.7 KiB; `e2ee-check-policy-profile` stays at 17/18 because an empty `allowed_suites` is unconstructible under `TlsVec<u16, 2, 32>`; `edge-origin-settled-gate` is mis-anchored onto two argument lines of `submitted_identifier` rather than the `settled()` decision its reason names, and moving a reviewed span is a policy change; all three are reported to the open coverage policy issue #135 rather than adjusted; and 308 regions in this slice, concentrated in the coordinator's sync, startup, delivery-owner restore, retention and mailbox owners, remain below 100 percent for the COV-04 (#73) integrated verdict.
+  - COV-02 encrypted lifecycle, authentication and crypto critical-branch coverage (2026-09-17, issue #72 under master #35): a fresh source-bound branch report over the encrypted slice — runtime E2EE including the companion loader that pages the E2EE tables at startup, `agenc-relay-e2ee`, `agenc-relay-auth` and `agenc-relay-crypto` — identified the uncovered executable decisions this issue owns, and eight new test modules close eighteen critical regions that were below 100 percent at `ce98ea0`, with none regressed. The crypto case proves one key and one content produce forty-four distinct signatures, one per registered `SignatureDomain`, each verifying only under its own domain and each label unique, non-empty and carrying the prefix its declared encoding requires. The policy cases refuse a later profile version, a later MLS version, a foreign network and one disabled suite in an otherwise well-formed allowed set; they prove generation zero names no previous policy, that a successor must name the identifier it replaces and never changes the conversation kind, and that the device and leaf caps admit exactly their declared ranges with the same two fields accepted at the bottom of those ranges under re-signed approvals. The route cases refuse a later profile before the kind is read, refuse either direct account on a channel route and a pinned authority root on a direct route, and accept a replacement binding carrying no proof of its own while refusing the same binding carrying the initial unanimous approvals. The authorization cases refuse one controller root approving twice through two of its own devices although the list is already canonical, and refuse two distinct controller roots that enrolled one device signature key. The membership case proves a device that states its own removal at the epoch it reached claims nothing while both proofs stay retained and the continuing proof still identifies the ACKs of its own epoch. The finality cases prove a council seat is pinned to one certificate: a device the root dropped from its republished roster cannot vote, and a re-enrolled device does not inherit the seat. The runtime cases check each of the six gated fields of one companion part on its own, admit an ungated sequence only outside the gate's own mutation, require an open gate's rows contiguous from its first sequence, require a READY owner that still owes one profile, refuse to install a gate whose peer stream is incomplete, and prove a barrier resume recovers a lost ordinary prefix only through the exact gate end and only under an acknowledgement that is really one. Overall workspace branches move from 65.8418 percent to 65.9793 percent and lines from 82.0205 percent to 82.0265 percent under the same `--lib` command; the aggregate 90 percent floor stays with COV-04 (#73). Evidence: recorded in [the encrypted coverage record](docs/stage-10-encrypted-coverage.md). No production source changed and no implementation defect was demonstrated. The evidence did expose more of the coverage-policy declaration defect COV-01 recorded: five regions in this slice declared `metric = "branches"` over spans that emit no branch records at all, so `check-coverage.py` failed them with "matched no executable coverage data" however they were tested; all five are re-scored to the `regions` metric and now reach 100 percent with their category, file, span and reason unchanged. Limitations recorded there: the workspace figures use `--lib` and so exclude every `crates/*/tests/` target, with per-crate all-target reports supplied for the three encrypted crates where that matters; `e2ee-verify-policy` stays at 1/2 because its `MAX_POLICY_BYTES` guard cannot be reached while the TLS field bounds cap a constructible policy at about 23.7 KiB; `e2ee-check-policy-profile` stays at 17/18 because an empty `allowed_suites` is unconstructible under `TlsVec<u16, 2, 32>`; `edge-origin-settled-gate` is mis-anchored onto two argument lines of `submitted_identifier` rather than the `settled()` decision its reason names, and moving a reviewed span is a policy change; all three are reported to the open coverage policy issue #135 rather than adjusted; and 308 regions in this slice, concentrated in the coordinator's sync, startup, delivery-owner restore, retention and mailbox owners, remain below 100 percent for the COV-04 (#73) integrated verdict.
   - COV-05 release-critical region metric decisions (2026-09-17, issue #135 under master #35): a release-critical region declares the metric it is scored under, and COV-01 (#66) left sixteen rows that reach 100 percent under neither. The cause is that `branch_counts` scores only records LLVM emits for instrumented conditional jumps, which a body of `match` arms, slice patterns and `?` propagation never produces, while `region_counts` counts one entry per `?` unwind, so a span holding a propagation whose error arm cannot be produced is equally unscoreable. Each of the sixteen was measured entry by entry against a fresh workspace `--lib` report, a storage all-target report and a whole-workspace all-target report, and decided under one rule: narrow the span only when every uncovered entry is provably unreachable and sits at the span boundary, correct the metric and leave the row failing when any uncovered entry is reachable, and correct the metric and leave the row failing when the unreachable entries are interleaved with the decision the row is reviewed for. Four rows are narrowed and now reach 100 percent: `cap5-mod-maintenanceauditevent-sign` to the audit key selector fence (7/7), `runtime-join-echo-result-channels` to the echo-to-target correspondence and its `Violation::Consistency` refusal (16/16), `cap5-maintenance-preparedmaintenanceaudit-audit-mutation` to the kind-2 audit row itself (8/8), and `s10-cap70-projection-delete` to the barrier row the deletion addresses (3/3). Five stay failing with their remedy named: `s10-cap70-projection-write` 18/22 and `reload-audit-submission-outcome` 23/26 hold reachable entries that are ordinary test work, which withdraws COV-01's classification of both as unreachable unwinds; `cap5-tbs-maintenanceauditeventtbs-encode` 47/62, `cap5-export-export-render-0` 15/17 and `credential-replayed-completion-checkpoint` 45/47 hold unreachable propagations interleaved with their decision and need the production code restructured. The seven `login_index` rotation rows — COV-01's prose says six — take the metric correction alone and stay with COV-03 (#70); the metric correction alone brings `cap5-login-index-load-secrets` to 16/16, so one of COV-03's rows closes here, and the family is scored from the all-target report because a `--lib` report reads the two `login_index.rs` rows as 0/63 and 0/16 where every target built reads 56/63 and 16/16. The audit of the rest of the inventory found nine further rows with the same declaration defect and none in the interim policy: three storage rows are re-scored to `regions` and stay failing on reachable entries, and six in the encrypted, authentication and crypto slice are handed to COV-02 (#72) untouched, three of which need nothing but the metric correction to reach 100 percent. The same check separated a second, unrelated defect the old message had hidden: nine release rows match no coverage data at all because their spans are anchored on doc comments, `static` table rows and `struct` or `enum` declarations rather than on the item they name, and they are recorded for their owners rather than changed. `check-coverage.py` now refuses a branches declaration over a branch-free span with its own message naming it unscoreable as declared rather than untested, leaving `matched no executable coverage data` to mean only an empty span; the self-test grew from 24 to 25 rejection cases. No exemption mechanism was added, because opening the closed `REGION_FIELDS` set so a region can be scored over fewer entries than its span contains is a permanent weakening of the release policy and no narrowed row needs it. Evidence: recorded in [the region metric decisions record](docs/stage-10-region-metric-decisions.md). No production source changed, no floor moved, no reviewed row was deleted and no reachable entry was narrowed away. `check-coverage.py check` over the whole-workspace all-target report now classifies every one of its 665 failure items with no ambiguous message left: one floor (branch coverage 76.04 percent below 90), six unscoreable declarations all in the reserved slice, nine mis-anchored spans and 649 rows below 100 percent. Limitations recorded there: unreachable means unreachable from any caller in the release build rather than proved dead, fourteen rows stay below 100 percent on purpose, and no overall floor is claimed — the integrated verdict remains COV-04's (#73).
   - COV-06 release-critical region anchors (2026-09-17, issue #142 under master #35): a release-critical region names a file and a line span, and that span is what the release claims was reviewed. COV-01 (#66), COV-02 (#72) and COV-05 (#135) each found rows whose span is not the item the row's `reason` describes and each recorded them rather than moving them, because re-anchoring silently asserts a review over lines nobody read. The cause is drift, not authoring error: every one of these spans was correct when it was written and the file then grew above it, and `4bcf230` is the clearest case, inserting thirty-six lines into `witness_failure.rs` and refreshing every affected row's `source_sha256` to the new file while leaving every `start_line` and `end_line` where they were, which defeats the only staleness check the repository has, because `verify-regions.py` compares the hash and checks that `end_line` exists and both pass after such a refresh. Thirty-five rows are re-anchored here onto the item their `id`, `category` and `reason` name, each item read and each row's claim confirmed over the span it now covers, with the move and the re-review recorded in the row's own `reason`: the ten the issue names, of which eight now reach 100 percent including `edge-origin-settled-gate` at 4/4 on the `branches` metric it already declared, and twenty-five more in the same five files. Thirteen stay below 100 percent at their correct span with their owed entries named, decided under COV-05's rule that a span is narrowed only when every uncovered entry is provably unreachable and sits at the boundary; no span here satisfies it, so none is narrowed. Four rows read 100 percent at lines they do not describe and read below 100 percent at the lines they do — `cap97-recent-001-replay-recent` 32/32 to 49/51, `companion-mod-companioncoordinator-batch-applied` 16/16 to 39/40, `cap78-session-sessiontable-query-snapshot-for` 21/21 to 18/19 and `edge-delivery-checkpoint-encode` 1/1 to 29/36 — which is the honest cost of the correction. A second audit, independent of the coverage report, tests whether the item a row's `id` names is defined inside the row's span; over all 1144 release rows it flags 101, of which four are COV-05's deliberate narrowings inside the right function, thirty-four are re-anchored here and sixty-seven in twenty-three other files are recorded untouched for their owners, every one of which matches executable coverage data and so scores silently against an item its row never declared. The interim policy has none. `check-coverage.py` now splits COV-05's remaining message again, keeping `matched no executable coverage data` as the stem of both halves: a span anchored on non-executable text inside a file the report does cover, and a file the report never exercised; the self-test grew from 25 to 26 rejection cases. Evidence: recorded in [the region anchors record](docs/stage-10-region-anchors.md). No production source changed, no floor moved, no reviewed row was deleted and no span was widened. `check-coverage.py check` over the whole-workspace all-target report falls from 648 failure items to 635, with no mis-anchored and no unscoreable row left: one floor (branch coverage 76.19 percent below 90) and 634 rows below 100 percent. Limitations recorded there: a row is re-reviewed only against the item its `id`, `category` and `reason` name; sixty-seven mis-anchored rows are recorded and not moved, so sixty-seven release-critical scores still describe items their rows do not declare; the `id`-names-the-item audit is a lower bound, since a row named for a concept rather than an item cannot be checked that way; no overall floor is claimed and the integrated verdict remains COV-04's (#73); and nothing here prevents the next drift, because `verify-regions.py` still passes for a row whose hash was refreshed without moving its span.
   - COV-07 release-critical region drift (2026-09-17, issue #145 under master #35): COV-06 (#142) moved the ten mis-anchored spans whose drift landed on non-executable text, because those refuse visibly, and recorded sixty-seven more that had drifted onto executable code, where nothing refuses and each row scores silently against an item it never declared. Those are corrected here. The audit is re-run against the item's full extent rather than its declaration line alone and flags sixty-eight rows, and each of the sixty-eight is then decided against the history of `conformance/release-critical-coverage.toml` itself, reading the source at the commit that introduced the row at the row's own span, which says without guessing what the row was anchored to when it was written. Fifty-nine have genuinely drifted and are re-anchored onto the item their `id`, `category` and `reason` name, each item read and each row's claim confirmed over the span it now covers, with the move, the re-review and the resulting score recorded in the row's own `reason`; the ten in `federation/coordinator/companion.rs` are displaced by exactly thirty-four lines and the nine in `witness_failure.rs` by exactly thirty-six, which is one insertion each. Eight of the sixty-eight never named the item the audit guessed — their `id` ends in a word that is also an unrelated helper's name — and one, `storage-execute-restore-command`, had its reviewed body renamed `execute_restore_admitted` behind an identically-signed delegator; those nine keep their spans and now declare the item they have always held. Moving the delegator case onto the six-line entry point was measured and rejected, because that span matches no executable coverage data at all. So sixty-seven was an overcount by nine and an undercount by one: `cap101-sequencer-eligibility-001-selected-credential`, filed by COV-06 as one of COV-05's four deliberate narrowings, is not one of them and had drifted two lines. Nine rows read 100 percent at lines they do not describe and below 100 percent at the lines they do, and six measure zero at their own item — the mailbox expiry timer, the companion snapshot expiry timer, the companion fetch continuation and three quarters of the startup retirement protocol are release-critical and untested, and the policy had been reporting otherwise. Eight rows reach 100 percent only once correctly anchored. Thirty-six stay below 100 percent at their correct span, decided under COV-05's rule that a span is narrowed only when every uncovered entry is provably unreachable and sits at the boundary; none satisfies it, so no span is narrowed and none is widened. The hole is closed rather than patched: every region in both policies now carries `item`, the name of the Rust item the span is anchored to, and `span_sha256` over the span's own bytes. The span hash is invariant under every edit that does not touch the reviewed lines and changes exactly when a re-review is owed, so refreshing a file hash after an insertion above the span — the `4bcf230` operation that produced all of this — is now refused instead of absorbed; the item bind states in the policy what the `id` could only imply. Both are checked by `validate_policy_data`, so both run on every `check` and `self-test` the gate already calls, and `check-coverage.py` gained a Rust item locator (`source_items`) and an `audit` subcommand that runs the audit with no coverage report at all. The self-test grew from 26 to 28 rejection cases, one for a span hash that does not match its lines and one for a row whose item sits outside its span. `verify-regions.py` checks both new fields, and `reanchor.py` may move a span only by finding the exact reviewed text again, verifies the relocated span against the reviewed span hash and the named item, and exits nonzero when a region needs manual re-anchoring. Evidence: recorded in [the region drift record](docs/stage-10-region-drift.md). No production source changed, no floor moved and no reviewed row was deleted. `check-coverage.py check` over the whole-workspace all-target report moves from 635 failure items to 636 — one floor (branch coverage 76.18 percent below 90) and 635 rows below 100 percent — with nine newly failing and eight newly passing, and the audit reports zero drifted rows over all 1165 rows in both policies. Limitations recorded there: thirty-six rows stay below 100 percent and six at zero, with nothing here testing them; the item bind accepts a span that covers its item's declaration without covering the whole item, which is what permits a deliberate narrowing, and a stricter reading flags a further eighty-eight rows across twenty-nine files whose spans are offset from their item by a line or two while still covering its declaration, none of them a row this change touched; the `id`-derived form of the audit is a lower bound and was imprecise in both directions, so the gate reads the declared `item` instead; and no overall floor is claimed, the integrated verdict remaining COV-04's (#73).
   - ENC-07 sequencer signer roles (2026-09-17, issue #58 under master #35): the coordinator holds the active, successor and retired-retained signers from `e2ee.sequencer_private_key_file`, `e2ee.sequencer_successor_private_key_file` and `e2ee.sequencer_retired_private_key_file`, every route pins its accepted context's credential (`route/v1/` gains the pin and a blocked marker), receipts sign only under the pinned issuing credential covering the validation time, terminals only under the receipt's credential through any role, a finalized `SEQUENCER` transition moves the pin, and startup reconciles ownership from `keyset/v1` (kind 11) and `sequencer-history/v1/` (kind 19) rows: continuous succession only, refusal of an omitting set before the overlap deadline, blocked routes at it, release facts, refusal of a released or unrelated retired key, and the `e2ee_routes_blocked` and `e2ee_retired_signer_missing` audit events. A credentials file may open above generation zero after a retirement; `print-onboarding` renders the verified set and omits the four E2EE lines when the profile is disabled. Evidence: fifteen in-process coordinator tests, e2ee, config, daemon, onboarding and observer tests; recorded in [the sequencer signer record](docs/stage-10-sequencer-signers.md). Limitations recorded there: one retired-retained signer, the Appendix C.7/C.8 clauses stay bound to `S10-008`. The daemon evidence fixed a startup stall: the federation loader now continues the reload from the commit receipt of a startup write instead of the next maintenance tick.
-  - ENC-01 public-evidence contract (2026-09-15, issue #36 under master #35): the companion now defines the Section 13.7.2 proof-input and validation-owner tables, the Section 13.7.3 leaf-membership proof (`leaf_membership_proof(37)`, `EGROUP SUBMIT MEMBERSHIP`, `submit_membership(44)`, `store_membership(11)`), the Section 13.7.4 recovery submission carrier (`recovery_submission(35)`, `EGROUP SUBMIT RECOVERY` and `RECOVERY-ELEMENT`, `submit_recovery(42)`, `submit_recovery_element(43)`, result kinds 24 through 27), the Section 12.5.1 edge witness resolution (`witness_resolution(36)`, the `EWITNESS` frames), Section 13.7.5 durability and worked examples, eight Section 16 limits, and the architecture Section 18.4 pending-admission narrowing. The companion raw SHA-256 moved from `398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1` to `79236c985a46205501c64ff45215846288cc0a4a3b8c17884d58055c1c394795`; the profile hash moved from `699c74adfe70c8cc336888e5191d1e09166c5de4406b9c7c8e9a58edadc48159` (token `aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk`) to `d4deba80758c4585437420cd25330682b4fee97c77aea714df238505b08ab38c` (token `1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w`), and every pin moved with it. No production handler changed; the base registry, wire budget and evidence archive are byte-identical. Implementation handoffs: `IrcRecoverySubmission`, `IrcRecoveryElementKind`, `IrcFederationWitnessResolution`, `IrcLeafMembershipProof` and `IrcLeafDispositionKind` object definitions, `IrcWireObjectKind` arms 35 through 37 and the `POLICY`, `RECOVERY-SUBMISSION`, `WITNESS-RESOLUTION` and `LEAF-MEMBERSHIP-PROOF` client literals in `crates/agenc-ircd-client-wire/src/text.rs` belong to `agenc-ircd-e2ee` objects, envelope and wire modules and `agenc-ircd-client-wire` (ENC-02 #51); the `IRC-MLS/1 recovery submission`, `IRC-MLS/1 leaf membership` and `IRC-MLS/1 leaf membership possession` signature domains and the `recovery_submission_id` and `leaf_membership_id` hash domains belong to `agenc-ircd-crypto` and `agenc-ircd-e2ee` (ENC-02 #51); recovery submission and element admission, the Section 13.7.4 reply-code mapping, Closed and Conflict installation and the `submit_recovery`, `submit_recovery_element` opcodes and `recovery_*` result kinds belong to coordinator `ops/recovery.rs` and `terminal_proof.rs` and storage `e2ee_records` rows (ENC-03 #57); `EWITNESS` request, delivery and resolution with `MAX_WITNESS_RESOLUTION_*` belong to edge `sync.rs` and `witness_recovery.rs` (ENC-04 #62); leaf-membership storage, ACK signer identification, duplicate and missing continuing-leaf refusal, `submit_membership` and `store_membership` belong to coordinator `ack_context.rs` and the ReInit activation path (ENC-05 #52). The Section 13.7.2 endpoint-only rows stay outside every server crate.
-  - ENC-06 sequencer signer contract (2026-09-15, issue #37 under master #35): companion Section 9.2.1 defines credential identity as `sequencer_credential_id`, the three signer roles (active, successor, retired-retained), the per-conversation transition instant, receipt and terminal key selection, retirement at the overlap deadline with blocked routes, the durable signer-ownership metadata, the exact signer-release conditions and an eight-phase transition table; the `E2EE_SYNCING` meaning also covers an unavailable pinned signer with the reply registry unchanged. Architecture Sections 22.2, 22.6 and 25.4, Appendix C.7 (`e2ee.sequencer_successor_private_key_file`, `e2ee.sequencer_retired_private_key_file`, the exact credentials-file layout and the atomic refusal table) and Appendix C.8 (`print-onboarding` verifies the configured key set and omits the four E2EE lines as one unit when the profile is disabled) carry the configuration contract, and the operator guide gains the rotation workflow, three TOML examples and the refusal list. The seven new BCP 14 clauses are bound to `S10-008` as unimplemented. The companion raw SHA-256 moved from `79236c985a46205501c64ff45215846288cc0a4a3b8c17884d58055c1c394795` to `0620b993c63529dca24cc7b2e54eba158ebdf5401ecf54dc081ded73501a76f6`; the profile hash moved from `d4deba80758c4585437420cd25330682b4fee97c77aea714df238505b08ab38c` (token `1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w`) to `618080b4c92aa6b92196ce823369e5c0dd36b4916049670fd82bdabb09f78f07` (token `YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc`), and every pin moved with it. No production behaviour changed. Implementation handoffs to ENC-07 (#58): the two new configuration keys and their protected-file parsing in `crates/agenc-ircd-config/src/e2ee.rs`, successor and retired-retained signer installation and receipt-time credential selection in `crates/agenc-ircd-runtime/src/e2ee/coordinator/sequencer_signing.rs` and `ops/sequence.rs`, the credential history, signer-release fact and blocked-route rows in storage, the refusal table and audit event in `crates/agenc-ircd-runtime/src/daemon.rs`, the verified key set in `render_onboarding` (`crates/agenc-ircd-runtime/src/offline.rs`), and removal of the unused duplicate layout in `crates/agenc-ircd-e2ee/src/federation/keyset_file.rs`.
-  - ENC-10 encrypted recovery, rotation and ReInit with real MLS clients (2026-09-17, issue #71 under master #35): the repaired encrypted paths are now driven end to end by real openmls and mls-rs endpoints through the production binary's client surface instead of synthetic MLS bodies. The daemon suite's leaf evidence is now the endpoint's own: `OldLeaf` names the exact signature key each MLS library holds and the `old_credential_hash` of the credential bundle that leaf carries, so every Section 13.7.3 membership proof carries that key's own possession signature and every Commit and ReInit acknowledgement is signed by the private key of the leaf it names; removal proofs name the finalization that removed the leaf. Three daemon scenarios join the Stage 08 suite. Recovery: a member whose live MLS state is lost is removed, rejoins under a fresh leaf through a second claimed KeyPackage and Welcome, decrypts the minutes of the epoch it joined and derives no plaintext from the retained ciphertext of before the loss, and the ten real records of that lineage plus its public close are then re-proved to a coordinator restored under a new recovery epoch through the companion 13.7.4 carrier, where a record that does not continue the chain is refused without installing anything and the genuine record at the same position is still accepted, and `closed` survives a stop and refuses every later submission. Rotation: the advertised sequencer key set moves through three generations while the same conversation runs, a finalized `SEQUENCER` transition is receipted under the old credential and moves the pin, every later receipt verifies under the successor, the coordinator then opens a credentials file whose only credential is generation one, a binding that still pins the retired credential is refused while the same reservation binds under the successor, and a leaf retired from the group still receives the ciphertext but derives no plaintext past its retirement. ReInit: a real RFC 9420 ReInit proposal closes the old group, both endpoints resume through `get_reinit_client`, and the successor activates only once every continuing leaf has acknowledged, while an openmls leaf removed from that mls-rs group in an earlier finalized epoch leaves the expected continuing set, is not required to acknowledge and derives nothing from the successor. Evidence: the three daemon scenarios, the existing real-client, recovery-submission and interoperability suites, and nine new lifecycle rules in `conformance/e2ee-interop-matrix.toml` whose stale final close claim is repaired to name the separately finalized public closing intent; recorded in [the encrypted client proof record](docs/stage-10-encrypted-client-proof.md). No production behaviour changed and no defect was demonstrated; the only production-crate change is a test-only credentials-document builder in the testkit. Limitations recorded there: mls-rs produces a Welcome and a `GroupInfo` for a resumption successor rather than a separate initial-Commit message, so the attempt carries that `GroupInfo` where the coordinator binds only its digest; three of the four successor result digests have no Section 2.2 formula and bind real successor material through the object-identifier hash; the ReInit successor route is not bound, so the `IrcStagedReInit` mailbox carrier is not exercised; the two endpoints that continue through the ReInit are both mls-rs because openmls 0.9 exposes no ReInit proposal or resumption successor, and openmls participates there only as the leaf removed before it; the blocked-route path of a retirement before the overlap deadline stays with the ENC-07 in-process suites; and native release qualification, the seven-day soak and the long fuzz campaigns remain with the root release issues.
-  - RUN-07 Section 19.3 overload class owners (2026-09-17, issue #131 under master #35): the runtime computed all three overload classes and reported them while only part of one acted, so a loaded node kept accepting guests, kept serving expensive queries, kept creating channels and never shed the slow consumer that caused the pressure. Every rung now has an owner reading one live class through the new `StateCoreContext::refresh_overload`, which reclassifies from the budget at the moment of the decision and reports the transition, and which `admit_connection` now shares. At 80 percent a guest registration is refused with the Section 19.1 line for temporarily rejecting a guest, `FAIL * REGISTRATION_REQUIRED :Registration required`, before any session seed exists, and every command in the closed expensive-query class of Section 19.1 — now the public `agenc_ircd_domain::is_expensive_query`, covering `NAMES`, `LIST`, `WHO`, `WHOIS`, `WHOWAS` and `CHATHISTORY` — is refused with the bounded `FAIL <command> SERVER_BUSY :Server is busy`, in both the ordinary command path and the separate history-admission path, while authenticated ordinary traffic continues untouched. At 90 percent a join is refused only when the domain's own external-input vector asks for a channel-instance draw, so creating a channel is stopped while joining an existing one is not, and no domain planning rule changed. At 95 percent `StateCoreContext::shed_overloaded_connections` calls the existing `select_evictions`, marks each selected connection closing and destroys its entire queue with the connection, stopping at the 85-percent recovery mark through the existing hysteresis; a connection already closing is never offered again, no individual frame is ever selected, and a frame shared with another queue keeps its permit until that last queue drops it. The sweep runs after every accepted input and every timer wake and counts what it selected in `StateCoreCounters::connections_evicted`. Both refusals are charged first, as Section 19.1 requires so a rejection cannot become a cheaper error oracle than the work it replaces. Evidence: two ladder tests that walk one live pool up through 80, 90 and 95 percent and back down through 85 against the real actor loop, registration router and command executor — asserting the exact refusal and the absent numerics at each rung, that a join of an existing channel survives 90 percent, that the refused creation left no channel behind, that eviction takes the largest charged queues first and stops at the recovery mark with the smaller queue alive, and that a recovered node accepts again — plus the extended `admission::overload` class-predicate test; recorded in [the overload class owners record](docs/stage-10-overload-class-owners.md). Limitations recorded there: with the 4-GiB default still on this branch the Section 19.2 default population sits at 98 percent of its pool, so the ladder is only correct for that population once RUN-04 (#130) raises the default; the accept rung stays with `TransportAdmission` and a refused accept never reaches the state owner; federated and edge-mode command paths are untouched; and ranking is by queue occupancy alone, exactly as Section 19.3 words it.
+  - ENC-01 public-evidence contract (2026-09-15, issue #36 under master #35): the companion now defines the Section 13.7.2 proof-input and validation-owner tables, the Section 13.7.3 leaf-membership proof (`leaf_membership_proof(37)`, `EGROUP SUBMIT MEMBERSHIP`, `submit_membership(44)`, `store_membership(11)`), the Section 13.7.4 recovery submission carrier (`recovery_submission(35)`, `EGROUP SUBMIT RECOVERY` and `RECOVERY-ELEMENT`, `submit_recovery(42)`, `submit_recovery_element(43)`, result kinds 24 through 27), the Section 12.5.1 edge witness resolution (`witness_resolution(36)`, the `EWITNESS` frames), Section 13.7.5 durability and worked examples, eight Section 16 limits, and the architecture Section 18.4 pending-admission narrowing. The companion raw SHA-256 moved from `398237eccca60c7056774b7565dbcac19c38417828191729f50d8fb86a33fdb1` to `79236c985a46205501c64ff45215846288cc0a4a3b8c17884d58055c1c394795`; the profile hash moved from `699c74adfe70c8cc336888e5191d1e09166c5de4406b9c7c8e9a58edadc48159` (token `aZx0rf5wyMwzaIjlGR0eCRZsXeRAa5x8jppY7a3EgVk`) to `d4deba80758c4585437420cd25330682b4fee97c77aea714df238505b08ab38c` (token `1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w`), and every pin moved with it. No production handler changed; the base registry, wire budget and evidence archive are byte-identical. Implementation handoffs: `ArcRecoverySubmission`, `ArcRecoveryElementKind`, `ArcFederationWitnessResolution`, `ArcLeafMembershipProof` and `ArcLeafDispositionKind` object definitions, `ArcWireObjectKind` arms 35 through 37 and the `POLICY`, `RECOVERY-SUBMISSION`, `WITNESS-RESOLUTION` and `LEAF-MEMBERSHIP-PROOF` client literals in `crates/agenc-relay-client-wire/src/text.rs` belong to `agenc-relay-e2ee` objects, envelope and wire modules and `agenc-relay-client-wire` (ENC-02 #51); the `ARC-MLS/1 recovery submission`, `ARC-MLS/1 leaf membership` and `ARC-MLS/1 leaf membership possession` signature domains and the `recovery_submission_id` and `leaf_membership_id` hash domains belong to `agenc-relay-crypto` and `agenc-relay-e2ee` (ENC-02 #51); recovery submission and element admission, the Section 13.7.4 reply-code mapping, Closed and Conflict installation and the `submit_recovery`, `submit_recovery_element` opcodes and `recovery_*` result kinds belong to coordinator `ops/recovery.rs` and `terminal_proof.rs` and storage `e2ee_records` rows (ENC-03 #57); `EWITNESS` request, delivery and resolution with `MAX_WITNESS_RESOLUTION_*` belong to edge `sync.rs` and `witness_recovery.rs` (ENC-04 #62); leaf-membership storage, ACK signer identification, duplicate and missing continuing-leaf refusal, `submit_membership` and `store_membership` belong to coordinator `ack_context.rs` and the ReInit activation path (ENC-05 #52). The Section 13.7.2 endpoint-only rows stay outside every server crate.
+  - ENC-06 sequencer signer contract (2026-09-15, issue #37 under master #35): companion Section 9.2.1 defines credential identity as `sequencer_credential_id`, the three signer roles (active, successor, retired-retained), the per-conversation transition instant, receipt and terminal key selection, retirement at the overlap deadline with blocked routes, the durable signer-ownership metadata, the exact signer-release conditions and an eight-phase transition table; the `E2EE_SYNCING` meaning also covers an unavailable pinned signer with the reply registry unchanged. Architecture Sections 22.2, 22.6 and 25.4, Appendix C.7 (`e2ee.sequencer_successor_private_key_file`, `e2ee.sequencer_retired_private_key_file`, the exact credentials-file layout and the atomic refusal table) and Appendix C.8 (`print-onboarding` verifies the configured key set and omits the four E2EE lines as one unit when the profile is disabled) carry the configuration contract, and the operator guide gains the rotation workflow, three TOML examples and the refusal list. The seven new BCP 14 clauses are bound to `S10-008` as unimplemented. The companion raw SHA-256 moved from `79236c985a46205501c64ff45215846288cc0a4a3b8c17884d58055c1c394795` to `0620b993c63529dca24cc7b2e54eba158ebdf5401ecf54dc081ded73501a76f6`; the profile hash moved from `d4deba80758c4585437420cd25330682b4fee97c77aea714df238505b08ab38c` (token `1N66gHWMRYVDdCDNJTMGgrT-6Xx3rqcU3yOFBbCKs4w`) to `618080b4c92aa6b92196ce823369e5c0dd36b4916049670fd82bdabb09f78f07` (token `YYCAtMkqprkhls6CM2nlwN02tJFgSWcP2Cvauwn3jwc`), and every pin moved with it. No production behaviour changed. Implementation handoffs to ENC-07 (#58): the two new configuration keys and their protected-file parsing in `crates/agenc-relay-config/src/e2ee.rs`, successor and retired-retained signer installation and receipt-time credential selection in `crates/agenc-relay-runtime/src/e2ee/coordinator/sequencer_signing.rs` and `ops/sequence.rs`, the credential history, signer-release fact and blocked-route rows in storage, the refusal table and audit event in `crates/agenc-relay-runtime/src/daemon.rs`, the verified key set in `render_onboarding` (`crates/agenc-relay-runtime/src/offline.rs`), and removal of the unused duplicate layout in `crates/agenc-relay-e2ee/src/federation/keyset_file.rs`.
+  - ENC-10 encrypted recovery, rotation and ReInit with real MLS clients (2026-09-17, issue #71 under master #35): the repaired encrypted paths are now driven end to end by real openmls and mls-rs endpoints through the production binary's client surface instead of synthetic MLS bodies. The daemon suite's leaf evidence is now the endpoint's own: `OldLeaf` names the exact signature key each MLS library holds and the `old_credential_hash` of the credential bundle that leaf carries, so every Section 13.7.3 membership proof carries that key's own possession signature and every Commit and ReInit acknowledgement is signed by the private key of the leaf it names; removal proofs name the finalization that removed the leaf. Three daemon scenarios join the Stage 08 suite. Recovery: a member whose live MLS state is lost is removed, rejoins under a fresh leaf through a second claimed KeyPackage and Welcome, decrypts the minutes of the epoch it joined and derives no plaintext from the retained ciphertext of before the loss, and the ten real records of that lineage plus its public close are then re-proved to a coordinator restored under a new recovery epoch through the companion 13.7.4 carrier, where a record that does not continue the chain is refused without installing anything and the genuine record at the same position is still accepted, and `closed` survives a stop and refuses every later submission. Rotation: the advertised sequencer key set moves through three generations while the same conversation runs, a finalized `SEQUENCER` transition is receipted under the old credential and moves the pin, every later receipt verifies under the successor, the coordinator then opens a credentials file whose only credential is generation one, a binding that still pins the retired credential is refused while the same reservation binds under the successor, and a leaf retired from the group still receives the ciphertext but derives no plaintext past its retirement. ReInit: a real RFC 9420 ReInit proposal closes the old group, both endpoints resume through `get_reinit_client`, and the successor activates only once every continuing leaf has acknowledged, while an openmls leaf removed from that mls-rs group in an earlier finalized epoch leaves the expected continuing set, is not required to acknowledge and derives nothing from the successor. Evidence: the three daemon scenarios, the existing real-client, recovery-submission and interoperability suites, and nine new lifecycle rules in `conformance/e2ee-interop-matrix.toml` whose stale final close claim is repaired to name the separately finalized public closing intent; recorded in [the encrypted client proof record](docs/stage-10-encrypted-client-proof.md). No production behaviour changed and no defect was demonstrated; the only production-crate change is a test-only credentials-document builder in the testkit. Limitations recorded there: mls-rs produces a Welcome and a `GroupInfo` for a resumption successor rather than a separate initial-Commit message, so the attempt carries that `GroupInfo` where the coordinator binds only its digest; three of the four successor result digests have no Section 2.2 formula and bind real successor material through the object-identifier hash; the ReInit successor route is not bound, so the `ArcStagedReInit` mailbox carrier is not exercised; the two endpoints that continue through the ReInit are both mls-rs because openmls 0.9 exposes no ReInit proposal or resumption successor, and openmls participates there only as the leaf removed before it; the blocked-route path of a retirement before the overlap deadline stays with the ENC-07 in-process suites; and native release qualification, the seven-day soak and the long fuzz campaigns remain with the root release issues.
+  - RUN-07 Section 19.3 overload class owners (2026-09-17, issue #131 under master #35): the runtime computed all three overload classes and reported them while only part of one acted, so a loaded node kept accepting guests, kept serving expensive queries, kept creating channels and never shed the slow consumer that caused the pressure. Every rung now has an owner reading one live class through the new `StateCoreContext::refresh_overload`, which reclassifies from the budget at the moment of the decision and reports the transition, and which `admit_connection` now shares. At 80 percent a guest registration is refused with the Section 19.1 line for temporarily rejecting a guest, `FAIL * REGISTRATION_REQUIRED :Registration required`, before any session seed exists, and every command in the closed expensive-query class of Section 19.1 — now the public `agenc_relay_domain::is_expensive_query`, covering `NAMES`, `LIST`, `WHO`, `WHOIS`, `WHOWAS` and `CHATHISTORY` — is refused with the bounded `FAIL <command> SERVER_BUSY :Server is busy`, in both the ordinary command path and the separate history-admission path, while authenticated ordinary traffic continues untouched. At 90 percent a join is refused only when the domain's own external-input vector asks for a channel-instance draw, so creating a channel is stopped while joining an existing one is not, and no domain planning rule changed. At 95 percent `StateCoreContext::shed_overloaded_connections` calls the existing `select_evictions`, marks each selected connection closing and destroys its entire queue with the connection, stopping at the 85-percent recovery mark through the existing hysteresis; a connection already closing is never offered again, no individual frame is ever selected, and a frame shared with another queue keeps its permit until that last queue drops it. The sweep runs after every accepted input and every timer wake and counts what it selected in `StateCoreCounters::connections_evicted`. Both refusals are charged first, as Section 19.1 requires so a rejection cannot become a cheaper error oracle than the work it replaces. Evidence: two ladder tests that walk one live pool up through 80, 90 and 95 percent and back down through 85 against the real actor loop, registration router and command executor — asserting the exact refusal and the absent numerics at each rung, that a join of an existing channel survives 90 percent, that the refused creation left no channel behind, that eviction takes the largest charged queues first and stops at the recovery mark with the smaller queue alive, and that a recovered node accepts again — plus the extended `admission::overload` class-predicate test; recorded in [the overload class owners record](docs/stage-10-overload-class-owners.md). Limitations recorded there: with the 4-GiB default still on this branch the Section 19.2 default population sits at 98 percent of its pool, so the ladder is only correct for that population once RUN-04 (#130) raises the default; the accept rung stays with `TransportAdmission` and a refused accept never reaches the state owner; federated and edge-mode command paths are untouched; and ranking is by queue occupancy alone, exactly as Section 19.3 words it.
   - RUN-08 edge restore refusal causes (2026-09-17, issue #134 under master #35): the last hypothesis #134 carried was that `Restore::install_projection`'s `edge.replica.install(...).map_err(|_| invalid())` and `E2eeEdge::finish_snapshot_restore` turn an allocation refusal into a stale-state refusal, which would have explained CAP-01's four-GiB run failing where its one-GiB control survived. **It does not hold.** `EdgeReplica::install` returns a closed eight-arm `ReplicaError`, every arm a statement about the restored entries, and the replica is a domain value that never touches `MemoryBudget`, never calls `try_reserve` and has no `MemoryExhausted`, `LimitExceeded` or `Overflow` arm to return; `snapshot_finish_restore` has exactly two `Err` sites, both `E2eeReplyCode::Syncing`, stating only that a READY generation's restored pending-route rows do not add up to its own durable marker's count, and it reads no budget. The companion restore's real admission path is one step earlier — `snapshot_restore_entry` and `WitnessRecovery::restore` reserve through `BackingReservationPort` — and already propagates `MemoryExhausted` unchanged at `e2ee-state-rows`. A different capacity defect was found beside them and is fixed: `Restore::charge` held one pool of `536_870_912` bytes and `1_000_000` rows and charged six record families into it, although those two numbers are the spec-20.8 ceilings the live path admits for **one** projection generation, and an edge holds two generations' entry rows at once because `sync::snapshot_active` switches the peer row without deleting the superseded rows in that batch and `install_projection` requires the active count to match while `pending_generation` is `Some`. A node that crossed no ceiling could therefore be admitted into a durable state its own restore refused, and only a kill would reveal it. A restore that cannot rebuild an admitted projection is not a legitimate refusal: each generation and the companion material now charge against their own copy of the admission ceiling, so the restore fits everything admission admits, no spec ceiling moved, no live path changed, every pool still fails closed with `RuntimeError::LimitExceeded`, and no projection is ever installed partially. The cause-destroying arms are repaired either way. `EdgeRestoreRefusal` gains `cause: EdgeRestoreCause` beside PR #138's step, `ReconstructionSurface::EdgeFederation` prints `edge federation restore at {step} ({cause})` and prints PR #138's exact line unchanged for `Unclassified`, and five arms stopped discarding what they were given: the two replica installs keep their `ReplicaError`, `finish_snapshot_restore` records `CompanionSnapshotIncomplete`, `install_stage` keeps its `BarrierFault` and raises `LimitExceeded` rather than `StaleState` for `BarrierFault::Aggregate`, and `verify_restored_cut` raises `LimitExceeded` for the same two ceilings the live install reports as `Violation::Ceiling`; `Restore::charge`'s own overflow became `Overflow` and a missing `BackingReservationPort` became `InvalidValue`. Evidence: three pool cases driving the accounting directly, two end-to-end cases seeding durable rows through the real storage owner and pinning the whole operator-visible line, one strengthened companion-snapshot case and one added daemon line case; recorded in [the edge restore refusal cause record](docs/stage-10-reconstruction-cause.md). **#134 stays open**: the CAP-01 refusal is still unexplained and still unreproduced, the defect repaired here refuses with `runtime ceiling exceeded` and never with the captured stale-state line, and the peer-loss acceptance re-run still needs the production campaign that #113 blocks.
   - QA-02 sequencer rotation drill repair (2026-09-17, issue #137 under master #35): `run_sequencer_rotation` installed a two-credential rotation document and then pointed `e2ee.sequencer_private_key_file` at the **new** key while configuring no `e2ee.sequencer_successor_private_key_file` at all, which is exactly the set ENC-07 (#58) made the daemon refuse: `e2ee_setup_with_hook` takes the active key to be the key of the credential the file lists first and requires a successor key exactly when the file lists a successor, so the coordinator exited with `DaemonError::E2eeCredentials` before opening a listener and the drill could not start its nodes. The drill carries `#[ignore = "Stage 10 drill; run through the qualification driver"]`, so no ordinary run exercised it and the breakage was invisible until the native campaign; its last recorded pass, "a generation-1 set chaining from the previous credential" in the qualification record, predates ENC-07. The drill now walks the workflow the operator guide documents. The active key keeps the generation it already holds while the incoming key is installed as `sequencer_successor_private_key_file` beside the two-credential document (set generation 1); a finalized `SEQUENCER` transition on the bound channel moves that conversation's pin; and only then does the successor become the active key with the predecessor retained at `e2ee.sequencer_retired_private_key_file` (set generation 2), where a second channel deliberately left pinned to the predecessor keeps that signer required rather than released. Every step now asserts what a client observes instead of that the nodes started: the bootstrap activation's candidate receipt names the generation-zero credential and its signature verifies under exactly that credential's public key, the transition's own receipt is signed under the predecessor and the next finalized record's under the successor, the retirement start is itself the check that the retained key is the key of the one credential the live state still requires because a released or unrelated key refuses startup, `e2ee_routes_blocked` is reported for the route that still pins the predecessor while `e2ee_retired_signer_missing` is not, and a new binding package pinning the retired credential is refused with `E2EE_BINDING_AUTH_INVALID` while the same reservation binds once it pins the credential the advertised set now issues. One further repair was needed: a client session never survives an edge restart and a submission on a channel conversation needs its members present, so the drill re-joins both channels after every restart, without which the first submission after a restart receives no reply at all. The signal outside the native campaign is an ordinary non-ignored test in the same module over the same `KeyPlan` values and the same `install_keys`, which requires the refused shape to exit non-zero and both correct shapes to come up and link, in 24 seconds; the qualification driver's own self-test feeds `validate_record` synthetic record dictionaries and has no fixture, configuration or daemon, so it can only check the closed record schema and the check cannot live there. Audit of the other fourteen ignored Stage 10 drills, each run to completion serially on this host: thirteen configurations are still accepted and their drills pass (restore, disaster restore, rekey, index transition, TLS rotation, federation rotation, backup rotation, audit rotation, compromise, rollback, resynchronization, host hardening, observability); `deletion` writes no configuration the daemon refuses but still fails, in the serial sweep at `authenticated_client` right after a coordinator restart with `FAIL ACCTCREATE UNAVAILABLE` because `DrillNodes::restart` waits for the federation links but not for account authority, and on its own run further in, inside `delete_account`, where an `ACCT` command of the deletion sequence is answered `481 :Permission denied`. That second failure is an authority refusal only the account-deletion path can explain, so both are reported for their own issue rather than patched speculatively and `run_deletion` is left untouched. No production source changed and no production defect was demonstrated; the daemon's refusal was correct and the drill encoded a procedure the daemon does not accept. Evidence: recorded in [the rotation drill repair record](docs/stage-10-rotation-drill-repair.md). Limitations recorded there: the drill's MLS bodies stay synthetic with the real-endpoint rotation left to ENC-10 (#71); the fixture's credentials carry `not_before = 0`, so the retirement is proved at or after the seven-day overlap deadline and a retirement refused before it while a normal route still pins the predecessor stays with the ENC-07 in-process suites; one retired-retained signer is held, so exactly one credential is retired; and native release qualification of the whole drill campaign remains with REL-10 (#84).
   - QA-03 deletion drill repair (2026-09-17, issue #147 under master #35): the Stage 10 account-deletion drill failed in two different places depending on how it was run, and neither was visible outside the native campaign because every Stage 10 drill carries `#[ignore = "Stage 10 drill; run through the qualification driver"]`. **First**, in the serial sweep, `authenticated_client` right after `nodes.restart(&network, 0)` was answered `FAIL ACCTCREATE UNAVAILABLE :Account creation unavailable`: `DrillNodes::restart` waited for the federation links the restart interrupts and returned, while `DrillNodes::restart_all` waits for those links **and** for `wait_for_account_authority` on both edges, and a link is established before an edge can serve an account. That is a harness gap and `restart` now performs the same readiness wait for each edge whose link it waits on. **Second**, run alone, the drill reached `delete_account` and its first `ACCT` line, `ACCT LABEL deletion-check`, was answered `:edge-a.test 481 delete-me :Permission denied`, after which the read waited out its deadline. **The refusal was correct and the drill was wrong.** `delete_account` opened its session with `negotiate_sasl` and then `CAP REQ :standard-replies` alone, while architecture Section 14.6 opens the `ACCT` surface through the Section 9.3 vendor capability and `require_command_capabilities` requires both `agenc.ag/account-controls` and `standard-replies`, returning `NoPrivileges`, which the runtime renders as `481`. The drill was written in `ac0d73f` (2026-09-05) and that requirement arrived eight days later in `0c0128a` (2026-09-13); nothing updated the drill, so it kept negotiating a session the surface is not open on. Every deletion session now requests `standard-replies agenc.ag/account-controls` and asserts the server acknowledged both before it sends an `ACCT` line, and no runtime or domain source changed. The drill now asserts the observable outcome rather than the absence of an error, reading every durable claim from the stopped coordinator's own storage: a new `refuse` step confirms a canonical deletion token no `DELETE START` ever issued, requires `FAIL ACCT BAD_STATE :Command is not valid in the current state`, and then requires both accounts' rows to be what the creation left, so an authorization failure is proved to write nothing; the deletion itself must end on `NOTE ACCT UPDATED :Account setting updated` with the server's own clean close; what it removes is the target's `Account` row reduced to a tombstone with generation 0, no expiry, no references and an empty body with its `OpaqueRecord` row gone; what it retains is the login-index `DeletionTombstone` naming the deleted account with the non-zero expiry of the 30-day login-hash reservation and the unrelated account's credential and policy; and what a later lookup returns is an OPAQUE refusal of the deleted login before and after a rekey under a new master key and rollback guard, on both edges, while the seeded account still authenticates. The signal outside the native campaign is an ordinary non-ignored test in the same module over the same helpers, `deletion_drill_preconditions_are_the_ones_the_daemon_requires`, which requires `ACCT LABEL` over `standard-replies` alone to be refused `481`, the same line over the set the drill now negotiates to be answered `NOTE ACCT UPDATED`, and a coordinator restarted through the repaired `DrillNodes::restart` to leave both edges reporting `active_peers` of 1 read with no wait of its own, in about 20 seconds against the drill's 47. All fifteen ignored Stage 10 drills now pass serially on this host. One unrelated behaviour was found and is **reported for its own issue rather than repaired**: an OPAQUE authentication that reaches an edge whose account authority is momentarily unavailable is answered `904 :SASL authentication failed`, which `SaslNumeric` cannot distinguish from a wrong password because it has no unavailable arm, although Section 9.3 gives `FAIL ACCTCREATE UNAVAILABLE` and `FAIL ACCTCRED UNAVAILABLE` for that state on the other two carriers; the drill works around it by retrying its own session inside `NETWORK_WAIT` after re-waiting for account authority, and no refusal the module proves is read from that carrier. Evidence: recorded in [the deletion drill repair record](docs/stage-10-deletion-drill-repair.md). Limitations recorded there: the deleted account owns no channel and holds no E2EE route, so the Section 14.6 conditions that refuse a confirmation from a session occupying a channel, from an account that would leave a channel ownerless, or from one that has not left every E2EE route stay with the in-process suites; the token-mismatch refusal consumes the challenge on every outcome and would need a second OPAQUE authentication to continue, so only the `BAD_STATE` refusal is driven from the drill; the 30-day login-hash reservation is proved as the durable tombstone row with its expiry rather than by a second creation on the same login; and native release qualification of the whole drill campaign remains with REL-10 (#84).
@@ -3099,7 +3103,7 @@ and [source ledger §3](docs/protocol-sources-and-decisions.md#3-work-in-progres
   - STO-05 incremental online backup (2026-09-18, issue #68 under master #35): `BACKUP CREATE` ran three whole-database passes on the storage owner thread before it yielded once, because `start_backup` called the full `startup_scan` and then `verify_snapshot_accounting` synchronously and `BackupJob::finish` ran the complete `verify_backup` in one call; a commit or read queued behind a backup of a large database waited for each pass. The backup is now the phase machine in `engine/backup_job.rs`: capture (the snapshot slot, inventory, meta membership, the re-authenticated reservation and guard classified as an exact boundary, the header, one redb read transaction, no file), accounting (every row of that one read transaction decrypted and checked through the same `BackupRecordVerification` the post-write pass uses plus the startup scan's per-row domain checks, the logical and exact stream counters recomputed and refusing at their ceilings, references recorded in a scratch, and the last slice binding the accumulators to the authenticated `StateMeta`, so the exact length `O` is fixed before any output exists), resolution of every reference, admission of the temporary at `R(F) + O`, the copy through the same read transaction, the seal that requires exactly `O` bytes, the resumable post-write verification (`BackupStreamVerifier`, the same grammar `verify_backup` now drives to completion) whose last slice must equal the sealed trailer and the captured cut, and the unchanged rename-in-place publication. Each `service_backup` call runs one 4,096-record or 16 MiB slice of one phase and returns, so `owner_step` serves a request beside every slice; a failure in any phase drops the job with its temporary and scratch and publishes nothing; shutdown cancels a backup still in its phases instead of waiting behind it. **One authenticated cut**: accounting and copy read the one read transaction opened at capture, and the proof is byte identity between a quiescent backup and one taken at the same cut with a row committed between every slice of every phase, at the engine and through the real owner. The scratch is the one redb database the backup path writes and it is written only through the fork: `begin_write_bounded` under the `G` allowance with `set_two_phase_commit(true)`, `prepare` and `publish` per slice, `persist_allocator_state_bounded` at close, created with `set_region_size(64 MiB)` because a bounded database is created with regions of at most half its allowance; a refusal anywhere is the determinate `AllowanceRefused` with its phase and the following backup runs. The scratch is not admitted at `R(F) + G`: that would refuse the Section 28.7 backup boundaries whenever the state and backup directories share a filesystem, as the qualification's boundary cases do, and it is unlinked before the output is admitted. Stacked on STO-04 (#65), the scratch runs on its shared `ScratchDatabase` and STO-03's error mappers, keeping only the reference layout and an always-admitting admission private; the full tracked-record replay against the manifests is the whole-database phase this issue removes and is not run by the backup. Evidence: nine engine-level phase tests (byte identity under interleaved commits with every phase in at least two slices, a `BackupRecord` fault on both sides of the first row of each pass and every publication fault refusing with no temporary and the same name retrying, zero and one-byte scratch allowances, ceiling exhaustion in accounting and verification, a dangling reference, the largest legal record, the single slot and an orderly restart in each of the seven phases), four owner-level tests (a request served beside every phase and both reads and commits beside every sliced pass, shutdown cancellation, a dropped receiver, a competing backup) and four through the real `StorageOwner` (the exact authenticated length and the single-cut equality with commits submitted behind the request, refusal at each pass boundary, the `R(F) + O - 1`, equal and plus-one boundaries against the live filesystem, and stale temporaries swept after a kill); recorded in [the incremental backup record](docs/stage-10-incremental-backup.md). Limitations recorded there: the slice budget bounds records and bytes rather than wall time, the scratch's growth is bounded per transaction by `G` and not admitted against the reserve, and native release qualification remains with REL-10 (#84).
   - STO-07 restore and rekey transaction admission (2026-09-18, issue #69 under master #35): Section 19.3 requires restore, rekey, scratch-plan and target-construction databases to apply the same `R(F) + G` gate independently before every scratch or target redb transaction, and the scratch plan applied none: `ConstructionPlanBuilder` held one ordinary redb write transaction across the whole streamed source and committed it once at `finish`, on a filesystem nothing sampled. A new descriptor-bound `ConstructionAdmission` takes a fresh `fstatvfs` sample of the directory that holds the plan or the target immediately before each transaction, computes `R(F)` and UID-available bytes exactly as the live path does, and refuses with `FilesystemRejected(InsufficientCapacity)` below `R(F) + G`; it never lowers `R(F)`. The builder is now a sequence of bounded transactions from the project-owned fork, each `begin_write_bounded(G)` with two-phase commit, `prepare` and `publish`: the plan file's creation, the table reset, slices of source observation and auxiliary indexing, slices of the reverse replay, slices of the unsorted-to-ordered copy with the plan hash carried across them, `reclaim_bounded` and `persist_allocator_state_bounded`, so closing the plan database allocates nothing, and an abandoned builder takes the close duty under a zero allowance so a refused construction writes nothing on drop either. Slices end at the batch record or byte bound, checked before a record's writes. Every target transaction keeps exactly one admission, the engine's own gate and bounded allowance from STO-03 (#61); `ConstructionTarget` only names the initialization, each batch, the finalization and the checkpoint to an installed test observer before the engine begins them. The work found that a bounded database cannot grow under redb's default 4 GiB region, because the account charges a whole doubling extension and the 256-to-512 MiB step alone costs `G`; the fork now exposes `Builder::set_region_size`, STO-03's `live_database_builder` applies 64 MiB regions, and the scratch plan is created through it, so one extension is at most two regions and half of `G`. It also found that `--resume` refused a staging directory stopped before its target existed, which is exactly what a scratch refusal leaves; the resume now builds a fresh target there. A refusal at a target batch leaves the authenticated marker at that batch, and the resumed command's first target transaction is exactly the refused one. `storage restore` reports the refusal as its own `OfflineError::InsufficientCapacity`. Evidence: five tests through the real restore command and the rekey composition with a capacity observer that stands in for an external writer at one named transaction (a construction that fits, a refusal at each of seven scratch-side transactions with no target written and a completing resume, a refusal at the second batch, the finalization and the checkpoint with the exact remainder on resume, and `R(F) + G` minus, equal and plus one at the first scratch and first target transaction after preflight), a growth test that extends a plan file past 256 MiB under an allowance of exactly `G` in steps of at most two regions, and the gate and directory unit tests; recorded in [the restore and rekey admission record](docs/stage-10-restore-rekey-admission.md). Limitations recorded there: the observer replaces a sample rather than filling a filesystem, so the native ext4 boundary stays with the qualification workload and REL-08; a target refusal in the tests is raised by the observer seam rather than by the engine's gate, which STO-03 proves; and `capacity_from_statistics` is repeated privately rather than shared from `platform.rs`.
   - ENC-23 direct route release (2026-09-18, issue #173 under master #35): the coordinator never called `RouteEntitlements::release_direct` on the live path, so it kept and restated every direct route it had ever projected to a Server ID, and PR #171 only fenced that at cut time. Observed under `rust-gdb` before the change: at `EORIGIN DEL` the ledger held one direct entry and no release or departure breakpoint was ever reached. Now `EORIGIN DEL`, `EORIGIN UPDATE` and the `EORIGIN READY` after a replay mark the edge's direct standings departing (`mark_departure`, at most 4,096), and the next committed mutation plan that delivers events examines up to sixteen: a standing whose edge hosts neither account (no live attached companion origin, no base account projection) gets a `route_state_hidden` copy in that plan and `release_departed` drops its references with the commit, observed under `rust-gdb` going from one to zero exactly there; one still hosted keeps its reference and leaves the queue after eight looks. `hosts_direct_account` no longer counts a fenced origin or one left suspended after the edge replayed its origins, and shares `attached_at` with the live release, so a full cut names a direct route exactly when the edge hosts one of its accounts, the rule the ENC-15 edge check verifies. The cut was deliberately not narrowed below hosting because the edge's projected direct routes are the only enforcement of the plaintext downgrade refusal for a bound direct pair. An interrupted cut is republished only while every direct pair it names is still hosted and is otherwise retired for a fresh cut in the next delivery generation, which narrows the 15-minute refusal ENC-15 recorded. Evidence: three real-coordinator scenarios, three bridged regressions that feed the coordinator's rendered lines to the real edge (hosting ends and the route leaves the projection, a reinstalled edge receives no direct route it does not host, an honest cut is accepted across a resync that closes the counted session mid-transfer) and the domain ledger test; recorded in [the direct route release record](docs/stage-10-direct-route-release.md). Limitations recorded there: the release waits for the next event-bearing plan because the coordinator has no mutation of its own, channel routes still leave an edge only through a successor or a cut, a login after a cut is not covered by the edge-side downgrade refusal until the next event or cut, and a change the coordinator has not learned by the next `ERESUME` still republishes the old cut.
-  - COV-04a, federation branch tests (2026-09-18, toward issues #70 and #73 under master #35): tests only, no production change. The coordinator gains misaddressed-request, startup-row and retained-resume cases; the edge gains restored-journal, result-refusal, snapshot-refusal and part-binding restart cases; edge history gains lifecycle, refusal, restored and retention cases. Evidence: `cargo nextest run -p agenc-ircd-runtime --all-features --locked --lib federation` passes 450 tests. The workspace branch-coverage figure has not been re-measured with these tests; the 90 percent floor of #73 stays open.
+  - COV-04a, federation branch tests (2026-09-18, toward issues #70 and #73 under master #35): tests only, no production change. The coordinator gains misaddressed-request, startup-row and retained-resume cases; the edge gains restored-journal, result-refusal, snapshot-refusal and part-binding restart cases; edge history gains lifecycle, refusal, restored and retention cases. Evidence: `cargo nextest run -p agenc-relay-runtime --all-features --locked --lib federation` passes 450 tests. The workspace branch-coverage figure has not been re-measured with these tests; the 90 percent floor of #73 stays open.
   - Reload failure outcome refused by a full request queue (2026-09-19, found by the coverage work under master #35): when an audited reload's success outcome was rejected, the state core rolled the reservation back, reserved the failure outcome's limits and submitted the failure outcome commit. Each limit change wakes the storage owner with a `LimitsChanged` request through the same queue as the commit, and that queue holds two entries, so an owner that had drained neither notice refused the commit as `QueueFull` and the core exited `Indeterminate(StorageIndeterminate)`. `StorageLimitWriter::replace_reservation` makes both limit changes and queues one notice, since the owner reads the limit cell when it wakes. Evidence: `owner/tests/limit_notices.rs` shows the two-call form filling an undrained queue and the replacement leaving a slot; the storage and runtime unit suites pass.
   - Channel revision advanced by an unpersisted change (2026-09-19, found by the coverage work under master #35): a plan whose channel keeps its persisted content, such as `MODE #room +t` on a channel already `+t`, writes nothing and projects nothing, but `apply_prepared` still moved the live channel revision to the plan's resulting revision. The next channel message bound to that live revision, so every edge replica, still holding the persisted revision, refused it with `Revision`, and the channel stayed undeliverable until a real change. `apply_prepared` now keeps the persisted revision of every touched channel the plan does not write. Evidence: `domain/src/federation/tests/projection_revision_drift.rs` (`a_mode_command_without_an_effective_change_keeps_the_channel_revision_edges_hold`) fails before the fix at the revision check; the domain, testkit and runtime unit suites pass after it.
   - Drain acknowledged before the router began its shutdown (2026-09-19, found by the coverage work under master #35): a reload still pending when Drain was requested kept the StateCore run loop from calling `router.begin_shutdown`, and the same pass then activated the reload, computed the activation barrier as clear and acknowledged Drain, so connections were told to shut down and the supervisor moved on while the edge journal retry, the live account exchanges and the pending command observations had not been cancelled. A pass that activates a pending reload now restarts, so the router shutdown guard runs before any Drain or Flush acknowledgement; the activation always takes the pending reload, so the restart happens once per reload and never waits on an outside event, and a router that still declines because a staged authority owns its outcome converges as before. Evidence: `drain_behind_a_pending_reload_is_acknowledged_only_after_the_router_began_shutdown` fails on the old loop with the router shutdown count at zero when the connection is told to shut down; the runtime library suite and the 38 Stage 06 daemon tests pass. Found alongside and not patched: the audited-reload fallback in `submit_reload_failure_after_rejection` notifies the storage owner of a rollback and of a reservation and then submits into the two-slot request queue, so an owner thread that has drained neither turns the determinate `QueueFull` into an indeterminate exit; the unit test that met this under load now asserts only the scheduling-independent invariant.
@@ -3108,11 +3112,11 @@ and [source ledger §3](docs/protocol-sources-and-decisions.md#3-work-in-progres
   - Channel revision drift on edges (2026-09-19, found by review under master #35): the coordinator advances a channel's revision on every mutation of it, an edge refuses a `message_delivered` whose `target_revision` differs from the revision it installed, and several mutations reached an edge holding the channel with no copy that carried the new revision. `EdgeReplica::apply` advanced the channel for an `invited` copy only on an edge hosting the target, so after an INVITE whose target was homed elsewhere every other member edge refused the next channel message with `ReplicaError::Revision`. A member's login or logout rewrites its membership in each joined channel and advances it, and projected nothing about the channel to any edge. An expired invite reached only the edges holding a copy, and a topic, mode or membership change never reached an edge entitled only by an invite. A reprojected invite carried its creation revision, which an edge refuses once the channel has moved on. Now a member edge takes the revision of an `invited` copy without a local projection (Appendix B.5: `invited` uses its explicit resulting revision), which repeats the channel's current revision; an account switch projects one `channel_memberships_recomputed` per joined channel to its member edges, with the recomputed membership; and the derivation ends by sending `channel_policy_changed`, the complete resulting detail that renders nothing, to every edge that keeps a channel the plan advanced and received no copy carrying it. Both sides must run the change. Evidence: `an_invite_hosted_elsewhere_advances_the_channel_on_every_member_edge`, `a_member_switching_account_advances_the_channel_on_every_member_edge`, `an_expired_invite_advances_the_channel_on_edges_that_held_no_copy` and `a_reprojected_invite_repeats_the_current_channel_revision` drive the real derivation into three replicas and failed before the change (the first with `[Err(Revision), Ok, Err(Revision)]` on the next message); `an_invitation_hosted_elsewhere_advances_the_channel_of_a_member_edge` covers the replica arm and its refusals; the domain, runtime federation and testkit suites and the Stage 07 and Stage 08 daemon tests pass. Not measured: coverage of the new projection functions, and the registered-channel case where a login changes the member's role.
   - Invite copies left behind on an edge (2026-09-19, found by review under master #35): `Derivation::hosting_edges` answered a guest principal with `home_of`, which falls back to the session as it was before the plan, so a closed guest still counted as hosted on its home edge. `project_principal_invites_hidden` therefore returned before removing anything: the home edge received `session_hidden` alone, kept the invite row of a session it no longer held, and `EdgeReplica::validate` failed with `DanglingReference`, while the coordinator's standing index kept the key of an invite the domain had already deleted. A guest logging in left its guest invites on the edge in the same way, and an account logging out left the account's invite copies on an edge that no longer hosted the account; once the channel was next touched the edge was sent `channel_hidden` over a remaining child and refused it with `ChildrenRemain`. A guest principal is now hosted only by a live session that is still a guest, and an account switch hides the copies of the principal the session had before it, exactly as a close does, unless the edge still hosts that principal. The removals are `invite_removed(projection_hidden)`; the channel revision the domain advances when it deletes a guest invite reaches the edges that keep the channel through the revision carrier of the entry above. Evidence: `a_closed_guest_leaves_no_invite_behind_on_its_home_edge` (failed with `DanglingReference` on edge A), `a_closed_guest_invite_advances_the_channel_on_every_member_edge`, `a_guest_logging_in_leaves_no_guest_invite_behind` and `an_account_logging_out_hides_its_invite_copy_on_that_edge` drive the real derivation into three replicas, validate each, compare each with the snapshot cut and deliver a following channel message; the domain, runtime federation and testkit suites and the Stage 07 and Stage 08 daemon tests pass.
   - Issue #175 residue (2026-09-18, under master #35): the sweep rounds run after PR #177 pass at 64 test threads beside 64 CPU hogs and fail only at 256 threads beside 128 hogs. Read from their saved output: `idle_capacity` and the recovery test exited on `phase=flush`, the audit sweep inside flush that #180 removed after those rounds ran; two Stage 06 tests failed `public listener did not start` because the fixture gave a debug daemon 20 seconds to open its listener on a host six times oversubscribed, and the bound is now 60 seconds, which costs a passing test nothing because the wait ends when the listener answers; one `FAIL ACCTCREATE UNAVAILABLE` on a single node has no recorded cause, and the refusal-reason event added the same day names the check the next time it occurs.
-  - Workspace version (2026-09-18, under master #35): the tag `v1.0.0-rc.1` names a commit whose crates, logs, `VERSION` reply and `--version` output all said `0.0.0`, because the workspace policy required that placeholder. The workspace, the twelve exact inter-crate pins, the fuzz workspace, both lockfiles, the workspace checker and the interop matrix now say `1.0.0-rc.2`, the version the next candidate tag will carry. The lockfiles change nothing else. Evidence: static checks pass, the daemon builds with `--locked` and prints `agenc-ircd 1.0.0-rc.2`, and the fuzz workspace resolves with `--locked`.
+  - Workspace version (2026-09-18, under master #35): the tag `v1.0.0-rc.1` names a commit whose crates, logs, `VERSION` reply and `--version` output all said `0.0.0`, because the workspace policy required that placeholder. The workspace, the twelve exact inter-crate pins, the fuzz workspace, both lockfiles, the workspace checker and the interop matrix now say `1.0.0-rc.3`, the version the next candidate tag will carry. The lockfiles change nothing else. Evidence: static checks pass, the daemon builds with `--locked` and prints `agenc-relay-server 1.0.0-rc.3`, and the fuzz workspace resolves with `--locked`.
   - Release-source ledger binding (2026-09-18, toward issue #63 under master #35): `conformance/release-source-decisions.toml` binds its decisions to the bytes of `docs/protocol-sources-and-decisions.md`, and the redb fork commit of 2026-09-17 added a paragraph to that document without refreshing the binding, so `scripts/test-release-qualification.py` failed on main unnoticed because no gate ran it. The added paragraph changes no RFC, draft or protocol-repository decision; the binding now names the current bytes, the 56 qualification tests pass, and the Stage 09 gate runs them in its static lane.
   - Refused account requests name their check (2026-09-18, under master #35): about ten different checks answered a login or account request with the same bare failure and logged nothing, which cost most of a day when the concurrent gate surfaced one of them. `account_request_refused` is a new warning event with a closed `reason` field (`AccountRefusalReason`, ten labels, no identifiers); the account service's `fail_route` and `fail_pending`, the edge's two forward failures, the authority's bare refusal at the edge, and the coordinator's principal-mismatch and busy-carrier refusals emit it. The operator guide lists the reasons. Evidence: the event-format unit test and the runtime crate's 1,683 unit tests pass; clippy is clean.
   - Admin test client and refused commands (2026-09-18, found through the concurrent gate under master #35): the daemon answers a refused administrative command with one `FAIL` line and no batch, and answers `FAIL <verb> BUSY` while its audit commit cannot be admitted, which happens in the second after a link comes up on a busy host. The test client's `command_batch` read until `BATCH -` only, so a `FAIL` reply left it waiting for its 20-second socket deadline and the readiness pollers failed with `EAGAIN` (`deletion_drill_preconditions_are_the_ones_the_daemon_requires`, `sequencer_rotation_and_leaf_retirement_hold_the_encrypted_channel`). It now ends a read at a `FAIL` line outside a batch and repeats a command refused as `BUSY` until the deadline. Test support only; the 23 daemon tests that use the admin client pass.
   - Login during an origin update (2026-09-18, found through the concurrent gate under master #35): an edge welcomes a client as soon as its session is bound, before the coordinator acknowledges the origin update that carries the binding. Until that acknowledgement no request can be built for the connection. Commands already wait through the window (`defer_command`); an account carrier did not, so `send_account_carrier` failed and the client read a bare `904`. The window is milliseconds on a quiet disk and seconds when the coordinator's durable write queues behind other I/O, which is how `edge_credential_replacement_survives_coordinator_restart` failed in the concurrent gate. The edge now holds one carrier per connection behind the pending update, with its backing reserved, forwards it when the acknowledgement arrives, ahead of the deferred commands, and drops it when the connection closes. Evidence: three edge tests in `federation/edge/tests/carrier_during_origin_update.rs` (they fail with the deferral disabled), all 453 federation unit tests, and the daemon test pass.
   - Gate lanes (2026-09-18, user directive under master #35): `run-gate.py` no longer runs the manifest as one sequence. `gate_lane` assigns every reviewed command to a lane by its argv (static checks, the three `cargo check` targets, clippy, the workspace tests, coverage, the per-stage test runs, the storage runs, the stage scripts, the feature matrix, fuzz); lanes run concurrently, each Cargo lane in its own directory under `target/lanes/` with a share of the host's build jobs and test threads, and results stay in manifest order. `check-evidence.py` orders command results within a lane instead of across the whole gate. The storage qualification workload measures free space to the byte, so the default nextest profile leaves it out and a new Stage 05 command runs it through the `disk` profile in an exclusive lane after every other lane has ended. Commands that start real daemons (the workspace and coverage test runs and the transcript, soak and load scripts) run one at a time: with all of them overlapping, twelve e2ee daemon tests hit their 20-second socket timeout in one run and a SASL exchange was refused in the next, the load sensitivity issue #175 records. Evidence: two consecutive full gates passed in 14 min 38 s and then, with one shared build for the script lane and the lock narrowed to daemon commands, 11 min 17 s (from 21 min 19 s sequential). The lock is what keeps the gate above about four minutes; it can go when #175 is fixed.
   - Gate wall time (2026-09-18, user directive under master #35): the Stage 09 implementation gate took 37 to 39 minutes on a 64-core host at a load average near 4. Measured from a passing gate log, 888 s was the issue pipeline's Python suite on one core (removed with the pipeline), and 468 s was the workspace suite run twice by `cargo test` and `cargo llvm-cov`, which execute one test binary at a time. The test passes, the coverage pass and the three transcript scripts now use `cargo nextest` (pinned as `cargo-nextest 0.9.145` in the toolchain policy, CI install list and qualification host probe); doctests keep `cargo test --doc`. `.config/nextest.toml` gives the byte-exact storage qualification workload every test thread, so it runs alone inside the same command. `run-gate.py` prints each command's duration. Evidence: `cargo nextest run --workspace --all-features --locked` passed 3,361 tests in 139 s with the qualification workload passing, and `cargo llvm-cov nextest` produced a report that passes the critical coverage policy (branches 76.72%, lines 92.51%, 21 critical regions at 100%).
-  - STO-05 follow-up, deterministic reserve boundaries (2026-09-18, after issue #68 under master #35): the backup `R(F) + O` boundary test placed a one-byte boundary on live free space and lost to the other tests of its own binary, failing the release gate after eight retries; STO-04's owner-open boundaries, the transaction `R(F) + G` boundaries and the engine scratch-gate boundaries had the same shape. `StorageFaultInjector::with_capacity_headroom` now injects the capacity sample (available bytes are the computed reserve plus the headroom) at every admission site that samples through the injector, the four tests use it, and their retry loops and the separate-filesystem skip are removed. A disabled handle returns the `fstatvfs` sample unchanged, so production admission is unchanged, and the qualification workload still measures the real filesystem. Evidence: ten of ten consecutive plain `cargo test -p agenc-ircd-storage --all-features --locked` runs pass with the build target on ext4; recorded in [the incremental backup record](docs/stage-10-incremental-backup.md).
+  - STO-05 follow-up, deterministic reserve boundaries (2026-09-18, after issue #68 under master #35): the backup `R(F) + O` boundary test placed a one-byte boundary on live free space and lost to the other tests of its own binary, failing the release gate after eight retries; STO-04's owner-open boundaries, the transaction `R(F) + G` boundaries and the engine scratch-gate boundaries had the same shape. `StorageFaultInjector::with_capacity_headroom` now injects the capacity sample (available bytes are the computed reserve plus the headroom) at every admission site that samples through the injector, the four tests use it, and their retry loops and the separate-filesystem skip are removed. A disabled handle returns the `fstatvfs` sample unchanged, so production admission is unchanged, and the qualification workload still measures the real filesystem. Evidence: ten of ten consecutive plain `cargo test -p agenc-relay-storage --all-features --locked` runs pass with the build target on ext4; recorded in [the incremental backup record](docs/stage-10-incremental-backup.md).

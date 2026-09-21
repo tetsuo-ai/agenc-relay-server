@@ -15,7 +15,7 @@ READY and says a direct route "is never projected merely because the edge
 hosts a session for either Account ID". The receiver staged whatever route a
 cut named. `retain_entry` now refuses the whole snapshot with `E2EE_SYNCING`
 before anything of the entry is charged or retained, unless
-`cut_route_entitled` (`crates/agenc-ircd-runtime/src/e2ee/edge/entitlement.rs`)
+`cut_route_entitled` (`crates/agenc-relay-runtime/src/e2ee/edge/entitlement.rs`)
 accepts the route:
 
 - a channel route needs `EdgeFederation::holds_channel`: the hosted channel
@@ -73,7 +73,7 @@ quota reservation", and counts signature verifications per verification.
 `E2eeSignature` token: a 4 MiB control object moved at about 11,760 bytes per
 second and cost 1,427 verifications.
 
-`E2eeEdge::ingress_charge` (`crates/agenc-ircd-runtime/src/e2ee/edge/ingress.rs`)
+`E2eeEdge::ingress_charge` (`crates/agenc-relay-runtime/src/e2ee/edge/ingress.rs`)
 now classifies each line before admission from its one bounded fragment tag:
 
 - a command line, a fragment zero, a malformed tag and a fragment behind no
@@ -120,7 +120,7 @@ the row, like any other record under a key the link did not negotiate.
 
 ## Evidence
 
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/snapshot.rs`: an unentitled
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/snapshot.rs`: an unentitled
   channel entry and an unentitled direct entry each refuse the snapshot with
   nothing of the entry retained and nothing staged, and the frame failure
   abandons the generation before any READY; the same channel cut installs once
@@ -129,20 +129,20 @@ the row, like any other record under a key the link did not negotiate.
   host closed after the transfer opened and refused when it closed before;
   a cut may restate a projected pair and may not change it. The receiver's
   existing tests now host every channel they feed.
-- `crates/agenc-ircd-runtime/src/federation/edge/tests/pending_generation.rs`:
+- `crates/agenc-relay-runtime/src/federation/edge/tests/pending_generation.rs`:
   the channel detail, account projection and session accounts of the active
   and of the installing base generation.
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/witness_resolution.rs`: an
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/witness_resolution.rs`: an
   authentic continuation for a channel the base no longer hosts closes the
   link and retains the row; a successor record at the opening, inside and at
   the close of its window stages its installation, the active credential has
   no window, and a successor record before, past and far past the window, or
   on a link that never negotiated it, is refused with the row retained.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync.rs` and
-  `crates/agenc-ircd-domain/src/e2ee/tests/projection.rs`: a full cut drops a
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sync.rs` and
+  `crates/agenc-relay-domain/src/e2ee/tests/projection.rs`: a full cut drops a
   direct reference the edge no longer hosts and keeps its channel standing;
   `fence_direct` touches one edge's direct references only.
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/ingress.rs`: one
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/ingress.rs`: one
   three-fragment object costs one command token, one signature token and its
   continuation bytes; a fragment behind no accepted fragment zero is a
   command line and is refused `E2EE_INVALID_FRAGMENT`, and another
@@ -151,11 +151,11 @@ the row, like any other record under a key the link did not negotiate.
   zero; a `MAX_LIVE_OBJECT` is admitted at once and a
   `MAX_SEQUENCER_RECORD_OBJECT` inside the floor's time without touching the
   line bucket.
-- `crates/agenc-ircd-e2ee/src/tests/sequencer.rs` and
-  `crates/agenc-ircd-e2ee/tests/record_authentication.rs`: `credential_at`
+- `crates/agenc-relay-e2ee/src/tests/sequencer.rs` and
+  `crates/agenc-relay-e2ee/tests/record_authentication.rs`: `credential_at`
   before, at the opening, inside, at the close and past the window, and the
   signed second of every record arm.
-- `crates/agenc-ircd/tests/stage_eight_e2ee.rs`: the daemon suite passes
+- `crates/agenc-relay-server/tests/stage_eight_e2ee.rs`: the daemon suite passes
   under the relaxed pacer.
 
 ## Limitations

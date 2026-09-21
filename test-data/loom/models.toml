@@ -1,5 +1,5 @@
 schema_version = 1
-test = "crates/agenc-ircd-runtime/tests/loom_models.rs"
+test = "crates/agenc-relay-runtime/tests/loom_models.rs"
 loom = "0.7.2"
 preemption_bound = 2
 max_branches = 20000

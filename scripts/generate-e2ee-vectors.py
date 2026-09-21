@@ -11,7 +11,7 @@ Two sets are written. The identity set under `test-data/vectors/e2ee/identity`
 covers Section 8 objects. The recovery set under
 `test-data/vectors/e2ee/recovery` covers the Section 12.5.1 witness
 resolution, the Section 13.7.3 leaf-membership proof and the Section 13.7.4
-recovery submission as complete `IrcWireObject` envelopes, with sequencer
+recovery submission as complete `ArcWireObject` envelopes, with sequencer
 records and a close authorization as elements. The recovery set is
 synthetic public-envelope evidence: its chain is structurally valid under the
 contract's encoding, identifier and signature rules, but it is not a real
@@ -90,16 +90,16 @@ def public(private: Ed25519PrivateKey) -> bytes:
 
 
 def irc_signature_input(label: str, content: bytes) -> bytes:
-    """`IrcSignatureInput { opaque label<1..255>; opaque content<0..2^24-1>; }`."""
+    """`ArcSignatureInput { opaque label<1..255>; opaque content<0..2^24-1>; }`."""
     return opaque(label.encode(), 255) + opaque(content, 0xFFFFFF)
 
 
 def sign(private: Ed25519PrivateKey, label: str, tbs: bytes) -> bytes:
-    return private.sign(irc_signature_input(f"IRC-MLS/1 {label}", tbs))
+    return private.sign(irc_signature_input(f"ARC-MLS/1 {label}", tbs))
 
 
 def semantic_id(label: str, encoding: bytes) -> bytes:
-    return hashlib.sha256(f"IRC-MLS/1 {label}".encode() + encoding).digest()
+    return hashlib.sha256(f"ARC-MLS/1 {label}".encode() + encoding).digest()
 
 
 def mls_varint(value: int) -> bytes:
@@ -332,7 +332,7 @@ def build_identity() -> tuple[dict[str, bytes], dict[str, str], dict[str, object
 
 # --- recovery, membership and witness-resolution set --------------------------
 
-# IrcWireObjectKind discriminants used by the recovery set.
+# ArcWireObjectKind discriminants used by the recovery set.
 KIND_COMMIT_ACK = 4
 KIND_CLOSE_AUTHORIZATION = 16
 KIND_SEQUENCER_RECORD = 25
@@ -347,9 +347,9 @@ KIND_NAMES = {
     KIND_WITNESS_RESOLUTION: "witness_resolution",
     KIND_LEAF_MEMBERSHIP_PROOF: "leaf_membership_proof",
 }
-CANDIDATE_RECORD = 1  # IrcSequencerRecordKind.candidate_record
-RECORD_ELEMENT, CLOSE_ELEMENT = 1, 2  # IrcRecoveryElementKind
-CONTINUING, REMOVED = 1, 2  # IrcLeafDispositionKind
+CANDIDATE_RECORD = 1  # ArcSequencerRecordKind.candidate_record
+RECORD_ELEMENT, CLOSE_ELEMENT = 1, 2  # ArcRecoveryElementKind
+CONTINUING, REMOVED = 1, 2  # ArcLeafDispositionKind
 ED25519_SCHEME = 0x0807
 
 CONVERSATION = bytes([0x43] * 32)
@@ -368,7 +368,7 @@ SEQUENCER_SEED = 50
 
 
 def wire_object(kind: int, body: bytes) -> bytes:
-    """`IrcWireObject { uint16 profile_version; IrcWireObjectKind kind; opaque body<1..4194298>; }`."""
+    """`ArcWireObject { uint16 profile_version; ArcWireObjectKind kind; opaque body<1..4194298>; }`."""
     return u16(1) + u8(kind) + opaque(body, 4_194_298)
 
 

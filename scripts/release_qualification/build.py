@@ -122,7 +122,7 @@ def validate_build(directory: Path, record: dict[str, Any], source: dict[str, st
     if record["target"] not in TARGETS or record["features"] != ["history", "wss"]:
         raise QualificationError("build has an undeclared target or feature set")
     immutable_image(record["image"])
-    if record["binary"] not in ("agenc-ircd", "arcd") or record["sbom"] != "sbom.spdx.json" or record["notices"] != "THIRD-PARTY-NOTICES.txt":
+    if record["binary"] != "arcd" or record["sbom"] != "sbom.spdx.json" or record["notices"] != "THIRD-PARTY-NOTICES.txt":
         raise QualificationError("noncanonical build artifact name")
     for name in ("binary", "sbom", "notices", "archive"):
         expected = require_hash(record[f"{name}_sha256"], name)

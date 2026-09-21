@@ -19,7 +19,7 @@ vendored source" throughout.
 
 ## The phase machine
 
-`crates/agenc-ircd-storage/src/engine/backup_job.rs` owns the online backup
+`crates/agenc-relay-storage/src/engine/backup_job.rs` owns the online backup
 as a phase machine. `StorageEngine::start_backup` captures the cut and every
 later `service_backup` call runs one bounded slice of one phase and returns,
 so `owner_step` admits a queued request beside every slice exactly as it does
@@ -148,7 +148,7 @@ name only if it still refers to the verified inode.
 
 ## Tests
 
-Engine level, `crates/agenc-ircd-storage/src/engine/backup_job/tests/phases.rs`:
+Engine level, `crates/agenc-relay-storage/src/engine/backup_job/tests/phases.rs`:
 the byte-identity proof under interleaved commits with every phase serviced
 in at least two slices; a `BackupRecord` fault on both sides of the first row
 of each pass (accounting, copy, verification) refusing with no temporary, no
@@ -160,12 +160,12 @@ dangling reference refused during resolution; the largest legal record
 forming its own slice in every pass; the single snapshot slot against a second
 backup and a checkpoint, and an orderly restart in each of the seven phases
 leaving nothing behind. Owner level,
-`crates/agenc-ircd-storage/src/owner/tests/backup_phases.rs`: a read or a
+`crates/agenc-relay-storage/src/owner/tests/backup_phases.rs`: a read or a
 commit served beside every phase and both beside every sliced pass, the cut's
 row count unchanged; shutdown cancelling an active backup with its temporary
 gone; a dropped receiver neither cancelling nor leaking; a competing backup
 waiting for the slot. Through the real `StorageOwner`,
-`crates/agenc-ircd-storage/tests/stage_five_completion/backup_phases.rs`: a
+`crates/agenc-relay-storage/tests/stage_five_completion/backup_phases.rs`: a
 backup that fits writes exactly the authenticated length and equals the
 single-cut stream with commits submitted behind it; a refusal at each pass
 boundary leaving no temporary with the same name retrying; the `R(F) + O - 1`,
@@ -209,7 +209,7 @@ reachable only through the test-only injector; a disabled handle, the only
 kind the daemon constructs, returns the `fstatvfs` sample unchanged, so
 production admission is byte-for-byte what it was. The qualification
 workload still measures the real filesystem with ballast, which is its
-purpose. Evidence: the plain `cargo test -p agenc-ircd-storage --all-features
+purpose. Evidence: the plain `cargo test -p agenc-relay-storage --all-features
 --locked` suite, with its default in-process parallelism and the build target
 on ext4 (the qualification workload does not pass on the XFS data volume
 before or after this change), passed ten of ten consecutive runs.

@@ -69,8 +69,8 @@ result=Err(DatabaseRejected) final_exists=false retry=Ok(BackupReceipt { stream_
   length, record count, and digest.
 - The audit regression above is retained with its baseline output.
 
-Commands: `cargo test -p agenc-ircd-storage --locked --lib platform::tests`,
-`cargo test -p agenc-ircd-storage --locked --test stage_five stage_five_completion::audit_backup_rename_error_leaves_final_name_and_blocks_retry -- --exact`,
-`cargo test -p agenc-ircd-storage --locked --test stage_five real_startup_and_backup_inject_read_and_publication_boundaries`,
-`cargo test -p agenc-ircd-storage --all-features --locked`, workspace Clippy,
+Commands: `cargo test -p agenc-relay-storage --locked --lib platform::tests`,
+`cargo test -p agenc-relay-storage --locked --test stage_five stage_five_completion::audit_backup_rename_error_leaves_final_name_and_blocks_retry -- --exact`,
+`cargo test -p agenc-relay-storage --locked --test stage_five real_startup_and_backup_inject_read_and_publication_boundaries`,
+`cargo test -p agenc-relay-storage --all-features --locked`, workspace Clippy,
 and the stage-nine gate.

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![no_main]
 
-use agenc_ircd_client_wire::websocket_transport::{
+use agenc_relay_client_wire::websocket_transport::{
     HTTP_UPGRADE_BYTES, parse_upgrade, upgrade_response,
 };
 use libfuzzer_sys::fuzz_target;

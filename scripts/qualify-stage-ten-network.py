@@ -71,9 +71,9 @@ def main() -> None:
     tests.run("federation", "stage_seven_federation", "clients_on_two_edges_share_channels_through_the_coordinator")
     tests.run("mls-engines", "stage_eight_e2ee", "encrypted_clients_on_two_edges_bind_a_channel_through_the_coordinator")
     tor_network(root, attempt, tests, image)
-    command(root, attempt, "native-tor-refusals", ["cargo", "test", "-p", "agenc-ircd-runtime", "--test", "tor_client", "--all-features", "--locked"])
-    command(root, attempt, "account-canaries-and-timing", ["cargo", "test", "-p", "agenc-ircd-auth", "--test", "stage_four_security", "--locked"])
-    command(root, attempt, "client-trust-and-rendering", ["cargo", "test", "-p", "agenc-ircd-testkit", "--test", "client_policy", "--locked"])
+    command(root, attempt, "native-tor-refusals", ["cargo", "test", "-p", "agenc-relay-runtime", "--test", "tor_client", "--all-features", "--locked"])
+    command(root, attempt, "account-canaries-and-timing", ["cargo", "test", "-p", "agenc-relay-auth", "--test", "stage_four_security", "--locked"])
+    command(root, attempt, "client-trust-and-rendering", ["cargo", "test", "-p", "agenc-relay-testkit", "--test", "client_policy", "--locked"])
     finish(attempt, "interoperability", {name: True for name in (
         "weechat", "irssi", "native_accounts", "openmls", "mls_rs", "federation", "tls", "wss", "tor_v3",
         "socks_isolation", "packet_capture", "dns_leaks", "metadata_canaries", "timing_classes", "trust_presentation", "safe_rendering")})

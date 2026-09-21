@@ -39,7 +39,7 @@ EXPECTED_AUTH_MODULES = {
 }
 EXPECTED_CRYPTO_DEPENDENCIES = {
     "aws-lc-rs",
-    "agenc-ircd-types",
+    "agenc-relay-types",
     "chacha20poly1305",
     "ed25519-dalek",
     "getrandom",
@@ -52,8 +52,8 @@ EXPECTED_CRYPTO_DEPENDENCIES = {
     "zeroize",
 }
 EXPECTED_AUTH_DEPENDENCIES = {
-    "agenc-ircd-crypto",
-    "agenc-ircd-types",
+    "agenc-relay-crypto",
+    "agenc-relay-types",
     "argon2",
     "opaque-ke",
     "opaque-sha2",
@@ -133,9 +133,9 @@ EXPECTED_SOURCE_PATCH = {
 }
 EXPECTED_VECTOR_FILES = {
     "test-data/vectors/stage-four-crypto-v1.vectors": {
-        "sha256": "a3c88fc13fdf701d4ca5b2798b2a8db43269e2b1e3debd9ade81ea256b740ede",
-        "generator": "crates/agenc-ircd-crypto/tests/generate_stage_four_vectors.rs",
-        "generator_sha256": "12c23093367bc95fde8381accef1340ee977974c279948772c49d270ecdaa37a",
+        "sha256": "a554fcd579034512993c001fa17d8480d1e895ed62e63896fe7a55171b5a3c7c",
+        "generator": "crates/agenc-relay-crypto/tests/generate_stage_four_vectors.rs",
+        "generator_sha256": "d86744c242c53385ba02991f1c0766ce965df7d00c555adfdd12a3c24a8a21cf",
         "records": {
             "VEC-S04-003-SHA256",
             "VEC-S04-003-LOGIN-HMAC",
@@ -147,18 +147,18 @@ EXPECTED_VECTOR_FILES = {
         "source": "project-reference",
     },
     "test-data/vectors/stage-four-opaque-v1.vectors": {
-        "sha256": "a0134c2b46c08def5d5081a58d2a6212b3d90fe4ef55f9242f563452440abf3f",
-        "generator": "crates/agenc-ircd-auth/tests/generate_stage_four_vectors.rs",
-        "generator_sha256": "3f1afff29e1f54e6d1eda0fd24b58f69742f0c5bc2dffb20f7c70f707d378270",
+        "sha256": "9b68ed31f200c744c269ca40b912bdc12432186209036594bd15d197d81277f7",
+        "generator": "crates/agenc-relay-auth/tests/generate_stage_four_vectors.rs",
+        "generator_sha256": "5990442772f64318377cc12a15d2eb5f11d15e934fd9b324d28e8e54dbf6270d",
         "records": {"VEC-S04-007-OPAQUE"},
         "source": "opaque-ke-4.0.1-reference",
     },
 }
 EXPECTED_CONSTANT_TIME_SURFACES = {
-    "crates/agenc-ircd-auth/src/service.rs",
-    "crates/agenc-ircd-auth/src/opaque.rs",
-    "crates/agenc-ircd-crypto/src/hash.rs",
-    "crates/agenc-ircd-crypto/src/storage.rs",
+    "crates/agenc-relay-auth/src/service.rs",
+    "crates/agenc-relay-auth/src/opaque.rs",
+    "crates/agenc-relay-crypto/src/hash.rs",
+    "crates/agenc-relay-crypto/src/storage.rs",
     "vendor/opaque-ke-4.0.1/src/opaque.rs",
     "vendor/opaque-ke-4.0.1/src/key_exchange/tripledh.rs",
 }
@@ -383,8 +383,8 @@ def validate_profile(document: dict[str, object]) -> None:
 def validate_modules(root: Path) -> None:
     """Require the closed module sets, safe-Rust policy, and crate boundaries."""
     roots = {
-        root / "crates/agenc-ircd-crypto/src": EXPECTED_CRYPTO_MODULES,
-        root / "crates/agenc-ircd-auth/src": EXPECTED_AUTH_MODULES,
+        root / "crates/agenc-relay-crypto/src": EXPECTED_CRYPTO_MODULES,
+        root / "crates/agenc-relay-auth/src": EXPECTED_AUTH_MODULES,
     }
     sources: list[str] = []
     for source_root, expected_modules in roots.items():
@@ -418,8 +418,8 @@ def validate_modules(root: Path) -> None:
 
 def validate_manifests(root: Path, profile: dict[str, object]) -> None:
     """Check exact direct dependency sets, features, sources, and checksums."""
-    crypto = load_toml(root / "crates/agenc-ircd-crypto/Cargo.toml")
-    auth = load_toml(root / "crates/agenc-ircd-auth/Cargo.toml")
+    crypto = load_toml(root / "crates/agenc-relay-crypto/Cargo.toml")
+    auth = load_toml(root / "crates/agenc-relay-auth/Cargo.toml")
     if crypto.get("features") != {"default": [], "wss": ["dep:aws-lc-rs"]}:
         raise StageFourError("handshake digest adapter must remain optional and default off")
     if crypto.get("dependencies", {}).get("aws-lc-rs") != {"workspace": True, "optional": True}:
@@ -595,9 +595,9 @@ def validate_vectors(root: Path) -> None:
         ):
             raise StageFourError(f"golden vector generator is not manual and digest-bound: {generator_path}")
         production_adapter = (
-            "agenc_ircd_crypto::"
-            if "agenc-ircd-crypto" in str(generator_path)
-            else "agenc_ircd_auth::"
+            "agenc_relay_crypto::"
+            if "agenc-relay-crypto" in str(generator_path)
+            else "agenc_relay_auth::"
         )
         if production_adapter in generator_source:
             raise StageFourError(f"golden vector generator calls a production adapter: {generator_path}")
@@ -622,9 +622,9 @@ def validate_vectors(root: Path) -> None:
             if hashlib.sha256(output).hexdigest() != digest:
                 raise StageFourError(f"golden vector output digest differs: {record_id}")
 
-    crypto_test = root / "crates/agenc-ircd-crypto/tests/stage_four_vectors.rs"
-    auth_test = root / "crates/agenc-ircd-auth/tests/stage_four_vectors.rs"
-    security_test = root / "crates/agenc-ircd-auth/tests/stage_four_security.rs"
+    crypto_test = root / "crates/agenc-relay-crypto/tests/stage_four_vectors.rs"
+    auth_test = root / "crates/agenc-relay-auth/tests/stage_four_vectors.rs"
+    security_test = root / "crates/agenc-relay-auth/tests/stage_four_security.rs"
     for path in (crypto_test, auth_test, security_test):
         if not path.is_file():
             raise StageFourError(f"Stage-04 vector or security test is absent: {path}")
@@ -708,12 +708,12 @@ def validate_constant_time_review(root: Path) -> None:
 def validate_tests_and_roadmap(root: Path) -> None:
     """Require public-boundary suites and completed implementation tasks."""
     required_tests = (
-        root / "crates/agenc-ircd-auth/tests/stage_four.rs",
-        root / "crates/agenc-ircd-auth/tests/stage_four_vectors.rs",
-        root / "crates/agenc-ircd-auth/tests/stage_four_security.rs",
-        root / "crates/agenc-ircd-crypto/tests/stage_four.rs",
-        root / "crates/agenc-ircd-crypto/tests/stage_four_vectors.rs",
-        root / "crates/agenc-ircd-testkit/tests/stage_four_domain_auth.rs",
+        root / "crates/agenc-relay-auth/tests/stage_four.rs",
+        root / "crates/agenc-relay-auth/tests/stage_four_vectors.rs",
+        root / "crates/agenc-relay-auth/tests/stage_four_security.rs",
+        root / "crates/agenc-relay-crypto/tests/stage_four.rs",
+        root / "crates/agenc-relay-crypto/tests/stage_four_vectors.rs",
+        root / "crates/agenc-relay-testkit/tests/stage_four_domain_auth.rs",
     )
     if any(not path.is_file() for path in required_tests):
         raise StageFourError("a Stage-04 public-boundary test suite is absent")

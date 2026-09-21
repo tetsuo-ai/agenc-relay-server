@@ -2891,7 +2891,7 @@ original runtime test source is preserved in `cap79-pending-runtime-regression`.
 The test was temporarily excluded during the separate format and migration
 checkpoint; the current adapted regression is back in the compiled suite.
 
-The [generation-4 storage contract](storage-schema-generation-4.md) adds
+The [historical generation-4 storage contract](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/docs/storage-schema-generation-4.md) adds
 versioned replay-owner and acknowledgement-range codecs plus an explicit
 3-to-4 stopped migration. This lets a later ACK implementation commit a
 logical retention cutoff without rewriting an arbitrarily large prefix.
@@ -3316,7 +3316,7 @@ Run the committed test explicitly with a private `TMPDIR` on the intended
 qualification filesystem:
 
 ```sh
-cargo test -p agenc-ircd-runtime --lib --all-features --locked \
+cargo test -p agenc-relay-runtime --lib --all-features --locked \
   selective_startup_recovers_more_than_256_mib_from_reopened_storage \
   -- --ignored --nocapture
 ```

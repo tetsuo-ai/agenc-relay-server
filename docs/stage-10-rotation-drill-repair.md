@@ -22,7 +22,7 @@ the file lists a successor, so that set is refused twice over with
 listener, printing
 
 ```
-agenc-ircd: E2EE sequencer credentials file is invalid or does not match the sequencer key
+agenc-relay-server: E2EE sequencer credentials file is invalid or does not match the sequencer key
 ```
 
 and `DrillNodes::check_alive` then fails the drill. Because startup
@@ -202,34 +202,34 @@ clean. Nothing in this change touches `run_deletion` or any path it uses.
 
 Sources:
 
-- `crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_drills/sequencer_rotation.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_drills/sequencer_rotation.rs`
   (the drill, the key sets, and the ordinary smoke test)
-- `crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_drills.rs`
-- `crates/agenc-ircd/tests/stage_eight_e2ee.rs` (the fixture, the binding and
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_drills.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee.rs` (the fixture, the binding and
   certification helpers)
-- `crates/agenc-ircd/tests/stage_eight_e2ee/encrypted_clients/rotation.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/rotation.rs`
   (the ENC-10 scenario this repair follows)
-- `crates/agenc-ircd-runtime/src/daemon.rs` (`e2ee_setup_with_hook`)
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/signer_startup.rs`
+- `crates/agenc-relay-runtime/src/daemon.rs` (`e2ee_setup_with_hook`)
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/signer_startup.rs`
   (the reconciliation that requires or releases a retired signer)
 
 Commands and results at this branch (Rust 1.98.0, from the repository root):
 
 ```sh
 # the repaired drill, explicitly including ignored tests
-AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-ircd --test stage_eight_e2ee \
+AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-relay-server --test stage_eight_e2ee \
   --all-features drill_sequencer_rotation -- --ignored --nocapture
 # 1 passed; 0 failed; 50 filtered out; 42.47s
 # record: passed=true, five steps, eleven facts
 
 # every ignored Stage 10 drill, serially, for the audit above
-AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-ircd --test stage_eight_e2ee \
+AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-relay-server --test stage_eight_e2ee \
   --all-features stage_ten_drills::drill_ -- --ignored --test-threads=1
 # 14 passed; 1 failed (deletion); 294.28s
 # run through the already-built test binary so the sweep held no cargo lock
 
 # the ordinary suite, which now carries the non-ignored guard
-cargo test -p agenc-ircd --test stage_eight_e2ee --all-features
+cargo test -p agenc-relay-server --test stage_eight_e2ee --all-features
 # 35 passed; 0 failed; 16 ignored; 42.80s
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

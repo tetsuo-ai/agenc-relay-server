@@ -30,7 +30,7 @@ with an availability edge, not an authority break.
 
 ## Change
 
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/roster_snapshots.rs` (new)
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/roster_snapshots.rs` (new)
   keeps `CompanionState::roster_snapshots`, an index from roster identifier
   to the retained `device_roster` object, and `resolve`, which returns the
   root and roster a statement names for one account. A statement naming the
@@ -90,7 +90,7 @@ specified behaviour, and missed the roster-active case, which was the defect.
 
 ## Tests
 
-`crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence/leaf_membership/named_roster.rs`:
+`crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/leaf_membership/named_roster.rs`:
 
 | Test | What it pins |
 | --- | --- |
@@ -152,8 +152,8 @@ conditionals.
 Commands at this branch (from the repository root):
 
 ```sh
-cargo test -p agenc-ircd-runtime --all-features --locked
-cargo test -p agenc-ircd-e2ee --all-features --locked
+cargo test -p agenc-relay-runtime --all-features --locked
+cargo test -p agenc-relay-e2ee --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all
 python3 scripts/check-source.py check

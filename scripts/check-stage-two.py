@@ -136,7 +136,7 @@ def validate_budgets(document: dict[str, object]) -> None:
 
 def validate_capabilities(root: Path) -> None:
     """Require bare, unique generated capability names and mandatory entries."""
-    source = (root / "crates/agenc-ircd-types/src/generated_registry.rs").read_text(encoding="utf-8")
+    source = (root / "crates/agenc-relay-types/src/generated_registry.rs").read_text(encoding="utf-8")
     match = re.search(r"pub const CAPABILITIES: &\[&str\] = &\[(.*?)\];", source, re.DOTALL)
     if match is None:
         raise StageTwoError("generated capability registry is absent")
@@ -149,12 +149,12 @@ def validate_capabilities(root: Path) -> None:
 
 def validate_modules(root: Path) -> None:
     """Validate the complete pure wire module boundary and forbidden imports."""
-    source_root = root / "crates/agenc-ircd-client-wire/src"
+    source_root = root / "crates/agenc-relay-client-wire/src"
     modules = {path.name for path in source_root.glob("*.rs") if path.name != "lib.rs"}
     if modules != EXPECTED_MODULES:
         raise StageTwoError("client-wire module set is missing or unexpected")
     combined = "\n".join(path.read_text(encoding="utf-8") for path in source_root.glob("*.rs"))
-    forbidden = ("std::net", "tokio::net", "agenc_ircd_runtime", "agenc_ircd_auth", "opaque_ke", "hpke::")
+    forbidden = ("std::net", "tokio::net", "agenc_relay_runtime", "agenc_relay_auth", "opaque_ke", "hpke::")
     if any(marker in combined for marker in forbidden):
         raise StageTwoError("client-wire crossed its socket, runtime, or crypto boundary")
     required = ("StreamFramer", "WebSocketWire", "ParsedMessage", "CapabilityState", "RegistrationState", "SaslTransport", "AccountTransfer", "MeasuredMessage", "BatchStack")
@@ -164,14 +164,14 @@ def validate_modules(root: Path) -> None:
 
 def validate_corrected_semantics(root: Path) -> None:
     """Pin security-relevant Stage-02 behavior that broad surface checks miss."""
-    wire_root = root / "crates/agenc-ircd-client-wire"
+    wire_root = root / "crates/agenc-relay-client-wire"
     capability = (wire_root / "src/capability.rs").read_text(encoding="utf-8")
     registration = (wire_root / "src/registration.rs").read_text(encoding="utf-8")
     grammar = (wire_root / "src/registration_command.rs").read_text(encoding="utf-8")
     auth = (wire_root / "src/auth_transport.rs").read_text(encoding="utf-8")
     render = (wire_root / "src/render.rs").read_text(encoding="utf-8")
     transcript = (
-        root / "crates/agenc-ircd-testkit/src/client_transcript.rs"
+        root / "crates/agenc-relay-testkit/src/client_transcript.rs"
     ).read_text(encoding="utf-8")
 
     obsolete_dependency = (

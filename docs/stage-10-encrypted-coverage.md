@@ -2,9 +2,9 @@
 
 This record covers COV-02 (issue #72). It closes measured branch-coverage
 deficits in the encrypted slice — runtime E2EE
-(`crates/agenc-ircd-runtime/src/e2ee/**`, including the companion loader that
-pages the E2EE tables at startup), `crates/agenc-ircd-e2ee`,
-`crates/agenc-ircd-auth` and `crates/agenc-ircd-crypto`. The base runtime,
+(`crates/agenc-relay-runtime/src/e2ee/**`, including the companion loader that
+pages the E2EE tables at startup), `crates/agenc-relay-e2ee`,
+`crates/agenc-relay-auth` and `crates/agenc-relay-crypto`. The base runtime,
 domain and wire slice belongs to COV-01 (#66), which merged at `ce98ea0`;
 storage, configuration and the offline commands belong to COV-03 (#70).
 
@@ -25,7 +25,7 @@ RUSTFLAGS="--cap-lints=warn" cargo +nightly-2026-08-24 llvm-cov \
   --output-path <report>.json
 ```
 
-`agenc-ircd-crypto`, `agenc-ircd-auth` and `agenc-ircd-e2ee` keep large parts
+`agenc-relay-crypto`, `agenc-relay-auth` and `agenc-relay-e2ee` keep large parts
 of their regression suites in `crates/<crate>/tests/`, which `--lib` does not
 build, so each was measured a second time with every target:
 
@@ -49,7 +49,7 @@ instrumentation only. `Cargo.lock` SHA-256:
 
 Under `--lib` the eleven `initial_authority` and `record_authentication`
 regions and both `history/reinit` regions read as entirely uncovered, because
-every case that drives them lives in `crates/agenc-ircd-e2ee/tests/`. The
+every case that drives them lives in `crates/agenc-relay-e2ee/tests/`. The
 per-crate all-target report reaches all thirteen. Both figures are reported
 below so the difference stays a measurement fact rather than a claim. The new
 cases in this branch are all in-crate unit tests, so each one is visible in
@@ -78,24 +78,24 @@ metric:
 
 Both measurements agree on the delta: **18 regions in this slice reach 100
 percent that did not before, and none regressed.** The slice holds 498
-reviewed regions in total, split 8 in `agenc-ircd-crypto` (all 8 now at 100
-percent), 56 in `agenc-ircd-e2ee` (32 at 100 percent) and 434 under
-`crates/agenc-ircd-runtime/src/e2ee/**` (150 at 100 percent).
-`agenc-ircd-auth` declares none.
+reviewed regions in total, split 8 in `agenc-relay-crypto` (all 8 now at 100
+percent), 56 in `agenc-relay-e2ee` (32 at 100 percent) and 434 under
+`crates/agenc-relay-runtime/src/e2ee/**` (150 at 100 percent).
+`agenc-relay-auth` declares none.
 
 ## Regions that now reach 100 percent
 
 Eighteen regions, with their metric and their after counts. Five of them are
 metric corrections, marked and explained under "Region metric corrections".
 
-Cryptographic adapters (`agenc-ircd-crypto`):
+Cryptographic adapters (`agenc-relay-crypto`):
 
 | Region | Metric | After |
 | --- | --- | --- |
 | `cap5-signature-signaturedomain-label` | regions (corrected) | 45/45 |
 | `cap5-signature-signaturedomain-encoding` | regions (corrected) | 4/4 |
 
-Encrypted domain (`agenc-ircd-e2ee`):
+Encrypted domain (`agenc-relay-e2ee`):
 
 | Region | Metric | After |
 | --- | --- | --- |
@@ -108,7 +108,7 @@ Encrypted domain (`agenc-ircd-e2ee`):
 | `leaf-membership-planned-device` | regions (corrected) | 10/10 |
 | `cap83-finality-quorumledger-record-encoded` | regions | 41/41 |
 
-Runtime E2EE and the companion loader (`agenc-ircd-runtime/src/e2ee`):
+Runtime E2EE and the companion loader (`agenc-relay-runtime/src/e2ee`):
 
 | Region | Metric | After |
 | --- | --- | --- |
@@ -125,20 +125,20 @@ Runtime E2EE and the companion loader (`agenc-ircd-runtime/src/e2ee`):
 
 ### Every registered signature domain
 
-`crates/agenc-ircd-crypto/src/signature/tests/domains.rs`
+`crates/agenc-relay-crypto/src/signature/tests/domains.rs`
 
 One key and one content produce forty-four distinct signatures, one per
 registered `SignatureDomain`, each verifying under its own domain and none
 verifying under its successor in the registry. Every label is unique, not
 empty, and carries the prefix its declared encoding requires: thirty-two
-`IRC-MLS/1 ` labels under the IRC signature input, ten `agenc-chat ` labels
+`ARC-MLS/1 ` labels under the IRC signature input, ten `agenc-chat ` labels
 under the direct prefix and two `MLS 1.0 ` labels under RFC 9420
 `SignWithLabel`. The list is exhaustive, so a new domain fails the count
 before it can reach the wire with an unexercised label.
 
 ### Conversation policy profile, lineage and bounds
 
-`crates/agenc-ircd-e2ee/src/tests/policy/fences.rs`
+`crates/agenc-relay-e2ee/src/tests/policy/fences.rs`
 
 - A later profile version and a later MLS version are each refused with
   `ProfileMismatch` before any principal set is resolved, and the policy of
@@ -157,7 +157,7 @@ before it can reach the wire with an unexercised label.
 
 ### Semantic routes and replacement bindings
 
-`crates/agenc-ircd-e2ee/src/tests/route/fences.rs`
+`crates/agenc-relay-e2ee/src/tests/route/fences.rs`
 
 - A route of a later profile is refused before its kind is read, although its
   network matches.
@@ -170,7 +170,7 @@ before it can reach the wire with an unexercised label.
 
 ### Commit authorization signer identity
 
-`crates/agenc-ircd-e2ee/src/tests/authorization/fences.rs`
+`crates/agenc-relay-e2ee/src/tests/authorization/fences.rs`
 
 - One controller root states one approval however many devices it holds: an
   approval list that is already canonical by `(root, device)` but repeats a
@@ -183,7 +183,7 @@ before it can reach the wire with an unexercised label.
 
 ### The retained leaf-membership claim
 
-`crates/agenc-ircd-e2ee/src/tests/membership/fences.rs`
+`crates/agenc-relay-e2ee/src/tests/membership/fences.rs`
 
 A device that holds a continuing proof on one leaf and states its own removal
 of another leaf at the same epoch claims nothing: the removal is admitted (it
@@ -195,7 +195,7 @@ retires the device.
 
 ### The council seat a policy pinned
 
-`crates/agenc-ircd-e2ee/src/tests/finality/roster_fences.rs`
+`crates/agenc-relay-e2ee/src/tests/finality/roster_fences.rs`
 
 A vote is recorded only while the current roster still holds exactly the
 certificate the policy pinned. A council device the root dropped from its
@@ -205,7 +205,7 @@ identity, same key — does not inherit it. Both refusals record no vote.
 
 ### The durable companion gate
 
-`crates/agenc-ircd-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers/tests/fences.rs`
+`crates/agenc-relay-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers/tests/fences.rs`
 
 - Each of the six gated fields of one companion part is checked on its own:
   the delivery generation, the coordinator state generation, the mutation
@@ -227,7 +227,7 @@ identity, same key — does not inherit it. Both refusals record no vote.
 
 ### Barrier resume
 
-`crates/agenc-ircd-runtime/src/e2ee/coordinator/events/tests/barrier_resume.rs`
+`crates/agenc-relay-runtime/src/e2ee/coordinator/events/tests/barrier_resume.rs`
 
 A resume recovers a lost ordinary prefix only through the exact gate end: the
 first gated sequence, the gate end under another event identity, a stream
@@ -255,11 +255,11 @@ the after report:
 
 | Region | File and span | Before | After |
 | --- | --- | --- | --- |
-| `cap5-signature-signaturedomain-label` | `crates/agenc-ircd-crypto/src/signature.rs:111-157` | `branches` 0/0 | `regions` 45/45 |
-| `cap5-signature-signaturedomain-encoding` | `crates/agenc-ircd-crypto/src/signature.rs:159-204` | `branches` 0/0 | `regions` 4/4 |
-| `leaf-membership-planned-device` | `crates/agenc-ircd-e2ee/src/membership.rs:387-399` | `branches` 0/0 | `regions` 10/10 |
-| `s10-cap70-companion-restore-install` | `crates/agenc-ircd-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers.rs:128-140` | `branches` 0/0 | `regions` 23/23 |
-| `e2ee-owner-ledger-index` | `crates/agenc-ircd-runtime/src/e2ee/coordinator/owners.rs:113-153` | `branches` 0/0 | `regions` 51/51 |
+| `cap5-signature-signaturedomain-label` | `crates/agenc-relay-crypto/src/signature.rs:111-157` | `branches` 0/0 | `regions` 45/45 |
+| `cap5-signature-signaturedomain-encoding` | `crates/agenc-relay-crypto/src/signature.rs:159-204` | `branches` 0/0 | `regions` 4/4 |
+| `leaf-membership-planned-device` | `crates/agenc-relay-e2ee/src/membership.rs:387-399` | `branches` 0/0 | `regions` 10/10 |
+| `s10-cap70-companion-restore-install` | `crates/agenc-relay-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers.rs:128-140` | `branches` 0/0 | `regions` 23/23 |
+| `e2ee-owner-ledger-index` | `crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs:113-153` | `branches` 0/0 | `regions` 51/51 |
 
 Two of the five needed new cases as well as the correction: the label table
 needed the `ReinitAttempt` arm, which no other suite had reached, and the
@@ -283,19 +283,19 @@ policy issue #135, not to this branch.
 | `e2ee-check-policy-profile` | `branches` | 17/18 (`regions` 34/34) | unreachable guard, see below |
 | `edge-origin-settled-gate` | `branches` | 0/0 (`regions` 0/2) | stale anchor, see below |
 
-`e2ee-verify-policy` (`crates/agenc-ircd-e2ee/src/policy.rs:129-170`) guards
+`e2ee-verify-policy` (`crates/agenc-relay-e2ee/src/policy.rs:129-170`) guards
 `policy.encode()?.len() > MAX_POLICY_BYTES`, and that condition cannot be true
 for any value the type admits. `MAX_POLICY_BYTES` is 32,768, while the TLS
-field bounds of `IrcPolicyTbs` cap its encoding at roughly 7.3 KiB
+field bounds of `ArcPolicyTbs` cap its encoding at roughly 7.3 KiB
 (`allowed_suites` at 32 bytes, `controller_root_fingerprints` at 2,048,
-`finality_principals` at 5,120) and `IrcPolicy::approvals` adds at most 16,384,
+`finality_principals` at 5,120) and `ArcPolicy::approvals` adds at most 16,384,
 so a constructible policy encodes to at most about 23.7 KiB. The guard is
 correct defence in depth against a later field-bound change; it is simply not
 reachable today. Its three remaining `regions` entries are `?` unwinds on
 hashing and boolean decoding that cannot fail for a policy that reached them,
 so the `regions` metric does not close it either.
 
-`e2ee-check-policy-profile` (`crates/agenc-ircd-e2ee/src/policy.rs:172-195`)
+`e2ee-check-policy-profile` (`crates/agenc-relay-e2ee/src/policy.rs:172-195`)
 now covers seventeen of eighteen outcomes; the last one needs
 `tbs.allowed_suites` to be empty. `TlsVec<u16, 2, 32>` requires at least two
 encoded bytes, so neither `TlsVec::new` nor the decoder can produce an empty
@@ -305,7 +305,7 @@ declaration defect — the span emits real branch records — so it is left as
 declared.
 
 `edge-origin-settled-gate`
-(`crates/agenc-ircd-runtime/src/e2ee/edge/router.rs:609-611`) is mis-anchored.
+(`crates/agenc-relay-runtime/src/e2ee/edge/router.rs:609-611`) is mis-anchored.
 Its reason reads "Requests leave the edge only under an acknowledged
 declaration that carries the current attachment", which is `settled()` at
 lines 622-628 of the same file; the declared span is instead two argument
@@ -317,7 +317,7 @@ the row is reported rather than adjusted.
 ### The rest of the slice
 
 308 regions in this slice are still below 100 percent after this work: 24 in
-`agenc-ircd-e2ee` and 284 under `crates/agenc-ircd-runtime/src/e2ee/**`,
+`agenc-relay-e2ee` and 284 under `crates/agenc-relay-runtime/src/e2ee/**`,
 concentrated in the coordinator's sync, startup, delivery-owner restore,
 retention and mailbox owners. Of those, 86 have no uncovered branch outcome at
 all and only `?`, `ok_or` or `map_err` unwinds left — the same class COV-01
@@ -330,7 +330,7 @@ them.
 
 - The workspace figures use `--lib`, so they exclude every
   `crates/*/tests/` integration target. The per-crate all-target reports are
-  supplied for `agenc-ircd-crypto`, `agenc-ircd-auth` and `agenc-ircd-e2ee`,
+  supplied for `agenc-relay-crypto`, `agenc-relay-auth` and `agenc-relay-e2ee`,
   where that difference is material; the runtime's integration targets were
   not measured, and the heavy ones (`e2ee_load`, `idle_connection_memory`,
   `loom_models`, `stage_six_soak`) were not run.
@@ -339,7 +339,7 @@ them.
   per-crate report therefore understates a `pub(crate)` or `pub(super)` item.
   Every metric correction below was validated on the workspace report, where
   the dependent crates' tests exercise that copy.
-- `agenc-ircd-auth` declares no release-critical region, so nothing in this
+- `agenc-relay-auth` declares no release-critical region, so nothing in this
   slice is claimed for it; its measured branch coverage is reported only as
   part of the workspace aggregate.
 - No overall floor is claimed. The release floors of 90 percent branches and
@@ -349,14 +349,14 @@ them.
 
 New test sources, all under a `tests` path component:
 
-- `crates/agenc-ircd-crypto/src/signature/tests/domains.rs`
-- `crates/agenc-ircd-e2ee/src/tests/policy/fences.rs`
-- `crates/agenc-ircd-e2ee/src/tests/route/fences.rs`
-- `crates/agenc-ircd-e2ee/src/tests/authorization/fences.rs`
-- `crates/agenc-ircd-e2ee/src/tests/membership/fences.rs`
-- `crates/agenc-ircd-e2ee/src/tests/finality/roster_fences.rs`
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers/tests/fences.rs`
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/events/tests/barrier_resume.rs`
+- `crates/agenc-relay-crypto/src/signature/tests/domains.rs`
+- `crates/agenc-relay-e2ee/src/tests/policy/fences.rs`
+- `crates/agenc-relay-e2ee/src/tests/route/fences.rs`
+- `crates/agenc-relay-e2ee/src/tests/authorization/fences.rs`
+- `crates/agenc-relay-e2ee/src/tests/membership/fences.rs`
+- `crates/agenc-relay-e2ee/src/tests/finality/roster_fences.rs`
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers/tests/fences.rs`
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/events/tests/barrier_resume.rs`
 
 plus the `mod` lines that admit them. No production handler changed, so this
 work adds no wire or storage format, no dependency pin and no limit.
@@ -364,16 +364,16 @@ work adds no wire or storage format, no dependency pin and no limit.
 Commands and results at this branch:
 
 ```sh
-cargo test -p agenc-ircd-crypto --all-features --locked
+cargo test -p agenc-relay-crypto --all-features --locked
 # 35 unit tests and every integration target pass, with one ignored
 
-cargo test -p agenc-ircd-auth --all-features --locked
+cargo test -p agenc-relay-auth --all-features --locked
 # 33 unit tests and every integration target pass, with one ignored
 
-cargo test -p agenc-ircd-e2ee --all-features --locked
+cargo test -p agenc-relay-e2ee --all-features --locked
 # 150 unit tests and every integration target pass; no failures
 
-cargo test -p agenc-ircd-runtime --all-features --locked
+cargo test -p agenc-relay-runtime --all-features --locked
 # 1,549 unit tests pass with one ignored, and every integration target passes:
 # bridge_crypto 8, bridge_storage 6, e2ee_load 1, federation_link 16,
 # idle_connection_memory 2 with one ignored, listener_accept 22,

@@ -268,7 +268,7 @@ creating `database.redb`. First-guard publication uses an exclusive rename;
 a late entry is preserved and a failure after the database commit remains
 Indeterminate. Later normal guard replacements retain their existing behavior.
 
-`cargo test -p agenc-ircd-storage --locked` passes 210 unit tests and 106
+`cargo test -p agenc-relay-storage --locked` passes 210 unit tests and 106
 integration tests, including the new five regression and control tests and
 the existing crash, restore and fault-injection cases. The production changes
 add no wire or storage format and change no dependency pin or limit. The

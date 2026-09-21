@@ -20,7 +20,7 @@ score below is bound to one measurement.
 One report, on the pinned nightly that carries `-C instrument-coverage` branch
 support, with `cargo-llvm-cov 0.9.0`. It is a whole-workspace all-target
 report, which is the only report `check-coverage.py check` can run to
-completion: a `--lib` report omits `crates/agenc-ircd/src/main.rs` entirely and
+completion: a `--lib` report omits `crates/agenc-relay-server/src/main.rs` entirely and
 refuses before scoring anything.
 
 ```sh
@@ -41,7 +41,7 @@ branches, 91.7469 percent lines and 86.2036 percent regions over the workspace.
 checked that `end_line` exists. Both pass after a routine re-anchor that
 refreshes the hash without moving the lines, which is exactly what the tooling
 did. Commit `4bcf230` is the worked example: it inserted thirty-six lines into
-`crates/agenc-ircd-runtime/src/e2ee/edge/witness_failure.rs` and refreshed
+`crates/agenc-relay-runtime/src/e2ee/edge/witness_failure.rs` and refreshed
 every affected row's `source_sha256` to the new file while leaving every
 `start_line` and `end_line` where they were. At the parent commit `52808b9`,
 `cap74-witness-failure-witness-pending` read exactly `witness_pending` at
@@ -104,7 +104,7 @@ name, that item was read, and the row's claim was confirmed to hold over the
 span it now covers. Each row's `reason` records the move and the re-review, and
 names the score where the row does not reach 100 percent. No span was widened.
 
-#### `crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs` (10)
+#### `crates/agenc-relay-runtime/src/federation/coordinator/companion.rs` (10)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -119,7 +119,7 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `companion-companion-send-page` | 911-936 | 945-970 | `send_page` | `regions` | 40/42 | 23/32 |
 | `companion-companion-continue-fetch` | 938-971 | 972-1005 | `continue_fetch` | `regions` | 27/42 | 0/55 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/edge/witness_failure.rs` (9)
+#### `crates/agenc-relay-runtime/src/e2ee/edge/witness_failure.rs` (9)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -133,7 +133,7 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `cap74-witness-failure-witness-rejection` | 218-225 | 265-272 | `E2eeEdge::witness_rejection` | `regions` | 7/8 | 11/14 |
 | `cap74-witness-failure-witness-batch-rejected` | 227-240 | 274-287 | `E2eeEdge::witness_batch_rejected` | `regions` | 12/12 | 12/14 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/edge/witness_recovery.rs` (8)
+#### `crates/agenc-relay-runtime/src/e2ee/edge/witness_recovery.rs` (8)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -146,7 +146,7 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `cap74-witness-recovery-restore-witness-backing` | 118-123 | 162-167 | `super::restore_witness_backing` | `regions` | 14/15 | 5/5 |
 | `cap74-witness-recovery-restore-chain-witness` | 125-132 | 169-176 | `super::restore_chain_witness` | `regions` | 13/16 | 9/10 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs` (5)
+#### `crates/agenc-relay-runtime/src/e2ee/coordinator/sync.rs` (5)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -156,7 +156,7 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `companion-sync-companioncoordinator-link-lost` | 1032-1045 | 1054-1070 | `CompanionCoordinator::link_lost` | `regions` | 14/14 | 21/22 |
 | `companion-sync-require-cut-scope` | 1176-1188 | 1201-1213 | `require_cut_scope` | `regions` | 19/20 | 10/10 |
 
-#### `crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs` (5)
+#### `crates/agenc-relay-runtime/src/federation/coordinator/mod.rs` (5)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -166,7 +166,7 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `cap81-mod-federationcoordinator-batch-rejected-with-error` | 1619-1629 | 1638-1648 | `FederationCoordinator::batch_rejected_with_error` | `regions` | 13/14 | 16/16 |
 | `cap79-maintenance-057-reject-origin-acknowledgement` | 1721-1730 | 1750-1759 | `FederationCoordinator::reject_origin_acknowledgement` | `regions` | 10/10 | 11/12 |
 
-#### `crates/agenc-ircd-runtime/src/federation/coordinator/startup/retirement.rs` (4)
+#### `crates/agenc-relay-runtime/src/federation/coordinator/startup/retirement.rs` (4)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -175,7 +175,7 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `companion-retirement-retryable` | 189-198 | 258-267 | `retryable` | `regions` | 5/6 | 0/4 |
 | `companion-retirement-retry` | 200-206 | 269-275 | `retry` | `regions` | 8/8 | 0/9 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs` (3)
+#### `crates/agenc-relay-runtime/src/e2ee/coordinator/ops/sequence.rs` (3)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -183,7 +183,7 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `cap99-ack-context-010-submit-reinit-ack` | 1110-1192 | 1203-1285 | `submit_reinit_ack` | `regions` | 110/126 | 125/140 |
 | `cap79-fresh-object-012-fetch-object` | 1490-1526 | 1583-1619 | `fetch_object` | `regions` | 49/57 | 56/65 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/coordinator/sequencer_signing.rs` (3)
+#### `crates/agenc-relay-runtime/src/e2ee/coordinator/sequencer_signing.rs` (3)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -191,63 +191,63 @@ names the score where the row does not reach 100 percent. No span was widened.
 | `cap101-sequencer-eligibility-002-at-time` | 44-48 | 109-117 | `at_time` | `regions` | 1/1 | 18/21 |
 | `cap101-terminal-key-001-for-receipt` | 51-58 | 121-126 | `for_receipt` | `regions` | 15/15 | 7/7 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/coordinator/recovery_gates.rs` (2)
+#### `crates/agenc-relay-runtime/src/e2ee/coordinator/recovery_gates.rs` (2)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cap73-declared-head-predicate-001-matches-restored-heads` | 167-171 | 175-179 | `matches_restored_heads` | `regions` | 3/3 | 5/5 |
 | `cap73-declared-gates-007-states` | 173-180 | 181-188 | `states` | `regions` | 6/6 | 7/7 |
 
-#### `crates/agenc-ircd-runtime/src/state_core/mod.rs` (2)
+#### `crates/agenc-relay-runtime/src/state_core/mod.rs` (2)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `companion-mod-statecorecontext-backing-reservations` | 838-840 | 860-862 | `StateCoreContext::backing_reservations` | `regions` | 0/9 | 5/5 |
 | `cap13-mod-complete-index-refresh` | 3835-3877 | 3916-3958 | `StateCore::complete_index_refresh` | `regions` | 53/60 | 35/45 |
 
-#### `crates/agenc-ircd-e2ee/src/record_authentication.rs` (1)
+#### `crates/agenc-relay-e2ee/src/record_authentication.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cap73-record-authentication-001-authenticate-record` | 67-96 | 111-127 | `authenticate_record` | `regions` | 26/29 | 23/23 |
 
-#### `crates/agenc-ircd-runtime/src/daemon.rs` (1)
+#### `crates/agenc-relay-runtime/src/daemon.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `companion-daemon-attach-coordinator-role` | 1294-1334 | 1383-1423 | `attach_coordinator_role` | `regions` | 52/55 | 54/59 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/edge/mod.rs` (1)
+#### `crates/agenc-relay-runtime/src/e2ee/edge/mod.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cap74-mod-is-active` | 278-280 | 320-322 | `E2eeEdge::is_active` | `regions` | 3/3 | 5/5 |
 
-#### `crates/agenc-ircd-runtime/src/e2ee/edge/sync.rs` (1)
+#### `crates/agenc-relay-runtime/src/e2ee/edge/sync.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cap74-sync-fail-frame` | 209-217 | 235-243 | `E2eeEdge::fail_frame` | `regions` | 16/16 | 16/16 |
 
-#### `crates/agenc-ircd-runtime/src/federation/coordinator/mailbox_expiry.rs` (1)
+#### `crates/agenc-relay-runtime/src/federation/coordinator/mailbox_expiry.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cap79-mailbox-expiry-023-rejected` | 172-178 | 181-187 | `rejected` | `regions` | 12/12 | 5/5 |
 
-#### `crates/agenc-ircd-runtime/src/federation/coordinator/replay_maintenance/receipt.rs` (1)
+#### `crates/agenc-relay-runtime/src/federation/coordinator/replay_maintenance/receipt.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cap79-maintenance-045-rejected` | 97-103 | 114-120 | `rejected` | `regions` | 11/12 | 5/5 |
 
-#### `crates/agenc-ircd-runtime/src/federation/coordinator/request_expiry.rs` (1)
+#### `crates/agenc-relay-runtime/src/federation/coordinator/request_expiry.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |
 | `cap79-request-expiry-015-rejected` | 172-178 | 181-187 | `rejected` | `regions` | 12/12 | 5/5 |
 
-#### `crates/agenc-ircd-runtime/src/registration.rs` (1)
+#### `crates/agenc-relay-runtime/src/registration.rs` (1)
 
 | Region | Old span | New span | Item it now covers | Metric | Was | Now |
 | --- | --- | --- | --- | --- | --- | --- |

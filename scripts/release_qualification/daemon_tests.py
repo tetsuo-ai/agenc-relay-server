@@ -24,10 +24,10 @@ class DaemonTests:
         self.executables: dict[str, Path] = {}
         # Tests exercise both the current daemon name and the legacy entry point.
         # Both paths must execute the immutable candidate, not a Cargo-built copy.
-        self.installed = [self.output / target / f"release/{name}" for name in ("arcd", "agenc-ircd")]
+        self.installed = [self.output / target / "release/arcd"]
 
     def compile(self, suites: list[str]) -> None:
-        argv = ["cargo", "test", "-p", "agenc-ircd", "--release", "--all-features", "--frozen",
+        argv = ["cargo", "test", "-p", "agenc-relay-server", "--release", "--all-features", "--frozen",
                 "--target", self.target, "--no-run", "--message-format=json"]
         for suite in suites:
             if not re.fullmatch(r"[a-z][a-z0-9_]+", suite):

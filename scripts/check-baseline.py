@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Mapping, NoReturn
 
 ARTIFACTS = {
-    "architecture": "docs/ircd-architecture-and-implementation-spec.md",
-    "e2ee-companion": "docs/irc-mls-e2ee-extension.md",
+    "architecture": "docs/arc-architecture-and-implementation-spec.md",
+    "e2ee-companion": "docs/arc-mls-e2ee-extension.md",
     "federation-registry": "docs/federation-v1-profile.registry",
     "source-ledger": "docs/protocol-sources-and-decisions.md",
     "specification-manifest": "docs/specification-manifest.txt",

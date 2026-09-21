@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![no_main]
 
-use agenc_ircd_client_wire::{
+use agenc_relay_client_wire::{
     CapabilityProfile, CapabilitySpec, CapabilityState, FramedLine, MAX_CLIENT_TAG_DATA_BYTES,
     MAX_COMMAND_BYTES, MAX_PHYSICAL_LINE_BYTES, MAX_SERVER_TAG_DATA_BYTES,
     MAX_TRADITIONAL_LINE_BYTES, OutputBudget, RenderError, WireMessage, parse_client_tags,
@@ -402,7 +402,7 @@ fn safe_text(data: &[u8], maximum: usize) -> String {
         .collect()
 }
 
-fn message_tag_capabilities() -> Result<CapabilityState, agenc_ircd_client_wire::CapError> {
+fn message_tag_capabilities() -> Result<CapabilityState, agenc_relay_client_wire::CapError> {
     let profile = CapabilityProfile::new(vec![CapabilitySpec::new("message-tags", None)?])?;
     let mut capabilities = CapabilityState::default();
     capabilities.ls(Some("302"), &profile)?;

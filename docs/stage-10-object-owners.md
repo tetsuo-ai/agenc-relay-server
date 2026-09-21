@@ -29,7 +29,7 @@ owner is the batch that puts or deletes its row.
 | `package/v1/`, `claim/v1/` | the KeyPackage; the claimed package | ordinary | no |
 | `attach/v1/` | the open challenge object | ordinary | no |
 | `mailbox/v1/`, `token/v1/`, `ack-mailbox/v1/` | the item object | mailbox | no |
-| `replay/v1/irc-mls-v1/` | the request, result and response objects | replay | no |
+| `replay/v1/arc-mls-v1/` | the request, result and response objects | replay | no |
 | `cross-profile/part/v1/`, delivery outbox rows | the event and payload objects | replay | no |
 
 Rows of other kinds own nothing. A row naming an object this coordinator
@@ -117,10 +117,10 @@ reconstruction cannot make an existing proof older than its evidence.
 
 ## Evidence
 
-- `crates/agenc-ircd-storage/tests/e2ee_records.rs`: the owner row codec
+- `crates/agenc-relay-storage/tests/e2ee_records.rs`: the owner row codec
   round trip and every inconsistent account refusal (unknown kind, empty or
   oversize object, missing acceptance, retirement before acceptance).
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence/owners.rs`:
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/owners.rs`:
   one object shared by a security proof, a directory row, a mailbox
   acknowledgement and a replay row retired in all 24 orders with the class,
   conversation charge and retirement checked at every step; the ledger alone

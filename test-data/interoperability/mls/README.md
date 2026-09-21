@@ -11,7 +11,7 @@ one hex line per message), the variable-length integer header vectors from
 seven welcome joins from `test-vectors/welcome.json` (`suite key_package
 welcome` per line).
 
-`crates/agenc-ircd-e2ee/tests/mls_corpus.rs` parses every line under the
+`crates/agenc-relay-e2ee/tests/mls_corpus.rs` parses every line under the
 production outer parser and checks the suite gate: messages of an enabled
 suite are accepted with their public fields, messages of any other suite
 are refused as a profile mismatch, and no line panics or overruns a budget.

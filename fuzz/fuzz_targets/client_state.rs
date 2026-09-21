@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![no_main]
 
-use agenc_ircd_client_wire::{
+use agenc_relay_client_wire::{
     ACCOUNT_REQUEST_BYTES, ACCOUNT_REQUEST_CHARACTERS, ACCOUNT_RESPONSE_BYTES,
     AUTH_CHUNK_CHARACTERS, AccessTokenPolicy, AccountCarrierKind, AccountCarrierPhase,
     AccountTransfer, CanonicalBase64Url, CapRequestReply, CapabilityChange, CapabilityProfile,
@@ -490,7 +490,7 @@ fn assert_reply_tokens(request: &str, tokens: &[String]) {
 
 fn assert_capability_lines(
     tokens: &[String],
-    lines: &[agenc_ircd_client_wire::CapLine],
+    lines: &[agenc_relay_client_wire::CapLine],
     budget: usize,
 ) {
     assert!(!lines.is_empty());

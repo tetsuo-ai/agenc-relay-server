@@ -1,9 +1,9 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_e2ee::identity::verify_root_chain;
-use agenc_ircd_e2ee::objects::identity::IrcAccountRootChain;
-use agenc_ircd_e2ee::{DecodeBudget, TlsDecode as _};
+use agenc_relay_e2ee::identity::verify_root_chain;
+use agenc_relay_e2ee::objects::identity::ArcAccountRootChain;
+use agenc_relay_e2ee::{DecodeBudget, TlsDecode as _};
 use libfuzzer_sys::fuzz_target;
 
 const BUDGET_BYTES: usize = 1_048_576;
@@ -15,7 +15,7 @@ const NETWORK: [u8; 32] = [7; 32];
 // the accepted chain again from its first head must agree.
 fuzz_target!(|data: &[u8]| {
     let mut budget = DecodeBudget::new(BUDGET_BYTES, BUDGET_VALUES);
-    let Ok(chain) = IrcAccountRootChain::decode_exact(data, &mut budget) else {
+    let Ok(chain) = ArcAccountRootChain::decode_exact(data, &mut budget) else {
         return;
     };
     let roots = chain.roots.as_slice();

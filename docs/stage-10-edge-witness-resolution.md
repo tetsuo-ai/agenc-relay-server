@@ -13,11 +13,11 @@ changed; the companion already defined the frames, the object and the three
 
 `witness_resolution(36)` joins the wire-kind table as a server-only federation
 control object bounded by `MAX_FEDERATION_CONTROL_OBJECT`, carrying
-`IrcFederationWitnessResolution` (`crates/agenc-ircd-e2ee/src/objects/federation.rs`):
+`ArcFederationWitnessResolution` (`crates/agenc-relay-e2ee/src/objects/federation.rs`):
 the network, coordinator, target, conversation, token, the expected position
 and head the row retained, the record count, the claimed new head, and exactly
 `record_count` concatenated 32-byte object IDs in chain order. Five frames
-join `CompanionFrame` (`crates/agenc-ircd-e2ee/src/federation/frames.rs`):
+join `CompanionFrame` (`crates/agenc-relay-e2ee/src/federation/frames.rs`):
 `EWITNESS REQUEST` and `EWITNESS RESOLVED` from the edge, and `EWITNESS
 BEGIN`, `ENTRY` and `END` from the coordinator. BEGIN and ENTRY carry object
 fragments; the other three are untagged. Three limits are published:
@@ -45,7 +45,7 @@ reserved `CompanionWitnessResolution` wake.
 
 ## Validating one resolution
 
-`crates/agenc-ircd-runtime/src/e2ee/edge/witness_resolution.rs` owns one open
+`crates/agenc-relay-runtime/src/e2ee/edge/witness_resolution.rs` owns one open
 resolution per link incarnation. BEGIN's object must name this network, this
 coordinator, this edge, the conversation the line named, its own token, and
 must repeat the row's exact `expected_sequence` and `expected_head_id`; its
@@ -147,7 +147,7 @@ no frames at all, and both were wrong once it reads `EWITNESS`:
 
 ## Evidence
 
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/witness_resolution.rs`: a
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/witness_resolution.rs`: a
   sealed durable row reaches the blocked phase over a replacement link and is
   answered by a real two-record continuation signed by the negotiated
   credential — nothing is published before the receipt, the receipt sends the
@@ -162,23 +162,23 @@ no frames at all, and both were wrong once it reads `EWITNESS`:
   anchor and a wrong conversation each close the phase and retain the row —
   with the same record under the negotiated credential staging its
   transaction, so only the key made the difference.
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/witness_gating.rs`: the
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/witness_gating.rs`: the
   blocked phase admits the resume and one request per durable row in
   conversation order, drops the `EORIGIN READY` that followed, and keeps the
   cursor, the head, the retention block and `is_active` exactly where they
   were — across two link incarnations and across a sealed reconstruction that
   preserves two unresolved rows.
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/witness_persistence.rs`: the
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/witness_persistence.rs`: the
   existing durable-receipt, refusal, replacement-link and timer controls are
   unchanged.
-- `crates/agenc-ircd-e2ee/src/tests/federation_frames.rs`: all five `EWITNESS`
+- `crates/agenc-relay-e2ee/src/tests/federation_frames.rs`: all five `EWITNESS`
   frames render and parse back with their exact arity and direction, and a
   wrong verb, a noncanonical sequence, a trailing parameter, a missing
   fragment and a tag on an untagged frame are refused.
-- `crates/agenc-ircd-e2ee/src/tests/objects.rs` and `tests/object.rs`: the
+- `crates/agenc-relay-e2ee/src/tests/objects.rs` and `tests/object.rs`: the
   `witness_resolution` body round-trips and kind 36 has its token, its
   federation-control limit and its server-only direction.
-- `crates/agenc-ircd-storage/tests/stage_five_completion/witness_evidence.rs`:
+- `crates/agenc-relay-storage/tests/stage_five_completion/witness_evidence.rs`:
   the conflict mark round-trips through the witness body and is the only
   difference from an unmarked row.
 

@@ -14,7 +14,7 @@ to it. The gate is unchanged. The allowance is what makes `G` exact.
 
 ## The allowance, and how it is derived
 
-`crates/agenc-ircd-storage/src/bounded.rs` holds `OperationAllowance`. One is
+`crates/agenc-relay-storage/src/bounded.rs` holds `OperationAllowance`. One is
 created per admitted operation, immediately after the `R(F) + G` gate:
 
 1. It starts at `MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH = G = 268,435,456`.
@@ -200,7 +200,7 @@ specification took the full refreeze.
 
 ## Shared helpers for the sibling lanes
 
-All in `crates/agenc-ircd-storage/src/bounded.rs`, crate-visible:
+All in `crates/agenc-relay-storage/src/bounded.rs`, crate-visible:
 
 - `OperationAllowance::new(block_size, guard_replacements)`, `.capped(..)`,
   `.allowance()`, `.charge(bytes)`, `.charged()`: one ledger per operation.
@@ -269,9 +269,9 @@ both new messages and the four phase labels.
 Commands, on the workspace-pinned toolchain in the lane's own target:
 
 ```text
-cargo test -p agenc-ircd-storage --all-features --locked -- --skip qualification_workload
-cargo test -p agenc-ircd-storage --all-features --locked qualification_workload
-cargo test -p agenc-ircd-runtime --all-features --locked
+cargo test -p agenc-relay-storage --all-features --locked -- --skip qualification_workload
+cargo test -p agenc-relay-storage --all-features --locked qualification_workload
+cargo test -p agenc-relay-runtime --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 python3 scripts/check-source.py check

@@ -22,7 +22,7 @@ from typing import Mapping, NoReturn, TypedDict
 
 MANIFEST_PATH = "conformance/gates.toml"
 ALLOWED_ENVIRONMENT = {"RUSTC_BOOTSTRAP"}
-ARTIFACT_ENVIRONMENT = "AGENC_IRCD_RECORD_GATE"
+ARTIFACT_ENVIRONMENT = "AGENC_RELAY_RECORD_GATE"
 ARTIFACT_DIRECTORY = Path("conformance/evidence/artifacts")
 ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
 TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30
@@ -287,7 +287,7 @@ LANE_TEST_SHARE = {
     "matrix": 1,
 }
 LANE_BUILD_SHARE = 3
-BULK_TARGET_ENVIRONMENT = "AGENC_IRCD_GATE_BULK_TARGET"
+BULK_TARGET_ENVIRONMENT = "AGENC_RELAY_GATE_BULK_TARGET"
 BULK_LANES = {
     "check-host",
     "check-x86_64-unknown-linux-gnu",
@@ -339,7 +339,7 @@ def gate_lane(argv: list[str]) -> str:
     ):
         return "tests"
     if argv[:3] == ["cargo", "nextest", "run"]:
-        return "stage-storage" if "agenc-ircd-storage" in argv else "stage-tests"
+        return "stage-storage" if "agenc-relay-storage" in argv else "stage-tests"
     if argv[0] == "bash" and argv[1:] == ["scripts/check-stage-nine-matrix.sh"]:
         return "matrix"
     if argv[0] == "bash" and len(argv) == 2 and argv[1].startswith("scripts/run-stage-"):
@@ -495,7 +495,7 @@ def evidence_policy(root: Path) -> dict[str, object]:
     """Load the checked-in evidence policy without creating a second policy copy."""
     return runpy.run_path(
         str(root / "scripts/check-evidence.py"),
-        run_name="agenc_ircd_evidence_policy",
+        run_name="agenc_relay_evidence_policy",
     )
 
 
@@ -733,7 +733,7 @@ def bounded_command_runner() -> object:
     try:
         probe_support = runpy.run_path(
             str(Path(__file__).resolve().with_name("check-rust-components.py")),
-            run_name="agenc_ircd_bounded_probe_support",
+            run_name="agenc_relay_bounded_probe_support",
         )
         run_bounded = probe_support["run_bounded"]
     except (KeyError, OSError, TypeError, ValueError) as error:
@@ -895,7 +895,7 @@ def write_artifact(
         "limitations": metadata["limitations"],
         "argv": ["python3", "scripts/run-gate.py", gate],
         "tool": {
-            "name": "agenc-ircd-gate-runner",
+            "name": "agenc-relay-gate-runner",
             "version": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         },
         "source_commit": metadata["source_commit"],

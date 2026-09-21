@@ -17,12 +17,12 @@ qualification_root="$(mktemp -d)"
 trap 'find "$qualification_root" -depth -delete' EXIT
 mkdir -p \
     "$qualification_root/usr/bin" \
-    "$qualification_root/etc/systemd/system/agenc-ircd.service.d"
-install -m 0755 /bin/true "$qualification_root/usr/bin/agenc-ircd"
+    "$qualification_root/etc/systemd/system/arcd.service.d"
+install -m 0755 /bin/true "$qualification_root/usr/bin/arcd"
 install -m 0755 /bin/true "$qualification_root/usr/bin/setfacl"
 install -m 0644 \
-    deploy/systemd/agenc-ircd.service \
-    "$qualification_root/etc/systemd/system/agenc-ircd.service"
+    deploy/systemd/arcd.service \
+    "$qualification_root/etc/systemd/system/arcd.service"
 for target in sysinit basic multi-user network-online; do
     printf '%s\n' \
         "[Unit]" \
@@ -33,8 +33,8 @@ done
 for profile in deploy/systemd/profiles/*.conf; do
     install -m 0644 \
         "$profile" \
-        "$qualification_root/etc/systemd/system/agenc-ircd.service.d/20-address-families.conf"
-    systemd-analyze --root="$qualification_root" verify agenc-ircd.service
+        "$qualification_root/etc/systemd/system/arcd.service.d/20-address-families.conf"
+    systemd-analyze --root="$qualification_root" verify arcd.service
 done
 
 tor_root="$qualification_root/tor"

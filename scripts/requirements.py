@@ -14,26 +14,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-ARCHITECTURE_PATH = "docs/ircd-architecture-and-implementation-spec.md"
-E2EE_PATH = "docs/irc-mls-e2ee-extension.md"
+ARCHITECTURE_PATH = "docs/arc-architecture-and-implementation-spec.md"
+E2EE_PATH = "docs/arc-mls-e2ee-extension.md"
 LEDGER_PATH = "conformance/requirements.toml"
 BINDINGS_PATH = "conformance/requirement-bindings.toml"
 
 CRATES = frozenset(
     {
-        "agenc-ircd",
-        "agenc-ircd-admin",
-        "agenc-ircd-auth",
-        "agenc-ircd-client-wire",
-        "agenc-ircd-config",
-        "agenc-ircd-crypto",
-        "agenc-ircd-domain",
-        "agenc-ircd-e2ee",
-        "agenc-ircd-federation-wire",
-        "agenc-ircd-runtime",
-        "agenc-ircd-storage",
-        "agenc-ircd-testkit",
-        "agenc-ircd-types",
+        "agenc-relay-server",
+        "agenc-relay-admin",
+        "agenc-relay-auth",
+        "agenc-relay-client-wire",
+        "agenc-relay-config",
+        "agenc-relay-crypto",
+        "agenc-relay-domain",
+        "agenc-relay-e2ee",
+        "agenc-relay-federation-wire",
+        "agenc-relay-runtime",
+        "agenc-relay-storage",
+        "agenc-relay-testkit",
+        "agenc-relay-types",
     }
 )
 TERMS = (
@@ -250,7 +250,7 @@ E2EE_REQUIREMENT_TASKS = {
     "E2EE-REQ-1AB78DA63741FF0B38CF": "S08-021",
     "E2EE-REQ-1BFDC5AC26176497302E": "S08-020",
     "E2EE-REQ-1CF30FAFE8FA36F5CF2E": "S01-010",
-    "E2EE-REQ-208C5CAB7399B4AC15B8": "S08-017",
+    "E2EE-REQ-FC9468555542933311EE": "S08-017",
     "E2EE-REQ-21F466D08365E6787EFF": "S08-023",
     "E2EE-REQ-226E2E46DD9A8986A73D": "S10-005",
     "E2EE-REQ-28CC5A2874FBFEDC8694": "S08-025",
@@ -259,7 +259,7 @@ E2EE_REQUIREMENT_TASKS = {
     "E2EE-REQ-37CAE24A086303163D86": "S08-027",
     "E2EE-REQ-3823DB12FF1BAAB21A9C": "S10-005",
     "E2EE-REQ-3AE1FE848688A346F9F1": "S08-005",
-    "E2EE-REQ-3DDAFB884DFFB22C1F74": "S08-002",
+    "E2EE-REQ-10F776460FE3B0DD1DCD": "S08-002",
     "E2EE-REQ-3DFFF778DA62F4CEEF8F": "S08-023",
     "E2EE-REQ-3F31F96A8E03DA4C101C": "S08-037",
     "E2EE-REQ-3F6EB7E7803E9A17D029": "S08-024",
@@ -275,7 +275,7 @@ E2EE_REQUIREMENT_TASKS = {
     "E2EE-REQ-532CF56360A03DCF3C39": "S08-034",
     "E2EE-REQ-54D3BF177A5D79854AEC": "S08-027",
     "E2EE-REQ-5754ACC17005856FB5B2": "S10-005",
-    "E2EE-REQ-5B3475BE0506C311BEF2": "S08-027",
+    "E2EE-REQ-9C64A30F28B449358D6C": "S08-027",
     "E2EE-REQ-5B7791BEAEA4EF6B0D60": "S08-027",
     "E2EE-REQ-5E00851700473A8BFE36": "S10-012",
     "E2EE-REQ-67059195AB3AA10AAD9B": "S08-002",
@@ -310,23 +310,23 @@ E2EE_REQUIREMENT_TASKS = {
     "E2EE-REQ-B73C16A97C1278CDDE0B": "S08-023",
     "E2EE-REQ-B8F44A765000AE5B6944": "S08-032",
     "E2EE-REQ-B93A7B094027B1B00105": "S08-027",
-    "E2EE-REQ-B99A6DD4949FED0CE02A": "S08-027",
+    "E2EE-REQ-2D4AECA63BE39613CF13": "S08-027",
     "E2EE-REQ-BFA20A50D15399A2F088": "S08-024",
     "E2EE-REQ-C345CFA457EB0B500D2A": "S08-030",
-    "E2EE-REQ-C8997B4345158FD54D44": "S08-017",
+    "E2EE-REQ-4E5001A4DC4E7E0D12A2": "S08-017",
     "E2EE-REQ-CA268835A931F5051D79": "S08-025",
     "E2EE-REQ-CED437B1C62CF9CD0A79": "S08-023",
-    "E2EE-REQ-D07C2C1AA58D16CA582D": "S08-037",
+    "E2EE-REQ-7DF536DF685CBA18FC96": "S08-037",
     "E2EE-REQ-D150C4C93D931F51EE12": "S08-021",
     "E2EE-REQ-D2C711B6BB260BFB72FD": "S08-024",
     "E2EE-REQ-D70B8B9850E29E082F85": "S08-027",
     "E2EE-REQ-D8D8C1DBDAE5F09E95FD": "S08-043",
-    "E2EE-REQ-DB900449D8D52DA92117": "S08-017",
-    "E2EE-REQ-DF1E11F99D8CA9C38917": "S08-002",
+    "E2EE-REQ-45AD6D0BCA78DC42EFD7": "S08-017",
+    "E2EE-REQ-80E07C3BFD96B7F73087": "S08-002",
     "E2EE-REQ-DFF4835BF134E29328E1": "S08-021",
     "E2EE-REQ-E84E3DF2CF6A849CCBA8": "S08-027",
     "E2EE-REQ-E9D6A931BDD262B08F93": "S08-024",
-    "E2EE-REQ-EC03C8374D88E32F6776": "S08-031",
+    "E2EE-REQ-675C5F4ED330BC9F24B5": "S08-031",
     "E2EE-REQ-ED359F4450E30FD76278": "S08-023",
     "E2EE-REQ-EFECC9F9EB196FD2CF16": "S08-020",
     "E2EE-REQ-F14B7B01F4CFF98A804E": "S08-023",
@@ -524,80 +524,80 @@ def architecture_target(section: str, invariant: str | None = None) -> str:
     if invariant is not None:
         prefix = invariant.split("-", 1)[0]
         return {
-            "TRN": "agenc-ircd-client-wire",
-            "ID": "agenc-ircd-types",
-            "AUTH": "agenc-ircd-auth",
-            "PRV": "agenc-ircd-domain",
-            "STA": "agenc-ircd-domain",
-            "E2E": "agenc-ircd-e2ee",
-            "FED": "agenc-ircd-federation-wire",
-            "DUR": "agenc-ircd-storage",
-            "CON": "agenc-ircd-runtime",
-            "OPS": "agenc-ircd-runtime",
+            "TRN": "agenc-relay-client-wire",
+            "ID": "agenc-relay-types",
+            "AUTH": "agenc-relay-auth",
+            "PRV": "agenc-relay-domain",
+            "STA": "agenc-relay-domain",
+            "E2E": "agenc-relay-e2ee",
+            "FED": "agenc-relay-federation-wire",
+            "DUR": "agenc-relay-storage",
+            "CON": "agenc-relay-runtime",
+            "OPS": "agenc-relay-runtime",
         }[prefix]
 
     number = section_number(section)
     by_number = {
-        1: "agenc-ircd",
-        2: "agenc-ircd-types",
-        3: "agenc-ircd-types",
-        4: "agenc-ircd-config",
-        5: "agenc-ircd-domain",
-        6: "agenc-ircd-runtime",
-        7: "agenc-ircd-types",
-        8: "agenc-ircd-runtime",
-        9: "agenc-ircd-client-wire",
-        10: "agenc-ircd-client-wire",
-        11: "agenc-ircd-auth",
-        12: "agenc-ircd-domain",
-        13: "agenc-ircd-domain",
-        14: "agenc-ircd-domain",
-        15: "agenc-ircd-domain",
-        16: "agenc-ircd-domain",
-        17: "agenc-ircd-storage",
-        18: "agenc-ircd-e2ee",
-        19: "agenc-ircd-runtime",
-        20: "agenc-ircd-federation-wire",
-        21: "agenc-ircd-runtime",
-        22: "agenc-ircd-config",
-        23: "agenc-ircd-storage",
-        24: "agenc-ircd-runtime",
-        25: "agenc-ircd-runtime",
-        26: "agenc-ircd-types",
-        27: "agenc-ircd-runtime",
-        28: "agenc-ircd-testkit",
-        29: "agenc-ircd",
-        30: "agenc-ircd",
+        1: "agenc-relay-server",
+        2: "agenc-relay-types",
+        3: "agenc-relay-types",
+        4: "agenc-relay-config",
+        5: "agenc-relay-domain",
+        6: "agenc-relay-runtime",
+        7: "agenc-relay-types",
+        8: "agenc-relay-runtime",
+        9: "agenc-relay-client-wire",
+        10: "agenc-relay-client-wire",
+        11: "agenc-relay-auth",
+        12: "agenc-relay-domain",
+        13: "agenc-relay-domain",
+        14: "agenc-relay-domain",
+        15: "agenc-relay-domain",
+        16: "agenc-relay-domain",
+        17: "agenc-relay-storage",
+        18: "agenc-relay-e2ee",
+        19: "agenc-relay-runtime",
+        20: "agenc-relay-federation-wire",
+        21: "agenc-relay-runtime",
+        22: "agenc-relay-config",
+        23: "agenc-relay-storage",
+        24: "agenc-relay-runtime",
+        25: "agenc-relay-runtime",
+        26: "agenc-relay-types",
+        27: "agenc-relay-runtime",
+        28: "agenc-relay-testkit",
+        29: "agenc-relay-server",
+        30: "agenc-relay-server",
     }
     if number is not None:
-        return by_number.get(number, "agenc-ircd-runtime")
+        return by_number.get(number, "agenc-relay-runtime")
     if section.startswith("Appendix A"):
-        return "agenc-ircd-client-wire"
+        return "agenc-relay-client-wire"
     if section.startswith("Appendix B"):
-        return "agenc-ircd-federation-wire"
+        return "agenc-relay-federation-wire"
     if section.startswith("Appendix C"):
-        return "agenc-ircd-config"
+        return "agenc-relay-config"
     if section.startswith(("Appendix D", "Appendix E")):
-        return "agenc-ircd-testkit"
-    return "agenc-ircd"
+        return "agenc-relay-testkit"
+    return "agenc-relay-server"
 
 
 def e2ee_target(section: str, identifier: str | None = None) -> str:
     """Assign primary crate ownership for one companion requirement."""
     if identifier in E2EE_TESTKIT_REQUIREMENTS:
-        return "agenc-ircd-testkit"
+        return "agenc-relay-testkit"
     if identifier in E2EE_CRYPTO_REQUIREMENTS:
-        return "agenc-ircd-crypto"
+        return "agenc-relay-crypto"
     number = section_number(section)
     if number == 7:
-        return "agenc-ircd-crypto"
+        return "agenc-relay-crypto"
     if number == 11:
-        return "agenc-ircd-client-wire"
+        return "agenc-relay-client-wire"
     if number == 12:
-        return "agenc-ircd-federation-wire"
+        return "agenc-relay-federation-wire"
     if number == 21:
-        return "agenc-ircd-testkit"
-    return "agenc-ircd-e2ee"
+        return "agenc-relay-testkit"
+    return "agenc-relay-e2ee"
 
 
 def target_for(
@@ -1245,7 +1245,7 @@ def self_test(root: Path) -> int:
     cases += 1
 
     bad_target = copy.deepcopy(valid)
-    bad_target["requirement"][0]["target_crates"] = ["agenc-ircd-invalid"]  # type: ignore[index]
+    bad_target["requirement"][0]["target_crates"] = ["agenc-relay-invalid"]  # type: ignore[index]
     expect_rejection("target", bad_target, expected, source_hashes, "invalid target crates")
     cases += 1
 

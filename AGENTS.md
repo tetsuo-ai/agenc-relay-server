@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-AgenC Relay (ARCD) is a safe-Rust federated chat daemon organized as thirteen crates under `crates/`. The `arcd` binary composes configuration and runtime; the legacy `agenc-ircd` binary remains available for existing installations. Domain logic, client/federation codecs, authentication, cryptography, E2EE, and storage have separate owning crates. Keep `agenc-ircd-domain` free of I/O, clocks, and random generators.
+AgenC Relay (ARCD) is a safe-Rust federated chat daemon organized as thirteen crates under `crates/`. The sole `arcd` binary composes configuration and runtime. Domain logic, client/federation codecs, authentication, cryptography, E2EE, and storage have separate owning crates. Keep `agenc-relay-domain` free of I/O, clocks, and random generators.
 
-Unit tests live beside modules; integration tests live in each crate's `tests/`. `agenc-ircd-testkit` provides shared test support. Deterministic fixtures belong in `test-data/`, fuzz targets in `fuzz/`, and evidence in `conformance/`. `docs/` and `rfcs/` contain specifications; `scripts/` contains validation tools; `deploy/` holds service templates; `assets/` holds artwork.
+Unit tests live beside modules; integration tests live in each crate's `tests/`. `agenc-relay-testkit` provides shared test support. Deterministic fixtures belong in `test-data/`, fuzz targets in `fuzz/`, and evidence in `conformance/`. `docs/` and `rfcs/` contain specifications; `scripts/` contains validation tools; `deploy/` holds service templates; `assets/` holds artwork.
 
 ## Build, Test, and Development Commands
 
@@ -14,9 +14,9 @@ Use the pinned Rust 1.98.0 toolchain. Run commands from the repository root:
 - `cargo fmt --all --check`: check formatting.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: enforce lint policy.
 - `cargo test --workspace --all-features --locked`: run workspace tests.
-- `cargo test -p agenc-ircd-client-wire --locked`: test one owning crate.
+- `cargo test -p agenc-relay-client-wire --locked`: test one owning crate.
 - `bash scripts/check-stage-nine.sh`: run the full implementation gate used by CI; install prerequisites from `.github/workflows/ci.yml`.
-- `cargo run -p agenc-ircd --bin arcd --locked -- serve --config <file>`: start an initialized node. Follow `docs/operator-guide.md` for initialization, TLS credentials, and `check-config` first.
+- `cargo run -p agenc-relay-server --bin arcd --locked -- serve --config <file>`: start an initialized node. Follow `docs/operator-guide.md` for initialization, TLS credentials, and `check-config` first.
 
 ## Coding Style & Naming Conventions
 

@@ -4,143 +4,143 @@ stage = 7
 [[transcript]]
 id = "link-mutual-tls"
 surface = "federation_link"
-file = "crates/agenc-ircd-runtime/tests/federation_link.rs"
+file = "crates/agenc-relay-runtime/tests/federation_link.rs"
 test = "mutual_tls_binds_pin_uri_and_alpn"
 
 [[transcript]]
 id = "link-hello"
 surface = "federation_link"
-file = "crates/agenc-ircd-runtime/tests/federation_link.rs"
+file = "crates/agenc-relay-runtime/tests/federation_link.rs"
 test = "hello_exchange_authenticates_both_directions"
 
 [[transcript]]
 id = "link-keepalive"
 surface = "federation_link"
-file = "crates/agenc-ircd-runtime/tests/federation_link.rs"
+file = "crates/agenc-relay-runtime/tests/federation_link.rs"
 test = "keepalive_silence_and_unsolicited_pong_close_the_link"
 
 [[transcript]]
 id = "link-owners"
 surface = "federation_link"
-file = "crates/agenc-ircd-runtime/src/federation/owner/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/owner/tests/harness.rs"
 test = "accept_and_dial_owners_establish_squit_and_reconnect"
 
 [[transcript]]
 id = "text-carrier-fragments"
 surface = "federation_wire"
-file = "crates/agenc-ircd-federation-wire/tests/text_carrier.rs"
+file = "crates/agenc-relay-federation-wire/tests/text_carrier.rs"
 test = "federation_fragment_round_trips_and_checks_exact_partition"
 
 [[transcript]]
 id = "origin-lifecycle"
 surface = "domain"
-file = "crates/agenc-ircd-domain/src/federation/tests/origin.rs"
+file = "crates/agenc-relay-domain/src/federation/tests/origin.rs"
 test = "replay_classification_covers_fresh_duplicate_conflict_gap_expired_and_reuse"
 
 [[transcript]]
 id = "projection-least-information"
 surface = "domain"
-file = "crates/agenc-ircd-domain/src/federation/tests/projection.rs"
+file = "crates/agenc-relay-domain/src/federation/tests/projection.rs"
 test = "sessions_channels_messages_and_departures_project_least_information"
 
 [[transcript]]
 id = "replica-revision-rules"
 surface = "domain"
-file = "crates/agenc-ircd-domain/src/federation/tests/replica.rs"
+file = "crates/agenc-relay-domain/src/federation/tests/replica.rs"
 test = "event_application_enforces_revision_and_home_rules"
 
 [[transcript]]
 id = "query-cursor-slot"
 surface = "domain"
-file = "crates/agenc-ircd-domain/src/federation/tests/query_cursor.rs"
+file = "crates/agenc-relay-domain/src/federation/tests/query_cursor.rs"
 test = "cursor_table_installs_checks_replaces_and_releases"
 
 [[transcript]]
 id = "storage-federation-records"
 surface = "storage"
-file = "crates/agenc-ircd-storage/tests/federation_records.rs"
+file = "crates/agenc-relay-storage/tests/federation_records.rs"
 test = "every_arm_round_trips_and_binds_its_table_and_kind"
 
 [[transcript]]
 id = "coordinator-request-result-events"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "origin_exchange_and_session_open_commit_result_then_events"
 
 [[transcript]]
 id = "coordinator-replay"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "exact_duplicate_replays_identical_result_bytes_from_storage"
 
 [[transcript]]
 id = "coordinator-two-edges"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "joins_and_messages_project_across_two_edges"
 
 [[transcript]]
 id = "coordinator-grace"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "synchronous_grace_expiry_hides_every_hosted_session"
 
 [[transcript]]
 id = "coordinator-resume"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "resume_with_the_retained_cursor_replays_events_reserved_while_away"
 
 [[transcript]]
 id = "coordinator-snapshot"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "unknown_cursor_triggers_a_verified_snapshot_and_active_swap"
 
 [[transcript]]
 id = "coordinator-query-pages"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "names_query_answers_one_reply_page_and_a_bad_cursor_expires"
 
 [[transcript]]
 id = "coordinator-peer-quarantine"
 surface = "coordinator"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs"
 test = "peer_quarantine_closes_the_link_and_stats_report_it"
 
 [[transcript]]
 id = "edge-registration-names"
 surface = "edge"
-file = "crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/edge/tests/harness.rs"
 test = "edge_registers_joins_and_relays_names_through_the_coordinator"
 
 [[transcript]]
 id = "edge-partition"
 surface = "edge"
-file = "crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/edge/tests/harness.rs"
 test = "global_commands_fail_closed_while_the_link_is_down"
 
 [[transcript]]
 id = "edge-coordinator-bridge"
 surface = "edge"
-file = "crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs"
+file = "crates/agenc-relay-runtime/src/federation/edge/tests/harness.rs"
 test = "edge_and_coordinator_interoperate_over_a_bridged_link"
 
 [[transcript]]
 id = "admin-federation-commands"
 surface = "admin"
-file = "crates/agenc-ircd-runtime/src/admin.rs"
+file = "crates/agenc-relay-runtime/src/admin.rs"
 test = "federation_commands_record_intent_and_outcome"
 
 [[transcript]]
 id = "three-process-federation"
 surface = "daemon"
-file = "crates/agenc-ircd/tests/stage_seven_federation.rs"
+file = "crates/agenc-relay-server/tests/stage_seven_federation.rs"
 test = "clients_on_two_edges_share_channels_through_the_coordinator"
 
 [[transcript]]
 id = "bounded-model"
 surface = "model"
-file = "crates/agenc-ircd-testkit/tests/federation_model.rs"
+file = "crates/agenc-relay-testkit/tests/federation_model.rs"
 test = "bounded_exploration_is_exhaustive_and_matches_the_record"

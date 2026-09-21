@@ -1,7 +1,7 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_federation_wire::{
+use agenc_relay_federation_wire::{
     CanonicalEncode as _, DecodeBudget, EventHeader, FederationHello, OriginRecord,
     ProjectionEntryHeader, RequestHeader, ResultHeader, SCHEMA_REGISTRY, SchemaObject,
     decode_event_arm, decode_projection_arm, decode_request_operation, decode_result_arm,

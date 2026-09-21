@@ -1,8 +1,8 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_crypto::RollbackGuardRootKey;
-use agenc_ircd_storage::{
+use agenc_relay_crypto::RollbackGuardRootKey;
+use agenc_relay_storage::{
     BackupRecord, DatabaseHeader, IntegrityCheckpoint, IntegrityManifest, LoginIndexKeyState,
     LoginIndexStoredKey, NonceReservationState, RollbackGuard, SealedRecord, StateMeta,
     StorageConstruction, StorageConstructionKind, StorageConstructionPlanEntry, StorageError,
@@ -24,12 +24,12 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let guard_root = RollbackGuardRootKey::from_bytes([0x51; 32]);
-    let Ok(integrity_keys) = agenc_ircd_crypto::derive_storage_integrity_keys(
+    let Ok(integrity_keys) = agenc_relay_crypto::derive_storage_integrity_keys(
         &guard_root,
-        agenc_ircd_crypto::StorageIntegrityContext::new(
-            agenc_ircd_types::NetworkId::from_bytes([0x53; 32]),
-            agenc_ircd_types::ServerId::from_bytes([0x54; 16]),
-            agenc_ircd_types::DatabaseId::from_bytes([0x55; 16]),
+        agenc_relay_crypto::StorageIntegrityContext::new(
+            agenc_relay_types::NetworkId::from_bytes([0x53; 32]),
+            agenc_relay_types::ServerId::from_bytes([0x54; 16]),
+            agenc_relay_types::DatabaseId::from_bytes([0x55; 16]),
         ),
     ) else {
         return;
@@ -55,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
         3 => {
             if let Ok(meta) = StateMeta::decode_and_verify(
                 encoded,
-                agenc_ircd_crypto::StorageDigest::from_bytes([0x52; 32]),
+                agenc_relay_crypto::StorageDigest::from_bytes([0x52; 32]),
                 &integrity_keys,
             ) {
                 assert_canonical(meta.encode(), encoded);

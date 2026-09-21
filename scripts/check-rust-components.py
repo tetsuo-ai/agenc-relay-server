@@ -421,7 +421,7 @@ def expect_probe_error(
 def self_test() -> None:
     """Exercise success plus path, process, encoding, and resource failures."""
     checks = 0
-    with tempfile.TemporaryDirectory(prefix="agenc-ircd-rust-components-") as directory:
+    with tempfile.TemporaryDirectory(prefix="agenc-relay-rust-components-") as directory:
         root = Path(directory).resolve(strict=True)
 
         for selector, version in (

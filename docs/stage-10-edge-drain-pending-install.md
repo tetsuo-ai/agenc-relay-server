@@ -32,7 +32,7 @@ to 1,000,000 rows in batches of 256; `installed` therefore stops chaining
 batches once shutdown is requested rather than spending the drain budget on
 rows the next start requests again.
 
-The companion E2EE transfer (`crates/agenc-ircd-runtime/src/e2ee/edge/snapshot.rs`)
+The companion E2EE transfer (`crates/agenc-relay-runtime/src/e2ee/edge/snapshot.rs`)
 needed no change. Its `Staging` and `Ready` stages never entered
 `reload_ready`, so they never held drain; its `Active` migration and
 `Discarding` cleanup are chains of local commits that a restart resumes from
@@ -40,7 +40,7 @@ the durable marker (`SnapshotInstall::restored`).
 
 ## Regressions
 
-`crates/agenc-ircd-runtime/src/federation/edge/tests/shutdown_pending_install.rs`
+`crates/agenc-relay-runtime/src/federation/edge/tests/shutdown_pending_install.rs`
 runs the production edge actor over real redb storage against a scripted
 coordinator, stops it through `run_shutdown` under the RUN-05 tightened plan
 (2 s, 5 s, 5 s, 2 s), requires all four phases `Completed`, no stop-deadline

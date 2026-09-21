@@ -1,40 +1,40 @@
 [workspace]
 members = [
-    "crates/agenc-ircd",
-    "crates/agenc-ircd-admin",
-    "crates/agenc-ircd-auth",
-    "crates/agenc-ircd-client-wire",
-    "crates/agenc-ircd-config",
-    "crates/agenc-ircd-crypto",
-    "crates/agenc-ircd-domain",
-    "crates/agenc-ircd-e2ee",
-    "crates/agenc-ircd-federation-wire",
-    "crates/agenc-ircd-runtime",
-    "crates/agenc-ircd-storage",
-    "crates/agenc-ircd-testkit",
-    "crates/agenc-ircd-types",
+    "crates/agenc-relay-server",
+    "crates/agenc-relay-admin",
+    "crates/agenc-relay-auth",
+    "crates/agenc-relay-client-wire",
+    "crates/agenc-relay-config",
+    "crates/agenc-relay-crypto",
+    "crates/agenc-relay-domain",
+    "crates/agenc-relay-e2ee",
+    "crates/agenc-relay-federation-wire",
+    "crates/agenc-relay-runtime",
+    "crates/agenc-relay-storage",
+    "crates/agenc-relay-testkit",
+    "crates/agenc-relay-types",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 edition = "2024"
 rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
-agenc-ircd-admin = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-admin" }
-agenc-ircd-auth = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-auth" }
-agenc-ircd-client-wire = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-client-wire" }
-agenc-ircd-config = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-config" }
-agenc-ircd-crypto = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-crypto" }
-agenc-ircd-domain = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-domain" }
-agenc-ircd-e2ee = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-e2ee" }
-agenc-ircd-federation-wire = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-federation-wire" }
-agenc-ircd-runtime = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-runtime" }
-agenc-ircd-storage = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-storage" }
-agenc-ircd-testkit = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-testkit" }
-agenc-ircd-types = { version = "=1.0.0-rc.2", path = "crates/agenc-ircd-types" }
+agenc-relay-admin = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-admin" }
+agenc-relay-auth = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-auth" }
+agenc-relay-client-wire = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-client-wire" }
+agenc-relay-config = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-config" }
+agenc-relay-crypto = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-crypto" }
+agenc-relay-domain = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-domain" }
+agenc-relay-e2ee = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-e2ee" }
+agenc-relay-federation-wire = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-federation-wire" }
+agenc-relay-runtime = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-runtime" }
+agenc-relay-storage = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-storage" }
+agenc-relay-testkit = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-testkit" }
+agenc-relay-types = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-types" }
 
 # These exact profiles are frozen by Architecture section 24.4. Crate manifests
 # for completed stages reference only the profiles they use. Profiles for later

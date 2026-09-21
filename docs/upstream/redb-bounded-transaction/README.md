@@ -11,7 +11,7 @@ replacement, the main transaction and maintenance is STO-03.
 
 Apply [bounded-transaction.patch](bounded-transaction.patch) with `git apply`
 to upstream redb commit `23b6ba05473b13e69ed4db82f4b5bc07f0c33be9`
-(`v4.2.0`), the provenance of the published crate agenc-ircd uses.
+(`v4.2.0`), the provenance of the published crate agenc-relay-server uses.
 [source.json](source.json) records the patch digest and the before/after
 digest of every changed file; applying the patch to a pristine checkout of
 that commit reproduces every `after_sha256`. The source retains redb's

@@ -9,7 +9,7 @@ proves = ["directives", "path allowlist", "Tor key separation", "socket activati
 
 [[check]]
 id = "systemd-profiles"
-command = ["systemd-analyze", "--root=<temporary-root>", "verify", "agenc-ircd.service"]
+command = ["systemd-analyze", "--root=<temporary-root>", "verify", "arcd.service"]
 proves = ["direct", "dual", "onion-local-admin", "onion-remote-admin"]
 
 [[check]]
@@ -19,10 +19,10 @@ proves = ["SafeSocks=1", "TestSocks=1", "DNSPort=0", "proxy listener absent", "o
 
 [[check]]
 id = "host-and-secret-modes"
-command = ["cargo", "test", "-p", "agenc-ircd-config", "--test", "host", "--test", "secrets", "--locked"]
+command = ["cargo", "test", "-p", "agenc-relay-config", "--test", "host", "--test", "secrets", "--locked"]
 proves = ["directory modes", "locked secret modes", "symlink refusal"]
 
 [[check]]
 id = "crash-signals-and-reopen"
-command = ["cargo", "test", "-p", "agenc-ircd-runtime", "--test", "shutdown", "--test", "bridge_storage", "--locked"]
+command = ["cargo", "test", "-p", "agenc-relay-runtime", "--test", "shutdown", "--test", "bridge_storage", "--locked"]
 proves = ["crash containment", "first and second signals", "database reopen"]

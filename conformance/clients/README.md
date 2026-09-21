@@ -36,7 +36,7 @@ Build the tools and run the development test with these commands:
 ```sh
 python3 scripts/build-qualification-tools.py --output /path/to/new-tools
 qualification_image="$(cat /path/to/new-tools/image-id.txt)"
-AGENC_STAGE10_TOOL_IMAGE="$qualification_image" cargo test -p agenc-ircd \
+AGENC_STAGE10_TOOL_IMAGE="$qualification_image" cargo test -p agenc-relay-server \
   --all-features --locked --test stage_six_daemon \
   stage_ten::conventional_clients_exchange_public_messages_and_cannot_enter_secret_channels \
   -- --ignored --nocapture

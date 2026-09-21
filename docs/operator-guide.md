@@ -1,12 +1,8 @@
 # AgenC Relay operator guide
 
-The `arcd` executable and the paths in this guide are for new installations.
-Existing `agenc-ircd` installations may continue using their current binary,
-service account, configuration, and state paths. Renaming an installed service
-or moving its state requires a stopped-node migration with a verified backup;
-do not point a fresh `arcd` service at an existing database through a partial
-path or ownership change. Both executables run the same server code and keep
-the same version-1 wire protocol and on-disk format.
+The daemon executable is `arcd`. Initialize a fresh schema-generation-5
+database using the paths below. Earlier development profiles and stored
+formats are rejected; this private project has no deployment migration.
 
 ## Install the service account and directories
 

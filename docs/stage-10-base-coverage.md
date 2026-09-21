@@ -43,7 +43,7 @@ Selection: `--all-features`, host `x86_64-unknown-linux-gnu`, toolchain
 
 ### Why `--lib` alone understates two crates
 
-`agenc-ircd-types`, `agenc-ircd-client-wire` and `agenc-ircd-federation-wire`
+`agenc-relay-types`, `agenc-relay-client-wire` and `agenc-relay-federation-wire`
 keep their regression suites in `crates/<crate>/tests/`, which `--lib` does not
 build. Under `--lib` the twenty-nine `generated_registry.rs` decoder regions
 and the twenty-one client and federation wire regions read as uncovered; under
@@ -79,7 +79,7 @@ COV-04's (#73) integrated verdict and is not claimed here.
 
 Forty-one regions, with their metric and their after counts.
 
-Domain authorization and state (`agenc-ircd-domain`):
+Domain authorization and state (`agenc-relay-domain`):
 
 | Region | Metric | After |
 | --- | --- | --- |
@@ -94,7 +94,7 @@ Domain authorization and state (`agenc-ircd-domain`):
 | `replica-validate-invites` | branches | 4/4 |
 | `replica-event-durable-rows` | branches | 48/48 |
 
-Administration (`agenc-ircd-admin` and `agenc-ircd-runtime/src/admin`):
+Administration (`agenc-relay-admin` and `agenc-relay-runtime/src/admin`):
 
 | Region | Metric | After |
 | --- | --- | --- |
@@ -139,7 +139,7 @@ Base runtime and federation classification:
 
 ### Domain authorization fences
 
-`crates/agenc-ircd-domain/src/decision/tests/authority_fences.rs`
+`crates/agenc-relay-domain/src/decision/tests/authority_fences.rs`
 
 - A session whose home peer is suspended is refused execution with
   `ServerBusy` and is refused as a new direct-message target with the same
@@ -162,7 +162,7 @@ Base runtime and federation classification:
 
 ### Committed administrative account transitions
 
-`crates/agenc-ircd-domain/src/model/tests/admin_fences.rs`
+`crates/agenc-relay-domain/src/model/tests/admin_fences.rs`
 
 - A channel key mode and its stored verifier must appear together; either
   alone is an invariant violation.
@@ -177,7 +177,7 @@ Base runtime and federation classification:
 
 ### Edge replica reference checks
 
-`crates/agenc-ircd-domain/src/federation/tests/replica/reference_fences.rs`
+`crates/agenc-relay-domain/src/federation/tests/replica/reference_fences.rs`
 
 - A membership whose channel resolves but whose session does not dangles, and
   the refused snapshot leaves the standing generation and its entries in
@@ -190,7 +190,7 @@ Base runtime and federation classification:
 
 ### Maintenance key-state decoding
 
-`crates/agenc-ircd-admin/src/maintenance/state/tests/mod.rs`
+`crates/agenc-relay-admin/src/maintenance/state/tests/mod.rs`
 
 - Five truncations, one immediately before each field of the encoded
   key-state tuple, are each refused by the real `Reader`; only the exact
@@ -208,9 +208,9 @@ Base runtime and federation classification:
 
 ### Administrative command arguments and audit export
 
-`crates/agenc-ircd-admin/src/command/tests/argument_refusals.rs`,
-`crates/agenc-ircd-admin/src/audit/tests/export_records.rs`,
-`crates/agenc-ircd-admin/src/maintenance/tests/mod.rs`
+`crates/agenc-relay-admin/src/command/tests/argument_refusals.rs`,
+`crates/agenc-relay-admin/src/audit/tests/export_records.rs`,
+`crates/agenc-relay-admin/src/maintenance/tests/mod.rs`
 
 - Twelve lines refuse one identifier or one reason each, and seven accepted
   lines differ from them only in that argument, so each refusal rests on the
@@ -224,7 +224,7 @@ Base runtime and federation classification:
 
 ### Runtime audit authority
 
-`crates/agenc-ircd-runtime/src/admin/audit/tests/authority_fences.rs`
+`crates/agenc-relay-runtime/src/admin/audit/tests/authority_fences.rs`
 
 - An authority that has not reconciled its persisted chain refuses both
   retention steps, and refusing leaves the chain position, the retained-first
@@ -240,7 +240,7 @@ Base runtime and federation classification:
 
 ### Channel-control account fence
 
-`crates/agenc-ircd-runtime/src/command_convert/tests/control_account_fence.rs`
+`crates/agenc-relay-runtime/src/command_convert/tests/control_account_fence.rs`
 
 Every channel-control kind is refused for a session with no account and
 admitted for one with an account, and the nickname family is unaffected in
@@ -337,35 +337,35 @@ COV-04 (#73) integrated verdict. This record makes no claim about them.
 
 New test sources, all under a `tests` path component:
 
-- `crates/agenc-ircd-domain/src/decision/tests/authority_fences.rs`
-- `crates/agenc-ircd-domain/src/model/tests/admin_fences.rs`
-- `crates/agenc-ircd-domain/src/federation/tests/replica/reference_fences.rs`
-- `crates/agenc-ircd-admin/src/maintenance/state/tests/mod.rs`
-- `crates/agenc-ircd-admin/src/command/tests/argument_refusals.rs`
-- `crates/agenc-ircd-admin/src/audit/tests/export_records.rs`
-- `crates/agenc-ircd-runtime/src/admin/audit/tests/authority_fences.rs`
-- `crates/agenc-ircd-runtime/src/command_convert/tests/control_account_fence.rs`
+- `crates/agenc-relay-domain/src/decision/tests/authority_fences.rs`
+- `crates/agenc-relay-domain/src/model/tests/admin_fences.rs`
+- `crates/agenc-relay-domain/src/federation/tests/replica/reference_fences.rs`
+- `crates/agenc-relay-admin/src/maintenance/state/tests/mod.rs`
+- `crates/agenc-relay-admin/src/command/tests/argument_refusals.rs`
+- `crates/agenc-relay-admin/src/audit/tests/export_records.rs`
+- `crates/agenc-relay-runtime/src/admin/audit/tests/authority_fences.rs`
+- `crates/agenc-relay-runtime/src/command_convert/tests/control_account_fence.rs`
 
 plus one case appended to
-`crates/agenc-ircd-admin/src/maintenance/tests/mod.rs` and the `mod` lines that
+`crates/agenc-relay-admin/src/maintenance/tests/mod.rs` and the `mod` lines that
 admit the new modules. No production handler changed, so this work adds no
 wire or storage format, no dependency pin and no limit.
 
 Commands and results at this branch:
 
 ```sh
-cargo test -p agenc-ircd-domain --all-features --locked
+cargo test -p agenc-relay-domain --all-features --locked
 # 179 + 7 passed; 0 failed
 
-cargo test -p agenc-ircd-admin --all-features --locked
+cargo test -p agenc-relay-admin --all-features --locked
 # 56 + 1 passed; 0 failed
 
-cargo test -p agenc-ircd-client-wire --all-features --locked
-cargo test -p agenc-ircd-federation-wire --all-features --locked
-cargo test -p agenc-ircd-types --all-features --locked
+cargo test -p agenc-relay-client-wire --all-features --locked
+cargo test -p agenc-relay-federation-wire --all-features --locked
+cargo test -p agenc-relay-types --all-features --locked
 # every target passes; no failures
 
-cargo test -p agenc-ircd-runtime --all-features --locked
+cargo test -p agenc-relay-runtime --all-features --locked
 # 1,534 unit tests pass with one ignored, and every integration target passes:
 # bridge_crypto 8, bridge_storage 6, e2ee_load 1, federation_link 16,
 # idle_connection_memory 2 with one ignored, listener_accept 22,
@@ -388,4 +388,4 @@ The coverage source inventory in `conformance/critical-coverage.toml` and
 `conformance/release-critical-coverage.toml` is reanchored to the 832 current
 production sources. Seventeen release regions and one interim region moved
 with the three lines added to
-`crates/agenc-ircd-admin/src/maintenance/state.rs`; no region text changed.
+`crates/agenc-relay-admin/src/maintenance/state.rs`; no region text changed.

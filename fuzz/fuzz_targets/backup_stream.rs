@@ -3,8 +3,8 @@
 
 use std::io::Cursor;
 
-use agenc_ircd_crypto::{Ed25519PublicKey, RollbackGuardRootKey, StorageMasterKey};
-use agenc_ircd_storage::{BackupTrustKey, verify_backup};
+use agenc_relay_crypto::{Ed25519PublicKey, RollbackGuardRootKey, StorageMasterKey};
+use agenc_relay_storage::{BackupTrustKey, verify_backup};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_FUZZ_BACKUP_BYTES: u64 = 1_048_576;

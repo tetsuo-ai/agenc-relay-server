@@ -20,7 +20,7 @@ measurement.
 One report, on the pinned nightly that carries `-C instrument-coverage` branch
 support, with `cargo-llvm-cov 0.9.0`. It is a whole-workspace all-target
 report, which is the only report `check-coverage.py check` can run to
-completion: a `--lib` report omits `crates/agenc-ircd/src/main.rs` entirely and
+completion: a `--lib` report omits `crates/agenc-relay-server/src/main.rs` entirely and
 refuses before scoring anything.
 
 ```sh
@@ -48,7 +48,7 @@ The cause is not authoring error. Every one of these spans was correct when it
 was written, and the file then grew above it. Commit `4bcf230` ("Resolve
 durable edge witnesses with authenticated record ancestry") is the clearest
 case: it inserted thirty-six lines into
-`crates/agenc-ircd-runtime/src/e2ee/edge/witness_failure.rs` and refreshed
+`crates/agenc-relay-runtime/src/e2ee/edge/witness_failure.rs` and refreshed
 every affected row's `source_sha256` to the new file, but left every
 `start_line` and `end_line` where they were. At the parent commit `52808b9`,
 `cap74-witness-failure-witness-pending` reads exactly `witness_pending` at
@@ -188,29 +188,29 @@ recorded here so that work is mechanical for whoever takes it.
 
 | File | Rows | The items their ids name, in file order |
 | --- | --- | --- |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/companion.rs` | 10 | `run`, `committed_ack`, `request_committed`, `send_response`, `schedule_mailbox_expiry`, `mailbox_timer_fired`, `snapshot_timer_fired`, `continue_snapshot`, `send_page`, `continue_fetch` |
-| `crates/agenc-ircd-runtime/src/e2ee/edge/witness_failure.rs` | 9 | `witness_pending`, `prepare_witness_retry`, `arm_witness_retry`, `record_witness`, `try_witness_stage`, `witness_timer_fired`, `witness_batch_applied`, `witness_rejection`, `witness_batch_rejected` |
-| `crates/agenc-ircd-runtime/src/e2ee/edge/witness_recovery.rs` | 8 | `witness_recovery_pending`, `install_backing`, `restore`, `reserve_one`, `grow`, `insert_reserved`, `restore_witness_backing`, `restore_chain_witness` |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/sync.rs` | 5 | `state_fetch`, `snapshot_expired`, `accepting_requests`, `link_lost`, `require_cut_scope` |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/mod.rs` | 5 | `batch_applied`, `delivery_ack_receipt`, `replay_io_busy`, `batch_rejected_with_error`, `reject_origin_acknowledgement` |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/startup/retirement.rs` | 4 | `committed`, `rejected`, `retryable`, `retry` |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/ops/sequence.rs` | 3 | `council`, `submit_reinit_ack`, `fetch_object` |
-| `crates/agenc-ircd-domain/src/model.rs` | 2 | `revision`, `revision` |
-| `crates/agenc-ircd-e2ee/src/sequencer.rs` | 2 | `credential`, `key_set` |
-| `crates/agenc-ircd-runtime/src/account_service.rs` | 2 | `binding`, `generation` |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/recovery_gates.rs` | 2 | `matches_restored_heads`, `states` |
-| `crates/agenc-ircd-runtime/src/e2ee/coordinator/sequencer_signing.rs` | 2 | `at_time`, `for_receipt` |
-| `crates/agenc-ircd-runtime/src/remote_accounts.rs` | 2 | `carrier`, `outcome` |
-| `crates/agenc-ircd-runtime/src/state_core/mod.rs` | 2 | `backing_reservations`, `complete_index_refresh` |
-| `crates/agenc-ircd-e2ee/src/record_authentication.rs` | 1 | `authenticate_record` |
-| `crates/agenc-ircd-runtime/src/daemon.rs` | 1 | `attach_coordinator_role` |
-| `crates/agenc-ircd-runtime/src/e2ee/edge/mod.rs` | 1 | `is_active` |
-| `crates/agenc-ircd-runtime/src/e2ee/edge/sync.rs` | 1 | `fail_frame` |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/mailbox_expiry.rs` | 1 | `rejected` |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/replay_maintenance/receipt.rs` | 1 | `rejected` |
-| `crates/agenc-ircd-runtime/src/federation/coordinator/request_expiry.rs` | 1 | `rejected` |
-| `crates/agenc-ircd-runtime/src/registration.rs` | 1 | `index_refreshed` |
-| `crates/agenc-ircd-storage/src/restore_command.rs` | 1 | `execute_restore_command` |
+| `crates/agenc-relay-runtime/src/federation/coordinator/companion.rs` | 10 | `run`, `committed_ack`, `request_committed`, `send_response`, `schedule_mailbox_expiry`, `mailbox_timer_fired`, `snapshot_timer_fired`, `continue_snapshot`, `send_page`, `continue_fetch` |
+| `crates/agenc-relay-runtime/src/e2ee/edge/witness_failure.rs` | 9 | `witness_pending`, `prepare_witness_retry`, `arm_witness_retry`, `record_witness`, `try_witness_stage`, `witness_timer_fired`, `witness_batch_applied`, `witness_rejection`, `witness_batch_rejected` |
+| `crates/agenc-relay-runtime/src/e2ee/edge/witness_recovery.rs` | 8 | `witness_recovery_pending`, `install_backing`, `restore`, `reserve_one`, `grow`, `insert_reserved`, `restore_witness_backing`, `restore_chain_witness` |
+| `crates/agenc-relay-runtime/src/e2ee/coordinator/sync.rs` | 5 | `state_fetch`, `snapshot_expired`, `accepting_requests`, `link_lost`, `require_cut_scope` |
+| `crates/agenc-relay-runtime/src/federation/coordinator/mod.rs` | 5 | `batch_applied`, `delivery_ack_receipt`, `replay_io_busy`, `batch_rejected_with_error`, `reject_origin_acknowledgement` |
+| `crates/agenc-relay-runtime/src/federation/coordinator/startup/retirement.rs` | 4 | `committed`, `rejected`, `retryable`, `retry` |
+| `crates/agenc-relay-runtime/src/e2ee/coordinator/ops/sequence.rs` | 3 | `council`, `submit_reinit_ack`, `fetch_object` |
+| `crates/agenc-relay-domain/src/model.rs` | 2 | `revision`, `revision` |
+| `crates/agenc-relay-e2ee/src/sequencer.rs` | 2 | `credential`, `key_set` |
+| `crates/agenc-relay-runtime/src/account_service.rs` | 2 | `binding`, `generation` |
+| `crates/agenc-relay-runtime/src/e2ee/coordinator/recovery_gates.rs` | 2 | `matches_restored_heads`, `states` |
+| `crates/agenc-relay-runtime/src/e2ee/coordinator/sequencer_signing.rs` | 2 | `at_time`, `for_receipt` |
+| `crates/agenc-relay-runtime/src/remote_accounts.rs` | 2 | `carrier`, `outcome` |
+| `crates/agenc-relay-runtime/src/state_core/mod.rs` | 2 | `backing_reservations`, `complete_index_refresh` |
+| `crates/agenc-relay-e2ee/src/record_authentication.rs` | 1 | `authenticate_record` |
+| `crates/agenc-relay-runtime/src/daemon.rs` | 1 | `attach_coordinator_role` |
+| `crates/agenc-relay-runtime/src/e2ee/edge/mod.rs` | 1 | `is_active` |
+| `crates/agenc-relay-runtime/src/e2ee/edge/sync.rs` | 1 | `fail_frame` |
+| `crates/agenc-relay-runtime/src/federation/coordinator/mailbox_expiry.rs` | 1 | `rejected` |
+| `crates/agenc-relay-runtime/src/federation/coordinator/replay_maintenance/receipt.rs` | 1 | `rejected` |
+| `crates/agenc-relay-runtime/src/federation/coordinator/request_expiry.rs` | 1 | `rejected` |
+| `crates/agenc-relay-runtime/src/registration.rs` | 1 | `index_refreshed` |
+| `crates/agenc-relay-storage/src/restore_command.rs` | 1 | `execute_restore_command` |
 
 Every one of these sixty-seven matches executable coverage data, so none is
 visible to `check-coverage.py` at all: each scores, silently, against an item

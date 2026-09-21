@@ -1,8 +1,8 @@
 schema_version = 1
 stage = 7
 model = "explicit-state exploration of base federation"
-source = "crates/agenc-ircd-testkit/src/federation_model.rs"
-test = "crates/agenc-ircd-testkit/tests/federation_model.rs"
+source = "crates/agenc-relay-testkit/src/federation_model.rs"
+test = "crates/agenc-relay-testkit/tests/federation_model.rs"
 edges = 2
 clients = 3
 channels = 2

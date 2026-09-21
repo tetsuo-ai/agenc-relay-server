@@ -1,7 +1,7 @@
 # PRECIS Dependency Decision
 
 Stage 01 pins `precis-profiles` 0.1.13 with default features disabled. The
-crate remains a private implementation detail of `agenc-ircd-types`; its types
+crate remains a private implementation detail of `agenc-relay-types`; its types
 and errors never cross a public API boundary.
 
 Version 0.1.13 contains a byte/character-index mismatch in nickname space

@@ -71,7 +71,7 @@ crosses the byte or item ceiling is refused whole and the sink is closed.
 
 ## Evidence
 
-- `crates/agenc-ircd/tests/stage_six_daemon/pipelined_commands.rs`, through
+- `crates/agenc-relay-server/tests/stage_six_daemon/pipelined_commands.rs`, through
   the real daemon: 5 and 9 pipelined PRIVMSGs from a guest and 32 from an
   account, each in one write, all delivered in order with the marker `PONG`
   and no slow-consumer close; the issue's exact default-bucket case, where
@@ -79,7 +79,7 @@ crosses the byte or item ceiling is refused whole and the sink is closed.
   connected; eight JOINs pipelined with registration. The first four fail
   without the runtime change; the JOIN case passed before and is kept as a
   guard.
-- `crates/agenc-ircd-runtime/tests/listener_accept.rs`,
+- `crates/agenc-relay-runtime/tests/listener_accept.rs`,
   `a_full_output_queue_closes_with_the_error_line_first`: over a real TLS
   transport a queue is driven to the ceiling that refuses a whole demand,
   closed as a slow consumer, and the client receives exactly the `ERROR`

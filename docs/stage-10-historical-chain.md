@@ -9,7 +9,7 @@ integration is ENC-03 and ENC-04.
 
 ## Composition
 
-`agenc_ircd_e2ee::history::HistoricalChain` opens at the external genesis
+`agenc_relay_e2ee::history::HistoricalChain` opens at the external genesis
 anchor of an `InitialAuthority` (CAP-73 initial authority under the
 independent binding pin) and adopts one complete `sequencer_record` at a
 time through `advance`. Each record is authenticated at exactly the next
@@ -71,7 +71,7 @@ leaf-membership facts in `RecordReferences::memberships` (ENC-05, see
 
 ## Evidence
 
-`crates/agenc-ircd-e2ee/tests/history.rs` builds real-signature chains from
+`crates/agenc-relay-e2ee/tests/history.rs` builds real-signature chains from
 the pinned genesis: two principals (three devices), the creator-only
 bootstrap policy, the generation-one operational policy, and a sequencer key
 that signs every record at its exact position. Inner MLS evidence stays
@@ -97,7 +97,7 @@ opened under another genesis pin; a record naming itself; the record limit,
 truncated bytes, a wrong object kind, and an exhausted decode budget, each
 leaving the chain unchanged.
 
-Commands: `cargo test -p agenc-ircd-e2ee --locked` (all crate suites,
-including the sixteen chain tests), `cargo clippy -p agenc-ircd-e2ee
+Commands: `cargo test -p agenc-relay-e2ee --locked` (all crate suites,
+including the sixteen chain tests), `cargo clippy -p agenc-relay-e2ee
 --all-targets --all-features -- -D warnings`, `cargo fmt --all --check`, and
 the stage-nine gate.

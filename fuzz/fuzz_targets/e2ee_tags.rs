@@ -1,9 +1,9 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_client_wire::parse_client_tags;
-use agenc_ircd_e2ee::wire::fragment::{FragmentTag, ReceiptTag};
-use agenc_ircd_e2ee::wire::tokens::{
+use agenc_relay_client_wire::parse_client_tags;
+use agenc_relay_e2ee::wire::fragment::{FragmentTag, ReceiptTag};
+use agenc_relay_e2ee::wire::tokens::{
     base64url_decode, base64url_encode, parse_account, parse_cursor, parse_hash, parse_id16,
     parse_key_package_ref, parse_u16, parse_u32, parse_u64,
 };

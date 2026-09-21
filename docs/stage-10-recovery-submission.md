@@ -10,13 +10,13 @@ historical chain and never signs a missing link. The registered wire kind
 `submit_recovery_element(43)`, the result kinds 24 through 27, the
 `EGROUP SUBMIT RECOVERY` and `RECOVERY-ELEMENT` commands, the
 `RECOVERY-ACCEPTED`, `RECOVERY-EXTENDED`, `RECOVERY-CLOSED` and
-`RECOVERY-CONFLICT` replies, the `IRC-MLS/1 recovery submission` signature
+`RECOVERY-CONFLICT` replies, the `ARC-MLS/1 recovery submission` signature
 label and the `recovery_submission_id` hash domain were all fixed by the
 companion (ENC-01); no profile hash, registry or specification text changes.
 
 ## Ingress
 
-`EGROUP SUBMIT RECOVERY <conversation-id>` carries an `IrcRecoverySubmission`
+`EGROUP SUBMIT RECOVERY <conversation-id>` carries an `ArcRecoverySubmission`
 (at most `MAX_RECOVERY_SUBMISSION_OBJECT`). The coordinator accepts it only
 when the durable gate is `pending` and the submission names exactly the
 gate's recovery epoch, source rollback guard hash and the three restored
@@ -160,7 +160,7 @@ edges.
 
 ## Evidence
 
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/recovery_submission.rs`
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/recovery_submission.rs`
   (in-process coordinator): a route restored `pending` at the genesis
   anchor adopts a four-record lineage (candidate, bootstrap activation with
   its policy reference, closing candidate and closing finalization) and the
@@ -182,16 +182,16 @@ edges.
   byte-identical head record repeats the extension; a submission object of
   another kind and a head named with another predecessor are refused; and
   references come only from retained reference objects at the position.
-- `crates/agenc-ircd/tests/stage_eight_e2ee/recovery_submission.rs` (real
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/recovery_submission.rs` (real
   daemons): a signed backup taken after the bind, the live lineage and close
   signed afterwards, `storage restore` under a new recovery epoch, the gate
   read `pending` from the restored state, the chain and close uploaded by
   the attached device through the edge, `RECOVERY-CLOSED` naming the
   original close, `closed` read from the durable gate after a stop, and
   `E2EE_ROUTE_INVALID` for a submission after the restart.
-- `crates/agenc-ircd-storage/tests/e2ee_records.rs`: both rows round trip,
+- `crates/agenc-relay-storage/tests/e2ee_records.rs`: both rows round trip,
   every inconsistent outcome is refused and neither body replays as the other.
-- `crates/agenc-ircd-e2ee`: the carrier object round trips with an
+- `crates/agenc-relay-e2ee`: the carrier object round trips with an
   identifier covering every field, the element kinds accept exactly their
   object kinds, and the command, carrier and reply tables cover the new
   productions.

@@ -1,8 +1,8 @@
 schema_version = 1
 stage = 8
 model = "explicit-state exploration of encrypted routes, sequencer logs, and lifecycles"
-source = "crates/agenc-ircd-testkit/src/e2ee_model.rs"
-test = "crates/agenc-ircd-testkit/tests/e2ee_model.rs"
+source = "crates/agenc-relay-testkit/src/e2ee_model.rs"
+test = "crates/agenc-relay-testkit/tests/e2ee_model.rs"
 conversations = 2
 accounts = 2
 devices = 2

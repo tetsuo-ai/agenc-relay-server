@@ -69,14 +69,14 @@ the classes reachable and the selector correct for the owner that will call it.
 
 ## Evidence
 
-- `cargo test -p agenc-ircd-runtime --all-features --lib`: 1,532 passed.
+- `cargo test -p agenc-relay-runtime --all-features --lib`: 1,532 passed.
   `the_full_default_population_stays_in_the_normal_overload_class` pins the new
   arithmetic and the normal class;
   `the_former_default_budget_left_the_population_above_every_class` keeps the
   rejected four-GiB arithmetic legible;
   `eviction_of_an_idle_population_stops_at_the_recovery_mark` fails against the
   previous projection, which selected all ten candidates instead of two.
-- `cargo test -p agenc-ircd-config --all-features`: the template, the golden
+- `cargo test -p agenc-relay-config --all-features`: the template, the golden
   public configuration and the cross-field fixtures carry the new default.
 - `python3 scripts/test-release-qualification.py`: 56 passed, including the
   negative fixture that refuses a node reporting a raised or overdrawn pool.

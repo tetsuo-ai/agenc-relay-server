@@ -12,7 +12,7 @@ from .records import (QualificationError, canonical, digest, file_digest, read_b
                       sync_directory, target_scope, utc_now, write_once)
 from .verify import status
 
-# The daemon verifies the same bytes under agenc_ircd_crypto's
+# The daemon verifies the same bytes under agenc_relay_crypto's
 # SignatureDomain::ReleaseDecision, whose direct-prefix label this is.
 DOMAIN = b"agenc-chat release decision v1"
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")

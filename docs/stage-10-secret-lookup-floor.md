@@ -66,16 +66,16 @@ running floor never changes underneath a waiting response.
 
 ## Evidence
 
-- `crates/agenc-ircd-runtime/src/state_core/tests/secret_floor.rs`: the
+- `crates/agenc-relay-runtime/src/state_core/tests/secret_floor.rs`: the
   deadline follows the command's start at floors of 1, 5 and 50
   milliseconds and disappears at and beyond it, a zero floor holds nothing,
   one connection holds one response, a held response reaches its connection
   only after the deadline and exactly once with its timer naming that exact
   connection, work that already exceeded the floor is answered at once, and
   a closed connection's response is dropped rather than published.
-- `crates/agenc-ircd-runtime/src/client_render.rs`: the classification test
+- `crates/agenc-relay-runtime/src/client_render.rs`: the classification test
   covers the four commands against the concealment outcomes and every other
   failure class, mixed multi-target outcomes, and other commands.
-- `crates/agenc-ircd/tests/stage_six_daemon.rs`: through the real daemon
+- `crates/agenc-relay-server/tests/stage_six_daemon.rs`: through the real daemon
   over TLS, a concealed TOPIC refusal precedes the next command's reply on
   the same connection.

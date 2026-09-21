@@ -1,0 +1,27 @@
+[package]
+name = "agenc-relay-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+agenc-relay-client-wire.workspace = true
+agenc-relay-crypto.workspace = true
+agenc-relay-domain.workspace = true
+agenc-relay-e2ee.workspace = true
+agenc-relay-federation-wire.workspace = true
+agenc-relay-types.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+mls-rs.workspace = true
+mls-rs-crypto-rustcrypto.workspace = true
+openmls.workspace = true
+openmls_basic_credential.workspace = true
+openmls_rust_crypto.workspace = true

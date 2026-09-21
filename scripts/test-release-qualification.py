@@ -422,14 +422,14 @@ class RunnerTests(unittest.TestCase):
         directory.mkdir(mode=0o700)
         return SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",))
 
-    def test_legacy_candidate_artifact_path_remains_verifiable(self) -> None:
+    def test_candidate_rejects_a_noncanonical_artifact_path(self) -> None:
         from release_qualification.candidate import validate_candidate
 
         directory = Path(self.temporary.name) / "legacy"
         directory.mkdir(mode=0o700)
-        legacy = SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",), binary="agenc-ircd")
-        validated = validate_candidate(self.root, directory, check_source=False)
-        self.assertEqual(validated["artifacts"], legacy.record["artifacts"])
+        legacy = SyntheticCandidate(self.root, directory, ("x86_64-unknown-linux-gnu",), binary="agenc-relay-server")
+        with self.assertRaises(QualificationError):
+            validate_candidate(self.root, directory, check_source=False)
 
     def test_prepare_records_only_the_named_targets(self) -> None:
         from unittest import mock
@@ -1221,7 +1221,7 @@ class DecisionFixtureTests(unittest.TestCase):
 
     ROOT = Path(__file__).resolve().parent.parent
     FIXTURE = ROOT / "test-data/release-decision"
-    SEED = b"agenc-ircd release decision seed"
+    SEED = b"AgenC Relay release fixture seed"
     PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 
     def test_fixture_signature_is_reproduced_from_the_seed_under_the_shared_domain(self) -> None:
@@ -1244,11 +1244,11 @@ class DecisionFixtureTests(unittest.TestCase):
         with self.assertRaises(QualificationError):
             verify_signature(DOMAIN + payload, committed, self.FIXTURE / "untrusted-public.pem")
         with self.assertRaises(QualificationError):
-            verify_signature(b"agenc-ircd release decision v1\x00" + payload, committed, public)
+            verify_signature(b"agenc-relay-server release decision v1\x00" + payload, committed, public)
         decision = read_record(self.FIXTURE / "release.json")
         self.assertEqual(decision["public_key_sha256"], file_digest(public))
         self.assertEqual(decision["targets"], ["x86_64-unknown-linux-gnu"])
-        self.assertEqual(decision["artifacts"][0]["sha256"], digest(b"agenc-ircd release decision fixture executable\n"))
+        self.assertEqual(decision["artifacts"][0]["sha256"], digest(b"arcd release decision fixture executable\n"))
         seed = self.ROOT / "test-data/fuzz-corpus/release-decision/canonical"
         self.assertEqual(seed.read_bytes(), payload)
 

@@ -20,7 +20,7 @@ Three reports, on the pinned nightly that carries `-C instrument-coverage`
 branch support, with `cargo-llvm-cov 0.9.0`. The whole-workspace all-target
 report is the authoritative one: every score quoted below is taken from it,
 and it is the only report `check-coverage.py check` can run to completion,
-because a `--lib` report omits `crates/agenc-ircd/src/main.rs` entirely.
+because a `--lib` report omits `crates/agenc-relay-server/src/main.rs` entirely.
 
 ```sh
 # the workspace report every decision below is taken from
@@ -30,7 +30,7 @@ RUSTFLAGS="--cap-lints=warn" cargo +nightly-2026-08-24 llvm-cov \
 
 # the storage crate's own regression suites, which live in crates/*/tests/
 RUSTFLAGS="--cap-lints=warn" cargo +nightly-2026-08-24 llvm-cov \
-  -p agenc-ircd-storage --all-features --branch --json \
+  -p agenc-relay-storage --all-features --branch --json \
   --output-path wt60-cov-storage.json -- --skip qualification_workload
 
 # every target in the workspace, for the one check run below
@@ -134,7 +134,7 @@ unwinds does not hold for them.
 ## The `login_index` family
 
 COV-01's prose says six `login_index` rotation rows; there are seven, all
-under `crates/agenc-ircd-runtime/src/daemon/login_index`. They belong to
+under `crates/agenc-relay-runtime/src/daemon/login_index`. They belong to
 COV-03 (#70). Each declares `branches` over a span with no branch records, so
 each takes the **metric correction only** — `branches` → `regions`, with
 category, span and reason untouched. That is purely a description fix: it
@@ -152,8 +152,8 @@ changes no claim and leaves every row failing for COV-03 to close with tests.
 
 The metric correction alone brings `cap5-login-index-load-secrets` to 100
 percent, so one of COV-03's rows closes here. The family is reached only from
-`crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_login_index`, which drives
-the offline entry point as a spawned `agenc-ircd` subprocess; under `--lib`
+`crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_login_index`, which drives
+the offline entry point as a spawned `agenc-relay-server` subprocess; under `--lib`
 the two `login_index.rs` rows read 0/63 and 0/16, and with every workspace
 target built they read 56/63 and 16/16. That is the `--lib` limitation, not a
 coverage gap, and it is why the all-target report is the authoritative one
@@ -168,23 +168,23 @@ sixteen. The nine further rows are:
 
 | Row | File | Measured (regions) | Status |
 | --- | --- | --- | --- |
-| `storage-initial-guard-absence` | `agenc-ircd-storage/src/platform.rs` | 4/6 | re-scored to `regions`; still failing — the uncovered entry is the reachable `Err(error)` arm for a `statat` failure other than `ENOENT` |
-| `storage-declared-recovery-selection` | `agenc-ircd-storage/src/construction_runtime/recovery.rs` | 23/24 | re-scored to `regions`; still failing — the reachable `?` unwind on `validate_at`, which no malformed body reaches |
-| `storage-declared-recovery-delivery-key` | `agenc-ircd-storage/src/construction_runtime/recovery.rs` | 5/6 | re-scored to `regions`; still failing — `DeliveryRow::decode` is never given a malformed body |
-| `cap5-signature-signaturedomain-label` | `agenc-ircd-crypto/src/signature.rs` | 44/45 | **not touched** — reserved slice |
-| `cap5-signature-signaturedomain-encoding` | `agenc-ircd-crypto/src/signature.rs` | 4/4 | **not touched** — reserved slice; a metric correction alone would bring it to 100 percent |
-| `leaf-membership-planned-device` | `agenc-ircd-e2ee/src/membership.rs` | 10/10 | **not touched** — reserved slice; a metric correction alone would bring it to 100 percent |
-| `e2ee-owner-ledger-index` | `agenc-ircd-runtime/src/e2ee/coordinator/owners.rs` | 51/51 | **not touched** — reserved slice; a metric correction alone would bring it to 100 percent |
-| `s10-cap70-companion-restore-install` | `agenc-ircd-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers.rs` | 21/23 | **not touched** — reserved slice |
-| `edge-origin-settled-gate` | `agenc-ircd-runtime/src/e2ee/edge/router.rs` | 0/2 | **not touched** — reserved slice |
+| `storage-initial-guard-absence` | `agenc-relay-storage/src/platform.rs` | 4/6 | re-scored to `regions`; still failing — the uncovered entry is the reachable `Err(error)` arm for a `statat` failure other than `ENOENT` |
+| `storage-declared-recovery-selection` | `agenc-relay-storage/src/construction_runtime/recovery.rs` | 23/24 | re-scored to `regions`; still failing — the reachable `?` unwind on `validate_at`, which no malformed body reaches |
+| `storage-declared-recovery-delivery-key` | `agenc-relay-storage/src/construction_runtime/recovery.rs` | 5/6 | re-scored to `regions`; still failing — `DeliveryRow::decode` is never given a malformed body |
+| `cap5-signature-signaturedomain-label` | `agenc-relay-crypto/src/signature.rs` | 44/45 | **not touched** — reserved slice |
+| `cap5-signature-signaturedomain-encoding` | `agenc-relay-crypto/src/signature.rs` | 4/4 | **not touched** — reserved slice; a metric correction alone would bring it to 100 percent |
+| `leaf-membership-planned-device` | `agenc-relay-e2ee/src/membership.rs` | 10/10 | **not touched** — reserved slice; a metric correction alone would bring it to 100 percent |
+| `e2ee-owner-ledger-index` | `agenc-relay-runtime/src/e2ee/coordinator/owners.rs` | 51/51 | **not touched** — reserved slice; a metric correction alone would bring it to 100 percent |
+| `s10-cap70-companion-restore-install` | `agenc-relay-runtime/src/e2ee/coordinator/delivery_owner/restore/barriers.rs` | 21/23 | **not touched** — reserved slice |
+| `edge-origin-settled-gate` | `agenc-relay-runtime/src/e2ee/edge/router.rs` | 0/2 | **not touched** — reserved slice |
 
 The six reserved rows are inside the encrypted, authentication and crypto
 slice that COV-02 (#72) owns; three of them need nothing but the same metric
 correction to reach 100 percent and are handed over rather than edited.
 
 `cli-account-invite-expiry` is not a defect. It looked like one only because
-`crates/agenc-ircd/src/main.rs` is a binary crate source that a `--lib` report
-omits entirely; under `cargo llvm-cov -p agenc-ircd --all-features --branch`
+`crates/agenc-relay-server/src/main.rs` is a binary crate source that a `--lib` report
+omits entirely; under `cargo llvm-cov -p agenc-relay-server --all-features --branch`
 it scores branches 10/10 as declared.
 
 ## The refusal now names the case
@@ -197,7 +197,7 @@ but does match executable regions now refuses separately:
 
 ```
 critical region cap5-signature-signaturedomain-encoding
-(crates/agenc-ircd-crypto/src/signature.rs:159-204) declares the branches
+(crates/agenc-relay-crypto/src/signature.rs:159-204) declares the branches
 metric over a span that emits 4 executable regions and no branch records, so
 it is unscoreable as declared rather than untested; re-score it to the regions
 metric or narrow the reviewed span

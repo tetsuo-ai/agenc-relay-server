@@ -1,0 +1,2312 @@
+//! The runtime layer of the persistence boundary (spec 21.5, lines
+//! 4152-4165; spec 23.2 table registry, lines 4700-4750).
+//!
+//! The domain declares logical writes, storage owns the body codecs, and
+//! this module owns what neither may know: the keyed stored keys, the
+//! before-image of every row it touches, the head counters, and the
+//! projection of a batch of plans into one `StorageMutationBatch` that
+//! carries no handle, closure, frame, or permit.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use agenc_relay_admin::{AdminAuditCheckpoint, AdminAuditEvent};
+use agenc_relay_crypto::{
+    DatabaseBinding, OpenedStoragePlaintext, StorageMasterKey, StorageTable, derive_storage_index,
+};
+use agenc_relay_domain::{
+    ChannelNameValue, DurableAccount, DurableChannel, DurableSanction, DurableSession,
+    DurableWrite, MutationPlan, NicknameValue,
+};
+use agenc_relay_storage::{
+    AccountRecordBody, ChannelNameRecordBody, ChannelRecordBody, CommitReceipt, ExistingRecord,
+    LIVE_RECORD_KIND, MAX_TRANSACTION_PLANS, PersistentRecordValue, ReadResult, RecordMutation,
+    RecordReference, RecoveredStorageState, SanctionRecordBody, SealedRecord, SessionRecordBody,
+    StorageAccountingLimits, StorageError, StorageMutationBatch, StorageMutationHead, StoredKey,
+    TableId, validate_record_plaintext,
+};
+use agenc_relay_types::{AccountId, ChannelInstanceId, EntropySource, SessionId, TransactionId};
+use zeroize::Zeroizing;
+
+use crate::RuntimeError;
+
+/// The record kind Stage 5 reserves for an account or channel tombstone
+/// (`validate_record_counters`, storage records.rs).
+pub const TOMBSTONE_RECORD_KIND: u16 = 2;
+/// The record schema every Stage 06 domain row is sealed under.
+pub const DOMAIN_RECORD_SCHEMA: u32 = 1;
+/// Sanction stored-key scope tag for a network-wide sanction (spec 23.2:
+/// "scope + random sanction ID").
+pub const SANCTION_SCOPE_NETWORK: u16 = 0;
+/// Sanction stored-key scope tag for a channel-scoped sanction.
+pub const SANCTION_SCOPE_CHANNEL: u16 = 1;
+/// Random bytes in a sanction stored key.
+pub const SANCTION_KEY_RANDOM_BYTES: usize = 16;
+/// Largest expired audit prefix replaced by one checkpoint per sweep.
+pub(crate) const MAX_AUDIT_RETENTION_EVENTS: usize = 4_096;
+
+/// Derives every stored key the runtime writes and opens sealed rows.
+///
+/// Holds the master key for the lifetime of the state owner; it never leaves
+/// this type except through the crypto adapters.
+pub struct KeyDeriver {
+    master_key: StorageMasterKey,
+    binding: DatabaseBinding,
+    key_generation: u32,
+}
+
+impl KeyDeriver {
+    /// Binds the master key to the database identity and its active
+    /// storage-key generation.
+    pub fn new(
+        master_key: StorageMasterKey,
+        binding: DatabaseBinding,
+        key_generation: u32,
+    ) -> Result<Self, RuntimeError> {
+        if key_generation == 0 {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(Self {
+            master_key,
+            binding,
+            key_generation,
+        })
+    }
+
+    /// Returns the immutable record-encryption binding.
+    #[must_use]
+    pub const fn binding(&self) -> DatabaseBinding {
+        self.binding
+    }
+
+    /// Returns the active storage-key generation.
+    #[must_use]
+    pub const fn key_generation(&self) -> u32 {
+        self.key_generation
+    }
+
+    /// The `account` table key: the 24-byte account identity text.
+    pub fn account_key(account_id: AccountId) -> Result<StoredKey, RuntimeError> {
+        Ok(StoredKey::new(account_id.to_text().into_bytes())?)
+    }
+
+    /// The `channel` table key: the 16 instance identity bytes.
+    pub fn channel_key(channel_id: ChannelInstanceId) -> Result<StoredKey, RuntimeError> {
+        Ok(StoredKey::new(channel_id.as_bytes().to_vec())?)
+    }
+
+    /// The `session` table key: the 16 physical-session identity bytes.
+    pub fn session_key(session_id: SessionId) -> Result<StoredKey, RuntimeError> {
+        Ok(StoredKey::new(session_id.as_bytes().to_vec())?)
+    }
+
+    /// The `channel_name` table key: the keyed digest of the canonical name.
+    pub fn channel_name_key(&self, name: &ChannelNameValue) -> Result<StoredKey, RuntimeError> {
+        self.keyed(TableId::ChannelName, name.canonical().as_bytes())
+    }
+
+    /// The `nickname_reservation` table key: the keyed digest of the
+    /// canonical nickname.
+    pub fn nickname_key(&self, nickname: &NicknameValue) -> Result<StoredKey, RuntimeError> {
+        self.keyed(
+            TableId::NicknameReservation,
+            nickname.canonical().as_bytes(),
+        )
+    }
+
+    /// The `sanction` table key: the scope tag followed by random bytes.
+    pub fn sanction_key(
+        scope: Option<ChannelInstanceId>,
+        random: [u8; SANCTION_KEY_RANDOM_BYTES],
+    ) -> Result<StoredKey, RuntimeError> {
+        let tag = match scope {
+            None => SANCTION_SCOPE_NETWORK,
+            Some(_) => SANCTION_SCOPE_CHANNEL,
+        };
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(2 + SANCTION_KEY_RANDOM_BYTES)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        bytes.extend_from_slice(&tag.to_be_bytes());
+        bytes.extend_from_slice(&random);
+        Ok(StoredKey::new(bytes)?)
+    }
+
+    /// Authenticates and opens one sealed row of the active generation.
+    pub fn open(
+        &self,
+        table: TableId,
+        key: &StoredKey,
+        sealed: &SealedRecord<'_>,
+    ) -> Result<OpenedStoragePlaintext, RuntimeError> {
+        Ok(sealed.open(
+            &self.master_key,
+            self.binding,
+            table,
+            DOMAIN_RECORD_SCHEMA,
+            self.key_generation,
+            key,
+        )?)
+    }
+
+    fn keyed(&self, table: TableId, semantic: &[u8]) -> Result<StoredKey, RuntimeError> {
+        let crypto_table =
+            StorageTable::new(table.as_u16()).map_err(|_| RuntimeError::InvalidValue)?;
+        let index = derive_storage_index(
+            &self.master_key,
+            self.binding,
+            crypto_table,
+            self.key_generation,
+            semantic,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok(StoredKey::new(index.expose_for_storage_key().to_vec())?)
+    }
+}
+
+/// What the index knows about one stored row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexedRow {
+    /// The exact sealed identity and length read from the database.
+    Known(ExistingRecord),
+    /// A row this process wrote whose sealed identity has not been read back
+    /// yet; a projection that needs it must refresh first.
+    Pending {
+        /// The plaintext length of the written row.
+        plaintext_bytes: usize,
+    },
+}
+
+/// Head counters the next batch must be fenced against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeadCounters {
+    /// Last committed logical state generation.
+    pub state_generation: u64,
+    /// Last observed storage commit sequence.
+    pub storage_commit_sequence: u64,
+    /// Committed account-service response count.
+    pub account_service_response_count: u64,
+    /// Authenticated logical database bytes.
+    pub logical_database_bytes: u64,
+    /// Authenticated backup stream bytes.
+    pub backup_stream_bytes: u64,
+}
+
+impl HeadCounters {
+    /// Seeds the counters from the recovered storage facts.
+    #[must_use]
+    pub const fn from_recovered(recovered: &RecoveredStorageState) -> Self {
+        Self {
+            state_generation: recovered.state_generation(),
+            storage_commit_sequence: recovered.storage_commit_sequence(),
+            account_service_response_count: recovered.account_service_response_count(),
+            logical_database_bytes: recovered.logical_database_bytes(),
+            backup_stream_bytes: recovered.backup_stream_bytes(),
+        }
+    }
+
+    /// Advances the counters after a committed batch.
+    #[must_use]
+    pub const fn after_commit(self, receipt: &CommitReceipt, batch: &ProjectedBatch) -> Self {
+        Self {
+            state_generation: receipt.state_generation,
+            storage_commit_sequence: receipt.storage_commit_sequence,
+            account_service_response_count: batch.resulting_account_service_response_count,
+            logical_database_bytes: batch.resulting_logical_database_bytes,
+            backup_stream_bytes: batch.resulting_backup_stream_bytes,
+        }
+    }
+}
+
+/// Configured storage ceilings the batch must respect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AccountingCeilings {
+    /// Configured logical database ceiling.
+    pub database_max_bytes: u64,
+    /// Configured backup stream ceiling.
+    pub backup_max_bytes: u64,
+}
+
+/// Full durable entity after-image coupled to one committed administrative
+/// mutation audit event.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "administrative after-images stay allocation-free after bounded projection"
+)]
+pub(crate) enum AdminMutationAfterImage {
+    Account(DurableAccount),
+    Channel(DurableChannel),
+}
+
+/// One change the index applies after the batch it belongs to commits.
+#[derive(Clone, Eq, PartialEq)]
+pub enum IndexUpdate {
+    /// A row was written; its sealed identity must be read back.
+    Put {
+        /// The touched table.
+        table: TableId,
+        /// The touched key.
+        key: StoredKey,
+        /// The written plaintext length.
+        plaintext_bytes: usize,
+    },
+    /// A row was deleted.
+    Delete {
+        /// The touched table.
+        table: TableId,
+        /// The touched key.
+        key: StoredKey,
+    },
+    /// An account now owns a nickname reservation row.
+    NicknameOwned {
+        /// The owning account.
+        account_id: AccountId,
+        /// The canonical nickname.
+        canonical: String,
+        /// The reservation row key.
+        key: StoredKey,
+    },
+    /// An account released a nickname reservation row.
+    NicknameReleased {
+        /// The releasing account.
+        account_id: AccountId,
+        /// The canonical nickname.
+        canonical: String,
+    },
+    /// A channel gained its name row.
+    ChannelNamed {
+        /// The channel.
+        channel_id: ChannelInstanceId,
+        /// The name row key.
+        key: StoredKey,
+    },
+    /// A channel lost its name row.
+    ChannelUnnamed {
+        /// The channel.
+        channel_id: ChannelInstanceId,
+    },
+}
+
+/// Before-images and secondary-row ownership for every durable row.
+#[derive(Default)]
+pub struct DurableIndex {
+    rows: BTreeMap<(TableId, StoredKey), IndexedRow>,
+    nicknames: BTreeMap<AccountId, BTreeMap<String, StoredKey>>,
+    channel_names: BTreeMap<ChannelInstanceId, StoredKey>,
+}
+
+impl DurableIndex {
+    /// Creates an empty index.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one row read from the database.
+    pub fn record_known(&mut self, table: TableId, key: StoredKey, existing: ExistingRecord) {
+        self.rows.insert((table, key), IndexedRow::Known(existing));
+    }
+
+    /// Records that an account owns a nickname reservation row.
+    pub fn record_nickname(&mut self, account_id: AccountId, canonical: String, key: StoredKey) {
+        self.nicknames
+            .entry(account_id)
+            .or_default()
+            .insert(canonical, key);
+    }
+
+    /// Records a channel's name row.
+    pub fn record_channel_name(&mut self, channel_id: ChannelInstanceId, key: StoredKey) {
+        self.channel_names.insert(channel_id, key);
+    }
+
+    /// Returns whether the index holds a row under the key, whether read
+    /// back already or still pending after the last commit.
+    #[must_use]
+    pub fn holds(&self, table: TableId, key: &StoredKey) -> bool {
+        self.rows.contains_key(&(table, key.clone()))
+    }
+
+    /// Returns the before-image for a row, `None` when the row is absent.
+    ///
+    /// A pending row is a caller error: the index must be refreshed after
+    /// every commit before the next projection.
+    pub fn existing(
+        &self,
+        table: TableId,
+        key: &StoredKey,
+    ) -> Result<Option<ExistingRecord>, RuntimeError> {
+        match self.rows.get(&(table, key.clone())) {
+            None => Ok(None),
+            Some(IndexedRow::Known(existing)) => Ok(Some(*existing)),
+            Some(IndexedRow::Pending { .. }) => {
+                Err(RuntimeError::Storage(StorageError::StaleState))
+            }
+        }
+    }
+
+    /// Returns the nickname rows an account owns, keyed by canonical name.
+    #[must_use]
+    pub fn nickname_rows(&self, account_id: AccountId) -> BTreeMap<String, StoredKey> {
+        self.nicknames.get(&account_id).cloned().unwrap_or_default()
+    }
+
+    /// Returns a channel's name row key, if it has one.
+    #[must_use]
+    pub fn channel_name_row(&self, channel_id: ChannelInstanceId) -> Option<&StoredKey> {
+        self.channel_names.get(&channel_id)
+    }
+
+    /// Applies the updates of a committed batch.
+    pub fn apply(&mut self, updates: &[IndexUpdate]) {
+        for update in updates {
+            self.apply_one(update);
+        }
+    }
+
+    fn apply_one(&mut self, update: &IndexUpdate) {
+        match update {
+            IndexUpdate::Put {
+                table,
+                key,
+                plaintext_bytes,
+            } => {
+                self.rows.insert(
+                    (*table, key.clone()),
+                    IndexedRow::Pending {
+                        plaintext_bytes: *plaintext_bytes,
+                    },
+                );
+            }
+            IndexUpdate::Delete { table, key } => {
+                self.rows.remove(&(*table, key.clone()));
+            }
+            IndexUpdate::NicknameOwned {
+                account_id,
+                canonical,
+                key,
+            } => self.record_nickname(*account_id, canonical.clone(), key.clone()),
+            IndexUpdate::NicknameReleased {
+                account_id,
+                canonical,
+            } => self.release_nickname(*account_id, canonical),
+            IndexUpdate::ChannelNamed { channel_id, key } => {
+                self.channel_names.insert(*channel_id, key.clone());
+            }
+            IndexUpdate::ChannelUnnamed { channel_id } => {
+                self.channel_names.remove(channel_id);
+            }
+        }
+    }
+
+    fn release_nickname(&mut self, account_id: AccountId, canonical: &str) {
+        let Some(rows) = self.nicknames.get_mut(&account_id) else {
+            return;
+        };
+        rows.remove(canonical);
+        if rows.is_empty() {
+            self.nicknames.remove(&account_id);
+        }
+    }
+
+    /// Exact sealed byte and row totals of one table, without allocating a copy.
+    pub(crate) fn table_backing(&self, table: TableId) -> Result<(usize, usize), RuntimeError> {
+        self.rows
+            .iter()
+            .filter(|((row_table, _), _)| *row_table == table)
+            .try_fold((0_usize, 0_usize), |(bytes, count), (_, row)| {
+                let IndexedRow::Known(existing) = row else {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                };
+                let size = usize::try_from(existing.sealed_record_bytes())
+                    .map_err(|_| RuntimeError::Overflow)?;
+                Ok((
+                    bytes.checked_add(size).ok_or(RuntimeError::Overflow)?,
+                    count.checked_add(1).ok_or(RuntimeError::Overflow)?,
+                ))
+            })
+    }
+
+    /// Whether a prior receipt still requires authenticated envelope readback.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.rows
+            .values()
+            .any(|row| matches!(row, IndexedRow::Pending { .. }))
+    }
+
+    /// Lists the rows whose sealed identity must be read back.
+    #[must_use]
+    pub fn pending_rows(&self) -> Vec<(TableId, StoredKey)> {
+        self.rows
+            .iter()
+            .filter(|(_, row)| matches!(row, IndexedRow::Pending { .. }))
+            .map(|((table, key), _)| (*table, key.clone()))
+            .collect()
+    }
+
+    /// Replaces pending rows with the identities read back from storage.
+    ///
+    /// A row that is pending but absent from the read, or whose sealed
+    /// length disagrees with the written plaintext, means the database no
+    /// longer matches this process's view.
+    pub fn refresh(
+        &mut self,
+        rows: Vec<(TableId, StoredKey, Option<ExistingRecord>)>,
+    ) -> Result<(), RuntimeError> {
+        for (table, key, existing) in rows {
+            let slot = self
+                .rows
+                .get_mut(&(table, key))
+                .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+            let IndexedRow::Pending { plaintext_bytes } = *slot else {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            };
+            let Some(existing) = existing else {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            };
+            if !sealed_length_matches(plaintext_bytes, existing) {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            }
+            *slot = IndexedRow::Known(existing);
+        }
+        Ok(())
+    }
+
+    /// Returns the number of tracked rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Returns whether no row is tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// A sealed envelope is the plaintext plus the fixed envelope and tag
+/// (`MIN_SEALED_RECORD_BYTES` covers an empty plaintext).
+fn sealed_length_matches(plaintext_bytes: usize, existing: ExistingRecord) -> bool {
+    let expected = plaintext_bytes.checked_add(agenc_relay_storage::MIN_SEALED_RECORD_BYTES);
+    expected.is_some_and(|expected| {
+        usize::try_from(existing.sealed_record_bytes()).is_ok_and(|actual| actual == expected)
+    })
+}
+
+/// A domain entity a pending batch reserves while its plans are in flight
+/// (spec lines 4167-4168).
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EntityId {
+    /// One account.
+    Account(AccountId),
+    /// One logical session.
+    Session(SessionId),
+    /// One channel instance.
+    Channel(ChannelInstanceId),
+}
+
+/// The entities a plan's logical writes touch.
+#[must_use]
+pub fn touched_entities(plan: &MutationPlan) -> BTreeSet<EntityId> {
+    plan.durable_writes()
+        .iter()
+        .filter_map(|write| match write {
+            DurableWrite::PutAccount(account) => Some(EntityId::Account(account.account_id)),
+            DurableWrite::TombstoneAccount(account_id) => Some(EntityId::Account(*account_id)),
+            DurableWrite::PutSession(session) => Some(EntityId::Session(session.session_id)),
+            DurableWrite::TombstoneSession(session_id) => Some(EntityId::Session(*session_id)),
+            DurableWrite::PutChannel(channel) => Some(EntityId::Channel(channel.channel_id)),
+            DurableWrite::TombstoneChannel { channel_id, .. } => {
+                Some(EntityId::Channel(*channel_id))
+            }
+            DurableWrite::AppendSanction(_) => None,
+        })
+        .collect()
+}
+
+/// One already encoded account-service row that must commit with a domain plan.
+///
+/// The storage plaintext remains zeroizing while StateCore gathers a batch.
+/// Its constructor accepts only the closed account-service record set and
+/// validates the complete table codec before the write can be staged.
+pub(crate) enum AccountServiceDurableWrite {
+    Put {
+        table: TableId,
+        key: StoredKey,
+        plaintext: Zeroizing<Vec<u8>>,
+    },
+    Delete {
+        table: TableId,
+        key: StoredKey,
+    },
+}
+
+impl AccountServiceDurableWrite {
+    /// Borrows the encoded persistent value of a put without copying storage buffers.
+    pub(crate) fn encoded_record(&self) -> Option<(TableId, &StoredKey, &[u8])> {
+        match self {
+            Self::Put {
+                table,
+                key,
+                plaintext,
+            } => Some((*table, key, plaintext.as_slice())),
+            Self::Delete { .. } => None,
+        }
+    }
+
+    /// Whether both writes put the same plaintext under the same key, so
+    /// one batch can drop a repeated put of an identical row.
+    pub(crate) fn same_put(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Put {
+                    table,
+                    key,
+                    plaintext,
+                },
+                Self::Put {
+                    table: other_table,
+                    key: other_key,
+                    plaintext: other_plaintext,
+                },
+            ) => table == other_table && key == other_key && **plaintext == **other_plaintext,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn put(
+        table: TableId,
+        key: StoredKey,
+        plaintext: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        if !account_service_table(table) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        validate_record_plaintext(table, &key, DOMAIN_RECORD_SCHEMA, &plaintext)?;
+        Ok(Self::Put {
+            table,
+            key,
+            plaintext: Zeroizing::new(plaintext),
+        })
+    }
+
+    pub(crate) fn delete(table: TableId, key: StoredKey) -> Result<Self, RuntimeError> {
+        if !account_service_table(table) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        agenc_relay_storage::table_schema(table).validate_key(key.as_bytes())?;
+        Ok(Self::Delete { table, key })
+    }
+
+    /// Restamps a put row with the revision of the batch that commits it;
+    /// companion rows are built before their plan exists (spec 20.5 keeps
+    /// every row at the resulting revision). Deletes are unchanged.
+    pub(crate) fn at_revision(self, revision: u64) -> Result<Self, RuntimeError> {
+        match self {
+            Self::Put {
+                table,
+                key,
+                plaintext,
+            } => {
+                let value = PersistentRecordValue::decode(table, plaintext.as_slice())?;
+                let restamped = PersistentRecordValue::new(
+                    table,
+                    value.record_kind(),
+                    revision,
+                    value.generation(),
+                    value.expires_at(),
+                    value.references().to_vec(),
+                    value.body().to_vec(),
+                )?
+                .encode()?;
+                Self::put(table, key, restamped)
+            }
+            delete @ Self::Delete { .. } => Ok(delete),
+        }
+    }
+
+    pub(crate) fn revalidate(self) -> Result<Self, RuntimeError> {
+        match self {
+            Self::Put {
+                table,
+                key,
+                plaintext,
+            } => Self::put(table, key, plaintext.as_slice().to_vec()),
+            Self::Delete { table, key } => Self::delete(table, key),
+        }
+    }
+}
+
+/// The closed set of tables whose rows may ride a domain plan's batch as
+/// already encoded records: the account-service set and the coordinator's
+/// federation set (spec 20.5 and 20.6 require result, outbox, origin, and
+/// projection rows to commit with the mutation that produced them).
+const fn account_service_table(table: TableId) -> bool {
+    matches!(
+        table,
+        TableId::Account
+            | TableId::LoginIndex
+            | TableId::OpaqueRecord
+            | TableId::AuthTransaction
+            | TableId::RegistrationInvite
+            | TableId::Session
+            | TableId::RequestResult
+            | TableId::LoginIndexKeyState
+            | TableId::FederationPeer
+            | TableId::FederationOrigin
+            | TableId::EdgeOutbox
+            | TableId::EdgeProjection
+            | TableId::E2eeObject
+            | TableId::E2eeState
+            | TableId::History
+    )
+}
+
+/// One plan submitted for projection.
+pub struct PlanProjection<'a> {
+    /// The domain plan.
+    pub plan: &'a MutationPlan,
+    /// Account-service response count permits this plan consumes.
+    pub response_count_increment: u64,
+    /// Exact account-service rows inseparable from this plan.
+    pub(crate) account_service_writes: &'a [AccountServiceDurableWrite],
+}
+
+/// A batch ready for the storage owner plus the index changes to apply once
+/// it commits.
+pub struct ProjectedBatch {
+    batch: StorageMutationBatch,
+    updates: Vec<IndexUpdate>,
+    advancing_plans: u16,
+    resulting_account_service_response_count: u64,
+    resulting_logical_database_bytes: u64,
+    resulting_backup_stream_bytes: u64,
+}
+
+impl ProjectedBatch {
+    /// Returns the transaction identity bound to the batch.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.batch.transaction_id()
+    }
+
+    /// Returns the number of plans that advance the state generation.
+    #[must_use]
+    pub const fn advancing_plans(&self) -> u16 {
+        self.advancing_plans
+    }
+
+    /// Borrows the index updates.
+    #[must_use]
+    pub fn updates(&self) -> &[IndexUpdate] {
+        &self.updates
+    }
+
+    /// Returns the number of record mutations.
+    #[must_use]
+    pub fn mutation_count(&self) -> usize {
+        self.batch.mutations().len()
+    }
+
+    /// Returns the exact logical storage use after this batch commits.
+    #[must_use]
+    pub(crate) const fn resulting_logical_database_bytes(&self) -> u64 {
+        self.resulting_logical_database_bytes
+    }
+
+    /// Returns the exact backup-stream size after this batch commits.
+    #[must_use]
+    pub(crate) const fn resulting_backup_stream_bytes(&self) -> u64 {
+        self.resulting_backup_stream_bytes
+    }
+
+    /// Splits the projection into the owned batch and the retained updates.
+    #[must_use]
+    pub fn into_parts(self) -> (StorageMutationBatch, RetainedProjection) {
+        (
+            self.batch,
+            RetainedProjection {
+                updates: self.updates,
+                resulting_account_service_response_count: self
+                    .resulting_account_service_response_count,
+                resulting_logical_database_bytes: self.resulting_logical_database_bytes,
+                resulting_backup_stream_bytes: self.resulting_backup_stream_bytes,
+            },
+        )
+    }
+}
+
+/// What StateCore keeps after handing the batch to storage.
+pub struct RetainedProjection {
+    updates: Vec<IndexUpdate>,
+    resulting_account_service_response_count: u64,
+    resulting_logical_database_bytes: u64,
+    resulting_backup_stream_bytes: u64,
+}
+
+impl RetainedProjection {
+    /// Borrows the index updates.
+    #[must_use]
+    pub fn updates(&self) -> &[IndexUpdate] {
+        &self.updates
+    }
+
+    /// Advances the head counters with the receipt of this projection.
+    #[must_use]
+    pub const fn advance(&self, receipt: &CommitReceipt) -> HeadCounters {
+        HeadCounters {
+            state_generation: receipt.state_generation,
+            storage_commit_sequence: receipt.storage_commit_sequence,
+            account_service_response_count: self.resulting_account_service_response_count,
+            logical_database_bytes: self.resulting_logical_database_bytes,
+            backup_stream_bytes: self.resulting_backup_stream_bytes,
+        }
+    }
+}
+
+/// Validates one exact readback and returns the durable identity needed by
+/// the in-memory before-image index.
+pub(crate) fn read_back_record(
+    table: TableId,
+    key: StoredKey,
+    result: ReadResult,
+) -> Result<(TableId, StoredKey, Option<ExistingRecord>), RuntimeError> {
+    let mut records = result.records.into_iter();
+    let Some(record) = records.next() else {
+        return Ok((table, key, None));
+    };
+    if records.next().is_some() || record.table != table || record.key != key {
+        return Err(RuntimeError::Storage(StorageError::StaleState));
+    }
+    let sealed = SealedRecord::decode(&record.sealed_record)?;
+    let existing = ExistingRecord::new(
+        sealed.record_schema(),
+        sealed.record_id()?,
+        record.sealed_record.len(),
+    )?;
+    Ok((table, key, Some(existing)))
+}
+
+struct Projection<'a> {
+    index: &'a DurableIndex,
+    keys: &'a KeyDeriver,
+    mutations: Vec<RecordMutation>,
+    updates: Vec<IndexUpdate>,
+    touched: BTreeSet<(TableId, StoredKey)>,
+}
+
+/// Checks the exact edge checkpoint contents with the same projection and
+/// storage validator used by submission. No transaction or sealing entropy is used.
+pub(super) fn preflight_checkpoint(
+    writes: &[AccountServiceDurableWrite],
+    revision: u64,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<(), RuntimeError> {
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    for write in writes {
+        projection.project_account_service_write(write, revision)?;
+    }
+    StorageMutationBatch::preflight_contents(
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        &mut projection.mutations,
+    )?;
+    Ok(())
+}
+
+/// Projects every plan's logical writes into one owned storage batch.
+///
+/// Returns `None` when no plan produces a persisted delta; such plans are
+/// applied in the same actor step without a storage round trip (spec line
+/// 4165 keeps the ordering rule for reserved entities).
+pub fn project_batch(
+    transaction_id: TransactionId,
+    plans: &[PlanProjection<'_>],
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+    entropy: &mut dyn EntropySource,
+) -> Result<Option<ProjectedBatch>, RuntimeError> {
+    if plans.is_empty() || plans.len() > MAX_TRANSACTION_PLANS {
+        return Err(RuntimeError::InvalidValue);
+    }
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    let mut advancing: u16 = 0;
+    let mut response_count = head.account_service_response_count;
+    for plan in plans {
+        let before = projection.mutations.len();
+        let revision = plan.plan.resulting_revision().get();
+        for write in plan.plan.durable_writes() {
+            projection.project_write(write, revision, entropy)?;
+        }
+        for write in plan.account_service_writes {
+            projection.project_account_service_write(write, revision)?;
+        }
+        if projection.mutations.len() > before {
+            advancing = advancing.checked_add(1).ok_or(RuntimeError::Overflow)?;
+        }
+        response_count = response_count
+            .checked_add(plan.response_count_increment)
+            .ok_or(RuntimeError::Overflow)?;
+    }
+    if projection.mutations.is_empty() {
+        return Ok(None);
+    }
+    let batch = StorageMutationBatch::new(
+        StorageMutationHead {
+            transaction_id,
+            expected_storage_commit_sequence: head.storage_commit_sequence,
+            expected_state_generation: head.state_generation,
+            resulting_state_generation: head
+                .state_generation
+                .checked_add(u64::from(advancing))
+                .ok_or(RuntimeError::Overflow)?,
+            state_advancing_plan_count: advancing,
+            expected_account_service_response_count: head.account_service_response_count,
+            resulting_account_service_response_count: response_count,
+        },
+        plans.len(),
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        projection.mutations,
+    )?;
+    Ok(Some(ProjectedBatch {
+        resulting_logical_database_bytes: batch.resulting_logical_database_bytes(),
+        resulting_backup_stream_bytes: batch.resulting_backup_stream_bytes(),
+        resulting_account_service_response_count: response_count,
+        batch,
+        updates: projection.updates,
+        advancing_plans: advancing,
+    }))
+}
+
+/// Projects one signed administrative audit append without advancing the
+/// logical protocol-state generation.
+pub(crate) fn project_admin_audit_event(
+    transaction_id: TransactionId,
+    event: &AdminAuditEvent,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    project_admin_event(transaction_id, event, None, index, keys, head, ceilings)
+}
+
+/// Projects one state-changing administrative action and its signed audit
+/// event into the same storage transaction.
+pub(crate) fn project_admin_mutation_event(
+    transaction_id: TransactionId,
+    event: &AdminAuditEvent,
+    after_image: (&AdminMutationAfterImage, &[AccountServiceDurableWrite]),
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    project_admin_event(
+        transaction_id,
+        event,
+        Some(after_image),
+        index,
+        keys,
+        head,
+        ceilings,
+    )
+}
+
+fn project_admin_event(
+    transaction_id: TransactionId,
+    event: &AdminAuditEvent,
+    after_image: Option<(&AdminMutationAfterImage, &[AccountServiceDurableWrite])>,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    let sequence = event.tbs().audit_sequence;
+    let revision = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+    let key = StoredKey::new(sequence.to_be_bytes().to_vec())?;
+    let value = PersistentRecordValue::new(
+        TableId::Audit,
+        LIVE_RECORD_KIND,
+        revision,
+        0,
+        None,
+        Vec::new(),
+        event.encode().map_err(|_| RuntimeError::InvalidValue)?,
+    )?;
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    let advancing_plans = project_admin_after_image(&mut projection, after_image)?;
+    projection.put(TableId::Audit, key, value)?;
+    let batch = StorageMutationBatch::new(
+        StorageMutationHead {
+            transaction_id,
+            expected_storage_commit_sequence: head.storage_commit_sequence,
+            expected_state_generation: head.state_generation,
+            resulting_state_generation: head
+                .state_generation
+                .checked_add(u64::from(advancing_plans))
+                .ok_or(RuntimeError::Overflow)?,
+            state_advancing_plan_count: advancing_plans,
+            expected_account_service_response_count: head.account_service_response_count,
+            resulting_account_service_response_count: head.account_service_response_count,
+        },
+        1,
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        projection.mutations,
+    )?;
+    Ok(ProjectedBatch {
+        resulting_logical_database_bytes: batch.resulting_logical_database_bytes(),
+        resulting_backup_stream_bytes: batch.resulting_backup_stream_bytes(),
+        resulting_account_service_response_count: head.account_service_response_count,
+        batch,
+        updates: projection.updates,
+        advancing_plans,
+    })
+}
+
+fn project_admin_after_image(
+    projection: &mut Projection<'_>,
+    mutation: Option<(&AdminMutationAfterImage, &[AccountServiceDurableWrite])>,
+) -> Result<u16, RuntimeError> {
+    let Some((after_image, writes)) = mutation else {
+        return Ok(0);
+    };
+    let revision = match after_image {
+        AdminMutationAfterImage::Account(account) => {
+            projection.put_account(account, account.revision.get())?;
+            account.revision.get()
+        }
+        AdminMutationAfterImage::Channel(channel) => {
+            projection.put_channel(channel, channel.revision.get())?;
+            channel.revision.get()
+        }
+    };
+    for write in writes {
+        projection.project_account_service_write(write, revision)?;
+    }
+    Ok(1)
+}
+
+/// Replaces one verified, nonempty retained audit prefix with one signed
+/// checkpoint without advancing logical protocol state.
+// agenc-review: focus owner=runtime reviewed=2026-08-30 reason=one projection must visibly couple every prefix deletion with the replacement checkpoint and accounting fence
+pub(crate) fn project_admin_audit_retention(
+    transaction_id: TransactionId,
+    checkpoint: &AdminAuditCheckpoint,
+    index: &DurableIndex,
+    keys: &KeyDeriver,
+    head: HeadCounters,
+    ceilings: AccountingCeilings,
+) -> Result<ProjectedBatch, RuntimeError> {
+    checkpoint
+        .tbs()
+        .validate()
+        .map_err(|_| RuntimeError::InvalidValue)?;
+    let tbs = checkpoint.tbs();
+    let deleted_count = usize::try_from(tbs.deleted_count).map_err(|_| RuntimeError::Overflow)?;
+    if deleted_count == 0 || deleted_count > MAX_AUDIT_RETENTION_EVENTS {
+        return Err(RuntimeError::LimitExceeded);
+    }
+    let mut projection = Projection {
+        index,
+        keys,
+        mutations: Vec::new(),
+        updates: Vec::new(),
+        touched: BTreeSet::new(),
+    };
+    let mut sequence = tbs.deleted_first_sequence;
+    loop {
+        projection.delete(
+            TableId::Audit,
+            StoredKey::new(sequence.to_be_bytes().to_vec())?,
+        )?;
+        if sequence == tbs.deleted_last_sequence {
+            break;
+        }
+        sequence = sequence.checked_add(1).ok_or(RuntimeError::Overflow)?;
+    }
+    let checkpoint_revision = tbs
+        .checkpoint_sequence
+        .checked_add(1)
+        .ok_or(RuntimeError::Overflow)?;
+    let checkpoint_key = StoredKey::new(tbs.checkpoint_sequence.to_be_bytes().to_vec())?;
+    let checkpoint_value = PersistentRecordValue::new(
+        TableId::AuditCheckpoint,
+        LIVE_RECORD_KIND,
+        checkpoint_revision,
+        0,
+        None,
+        Vec::new(),
+        checkpoint
+            .encode()
+            .map_err(|_| RuntimeError::InvalidValue)?,
+    )?;
+    projection.put(TableId::AuditCheckpoint, checkpoint_key, checkpoint_value)?;
+    let batch = StorageMutationBatch::new(
+        StorageMutationHead {
+            transaction_id,
+            expected_storage_commit_sequence: head.storage_commit_sequence,
+            expected_state_generation: head.state_generation,
+            resulting_state_generation: head.state_generation,
+            state_advancing_plan_count: 0,
+            expected_account_service_response_count: head.account_service_response_count,
+            resulting_account_service_response_count: head.account_service_response_count,
+        },
+        1,
+        StorageAccountingLimits {
+            current_logical_database_bytes: head.logical_database_bytes,
+            current_backup_stream_bytes: head.backup_stream_bytes,
+            database_max_bytes: ceilings.database_max_bytes,
+            backup_max_bytes: ceilings.backup_max_bytes,
+        },
+        projection.mutations,
+    )?;
+    Ok(ProjectedBatch {
+        resulting_logical_database_bytes: batch.resulting_logical_database_bytes(),
+        resulting_backup_stream_bytes: batch.resulting_backup_stream_bytes(),
+        resulting_account_service_response_count: head.account_service_response_count,
+        batch,
+        updates: projection.updates,
+        advancing_plans: 0,
+    })
+}
+
+impl Projection<'_> {
+    fn project_account_service_write(
+        &mut self,
+        write: &AccountServiceDurableWrite,
+        revision: u64,
+    ) -> Result<(), RuntimeError> {
+        match write {
+            AccountServiceDurableWrite::Put {
+                table,
+                key,
+                plaintext,
+            } => {
+                if !matches!(*table, TableId::LoginIndex | TableId::LoginIndexKeyState)
+                    && PersistentRecordValue::decode(*table, plaintext)?.revision() != revision
+                {
+                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                }
+                self.put_plaintext(*table, key.clone(), plaintext.as_slice().to_vec())
+            }
+            AccountServiceDurableWrite::Delete { table, key } => self.delete(*table, key.clone()),
+        }
+    }
+
+    fn project_write(
+        &mut self,
+        write: &DurableWrite,
+        revision: u64,
+        entropy: &mut dyn EntropySource,
+    ) -> Result<(), RuntimeError> {
+        match write {
+            DurableWrite::PutAccount(account) => self.put_account(account, revision),
+            DurableWrite::TombstoneAccount(account_id) => {
+                self.tombstone_account(*account_id, revision)
+            }
+            DurableWrite::PutSession(session) => self.put_session(session, revision),
+            DurableWrite::TombstoneSession(session_id) => {
+                self.tombstone_session(*session_id, revision)
+            }
+            DurableWrite::PutChannel(channel) => self.put_channel(channel, revision),
+            DurableWrite::TombstoneChannel { channel_id, name } => {
+                self.tombstone_channel(*channel_id, name, revision)
+            }
+            DurableWrite::AppendSanction(sanction) => {
+                self.append_sanction(sanction, revision, entropy)
+            }
+        }
+    }
+
+    fn put_account(&mut self, account: &DurableAccount, revision: u64) -> Result<(), RuntimeError> {
+        let key = KeyDeriver::account_key(account.account_id)?;
+        let value = PersistentRecordValue::new(
+            TableId::Account,
+            LIVE_RECORD_KIND,
+            revision,
+            account.session_generation.get(),
+            None,
+            Vec::new(),
+            AccountRecordBody::encode(account)?,
+        )?;
+        self.put(TableId::Account, key.clone(), value)?;
+        let owned = self.index.nickname_rows(account.account_id);
+        let mut wanted = BTreeMap::new();
+        for nickname in &account.reserved_nicknames {
+            wanted.insert(nickname.canonical().to_owned(), nickname);
+        }
+        for (canonical, nickname) in &wanted {
+            if owned.contains_key(canonical) {
+                continue;
+            }
+            self.reserve_nickname(account.account_id, &key, nickname, revision)?;
+        }
+        for (canonical, row_key) in &owned {
+            if wanted.contains_key(canonical) {
+                continue;
+            }
+            self.delete(TableId::NicknameReservation, row_key.clone())?;
+            self.updates.push(IndexUpdate::NicknameReleased {
+                account_id: account.account_id,
+                canonical: canonical.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn reserve_nickname(
+        &mut self,
+        account_id: AccountId,
+        account_key: &StoredKey,
+        nickname: &NicknameValue,
+        revision: u64,
+    ) -> Result<(), RuntimeError> {
+        let row_key = self.keys.nickname_key(nickname)?;
+        let value = PersistentRecordValue::new(
+            TableId::NicknameReservation,
+            LIVE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            vec![RecordReference::new(TableId::Account, account_key.clone())?],
+            nickname.presentation().as_bytes().to_vec(),
+        )?;
+        self.put(TableId::NicknameReservation, row_key.clone(), value)?;
+        self.updates.push(IndexUpdate::NicknameOwned {
+            account_id,
+            canonical: nickname.canonical().to_owned(),
+            key: row_key,
+        });
+        Ok(())
+    }
+
+    fn tombstone_account(
+        &mut self,
+        account_id: AccountId,
+        revision: u64,
+    ) -> Result<(), RuntimeError> {
+        let key = KeyDeriver::account_key(account_id)?;
+        let value = PersistentRecordValue::new(
+            TableId::Account,
+            TOMBSTONE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        self.put(TableId::Account, key, value)?;
+        for (canonical, row_key) in self.index.nickname_rows(account_id) {
+            self.delete(TableId::NicknameReservation, row_key)?;
+            self.updates.push(IndexUpdate::NicknameReleased {
+                account_id,
+                canonical,
+            });
+        }
+        Ok(())
+    }
+
+    fn put_session(&mut self, session: &DurableSession, revision: u64) -> Result<(), RuntimeError> {
+        if session.revision.get() != revision {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        let key = KeyDeriver::session_key(session.session_id)?;
+        let reference_count = session
+            .joined_channels
+            .len()
+            .checked_add(usize::from(session.account_id.is_some()))
+            .ok_or(RuntimeError::Overflow)?;
+        let mut references = Vec::new();
+        references
+            .try_reserve_exact(reference_count)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        if let Some(account_id) = session.account_id {
+            references.push(RecordReference::new(
+                TableId::Account,
+                KeyDeriver::account_key(account_id)?,
+            )?);
+        }
+        for channel_id in &session.joined_channels {
+            references.push(RecordReference::new(
+                TableId::Channel,
+                KeyDeriver::channel_key(*channel_id)?,
+            )?);
+        }
+        let value = PersistentRecordValue::new(
+            TableId::Session,
+            LIVE_RECORD_KIND,
+            revision,
+            session.generation.get(),
+            None,
+            references,
+            SessionRecordBody::encode(session)?,
+        )?;
+        self.put(TableId::Session, key, value)
+    }
+
+    fn tombstone_session(
+        &mut self,
+        session_id: SessionId,
+        revision: u64,
+    ) -> Result<(), RuntimeError> {
+        let key = KeyDeriver::session_key(session_id)?;
+        let value = PersistentRecordValue::new(
+            TableId::Session,
+            TOMBSTONE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        self.put(TableId::Session, key, value)
+    }
+
+    fn put_channel(&mut self, channel: &DurableChannel, revision: u64) -> Result<(), RuntimeError> {
+        let key = KeyDeriver::channel_key(channel.channel_id)?;
+        let value = PersistentRecordValue::new(
+            TableId::Channel,
+            LIVE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            Vec::new(),
+            ChannelRecordBody::encode(channel)?,
+        )?;
+        self.put(TableId::Channel, key.clone(), value)?;
+        if self.index.channel_name_row(channel.channel_id).is_some() {
+            return Ok(());
+        }
+        let name_key = self.keys.channel_name_key(&channel.name)?;
+        let name_value = PersistentRecordValue::new(
+            TableId::ChannelName,
+            LIVE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            vec![RecordReference::new(TableId::Channel, key)?],
+            ChannelNameRecordBody::encode(channel.channel_id, &channel.name)?,
+        )?;
+        self.put(TableId::ChannelName, name_key.clone(), name_value)?;
+        self.updates.push(IndexUpdate::ChannelNamed {
+            channel_id: channel.channel_id,
+            key: name_key,
+        });
+        Ok(())
+    }
+
+    fn tombstone_channel(
+        &mut self,
+        channel_id: ChannelInstanceId,
+        name: &ChannelNameValue,
+        revision: u64,
+    ) -> Result<(), RuntimeError> {
+        let key = KeyDeriver::channel_key(channel_id)?;
+        let value = PersistentRecordValue::new(
+            TableId::Channel,
+            TOMBSTONE_RECORD_KIND,
+            revision,
+            0,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        self.put(TableId::Channel, key, value)?;
+        let name_key = match self.index.channel_name_row(channel_id) {
+            Some(key) => key.clone(),
+            None => self.keys.channel_name_key(name)?,
+        };
+        self.delete(TableId::ChannelName, name_key)?;
+        self.updates
+            .push(IndexUpdate::ChannelUnnamed { channel_id });
+        Ok(())
+    }
+
+    fn append_sanction(
+        &mut self,
+        sanction: &DurableSanction,
+        revision: u64,
+        entropy: &mut dyn EntropySource,
+    ) -> Result<(), RuntimeError> {
+        let mut random = [0_u8; SANCTION_KEY_RANDOM_BYTES];
+        entropy
+            .fill_exact(&mut random)
+            .map_err(|_| RuntimeError::Storage(StorageError::Unavailable))?;
+        let key = KeyDeriver::sanction_key(sanction.channel_id, random)?;
+        if self.index.existing(TableId::Sanction, &key)?.is_some() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let value = PersistentRecordValue::new(
+            TableId::Sanction,
+            LIVE_RECORD_KIND,
+            revision,
+            0,
+            sanction.expires_at.map(agenc_relay_types::UtcSecond::get),
+            Vec::new(),
+            SanctionRecordBody::encode(sanction)?,
+        )?;
+        self.put(TableId::Sanction, key, value)
+    }
+
+    /// Appends one put with the exact before-image from the index.
+    fn put(
+        &mut self,
+        table: TableId,
+        key: StoredKey,
+        value: PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        self.put_plaintext(table, key, value.encode()?)
+    }
+
+    fn put_plaintext(
+        &mut self,
+        table: TableId,
+        key: StoredKey,
+        plaintext: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        self.touch(table, &key)?;
+        let before = self.index.existing(table, &key)?;
+        let plaintext_bytes = plaintext.len();
+        self.mutations.push(RecordMutation::put(
+            table,
+            key.clone(),
+            DOMAIN_RECORD_SCHEMA,
+            before,
+            plaintext,
+        )?);
+        self.updates.push(IndexUpdate::Put {
+            table,
+            key,
+            plaintext_bytes,
+        });
+        Ok(())
+    }
+
+    /// Appends one deletion; the row must exist.
+    fn delete(&mut self, table: TableId, key: StoredKey) -> Result<(), RuntimeError> {
+        self.touch(table, &key)?;
+        let before = self
+            .index
+            .existing(table, &key)?
+            .ok_or(RuntimeError::Storage(StorageError::StaleState))?;
+        self.mutations
+            .push(RecordMutation::delete(table, key.clone(), before));
+        self.updates.push(IndexUpdate::Delete { table, key });
+        Ok(())
+    }
+
+    /// One batch touches each row at most once (storage rejects duplicates,
+    /// and two plans rewriting one row would need the second before-image).
+    fn touch(&mut self, table: TableId, key: &StoredKey) -> Result<(), RuntimeError> {
+        if !self.touched.insert((table, key.clone())) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agenc_relay_admin::{
+        AdminAuditCheckpoint, AdminAuditCheckpointTbs, AdminAuditEventTbs, AdminAuditPhase,
+        AdminCommandTbs, AdminSessionId,
+    };
+    use agenc_relay_crypto::{
+        Ed25519SecretKey, LoginIndexKey, StorageDigest, audit_signing_key_id,
+    };
+    use agenc_relay_domain::{
+        AccountState, DisplayNameValue, DomainState, NicknameValue, SessionSeed,
+    };
+    use agenc_relay_storage::{
+        LOGIN_INDEX_KEY_STATE_KEY, LoginIndexKeyState, MIN_SEALED_RECORD_BYTES,
+        logical_record_charge,
+    };
+    use agenc_relay_testkit::{ScriptedEntropy, account_id, deterministic_cloak};
+    use agenc_relay_types::{
+        DatabaseId, Generation, NetworkId, OperatorId, Revision, ServerId, ServerIncarnation,
+        SessionId, UserId, UtcSecond,
+    };
+
+    fn binding() -> DatabaseBinding {
+        DatabaseBinding::new(
+            NetworkId::from_bytes([1; 32]),
+            ServerId::from_bytes([2; 16]),
+            ServerIncarnation::from_bytes([3; 16]),
+            DatabaseId::from_bytes([4; 16]),
+        )
+    }
+
+    fn keys() -> Result<KeyDeriver, RuntimeError> {
+        KeyDeriver::new(StorageMasterKey::from_bytes([7; 32]), binding(), 1)
+    }
+
+    const fn head(logical: u64, backup: u64) -> HeadCounters {
+        HeadCounters {
+            state_generation: 0,
+            storage_commit_sequence: 0,
+            account_service_response_count: 0,
+            logical_database_bytes: logical,
+            backup_stream_bytes: backup,
+        }
+    }
+
+    const fn ceilings() -> AccountingCeilings {
+        AccountingCeilings {
+            database_max_bytes: 1_000_000,
+            backup_max_bytes: 1_000_000,
+        }
+    }
+
+    fn account_plan() -> Result<MutationPlan, RuntimeError> {
+        let state = DomainState::new().map_err(|_| RuntimeError::InvalidValue)?;
+        let generation = Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?;
+        let account = AccountState::new(account_id(1), generation, state.revision());
+        state
+            .plan_account_created(account)
+            .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    fn session_plan() -> Result<(DomainState, MutationPlan, SessionId, UserId), RuntimeError> {
+        let state = DomainState::new().map_err(|_| RuntimeError::InvalidValue)?;
+        let session_id = SessionId::from_bytes([40; 16]);
+        let user_id = UserId::from_bytes([41; 16]);
+        let plan = state
+            .plan_session_opened(SessionSeed {
+                session_id,
+                user_id,
+                home_server_id: ServerId::from_bytes([42; 16]),
+                account_id: None,
+                account_session_generation: Generation::new(0)
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+                generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
+                nickname: NicknameValue::parse("Projected")
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+                display_name: DisplayNameValue::prepare("Projected")
+                    .map_err(|_| RuntimeError::InvalidValue)?,
+                public_cloak: deterministic_cloak(43).map_err(|_| RuntimeError::InvalidValue)?,
+                connection_nonce: [44; 32],
+                negotiated_capability_hash: [45; 32],
+                created_at_utc: UtcSecond::from_unix_seconds(1_000),
+                revision: state.revision(),
+            })
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok((state, plan, session_id, user_id))
+    }
+
+    fn audit_event() -> Result<AdminAuditEvent, RuntimeError> {
+        let operator_key = Ed25519SecretKey::from_bytes([21; 32]);
+        let audit_key = Ed25519SecretKey::from_bytes([22; 32]);
+        let command = AdminCommandTbs::new(
+            NetworkId::from_bytes([1; 32]),
+            ServerId::from_bytes([2; 16]),
+            AdminSessionId::from_bytes([23; 16]),
+            0,
+            None,
+            b"MOTD",
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let operator_signature = command
+            .sign(&operator_key)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let key_id = *audit_signing_key_id(audit_key.public_key().as_bytes())
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .as_bytes();
+        AdminAuditEvent::sign(
+            AdminAuditEventTbs {
+                network_id: NetworkId::from_bytes([1; 32]),
+                server_id: ServerId::from_bytes([2; 16]),
+                audit_signing_key_id: key_id,
+                audit_sequence: 0,
+                created_at: 50,
+                operator_id: OperatorId::from_bytes([24; 16]),
+                command_tbs: command,
+                operator_signature,
+                phase: AdminAuditPhase::Observed,
+                previous_event_hash: [0; 32],
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    }
+
+    #[test]
+    fn audit_projection_does_not_advance_protocol_state() -> Result<(), RuntimeError> {
+        let current = HeadCounters {
+            state_generation: 9,
+            storage_commit_sequence: 4,
+            account_service_response_count: 3,
+            logical_database_bytes: 0,
+            backup_stream_bytes: 0,
+        };
+        let projected = project_admin_audit_event(
+            TransactionId::from_bytes([25; 16]),
+            &audit_event()?,
+            &DurableIndex::new(),
+            &keys()?,
+            current,
+            ceilings(),
+        )?;
+        assert_eq!(projected.advancing_plans(), 0);
+        assert_eq!(projected.batch.expected_state_generation(), 9);
+        assert_eq!(projected.batch.resulting_state_generation(), 9);
+        assert_eq!(projected.batch.state_advancing_plan_count(), 0);
+        assert_eq!(projected.batch.plan_count(), 1);
+        let mutation = projected
+            .batch
+            .mutations()
+            .first()
+            .ok_or(RuntimeError::InvalidValue)?;
+        assert_eq!(mutation.table(), TableId::Audit);
+        assert_eq!(mutation.key().as_bytes(), 0_u64.to_be_bytes());
+        assert_eq!(projected.updates().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn admin_mutation_projection_couples_entity_and_audit_in_one_advancing_batch()
+    -> Result<(), RuntimeError> {
+        let plan = account_plan()?;
+        let mut account = match plan.durable_writes().first() {
+            Some(DurableWrite::PutAccount(account)) => account.clone(),
+            _ => return Err(RuntimeError::InvalidValue),
+        };
+        account.admin_suspension_expires_at = Some(UtcSecond::from_unix_seconds(100));
+        let projected = project_admin_mutation_event(
+            TransactionId::from_bytes([26; 16]),
+            &audit_event()?,
+            (&AdminMutationAfterImage::Account(account), &[]),
+            &DurableIndex::new(),
+            &keys()?,
+            head(0, 0),
+            ceilings(),
+        )?;
+        assert_eq!(projected.advancing_plans(), 1);
+        assert_eq!(projected.batch.resulting_state_generation(), 1);
+        assert_eq!(projected.batch.state_advancing_plan_count(), 1);
+        assert_eq!(projected.batch.plan_count(), 1);
+        assert_eq!(projected.batch.mutations().len(), 2);
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .first()
+                .map(RecordMutation::table),
+            Some(TableId::Account)
+        );
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .get(1)
+                .map(RecordMutation::table),
+            Some(TableId::Audit)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_retention_refuses_a_checkpoint_deleting_more_than_one_batch_holds()
+    -> Result<(), RuntimeError> {
+        let event = audit_event()?;
+        let audit_key = Ed25519SecretKey::from_bytes([22; 32]);
+        let key_id = *audit_signing_key_id(audit_key.public_key().as_bytes())
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .as_bytes();
+        let too_many = u64::try_from(MAX_AUDIT_RETENTION_EVENTS)
+            .map_err(|_| RuntimeError::Overflow)?
+            .saturating_add(1);
+        let checkpoint = AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                network_id: NetworkId::from_bytes([1; 32]),
+                server_id: ServerId::from_bytes([2; 16]),
+                audit_signing_key_id: key_id,
+                checkpoint_sequence: 0,
+                created_at: 100,
+                deleted_first_sequence: 0,
+                deleted_last_sequence: too_many.saturating_sub(1),
+                deleted_count: too_many,
+                deleted_last_event_hash: event.event_hash(),
+                next_retained_sequence: too_many,
+                previous_checkpoint_hash: [0; 32],
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let index = DurableIndex::new();
+        assert!(matches!(
+            project_admin_audit_retention(
+                TransactionId::from_bytes([32; 16]),
+                &checkpoint,
+                &index,
+                &keys()?,
+                head(100_000, 100_000),
+                ceilings(),
+            ),
+            Err(RuntimeError::LimitExceeded)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_retention_deletes_prefix_and_puts_checkpoint_in_one_batch() -> Result<(), RuntimeError>
+    {
+        let event = audit_event()?;
+        let audit_key = Ed25519SecretKey::from_bytes([22; 32]);
+        let key_id = *audit_signing_key_id(audit_key.public_key().as_bytes())
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .as_bytes();
+        let checkpoint = AdminAuditCheckpoint::sign(
+            AdminAuditCheckpointTbs {
+                network_id: NetworkId::from_bytes([1; 32]),
+                server_id: ServerId::from_bytes([2; 16]),
+                audit_signing_key_id: key_id,
+                checkpoint_sequence: 0,
+                created_at: 100,
+                deleted_first_sequence: 0,
+                deleted_last_sequence: 0,
+                deleted_count: 1,
+                deleted_last_event_hash: event.event_hash(),
+                next_retained_sequence: 1,
+                previous_checkpoint_hash: [0; 32],
+            },
+            &audit_key,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        let mut index = DurableIndex::new();
+        index.record_known(
+            TableId::Audit,
+            StoredKey::new(0_u64.to_be_bytes().to_vec())?,
+            ExistingRecord::new(
+                DOMAIN_RECORD_SCHEMA,
+                StorageDigest::from_bytes([31; 32]),
+                MIN_SEALED_RECORD_BYTES,
+            )?,
+        );
+        let projected = project_admin_audit_retention(
+            TransactionId::from_bytes([32; 16]),
+            &checkpoint,
+            &index,
+            &keys()?,
+            head(100_000, 100_000),
+            ceilings(),
+        )?;
+        assert_eq!(projected.batch.plan_count(), 1);
+        assert_eq!(projected.batch.state_advancing_plan_count(), 0);
+        assert_eq!(projected.batch.mutations().len(), 2);
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .first()
+                .map(RecordMutation::table),
+            Some(TableId::Audit)
+        );
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .get(1)
+                .map(RecordMutation::table),
+            Some(TableId::AuditCheckpoint)
+        );
+        assert_eq!(projected.updates().len(), 2);
+        Ok(())
+    }
+
+    fn auth_transaction_write(revision: u64) -> Result<AccountServiceDurableWrite, RuntimeError> {
+        let key = StoredKey::new(vec![6; 16])?;
+        let value = PersistentRecordValue::new(
+            TableId::AuthTransaction,
+            1,
+            revision,
+            0,
+            Some(30),
+            Vec::new(),
+            vec![7; 32],
+        )?;
+        AccountServiceDurableWrite::put(TableId::AuthTransaction, key, value.encode()?)
+    }
+
+    fn project_account(
+        index: &DurableIndex,
+        head: HeadCounters,
+    ) -> Result<ProjectedBatch, RuntimeError> {
+        let plan = account_plan()?;
+        let projections = [PlanProjection {
+            plan: &plan,
+            response_count_increment: 0,
+            account_service_writes: &[],
+        }];
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        project_batch(
+            TransactionId::from_bytes([9; 16]),
+            &projections,
+            index,
+            &keys()?,
+            head,
+            ceilings(),
+            &mut entropy,
+        )?
+        .ok_or(RuntimeError::InvalidValue)
+    }
+
+    #[test]
+    fn account_projection_binds_head_counts_and_the_exact_before_image() -> Result<(), RuntimeError>
+    {
+        let current = head(10_000, 20_000);
+        let fresh = project_account(&DurableIndex::new(), current)?;
+        assert_eq!(fresh.batch.expected_state_generation(), 0);
+        assert_eq!(fresh.batch.resulting_state_generation(), 1);
+        assert_eq!(fresh.batch.state_advancing_plan_count(), 1);
+        assert_eq!(fresh.batch.plan_count(), 1);
+        assert_eq!(fresh.mutation_count(), 1);
+        assert_eq!(
+            fresh.batch.mutations().first().map(RecordMutation::table),
+            Some(TableId::Account)
+        );
+
+        let mut existing = DurableIndex::new();
+        let account_key = KeyDeriver::account_key(account_id(1))?;
+        let sealed_bytes = 100;
+        existing.record_known(
+            TableId::Account,
+            account_key.clone(),
+            ExistingRecord::new(
+                DOMAIN_RECORD_SCHEMA,
+                StorageDigest::from_bytes([5; 32]),
+                sealed_bytes,
+            )?,
+        );
+        let replacement = project_account(&existing, current)?;
+        let prior_charge = logical_record_charge(account_key.as_bytes().len(), sealed_bytes)?;
+        // A present integrity before-image adds the 32-byte prior record ID
+        // to the successor manifest compared with an absent before-image.
+        let manifest_growth = u64::try_from(StorageDigest::from_bytes([0; 32]).as_bytes().len())
+            .map_err(|_| RuntimeError::Overflow)?;
+        assert_eq!(
+            fresh.resulting_logical_database_bytes,
+            replacement
+                .resulting_logical_database_bytes
+                .checked_add(prior_charge)
+                .and_then(|value| value.checked_sub(manifest_growth))
+                .ok_or(RuntimeError::Overflow)?
+        );
+        assert_eq!(
+            fresh.resulting_backup_stream_bytes,
+            replacement
+                .resulting_backup_stream_bytes
+                .checked_add(prior_charge)
+                .and_then(|value| value.checked_add(8))
+                .and_then(|value| value.checked_sub(manifest_growth))
+                .ok_or(RuntimeError::Overflow)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_put_and_tombstone_use_the_exact_session_row() -> Result<(), RuntimeError> {
+        let (mut state, opened, session_id, user_id) = session_plan()?;
+        assert_eq!(
+            touched_entities(&opened),
+            BTreeSet::from([EntityId::Session(session_id)])
+        );
+        let projections = [PlanProjection {
+            plan: &opened,
+            response_count_increment: 0,
+            account_service_writes: &[],
+        }];
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        let projected = project_batch(
+            TransactionId::from_bytes([46; 16]),
+            &projections,
+            &DurableIndex::new(),
+            &keys()?,
+            head(0, 0),
+            ceilings(),
+            &mut entropy,
+        )?
+        .ok_or(RuntimeError::InvalidValue)?;
+        let [mutation] = projected.batch.mutations() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(mutation.table(), TableId::Session);
+        assert!(mutation.key() == &KeyDeriver::session_key(session_id)?);
+
+        let prepared = state
+            .prepare_mutation(opened)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        state
+            .apply_prepared(prepared)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let disconnected = state
+            .plan_session_disconnected(user_id)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let session_key = KeyDeriver::session_key(session_id)?;
+        let mut index = DurableIndex::new();
+        index.record_known(
+            TableId::Session,
+            session_key.clone(),
+            ExistingRecord::new(
+                DOMAIN_RECORD_SCHEMA,
+                StorageDigest::from_bytes([47; 32]),
+                MIN_SEALED_RECORD_BYTES,
+            )?,
+        );
+        let projections = [PlanProjection {
+            plan: &disconnected,
+            response_count_increment: 0,
+            account_service_writes: &[],
+        }];
+        let projected = project_batch(
+            TransactionId::from_bytes([48; 16]),
+            &projections,
+            &index,
+            &keys()?,
+            HeadCounters {
+                state_generation: 1,
+                storage_commit_sequence: 1,
+                account_service_response_count: 0,
+                logical_database_bytes: 10_000,
+                backup_stream_bytes: 10_000,
+            },
+            ceilings(),
+            &mut entropy,
+        )?
+        .ok_or(RuntimeError::InvalidValue)?;
+        let [mutation] = projected.batch.mutations() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        assert_eq!(mutation.table(), TableId::Session);
+        assert!(mutation.key() == &session_key);
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_checkpoint_advances_with_its_validated_row() -> Result<(), RuntimeError> {
+        let state = DomainState::new().map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = state
+            .plan_account_service_checkpoint()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        assert!(plan.durable_writes().is_empty());
+        let write = auth_transaction_write(plan.resulting_revision().get())?;
+        let projections = [PlanProjection {
+            plan: &plan,
+            response_count_increment: 1,
+            account_service_writes: std::slice::from_ref(&write),
+        }];
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        let projected = project_batch(
+            TransactionId::from_bytes([10; 16]),
+            &projections,
+            &DurableIndex::new(),
+            &keys()?,
+            head(0, 0),
+            ceilings(),
+            &mut entropy,
+        )?
+        .ok_or(RuntimeError::InvalidValue)?;
+
+        assert_eq!(projected.advancing_plans(), 1);
+        assert_eq!(projected.mutation_count(), 1);
+        assert_eq!(projected.batch.resulting_state_generation(), 1);
+        assert_eq!(
+            projected.batch.resulting_account_service_response_count(),
+            1
+        );
+        assert_eq!(projected.updates().len(), 1);
+        assert_eq!(
+            projected
+                .batch
+                .mutations()
+                .first()
+                .map(RecordMutation::table),
+            Some(TableId::AuthTransaction)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_projection_rejects_wrong_table_and_revision() -> Result<(), RuntimeError> {
+        assert_eq!(
+            AccountServiceDurableWrite::put(
+                TableId::Channel,
+                StoredKey::new(vec![8; 16])?,
+                vec![1],
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+
+        let state = DomainState::new().map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = state
+            .plan_account_service_checkpoint()
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let stale = auth_transaction_write(
+            plan.resulting_revision()
+                .get()
+                .checked_add(1)
+                .ok_or(RuntimeError::Overflow)?,
+        )?;
+        let projections = [PlanProjection {
+            plan: &plan,
+            response_count_increment: 0,
+            account_service_writes: std::slice::from_ref(&stale),
+        }];
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([11; 16]),
+                &projections,
+                &DurableIndex::new(),
+                &keys()?,
+                head(0, 0),
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::Storage(StorageError::StaleState))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_write_set_accepts_only_the_login_index_control_row()
+    -> Result<(), RuntimeError> {
+        let network = NetworkId::from_bytes([12; 32]);
+        let login_key = LoginIndexKey::from_bytes([13; 32]);
+        let state = LoginIndexKeyState::stable(1, login_key.key_id(network))?;
+        let write = AccountServiceDurableWrite::put(
+            TableId::LoginIndexKeyState,
+            StoredKey::new(LOGIN_INDEX_KEY_STATE_KEY.to_vec())?,
+            state.encode()?,
+        );
+        assert!(write.is_ok());
+        assert_eq!(
+            AccountServiceDurableWrite::put(
+                TableId::StateMeta,
+                StoredKey::new(agenc_relay_storage::STATE_META_STORED_KEY.to_vec())?,
+                vec![0; 8],
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_requires_an_exact_known_before_image() -> Result<(), RuntimeError> {
+        let keys = keys()?;
+        let row_key = StoredKey::new(vec![1])?;
+        let empty = DurableIndex::new();
+        let mut missing = Projection {
+            index: &empty,
+            keys: &keys,
+            mutations: Vec::new(),
+            updates: Vec::new(),
+            touched: BTreeSet::new(),
+        };
+        assert_eq!(
+            missing.delete(TableId::NicknameReservation, row_key.clone()),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        );
+
+        let mut known = DurableIndex::new();
+        known.record_known(
+            TableId::NicknameReservation,
+            row_key.clone(),
+            ExistingRecord::new(
+                DOMAIN_RECORD_SCHEMA,
+                StorageDigest::from_bytes([6; 32]),
+                MIN_SEALED_RECORD_BYTES,
+            )?,
+        );
+        let mut present = Projection {
+            index: &known,
+            keys: &keys,
+            mutations: Vec::new(),
+            updates: Vec::new(),
+            touched: BTreeSet::new(),
+        };
+        present.delete(TableId::NicknameReservation, row_key)?;
+        assert_eq!(present.mutations.len(), 1);
+        assert!(
+            present
+                .mutations
+                .first()
+                .is_some_and(RecordMutation::is_deletion)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_index_rows_require_the_exact_sealed_length() -> Result<(), RuntimeError> {
+        let key = StoredKey::new(vec![8])?;
+        let update = IndexUpdate::Put {
+            table: TableId::Account,
+            key: key.clone(),
+            plaintext_bytes: 10,
+        };
+        let mut index = DurableIndex::new();
+        index.apply(&[update]);
+        assert_eq!(index.pending_rows().len(), 1);
+        let wrong = ExistingRecord::new(
+            DOMAIN_RECORD_SCHEMA,
+            StorageDigest::from_bytes([1; 32]),
+            MIN_SEALED_RECORD_BYTES,
+        )?;
+        assert_eq!(
+            index.refresh(vec![(TableId::Account, key.clone(), Some(wrong))]),
+            Err(RuntimeError::Storage(StorageError::StaleState))
+        );
+        let exact = ExistingRecord::new(
+            DOMAIN_RECORD_SCHEMA,
+            StorageDigest::from_bytes([2; 32]),
+            MIN_SEALED_RECORD_BYTES + 10,
+        )?;
+        index.refresh(vec![(TableId::Account, key.clone(), Some(exact))])?;
+        assert_eq!(index.existing(TableId::Account, &key)?, Some(exact));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_rejects_empty_and_response_count_overflow() -> Result<(), RuntimeError> {
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([1; 16]),
+                &[],
+                &DurableIndex::new(),
+                &keys()?,
+                head(0, 0),
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        let plan = account_plan()?;
+        let projections = [PlanProjection {
+            plan: &plan,
+            response_count_increment: 1,
+            account_service_writes: &[],
+        }];
+        let overflowing = HeadCounters {
+            account_service_response_count: u64::MAX,
+            ..head(0, 0)
+        };
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([2; 16]),
+                &projections,
+                &DurableIndex::new(),
+                &keys()?,
+                overflowing,
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::Overflow)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn key_shapes_and_generation_validation_are_closed() -> Result<(), RuntimeError> {
+        assert!(matches!(
+            KeyDeriver::new(StorageMasterKey::from_bytes([1; 32]), binding(), 0),
+            Err(RuntimeError::InvalidValue)
+        ));
+        assert_eq!(KeyDeriver::account_key(account_id(1))?.as_bytes().len(), 24);
+        assert_eq!(
+            KeyDeriver::channel_key(ChannelInstanceId::from_bytes([2; 16]))?
+                .as_bytes()
+                .len(),
+            16
+        );
+        let sanction = KeyDeriver::sanction_key(None, [3; SANCTION_KEY_RANDOM_BYTES])?;
+        assert_eq!(sanction.as_bytes().len(), 2 + SANCTION_KEY_RANDOM_BYTES);
+        assert_eq!(
+            sanction.as_bytes().get(..2),
+            Some(SANCTION_SCOPE_NETWORK.to_be_bytes().as_slice())
+        );
+        assert!(Revision::new(0).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn read_back_records_must_be_exactly_one_matching_row() -> Result<(), RuntimeError> {
+        let key = StoredKey::new(vec![9])?;
+        let record = |table: TableId, key: &StoredKey| agenc_relay_storage::ReadRecord {
+            table,
+            key: key.clone(),
+            sealed_record: Vec::new(),
+        };
+        let result =
+            |records: Vec<agenc_relay_storage::ReadRecord>| agenc_relay_storage::ReadResult {
+                storage_commit_sequence: 0,
+                records,
+                truncated: false,
+            };
+        let stale = Some(RuntimeError::Storage(StorageError::StaleState));
+        assert_eq!(
+            read_back_record(
+                TableId::Account,
+                key.clone(),
+                result(vec![
+                    record(TableId::Account, &key),
+                    record(TableId::Account, &key)
+                ]),
+            )
+            .err(),
+            stale
+        );
+        assert_eq!(
+            read_back_record(
+                TableId::Account,
+                key.clone(),
+                result(vec![record(TableId::Session, &key)]),
+            )
+            .err(),
+            stale
+        );
+        let other = StoredKey::new(vec![10])?;
+        assert_eq!(
+            read_back_record(
+                TableId::Account,
+                key.clone(),
+                result(vec![record(TableId::Account, &other)]),
+            )
+            .err(),
+            stale
+        );
+        assert!(
+            read_back_record(TableId::Account, key, result(Vec::new()))?
+                .2
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_batch_touches_each_row_once_and_holds_at_most_the_plan_ceiling() -> Result<(), RuntimeError>
+    {
+        let mut entropy =
+            ScriptedEntropy::new(Vec::new()).map_err(|_| RuntimeError::InvalidValue)?;
+        let plan = account_plan()?;
+        let projection = || PlanProjection {
+            plan: &plan,
+            response_count_increment: 0,
+            account_service_writes: &[],
+        };
+        let twice = [projection(), projection()];
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([3; 16]),
+                &twice,
+                &DurableIndex::new(),
+                &keys()?,
+                head(0, 0),
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        let many: Vec<PlanProjection<'_>> =
+            (0..=MAX_TRANSACTION_PLANS).map(|_| projection()).collect();
+        assert_eq!(
+            project_batch(
+                TransactionId::from_bytes([4; 16]),
+                &many,
+                &DurableIndex::new(),
+                &keys()?,
+                head(0, 0),
+                ceilings(),
+                &mut entropy,
+            )
+            .err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_session_row_carries_the_batch_revision() -> Result<(), RuntimeError> {
+        let (_, plan, _, _) = session_plan()?;
+        let session = plan
+            .durable_writes()
+            .iter()
+            .find_map(|write| match write {
+                DurableWrite::PutSession(session) => Some(session),
+                _ => None,
+            })
+            .ok_or(RuntimeError::InvalidValue)?;
+        let keys = keys()?;
+        let index = DurableIndex::new();
+        let mut projection = Projection {
+            index: &index,
+            keys: &keys,
+            mutations: Vec::new(),
+            updates: Vec::new(),
+            touched: BTreeSet::new(),
+        };
+        assert_eq!(
+            projection.put_session(session, 999).err(),
+            Some(RuntimeError::Storage(StorageError::StaleState))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn account_service_deletes_name_only_account_service_tables() -> Result<(), RuntimeError> {
+        assert_eq!(
+            AccountServiceDurableWrite::delete(TableId::Audit, StoredKey::new(vec![1])?).err(),
+            Some(RuntimeError::InvalidValue)
+        );
+        Ok(())
+    }
+}

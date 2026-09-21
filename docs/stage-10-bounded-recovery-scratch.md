@@ -23,7 +23,7 @@ same bound from both directory authorities.
 
 ## What is now bounded
 
-The new module `crates/agenc-ircd-storage/src/scratch.rs` owns one
+The new module `crates/agenc-relay-storage/src/scratch.rs` owns one
 `ScratchDatabase`: a redb database created from a descriptor the state
 directory handed out, whose every write transaction goes through
 `Database::begin_write_bounded(AllocationAllowance)` of the fork and is
@@ -255,7 +255,7 @@ Second, opening a table allocates its root, so a refusal can surface from
 
 ## Evidence
 
-Storage crate, `cargo test -p agenc-ircd-storage --all-features --locked --
+Storage crate, `cargo test -p agenc-relay-storage --all-features --locked --
 --skip qualification_workload`:
 
 - `scratch::tests`: the fixed workload fits exactly at its measured peak,

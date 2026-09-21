@@ -13,23 +13,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenc-ircd-admin"
-version = "1.0.0-rc.2"
+name = "agenc-relay-admin"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-crypto",
- "agenc-ircd-domain",
- "agenc-ircd-types",
+ "agenc-relay-crypto",
+ "agenc-relay-domain",
+ "agenc-relay-types",
  "base64",
  "subtle",
  "zeroize",
 ]
 
 [[package]]
-name = "agenc-ircd-auth"
-version = "1.0.0-rc.2"
+name = "agenc-relay-auth"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-crypto",
- "agenc-ircd-types",
+ "agenc-relay-crypto",
+ "agenc-relay-types",
  "argon2",
  "opaque-ke",
  "sha2 0.10.9",
@@ -39,19 +39,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenc-ircd-client-wire"
-version = "1.0.0-rc.2"
+name = "agenc-relay-client-wire"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-types",
+ "agenc-relay-types",
  "base64",
  "zeroize",
 ]
 
 [[package]]
-name = "agenc-ircd-config"
-version = "1.0.0-rc.2"
+name = "agenc-relay-config"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-types",
+ "agenc-relay-types",
  "base64",
  "rustix",
  "toml",
@@ -59,10 +59,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenc-ircd-crypto"
-version = "1.0.0-rc.2"
+name = "agenc-relay-crypto"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-types",
+ "agenc-relay-types",
  "chacha20poly1305",
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -76,28 +76,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenc-ircd-domain"
-version = "1.0.0-rc.2"
+name = "agenc-relay-domain"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-types",
+ "agenc-relay-types",
 ]
 
 [[package]]
-name = "agenc-ircd-e2ee"
-version = "1.0.0-rc.2"
+name = "agenc-relay-e2ee"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-crypto",
- "agenc-ircd-domain",
- "agenc-ircd-federation-wire",
- "agenc-ircd-types",
+ "agenc-relay-crypto",
+ "agenc-relay-domain",
+ "agenc-relay-federation-wire",
+ "agenc-relay-types",
  "sha2 0.11.0",
 ]
 
 [[package]]
-name = "agenc-ircd-federation-wire"
-version = "1.0.0-rc.2"
+name = "agenc-relay-federation-wire"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-types",
+ "agenc-relay-types",
  "base64",
  "sha2 0.11.0",
  "tls_codec",
@@ -105,29 +105,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenc-ircd-fuzz"
-version = "1.0.0-rc.2"
+name = "agenc-relay-fuzz"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-admin",
- "agenc-ircd-auth",
- "agenc-ircd-client-wire",
- "agenc-ircd-config",
- "agenc-ircd-crypto",
- "agenc-ircd-e2ee",
- "agenc-ircd-federation-wire",
- "agenc-ircd-storage",
- "agenc-ircd-types",
+ "agenc-relay-admin",
+ "agenc-relay-auth",
+ "agenc-relay-client-wire",
+ "agenc-relay-config",
+ "agenc-relay-crypto",
+ "agenc-relay-e2ee",
+ "agenc-relay-federation-wire",
+ "agenc-relay-storage",
+ "agenc-relay-types",
  "libfuzzer-sys",
 ]
 
 [[package]]
-name = "agenc-ircd-storage"
-version = "1.0.0-rc.2"
+name = "agenc-relay-storage"
+version = "1.0.0-rc.3"
 dependencies = [
- "agenc-ircd-crypto",
- "agenc-ircd-domain",
- "agenc-ircd-e2ee",
- "agenc-ircd-types",
+ "agenc-relay-crypto",
+ "agenc-relay-domain",
+ "agenc-relay-e2ee",
+ "agenc-relay-types",
  "redb",
  "rustix",
  "subtle",
@@ -135,8 +135,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "agenc-ircd-types"
-version = "1.0.0-rc.2"
+name = "agenc-relay-types"
+version = "1.0.0-rc.3"
 dependencies = [
  "base64",
  "precis-profiles",

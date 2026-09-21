@@ -60,9 +60,9 @@ FORBIDDEN_DOMAIN_MARKERS = (
     "tokio::",
     "getrandom",
     "rand::",
-    "agenc_ircd_storage",
-    "agenc_ircd_runtime",
-    "agenc_ircd_crypto",
+    "agenc_relay_storage",
+    "agenc_relay_runtime",
+    "agenc_relay_crypto",
 )
 REQUIRED_SURFACES = (
     "pub struct DomainState",
@@ -92,7 +92,7 @@ def load_toml(path: Path) -> dict[str, object]:
 
 def validate_domain_boundary(root: Path) -> None:
     """Require the complete pure-domain module set and forbidden-import boundary."""
-    source_root = root / "crates/agenc-ircd-domain/src"
+    source_root = root / "crates/agenc-relay-domain/src"
     modules = {path.name for path in source_root.glob("*.rs") if path.name != "lib.rs"}
     if modules != EXPECTED_MODULES:
         raise StageThreeError("domain module set is missing or unexpected")
@@ -104,7 +104,7 @@ def validate_domain_boundary(root: Path) -> None:
         raise StageThreeError("domain is missing a required Stage-03 surface")
     tests = {
         path.name
-        for path in (root / "crates/agenc-ircd-testkit/tests").glob("domain_*.rs")
+        for path in (root / "crates/agenc-relay-testkit/tests").glob("domain_*.rs")
     }
     if tests != EXPECTED_TESTS:
         raise StageThreeError("Stage-03 integration-test set is missing or unexpected")
@@ -129,19 +129,19 @@ def extract_command_match_names(source: str) -> set[str]:
 
 def validate_command_coverage(root: Path) -> None:
     """Prove production and independent models cover the same frozen registry."""
-    client = (root / "crates/agenc-ircd-client-wire/src/registration_command.rs").read_text(
+    client = (root / "crates/agenc-relay-client-wire/src/registration_command.rs").read_text(
         encoding="utf-8"
     )
     expected = {"NICK", "QUIT", *extract_post_registration_names(client)}
     domain = extract_command_match_names(
-        (root / "crates/agenc-ircd-domain/src/command.rs").read_text(encoding="utf-8")
+        (root / "crates/agenc-relay-domain/src/command.rs").read_text(encoding="utf-8")
     )
-    reference_path = root / "crates/agenc-ircd-testkit/src/domain_reference.rs"
+    reference_path = root / "crates/agenc-relay-testkit/src/domain_reference.rs"
     reference_source = reference_path.read_text(encoding="utf-8")
     reference = extract_command_match_names(reference_source)
     if domain != expected or reference != expected or len(expected) != 31:
         raise StageThreeError("domain/reference command coverage differs from the frozen registry")
-    forbidden = ("agenc_ircd_domain", "DomainState", "CanonicalCommand", "MutationPlan")
+    forbidden = ("agenc_relay_domain", "DomainState", "CanonicalCommand", "MutationPlan")
     if any(marker in reference_source for marker in forbidden):
         raise StageThreeError("reference model calls or embeds production domain transitions")
 
@@ -248,7 +248,7 @@ def validate_sequence_fixture(path: Path) -> None:
 def validate_model_test_source(root: Path) -> None:
     """Require the Rust test to execute both models at every generated step."""
     source = (
-        root / "crates/agenc-ircd-testkit/tests/domain_reference_model.rs"
+        root / "crates/agenc-relay-testkit/tests/domain_reference_model.rs"
     ).read_text(encoding="utf-8")
     missing = [marker for marker in REQUIRED_MODEL_TEST_MARKERS if marker not in source]
     if missing:

@@ -1,7 +1,7 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_storage::history_records::{
+use agenc_relay_storage::history_records::{
     HistoryControlRecord, HistoryCoordinatorResultRecord, HistoryEdgeRequestRecord,
     HistoryMessageRecord,
 };

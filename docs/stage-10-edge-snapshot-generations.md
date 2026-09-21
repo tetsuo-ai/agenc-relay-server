@@ -12,7 +12,7 @@ reconstruction) is untouched.
 
 ## Rows
 
-Two table-23 rows carry the generation (`crates/agenc-ircd-storage/src/e2ee_records.rs`):
+Two table-23 rows carry the generation (`crates/agenc-relay-storage/src/e2ee_records.rs`):
 
 - `pending-route/v1/<delivery-generation><conversation-id>` (kind 20,
   `PendingRouteRow`): exactly a `route/v1/` body under the generation's key,
@@ -28,7 +28,7 @@ Earlier development images without these rows restore no generation.
 
 ## Receiving
 
-`crates/agenc-ircd-runtime/src/e2ee/edge/snapshot.rs` replaces the in-memory
+`crates/agenc-relay-runtime/src/e2ee/edge/snapshot.rs` replaces the in-memory
 `SnapshotInstall`. Page zero opens a generation only in `Resuming`, refuses a
 declared count above `MAX_FEDERATION_STATE_ENTRIES_PER_EDGE` before anything
 is allocated, and fixes the exact partition (every nonfinal page holds
@@ -60,7 +60,7 @@ move at READY.
 The encrypted-profile defect sweep found that the receiver staged
 whatever route a cut named (issue #160), although companion 12.5 has the edge
 verify base channel and account entitlement before READY. `retain_entry` now
-asks `cut_route_entitled` (`crates/agenc-ircd-runtime/src/e2ee/edge/entitlement.rs`)
+asks `cut_route_entitled` (`crates/agenc-relay-runtime/src/e2ee/edge/entitlement.rs`)
 before anything of an entry is charged or retained:
 
 - a channel route needs the base channel-detail entitlement,
@@ -132,11 +132,11 @@ so a restart never infers activation from it.
 
 ## Evidence
 
-- `crates/agenc-ircd-storage/tests/e2ee_records.rs`: the pending route and
+- `crates/agenc-relay-storage/tests/e2ee_records.rs`: the pending route and
   marker rows round-trip under their keys and kinds, the marker rules refuse
   an over-staged, incomplete READY, or cursor-bearing READY row, and a
   forged phase does not decode.
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/snapshot.rs`: a two-page
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/snapshot.rs`: a two-page
   snapshot stages one bounded batch per page with the exact marker
   progress, keeps the prior projection live through READY, swaps at ACTIVE
   with the new cursor, and migrates with the stale row deleted and the marker
@@ -151,12 +151,12 @@ so a restart never infers activation from it.
   resumed and its stale row deleted; a restart in mid-migration restores the
   exact route set; a staging marker is abandoned at restart and its rows and
   a stray generation deleted.
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/projection.rs` and
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/projection.rs` and
   `projection/rollback.rs`: an empty snapshot removes the prior routes only
   at ACTIVE, refused storage keeps the previous delivery generation, and a
   READY committed after link loss keeps the generation pending and is
   announced by the next link.
-- `crates/agenc-ircd-runtime/src/federation/edge/tests`: the real state core
+- `crates/agenc-relay-runtime/src/federation/edge/tests`: the real state core
   drives the empty-snapshot READY and ACTIVE sequence through the receiver.
 
 Six release critical regions cover the page partition, the receiver, the

@@ -1,23 +1,23 @@
 schema_version = 1
-frozen_at_commit = "66c6695f5098a0a332b8c929a15fa27bfdf2e57c"
+frozen_at_commit = "2e13fab121efcdf3128eb1ce8a5b3577f95b8e25"
 
 [profiles.base_federation_v1]
 sha256 = "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
 base64url = "ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M"
 
 [profiles.e2ee_mls_v1]
-sha256 = "3771bab2f09024644d0468d004af30fba3d00403e4dc6f0205aea20a75265e45"
-base64url = "N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU"
+sha256 = "c70f477beb9d143a16357cdf3850542143d327bc200b3cacf6a32fc94a5f9035"
+base64url = "xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU"
 
 [[artifacts]]
-path = "docs/ircd-architecture-and-implementation-spec.md"
+path = "docs/arc-architecture-and-implementation-spec.md"
 role = "architecture"
-sha256 = "76ae43d35e8bb83b5ad57b991c875af8a5762744240d0014ed3f13060c6b3dd3"
+sha256 = "96b571532b3c886f055eaaaecc0fadee2d17d02b7c9bb3f480e12c0023faf6c7"
 
 [[artifacts]]
-path = "docs/irc-mls-e2ee-extension.md"
+path = "docs/arc-mls-e2ee-extension.md"
 role = "e2ee-companion"
-sha256 = "b2716e8e7a5531ed0e6f23455d45e51e81c8f901a0ef9a2b5ad3d471f059bf23"
+sha256 = "0960d58205933a94e482be38469ebbfbc87dd3d5cdb2f8f241962fe9cf43d0b8"
 
 [[artifacts]]
 path = "docs/federation-v1-profile.registry"
@@ -27,14 +27,14 @@ sha256 = "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411"
 [[artifacts]]
 path = "docs/protocol-sources-and-decisions.md"
 role = "source-ledger"
-sha256 = "40e5c1c256f6103eea35751135c2c4eee0c869f22318167ad16fd1bbe2439013"
+sha256 = "23a20cb38c7918d8488403fc780fc1eba14c647d187548f921cee4cdad4635ac"
 
 [[artifacts]]
 path = "docs/specification-manifest.txt"
 role = "specification-manifest"
-sha256 = "f905043562d1928a6a7205dbd042cc7097211db22c19e0183884fe0fb2732722"
+sha256 = "59e2345d2e293cf38cba53c3c9e68a07305fd4475a2505dfb73da611e0bc64f9"
 
 [[artifacts]]
 path = "scripts/check-spec.sh"
 role = "specification-validator"
-sha256 = "284395699b4690f74e722df82a81af5e5c9a0fe57350a217bccfd4792c920dc9"
+sha256 = "b56e787159e0aa5990feb0f79e1b63029d8eedca1c46aaa26d3c0d752d99ed77"

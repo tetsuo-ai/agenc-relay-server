@@ -16,7 +16,7 @@ handler: the frame fell through to a protocol violation, which closes the
 link, so an edge holding one row lost its companion link on every reconnect
 and every conversation it projected went down with it.
 
-`crates/agenc-ircd-runtime/src/e2ee/coordinator/sync/witness.rs` is the
+`crates/agenc-relay-runtime/src/e2ee/coordinator/sync/witness.rs` is the
 publication side:
 
 - A request is answered from the retained chain of the named conversation,
@@ -111,15 +111,15 @@ collector deletes it at the ordinary retention boundary.
 
 ## Evidence
 
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/witness_bridged.rs`: a skip
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/witness_bridged.rs`: a skip
   resolves through the coordinator, the edge installs the proven head,
   `RESOLVED` is accepted and idempotent, the origin replay is answered on the
   same link; a fork becomes a durable `conflict` confined to its
   conversation with the link up and a later request still answered; the
   answer stops before the unacknowledged event.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sync/review_witness.rs`:
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sync/review_witness.rs`:
   a request for an unretained conversation gets one empty set.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence/review_reload.rs`:
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/review_reload.rs`:
   a pending finalization is not a retained one after reload; every certified
   terminal proof reloads; the resulting council's vote survives a reload and
   completes the activation; a lost request is reported; a vote-less pending
@@ -127,7 +127,7 @@ collector deletes it at the ordinary retention boundary.
   retention boundary once unowned.
 
 Each regression failed on `46840bd` before its fix. Commands: `cargo test -p
-agenc-ircd-runtime --all-features --locked`, `cargo test -p agenc-ircd-e2ee
+agenc-relay-runtime --all-features --locked`, `cargo test -p agenc-relay-e2ee
 --all-features --locked`, `cargo clippy --workspace --all-targets
 --all-features --locked -- -D warnings`, `cargo fmt --all --check`, `python3
 scripts/check-source.py check`.

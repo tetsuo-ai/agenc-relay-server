@@ -138,7 +138,7 @@ def main() -> int:
         raise QualificationError("the frozen daemon admitted an unqualified filesystem tuple")
     write_once(evidence / "tmpfs-refusal.json", canonical({"argv": refusal, "measurement": measured, "tmpfs_root": str(refusal_root.parent)}))
     fault_environment = {**os.environ, "CARGO_TARGET_DIR": str(work / "target")}
-    command(root, attempt, "storage-fault-matrix", ["cargo", "test", "-p", "agenc-ircd-storage", "--test", "stage_five", "--frozen", "--release", "--", "--test-threads=4"], 7200, fault_environment)
+    command(root, attempt, "storage-fault-matrix", ["cargo", "test", "-p", "agenc-relay-storage", "--test", "stage_five", "--frozen", "--release", "--", "--test-threads=4"], 7200, fault_environment)
     fault_log = read_bytes(evidence / "storage-fault-matrix.log", 64 * 1024 * 1024)
     construction = set(CONSTRUCTION_TESTS.findall(fault_log))
     faults = set(FAULT_TESTS.findall(fault_log))

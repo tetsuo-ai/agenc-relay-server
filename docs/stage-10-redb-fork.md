@@ -45,8 +45,8 @@ has. Both documents were refrozen.
 
 ## Evidence
 
-- `cargo build -p agenc-ircd-storage --all-features --locked` compiles the
-  fork; `cargo test -p agenc-ircd-storage --all-features --locked -- --skip
+- `cargo build -p agenc-relay-storage --all-features --locked` compiles the
+  fork; `cargo test -p agenc-relay-storage --all-features --locked -- --skip
   qualification_workload` passes 217 and 120 tests, so the ordinary API the
   storage crate uses today is unchanged.
 - `python3 scripts/check-workspace.py check` reports 13 workspace packages

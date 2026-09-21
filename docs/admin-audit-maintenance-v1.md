@@ -33,9 +33,9 @@ only the lines needed for the selected range.
 `MAINTENANCE` carries the existing encoding-two, profile-version-one body:
 358 bytes of signed maintenance facts, followed by its 32-byte event hash and
 64-byte server signature. Its exact 454-byte codec is
-[`MaintenanceAuditEvent`](../crates/agenc-ircd-admin/src/maintenance/mod.rs),
+[`MaintenanceAuditEvent`](../crates/agenc-relay-admin/src/maintenance/mod.rs),
 with the field order in
-[`MaintenanceAuditEventTbs`](../crates/agenc-ircd-admin/src/maintenance/tbs.rs).
+[`MaintenanceAuditEventTbs`](../crates/agenc-relay-admin/src/maintenance/tbs.rs).
 The dedicated audit-key signature covers the existing maintenance hash and
 signature domains. Export preserves every original byte, including historical
 database, incarnation, recovery epoch, key-state, time, and chain fields.

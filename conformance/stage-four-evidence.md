@@ -2,11 +2,11 @@
 
 Status: implementation complete; checkpoint closed for exact source commit
 `1e5b738468f88b238061cc6e84b732176f5cae65`. The current schema version 2
-[manifest](evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json)
+[manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json)
 binds 20 passed records to one clean Stage 04 gate run and its checked-in
-[artifact](evidence/artifacts/stage-four-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
+[artifact](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/artifacts/stage-four-implementation-1e5b738468f88b238061cc6e84b732176f5cae65.json).
 The [schema version 1
-manifest](evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
+manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json)
 for commit `8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remains archive-only.
 
 Stage 04 implements the cryptographic adapters and account-authentication
@@ -114,7 +114,7 @@ parsers, OPAQUE messages and state, invitations, signatures, HPKE keys, and
 sealed storage records. The test matrix covers vectors, round trips, malformed
 lengths and padding, substitutions, replay, expiry, unknown-login work, worker
 bounds, credential replacement, account deletion, and the protocol's critical
-branches. `crates/agenc-ircd-auth/tests/stage_four_security.rs` enumerates all
+branches. `crates/agenc-relay-auth/tests/stage_four_security.rs` enumerates all
 public auth, crypto, and worker error formatting with a secret canary, then
 checks queued cancellation and panic capture without formatting the job. Its
 known/unknown OPAQUE timing test uses a fixed shuffled schedule, separate

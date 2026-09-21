@@ -5,7 +5,7 @@
 //! check, and the closed command registry must be total over arbitrary bytes,
 //! and an accepted tag must re-render to the exact bytes it was parsed from.
 
-use agenc_ircd_admin::{
+use agenc_relay_admin::{
     AdminCommand, CanonicalCommand, MAX_ADMIN_LINE_BYTES, parse_admin_line, render_admin_tag,
 };
 use libfuzzer_sys::fuzz_target;

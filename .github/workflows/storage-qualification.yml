@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p artifacts
           export TMPDIR="$RUNNER_TEMP"
-          cargo +1.98.0 run --locked --release -p agenc-ircd-storage \
+          cargo +1.98.0 run --locked --release -p agenc-relay-storage \
             --example storage-qualification -- \
             "artifacts/${{ matrix.target }}-ext4.unsigned" \
             "artifacts/${{ matrix.target }}-ext4.log"

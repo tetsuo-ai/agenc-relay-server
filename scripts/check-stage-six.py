@@ -18,83 +18,83 @@ EXPECTED_TASKS = [f"S06-{number:03d}" for number in range(1, 16)]
 EXPECTED_TRANSCRIPTS = {
     "client-tls-core-v1": {
         "transport": "client_tls",
-        "file": "crates/agenc-ircd/tests/stage_six_daemon.rs",
+        "file": "crates/agenc-relay-server/tests/stage_six_daemon.rs",
         "test": "production_daemon_core_v1_and_admin_mtls_are_byte_exact",
         "fixture": "test-data/transcripts/stage-six-core-v1.transcript",
     },
     "client-onion-core-v1": {
         "transport": "client_onion",
-        "file": "crates/agenc-ircd-runtime/tests/tor_client.rs",
+        "file": "crates/agenc-relay-runtime/tests/tor_client.rs",
         "test": "profiles_send_only_the_selected_hostname_through_socks",
     },
     "admin-local-isolation": {
         "transport": "admin_local",
-        "file": "crates/agenc-ircd-runtime/tests/listener_accept.rs",
+        "file": "crates/agenc-relay-runtime/tests/listener_accept.rs",
         "test": "local_admin_lines_never_enter_the_public_client_inbox",
     },
     "admin-tls-isolation": {
         "transport": "admin_tls",
-        "file": "crates/agenc-ircd-runtime/tests/listener_accept.rs",
+        "file": "crates/agenc-relay-runtime/tests/listener_accept.rs",
         "test": "admin_tls_lines_never_enter_the_public_client_inbox",
     },
     "admin-mtls-exporter": {
         "transport": "admin_tls",
-        "file": "crates/agenc-ircd/tests/stage_six_daemon.rs",
+        "file": "crates/agenc-relay-server/tests/stage_six_daemon.rs",
         "test": "production_daemon_core_v1_and_admin_mtls_are_byte_exact",
     },
     "admin-command-registry": {
         "transport": "admin_session",
-        "file": "crates/agenc-ircd-admin/src/command.rs",
+        "file": "crates/agenc-relay-admin/src/command.rs",
         "test": "every_registered_command_parses_with_its_permission_and_rules",
     },
     "admin-proof-counter-permission": {
         "transport": "admin_session",
-        "file": "crates/agenc-ircd-admin/src/session.rs",
+        "file": "crates/agenc-relay-admin/src/session.rs",
         "test": "authenticated_lines_enforce_counter_signature_form_and_permission",
     },
     "admin-confirmation": {
         "transport": "admin_session",
-        "file": "crates/agenc-ircd-admin/src/session.rs",
+        "file": "crates/agenc-relay-admin/src/session.rs",
         "test": "two_step_confirmation_binds_token_command_permissions_and_time",
     },
     "admin-authority-reload": {
         "transport": "admin_session",
-        "file": "crates/agenc-ircd-admin/src/session.rs",
+        "file": "crates/agenc-relay-admin/src/session.rs",
         "test": "authority_reload_updates_permissions_consumes_confirmation_and_disconnects_mismatch",
     },
     "admin-observed-output": {
         "transport": "admin_owner",
-        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "file": "crates/agenc-relay-runtime/src/admin.rs",
         "test": "observed_output_waits_for_the_durable_audit_reply",
     },
     "admin-atomic-account-mutation": {
         "transport": "admin_owner",
-        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "file": "crates/agenc-relay-runtime/src/admin.rs",
         "test": "account_mutation_waits_for_one_atomic_state_core_commit",
     },
     "admin-die-intent": {
         "transport": "admin_owner",
-        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "file": "crates/agenc-relay-runtime/src/admin.rs",
         "test": "confirmed_die_commits_intent_before_requesting_stop",
     },
     "admin-framing": {
         "transport": "admin_owner",
-        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "file": "crates/agenc-relay-runtime/src/admin.rs",
         "test": "reader_rejects_lf_only_and_overlong_frames",
     },
     "admin-shutdown-order": {
         "transport": "admin_owner",
-        "file": "crates/agenc-ircd-runtime/src/admin.rs",
+        "file": "crates/agenc-relay-runtime/src/admin.rs",
         "test": "writer_acknowledges_after_the_final_admin_frame_and_transport_close",
     },
     "public-oper-denial": {
         "transport": "client_wire",
-        "file": "crates/agenc-ircd/tests/stage_six_daemon.rs",
+        "file": "crates/agenc-relay-server/tests/stage_six_daemon.rs",
         "test": "production_daemon_core_v1_and_admin_mtls_are_byte_exact",
     },
     "tls-hybrid-and-alpn": {
         "transport": "client_tls",
-        "file": "crates/agenc-ircd-runtime/tests/tls_endpoint.rs",
+        "file": "crates/agenc-relay-runtime/tests/tls_endpoint.rs",
         "test": "hybrid_key_exchange_and_exact_alpn_carry_bytes_both_ways",
     },
 }
@@ -250,17 +250,17 @@ def validate_qualification(data: dict[str, object]) -> None:
 def validate_sources(root: Path) -> None:
     runtime = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in (root / "crates/agenc-ircd-runtime/src").rglob("*.rs")
+        for path in (root / "crates/agenc-relay-runtime/src").rglob("*.rs")
     )
     domain = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in (root / "crates/agenc-ircd-domain/src").rglob("*.rs")
+        for path in (root / "crates/agenc-relay-domain/src").rglob("*.rs")
     )
     admin = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (
-            root / "crates/agenc-ircd-admin/src",
-            root / "crates/agenc-ircd-runtime/src",
+            root / "crates/agenc-relay-admin/src",
+            root / "crates/agenc-relay-runtime/src",
         )
         for path in path.rglob("*.rs")
     )
@@ -273,7 +273,7 @@ def validate_sources(root: Path) -> None:
     for text in REQUIRED_ADMIN_TEXT:
         if text not in admin:
             raise StageSixError(f"administrative contract is missing: {text}")
-    if (root / "deploy/systemd/agenc-ircd.socket").exists():
+    if (root / "deploy/systemd/arcd.socket").exists():
         raise StageSixError("unsupported socket activation unit is present")
     fuzz = tomllib.loads((root / "fuzz/Cargo.toml").read_text(encoding="utf-8"))
     bins = {entry.get("name") for entry in fuzz.get("bin", [])}

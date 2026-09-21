@@ -1,0 +1,42 @@
+[package]
+name = "agenc-relay-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "arcd"
+path = "src/main.rs"
+
+[features]
+default = []
+wss = ["agenc-relay-config/wss", "agenc-relay-runtime/wss"]
+history = ["agenc-relay-config/history", "agenc-relay-runtime/history"]
+
+[dependencies]
+agenc-relay-config.workspace = true
+agenc-relay-runtime.workspace = true
+agenc-relay-storage.workspace = true
+
+[dev-dependencies]
+agenc-relay-admin.workspace = true
+agenc-relay-auth.workspace = true
+agenc-relay-crypto.workspace = true
+agenc-relay-testkit.workspace = true
+agenc-relay-types.workspace = true
+argon2.workspace = true
+base64.workspace = true
+mls-rs.workspace = true
+mls-rs-crypto-rustcrypto.workspace = true
+opaque-ke.workspace = true
+opaque-sha2.workspace = true
+openmls.workspace = true
+openmls_basic_credential.workspace = true
+openmls_rust_crypto.workspace = true
+rustix.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

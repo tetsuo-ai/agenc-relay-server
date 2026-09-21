@@ -1,19 +1,19 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_auth::{
+use agenc_relay_auth::{
     ACCOUNT_CREATION_INVITE_BYTES, AccountCreationInvite, OPAQUE_KE1_BYTES, OPAQUE_KE2_BYTES,
     OPAQUE_KE3_BYTES, OPAQUE_REGISTRATION_RECORD_BYTES, OPAQUE_REGISTRATION_REQUEST_BYTES,
     OPAQUE_REGISTRATION_RESPONSE_BYTES, OPAQUE_SERVER_LOGIN_STATE_BYTES, OpaqueKe1, OpaqueKe2,
     OpaqueKe3, OpaqueRegistrationRecord, OpaqueRegistrationRequest, OpaqueRegistrationResponse,
     OpaqueServerLoginState,
 };
-use agenc_ircd_crypto::{
+use agenc_relay_crypto::{
     AccountHpkePublicKey, DatabaseBinding, Ed25519PublicKey, Ed25519Signature, SealedStorageRecord,
     SignatureDomain, StorageMasterKey, StorageNonce, StorageTable, derive_storage_record_key,
     open_storage_record, verify_canonical,
 };
-use agenc_ircd_types::{DatabaseId, NetworkId, ServerId, ServerIncarnation};
+use agenc_relay_types::{DatabaseId, NetworkId, ServerId, ServerIncarnation};
 use libfuzzer_sys::fuzz_target;
 
 fn padded<const SIZE: usize>(input: &[u8]) -> [u8; SIZE] {

@@ -136,7 +136,7 @@ def validate_candidate(root: Path, directory: Path, *, check_source: bool = True
         if target not in targets or target in seen:
             raise QualificationError("unknown or repeated artifact target")
         seen.append(target)
-        if artifact["path"] not in (f"artifacts/{target}/agenc-ircd", f"artifacts/{target}/arcd") or artifact["build_record"] != f"artifacts/{target}/build.json":
+        if artifact["path"] != f"artifacts/{target}/arcd" or artifact["build_record"] != f"artifacts/{target}/build.json":
             raise QualificationError("noncanonical artifact location")
         for path_key, hash_key in (("path", "sha256"), ("build_record", "build_record_sha256")):
             require_hash(artifact[hash_key], hash_key)

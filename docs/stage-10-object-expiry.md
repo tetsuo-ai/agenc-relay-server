@@ -43,7 +43,7 @@ under-retaining one is not.
 
 ## Bounded pass
 
-`crates/agenc-ircd-runtime/src/e2ee/coordinator/object_expiry.rs` reserves
+`crates/agenc-relay-runtime/src/e2ee/coordinator/object_expiry.rs` reserves
 its work buffer before it reads an account, then walks at most
 `MAX_EXPIRY_ACCOUNTS` (64) accounts from the continuation, in the key order
 of the `owner/v1/` rows, and deletes at most `MAX_EXPIRY_BYTES` (4 MiB) of
@@ -51,7 +51,7 @@ bodies. A candidate that would cross the byte budget stops the pass *before*
 the cursor names it, so the budget can never hide an unexamined account. The
 batch itself reserves output backing before it stages.
 
-`crates/agenc-ircd-runtime/src/federation/coordinator/object_expiry.rs` is
+`crates/agenc-relay-runtime/src/federation/coordinator/object_expiry.rs` is
 the idle owner: a `CompanionObjectMaintenance` timer, independent of peer
 connectivity, that runs only when the loader admits, no batch is pending, no
 replay read is in flight, and the executor holds nothing. It retries after
@@ -60,7 +60,7 @@ one second and idles for sixty after a wrap.
 ## Durable continuation
 
 `object-expiry/v1` (state record kind 20,
-`crates/agenc-ircd-storage/src/e2ee_records/expiry.rs`) persists the last
+`crates/agenc-relay-storage/src/e2ee_records/expiry.rs`) persists the last
 account a committed pass examined, the sweeps that wrapped, and the objects
 and bytes deleted since the store was created. The E2EE state ceiling moved
 from 19 to 20 and the prefix joined `PREFIX_KINDS`, `validate_state_body`
@@ -132,13 +132,13 @@ alone. Cancellation is the ordinary `batch_rejected` path.
 
 ## Evidence
 
-- `crates/agenc-ircd-storage/tests/e2ee_records.rs`:
+- `crates/agenc-relay-storage/tests/e2ee_records.rs`:
   `object_expiry_progress_rows_round_trip_and_refuse_inconsistent_totals` —
   the fresh, resumed and wrapped rows round-trip, the singleton key
   classifies as kind 20, and a count without bytes, bytes without a count,
   fewer bytes than objects, trailing bytes, an empty body and a cross-kind
   replay of an ownership account are all refused.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence/object_expiry.rs`
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/object_expiry.rs`
   (14 tests):
   `an_expired_unowned_object_is_deleted_only_at_its_trusted_retention_boundary`
   (the boundary and ±1 second),
@@ -155,7 +155,7 @@ alone. Cancellation is the ordinary `batch_rejected` path.
   `a_restart_resumes_at_the_continuation_the_last_committed_pass_wrote`,
   `a_resumed_continuation_skips_the_accounts_the_committed_pass_examined`,
   and `an_object_record_write_is_never_produced_by_a_collection_pass`.
-- `crates/agenc-ircd-runtime/src/federation/coordinator/tests/startup_payloads/object_expiry.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/tests/startup_payloads/object_expiry.rs`
   (4 tests against sealed storage through the real timer, staging and
   receipt path):
   `idle_collection_deletes_an_expired_unowned_object_and_survives_restart`
@@ -172,6 +172,6 @@ alone. Cancellation is the ordinary `batch_rejected` path.
 Commands (Rust 1.98.0, from the repository root):
 `cargo fmt --all --check`; `python3 scripts/check-source.py check`;
 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`;
-`cargo test -p agenc-ircd-runtime --all-features`;
-`cargo test -p agenc-ircd-storage --all-features`;
-`cargo test -p agenc-ircd-e2ee --all-features`.
+`cargo test -p agenc-relay-runtime --all-features`;
+`cargo test -p agenc-relay-storage --all-features`;
+`cargo test -p agenc-relay-e2ee --all-features`.

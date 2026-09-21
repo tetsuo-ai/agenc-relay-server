@@ -5,7 +5,7 @@ enforcement, not missing evidence: the runtime computed all three Section-19.3
 overload classes and reported them to observers, but only part of one class
 acted.
 
-At `17da15a`, `crates/agenc-ircd-runtime/src/admission/transport.rs` was the
+At `17da15a`, `crates/agenc-relay-runtime/src/admission/transport.rs` was the
 only enforcement in the tree. It refuses an accept at
 `>= OverloadClass::NoNewConnections`, so the 90-percent class stopped new
 connections; because `Evict` orders above it, the 95-percent class inherited
@@ -48,7 +48,7 @@ and is then refused through the existing path. Neither refusal reaches
 `session_seed`, so no session, nickname binding or durable row is created.
 
 **Expensive queries.** The refused set is exactly
-`agenc_ircd_domain::is_expensive_query`, which was already the predicate that
+`agenc_relay_domain::is_expensive_query`, which was already the predicate that
 decides which commands owe a token from the session-keyed expensive-query
 bucket of Section 19.1: `NAMES`, `LIST`, `WHO`, `WHOIS`, `WHOWAS` and
 `CHATHISTORY`. It was private; this change makes it public and the runtime
@@ -120,7 +120,7 @@ counts what it selected in the new `StateCoreCounters::connections_evicted`.
 ## What is now proven
 
 Both tests are in
-`crates/agenc-ircd-runtime/src/state_core/tests/overload_ladder.rs` and drive
+`crates/agenc-relay-runtime/src/state_core/tests/overload_ladder.rs` and drive
 the real actor loop, the real registration router and the real command
 executor. Both walk one live pool: the accept-time authority under test shares
 the very `MemoryBudget` the command rungs are measured against, so the ladder

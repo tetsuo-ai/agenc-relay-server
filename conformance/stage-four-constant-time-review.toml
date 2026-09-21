@@ -6,32 +6,32 @@ conclusion = "Known and unknown account inputs converge on one OPAQUE server-sta
 limit = "This review does not claim resistance to global timing analysis. The full account lookup path requires separate Stage 05 evidence for the fixed storage lookup schedule before AUTH-01 can close."
 
 [measurement]
-test = "crates/agenc-ircd-auth/tests/stage_four_security.rs::shuffled_known_and_unknown_opaque_starts_share_one_timing_class"
+test = "crates/agenc-relay-auth/tests/stage_four_security.rs::shuffled_known_and_unknown_opaque_starts_share_one_timing_class"
 sample_order = "48 fixed shuffled samples, 24 known and 24 unknown, after four interleaved warmups"
 statistic = "separate medians with a pooled median absolute deviation; allowed difference is max(pooled median, 12 * pooled MAD)"
 role = "Supplemental regression signal only. The source-bound path review is the primary evidence."
 
 [[surface]]
-path = "crates/agenc-ircd-auth/src/service.rs"
-sha256 = "ef96029e0d6340a06358f0eca3490284a706ea17f869a0a90805fcbef81b98e5"
+path = "crates/agenc-relay-auth/src/service.rs"
+sha256 = "8e8f1dbb4d56fac8982f1b5255aab971b5062911b8197def35d63c34d0a16061"
 symbols = ["begin_authentication"]
 review = "Both lookup arms derive the same fixed-key fake credential HMAC, select a 32-byte credential ID and an exact 192-byte record choice, then call OpaqueProfile::authentication_start once. The real digest comparison is constant-time. Stage 05 owns the required fixed storage-lookup schedule. The 2026-09-15 re-review for the ZDH-A1 invitation-interval repair (issue #38) confirmed that begin_authentication and begin_authentication_with_entropy are byte-for-byte unchanged; the only source changes carry the invitation not_before through ValidatedInvitation and the 361-byte creation transaction record and recheck the exact invitation interval in finish_account_creation_with_entropy against public invitation bounds and the trusted FINISH-time UTC read. No secret comparison, fake-credential selection, OPAQUE start or finish work changed."
 
 [[surface]]
-path = "crates/agenc-ircd-auth/src/opaque.rs"
-sha256 = "8f05c544a943c245f4bb2f4fc27c6e4fcfefc73edfa075ce2ad0cc40600aba5e"
+path = "crates/agenc-relay-auth/src/opaque.rs"
+sha256 = "a303947672d27b818d0626e751c417948b417b0a3d08a726de2e53c482767b7d"
 symbols = ["OpaqueProfile::authentication_start", "finish_authentication", "opaque_server_public_key"]
 review = "Real and fake selections deserialize one exact-size record and execute the same ServerLogin::start call. Finish consumes one exact-size state and one KE3 on every result. The 2026-09-04 re-review confirmed that the only source change replaces a setup-byte slice in opaque_server_public_key with ServerSetup::keypair().public().serialize(), returning the AKE public key used by the library's registration response. The pinned keypair accessors return references, and serialization compresses that public Ristretto point. The helper's only production caller checks daemon key identities. Login worker callers, start and finish work, and secret comparisons are unchanged. The other five reviewed source hashes remain unchanged. The registration-response identity regression covers the corrected output."
 
 [[surface]]
-path = "crates/agenc-ircd-crypto/src/hash.rs"
-sha256 = "df4d62fc3f9a5132bcaa04e4634d08d8315f99c479baccf53a179c5a5031bf02"
+path = "crates/agenc-relay-crypto/src/hash.rs"
+sha256 = "865f5d82a64cc0fb648ee6e511f61ae7d1cf53ead8b9a179b065a3e17eec0707"
 symbols = ["LoginIndexDigest::matches", "LoginIndexKey::key_id", "derive_fake_credential_id"]
-review = "Login digest equality uses subtle::ConstantTimeEq. The public login-index key identifier is a network-bound SHA-256 derivation over the secret key. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label. The 2026-09-10 re-review against 68defd5 found only the new unkeyed Sha256Stream adapter and the FederationSnapshotHash module export. Their production callers hash release artifacts and public federation snapshots; neither enters login selection, HMAC derivation or secret comparison. The new snapshot adapter bounds its declared input and requires complete consumption. The reviewed login functions are byte-for-byte unchanged. The 2026-09-15 re-review for the leaf-membership work (ENC-05) found only the added SemanticHashDomain::LeafMembershipId variant and its `IRC-MLS/1 leaf membership id` label: a public semantic-hash domain used for companion object identifiers that enters neither login selection, HMAC derivation nor any secret comparison. The reviewed login functions remain byte-for-byte unchanged. The 2026-09-15 re-review for the recovery submission carrier (ENC-03) found only the added SemanticHashDomain::RecoverySubmissionId variant and its `IRC-MLS/1 recovery submission id` label: a public semantic-hash domain for companion object identifiers that enters neither login selection, HMAC derivation nor any secret comparison. The reviewed login functions remain byte-for-byte unchanged."
+review = "Login digest equality uses subtle::ConstantTimeEq. The public login-index key identifier is a network-bound SHA-256 derivation over the secret key. The fake credential ID is a full HMAC-SHA256 result under an independent key and fixed domain label. The 2026-09-10 re-review against 68defd5 found only the new unkeyed Sha256Stream adapter and the FederationSnapshotHash module export. Their production callers hash release artifacts and public federation snapshots; neither enters login selection, HMAC derivation or secret comparison. The new snapshot adapter bounds its declared input and requires complete consumption. The reviewed login functions are byte-for-byte unchanged. The 2026-09-15 re-review for the leaf-membership work (ENC-05) found only the added SemanticHashDomain::LeafMembershipId variant and its `ARC-MLS/1 leaf membership id` label: a public semantic-hash domain used for companion object identifiers that enters neither login selection, HMAC derivation nor any secret comparison. The reviewed login functions remain byte-for-byte unchanged. The 2026-09-15 re-review for the recovery submission carrier (ENC-03) found only the added SemanticHashDomain::RecoverySubmissionId variant and its `ARC-MLS/1 recovery submission id` label: a public semantic-hash domain for companion object identifiers that enters neither login selection, HMAC derivation nor any secret comparison. The reviewed login functions remain byte-for-byte unchanged."
 
 [[surface]]
-path = "crates/agenc-ircd-crypto/src/storage.rs"
-sha256 = "fe3381678abcffc908f5bc28296af1ef225fa6031a5b6d7b2656614f4f4c862b"
+path = "crates/agenc-relay-crypto/src/storage.rs"
+sha256 = "7a3ff3eb60360f468eb379a9b389f27b0daa51597d26e69d202f2d765db00b45"
 symbols = ["StorageIndex::matches", "StorageMasterKey::matches", "StorageMasterKey::source_operation_key_id", "StorageMasterKey::target_operation_key_id"]
 review = "Private storage-index and storage-master-key equality use subtle::ConstantTimeEq over all 32 bytes. Source- and target-role resumability IDs use separate domain labels and expose only a digest. The 2026-09-10 re-review against 68defd5 found only DatabaseBinding::database_instance_id, a const accessor returning the existing public database identity. It adds no secret-dependent work or comparison. All four reviewed functions are byte-for-byte unchanged. The 2026-09-13 re-review against 5721b3d confirmed the same four functions remain unchanged. SealedStorageRecord now stores owned or borrowed ciphertext; the new constructor checks only public ciphertext length, and ownership selection determines whether materialization copies. Opening retains the same associated-data construction and XChaCha20Poly1305 decrypt call. No secret comparison, authentication selection, key derivation, or plaintext lifetime changed."
 
@@ -47,6 +47,8 @@ sha256 = "d767a3f7bc734562582a23dbca8be90cd607819fb1cdc2d69d7a599bbacdaa8f"
 symbols = ["TripleDh::finish_ke"]
 review = "TripleDH compares the expected and supplied KE3 MAC with ConstantTimeEq before selecting the session key. Context and identifiers are committed when KE2 state is created."
 
+# ARC rebaseline: import and protocol-label edits preserve the reviewed
+# constant-time comparisons and the real/fake OPAQUE work schedule.
 [gate]
 status = "evidence-only"
 reason = "The 2026-09-10 implementation re-review binds the two changed crypto files by their source hashes. The four auth and vendored OPAQUE source hashes remain unchanged. The 2026-09-13 ciphertext-ownership re-review updates only the storage adapter binding; all other source hashes remain unchanged. This artifact does not claim gate closure or replace any qualification for an exact source revision."

@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 #![no_main]
 
-use agenc_ircd_client_wire::websocket_transport::decode_client_header;
-use agenc_ircd_client_wire::{MAX_WEBSOCKET_MESSAGE_BYTES, WebSocketSubprotocol, WebSocketWire};
+use agenc_relay_client_wire::websocket_transport::decode_client_header;
+use agenc_relay_client_wire::{MAX_WEBSOCKET_MESSAGE_BYTES, WebSocketSubprotocol, WebSocketWire};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

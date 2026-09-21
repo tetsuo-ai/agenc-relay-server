@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import NoReturn
 
 RAW_HASHES = {
-    "docs/ircd-architecture-and-implementation-spec.md": (
+    "docs/arc-architecture-and-implementation-spec.md": (
         "76ae43d35e8bb83b5ad57b991c875af8a5762744240d0014ed3f13060c6b3dd3"
     ),
-    "docs/irc-mls-e2ee-extension.md": (
-        "b2716e8e7a5531ed0e6f23455d45e51e81c8f901a0ef9a2b5ad3d471f059bf23"
+    "docs/arc-mls-e2ee-extension.md": (
+        "0960d58205933a94e482be38469ebbfbc87dd3d5cdb2f8f241962fe9cf43d0b8"
     ),
     "docs/federation-v1-profile.registry": (
         "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411"
@@ -30,12 +30,12 @@ PROFILE_HASHES = {
         "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
     ),
     "e2ee-mls-v1": (
-        "3771bab2f09024644d0468d004af30fba3d00403e4dc6f0205aea20a75265e45"
+        "c70f477beb9d143a16357cdf3850542143d327bc200b3cacf6a32fc94a5f9035"
     ),
 }
 PROFILE_LABELS = {
     "base-federation-v1": b"agenc-chat base federation profile registry v1\0",
-    "e2ee-mls-v1": b"agenc-chat IRC-MLS specification profile v1\0",
+    "e2ee-mls-v1": b"agenc-chat ARC-MLS specification profile v1\0",
 }
 CATEGORY_COUNTS = {
     "constant": 62,
@@ -85,7 +85,7 @@ def checked_sources(root: Path) -> dict[str, bytes]:
 def profile_digests(sources: dict[str, bytes]) -> dict[str, bytes]:
     """Derive both protocol profiles from their exact domain-separated bytes."""
     registry = sources["docs/federation-v1-profile.registry"]
-    e2ee = sources["docs/irc-mls-e2ee-extension.md"]
+    e2ee = sources["docs/arc-mls-e2ee-extension.md"]
     values = {
         "base-federation-v1": hashlib.sha256(
             PROFILE_LABELS["base-federation-v1"] + registry
@@ -118,7 +118,7 @@ def reject_single_byte_changes(sources: dict[str, bytes]) -> None:
     ).hexdigest()
     if changed_base == PROFILE_HASHES["base-federation-v1"]:
         raise StageOneError("single-byte base-profile negative failed")
-    e2ee = sources["docs/irc-mls-e2ee-extension.md"]
+    e2ee = sources["docs/arc-mls-e2ee-extension.md"]
     changed_e2ee = bytes([e2ee[0] ^ 1]) + e2ee[1:]
     changed_profile = hashlib.sha256(
         PROFILE_LABELS["e2ee-mls-v1"] + changed_e2ee
@@ -445,7 +445,7 @@ def validate_vectors(content: str, expected: dict[str, bytes]) -> None:
     """Validate vector identity, coverage, hashes, and independent bytes."""
     lines = content.splitlines()
     if lines[:2] != [
-        "# agenc-ircd federation vector manifest v1",
+        "# agenc-relay-server federation vector manifest v1",
         "# id|schema|lowercase-hex|decoded-sha256|provenance",
     ]:
         raise StageOneError("vector manifest header changed")
@@ -476,7 +476,7 @@ def validate_vectors(content: str, expected: dict[str, bytes]) -> None:
 
 def validate_independent_reference(root: Path) -> None:
     """Ensure the reference encoder does not reuse the production codec."""
-    source = (root / "crates/agenc-ircd-testkit/src/reference_codec.rs").read_text(
+    source = (root / "crates/agenc-relay-testkit/src/reference_codec.rs").read_text(
         encoding="utf-8"
     )
     forbidden = (
@@ -484,7 +484,7 @@ def validate_independent_reference(root: Path) -> None:
         "DecodeBudget",
         "SchemaObject",
         "WireValue",
-        "agenc_ircd_federation_wire",
+        "agenc_relay_federation_wire",
     )
     used = [name for name in forbidden if name in source]
     if used:
@@ -562,10 +562,10 @@ def validate(root: Path) -> tuple[int, int, int]:
     validate_vectors(vector_text, vectors)
     validate_independent_reference(root)
     validate_nonrecursive_parser(
-        (root / "crates/agenc-ircd-federation-wire/src/codec.rs").read_text(
+        (root / "crates/agenc-relay-federation-wire/src/codec.rs").read_text(
             encoding="utf-8"
         ),
-        (root / "crates/agenc-ircd-federation-wire/src/semantics.rs").read_text(
+        (root / "crates/agenc-relay-federation-wire/src/semantics.rs").read_text(
             encoding="utf-8"
         ),
     )
@@ -601,10 +601,10 @@ def self_test(root: Path) -> int:
     expect_failure("missing vector", lambda: validate_vectors(missing_vector, vectors))
     malformed_hex = vector_text.replace("|00", "|0z", 1)
     expect_failure("vector hex", lambda: validate_vectors(malformed_hex, vectors))
-    codec = (root / "crates/agenc-ircd-federation-wire/src/codec.rs").read_text(
+    codec = (root / "crates/agenc-relay-federation-wire/src/codec.rs").read_text(
         encoding="utf-8"
     )
-    semantics = (root / "crates/agenc-ircd-federation-wire/src/semantics.rs").read_text(
+    semantics = (root / "crates/agenc-relay-federation-wire/src/semantics.rs").read_text(
         encoding="utf-8"
     )
     recursive = codec.replace(

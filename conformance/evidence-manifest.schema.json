@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agenc.ag/schemas/ircd/evidence-manifest.json",
-  "title": "AgenC IRCD Evidence Manifest",
+  "$id": "https://agenc.ag/schemas/relay/evidence-manifest.json",
+  "title": "AgenC Relay Evidence Manifest",
   "type": "object",
   "additionalProperties": false,
   "required": [

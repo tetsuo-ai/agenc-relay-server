@@ -5,7 +5,7 @@ ACK are bound to authenticated old and continuing MLS leaves through the
 companion 13.7.3 leaf-membership proof. It adds the registered
 `leaf_membership_proof` wire kind (37), the `EGROUP SUBMIT MEMBERSHIP`
 command (`submit_membership`, federation opcode 44, `store_membership` 11),
-the `IRC-MLS/1 leaf membership` and `IRC-MLS/1 leaf membership possession`
+the `ARC-MLS/1 leaf membership` and `ARC-MLS/1 leaf membership possession`
 signature labels, the `leaf_membership_id` semantic hash, and one sequencer
 storage row (`membership/v1/`). All of these were already fixed by the
 companion; no profile hash, registry, or specification text changes. Earlier
@@ -13,7 +13,7 @@ development storage images without the row simply restore no proofs.
 
 ## Proof admission
 
-`agenc_ircd_e2ee::membership::verify_leaf_membership_proof` checks a proof
+`agenc_relay_e2ee::membership::verify_leaf_membership_proof` checks a proof
 against the root and the exact roster it names: profile, network,
 conversation, account, root generation and fingerprint, roster generation and
 ID, credential generation zero, the Ed25519 leaf scheme, and a leaf index
@@ -55,7 +55,7 @@ a principal of that binding.
 index and old credential hash equal the ACK's and whose epoch is not later
 than the ACK's prior epoch (the old group's accepted epoch for a ReInit ACK),
 and verifies `old_leaf_signature` under that proof's public key with the
-registered `IRC-MLS/1 commit processed` or `IRC-MLS/1 reinit processed`
+registered `ARC-MLS/1 commit processed` or `ARC-MLS/1 reinit processed`
 label. The coordinator additionally requires the proof's device to be
 roster-active now. An unidentified, revoked, or wrongly signed ACK is
 `E2EE_BINDING_AUTH_INVALID` and consumes no state.
@@ -93,7 +93,7 @@ at that epoch is `removed`. Earlier proofs stay retained and keep identifying
 the ACKs of their own epoch, so a credential a device has rotated away from
 and a leaf it has since stated `removed` both leave the set. The expected
 continuing set of one attempt is that set intersected with the attempt's
-approved `IrcKeyPackagePlan` in `activation_coverage`: a claim the plan does
+approved `ArcKeyPackagePlan` in `activation_coverage`: a claim the plan does
 not carry was already answered by the controller threshold that signed
 `key_package_plan_id`, so it never blocks an activation and revocation is not
 the only way to clear it. All role checks run before any sequencer signer
@@ -140,8 +140,8 @@ implementation landed with the specification:
   `LeafMembershipSet::expected_continuing` now returns the highest-epoch
   claim per device instead of every continuing entry.
 - The expected continuing set of a ReInit attempt counts only claims whose
-  device the attempt's `IrcKeyPackagePlan` carries into the successor.
-  `key_package_plan_id` is committed by the `IrcReInitAttemptAuthorization`
+  device the attempt's `ArcKeyPackagePlan` carries into the successor.
+  `key_package_plan_id` is committed by the `ArcReInitAttemptAuthorization`
   the old controller threshold signs, so a claim the approved plan does not
   carry has already been answered by the authority that decides membership
   and never blocks activation; one device can no longer stall a migration
@@ -156,22 +156,22 @@ implementation landed with the specification:
 
 ## Evidence
 
-- `crates/agenc-ircd-e2ee/src/tests/membership.rs`: replacement, duplicate
+- `crates/agenc-relay-e2ee/src/tests/membership.rs`: replacement, duplicate
   and conflicting leaves, the quota at exactly 1,024 retained proofs, signer
   lookup by leaf, credential, disposition, and epoch, the expected set, every
   verifier refusal (foreign roster, leaf beyond the group, short account or
   leaf key, invalid leaf point, disposition shape, inactive device, device and
   possession signatures), and one signing device per ACK set.
-- `crates/agenc-ircd-e2ee/tests/membership_vectors.rs`: the proofs
+- `crates/agenc-relay-e2ee/tests/membership_vectors.rs`: the proofs
   `scripts/generate-e2ee-vectors.py` encodes independently decode, verify
   under the generator's root and roster, and recompute their object and
   leaf-membership IDs; the revoked-device, duplicate-leaf, and
   ACK-without-membership vectors are refused for their stated reasons.
-- `crates/agenc-ircd-e2ee/tests/history/membership.rs`: supplied facts refuse
+- `crates/agenc-relay-e2ee/tests/history/membership.rs`: supplied facts refuse
   a finalization with no proof, another leaf key, or another credential, and
   an activation with an omitted joiner proof or a joiner leaf held by another
   device, then accept the exact facts.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence/leaf_membership.rs`
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/leaf_membership.rs`
   and its `finalization` and `restart` modules: proof replacement, conflicts,
   and every refusal of a foreign device, signature, roster, root, conversation,
   scheme, removal, or kind; the standalone Commit ACK matrix (unsigned,
@@ -187,7 +187,7 @@ implementation landed with the specification:
   would have refused, a proof that no longer verifies, a removal naming no
   retained finalization, a missing proof or ACK object, and a real storage
   shutdown and reopen.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence/reinit/leaf_membership.rs`
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/reinit/leaf_membership.rs`
   and its `maximum` module: a nonmember device of an approved account cannot
   attempt, activate, or abort with the signer present or absent while the
   proven device succeeds; activation by the creator and by a continuing
@@ -202,7 +202,7 @@ implementation landed with the specification:
   a removed leaf shrinking the set; a revoked joiner; and the maximum shape of
   one account with all 64 active devices continuing, where one missing ACK is
   refused and the exact 64-ACK set activates under a 33-of-64 quorum.
-- `crates/agenc-ircd/tests/stage_eight_e2ee.rs`: through the real daemon, an
+- `crates/agenc-relay-server/tests/stage_eight_e2ee.rs`: through the real daemon, an
   unproven Commit ACK is `E2EE_BINDING_AUTH_INVALID`, `EGROUP SUBMIT
   MEMBERSHIP` answers `STORED MEMBERSHIP` with the recomputed IDs, and the
   bootstrap and later finalizations embed ACKs signed by the proven leaf.

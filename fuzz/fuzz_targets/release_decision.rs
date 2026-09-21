@@ -7,7 +7,7 @@
 //! over arbitrary bytes: they never panic, and any document they accept
 //! re-parses to an identical typed decision.
 
-use agenc_ircd_config::{ReleaseDecisionDocument, parse_release_public_key_pem};
+use agenc_relay_config::{ReleaseDecisionDocument, parse_release_public_key_pem};
 use libfuzzer_sys::fuzz_target;
 
 /// One byte beyond the reader's own ceiling, so the limit itself is exercised.

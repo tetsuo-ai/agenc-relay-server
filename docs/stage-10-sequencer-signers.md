@@ -106,7 +106,7 @@ the coordinator's active credential.
 does and renders that set's generation and digest; with `e2ee.enabled = false`
 the four E2EE lines are omitted as one unit and the descriptor parser returns
 no key set, so an importer never enables E2EE. The unused duplicate file
-layout in `agenc-ircd-e2ee::federation::keyset_file` was removed.
+layout in `agenc-relay-e2ee::federation::keyset_file` was removed.
 
 ## Limitations
 
@@ -121,18 +121,18 @@ layout in `agenc-ircd-e2ee::federation::keyset_file` was removed.
 
 ## Evidence
 
-- `crates/agenc-ircd-e2ee/src/tests/sequencer.rs`: a file opening above
+- `crates/agenc-relay-e2ee/src/tests/sequencer.rs`: a file opening above
   generation zero verifies structurally to the same set as with the
   predecessor at hand, chains a successor, and refuses a missing continuity
   signature, a zero predecessor, an inverted interval, generation zero,
   another profile or network, and a third credential.
-- `crates/agenc-ircd-config/tests/sequencer_secrets.rs`: the successor and
+- `crates/agenc-relay-config/tests/sequencer_secrets.rs`: the successor and
   retired seeds load by role; a seed shared with the active key, with another
   purpose, or between the two optional paths is refused with its field.
-- `crates/agenc-ircd-config/tests/template_onboarding.rs`: a disabled
+- `crates/agenc-relay-config/tests/template_onboarding.rs`: a disabled
   profile omits the four lines and parses back as no key set; a partial or
   foreign block is refused.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/sequence/sequencer_eligibility/rotation.rs`:
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/sequencer_eligibility/rotation.rs`:
   bindings pin a credential and receipts follow it (old and successor,
   interval boundary, an unissued credential refused); a finalized `SEQUENCER`
   transition moves the pin durably and later receipts sign under the
@@ -148,16 +148,16 @@ layout in `agenc-ircd-e2ee::federation::keyset_file` was removed.
   receipt and the transition unblocks the route; release and refusal of the
   released or an unrelated key; early acceptance once every live route
   migrated.
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/close_authority_cases.rs`:
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/close_authority_cases.rs`:
   a closed route pins no signer at startup.
-- `crates/agenc-ircd-runtime/src/daemon.rs`: the active and successor keys
+- `crates/agenc-relay-runtime/src/daemon.rs`: the active and successor keys
   install by credential, either alone is refused, and a retired set with the
   configured retired key installs the successor as active on the coordinator
   and the same tuple on an edge.
-- `crates/agenc-ircd-runtime/src/offline.rs`: the descriptor pins the
+- `crates/agenc-relay-runtime/src/offline.rs`: the descriptor pins the
   verified set of an opened file, omits the block while disabled, and refuses
   a malformed file.
-- `crates/agenc-ircd-runtime/src/observe/adapter.rs`: the signer report
+- `crates/agenc-relay-runtime/src/observe/adapter.rs`: the signer report
   emits the two audit events.
 
 Seven release critical regions cover signer installation and selection, the

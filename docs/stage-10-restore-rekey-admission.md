@@ -18,7 +18,7 @@ project-owned fork at `vendor/redb-4.2.0`
 
 ## The admission authority
 
-`crates/agenc-ircd-storage/src/construction_runtime/admission.rs` adds one
+`crates/agenc-relay-storage/src/construction_runtime/admission.rs` adds one
 descriptor-bound authority:
 
 - `ConstructionAdmissionPolicy` takes `storage.disk_reserve_bytes` and
@@ -111,7 +111,7 @@ reconciles the database and guard pair under Section 21.5.
 
 A refusal is determinate: the refused transaction has not begun, nothing is
 written, the source is never opened for writing, and no target is published.
-`agenc-ircd storage restore` now reports it apart from every other storage
+`arcd storage restore` now reports it apart from every other storage
 failure (`OfflineError::InsufficientCapacity`: "storage free space is below the
 reserve; nothing was written, rerun with --resume when space is available").
 
@@ -130,7 +130,7 @@ reserve; nothing was written, rerun with --resume when space is available").
 
 ## Tests
 
-`crates/agenc-ircd-storage/tests/stage_five_completion/construction_admission.rs`
+`crates/agenc-relay-storage/tests/stage_five_completion/construction_admission.rs`
 drives the real `execute_restore_command` through
 `execute_restore_command_with_observer`, whose only difference is that every
 live `fstatvfs` sample passes through a test observer. The observer records
@@ -160,8 +160,8 @@ restore, fault-campaign and corruption test was moved onto the admitted API.
 
 ## Commands
 
-- `cargo test -p agenc-ircd-storage --all-features --locked -- --skip qualification_workload`
-- `cargo test -p agenc-ircd-runtime --all-features --locked`
+- `cargo test -p agenc-relay-storage --all-features --locked -- --skip qualification_workload`
+- `cargo test -p agenc-relay-runtime --all-features --locked`
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
 - `cargo fmt --all`, `python3 scripts/check-source.py check`,
   `python3 scripts/check-workspace.py check`

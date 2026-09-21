@@ -23,7 +23,7 @@ fixture's daemon, which surfaced as `InvalidCertificate(BadSignature)`,
 
 The daemon rejects port 0 by specification (Appendix C listener `bind`) and
 does not adopt inherited sockets, so the fixtures cannot read a bound port
-back. `crates/agenc-ircd/tests/support/loopback_ports.rs` removes the window
+back. `crates/agenc-relay-server/tests/support/loopback_ports.rs` removes the window
 instead: ports are taken only from outside the kernel's
 `ip_local_port_range`, so no connect or port-0 bind on the host can be handed
 one, and each port is claimed by an exclusive advisory lock on a per-port file

@@ -40,7 +40,7 @@ readiness wait `restart_all` performs, for each edge whose link it waits on.
 Reproduced at `14a594f` before any change, with the drill's own record:
 
 ```
-$ AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-ircd --test stage_eight_e2ee \
+$ AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-relay-server --test stage_eight_e2ee \
     --all-features drill_deletion -- --ignored --nocapture
 [drill deletion] delete (25040 ms): edge account deletion failed
 test result: FAILED. 0 passed; 1 failed; 50 filtered out; finished in 49.53s
@@ -56,7 +56,7 @@ session sent would have been refused the same way. The drill then waited out
 
 ## The decision: the refusal is correct and the drill was wrong
 
-`delete_account` opened its connection with `IrcClient::negotiate_sasl`, which
+`delete_account` opened its connection with `ArcClient::negotiate_sasl`, which
 requests `agenc.ag/account-create agenc.ag/account-credentials sasl`, and then
 added exactly one capability:
 
@@ -68,11 +68,11 @@ Architecture Section 14.6 opens the `ACCT` and `CHANCTL` surface with the
 words "the vendor capabilities in Section 9 enable this closed command
 surface", and Section 9.3 names `agenc.ag/account-controls=v1` as the one for
 "authenticated account control". `RegistrationState::require_command_capabilities`
-in `crates/agenc-ircd-client-wire/src/registration.rs` implements exactly
+in `crates/agenc-relay-client-wire/src/registration.rs` implements exactly
 that: a `PostRegistrationCommandKind::Account` command requires **both**
 `agenc.ag/account-controls` and `standard-replies`, and returns
 `RegistrationGrammarError::NoPrivileges` otherwise, which
-`crates/agenc-ircd-runtime/src/registration.rs` renders as
+`crates/agenc-relay-runtime/src/registration.rs` renders as
 `481 :Permission denied`. The session had one of the two, so the daemon
 refused, correctly, before the command reached the account service.
 
@@ -198,37 +198,37 @@ treats a `904` as a hard failure.
 
 Sources:
 
-- `crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_drills.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_drills.rs`
   (`DrillNodes::restart`, `deletion_session`, `refuse_unissued_deletion`,
   `delete_account`, `run_deletion`, and the ordinary signal)
-- `crates/agenc-ircd-client-wire/src/registration.rs`
+- `crates/agenc-relay-client-wire/src/registration.rs`
   (`require_command_capabilities`)
-- `crates/agenc-ircd-runtime/src/registration.rs`
+- `crates/agenc-relay-runtime/src/registration.rs`
   (`render_registration_error`, the `481` this raises)
-- `crates/agenc-ircd-domain/src/decision.rs`
+- `crates/agenc-relay-domain/src/decision.rs`
   (`plan_account_deletion_start`, `plan_account_deletion_confirm`)
-- `crates/agenc-ircd-runtime/src/account_service.rs`
+- `crates/agenc-relay-runtime/src/account_service.rs`
   (`account_deletion_writes`, the tombstone and the deleted credential)
-- `docs/ircd-architecture-and-implementation-spec.md` Sections 9.3 and 14.6
+- `docs/arc-architecture-and-implementation-spec.md` Sections 9.3 and 14.6
 
 Commands and results at this branch (Rust 1.98.0, from the repository root):
 
 ```sh
 # the repaired drill, explicitly including ignored tests
-AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-ircd --test stage_eight_e2ee \
+AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-relay-server --test stage_eight_e2ee \
   --all-features drill_deletion -- --ignored --nocapture
 # 1 passed; 0 failed; 51 filtered out; 46.97s
 # record: passed=true, six steps, twenty-one facts; refuse step reports
 #   "unissued DELETE CONFIRM refused=true, state unchanged=true"
 
 # every ignored Stage 10 drill, serially: the first failure only appears here
-AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-ircd --test stage_eight_e2ee \
+AGENC_STAGE10_DRILL_DIR=<dir> cargo test -p agenc-relay-server --test stage_eight_e2ee \
   --all-features stage_ten_drills::drill_ -- --ignored --test-threads=1
 # 15 passed; 0 failed; 37 filtered out; 327.45s
 # run through the already-built test binary so the sweep held no cargo lock
 
 # the ordinary suite, which now carries the non-ignored guard
-cargo test -p agenc-ircd --test stage_eight_e2ee --all-features
+cargo test -p agenc-relay-server --test stage_eight_e2ee --all-features
 # 36 passed; 0 failed; 16 ignored; 45.87s
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

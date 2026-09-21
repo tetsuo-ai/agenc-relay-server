@@ -1,0 +1,17 @@
+[package]
+name = "agenc-relay-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+agenc-relay-crypto.workspace = true
+agenc-relay-domain.workspace = true
+agenc-relay-types.workspace = true
+base64.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

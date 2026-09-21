@@ -73,7 +73,7 @@ artifacts for exact source commit
 `1e5b738468f88b238061cc6e84b732176f5cae65` close Stages 00 through 03. They
 contain 17 Stage 00 records, 14 Stage 01 records, 12 Stage 02 records, and 13
 Stage 03 records. The
-[Stage 04 manifest](evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
+[Stage 04 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
 with 20 passed records closes exact source commit
 `4040796f2c21774d58ea7ce54e70a080678e83ac` after the Stage 04 and 05 legibility
 review. Its recorded gate ran 50 commands and reached 90.64% of branches and
@@ -93,7 +93,7 @@ This command inherits the Stage 04 gate and adds the closed storage profile,
 storage dependency review, 191 storage tests, persistent-codec and backup-
 stream fuzzing, x86_64 and AArch64 checks, the complete fault campaign, signed
 native ext4 growth reports, and the Stage 05 requirement set. The
-[schema version 2 manifest](evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
+[schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
 contains 39 passed records and closes exact source commit
 `4040796f2c21774d58ea7ce54e70a080678e83ac`. The recorded run reached 90.64%
 branch coverage, 95.65% line coverage, and 100% coverage in all six critical
@@ -112,7 +112,7 @@ checks, the config, admin, and runtime package tests, the Stage 06
 persistence tests, Loom models, transcripts, the deterministic soak,
 deployment checks, controlled-host and Tor qualification, and both Stage 06
 fuzz targets. The
-[schema version 2 manifest](evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
+[schema version 2 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
 contains 55 passed records and closes exact source commit
 `65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. The recorded run of 75 commands reached
 79.79% branch coverage, 91.79% line coverage, and 100% coverage in all six
@@ -127,21 +127,21 @@ bash scripts/check-stage-seven.sh
 This command inherits Stage 06 and adds the federation profile, requirement
 set, transcript catalog, bounded federation model, three-process daemon test,
 and federation fuzz targets. The
-[Stage 07 manifest](evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json)
+[Stage 07 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json)
 contains 38 passed records for exact source commit
 `1093d88d0057c3461a423285e0f86ff3775c1140`; its recorded gate ran 85 commands.
 
 Stage 08 adds the encrypted profile, object and wire vectors, durable E2EE
 records, bounded route model, transcripts, two-library MLS interoperability,
 load checks, and E2EE fuzz targets. The
-[Stage 08 manifest](evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json)
+[Stage 08 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json)
 contains 159 passed records for exact source commit
 `26f0f8029dcad4aad27bff2706c4f0d255a555ba`; its recorded gate ran 98 commands.
 No checkpoint claims that Stage 10 production qualification has passed.
 
 Stage 09 adds WSS, plaintext channel history, retained-row maintenance in
 disabled builds, metadata-only history replay, and the schema-generation 1-to-2
-migration. Its [manifest](evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
+migration. Its [manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 records 103 commands and 10 passed evidence records for exact source commit
 `a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. The reported branch and line
 coverage are 75.38% and 90.69%, with nine critical regions at 100%.
@@ -166,7 +166,7 @@ python3 scripts/check-evidence.py check
 python3 scripts/check-evidence.py self-test
 ```
 
-Record an exact-source run with `AGENC_IRCD_RECORD_GATE=1` and generate its
+Record an exact-source run with `AGENC_RELAY_RECORD_GATE=1` and generate its
 manifest as described in [evidence/README.md](evidence/README.md). Add both JSON
 files to the Git index, then test closure with the literal commit ID:
 

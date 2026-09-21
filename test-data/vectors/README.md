@@ -14,10 +14,10 @@ complete file and its generator source to SHA-256.
 `scripts/generate-e2ee-vectors.py`, an independent Python TLS encoder and
 Ed25519 signer that never calls the Rust codec; `--check` fails on any drift
 in either set. The identity set covers the companion Section 8 objects and
-is read by `crates/agenc-ircd-e2ee/tests/identity_vectors.rs`.
+is read by `crates/agenc-relay-e2ee/tests/identity_vectors.rs`.
 
 The recovery set covers the ENC-01 public-evidence contract: every `.bin`
-file is one complete encoded `IrcWireObject` of kind `recovery_submission`
+file is one complete encoded `ArcWireObject` of kind `recovery_submission`
 (35), `witness_resolution` (36), `leaf_membership_proof` (37), or an existing
 `sequencer_record`, `close_authorization`, or `commit_ack` element or ACK.
 Its `manifest.toml` records each file's kind, encoded length, object ID,
@@ -51,9 +51,9 @@ is all zero. The file's SHA-256 is
 
 The ignored Rust targets are manual reference generators:
 
-- `crates/agenc-ircd-crypto/tests/generate_stage_four_vectors.rs`, SHA-256
+- `crates/agenc-relay-crypto/tests/generate_stage_four_vectors.rs`, SHA-256
   `12c23093367bc95fde8381accef1340ee977974c279948772c49d270ecdaa37a`
-- `crates/agenc-ircd-auth/tests/generate_stage_four_vectors.rs`, SHA-256
+- `crates/agenc-relay-auth/tests/generate_stage_four_vectors.rs`, SHA-256
   `3f1afff29e1f54e6d1eda0fd24b58f69742f0c5bc2dffb20f7c70f707d378270`
 
 They call the pinned primitive crates directly and never call the production
@@ -64,9 +64,9 @@ production code.
 Generate candidate output for review with:
 
 ```sh
-cargo test -q -p agenc-ircd-crypto \
+cargo test -q -p agenc-relay-crypto \
   --test generate_stage_four_vectors --locked -- --ignored --nocapture
-cargo test -q -p agenc-ircd-auth \
+cargo test -q -p agenc-relay-auth \
   --test generate_stage_four_vectors --locked -- --ignored --nocapture
 ```
 

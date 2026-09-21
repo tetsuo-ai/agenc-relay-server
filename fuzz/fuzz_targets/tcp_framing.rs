@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![no_main]
 
-use agenc_ircd_client_wire::{FramingError, MessageParseError, StreamFramer, parse_message};
+use agenc_relay_client_wire::{FramingError, MessageParseError, StreamFramer, parse_message};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

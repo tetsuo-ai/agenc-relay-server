@@ -76,7 +76,7 @@ def validate_profile(profile: dict[str, object]) -> None:
     database = profile.get("database")
     if not isinstance(database, dict) or database != {
         "engine": "redb", "version": "4.2.0", "database_format": 1,
-        "schema_generation": 4, "table_count": 27, "durability": "Immediate",
+        "schema_generation": 5, "table_count": 27, "durability": "Immediate",
         "two_phase_commit": True, "writer_threads": 1,
         "request_queue_capacity": 2, "handoff_slot_bytes": 58_720_240,
     }:
@@ -96,17 +96,17 @@ def validate_profile(profile: dict[str, object]) -> None:
 
 
 def validate_sources(root: Path) -> None:
-    source_root = root / "crates/agenc-ircd-storage/src"
+    source_root = root / "crates/agenc-relay-storage/src"
     modules = {path.name for path in source_root.glob("*.rs")}
     if modules != EXPECTED_MODULES:
         raise StageFiveError("storage module inventory is missing or unexpected")
     combined = "\n".join(path.read_text(encoding="utf-8") for path in source_root.glob("*.rs"))
     if any(surface not in combined for surface in REQUIRED_SURFACES):
         raise StageFiveError("storage crate is missing a required Stage-05 surface")
-    manifest = tomllib.loads((root / "crates/agenc-ircd-storage/Cargo.toml").read_text())
+    manifest = tomllib.loads((root / "crates/agenc-relay-storage/Cargo.toml").read_text())
     if set(manifest.get("dependencies", {})) != {
-        "agenc-ircd-crypto", "agenc-ircd-domain", "agenc-ircd-e2ee",
-        "agenc-ircd-types", "redb", "rustix", "subtle", "zeroize",
+        "agenc-relay-crypto", "agenc-relay-domain", "agenc-relay-e2ee",
+        "agenc-relay-types", "redb", "rustix", "subtle", "zeroize",
     }:
         raise StageFiveError("storage dependency boundary differs from the closed set")
     fuzz = tomllib.loads((root / "fuzz/Cargo.toml").read_text())

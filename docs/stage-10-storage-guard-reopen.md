@@ -3,7 +3,7 @@
 This record covers STO-10 (issue #124). It was filed on CAP-01's reading that
 a SIGKILL at the published Appendix C.2 memory budget left edge B unable to
 reopen its storage because `verify_guard_pair`
-(`crates/agenc-ircd-storage/src/control.rs`) refused the database/guard pair.
+(`crates/agenc-relay-storage/src/control.rs`) refused the database/guard pair.
 
 **That reading is wrong, and this record withdraws it.** The refusal CAP-01
 captured cannot have come from the storage open at all, and the exhaustive
@@ -17,7 +17,7 @@ reconstruction.
 
 Every durable storage operation publishes its control state twice. For an
 ordinary commit, `StorageEngine::commit_inner`
-(`crates/agenc-ircd-storage/src/engine.rs`) performs, in this order:
+(`crates/agenc-relay-storage/src/engine.rs`) performs, in this order:
 
 1. `reserve_nonce_block` writes the `NonceReserved` reservation record through
    `RedbStore::write_meta`, which is an `Immediate`, two-phase redb commit, so
@@ -39,7 +39,7 @@ its record, never lead it.
 
 A kill stops that sequence after one of exactly five durable prefixes, and
 each one is a state `classify_recovery_state`
-(`crates/agenc-ircd-storage/src/recovery.rs`) already names:
+(`crates/agenc-relay-storage/src/recovery.rs`) already names:
 
 | prefix | database record | on-disk guard | disposition |
 | --- | --- | --- | --- |
@@ -86,17 +86,17 @@ changed: this work adds test evidence and doc comments only.
 CAP-01 recorded the daemon's exact stderr line:
 
 ```text
-agenc-ircd: runtime startup failed: storage owner failed: storage state is
+agenc-relay-server: runtime startup failed: storage owner failed: storage state is
 stale or inconsistent
 ```
 
-`agenc-ircd serve` prints `agenc-ircd: {DaemonError}`
-(`crates/agenc-ircd/src/main.rs`). `DaemonError::Storage` renders as
+`arcd serve` prints `agenc-relay-server: {DaemonError}`
+(`crates/agenc-relay-server/src/main.rs`). `DaemonError::Storage` renders as
 `storage owner failed: {error}` and `DaemonError::Runtime` renders as
 `runtime startup failed: {error}`, which for `RuntimeError::Storage` adds its
 own `storage owner failed: {error}`
-(`crates/agenc-ircd-runtime/src/daemon.rs`,
-`crates/agenc-ircd-runtime/src/error.rs`). The captured line carries **both**
+(`crates/agenc-relay-runtime/src/daemon.rs`,
+`crates/agenc-relay-runtime/src/error.rs`). The captured line carries **both**
 prefixes, so it is
 `DaemonError::Runtime(RuntimeError::Storage(StorageError::StaleState))`.
 
@@ -111,9 +111,9 @@ prefixes, so it is
 So edge B's storage opened, reconstructed and reported its recovered state,
 and the daemon then refused during runtime startup. `daemon.rs`'s
 `startup_stale_state`, the edge federation restore
-(`crates/agenc-ircd-runtime/src/federation/edge/startup.rs`), the edge E2EE
+(`crates/agenc-relay-runtime/src/federation/edge/startup.rs`), the edge E2EE
 restore (`.../e2ee/edge/startup.rs`) and the durable reconstruction
-(`crates/agenc-ircd-runtime/src/state_core/reconstruct.rs`, which alone holds
+(`crates/agenc-relay-runtime/src/state_core/reconstruct.rs`, which alone holds
 82 of the runtime's `StorageError::StaleState` sites) all produce exactly that
 two-prefix line. Edge B is an edge under load with a projection, a barrier
 assembly, an outbox and live sessions, so those are the surfaces a kill can
@@ -124,7 +124,7 @@ pins both strings so this distinction cannot rot.
 
 ## What is now proven
 
-`crates/agenc-ircd-storage/tests/guard_reopen.rs` abandons a real storage
+`crates/agenc-relay-storage/tests/guard_reopen.rs` abandons a real storage
 owner inside the publication window and reopens the same directory. The
 abandonment is the owner's own indeterminate failure, which closes the owner
 without any shutdown checkpoint, so the directory keeps exactly the durable
@@ -190,14 +190,14 @@ evidence.
 
 Sources:
 
-- `crates/agenc-ircd-storage/tests/guard_reopen.rs` — new, test-only, under a
+- `crates/agenc-relay-storage/tests/guard_reopen.rs` — new, test-only, under a
   `tests` path component; `tests/stage_five.rs` gains one `mod` line and
   `tests/stage_five_completion.rs` raises four existing fixture helpers to
   `pub(crate)` so the new module can open the same live fixture.
-- `crates/agenc-ircd-storage/src/control.rs` and
-  `crates/agenc-ircd-storage/src/recovery.rs` — doc comments only, recording
+- `crates/agenc-relay-storage/src/control.rs` and
+  `crates/agenc-relay-storage/src/recovery.rs` — doc comments only, recording
   the ordering argument and the authority decision.
-- `crates/agenc-ircd-runtime/src/daemon.rs` — one added unit test in the
+- `crates/agenc-relay-runtime/src/daemon.rs` — one added unit test in the
   existing `#[cfg(test)] mod tests`.
 
 No production behaviour, wire format, storage format, dependency pin or limit
@@ -208,13 +208,13 @@ four admissible startup states and is already `implemented` in
 Commands and results at this branch:
 
 ```sh
-cargo test -p agenc-ircd-storage --all-features --test stage_five guard_reopen
+cargo test -p agenc-relay-storage --all-features --test stage_five guard_reopen
 # 5 passed; 0 failed; 116 filtered out
 
-cargo test -p agenc-ircd-storage --all-features -- --skip qualification_workload
+cargo test -p agenc-relay-storage --all-features -- --skip qualification_workload
 # 217 passed and 120 passed; 0 failed
 
-cargo test -p agenc-ircd-runtime --all-features --locked --lib
+cargo test -p agenc-relay-runtime --all-features --locked --lib
 # 1,530 passed; 0 failed; 1 ignored
 
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -235,7 +235,7 @@ The coverage source inventory in `conformance/critical-coverage.toml` and
 production sources. The added doc comment moves `classify_recovery_state` and
 its two helpers down twelve lines, so the whole-file
 `storage-recovery-state-classification` region and the three
-`crates/agenc-ircd-storage/src/recovery.rs` release regions move with them. No
+`crates/agenc-relay-storage/src/recovery.rs` release regions move with them. No
 region changed what it covers and no region digest beyond those files changed.
 
 `qualification_workload::production_workload_measures_every_required_case_and_phase`

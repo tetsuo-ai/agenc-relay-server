@@ -5,7 +5,7 @@ capacity pilot SIGKILLed edge B in `scenario_peer_loss` and the restarted daemon
 refused to come up with
 
 ```text
-agenc-ircd: runtime startup failed: storage owner failed: storage state is
+agenc-relay-server: runtime startup failed: storage owner failed: storage state is
 stale or inconsistent
 ```
 
@@ -22,8 +22,8 @@ wrong component.
 
 ## Where the refusal cannot be
 
-The storage open is already cleared by proof. `agenc-ircd serve` prints
-`agenc-ircd: {DaemonError}`; `DaemonError::Storage` renders as `storage owner
+The storage open is already cleared by proof. `arcd serve` prints
+`agenc-relay-server: {DaemonError}`; `DaemonError::Storage` renders as `storage owner
 failed: {error}` alone and only `DaemonError::Runtime` adds `runtime startup
 failed: `. The captured line carries both prefixes, so it is raised after
 `StorageOwner::start` returned, and STO-10's fault sweep over all 31
@@ -35,7 +35,7 @@ everything else ([the storage guard reopen record](stage-10-storage-guard-reopen
 them reachable, but it cannot see any edge-shaped state. Its scan admits
 `RequestResult`, `FederationPeer`, `FederationOrigin`, `EdgeOutbox`,
 `EdgeProjection`, `E2eeObject`, `E2eeState`, `Audit` and `AuditCheckpoint` for
-identity and sizing only (`crates/agenc-ircd-runtime/src/state_core/reconstruct.rs`,
+identity and sizing only (`crates/agenc-relay-runtime/src/state_core/reconstruct.rs`,
 the `Ok(())` arm at the end of `admit`). Every invariant it enforces is over the
 account, channel, session and account-service tables, which edge B's kill under
 load does not tear: the four shapes #134 names — a standing projection, a
@@ -48,7 +48,7 @@ own recovered-session reconciliation.
 
 Every edge write reaches storage through one atomic transaction, and the edge
 serializes its own writes: `events::stage_rows`
-(`crates/agenc-ircd-runtime/src/federation/edge/events.rs`) refuses while
+(`crates/agenc-relay-runtime/src/federation/edge/events.rs`) refuses while
 `edge.commit.is_some()`, and **it appends the peer row to every batch it
 stages**. A SIGKILL therefore leaves exactly a prefix of committed batches, and
 the question is only whether any logical operation spans more than one batch in
@@ -82,7 +82,7 @@ the ACTIVE marker with the peer row that counts its entries
 
 ## The reproduction
 
-The capacity campaign is not needed. `crates/agenc-ircd-runtime/src/federation/edge/tests/kill_reconstruction.rs`
+The capacity campaign is not needed. `crates/agenc-relay-runtime/src/federation/edge/tests/kill_reconstruction.rs`
 drives a live edge synchronously through the real writers and, **after every
 commit**, reconstructs a fresh `EdgeFederation` from exactly the rows storage
 holds at that moment. Each commit boundary is a durable prefix a SIGKILL can
@@ -104,7 +104,7 @@ storage layer's own reopen at those boundaries is already proven.
 
 Both refuse nothing. The barrier assembly's own windows are already swept by the
 existing crash-image suite in
-`crates/agenc-ircd-runtime/src/federation/edge/tests/restart.rs`: collection
+`crates/agenc-relay-runtime/src/federation/edge/tests/restart.rs`: collection
 with one part received and with the complete set, the payload-missing refusal,
 the wrong-incarnation refusal, the apply that turns the stage head into a
 receipt and restarts both committed cursors, the companion part that commits its
@@ -133,7 +133,7 @@ keeps its meaning — the refusals are still
 identification is added where the daemon reports it:
 
 - `DaemonError::Reconstruction(ReconstructionSurface, RuntimeError)`
-  (`crates/agenc-ircd-runtime/src/daemon.rs`) is the labelled refusal. It
+  (`crates/agenc-relay-runtime/src/daemon.rs`) is the labelled refusal. It
   renders as `runtime startup failed: {surface} refused the recovered state:
   {error}`.
 - `ReconstructionSurface` names `durable state reconstruction`, `recovered
@@ -142,7 +142,7 @@ identification is added where the daemon reports it:
   `reconcile_recovered_sessions` (through `startup_stale_state`),
   `router.restore_edge` and `HistoryState::load` at their call sites.
 - `EdgeRestoreStep`
-  (`crates/agenc-ircd-runtime/src/federation/edge/startup.rs`) names the record
+  (`crates/agenc-relay-runtime/src/federation/edge/startup.rs`) names the record
   family the edge restore had reached:
   `companion-witness-backing`, `federation-peer-record`,
   `edge-projection-rows`, `edge-projection-install`,
@@ -153,7 +153,7 @@ identification is added where the daemon reports it:
 The same kill would now print, for example:
 
 ```text
-agenc-ircd: runtime startup failed: edge federation restore at barrier-install
+agenc-relay-server: runtime startup failed: edge federation restore at barrier-install
 refused the recovered state: storage owner failed: storage state is stale or
 inconsistent
 ```
@@ -193,7 +193,7 @@ existed, #124 could not have been filed against the storage open.
 Run from the branch worktree.
 
 ```text
-cargo test -p agenc-ircd-runtime --all-features
+cargo test -p agenc-relay-runtime --all-features
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all
 python3 scripts/check-source.py check

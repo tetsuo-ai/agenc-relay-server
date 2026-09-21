@@ -67,19 +67,19 @@ same functions the listener and supervisor use.
 
 ## Measurements
 
-- `crates/agenc-ircd-runtime/src/budget/idle_model.rs`: the default pool is
+- `crates/agenc-relay-runtime/src/budget/idle_model.rs`: the default pool is
   `P = 3,338,666,016` bytes; a composed idle TLS client charges exactly
   65,536 bytes; 50,000 of them with the 2,007,040-byte ready list need
   3,278,807,040 bytes, inside `P`; the removed eager backing needed more
   than three times the pool.
-- `crates/agenc-ircd-runtime/tests/idle_connection_memory.rs`: the real
+- `crates/agenc-relay-runtime/tests/idle_connection_memory.rs`: the real
   listener, TLS endpoint, supervisor, reader, writer, and queue serve 288
   idle TLS connections held by a child process. The budget holds exactly
   65,536 bytes per connection once the setup increments return, and this
   process's anonymous resident memory grows by 37,680 bytes per connection
   (x86_64 debug build), under the base charge. Every permit returns when
   the connections close.
-- `crates/agenc-ircd/tests/stage_six_daemon/idle_capacity.rs`: the
+- `crates/agenc-relay-server/tests/stage_six_daemon/idle_capacity.rs`: the
   production binary with the default four-GiB budget serves 208 idle
   registered clients; 192 measured clients charge 192 x 65,536 plus one
   32,768-byte step of the keyed admission-bucket table, whose doubling is
@@ -103,14 +103,14 @@ pins these numbers; issue #113 records the normative decision they need.
 
 ## Exact permit evidence
 
-`crates/agenc-ircd-runtime/src/connection/queue/backing_tests.rs` covers the
+`crates/agenc-relay-runtime/src/connection/queue/backing_tests.rs` covers the
 charge at every quantum boundary and the hard maximum, an empty queue's
 first storage, partial drain, the default and hard-maximum response
 ceilings, the configured item ceiling, cancellation before and after
 `prepare`, permit mismatch, consumer drop with shared frames, a query
 snapshot on charged storage, generation and close fences, a reservation
 without storage, a full ring, the control reserve, and shutdown-after-flush.
-`crates/agenc-ircd-runtime/src/state_core/client_input/tests/mod.rs` covers
+`crates/agenc-relay-runtime/src/state_core/client_input/tests/mod.rs` covers
 the free idle port, the first overflow quantum, growth to the request
 maximum, the 128-line ceiling, release on drain, arrival order across the
 inline slot and the overflow, and a reader paused by an exhausted budget

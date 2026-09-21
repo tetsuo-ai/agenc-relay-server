@@ -1,15 +1,15 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_auth::{
+use agenc_relay_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountServiceEnvelope,
     AccountServiceResponse, AuthError, open_and_parse_request, open_and_parse_response,
 };
-use agenc_ircd_crypto::{
+use agenc_relay_crypto::{
     ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES, ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES,
     AccountHpkePrivateKey, AccountRequestBinding, open_account_request, seal_account_request,
 };
-use agenc_ircd_types::{
+use agenc_relay_types::{
     AccountServiceMessageKind, AccountServiceResponseKind, NetworkId, RecoveryEpoch, RequestId,
 };
 use libfuzzer_sys::fuzz_target;

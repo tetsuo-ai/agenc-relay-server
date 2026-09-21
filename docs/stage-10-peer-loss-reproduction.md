@@ -16,7 +16,7 @@ The observation being reproduced is one pilot run recorded in
 `scenario_peer_loss` SIGKILLed edge B, the restarted daemon printed
 
 ```text
-agenc-ircd: runtime startup failed: storage owner failed: storage state is
+agenc-relay-server: runtime startup failed: storage owner failed: storage state is
 stale or inconsistent
 ```
 
@@ -26,7 +26,7 @@ and the cycle failed with "edge never established its coordinator link".
 labelling named it on sight:
 
 ```text
-agenc-ircd: runtime startup failed: edge federation restore at
+agenc-relay-server: runtime startup failed: edge federation restore at
 edge-projection-install (active projection: federation replica reference does
 not resolve) refused the recovered state: storage owner failed: storage state
 is stale or inconsistent
@@ -175,7 +175,7 @@ That last row is the whole failure.
 `EdgeReplica::install` — the install a **coordinator snapshot** goes through —
 finishes with `validate`, and `validate` requires the entry set to be closed
 under entitlement: every channel it holds must have a local member or an invite
-(`has_entitlement`, `crates/agenc-ircd-domain/src/federation/replica.rs`).
+(`has_entitlement`, `crates/agenc-relay-domain/src/federation/replica.rs`).
 `Restore::install_projection` rebuilt the edge's own active generation through
 that same install, so a channel standing without a member refused the restore
 with `ReplicaError::DanglingReference`, which the restore reports as
@@ -214,12 +214,12 @@ sweep does not, and why every image shows exactly one offending channel.
 
 **The memory budget is not the mechanism, and cannot be.**
 `server.memory_budget_bytes` reaches one function: `memory_budget`
-(`crates/agenc-ircd-runtime/src/daemon.rs`) passes it to `startup_arithmetic`
+(`crates/agenc-relay-runtime/src/daemon.rs`) passes it to `startup_arithmetic`
 and wraps the resulting `protocol_pool_bytes` in a `MemoryBudget`, and the
 reload check re-runs the same arithmetic. It sizes nothing durable:
 `storage_open_config` builds `StorageEngineLimits` with
 `redb_cache_bytes: DEFAULT_REDB_CACHE_BYTES`, a fixed `67_108_864` in
-`agenc-ircd-config`'s bounds, and takes its reserve, database and backup
+`agenc-relay-config`'s bounds, and takes its reserve, database and backup
 ceilings from `[storage]`. No commit batching, no flush boundary and no cache
 size moves with the budget. The measured charge at every kill was one part in a
 thousand of the pool, so the restore's own admission was never near a ceiling
@@ -247,7 +247,7 @@ separately and each must be durable when it is applied — and coupling them
 would be a federation protocol change for a refusal that never had to happen.
 
 So `EdgeReplica` now distinguishes the two installs
-(`crates/agenc-ircd-domain/src/federation/replica.rs`):
+(`crates/agenc-relay-domain/src/federation/replica.rs`):
 
 - `install` is unchanged and still closed: `snapshot_end`'s verifying install,
   `sync::activated`'s install of the snapshot the coordinator sent, and
@@ -273,7 +273,7 @@ behind, which is the closest thing to an end-to-end proof this work can offer.
 
 ## Evidence
 
-- `crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_capacity.rs::peer_loss_kill_drill`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_capacity.rs::peer_loss_kill_drill`
   (ignored): the repeated kill at the published budget with its phase sweep and
   startup kill, the per-round occupancy record in `peer-loss-kill-drill.json`,
   and the durable-state capture that produced the three crash images.
@@ -341,8 +341,8 @@ refused here, and it is now identified if it ever does.
 Run from the branch worktree.
 
 ```text
-cargo test -p agenc-ircd-runtime --all-features
-cargo test -p agenc-ircd-domain --all-features
+cargo test -p agenc-relay-runtime --all-features
+cargo test -p agenc-relay-domain --all-features
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all
 python3 scripts/check-source.py check

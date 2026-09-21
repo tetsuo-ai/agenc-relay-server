@@ -22,7 +22,7 @@ was found beside them and fixed.
 
 ### `edge.replica.install(...)` in `Restore::install_projection`
 
-`EdgeReplica::install` (`crates/agenc-ircd-domain/src/federation/replica.rs`)
+`EdgeReplica::install` (`crates/agenc-relay-domain/src/federation/replica.rs`)
 returns `Result<(), ReplicaError>`, and `ReplicaError` is a closed eight-arm
 enum. Every arm is a statement about the entries themselves:
 
@@ -47,7 +47,7 @@ process memory budget at which `install` reports one.
 ### `companion.snapshot_finish_restore()` in `E2eeEdge::finish_snapshot_restore`
 
 `snapshot_finish_restore`
-(`crates/agenc-ircd-runtime/src/e2ee/edge/snapshot.rs`) returns
+(`crates/agenc-relay-runtime/src/e2ee/edge/snapshot.rs`) returns
 `Result<(), Refusal>` and has exactly two `Err` sites, both inside one `if`:
 `usize::try_from(snapshot.total)`, unreachable on a 64-bit target, and the
 condition it guards, which is `snapshot.pending.route_objects.len() !=
@@ -83,7 +83,7 @@ Those two numbers are the fixed standing-projection ceilings of spec 20.8, and
 they are what the live path admits for **one** projection generation:
 `sync::snapshot_start` refuses an entry count above `MAX_SNAPSHOT_ENTRIES` and
 `sync::snapshot_entry` refuses aggregate bytes above `MAX_SNAPSHOT_BYTES`
-(`crates/agenc-ircd-runtime/src/federation/edge/sync.rs`).
+(`crates/agenc-relay-runtime/src/federation/edge/sync.rs`).
 
 An edge holds two generations' entry rows at once by design. `sync::snapshot_active`
 switches the peer row to the new generation and writes the ACTIVE marker without
@@ -130,7 +130,7 @@ pub struct EdgeRestoreRefusal {
 }
 ```
 
-`EdgeRestoreCause` (`crates/agenc-ircd-runtime/src/federation/edge/startup.rs`)
+`EdgeRestoreCause` (`crates/agenc-relay-runtime/src/federation/edge/startup.rs`)
 names `Unclassified`, `ActiveProjection(ReplicaError)`,
 `PendingProjection(ReplicaError)`, `ActiveProjectionCeiling`,
 `PendingProjectionCeiling`, `CompanionCeiling`, `CompanionSnapshotIncomplete`,
@@ -166,13 +166,13 @@ reported its own `checked_add` overflow as `StaleState` and now raises
 `RuntimeError::InvalidValue` with `MissingAdmissionPort`.
 
 Decode arms were left alone. `SchemaObject::decode_exact`,
-`IrcWireObject::decode_kind`, `decode_projection_arm` and their neighbours mean
+`ArcWireObject::decode_kind`, `decode_projection_arm` and their neighbours mean
 exactly "this durable object does not decode under its schema", which is stale
 durable state and is already what the step label points at.
 
 ## Evidence
 
-- `crates/agenc-ircd-runtime/src/federation/edge/tests/reconstruction_pools.rs`
+- `crates/agenc-relay-runtime/src/federation/edge/tests/reconstruction_pools.rs`
   drives the restore's accounting directly.
   `both_projection_generations_and_the_companion_rows_fit_beside_one_another`
   charges each generation a whole standing-projection ceiling and then the
@@ -183,7 +183,7 @@ durable state and is already what the step label points at.
   require every pool to refuse one byte and one row past its own ceiling with
   `RuntimeError::LimitExceeded` and the cause that names it, so the repair did
   not open a hole.
-- `crates/agenc-ircd-runtime/src/federation/edge/tests/reconstruction_cause.rs`
+- `crates/agenc-relay-runtime/src/federation/edge/tests/reconstruction_cause.rs`
   seeds durable rows through the real storage owner.
   `a_projection_the_replica_refuses_names_the_replica_and_not_the_storage_layer`
   commits a coordinator row counting one standing entry and one `EdgeProjection`
@@ -233,7 +233,7 @@ durable state and is already what the step label points at.
 Run from the branch worktree.
 
 ```text
-cargo test -p agenc-ircd-runtime --all-features
+cargo test -p agenc-relay-runtime --all-features
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all
 python3 scripts/check-source.py check

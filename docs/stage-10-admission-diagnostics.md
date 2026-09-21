@@ -39,7 +39,7 @@ nickname, channel, or body by construction.
 
 ## Deterministic tests for every outcome
 
-`crates/agenc-ircd-runtime/tests/listener_accept/admission_outcomes.rs` drives
+`crates/agenc-relay-runtime/tests/listener_accept/admission_outcomes.rs` drives
 the real listener, TLS, and supervisor with a scripted StateCore inbox and
 forces each outcome once: accepted open followed by a routed `QUIT`, refused
 open followed by a fresh admission on the same slot, a dropped acknowledgement,
@@ -59,19 +59,19 @@ its distinctness, the severity per reason, and the rendered field.
 
 ## Fixture evidence
 
-The standalone daemon fixture (`crates/agenc-ircd/tests/stage_six_daemon.rs`)
+The standalone daemon fixture (`crates/agenc-relay-server/tests/stage_six_daemon.rs`)
 now records phase markers, every fresh-connection attempt with its reason, the
 daemon child's exit (joined status, killed after the stop budget, or killed at
 drop without a join), and the first failure. Two test-only environment
 variables control the evidence:
 
-- `AGENC_IRCD_STAGE_SIX_RETAIN_DIR=<directory>`: a fixture that ends in a
+- `AGENC_RELAY_STAGE_SIX_RETAIN_DIR=<directory>`: a fixture that ends in a
   panic or a returned error copies its daemon logs (at most 4 MiB) and a
   `diagnostics.txt` record into `<directory>/<fixture-root-name>/` with mode
   `0700` on the directory and `0600` on every file. Only the daemon's own
   structured logs are copied; keys, the database, the configuration, and raw
   source addresses never are. A fixture that succeeds still removes its root.
-- `AGENC_IRCD_STAGE_SIX_STRICT_ADMISSION=1`: every fresh-connection helper
+- `AGENC_RELAY_STAGE_SIX_STRICT_ADMISSION=1`: every fresh-connection helper
   makes exactly one attempt, so a silent close after TLS fails the test.
 
 Without the strict variable `connect_registered_guest` still retries a silent
@@ -102,8 +102,8 @@ unrelated repository gate was running on the same host.
 Commands (from the built `stage_six_daemon` test binary, x86_64 host, 2026-09-15 17:29 to 17:34 UTC, while an unrelated repository gate ran on the same host):
 
 ```sh
-export AGENC_IRCD_STAGE_SIX_STRICT_ADMISSION=1
-export AGENC_IRCD_STAGE_SIX_RETAIN_DIR=<private scratch directory>
+export AGENC_RELAY_STAGE_SIX_STRICT_ADMISSION=1
+export AGENC_RELAY_STAGE_SIX_RETAIN_DIR=<private scratch directory>
 for i in $(seq 1 10); do $EXE production_daemon_credential_and_lookup_edges_fail_closed --exact; done
 for round in 1 2 3; do for j in 1 2 3 4; do $EXE production_daemon_credential_and_lookup_edges_fail_closed --exact & done; wait; done
 for i in 1 2 3 4 5; do $EXE idle_healthy_admission_never_silently_closes_a_fresh_connection --exact; done

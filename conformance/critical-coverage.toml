@@ -3,14 +3,14 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 997
-reviewed_source_sha256 = "f076fee2672672d3300223a064afb155bf82bd46708274af7de49a150d5070c4"
+reviewed_source_files = 998
+reviewed_source_sha256 = "4c1d689824a2d167e42dbfbeb6274cdb0603493ece935d0cddefc5b4eae822f7"
 deferred = []
 
 [[region]]
 id = "client-message-error-enum-arms"
 category = "parser-error-discriminants"
-file = "crates/agenc-ircd-client-wire/src/message.rs"
+file = "crates/agenc-relay-client-wire/src/message.rs"
 item = "fmt"
 source_sha256 = "98aaba77f541e697884670b2c6cd7fcbfbdc6711e6bc28ecf69bcc6832b4a0c0"
 start_line = 134
@@ -22,7 +22,7 @@ reason = "Every closed parser error arm must be observed by the error reporting 
 [[region]]
 id = "client-message-parser-errors"
 category = "parser-error-discriminants"
-file = "crates/agenc-ircd-client-wire/src/message.rs"
+file = "crates/agenc-relay-client-wire/src/message.rs"
 item = "parse_message"
 source_sha256 = "98aaba77f541e697884670b2c6cd7fcbfbdc6711e6bc28ecf69bcc6832b4a0c0"
 start_line = 165
@@ -34,9 +34,9 @@ reason = "Every accepted and rejected syntax path must be exercised at the clien
 [[region]]
 id = "domain-command-authorization"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-domain/src/decision.rs"
+file = "crates/agenc-relay-domain/src/decision.rs"
 item = "validate_session_seed"
-source_sha256 = "f4f128d45704b285ee6bc5de8bf2fc5caa7393dd1409b265feac377f711cd54a"
+source_sha256 = "4e3c17cb1d93da11df2d37fc895218c94fe580ea8b75d1cc283853839fe6a01e"
 start_line = 2153
 end_line = 2422
 span_sha256 = "7f01e89dd0becb331f4f18bb3416a111d255167cc580353efa5a9f7fae8f7985"
@@ -46,9 +46,9 @@ reason = "Session fences, admission, and command authority are security decision
 [[region]]
 id = "federation-field-kind-decode"
 category = "protocol-enum-arms"
-file = "crates/agenc-ircd-federation-wire/src/codec.rs"
+file = "crates/agenc-relay-federation-wire/src/codec.rs"
 item = "begin_decode_value"
-source_sha256 = "d8a551cff63ee4a0cf0a4f29a7170ab7585b591ae0fc2f2a77c60c2a3580879b"
+source_sha256 = "6b9592798f13d22229f922fb3ed5e14f5537decd1a6814c68459e71bab1fa45c"
 start_line = 1363
 end_line = 1430
 span_sha256 = "f4ec0e1687d18b9787e626742092e25b372a1e9ef0c662d11421e880719aa10c"
@@ -58,9 +58,9 @@ reason = "Every closed FieldKind decode arm must run in the canonical federation
 [[region]]
 id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
-file = "crates/agenc-ircd-domain/src/model.rs"
+file = "crates/agenc-relay-domain/src/model.rs"
 item = "validate"
-source_sha256 = "e1a55ff540a7e89490db3074c9ce14cd0961241206f4cad6ccb3aaeabb2a40db"
+source_sha256 = "bb46878d8d0055721dfd5f864adb03993e652ee4fa0f531e9118ff949b7809e1"
 start_line = 1971
 end_line = 2156
 span_sha256 = "1678f0776eb9079e330bb50a96f1f818f39c5085ec1d3031c4cdb59dd54d765a"
@@ -70,21 +70,21 @@ reason = "Every current domain cross-index and authority-fence check must take b
 [[region]]
 id = "storage-recovery-state-classification"
 category = "persistence-recovery"
-file = "crates/agenc-ircd-storage/src/recovery.rs"
+file = "crates/agenc-relay-storage/src/recovery.rs"
 item = "RecoveryDisposition"
-source_sha256 = "e2966384987bcb95a1c776bdcd093dd6ffc4ed6ad266142b0db759f85b0e7be0"
+source_sha256 = "79d1e39f7c9c93bf39ff8da3faa4ec2655aa70fc68b443487bbe6a9e39d14fe7"
 start_line = 1
 end_line = 857
-span_sha256 = "7321b8fe8d6dec65f5c92b9bb73e1983b744c7ade17cef31c79fed9d1d26a124"
+span_sha256 = "d447eb5b86b25d9db1f996030782f2d38776f10d98f44dc9547b57d809b29094"
 metric = "branches"
 reason = "Every enumerated rollback-guard, reservation, and database recovery state must be exercised."
 
 [[region]]
 id = "history-command-authorization"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-domain/src/decision.rs"
+file = "crates/agenc-relay-domain/src/decision.rs"
 item = "authorize_history"
-source_sha256 = "f4f128d45704b285ee6bc5de8bf2fc5caa7393dd1409b265feac377f711cd54a"
+source_sha256 = "4e3c17cb1d93da11df2d37fc895218c94fe580ea8b75d1cc283853839fe6a01e"
 start_line = 2448
 end_line = 2469
 span_sha256 = "1ff392e30f0941e478445d2d53980c75cc49b516905653ebf94d9ccbc7ab2584"
@@ -94,7 +94,7 @@ reason = "History requests require current membership, plaintext content, enable
 [[region]]
 id = "wss-upgrade-error-responses"
 category = "parser-error-discriminants"
-file = "crates/agenc-ircd-client-wire/src/websocket_transport/upgrade.rs"
+file = "crates/agenc-relay-client-wire/src/websocket_transport/upgrade.rs"
 item = "response"
 source_sha256 = "c10c392485b0e182b85e498bbbd4f3814984ee7ef1e6636c0cdd6e68733eb782"
 start_line = 37
@@ -106,9 +106,9 @@ reason = "Every closed upgrade error maps to a fixed public response without ref
 [[region]]
 id = "registered-control-capability-admission"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-client-wire/src/registration.rs"
+file = "crates/agenc-relay-client-wire/src/registration.rs"
 item = "require_command_capabilities"
-source_sha256 = "85a845d3a40b876b47cb7068a40f5f327cf0577bb52b6b30dd22e49c49f8dd57"
+source_sha256 = "2e3944a1407c1263bef872b2549742869b427871d91bd01e55ecb0a2fdef3267"
 start_line = 960
 end_line = 981
 span_sha256 = "a7c797158ebfb75356075c060222c9a50c83dac91979096f5dde02a0064ac61e"
@@ -118,7 +118,7 @@ reason = "Control mutations and history cannot be admitted without their respons
 [[region]]
 id = "reader-outstanding-request-reservation"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/connection/reader/admission.rs"
+file = "crates/agenc-relay-runtime/src/connection/reader/admission.rs"
 item = "try_reserve"
 source_sha256 = "1ab444b9fb6712f29fe39d1caff80b2b3a43784a1066c8d00a0a1f6a0f12340c"
 start_line = 37
@@ -130,7 +130,7 @@ reason = "Count and wire-byte charges include commands already queued at StateCo
 [[region]]
 id = "reader-outstanding-request-release"
 category = "section-27-invariant-checkers"
-file = "crates/agenc-ircd-runtime/src/connection/reader/admission.rs"
+file = "crates/agenc-relay-runtime/src/connection/reader/admission.rs"
 item = "drop"
 source_sha256 = "1ab444b9fb6712f29fe39d1caff80b2b3a43784a1066c8d00a0a1f6a0f12340c"
 start_line = 65
@@ -142,7 +142,7 @@ reason = "Each non-cloneable parsed request reservation is released exactly once
 [[region]]
 id = "config-used-listener-material"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-config/src/config.rs"
+file = "crates/agenc-relay-config/src/config.rs"
 item = "listener_material_required"
 source_sha256 = "cc5a7f65b944d912cf1eabc741e81921fdb8737e023e97d1c8e084c3d42d489a"
 start_line = 84
@@ -154,7 +154,7 @@ reason = "Disabled client listeners need no material while outbound federation r
 [[region]]
 id = "config-tls-alias-separation"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-config/src/secrets.rs"
+file = "crates/agenc-relay-config/src/secrets.rs"
 item = "Loader"
 source_sha256 = "187f30de246563098944017a3a7ca4cb3863bf59035a519c05792223ba0542b7"
 start_line = 440
@@ -166,9 +166,9 @@ reason = "TLS aliases are admitted only within one purpose class and never alias
 [[region]]
 id = "mode-mask-lookup-after-authorization"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-domain/src/decision.rs"
+file = "crates/agenc-relay-domain/src/decision.rs"
 item = "entry_for_mask"
-source_sha256 = "f4f128d45704b285ee6bc5de8bf2fc5caa7393dd1409b265feac377f711cd54a"
+source_sha256 = "4e3c17cb1d93da11df2d37fc895218c94fe580ea8b75d1cc283853839fe6a01e"
 start_line = 5059
 end_line = 5079
 span_sha256 = "8674272a6fecd5827275e7a17fcef846a0ea4a82bdaf0a116360812bf27566df"
@@ -178,21 +178,21 @@ reason = "Authorized mask removal resolves original entries and ordered addition
 [[region]]
 id = "guest-control-before-name-lookup"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/command_convert.rs"
+file = "crates/agenc-relay-runtime/src/command_convert.rs"
 item = "require_channel_control_account"
-source_sha256 = "4595de3d122fbfdfc553fcd7d68a21e9f36a61aca5e519e340eb8d5bc2e51714"
+source_sha256 = "fa54b79eda291a27381634bb2306d8aad0cbc01a0399b9a58114721ceb66c9d2"
 start_line = 34
 end_line = 46
-span_sha256 = "5196974af33d87927d9c6eea8ec83c11a6191930b4ba13c8bd8b2b0fc2e16da0"
+span_sha256 = "d5b2abb5b7dbdfd0e52b8c000657d01d7488b629162bc83ab912a213dfd0809a"
 metric = "branches"
 reason = "Guest channel controls are refused before target existence can influence their public response."
 
 [[region]]
 id = "federated-mask-argument-encoding"
 category = "protocol-enum-arms"
-file = "crates/agenc-ircd-runtime/src/federation/codec/operations.rs"
+file = "crates/agenc-relay-runtime/src/federation/codec/operations.rs"
 item = "mode_argument_object"
-source_sha256 = "2f666a23d559f54d07d754830703759a386773a2142cabbd77f64d4a74ec3243"
+source_sha256 = "c247d856cdc53d12c647131462d731e58fc5b166e45b09d2e0272b5e2bd15b39"
 start_line = 732
 end_line = 769
 span_sha256 = "d286c4cb9a1acbbb555ce95c996a154bc7ea0fbc27467064796f25f62962efb9"
@@ -202,9 +202,9 @@ reason = "Both mask and non-mask encoding decisions are exercised; schema constr
 [[region]]
 id = "federated-mask-argument-decoding"
 category = "protocol-enum-arms"
-file = "crates/agenc-ircd-runtime/src/federation/codec/operations.rs"
+file = "crates/agenc-relay-runtime/src/federation/codec/operations.rs"
 item = "mode_argument_of"
-source_sha256 = "2f666a23d559f54d07d754830703759a386773a2142cabbd77f64d4a74ec3243"
+source_sha256 = "c247d856cdc53d12c647131462d731e58fc5b166e45b09d2e0272b5e2bd15b39"
 start_line = 771
 end_line = 791
 span_sha256 = "e959809ed3d6de497e499996c06d25f424217c625a64b8b9594a4b67c7c5fc88"
@@ -214,7 +214,7 @@ reason = "Both decode decisions are exercised after the validated schema boundar
 [[region]]
 id = "supervised-task-failure-classification"
 category = "section-27-invariant-checkers"
-file = "crates/agenc-ircd-runtime/src/supervisor/mod.rs"
+file = "crates/agenc-relay-runtime/src/supervisor/mod.rs"
 item = "next_exit"
 source_sha256 = "02922a56626732d8f103bc71734d0064288bb631f29e3cb284aaf5d8255af6ad"
 start_line = 213
@@ -226,9 +226,9 @@ reason = "Aborted and unwound tasks retain their registered identity and failure
 [[region]]
 id = "federated-mode-role-user-identity"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/federation/coordinator/convert.rs"
+file = "crates/agenc-relay-runtime/src/federation/coordinator/convert.rs"
 item = "channel_mode_text"
-source_sha256 = "4a7e9afe0834e566ac97cee2f86169497f24ac49e862da14c708d6ae1edf37de"
+source_sha256 = "a7d4878168fd790663fa944716eb1cc28fe68fec050c53c728a18c051e105422"
 start_line = 624
 end_line = 641
 span_sha256 = "d8861e2587a326fd5a7a8954d7f26d4b9a112ea0b4d7b56fcecd7d52af1a6ead"
@@ -238,9 +238,9 @@ reason = "Role targets resolve by the exact transmitted User ID and cannot follo
 [[region]]
 id = "borrowed-storage-ciphertext-bounds"
 category = "persistence-recovery"
-file = "crates/agenc-ircd-crypto/src/storage.rs"
+file = "crates/agenc-relay-crypto/src/storage.rs"
 item = "from_slice"
-source_sha256 = "fe3381678abcffc908f5bc28296af1ef225fa6031a5b6d7b2656614f4f4c862b"
+source_sha256 = "7a3ff3eb60360f468eb379a9b389f27b0daa51597d26e69d202f2d765db00b45"
 start_line = 248
 end_line = 253
 span_sha256 = "a0e15eb072c6c5b13441301a514d2f9ea7f555399baa0753333fb6dd4038438b"
@@ -250,7 +250,7 @@ reason = "Borrowing ciphertext retains the exact authentication-tag minimum and 
 [[region]]
 id = "connection-input-publication"
 category = "authorization-decisions"
-file = "crates/agenc-ircd-runtime/src/state_core/client_input.rs"
+file = "crates/agenc-relay-runtime/src/state_core/client_input.rs"
 item = "send"
 source_sha256 = "fc56984bae0f4cebbd1a82d71eb3ef5de52c84c4616ad7b7752e3ac120122f17"
 start_line = 208

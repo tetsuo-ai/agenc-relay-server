@@ -31,7 +31,7 @@ on the same code proves nothing.
 - A change across crates, to the storage engine, to a wire format or to the
   gate runner: the whole suite,
   `cargo nextest run --workspace --all-features --locked`, then
-  `cargo nextest run -p agenc-ircd-storage --all-features --locked --profile disk`
+  `cargo nextest run -p agenc-relay-storage --all-features --locked --profile disk`
   on a quiet machine.
 - A release candidate, a stage closure, or a change to the gate itself: the
   full implementation gate, which runs its lanes concurrently:
@@ -41,7 +41,7 @@ bash scripts/check-stage-nine.sh
 ```
 
 A check does not close a stage by itself.
-The [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
+The [Stage 09 manifest](https://github.com/tetsuo-ai/agenc-relay-server/blob/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
 records the closure for exact source commit
 `a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. Checkpoints apply to their named
 source revisions; later changes require new artifact-backed evidence to close

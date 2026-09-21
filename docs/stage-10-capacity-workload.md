@@ -48,10 +48,10 @@ of the issues.
 
 ## What the workload does now
 
-`crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_capacity/workload.rs`
+`crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_capacity/workload.rs`
 derives the whole matrix from the driver's population, using the production
 functions rather than restated constants (`startup_arithmetic` and the
-Section 19.3 percentages in `agenc_ircd_runtime::admission::overload`).
+Section 19.3 percentages in `agenc_relay_runtime::admission::overload`).
 
 - **Per-node first.** The total is split across the two client-admitting
   edges, and the per-node share decides the profile. `production` means every
@@ -74,7 +74,7 @@ Section 19.3 percentages in `agenc_ircd_runtime::admission::overload`).
   addresses, which the generator spreads over 25 /24s because the
   new-connection and TLS-handshake buckets are keyed by the source /24. Each
   worker binds its own source address before connecting
-  (`IrcClient::connect_from`).
+  (`ArcClient::connect_from`).
 - **Bounded warm-up.** Registration is paced per source address rather than
   globally: only the 256 workers that share one address wait for each other,
   so the production warm-up is about 102 seconds instead of about eleven
@@ -134,7 +134,7 @@ through procfs on this host; it must run inside a delegated cgroup
 
 ### One node admits the default idle population inside the default budget
 
-`crates/agenc-ircd-runtime/tests/idle_connection_memory.rs::one_node_admits_the_default_idle_population_within_the_default_budget`
+`crates/agenc-relay-runtime/tests/idle_connection_memory.rs::one_node_admits_the_default_idle_population_within_the_default_budget`
 opens the Section 19.2 default client population through the real listener,
 TLS endpoint, connection supervisor, reader, writer and writer queue of one
 process against one `MemoryBudget` built from the unchanged Appendix C
@@ -162,7 +162,7 @@ resident_per_connection=37207 admitted_in_ms=34963
 
 ### The advertised domain scans
 
-`crates/agenc-ircd-domain/src/decision/tests/advertised_scans.rs` builds the
+`crates/agenc-relay-domain/src/decision/tests/advertised_scans.rs` builds the
 Section 19.2 advertised populations (100,000 global channels, 10,000 local
 channels, 100,000 network-wide invitations at 256 per channel, one channel of
 4,096 members, 50,000 accounts each holding a reserved nickname, 1,024
@@ -291,7 +291,7 @@ sampling impossible, and a warm-up paced per generator source address.
    daemon refused to start:
 
    ```text
-   agenc-ircd: runtime startup failed: storage owner failed: storage state is
+   agenc-relay-server: runtime startup failed: storage owner failed: storage state is
    stale or inconsistent
    ```
 
@@ -302,7 +302,7 @@ sampling impossible, and a warm-up paced per generator source address.
 
    **Correction (STO-10, issue #124).** This record originally attributed the
    refusal to `verify_guard_pair`
-   (`crates/agenc-ircd-storage/src/control.rs`) refusing the database/guard
+   (`crates/agenc-relay-storage/src/control.rs`) refusing the database/guard
    pair after a kill between the database commit and the guard replacement.
    That attribution is withdrawn. The line above carries the
    `runtime startup failed: ` prefix that only `DaemonError::Runtime` adds,
@@ -344,13 +344,13 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 python3 scripts/check-source.py check
 python3 scripts/test-release-qualification.py
 python3 scripts/qualify-release.py check
-cargo test -p agenc-ircd-runtime --all-features --locked --lib
-cargo test -p agenc-ircd-domain --all-features --locked --lib
-cargo test -p agenc-ircd --test stage_eight_e2ee --all-features --locked -- workload::
-cargo test -p agenc-ircd-runtime --all-features --locked --test idle_connection_memory
-cargo test -p agenc-ircd-runtime --all-features --locked --test idle_connection_memory \
+cargo test -p agenc-relay-runtime --all-features --locked --lib
+cargo test -p agenc-relay-domain --all-features --locked --lib
+cargo test -p agenc-relay-server --test stage_eight_e2ee --all-features --locked -- workload::
+cargo test -p agenc-relay-runtime --all-features --locked --test idle_connection_memory
+cargo test -p agenc-relay-runtime --all-features --locked --test idle_connection_memory \
     -- --ignored --nocapture --test-threads=1
-cargo test -p agenc-ircd-domain --all-features --locked --lib -- advertised_scans --nocapture
+cargo test -p agenc-relay-domain --all-features --locked --lib -- advertised_scans --nocapture
 ```
 
 The development pilot was launched with the delegated-cgroup command shown

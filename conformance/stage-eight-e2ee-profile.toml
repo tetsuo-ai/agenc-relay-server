@@ -15,9 +15,9 @@ tasks = [
 [target]
 name = "encrypted-v1"
 profile_version = 1
-profile_token = "N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU"
+profile_token = "xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU"
 capability = "agenc.ag/e2ee-mls"
-capability_value = "v1,profile=N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU,seg=2940,obj=262144,parts=90,welcome=4194304"
+capability_value = "v1,profile=xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU,seg=2940,obj=262144,parts=90,welcome=4194304"
 mls_version = 1
 enabled_suites = [1, 3]
 signature_scheme = 2055
@@ -86,7 +86,7 @@ delivery_generation_restarts = false
 plaintext_on_bound_route = "FAIL <command> E2EE_REQUIRED"
 partition = "FAIL <command> E2EE_SYNCING"
 queue_while_syncing = false
-private_topic = "Encrypted channel - topic protected by IRC-MLS"
+private_topic = "Encrypted channel - topic protected by ARC-MLS"
 requests_resent_after_ready = true
 
 [coordinator]

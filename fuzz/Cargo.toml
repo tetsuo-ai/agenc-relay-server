@@ -1,6 +1,6 @@
 [package]
-name = "agenc-ircd-fuzz"
-version = "1.0.0-rc.2"
+name = "agenc-relay-fuzz"
+version = "1.0.0-rc.3"
 edition = "2024"
 rust-version = "1.98"
 publish = false
@@ -10,18 +10,18 @@ cargo-fuzz = true
 
 [features]
 default = []
-wss = ["agenc-ircd-client-wire/wss"]
+wss = ["agenc-relay-client-wire/wss"]
 
 [dependencies]
-agenc-ircd-client-wire = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-client-wire" }
-agenc-ircd-admin = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-admin" }
-agenc-ircd-auth = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-auth" }
-agenc-ircd-config = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-config" }
-agenc-ircd-crypto = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-crypto" }
-agenc-ircd-e2ee = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-e2ee" }
-agenc-ircd-federation-wire = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-federation-wire" }
-agenc-ircd-storage = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-storage" }
-agenc-ircd-types = { version = "=1.0.0-rc.2", path = "../crates/agenc-ircd-types" }
+agenc-relay-client-wire = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-client-wire" }
+agenc-relay-admin = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-admin" }
+agenc-relay-auth = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-auth" }
+agenc-relay-config = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-config" }
+agenc-relay-crypto = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-crypto" }
+agenc-relay-e2ee = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-e2ee" }
+agenc-relay-federation-wire = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-federation-wire" }
+agenc-relay-storage = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-storage" }
+agenc-relay-types = { version = "=1.0.0-rc.3", path = "../crates/agenc-relay-types" }
 libfuzzer-sys = "=0.4.13"
 
 [[bin]]

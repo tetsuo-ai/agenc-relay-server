@@ -18,7 +18,7 @@ CORPUS_PATH = "conformance/e2ee-mls-corpus.toml"
 WIRE_BUDGET_PATH = "conformance/e2ee-wire-budget.toml"
 INTEROP_PATH = "conformance/e2ee-interop-matrix.toml"
 EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 45) if number != 39]
-PROFILE_TOKEN = "N3G6svCQJGRNBGjQBK8w-6PQBAPk3G8CBa6iCnUmXkU"
+PROFILE_TOKEN = "xw9He-udFDoWNXzfOFBUIUPTJ7wgCzys9qMvyUpfkDU"
 EXPECTED_TARGET = {
     "name": "encrypted-v1",
     "profile_version": 1,
@@ -95,7 +95,7 @@ EXPECTED_EDGE = {
     "plaintext_on_bound_route": "FAIL <command> E2EE_REQUIRED",
     "partition": "FAIL <command> E2EE_SYNCING",
     "queue_while_syncing": False,
-    "private_topic": "Encrypted channel - topic protected by IRC-MLS",
+    "private_topic": "Encrypted channel - topic protected by ARC-MLS",
     "requests_resent_after_ready": True,
 }
 EXPECTED_COORDINATOR = {
@@ -143,37 +143,37 @@ EXPECTED_MODEL = {
     "invariants": ["E2E-02", "E2E-03", "E2E-05", "E2E-06"],
 }
 REQUIRED_SOURCE_SURFACES = (
-    ("crates/agenc-ircd-e2ee/src", "pub fn verify_root_identity"),
-    ("crates/agenc-ircd-e2ee/src", "pub fn verify_roster"),
-    ("crates/agenc-ircd-e2ee/src", "pub fn verify_binding_package"),
-    ("crates/agenc-ircd-e2ee/src", "pub fn verify_commit_object"),
-    ("crates/agenc-ircd-e2ee/src", "pub fn parse_mls_message"),
-    ("crates/agenc-ircd-e2ee/src", "pub struct E2eeAssembler"),
-    ("crates/agenc-ircd-e2ee/src", "pub enum CompanionFrame"),
-    ("crates/agenc-ircd-e2ee/src", "pub struct EcapTuple"),
-    ("crates/agenc-ircd-domain/src/e2ee", "pub struct RouteTable"),
-    ("crates/agenc-ircd-domain/src/e2ee", "pub struct SequencerLog"),
-    ("crates/agenc-ircd-domain/src/e2ee", "pub struct Lifecycle"),
-    ("crates/agenc-ircd-domain/src/e2ee", "pub struct Directory"),
-    ("crates/agenc-ircd-domain/src/e2ee", "pub struct Mailboxes"),
-    ("crates/agenc-ircd-domain/src/e2ee", "pub struct RouteEntitlements"),
-    ("crates/agenc-ircd-storage/src", "pub enum SequencerRow"),
-    ("crates/agenc-ircd-storage/src", "pub struct RouteRow"),
-    ("crates/agenc-ircd-runtime/src/e2ee", "pub struct CompanionCoordinator"),
-    ("crates/agenc-ircd-runtime/src/e2ee", "pub struct E2eeEdge"),
-    ("crates/agenc-ircd-runtime/src/e2ee", "pub(super) fn rebuild"),
-    ("crates/agenc-ircd-runtime/src/federation", "pub(super) struct BarrierState"),
-    ("crates/agenc-ircd-runtime/src", "E2EE_SYNCING"),
-    ("crates/agenc-ircd-runtime/src", "E2EE_REQUIRED"),
-    ("crates/agenc-ircd-testkit/src", "pub fn explore_e2ee(bounds: E2eeModelBounds)"),
+    ("crates/agenc-relay-e2ee/src", "pub fn verify_root_identity"),
+    ("crates/agenc-relay-e2ee/src", "pub fn verify_roster"),
+    ("crates/agenc-relay-e2ee/src", "pub fn verify_binding_package"),
+    ("crates/agenc-relay-e2ee/src", "pub fn verify_commit_object"),
+    ("crates/agenc-relay-e2ee/src", "pub fn parse_mls_message"),
+    ("crates/agenc-relay-e2ee/src", "pub struct E2eeAssembler"),
+    ("crates/agenc-relay-e2ee/src", "pub enum CompanionFrame"),
+    ("crates/agenc-relay-e2ee/src", "pub struct EcapTuple"),
+    ("crates/agenc-relay-domain/src/e2ee", "pub struct RouteTable"),
+    ("crates/agenc-relay-domain/src/e2ee", "pub struct SequencerLog"),
+    ("crates/agenc-relay-domain/src/e2ee", "pub struct Lifecycle"),
+    ("crates/agenc-relay-domain/src/e2ee", "pub struct Directory"),
+    ("crates/agenc-relay-domain/src/e2ee", "pub struct Mailboxes"),
+    ("crates/agenc-relay-domain/src/e2ee", "pub struct RouteEntitlements"),
+    ("crates/agenc-relay-storage/src", "pub enum SequencerRow"),
+    ("crates/agenc-relay-storage/src", "pub struct RouteRow"),
+    ("crates/agenc-relay-runtime/src/e2ee", "pub struct CompanionCoordinator"),
+    ("crates/agenc-relay-runtime/src/e2ee", "pub struct E2eeEdge"),
+    ("crates/agenc-relay-runtime/src/e2ee", "pub(super) fn rebuild"),
+    ("crates/agenc-relay-runtime/src/federation", "pub(super) struct BarrierState"),
+    ("crates/agenc-relay-runtime/src", "E2EE_SYNCING"),
+    ("crates/agenc-relay-runtime/src", "E2EE_REQUIRED"),
+    ("crates/agenc-relay-testkit/src", "pub fn explore_e2ee(bounds: E2eeModelBounds)"),
 )
 FORBIDDEN_PRODUCTION_CRATES = ("openmls", "mls-rs", "mls_rs")
 PRODUCTION_MANIFESTS = (
-    "crates/agenc-ircd-e2ee/Cargo.toml",
-    "crates/agenc-ircd-domain/Cargo.toml",
-    "crates/agenc-ircd-storage/Cargo.toml",
-    "crates/agenc-ircd-runtime/Cargo.toml",
-    "crates/agenc-ircd/Cargo.toml",
+    "crates/agenc-relay-e2ee/Cargo.toml",
+    "crates/agenc-relay-domain/Cargo.toml",
+    "crates/agenc-relay-storage/Cargo.toml",
+    "crates/agenc-relay-runtime/Cargo.toml",
+    "crates/agenc-relay-server/Cargo.toml",
 )
 
 
@@ -411,7 +411,7 @@ def validate_sources(root: Path) -> None:
         tables = tomllib.loads((root / manifest).read_text(encoding="utf-8"))
         # The daemon binary crate may link MLS clients from its integration
         # tests only (companion Section 21 gate 3); no production table may.
-        test_only = manifest == "crates/agenc-ircd/Cargo.toml"
+        test_only = manifest == "crates/agenc-relay-server/Cargo.toml"
         for table_name in ("dependencies", "build-dependencies", "dev-dependencies"):
             if test_only and table_name == "dev-dependencies":
                 continue

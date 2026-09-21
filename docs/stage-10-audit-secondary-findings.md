@@ -39,13 +39,13 @@ the channel's creation time whenever the trusted UTC read was absent.
 
 Code inspected at HEAD:
 
-- `crates/agenc-ircd-domain/src/decision.rs:1223` — `ModeBatch` carries a
+- `crates/agenc-relay-domain/src/decision.rs:1223` — `ModeBatch` carries a
   `setter: Principal` field beside the changes, entry identifiers, key
   verifiers and `created_at`.
-- `crates/agenc-ircd-domain/src/decision.rs:3115` — `plan_modes` populates
+- `crates/agenc-relay-domain/src/decision.rs:3115` — `plan_modes` populates
   `Mutation::ApplyModes` with `setter: principal`, the acting principal
   resolved from the authorized command, and `created_at: inputs.utc_now`.
-- `crates/agenc-ircd-domain/src/decision.rs:4224` and `:4247` — `apply_modes`
+- `crates/agenc-relay-domain/src/decision.rs:4224` and `:4247` — `apply_modes`
   destructures the batch and `apply_mode_change`'s `AddMask` arm constructs
   `ListEntry::new(entry_id, mask, setter, created_at.unwrap_or(channel.created_at))`.
   The setter is the acting operator. `Mutation::ApplyModes` is private to
@@ -54,7 +54,7 @@ Code inspected at HEAD:
 
 The creation-time fallback that the finding also named is unreachable rather
 than merely unused. `mode_requests`
-(`crates/agenc-ircd-domain/src/decision.rs:4505`) pushes a `UtcNow` request
+(`crates/agenc-relay-domain/src/decision.rs:4505`) pushes a `UtcNow` request
 whenever the vector contains an `AddMask`, and `validate_requested_clocks`
 (`:4586`) refuses the plan with `ExternalInputMismatch` unless the supplied
 inputs match the requested clocks exactly. A mask cannot be added without a
@@ -65,7 +65,7 @@ in the same file covers the clock and entropy mismatch matrix.
 **What changed here:** nothing. The finding is recorded as resolved.
 
 **Test that proves it:** `mask_list_entries_record_the_operator_that_added_them`
-(`crates/agenc-ircd-domain/src/decision.rs:10868`) drives a real MODE by a
+(`crates/agenc-relay-domain/src/decision.rs:10868`) drives a real MODE by a
 member promoted to operator through `authorize`, `plan_authorized`,
 `prepare_mutation` and `apply_prepared`, then asserts the stored entry's
 setter equals the acting member's account, differs from the owner's account,
@@ -88,7 +88,7 @@ result, and that creating a free name is distinguishable from the refusal of a
 held secret name.
 
 Architecture Section 14.2 now carries one executable JOIN outcome matrix
-(`docs/ircd-architecture-and-implementation-spec.md:2029`) that reconciles the
+(`docs/arc-architecture-and-implementation-spec.md:2029`) that reconciles the
 Section 13.1 creation rule with the Section 13.5 discovery rule. It requires
 `SECRET_UNAVAILABLE` for every existing hidden channel the requester is not
 authorized to enter, "whether the channel is banned, `+i`, or full", and
@@ -96,7 +96,7 @@ records absent-name creation as a documented outcome bounded only by the
 requester's own session quota and the scope ceiling. That text explicitly
 disposes ZDH-C4.
 
-Code inspected at HEAD, `crates/agenc-ircd-domain/src/decision.rs`:
+Code inspected at HEAD, `crates/agenc-relay-domain/src/decision.rs`:
 
 - `check_join_existing` (`:2919`) runs, in order: existing membership,
   `validate_guest_join` (`:4672`), invite resolution,
@@ -113,7 +113,7 @@ Code inspected at HEAD, `crates/agenc-ircd-domain/src/decision.rs`:
   creation, both identically for absent and existing names.
 
 The error renderings match the matrix:
-`crates/agenc-ircd-runtime/src/client_render.rs:150` maps `LimitExceeded` to
+`crates/agenc-relay-runtime/src/client_render.rs:150` maps `LimitExceeded` to
 `SERVER_BUSY`, the ban and `+i` refusals to `482`, and `SecretUnavailable` to
 the single channel-unavailable failure.
 
@@ -121,7 +121,7 @@ the single channel-unavailable failure.
 
 **Test that proves it:** a new regression,
 `hidden_invite_only_and_banned_joins_report_only_unavailability` in
-`crates/agenc-ircd-testkit/tests/domain_secret_admission.rs`. The existing
+`crates/agenc-relay-testkit/tests/domain_secret_admission.rs`. The existing
 RUN-01 regressions cover the *full* hidden channel and the guest and
 unauthorized-account cases; the `+i` and ban rows of the matrix, which are the
 two the finding named by error code, had no test of their own. The new one
@@ -144,13 +144,13 @@ finding described, and makes the existing
 with `got [LimitExceeded]`. The unmodified source passes both. The daemon-level
 equivalent through the real binary is
 `full_hidden_channel_join_is_unavailable_and_absent_name_is_created` in
-`crates/agenc-ircd/tests/stage_six_daemon/runtime_regressions.rs`.
+`crates/agenc-relay-server/tests/stage_six_daemon/runtime_regressions.rs`.
 
 **Residual:** the Section 13.5 response floor is a separate, still-open item.
 `privacy.secret_lookup_floor_milliseconds` is accepted by the configuration
-(`crates/agenc-ircd-config/src/privacy.rs:60`) and
+(`crates/agenc-relay-config/src/privacy.rs:60`) and
 `SECRET_CHANNEL_FLOOR_MILLIS` and `TimerKind::SecretChannelFloor` exist
-(`crates/agenc-ircd-runtime/src/state_core/timers.rs:26,65`), but nothing in
+(`crates/agenc-relay-runtime/src/state_core/timers.rs:26,65`), but nothing in
 the runtime reads them. That is a timing property, not the outcome divergence
 ZDH-C4 alleged; it is owned by RUN-06 (issue #60, open) and is untouched here.
 
@@ -174,7 +174,7 @@ by refusing the command. An authorization arm would have to distinguish
 absent from hidden in order to refuse, which is precisely the distinction
 PRV-01 forbids, so the decision belongs in the projection.
 
-Code inspected at HEAD, `crates/agenc-ircd-domain/src/projection.rs`:
+Code inspected at HEAD, `crates/agenc-relay-domain/src/projection.rs`:
 
 - `select_channel_list(selected)` (`:407`) is the single selection API. With
   an empty selector it scans the bounded table prefix; with an explicit vector
@@ -189,7 +189,7 @@ Code inspected at HEAD, `crates/agenc-ircd-domain/src/projection.rs`:
   unselected page only.
 
 Both renderers consume that one API:
-`render_list_snapshot` (`crates/agenc-ircd-runtime/src/query_render.rs:118`)
+`render_list_snapshot` (`crates/agenc-relay-runtime/src/query_render.rs:118`)
 sizes its snapshot from `list_scan_bound` and renders `scan.rows()`, and the
 federated `list_frames` (`:1598`) does the same. The Listed-only gate is not
 new — `project_channel_list` was already Listed-only at the audited commit
@@ -200,10 +200,10 @@ added was the named selector, and it was written with the gate inside it.
 
 **Test that proves it:** a new daemon regression,
 `named_list_answers_a_secret_name_exactly_like_an_absent_name` in
-`crates/agenc-ircd/tests/stage_six_daemon/runtime_regressions.rs`. The domain
+`crates/agenc-relay-server/tests/stage_six_daemon/runtime_regressions.rs`. The domain
 already pins the selection semantics
 (`list_selection_hides_secret_unlisted_and_absent_names_identically` in
-`crates/agenc-ircd-domain/src/decision.rs`), but the finding's claim was
+`crates/agenc-relay-domain/src/decision.rs`), but the finding's claim was
 specifically about a daemon resolving names directly, and no test covered a
 named LIST through the real binary. The new one drives the production daemon
 over TLS: an account owner creates a secret channel and a listed one, an
@@ -236,22 +236,22 @@ commit time.
 
 Code inspected at HEAD:
 
-- `crates/agenc-ircd-auth/src/invitation.rs:34` — `invitation_interval_admits`
+- `crates/agenc-relay-auth/src/invitation.rs:34` — `invitation_interval_admits`
   is the single exported predicate for the Section 11.3 rule
   `not_before <= now < expires_at`. START verification, the FINISH recheck and
   the runtime's durable admission all call it.
-- `crates/agenc-ircd-auth/src/service.rs:603` — `evaluate_creation_invitation`
+- `crates/agenc-relay-auth/src/service.rs:603` — `evaluate_creation_invitation`
   now records `not_before` beside `expires_at` in `ValidatedInvitation`, so
   the interval survives into the transaction rather than only its identifier
   and expiry.
-- `crates/agenc-ircd-auth/src/service.rs:650` —
+- `crates/agenc-relay-auth/src/service.rs:650` —
   `finish_account_creation_with_entropy` rechecks the interval against
   `context.now_utc`, the trusted UTC read taken when FINISH is opened, after
   the frozen START disposition and before an account identifier is drawn. A
   refusal returns the same fixed-size rejected completion as every other
   semantic rejection; the transaction is already consumed, so the one-use
   FINISH is spent and no `CreateAccountIntent` exists.
-- `crates/agenc-ircd-runtime/src/account_service.rs:4371` — the same predicate
+- `crates/agenc-relay-runtime/src/account_service.rs:4371` — the same predicate
   is re-evaluated with a fresh trusted UTC read immediately before the finish
   durable set is staged, so latency between the worker's check and staging
   cannot carry an expired invitation into a commit. A reading outside the
@@ -263,11 +263,11 @@ Code inspected at HEAD:
 **Test that proves it:**
 `invited_finish_at_or_after_expiry_is_rejected_inside_the_transaction_ttl` and
 `invited_finish_boundaries_follow_the_exact_interval_and_spare_unrelated_creations`
-in `crates/agenc-ircd-auth/tests/stage_four.rs`, with restart coverage in
+in `crates/agenc-relay-auth/tests/stage_four.rs`, with restart coverage in
 `restored_invited_creation_rechecks_the_invitation_interval_at_finish`
-(`crates/agenc-ircd-auth/tests/stage_four_restart_records.rs`) and durable
+(`crates/agenc-relay-auth/tests/stage_four_restart_records.rs`) and durable
 admission coverage in
-`crates/agenc-ircd-runtime/src/account_service/tests/invitation_window.rs`.
+`crates/agenc-relay-runtime/src/account_service/tests/invitation_window.rs`.
 Disabling the FINISH predicate as a temporary local mutation makes both
 `stage_four` tests fail with
 `assertion left == right failed: FINISH at UTC 20 must reject the expired
@@ -295,20 +295,20 @@ cargo fmt --all
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 python3 scripts/check-source.py check
-cargo test -p agenc-ircd-testkit --locked
-cargo test -p agenc-ircd --locked
-cargo test -p agenc-ircd-domain --locked
-cargo test -p agenc-ircd-auth --locked
+cargo test -p agenc-relay-testkit --locked
+cargo test -p agenc-relay-server --locked
+cargo test -p agenc-relay-domain --locked
+cargo test -p agenc-relay-auth --locked
 ```
 
 Formatting is clean, all-target Clippy with warnings denied passes across the
 workspace, and the source policy passes over 965 Rust files. The two crates
-carrying the new regressions pass in full: `agenc-ircd-testkit` passes 121
-tests with no failures and none ignored, and `agenc-ircd` passes 54 tests with
+carrying the new regressions pass in full: `agenc-relay-testkit` passes 121
+tests with no failures and none ignored, and `agenc-relay-server` passes 54 tests with
 no failures and 18 default-ignored qualification scenarios, including the
 61-second `stage_six_daemon` suite that carries the new named-LIST regression.
 The two crates whose sources the falsification experiments touched were
-restored and re-run: `agenc-ircd-domain` passes 171 tests and `agenc-ircd-auth`
+restored and re-run: `agenc-relay-domain` passes 171 tests and `agenc-relay-auth`
 80 tests with one ignored vector generator, both with no failures.
 
 No production source, wire format, numeric, reply code, registry, configured

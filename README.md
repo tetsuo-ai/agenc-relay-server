@@ -14,28 +14,27 @@
   <img alt="Unsafe Rust forbidden" src="https://img.shields.io/badge/unsafe-forbidden-5234ff?style=flat-square">
 </p>
 
-> [!IMPORTANT]
-> **This is pre-alpha infrastructure. Production qualification is incomplete.**
-> Stages 00 through 09 have revision-bound implementation checkpoints. The
-> [Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
-> closes exact source commit `a93e53e71d22a6d5ec46bd749ec18068a9fa572b`.
-> The daemon implements TLS-only direct, Tor-exit, and onion profiles,
-> coordinator/edge federation, and the E2EE server adapter. Stage 09 adds optional WebSocket transport and
-> plaintext channel history. Production
-> qualification is in progress for [Stage 10](docs/stage-10-qualification.md).
-> Checkpoints do not qualify later source changes.
+## Status
 
-## AgenC Relay
+AgenC Relay is the server for AgenC Relay Chat (ARC). **ARCD** is the daemon;
+`arcd` is its sole executable. This is private, pre-alpha infrastructure.
+Production qualification is incomplete; no release decision has been signed.
 
-AgenC Relay is the ARCD server for ARC, AgenC Relay Chat. Its client surface
-retains IRCv3-derived commands such as `/join`, while accounts, federation,
-and encrypted conversations follow the project's versioned profiles. The
-public names do not alter version-1 wire identifiers or existing deployments.
-The [naming decision](docs/rfcs/agenc-relay-naming.md) records the migration
-boundary. The [AgenC Relay SDK](https://github.com/tetsuo-ai/agenc-relay-sdk)
-will provide the shared client engine, and
-[AgenC Relay Chat](https://github.com/tetsuo-ai/agenc-relay-chat) will own the
-terminal and desktop applications. Both repositories are private during setup.
+The `1.0.0-rc.3` development baseline uses ARC protocol labels and storage
+schema generation 5. Initialize fresh development data. Earlier development
+profiles and databases are rejected. See the [naming RFC](docs/rfcs/agenc-relay-naming.md)
+and [storage baseline](docs/storage-schema-generation-5.md).
+
+| Repository | Responsibility |
+| --- | --- |
+| [agenc-relay-server](https://github.com/tetsuo-ai/agenc-relay-server) | Server, protocol specifications, and conformance fixtures |
+| [agenc-relay-sdk](https://github.com/tetsuo-ai/agenc-relay-sdk) | Shared Rust engine for CLI and GUI consumers; currently a scaffold with an SDK implementation charter |
+| [agenc-relay-chat](https://github.com/tetsuo-ai/agenc-relay-chat) | Terminal and desktop application interfaces; currently repository setup |
+
+The server implements accounts, channels, authenticated coordinator/edge
+federation, opaque MLS delivery, administration, durable storage and recovery,
+and optional WebSocket transport and plaintext channel history. The SDK and
+chat application do not yet implement working clients.
 
 ## What is being built
 
@@ -56,63 +55,6 @@ The project does not invent cryptographic primitives. It defines strict
 profiles around maintained implementations of TLS 1.3, OPAQUE, HPKE, MLS,
 Ed25519, and authenticated storage.
 
-## Current signal
-
-| Stage | State | Outcome |
-| --- | --- | --- |
-| 00 | complete; checkpoint closed | Reproducible workspace, source baseline, policy, and traceability |
-| 01 | complete; checkpoint closed | 62 registry constants, validated types, 132 canonical object codecs, and independent vectors |
-| 02 | complete; checkpoint closed | Incremental framing, client parsing, capability and registration state, bounded rendering, transcripts, and fuzz targets |
-| 03 | complete; checkpoint closed | Pure accounts, sessions, channels, authorization, privacy projections, plans, explicit external inputs, and an independent reference model |
-| 04 | complete; checkpoint closed | Secret-safe crypto adapters, fixed HPKE and OPAQUE profiles, account authentication, destructive-account proofs, bounded workers, and fuzz coverage |
-| 05 | complete; checkpoint closed | Sealed redb records, exact accounting, rollback recovery, bounded checkpoints, full startup reconstruction, signed backup/restore, rekey construction, login-index transition, and native filesystem qualification |
-| 06 | complete; checkpoint closed | Runtime composition, TLS endpoints, account sessions, administration, reload, and shutdown |
-| 07 | complete; checkpoint closed | Authenticated federation, projections, replay, snapshots, partitions, and paged queries |
-| 08 | complete; checkpoint closed | E2EE routing, policy quorum, edge witnesses, durable barriers, and two-library MLS interoperability |
-| 09 | complete; checkpoint closed | Independent WSS and plaintext history profiles, replay-safe paging, and purge |
-| 10 | in progress; no release decision | Production qualification and release evidence |
-
-`agenc-ircd-storage` keeps redb on one blocking owner thread, accepts only
-validated owned batches, seals every numbered-table value, and authenticates
-nonce reservations, manifests, checkpoints, and the external rollback guard.
-Startup opens every record and reconstructs the complete stored domain state
-through a disposable on-disk index before the storage port becomes available.
-Backup, stopped-daemon restore, rekey, login-index transitions, and bounded
-checkpoint work all use resumable authenticated construction records.
-
-Stages 05 through 09 are closed. Stage 06
-composes the runtime: strict configuration, first-run initialization, TLS
-endpoints, transport-profile isolation, the single StateCore owner,
-registration and account sessions, channels and messaging, isolated
-administration with an audit chain, atomic live reload, privacy-bounded
-observability, and hardened shutdown. Stage 07 adds base federation: mutually
-authenticated links with a signed hello, origin lifecycles, idempotent
-requests with durable results, least-information projections and events,
-acknowledged delivery, snapshots and resume, partition handling, paged
-directory queries, and the coordinator and edge roles of the daemon. Stage 08
-adds the E2EE server adapter: exact profile negotiation, public object
-validation, the sequencer with one candidate per epoch that certifies a
-terminal only at the published policy's finality quorum, policy publication,
-KeyPackage and mailbox delivery, route projection to edges with a
-record-chain witness at every edge, the cross-profile durable barrier, a
-coordinator reload from durable rows, the encrypted profile composed in the
-daemon, and a lifecycle driven by two independent MLS libraries. Stage 09 adds optional WSS transport,
-plaintext history, bounded purge and expiry, and authenticated history replay. See the
-[Stage 09 operating instructions](docs/stage-09-operations.md). The complete dependency-ordered roadmap lives in
-[TODO.md](TODO.md). See the
-[Stage 09 checkpoint](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json), the
-[Stage 08 checkpoint](conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json), the
-[Stage 07 checkpoint](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json), the
-[Stage 06 checkpoint](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json), the
-[Stage 05 storage profile](conformance/stage-five-storage-profile.toml), the
-[current Stage 05 checkpoint](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json), the
-[previous Stage 05 checkpoint](conformance/evidence/stage-05-bd7518fe7f5c7420debdbaa958aa444ecb5c80c9.json), the
-[Stage 04 evidence record](conformance/stage-four-evidence.md), the
-[current Stage 04 checkpoint](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json), the
-[previous Stage 04 checkpoint](conformance/evidence/stage-04-1e5b738468f88b238061cc6e84b732176f5cae65.json), the
-[historical Stage 04 checkpoint](conformance/evidence/stage-04-8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb.json), and the
-[latest CI runs](https://github.com/tetsuo-ai/agenc-relay-server/actions).
-
 ## Trust shape
 
 ```text
@@ -127,112 +69,63 @@ plaintext history, bounded purge and expiry, and authenticated history replay. S
 Tor improves network-location privacy; it does not defeat global timing or
 volume correlation. MLS protects encrypted conversation content and group
 state; it does not conceal every delivery relationship. The normative
-[threat model](docs/ircd-architecture-and-implementation-spec.md#5-threat-and-trust-model)
+[threat model](docs/arc-architecture-and-implementation-spec.md#5-threat-and-trust-model)
 states the exact guarantees and limits.
 
-## Verify the current stage
+## Build and verify
 
-The repository pins Rust 1.98.0 and a separate nightly toolchain for fuzz
-targets. Install the exact policy and evidence tool versions listed in the
-[CI workflow](.github/workflows/ci.yml), then run the implementation checks
-from a clean checkout:
+Use the pinned Rust toolchain and the prerequisites in the
+[CI workflow](.github/workflows/ci.yml).
 
 ```sh
 git clone https://github.com/tetsuo-ai/agenc-relay-server.git
 cd agenc-relay-server
+cargo build --workspace --all-features --locked
+cargo test --workspace --all-features --locked
 bash scripts/check-stage-nine.sh
 ```
 
-The Stage 08 implementation checks inherit every Stage 00 through 07 command.
-They add the encrypted profile, object and wire vectors, storage records,
-bounded route model, transcripts, MLS interoperability, load checks, and E2EE
-fuzz targets. The reviewed command list is in
+The Stage 09 gate includes the Stage 00–08 gates, cross-target checks,
+protocol fixtures, coverage, fuzzing, deployment qualification, and the
+optional-feature matrix. Commands are defined in
 [conformance/gates.toml](conformance/gates.toml).
 
-The reviewed `opaque-ke` patch is vendored, hashed, and checked by workspace
-policy. An implementation command alone does not close a stage. Schema version
-2 manifests and artifacts close Stages 00 through 03 for exact source commit
-`1e5b738468f88b238061cc6e84b732176f5cae65`. Stage 00 has 17 passed records,
-Stage 01 has 14, Stage 02 has 12, and Stage 03 has 13. The Stage 04 and
-Stage 05 legibility review changed Stage 04 sources, so the
-[Stage 04 manifest](conformance/evidence/stage-04-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
-with 20 passed records now closes exact source commit
-`4040796f2c21774d58ea7ce54e70a080678e83ac`; its recorded gate ran 50 commands. The
-earlier Stage 04 manifest for `1e5b738468f88b238061cc6e84b732176f5cae65` and the
-schema version 1 records for commit
-`8e7236e82ea15e9d3ae6b2a8f01466e32e48feeb` remain archive-only.
+Previous stage closures apply only to their recorded source commits. They
+are retained in [Git history](https://github.com/tetsuo-ai/agenc-relay-server/tree/1578b639b0aa6a42fececdc9752ab3f258a9ac61/conformance/evidence).
+They do not qualify the ARC baseline. Current evidence must be generated by
+passing the gates at the exact source revision under test; see the
+[evidence procedure](conformance/evidence/README.md).
 
-The [Stage 05 manifest](conformance/evidence/stage-05-4040796f2c21774d58ea7ce54e70a080678e83ac.json)
-contains 39 passed records and closes exact source commit
-`4040796f2c21774d58ea7ce54e70a080678e83ac`. Its recorded gate ran 58 commands.
-Coverage is 90.64% of branches and 95.65% of lines, with all six critical
-regions at 100%. The earlier Stage 05 manifest for
-`bd7518fe7f5c7420debdbaa958aa444ecb5c80c9` remains archive-only. The gate
-includes 191 storage tests, cross-target checks for
-x86_64 and AArch64, signed native ext4 growth reports for both targets, and
-10,000 deterministic runs of each storage fuzz target.
+## Run ARCD
 
-The [Stage 06 manifest](conformance/evidence/stage-06-65cce9d66f7bcfb0c0830a2ab1d42b52bff82942.json)
-contains 55 passed records and closes exact source commit
-`65cce9d66f7bcfb0c0830a2ab1d42b52bff82942`. Its recorded gate ran 75 commands.
-Coverage is 79.79% of branches and 91.79% of lines against the interim 75%
-branch floor, with all six critical regions at 100%. The gate includes the
-Stage 06 requirement set, cross-target checks for x86_64 and AArch64, Loom
-models, 16 transcripts, the deterministic soak, deployment and host
-qualification checks, and 10,000 deterministic runs of each Stage 06 fuzz
-target.
+Follow the [operator guide](docs/operator-guide.md) to initialize keys,
+configuration, certificates, and host controls. The standard layout is
+`/etc/arcd`, `/var/lib/arcd`, `/run/arcd`, and `/var/lib/arcd-operator`.
 
-The [Stage 07 manifest](conformance/evidence/stage-07-1093d88d0057c3461a423285e0f86ff3775c1140.json)
-contains 38 passed records and closes exact source commit
-`1093d88d0057c3461a423285e0f86ff3775c1140`. Its recorded gate ran 85 commands. Coverage is
-77.31% of branches and 90.73% of lines against the interim 75% branch floor,
-with all six critical regions at 100%. The gate adds the Stage 07 requirement
-set, the federated-v1 profile, the transcript catalog over every federation
-layer, the bounded federation model, the three-process daemon test, and
-10,000 deterministic runs of each federation fuzz target to the inherited
-Stage 06 checks.
+```sh
+cargo run -p agenc-relay-server --bin arcd --locked -- --help
+arcd init --help
+arcd check-config --config /etc/arcd/config.toml
+arcd serve --config /etc/arcd/config.toml
+```
 
-The [Stage 08 manifest](conformance/evidence/stage-08-26f0f8029dcad4aad27bff2706c4f0d255a555ba.json)
-contains 159 passed records and closes exact source commit
-`26f0f8029dcad4aad27bff2706c4f0d255a555ba`. Its recorded gate ran 98 commands.
-This checkpoint does not claim that Stage 10 production qualification has
-been completed.
-
-The [Stage 09 manifest](conformance/evidence/stage-09-a93e53e71d22a6d5ec46bd749ec18068a9fa572b.json)
-contains 10 passed records and closes exact source commit
-`a93e53e71d22a6d5ec46bd749ec18068a9fa572b`. Its recorded gate ran 103 commands.
-Coverage reached 75.38% of branches and 90.69% of lines, with all nine critical
-regions at 100%. The gate adds TCP/WSS transcript and stored-state equivalence,
-history lifecycle and encrypted-route refusals, all 16 build/configuration
-combinations and WSS/history fuzz campaigns.
-
-Stage 10 is in progress and has no checkpoint. The release qualification
-runner, the release image and reproducible container build, the storage,
-capacity, drill, source, and claims drivers, the decision inspection in the
-binary, and the release coverage inventory are implemented and described in
-the [Stage 10 qualification notes](docs/stage-10-qualification.md). The
-notes also record the findings the drivers have surfaced so far, the campaigns
-that still have to run, and the external inputs that remain open. No release
-decision has been signed, and no Stage 10 claim applies to any build.
-
-The ARCD binary starts the node with `arcd serve --config <file>` after
-`arcd init` created the layout and `arcd check-config` verified the
-host controls. Every command fails closed on a configuration, secret, or host
-problem; see [docs/operator-guide.md](docs/operator-guide.md).
+Use the configuration path emitted by `init` if you select a custom layout.
+Deployment templates are in [deploy/](deploy). Optional transport and history
+settings are covered by the [operating instructions](docs/stage-09-operations.md).
 
 ## Find your way around
 
 | Path | Purpose |
 | --- | --- |
-| [Architecture specification](docs/ircd-architecture-and-implementation-spec.md) | Base behavior, state ownership, federation, storage, concurrency, security, and release requirements |
-| [E2EE companion](docs/irc-mls-e2ee-extension.md) | MLS identity, objects, ordering, downgrade resistance, and encrypted routes |
+| [Architecture specification](docs/arc-architecture-and-implementation-spec.md) | Base behavior, state ownership, federation, storage, concurrency, security, and release requirements |
+| [E2EE companion](docs/arc-mls-e2ee-extension.md) | MLS identity, objects, ordering, downgrade resistance, and encrypted routes |
 | [Protocol decision ledger](docs/protocol-sources-and-decisions.md) | Adopted, narrowed, superseded, and pinned standards |
 | [`crates/`](crates) | Thirteen-crate Rust workspace with enforced dependency boundaries |
-| [`agenc-ircd-domain`](crates/agenc-ircd-domain) | Pure Stage 03 state, command, decision, event, and projection model |
-| [`agenc-ircd-crypto`](crates/agenc-ircd-crypto) | Stage 04 secret, entropy, hash, AEAD, signature, HPKE, and bounded-worker adapters |
-| [`agenc-ircd-auth`](crates/agenc-ircd-auth) | Stage 04 account-service wire, OPAQUE, creation, login, credential, and deletion state machines |
-| [`agenc-ircd-storage`](crates/agenc-ircd-storage) | Stage 05 redb ownership, sealed records, durable transactions, recovery, backup, and construction codecs |
-| [`agenc-ircd-testkit`](crates/agenc-ircd-testkit) | Independent models, deterministic inputs, fixtures, and transcript support |
+| [`agenc-relay-domain`](crates/agenc-relay-domain) | Pure Stage 03 state, command, decision, event, and projection model |
+| [`agenc-relay-crypto`](crates/agenc-relay-crypto) | Stage 04 secret, entropy, hash, AEAD, signature, HPKE, and bounded-worker adapters |
+| [`agenc-relay-auth`](crates/agenc-relay-auth) | Stage 04 account-service wire, OPAQUE, creation, login, credential, and deletion state machines |
+| [`agenc-relay-storage`](crates/agenc-relay-storage) | Stage 05 redb ownership, sealed records, durable transactions, recovery, backup, and construction codecs |
+| [`agenc-relay-testkit`](crates/agenc-relay-testkit) | Independent models, deterministic inputs, fixtures, and transcript support |
 | [`conformance/`](conformance) | Requirement ledger, evidence catalog, gates, and source policy |
 | [`test-data/`](test-data) | Deterministic vectors, transcripts, generated property cases, fuzz seeds, and reserved later-stage fixtures |
 

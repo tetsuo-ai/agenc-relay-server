@@ -1,8 +1,8 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_e2ee::objects::{TypedBody, decode_body};
-use agenc_ircd_e2ee::{DecodeBudget, IrcWireObject, ObjectId, TlsDecode as _, TlsEncode as _};
+use agenc_relay_e2ee::objects::{TypedBody, decode_body};
+use agenc_relay_e2ee::{DecodeBudget, ArcWireObject, ObjectId, TlsDecode as _, TlsEncode as _};
 use libfuzzer_sys::fuzz_target;
 
 const BUDGET_BYTES: usize = 8 * 1024 * 1024;
@@ -12,10 +12,10 @@ const BUDGET_VALUES: usize = 1_000_000;
 // identity; an accepted typed body re-encodes to the exact envelope body.
 fuzz_target!(|data: &[u8]| {
     let mut budget = DecodeBudget::new(BUDGET_BYTES, BUDGET_VALUES);
-    if IrcWireObject::peek(data).is_err() {
+    if ArcWireObject::peek(data).is_err() {
         return;
     }
-    let Ok(object) = IrcWireObject::decode_exact(data, &mut budget) else {
+    let Ok(object) = ArcWireObject::decode_exact(data, &mut budget) else {
         return;
     };
     let reencoded = object.encode().expect("accepted envelope must re-encode");

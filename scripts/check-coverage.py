@@ -860,7 +860,7 @@ def self_test(root: Path, policy_path: Path) -> int:
 
     path_traversal = copy.deepcopy(policy)
     path_traversal["region"][0]["file"] = (  # type: ignore[index]
-        "crates/agenc-ircd-client-wire/src/../../agenc-ircd-domain/src/decision.rs"
+        "crates/agenc-relay-client-wire/src/../../agenc-relay-domain/src/decision.rs"
     )
     expect_rejection(
         "policy path traversal",

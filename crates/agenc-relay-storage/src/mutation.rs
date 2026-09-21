@@ -1,0 +1,936 @@
+//! Owned, prevalidated storage-only mutation and read plans.
+
+use std::collections::BTreeSet;
+
+use agenc_relay_crypto::{MAX_STORAGE_PLAINTEXT_BYTES, StorageDigest};
+use agenc_relay_types::TransactionId;
+use zeroize::Zeroizing;
+
+use crate::{
+    MAX_SEALED_RECORD_BYTES, MAX_STORED_KEY_BYTES, MAX_TRACKED_MUTATIONS, MAX_TRANSACTION_PLANS,
+    MIN_SEALED_RECORD_BYTES, StorageError, StorageFaultSite, StoredKey, TableId,
+    logical_record_charge,
+};
+
+/// Exact upper bound on one owned storage handoff allocation.
+pub const MAX_STORAGE_MUTATION_BATCH_BYTES: usize = 58_720_240;
+const MAX_TRACKED_MUTATION_BYTES: usize = 16_777_216;
+/// Greatest logical records removed by one retention transaction.
+pub const MAX_RETENTION_DELETIONS: usize = 1_000;
+/// Greatest rows one consistent range read returns.
+const MAX_RANGE_READ_RECORDS: u16 = 4_096;
+/// Greatest key and value bytes one consistent range read copies. A page stops
+/// before the row that would exceed it, so rows larger than the budget still
+/// come back one per page.
+pub(crate) const MAX_RANGE_READ_BYTES: usize = 16_777_216;
+
+/// Existing record metadata required to validate replacement/deletion accounting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExistingRecord {
+    record_schema: u32,
+    sealed_record_id: StorageDigest,
+    sealed_record_bytes: u32,
+}
+
+impl ExistingRecord {
+    /// Validates a current record descriptor.
+    pub fn new(
+        record_schema: u32,
+        sealed_record_id: StorageDigest,
+        sealed_record_bytes: usize,
+    ) -> Result<Self, StorageError> {
+        if record_schema == 0
+            || !(MIN_SEALED_RECORD_BYTES..=MAX_SEALED_RECORD_BYTES).contains(&sealed_record_bytes)
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Ok(Self {
+            record_schema,
+            sealed_record_id,
+            sealed_record_bytes: u32::try_from(sealed_record_bytes)
+                .map_err(|_| StorageError::Overflow)?,
+        })
+    }
+
+    /// Returns the nonzero record schema.
+    #[must_use]
+    pub const fn record_schema(self) -> u32 {
+        self.record_schema
+    }
+
+    /// Returns the complete current envelope identifier.
+    #[must_use]
+    pub const fn sealed_record_id(self) -> StorageDigest {
+        self.sealed_record_id
+    }
+
+    /// Returns the complete current envelope length.
+    #[must_use]
+    pub const fn sealed_record_bytes(self) -> u32 {
+        self.sealed_record_bytes
+    }
+}
+
+/// One complete insertion, replacement, or deletion with no runtime handles.
+pub struct RecordMutation {
+    table: TableId,
+    key: StoredKey,
+    kind: RecordMutationKind,
+}
+
+enum RecordMutationKind {
+    Put {
+        record_schema: u32,
+        before: Option<ExistingRecord>,
+        plaintext: Zeroizing<Vec<u8>>,
+    },
+    Delete {
+        before: ExistingRecord,
+    },
+}
+
+impl RecordMutation {
+    /// Creates an insertion or replacement from a bounded canonical plaintext.
+    pub fn put(
+        table: TableId,
+        key: StoredKey,
+        record_schema: u32,
+        before: Option<ExistingRecord>,
+        plaintext: Vec<u8>,
+    ) -> Result<Self, StorageError> {
+        if record_schema == 0 || plaintext.len() > MAX_STORAGE_PLAINTEXT_BYTES {
+            return Err(StorageError::LimitExceeded);
+        }
+        if before.is_some_and(|record| record.record_schema != record_schema) {
+            return Err(StorageError::UnsupportedVersion);
+        }
+        Ok(Self {
+            table,
+            key,
+            kind: RecordMutationKind::Put {
+                record_schema,
+                before,
+                plaintext: Zeroizing::new(plaintext),
+            },
+        })
+    }
+
+    /// Creates an exact deletion precondition.
+    #[must_use]
+    pub fn delete(table: TableId, key: StoredKey, before: ExistingRecord) -> Self {
+        Self {
+            table,
+            key,
+            kind: RecordMutationKind::Delete { before },
+        }
+    }
+
+    /// Returns the touched table.
+    #[must_use]
+    pub const fn table(&self) -> TableId {
+        self.table
+    }
+
+    /// Borrows the exact touched key.
+    #[must_use]
+    pub const fn key(&self) -> &StoredKey {
+        &self.key
+    }
+
+    pub(crate) const fn before(&self) -> Option<ExistingRecord> {
+        match &self.kind {
+            RecordMutationKind::Put { before, .. } => *before,
+            RecordMutationKind::Delete { before } => Some(*before),
+        }
+    }
+
+    pub(crate) fn resulting_sealed_bytes(&self) -> Result<Option<usize>, StorageError> {
+        match &self.kind {
+            RecordMutationKind::Put { plaintext, .. } => plaintext
+                .len()
+                .checked_add(MIN_SEALED_RECORD_BYTES)
+                .map(Some)
+                .ok_or(StorageError::Overflow),
+            RecordMutationKind::Delete { .. } => Ok(None),
+        }
+    }
+
+    pub(crate) fn plaintext(&self) -> Option<&[u8]> {
+        match &self.kind {
+            RecordMutationKind::Put { plaintext, .. } => Some(plaintext),
+            RecordMutationKind::Delete { .. } => None,
+        }
+    }
+
+    /// Returns the nonzero record codec schema required by the mutation.
+    #[must_use]
+    pub const fn record_schema(&self) -> u32 {
+        match &self.kind {
+            RecordMutationKind::Put { record_schema, .. } => *record_schema,
+            RecordMutationKind::Delete { before } => before.record_schema,
+        }
+    }
+
+    /// Reports whether this mutation durably removes its exact prior envelope.
+    #[must_use]
+    pub const fn is_deletion(&self) -> bool {
+        matches!(self.kind, RecordMutationKind::Delete { .. })
+    }
+}
+
+/// Exact prior accounting state and configured ceilings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageAccountingLimits {
+    /// Current authenticated logical database bytes.
+    pub current_logical_database_bytes: u64,
+    /// Current authenticated backup stream bytes.
+    pub current_backup_stream_bytes: u64,
+    /// Configured logical database ceiling.
+    pub database_max_bytes: u64,
+    /// Configured exact backup stream ceiling.
+    pub backup_max_bytes: u64,
+}
+
+/// Complete owned mutation handoff accepted by the storage owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageMutationHead {
+    /// One transaction identity bound to the complete batch.
+    pub transaction_id: TransactionId,
+    /// Expected prior storage commit sequence.
+    pub expected_storage_commit_sequence: u64,
+    /// Expected prior logical state generation.
+    pub expected_state_generation: u64,
+    /// Exact successor logical state generation.
+    pub resulting_state_generation: u64,
+    /// Number of plans in this batch that advance logical state.
+    pub state_advancing_plan_count: u16,
+    /// Expected prior coordinator response count.
+    pub expected_account_service_response_count: u64,
+    /// Exact successor coordinator response count.
+    pub resulting_account_service_response_count: u64,
+}
+
+/// Complete owned mutation handoff accepted by the storage owner.
+pub struct StorageMutationBatch {
+    transaction_id: TransactionId,
+    expected_storage_commit_sequence: u64,
+    expected_state_generation: u64,
+    resulting_state_generation: u64,
+    state_advancing_plan_count: u16,
+    expected_account_service_response_count: u64,
+    resulting_account_service_response_count: u64,
+    plan_count: u16,
+    seal_count: u32,
+    expected_logical_database_bytes: u64,
+    expected_backup_stream_bytes: u64,
+    resulting_logical_database_bytes: u64,
+    resulting_backup_stream_bytes: u64,
+    mutations: Vec<RecordMutation>,
+    fault_site: Option<StorageFaultSite>,
+}
+
+impl StorageMutationBatch {
+    /// Recomputes every count and byte bound before accepting an owned batch.
+    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=single validation pass binds ordering uniqueness accounting and seal count
+    pub fn new(
+        head: StorageMutationHead,
+        plan_count: usize,
+        accounting: StorageAccountingLimits,
+        mutations: Vec<RecordMutation>,
+    ) -> Result<Self, StorageError> {
+        Self::new_for_scope(head, plan_count, accounting, mutations, MutationScope::Live)
+    }
+
+    /// Checks and orders the exact live mutation contents without allocating a
+    /// transaction identity. The final constructor repeats this same validation.
+    /// `LimitExceeded` here denotes only a count, byte, or accounting ceiling;
+    /// malformed contents retain their specific non-resource error.
+    pub fn preflight_contents(
+        accounting: StorageAccountingLimits,
+        mutations: &mut [RecordMutation],
+    ) -> Result<(), StorageError> {
+        mutation_content(accounting, mutations, MutationScope::Live).map(|_| ())
+    }
+
+    /// Builds an authentication-finish batch containing one exact lazy index migration.
+    pub fn new_login_index_lazy(
+        head: StorageMutationHead,
+        plan_count: usize,
+        accounting: StorageAccountingLimits,
+        mutations: Vec<RecordMutation>,
+    ) -> Result<Self, StorageError> {
+        let login_deletions = mutations
+            .iter()
+            .filter(|mutation| mutation.table() == TableId::LoginIndex && mutation.is_deletion())
+            .count();
+        let login_insertions = mutations
+            .iter()
+            .filter(|mutation| mutation.table() == TableId::LoginIndex && !mutation.is_deletion())
+            .count();
+        let key_state_updates = mutations
+            .iter()
+            .filter(|mutation| {
+                mutation.table() == TableId::LoginIndexKeyState && !mutation.is_deletion()
+            })
+            .count();
+        if login_deletions != 1 || login_insertions != 1 || key_state_updates != 1 {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Self::new(head, plan_count, accounting, mutations)
+            .map(|batch| batch.with_fault_site(StorageFaultSite::LoginIndexLazyMigration))
+    }
+
+    /// Builds one non-state-advancing deletion set with its durable successor cursor.
+    pub fn retention_deletion(
+        head: StorageMutationHead,
+        accounting: StorageAccountingLimits,
+        cursor: RecordMutation,
+        mut deletions: Vec<RecordMutation>,
+    ) -> Result<Self, StorageError> {
+        if deletions.is_empty()
+            || deletions.len() > MAX_RETENTION_DELETIONS
+            || deletions.iter().any(|mutation| !mutation.is_deletion())
+            || cursor.is_deletion()
+            || head.resulting_state_generation != head.expected_state_generation
+            || head.resulting_account_service_response_count
+                != head.expected_account_service_response_count
+            || head.state_advancing_plan_count != 0
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        deletions
+            .try_reserve_exact(1)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        deletions.push(cursor);
+        Self::new(head, 1, accounting, deletions)
+    }
+
+    pub(crate) fn new_construction(
+        head: StorageMutationHead,
+        accounting: StorageAccountingLimits,
+        mutations: Vec<RecordMutation>,
+    ) -> Result<Self, StorageError> {
+        Self::new_for_scope(head, 1, accounting, mutations, MutationScope::Construction)
+    }
+
+    // agenc-review: focus owner=storage reviewed=2026-08-28 reason=single admission transcript binds ordering uniqueness accounting manifest charge and seal count
+    fn new_for_scope(
+        head: StorageMutationHead,
+        plan_count: usize,
+        accounting: StorageAccountingLimits,
+        mut mutations: Vec<RecordMutation>,
+        scope: MutationScope,
+    ) -> Result<Self, StorageError> {
+        if (
+            !(1..=MAX_TRANSACTION_PLANS).contains(&plan_count),
+            mutations.is_empty(),
+            mutations.len() > MAX_TRACKED_MUTATIONS,
+            head.resulting_account_service_response_count
+                < head.expected_account_service_response_count,
+        ) != (false, false, false, false)
+        {
+            return Err(StorageError::LimitExceeded);
+        }
+        let state_generation_delta = head
+            .resulting_state_generation
+            .checked_sub(head.expected_state_generation)
+            .ok_or(StorageError::StaleState)?;
+        if (
+            usize::from(head.state_advancing_plan_count) > plan_count,
+            state_generation_delta != u64::from(head.state_advancing_plan_count),
+        ) != (false, false)
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let response_delta = head
+            .resulting_account_service_response_count
+            .checked_sub(head.expected_account_service_response_count)
+            .ok_or(StorageError::Overflow)?;
+        if response_delta > u64::try_from(plan_count).map_err(|_| StorageError::Overflow)? {
+            return Err(StorageError::InvalidEncoding);
+        }
+        let content = mutation_content(accounting, &mut mutations, scope)?;
+        Ok(Self {
+            transaction_id: head.transaction_id,
+            expected_storage_commit_sequence: head.expected_storage_commit_sequence,
+            expected_state_generation: head.expected_state_generation,
+            resulting_state_generation: head.resulting_state_generation,
+            state_advancing_plan_count: head.state_advancing_plan_count,
+            expected_account_service_response_count: head.expected_account_service_response_count,
+            resulting_account_service_response_count: head.resulting_account_service_response_count,
+            plan_count: u16::try_from(plan_count).map_err(|_| StorageError::Overflow)?,
+            seal_count: content.seal_count,
+            expected_logical_database_bytes: accounting.current_logical_database_bytes,
+            expected_backup_stream_bytes: accounting.current_backup_stream_bytes,
+            resulting_logical_database_bytes: content.logical,
+            resulting_backup_stream_bytes: content.backup,
+            mutations,
+            fault_site: None,
+        })
+    }
+
+    /// Returns the one transaction identity bound to the handoff.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the expected prior commit sequence.
+    #[must_use]
+    pub const fn expected_storage_commit_sequence(&self) -> u64 {
+        self.expected_storage_commit_sequence
+    }
+
+    /// Returns the prior logical generation.
+    #[must_use]
+    pub const fn expected_state_generation(&self) -> u64 {
+        self.expected_state_generation
+    }
+
+    /// Returns the exact successor logical generation.
+    #[must_use]
+    pub const fn resulting_state_generation(&self) -> u64 {
+        self.resulting_state_generation
+    }
+
+    /// Returns the exact number of plans that advance logical state.
+    #[must_use]
+    pub const fn state_advancing_plan_count(&self) -> u16 {
+        self.state_advancing_plan_count
+    }
+
+    /// Returns the expected prior coordinator-sealed response count.
+    #[must_use]
+    pub const fn expected_account_service_response_count(&self) -> u64 {
+        self.expected_account_service_response_count
+    }
+
+    /// Returns the exact successor coordinator-sealed response count.
+    #[must_use]
+    pub const fn resulting_account_service_response_count(&self) -> u64 {
+        self.resulting_account_service_response_count
+    }
+
+    /// Returns the number of compatible logical plans in the batch.
+    #[must_use]
+    pub const fn plan_count(&self) -> u16 {
+        self.plan_count
+    }
+
+    /// Returns the exact reservation length.
+    #[must_use]
+    pub const fn seal_count(&self) -> u32 {
+        self.seal_count
+    }
+
+    /// Returns the authenticated logical charge expected before the batch.
+    #[must_use]
+    pub const fn expected_logical_database_bytes(&self) -> u64 {
+        self.expected_logical_database_bytes
+    }
+
+    /// Returns the authenticated backup-stream length expected before the batch.
+    #[must_use]
+    pub const fn expected_backup_stream_bytes(&self) -> u64 {
+        self.expected_backup_stream_bytes
+    }
+
+    /// Returns the recomputed successor logical charge.
+    #[must_use]
+    pub const fn resulting_logical_database_bytes(&self) -> u64 {
+        self.resulting_logical_database_bytes
+    }
+
+    /// Returns the recomputed successor backup size.
+    #[must_use]
+    pub const fn resulting_backup_stream_bytes(&self) -> u64 {
+        self.resulting_backup_stream_bytes
+    }
+
+    /// Borrows canonical mutations in table/key order.
+    #[must_use]
+    pub fn mutations(&self) -> &[RecordMutation] {
+        &self.mutations
+    }
+
+    pub(crate) fn with_fault_site(mut self, fault_site: StorageFaultSite) -> Self {
+        self.fault_site = Some(fault_site);
+        self
+    }
+
+    pub(crate) const fn fault_site(&self) -> Option<StorageFaultSite> {
+        self.fault_site
+    }
+}
+
+struct MutationContent {
+    logical: u64,
+    backup: u64,
+    seal_count: u32,
+}
+
+struct ContentAccounting {
+    logical: u64,
+    backup: u64,
+    puts: usize,
+    owned: usize,
+    tracked: usize,
+}
+
+fn mutation_content(
+    accounting: StorageAccountingLimits,
+    mutations: &mut [RecordMutation],
+    scope: MutationScope,
+) -> Result<MutationContent, StorageError> {
+    if mutations.is_empty() {
+        return Err(StorageError::InvalidEncoding);
+    }
+    if mutations.len() > MAX_TRACKED_MUTATIONS {
+        return Err(StorageError::LimitExceeded);
+    }
+    mutations.sort_by(|left, right| {
+        (left.table(), left.key().as_bytes()).cmp(&(right.table(), right.key().as_bytes()))
+    });
+    let mut previous = None;
+    let mut totals = ContentAccounting {
+        logical: accounting.current_logical_database_bytes,
+        backup: accounting.current_backup_stream_bytes,
+        puts: 0,
+        owned: 0,
+        tracked: 0,
+    };
+    for mutation in mutations.iter() {
+        let identity = (mutation.table(), mutation.key().as_bytes());
+        if !mutation.table().is_integrity_tracked()
+            || (scope, mutation.table()) == (MutationScope::Live, TableId::StorageConstruction)
+            || previous == Some(identity)
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        previous = Some(identity);
+        totals.add(mutation)?;
+    }
+    totals.finish(accounting, mutations)
+}
+
+impl ContentAccounting {
+    fn add(&mut self, mutation: &RecordMutation) -> Result<(), StorageError> {
+        let key_len = mutation.key().as_bytes().len();
+        self.owned = self
+            .owned
+            .checked_add(key_len)
+            .and_then(|value| value.checked_add(mutation.plaintext().map_or(0, <[u8]>::len)))
+            .ok_or(StorageError::Overflow)?;
+        if let Some(before) = mutation.before() {
+            let before_bytes =
+                usize::try_from(before.sealed_record_bytes).map_err(|_| StorageError::Overflow)?;
+            self.tracked = self
+                .tracked
+                .checked_add(before_bytes)
+                .ok_or(StorageError::Overflow)?;
+            self.logical = self
+                .logical
+                .checked_sub(logical_record_charge(key_len, before_bytes)?)
+                .ok_or(StorageError::StaleState)?;
+            self.backup = self
+                .backup
+                .checked_sub(backup_record_charge(key_len, before_bytes)?)
+                .ok_or(StorageError::StaleState)?;
+        }
+        if let Some(after_bytes) = mutation.resulting_sealed_bytes()? {
+            self.tracked = self
+                .tracked
+                .checked_add(after_bytes)
+                .ok_or(StorageError::Overflow)?;
+            self.puts = self.puts.checked_add(1).ok_or(StorageError::Overflow)?;
+            self.logical = self
+                .logical
+                .checked_add(logical_record_charge(key_len, after_bytes)?)
+                .ok_or(StorageError::Overflow)?;
+            self.backup = self
+                .backup
+                .checked_add(backup_record_charge(key_len, after_bytes)?)
+                .ok_or(StorageError::Overflow)?;
+        }
+        self.tracked = self
+            .tracked
+            .checked_add(key_len)
+            .ok_or(StorageError::Overflow)?;
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        accounting: StorageAccountingLimits,
+        mutations: &[RecordMutation],
+    ) -> Result<MutationContent, StorageError> {
+        let manifest_bytes = manifest_plaintext_bytes(mutations)?
+            .checked_add(MIN_SEALED_RECORD_BYTES)
+            .ok_or(StorageError::Overflow)?;
+        self.logical = self
+            .logical
+            .checked_add(logical_record_charge(8, manifest_bytes)?)
+            .ok_or(StorageError::Overflow)?;
+        self.backup = self
+            .backup
+            .checked_add(backup_record_charge(8, manifest_bytes)?)
+            .ok_or(StorageError::Overflow)?;
+        if self.owned > MAX_STORAGE_MUTATION_BATCH_BYTES
+            || self.tracked > MAX_TRACKED_MUTATION_BYTES
+            || self.logical > accounting.database_max_bytes
+            || self.backup > accounting.backup_max_bytes
+        {
+            return Err(StorageError::LimitExceeded);
+        }
+        let seals = self.puts.checked_add(2).ok_or(StorageError::Overflow)?;
+        Ok(MutationContent {
+            logical: self.logical,
+            backup: self.backup,
+            seal_count: u32::try_from(seals).map_err(|_| StorageError::Overflow)?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MutationScope {
+    Live,
+    Construction,
+}
+
+fn manifest_plaintext_bytes(mutations: &[RecordMutation]) -> Result<usize, StorageError> {
+    let mut bytes = 162_usize;
+    for mutation in mutations
+        .iter()
+        .filter(|mutation| mutation.table().is_integrity_tracked())
+    {
+        let before_identifier = if mutation.before().is_some() { 32 } else { 0 };
+        let after_identifier = if mutation.plaintext().is_some() {
+            32
+        } else {
+            0
+        };
+        bytes = bytes
+            .checked_add(26)
+            .and_then(|value| value.checked_add(mutation.key().as_bytes().len()))
+            .and_then(|value| value.checked_add(before_identifier))
+            .and_then(|value| value.checked_add(after_identifier))
+            .ok_or(StorageError::Overflow)?;
+    }
+    if bytes > crate::MAX_INTEGRITY_PLAINTEXT_BYTES {
+        return Err(StorageError::LimitExceeded);
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn manifest_sealed_record_bytes(
+    mutations: &[RecordMutation],
+) -> Result<usize, StorageError> {
+    manifest_plaintext_bytes(mutations)?
+        .checked_add(MIN_SEALED_RECORD_BYTES)
+        .ok_or(StorageError::Overflow)
+}
+
+fn backup_record_charge(key_bytes: usize, sealed_record_bytes: usize) -> Result<u64, StorageError> {
+    if (
+        key_bytes == 0,
+        key_bytes > MAX_STORED_KEY_BYTES,
+        !(MIN_SEALED_RECORD_BYTES..=MAX_SEALED_RECORD_BYTES).contains(&sealed_record_bytes),
+    ) != (false, false, false)
+    {
+        return Err(StorageError::LimitExceeded);
+    }
+    let bytes = 18_usize
+        .checked_add(key_bytes)
+        .and_then(|value| value.checked_add(sealed_record_bytes))
+        .ok_or(StorageError::Overflow)?;
+    u64::try_from(bytes).map_err(|_| StorageError::Overflow)
+}
+
+/// Bounded consistent read request.
+pub struct ReadPlan {
+    kind: ReadPlanKind,
+}
+
+pub(crate) enum ReadPlanKind {
+    Exact {
+        table: TableId,
+        key: StoredKey,
+    },
+    ExactKeys {
+        table: TableId,
+        keys: Vec<StoredKey>,
+    },
+    Range {
+        table: TableId,
+        start: StoredKey,
+        end: StoredKey,
+        limit: u16,
+    },
+}
+
+impl ReadPlan {
+    /// Reads 1..100 unique keys in one consistent transaction, preserving input order.
+    /// Missing rows are omitted. The caller must verify its expected identities before use.
+    /// Unlike range reads, exceeding the aggregate byte ceiling fails the whole read.
+    pub fn exact_keys(table: TableId, keys: Vec<StoredKey>) -> Result<Self, StorageError> {
+        if keys.is_empty() || keys.len() > crate::history_records::MAX_HISTORY_QUERY_MESSAGES {
+            return Err(StorageError::LimitExceeded);
+        }
+        let mut unique = BTreeSet::new();
+        for key in &keys {
+            crate::table_schema(table).validate_key(key.as_bytes())?;
+            if !unique.insert(key) {
+                return Err(StorageError::InvalidEncoding);
+            }
+        }
+        Ok(Self {
+            kind: ReadPlanKind::ExactKeys { table, keys },
+        })
+    }
+
+    /// Creates one exact read request.
+    #[must_use]
+    pub fn exact(table: TableId, key: StoredKey) -> Self {
+        Self {
+            kind: ReadPlanKind::Exact { table, key },
+        }
+    }
+
+    /// Creates a bounded range request.
+    ///
+    /// A result holds at most `limit` rows and stops early at the byte budget;
+    /// `ReadResult::truncated` says whether rows remain, so callers page from
+    /// the last returned key only while it is set.
+    pub fn range(
+        table: TableId,
+        start: StoredKey,
+        end: StoredKey,
+        limit: u16,
+    ) -> Result<Self, StorageError> {
+        if start >= end || limit == 0 || limit > MAX_RANGE_READ_RECORDS {
+            return Err(StorageError::LimitExceeded);
+        }
+        Ok(Self {
+            kind: ReadPlanKind::Range {
+                table,
+                start,
+                end,
+                limit,
+            },
+        })
+    }
+
+    pub(crate) const fn kind(&self) -> &ReadPlanKind {
+        &self.kind
+    }
+}
+
+/// One raw sealed row returned from a consistent read transaction.
+pub struct ReadRecord {
+    /// Registered table.
+    pub table: TableId,
+    /// Exact stored key.
+    pub key: StoredKey,
+    /// Complete canonical SealedRecord bytes.
+    pub sealed_record: Vec<u8>,
+}
+
+/// Complete bounded consistent-read result.
+pub struct ReadResult {
+    /// Commit sequence observed by the immutable read transaction.
+    pub storage_commit_sequence: u64,
+    /// Rows in canonical table/key order.
+    pub records: Vec<ReadRecord>,
+    /// Whether rows remain in the requested range past the last returned row
+    /// because the row limit or the byte budget stopped the page. Callers
+    /// continue from the last key only when this is set.
+    pub truncated: bool,
+}
+
+/// Successful durable receipt returned only after guard installation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommitReceipt {
+    /// Matching submitted transaction.
+    pub transaction_id: TransactionId,
+    /// Successive authenticated storage commit sequence.
+    pub storage_commit_sequence: u64,
+    /// Resulting logical state generation.
+    pub state_generation: u64,
+    /// Complete committed rollback-guard hash.
+    pub rollback_guard_hash: StorageDigest,
+}
+
+/// Closed storage outcome; uncertainty is never represented as rejection.
+pub enum CommitOutcome {
+    /// Database commit and committed-guard replacement are durable.
+    Committed(CommitReceipt),
+    /// The irreversible commit was proven not to have begun.
+    Rejected(StorageError),
+    /// Persistence may have occurred; the owner is permanently closed.
+    Indeterminate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PersistentRecordValue;
+
+    #[test]
+    fn manifest_and_backup_charge_helpers_reject_their_exact_ceilings() -> Result<(), StorageError>
+    {
+        assert_eq!(
+            backup_record_charge(0, MIN_SEALED_RECORD_BYTES),
+            Err(StorageError::LimitExceeded),
+        );
+        assert_eq!(
+            backup_record_charge(MAX_STORED_KEY_BYTES + 1, MIN_SEALED_RECORD_BYTES),
+            Err(StorageError::LimitExceeded),
+        );
+        assert_eq!(
+            backup_record_charge(1, MIN_SEALED_RECORD_BYTES - 1),
+            Err(StorageError::LimitExceeded),
+        );
+        assert_eq!(
+            backup_record_charge(1, MAX_SEALED_RECORD_BYTES + 1),
+            Err(StorageError::LimitExceeded),
+        );
+
+        let plaintext = PersistentRecordValue::new(
+            TableId::Sanction,
+            1,
+            1,
+            0,
+            None,
+            Vec::new(),
+            crate::domain_records::fixtures::live_body(TableId::Sanction, 1)?,
+        )?
+        .encode()?;
+        let mut mutations = Vec::new();
+        mutations
+            .try_reserve_exact(4_100)
+            .map_err(|_| StorageError::AllocationFailed)?;
+        for index in 0_u64..4_100 {
+            let mut key = vec![0_u8; MAX_STORED_KEY_BYTES];
+            key.get_mut(..8)
+                .ok_or(StorageError::InvalidEncoding)?
+                .copy_from_slice(&index.to_be_bytes());
+            mutations.push(RecordMutation::put(
+                TableId::Sanction,
+                StoredKey::new(key)?,
+                1,
+                None,
+                plaintext.clone(),
+            )?);
+        }
+        assert_eq!(
+            manifest_plaintext_bytes(&mutations),
+            Err(StorageError::LimitExceeded),
+        );
+        Ok(())
+    }
+    fn preflight_row(before: Option<ExistingRecord>) -> Result<RecordMutation, StorageError> {
+        RecordMutation::put(
+            TableId::Sanction,
+            StoredKey::new(vec![1; 18])?,
+            1,
+            before,
+            vec![7; 64],
+        )
+    }
+
+    fn preflight_head() -> StorageMutationHead {
+        StorageMutationHead {
+            transaction_id: TransactionId::from_bytes([8; 16]),
+            expected_storage_commit_sequence: 0,
+            expected_state_generation: 0,
+            resulting_state_generation: 1,
+            state_advancing_plan_count: 1,
+            expected_account_service_response_count: 0,
+            resulting_account_service_response_count: 0,
+        }
+    }
+
+    #[test]
+    fn exact_preflight_and_constructor_share_logical_and_backup_boundaries()
+    -> Result<(), StorageError> {
+        let generous = StorageAccountingLimits {
+            current_logical_database_bytes: 0,
+            current_backup_stream_bytes: 0,
+            database_max_bytes: u64::MAX,
+            backup_max_bytes: u64::MAX,
+        };
+        let measured =
+            StorageMutationBatch::new(preflight_head(), 1, generous, vec![preflight_row(None)?])?;
+        let exact = StorageAccountingLimits {
+            database_max_bytes: measured.resulting_logical_database_bytes(),
+            backup_max_bytes: measured.resulting_backup_stream_bytes(),
+            ..generous
+        };
+        for (limits, accepted) in [
+            (exact, true),
+            (
+                StorageAccountingLimits {
+                    database_max_bytes: exact
+                        .database_max_bytes
+                        .checked_sub(1)
+                        .ok_or(StorageError::Overflow)?,
+                    ..exact
+                },
+                false,
+            ),
+            (
+                StorageAccountingLimits {
+                    backup_max_bytes: exact
+                        .backup_max_bytes
+                        .checked_sub(1)
+                        .ok_or(StorageError::Overflow)?,
+                    ..exact
+                },
+                false,
+            ),
+        ] {
+            let preflight =
+                StorageMutationBatch::preflight_contents(limits, &mut [preflight_row(None)?]);
+            let actual =
+                StorageMutationBatch::new(preflight_head(), 1, limits, vec![preflight_row(None)?]);
+            assert_eq!(preflight.is_ok(), accepted);
+            assert_eq!(actual.is_ok(), accepted);
+            if !accepted {
+                assert_eq!(preflight, Err(StorageError::LimitExceeded));
+                assert_eq!(actual.err(), Some(StorageError::LimitExceeded));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_preflight_preserves_malformed_identity_and_before_image_errors()
+    -> Result<(), StorageError> {
+        let limits = StorageAccountingLimits {
+            current_logical_database_bytes: 0,
+            current_backup_stream_bytes: 0,
+            database_max_bytes: u64::MAX,
+            backup_max_bytes: u64::MAX,
+        };
+        let mut duplicate = vec![preflight_row(None)?, preflight_row(None)?];
+        assert_eq!(
+            StorageMutationBatch::preflight_contents(limits, &mut duplicate),
+            Err(StorageError::InvalidEncoding)
+        );
+        assert_eq!(
+            StorageMutationBatch::new(preflight_head(), 1, limits, duplicate).err(),
+            Some(StorageError::InvalidEncoding)
+        );
+        let before = ExistingRecord::new(1, StorageDigest::from_bytes([4; 32]), 256)?;
+        let mut invalid_before = vec![preflight_row(Some(before))?];
+        assert_eq!(
+            StorageMutationBatch::preflight_contents(limits, &mut invalid_before),
+            Err(StorageError::StaleState)
+        );
+        assert_eq!(
+            StorageMutationBatch::new(preflight_head(), 1, limits, invalid_before).err(),
+            Some(StorageError::StaleState)
+        );
+        Ok(())
+    }
+}

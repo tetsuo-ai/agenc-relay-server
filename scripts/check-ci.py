@@ -132,7 +132,7 @@ REQUIRED_STAGE_THREE = (
     ("python3", "scripts/check-stage-three.py", "check"),
     ("python3", "scripts/check-stage-three.py", "self-test"),
     (
-        "cargo", "nextest", "run", "-p", "agenc-ircd-testkit",
+        "cargo", "nextest", "run", "-p", "agenc-relay-testkit",
         "--test", "domain_channels",
         "--test", "domain_commands",
         "--test", "domain_lifecycle",
@@ -145,10 +145,10 @@ REQUIRED_STAGE_FOUR = (
     ("python3", "scripts/requirements.py", "check-stage-four"),
     ("python3", "scripts/check-stage-four.py", "check"),
     ("python3", "scripts/check-stage-four.py", "self-test"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-auth", "--test", "stage_four", "--locked"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-crypto", "--test", "stage_four", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-auth", "--test", "stage_four", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-crypto", "--test", "stage_four", "--locked"),
     (
-        "cargo", "nextest", "run", "-p", "agenc-ircd-testkit",
+        "cargo", "nextest", "run", "-p", "agenc-relay-testkit",
         "--test", "stage_four_domain_auth", "--locked",
     ),
     ("bash", "scripts/run-stage-four-fuzz.sh"),
@@ -158,10 +158,10 @@ REQUIRED_STAGE_FIVE = (
     ("python3", "scripts/check-stage-five.py", "check"),
     ("python3", "scripts/check-stage-five.py", "self-test"),
     (
-        "cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--all-features", "--locked",
+        "cargo", "nextest", "run", "-p", "agenc-relay-storage", "--all-features", "--locked",
     ),
     (
-        "cargo", "nextest", "run", "-p", "agenc-ircd-storage", "--all-features", "--locked",
+        "cargo", "nextest", "run", "-p", "agenc-relay-storage", "--all-features", "--locked",
         "--profile", "disk",
     ),
     (
@@ -179,11 +179,11 @@ REQUIRED_STAGE_SIX = (
     ("python3", "scripts/requirements.py", "check-stage-six"),
     ("python3", "scripts/check-stage-six.py", "check"),
     ("python3", "scripts/check-stage-six.py", "self-test"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-config", "--all-features", "--locked"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-admin", "--all-features", "--locked"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-runtime", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-config", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-admin", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-runtime", "--all-features", "--locked"),
     (
-        "cargo", "nextest", "run", "-p", "agenc-ircd-testkit",
+        "cargo", "nextest", "run", "-p", "agenc-relay-testkit",
         "--test", "stage_six_persistence", "--locked",
     ),
     ("bash", "scripts/run-stage-six-loom.sh"),
@@ -207,13 +207,13 @@ REQUIRED_STAGE_SEVEN = (
     ("python3", "scripts/requirements.py", "check-stage-seven"),
     ("python3", "scripts/check-stage-seven.py", "check"),
     ("python3", "scripts/check-stage-seven.py", "self-test"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-federation-wire", "--all-features", "--locked"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-domain", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-federation-wire", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-domain", "--all-features", "--locked"),
     (
-        "cargo", "nextest", "run", "-p", "agenc-ircd-storage",
+        "cargo", "nextest", "run", "-p", "agenc-relay-storage",
         "--test", "stage_five", "--locked", "federation_records",
     ),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-crypto", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-crypto", "--all-features", "--locked"),
     ("bash", "scripts/run-stage-seven-model.sh"),
     ("bash", "scripts/run-stage-seven-transcripts.sh"),
     ("bash", "scripts/run-stage-seven-fuzz.sh"),
@@ -225,9 +225,9 @@ REQUIRED_STAGE_EIGHT = (
     ("python3", "scripts/generate-e2ee-wire-budget.py", "--check"),
     ("python3", "scripts/generate-e2ee-vectors.py", "--check"),
     ("python3", "scripts/generate-e2ee-fuzz-seeds.py", "--check"),
-    ("cargo", "nextest", "run", "-p", "agenc-ircd-e2ee", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-e2ee", "--all-features", "--locked"),
     (
-        "cargo", "nextest", "run", "-p", "agenc-ircd-storage",
+        "cargo", "nextest", "run", "-p", "agenc-relay-storage",
         "--test", "stage_five", "--locked", "e2ee_records",
     ),
     ("bash", "scripts/run-stage-eight-model.sh"),
@@ -616,7 +616,7 @@ def self_test(root: Path) -> int:
     if not callable(environment_builder):
         raise CiError("gate runner does not expose reviewed environment construction")
     inherited = {
-        "AGENC_IRCD_RECORD_GATE": "1",
+        "AGENC_RELAY_RECORD_GATE": "1",
         "AGENC_STAGE3_SEED": "1",
         "AGENC_STAGE3_STEPS": "1",
         "BASH_ENV": "/tmp/unreviewed-shell-environment",

@@ -96,7 +96,7 @@ def main() -> None:
     rustc = run(["rustc", "-vV"])
     if f"host: {target}" not in rustc.splitlines() or not rustc.startswith("rustc 1.98.0 "):
         raise ValueError("release build requires the pinned compiler on its native target")
-    subprocess.run(["cargo", "build", "-p", "agenc-ircd", "--bin", "arcd", "--release", "--all-features", "--frozen", "--target", target], env=environment, check=True)
+    subprocess.run(["cargo", "build", "-p", "agenc-relay-server", "--bin", "arcd", "--release", "--all-features", "--frozen", "--target", target], env=environment, check=True)
     binary = output / "target" / target / "release/arcd"
     shutil.copyfile(binary, output / "arcd")
     decisions = tomllib.loads(DECISIONS_PATH.read_text(encoding="utf-8")) if DECISIONS_PATH.is_file() else {}

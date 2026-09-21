@@ -42,8 +42,8 @@ one frame at a time with its batch settled in between, as the daemon does.
 
 The coordinator has no mutation of its own: every event leaves in the plan
 of a client request. So the release is in two steps
-(`crates/agenc-ircd-runtime/src/e2ee/coordinator/direct_release.rs`,
-`RouteEntitlements` in `crates/agenc-ircd-domain/src/e2ee/projection.rs`):
+(`crates/agenc-relay-runtime/src/e2ee/coordinator/direct_release.rs`,
+`RouteEntitlements` in `crates/agenc-relay-domain/src/e2ee/projection.rs`):
 
 1. When hosting may have ended — `EORIGIN DEL`, an `EORIGIN UPDATE` (logout,
    account switch, detach), and `EORIGIN READY` after a replay, where an
@@ -87,14 +87,14 @@ learned by the next `ERESUME` still republishes the old cut.
 
 ## Evidence
 
-- `crates/agenc-ircd-runtime/src/e2ee/coordinator/tests/direct_release.rs`
+- `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/direct_release.rs`
   (real coordinator): a hosted standing is left alone; the real
   `EORIGIN DEL` marks it; the next plan carries `route_state_hidden` to that
   edge and drops the references; a later plan hides nothing more; a standing
   still hosted keeps its reference and leaves the queue after eight looks; a
   pending cut is republished byte for byte while the pair is hosted and
   retired for a fresh, entry-free cut once it is not.
-- `crates/agenc-ircd-runtime/src/e2ee/edge/tests/direct_release_bridged.rs`
+- `crates/agenc-relay-runtime/src/e2ee/edge/tests/direct_release_bridged.rs`
   (the coordinator's rendered lines into the real edge): hosting ends and
   the route leaves the edge's conversations, route objects and route table
   with the link up and both copies acknowledged; a reinstalled edge whose
@@ -102,7 +102,7 @@ learned by the next `ERESUME` still republishes the old cut.
   records READY; an honest cut naming a hosted pair is accepted when the
   counted session closes between BEGIN and the entry, and the same cut is
   refused by an edge that never hosted the pair.
-- `crates/agenc-ircd-domain/src/e2ee/tests/projection.rs`: the departing
+- `crates/agenc-relay-domain/src/e2ee/tests/projection.rs`: the departing
   queue, its looks, the release, and the fences that clear it.
 
 ## Limitations

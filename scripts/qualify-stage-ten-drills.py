@@ -89,18 +89,18 @@ def host_checks(root: Path, attempt: Path) -> dict[str, bool]:
     with tempfile.TemporaryDirectory(prefix="agenc-stage10-deploy-") as scratch:
         scratch_root = Path(scratch)
         (scratch_root / "usr/bin").mkdir(parents=True)
-        dropin = scratch_root / "etc/systemd/system/agenc-ircd.service.d"
+        dropin = scratch_root / "etc/systemd/system/arcd.service.d"
         dropin.mkdir(parents=True)
-        for tool in ("agenc-ircd", "setfacl"):
+        for tool in ("arcd", "setfacl"):
             shutil.copyfile("/bin/true", scratch_root / "usr/bin" / tool)
             (scratch_root / "usr/bin" / tool).chmod(0o755)
-        shutil.copyfile(root / "deploy/systemd/agenc-ircd.service", scratch_root / "etc/systemd/system/agenc-ircd.service")
+        shutil.copyfile(root / "deploy/systemd/arcd.service", scratch_root / "etc/systemd/system/arcd.service")
         for target in ("sysinit", "basic", "multi-user", "network-online"):
             (scratch_root / f"etc/systemd/system/{target}.target").write_text("[Unit]\nDescription=Stage 10 drill target\n")
         for profile in DEPLOY_PROFILES:
             shutil.copyfile(root / "deploy/systemd/profiles" / profile, dropin / "20-address-families.conf")
             command(root, attempt, f"systemd-analyze-{profile}",
-                    ["systemd-analyze", f"--root={scratch_root}", "verify", "agenc-ircd.service"], 300)
+                    ["systemd-analyze", f"--root={scratch_root}", "verify", "arcd.service"], 300)
         results["systemd_profiles"] = True
         tor_root = scratch_root / "tor"
         for name in ("data", "onion"):

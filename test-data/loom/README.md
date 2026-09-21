@@ -4,7 +4,7 @@ Record model names, schedule bounds, and minimized concurrency regressions
 here. Executable Loom tests remain in their owning crate.
 
 `models.toml` lists every model in
-`crates/agenc-ircd-runtime/tests/loom_models.rs` with its thread count, the
+`crates/agenc-relay-runtime/tests/loom_models.rs` with its thread count, the
 operations it interleaves, the property it asserts, and the Section 27
 invariants it supports. The bounds recorded there are set explicitly by the
 test through `loom::model::Builder` (`preemption_bound = 2`,
@@ -15,7 +15,7 @@ crate; it never enters the release graph.
 Two scopes appear in `models.toml`:
 
 - `production source under the loom scheduler`: the storage bridge source
-  (`crates/agenc-ircd-runtime/src/bridge/storage.rs`) is compiled unchanged
+  (`crates/agenc-relay-runtime/src/bridge/storage.rs`) is compiled unchanged
   into the test through a `#[path]` module under a loom replacement of the
   crate-local `sync` alias, so every interleaving of its mutex-guarded
   ledger transitions is enumerated.

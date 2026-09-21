@@ -1,0 +1,16 @@
+[package]
+name = "agenc-relay-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+history = []
+
+[dependencies]
+agenc-relay-types.workspace = true
+
+[lints]
+workspace = true

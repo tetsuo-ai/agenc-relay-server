@@ -1,8 +1,8 @@
 #![no_main]
 #![forbid(unsafe_code)]
 
-use agenc_ircd_e2ee::DecodeBudget;
-use agenc_ircd_e2ee::mls_outer::{
+use agenc_relay_e2ee::DecodeBudget;
+use agenc_relay_e2ee::mls_outer::{
     MlsOuterMessage, parse_mls_message, verify_key_package_signatures,
 };
 use libfuzzer_sys::fuzz_target;

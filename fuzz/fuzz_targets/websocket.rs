@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![no_main]
 
-use agenc_ircd_client_wire::{
+use agenc_relay_client_wire::{
     ClientWebSocketFrame, MAX_WEBSOCKET_MESSAGE_BYTES, WebSocketEvent, WebSocketOpcode,
     WebSocketSubprotocol, WebSocketWire,
 };

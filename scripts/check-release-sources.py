@@ -45,7 +45,7 @@ def fetch_json(url: str) -> tuple[bytes, Any]:
     """Fetch one HTTPS status record with a bounded body."""
     if urllib.parse.urlsplit(url).scheme != "https":
         raise QualificationError("primary-source checks require HTTPS")
-    request = urllib.request.Request(url, headers={"User-Agent": "agenc-ircd-release-qualification/1", "Accept": "application/json"})
+    request = urllib.request.Request(url, headers={"User-Agent": "agenc-relay-release-qualification/1", "Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
         if urllib.parse.urlsplit(response.geturl()).scheme != "https":
             raise QualificationError("primary source redirected away from HTTPS")

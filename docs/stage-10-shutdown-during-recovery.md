@@ -3,7 +3,7 @@
 This record covers RUN-05 (issue #64). The gap it closes is missing focused
 evidence, not a reproduced defect: the production-capacity harness calls
 `wait_for_federation_drain` before every stop
-(`crates/agenc-ircd/tests/stage_eight_e2ee/stage_ten_capacity.rs`), so until
+(`crates/agenc-relay-server/tests/stage_eight_e2ee/stage_ten_capacity.rs`), so until
 now no test stopped a daemon while federation recovery was live and
 acknowledgement work was still outstanding. CAP-14's original failure is not
 reproducible on the current source and is not claimed here.
@@ -84,10 +84,10 @@ All three use in-crate fixtures over real storage:
 
 - `StateCoreFixture::with_federation_coordinator` for the coordinator cases,
   with the scripted `Edge` and `Origin` peers of
-  `crates/agenc-ircd-runtime/src/federation/coordinator/tests/harness.rs`;
+  `crates/agenc-relay-runtime/src/federation/coordinator/tests/harness.rs`;
 - `StateCoreFixture::with_edge` for the edge case, with the scripted `Hub`
   and `Client` of
-  `crates/agenc-ircd-runtime/src/federation/edge/tests/harness.rs`;
+  `crates/agenc-relay-runtime/src/federation/edge/tests/harness.rs`;
 - `StateCoreFixture::restart_registration_storage` for the reopen, which
   stops the storage owner and opens the same directory again through the
   ordinary rollback-guard path.
@@ -114,7 +114,7 @@ capacity driver's workload.
   millisecond and the actor loop closes it at its own deadline, so the
   regressions here hold a *submitted* batch whose receipt is withheld. The
   existing step-mode coverage in
-  `crates/agenc-ircd-runtime/src/federation/coordinator/tests/combined_barriers.rs`
+  `crates/agenc-relay-runtime/src/federation/coordinator/tests/combined_barriers.rs`
   and `.../tests/account_shutdown.rs` keeps the unsubmitted-batch boundary.
 - Combined cross-profile barriers are held pending only in the existing
   `combined_barriers` suite; the new stops do not carry a companion profile.
@@ -125,8 +125,8 @@ capacity driver's workload.
 
 Sources:
 
-- `crates/agenc-ircd-runtime/src/federation/coordinator/tests/shutdown_recovery.rs`
-- `crates/agenc-ircd-runtime/src/federation/edge/tests/shutdown_recovery.rs`
+- `crates/agenc-relay-runtime/src/federation/coordinator/tests/shutdown_recovery.rs`
+- `crates/agenc-relay-runtime/src/federation/edge/tests/shutdown_recovery.rs`
 
 Both files are test-only modules under a `tests` path component; the two
 harnesses gain one `mod` line each. No production handler changed, so this
@@ -135,22 +135,22 @@ work adds no wire or storage format, no dependency pin and no limit.
 Commands and results at this branch:
 
 ```sh
-cargo test -p agenc-ircd-runtime --all-features --locked --lib shutdown_recovery
+cargo test -p agenc-relay-runtime --all-features --locked --lib shutdown_recovery
 # 3 passed; 0 failed; 1498 filtered out
 
-cargo test -p agenc-ircd-runtime --all-features --locked --test shutdown
+cargo test -p agenc-relay-runtime --all-features --locked --test shutdown
 # 11 passed; 0 failed
 
-cargo test -p agenc-ircd-runtime --all-features --locked --lib account_shutdown
+cargo test -p agenc-relay-runtime --all-features --locked --lib account_shutdown
 # 6 passed; 0 failed
 
-cargo test -p agenc-ircd-runtime --all-features --locked --lib ordinary_batch
+cargo test -p agenc-relay-runtime --all-features --locked --lib ordinary_batch
 # 24 passed; 0 failed
 
-cargo test -p agenc-ircd-runtime --all-features --locked --lib combined_barriers
+cargo test -p agenc-relay-runtime --all-features --locked --lib combined_barriers
 # 32 passed; 0 failed
 
-cargo test -p agenc-ircd-runtime --all-features --locked
+cargo test -p agenc-relay-runtime --all-features --locked
 # 1,500 unit tests pass with one ignored, and every integration target passes:
 # bridge_crypto 8, bridge_storage 6, e2ee_load 1, federation_link 16,
 # idle_connection_memory 2, listener_accept 22, loom_models 6, shutdown 11,
