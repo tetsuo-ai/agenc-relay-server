@@ -1,0 +1,1533 @@
+{
+  "schema_version": 2,
+  "gate": "stage-nine-implementation",
+  "gate_manifest_sha256": "8e7ba12c4123d44cacb066c5368fb4b637a07f4bbc342b43559b2f3d0659b14d",
+  "toolchain_policy_sha256": "975452dacaa7c7be41e7fe2d712240b69668dd556f71bf6de5430b58b35a3d0e",
+  "toolchain": [
+    {
+      "name": "rustc",
+      "argv": [
+        "rustc",
+        "--version"
+      ],
+      "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+    },
+    {
+      "name": "cargo",
+      "argv": [
+        "cargo",
+        "--version"
+      ],
+      "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+    },
+    {
+      "name": "cargo-fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--version"
+      ],
+      "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+    },
+    {
+      "name": "rustfmt",
+      "argv": [
+        "rustfmt",
+        "--version"
+      ],
+      "version": "rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)"
+    },
+    {
+      "name": "cargo-clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--version"
+      ],
+      "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "clippy-driver",
+        "--version"
+      ],
+      "version": "clippy 0.1.98 (88d9e12ae1 2026-08-18)"
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "rustdoc",
+        "--version"
+      ],
+      "version": "rustdoc 1.98.0 (88d9e12ae 2026-08-18)"
+    },
+    {
+      "name": "cargo-deny",
+      "argv": [
+        "cargo",
+        "deny",
+        "--version"
+      ],
+      "version": "cargo-deny 0.20.2"
+    },
+    {
+      "name": "cargo-audit",
+      "argv": [
+        "cargo",
+        "audit",
+        "--version"
+      ],
+      "version": "cargo-audit-audit 0.22.2"
+    },
+    {
+      "name": "cargo-llvm-cov",
+      "argv": [
+        "cargo",
+        "llvm-cov",
+        "--version"
+      ],
+      "version": "cargo-llvm-cov 0.9.0"
+    },
+    {
+      "name": "cargo-nextest",
+      "argv": [
+        "cargo",
+        "nextest",
+        "-V"
+      ],
+      "version": "cargo-nextest 0.9.145 (00af4550e 2026-09-16)"
+    },
+    {
+      "name": "rust-llvm-cov",
+      "argv": [
+        "python3",
+        "scripts/check-rust-components.py",
+        "probe",
+        "llvm-cov"
+      ],
+      "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+    },
+    {
+      "name": "rust-llvm-profdata",
+      "argv": [
+        "python3",
+        "scripts/check-rust-components.py",
+        "probe",
+        "llvm-profdata"
+      ],
+      "version": "LLVM (http://llvm.org/):\n  LLVM version 22.1.8-rust-1.98.0-stable\n  Optimized build."
+    },
+    {
+      "name": "nightly-rustc",
+      "argv": [
+        "rustup",
+        "run",
+        "nightly-2026-08-24",
+        "rustc",
+        "--version"
+      ],
+      "version": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)"
+    },
+    {
+      "name": "nightly-cargo",
+      "argv": [
+        "rustup",
+        "run",
+        "nightly-2026-08-24",
+        "cargo",
+        "--version"
+      ],
+      "version": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)"
+    },
+    {
+      "name": "nightly-cargo-fmt",
+      "argv": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "fmt",
+        "--version"
+      ],
+      "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+    },
+    {
+      "name": "nightly-rustfmt",
+      "argv": [
+        "rustup",
+        "run",
+        "nightly-2026-08-24",
+        "rustfmt",
+        "--version"
+      ],
+      "version": "rustfmt 1.10.0-nightly (fb6531d550 2026-08-23)"
+    },
+    {
+      "name": "cargo-fuzz",
+      "argv": [
+        "cargo",
+        "fuzz",
+        "--version"
+      ],
+      "version": "cargo-fuzz 0.13.2"
+    }
+  ],
+  "limitations": [
+    "Command output is not captured.",
+    "Bash, external shell utilities such as awk and coreutils, Python, Git, the Rustup selector and version, PATH and executable locations, Cargo and Rustup homes, ignored build caches, installed target presence, and the default native compiler, archiver, linker, and runtime-library identities remain external inputs.",
+    "Reviewed outcome-affecting environment overrides are stripped.",
+    "Cargo audit and deny advisory database revisions, freshness, and network state are not captured.",
+    "Exact-source test attestation is not a hermetic-build or broad security proof."
+  ],
+  "argv": [
+    "python3",
+    "scripts/run-gate.py",
+    "stage-nine-implementation"
+  ],
+  "tool": {
+    "name": "agenc-relay-gate-runner",
+    "version": "b0d824073391c1ee35b3169d6e636900235027a1b4f135856ba4a8f0804de6b7"
+  },
+  "source_commit": "b477e1be87370b3ecef7462a4b3e9b474467df1b",
+  "source_sha256": "fb93a8fa823dfbdea840039b40d52ba539e7cd8c4a930d7de776910ee0f0ca4e",
+  "lock_sha256": "80194ea23b875f43814dcd92ca898e4d54b816ebbd9f7072852676a4bf357466",
+  "target": "x86_64-unknown-linux-gnu",
+  "features": [
+    "all-features"
+  ],
+  "started_at": "2026-09-21T03:55:51.355135Z",
+  "ended_at": "2026-09-21T04:03:55.790380Z",
+  "result": "passed",
+  "exit_code": 0,
+  "command_results": [
+    {
+      "argv": [
+        "bash",
+        "scripts/check-spec.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.356984Z",
+      "ended_at": "2026-09-21T03:55:51.458866Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-baseline.py"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.459135Z",
+      "ended_at": "2026-09-21T03:55:51.613991Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.614192Z",
+      "ended_at": "2026-09-21T03:55:51.709860Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-zero"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.709992Z",
+      "ended_at": "2026-09-21T03:55:51.806905Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.807092Z",
+      "ended_at": "2026-09-21T03:55:51.927423Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-workspace.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.927577Z",
+      "ended_at": "2026-09-21T03:55:51.992215Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-workspace.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.993449Z",
+      "ended_at": "2026-09-21T03:55:52.071944Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-source.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:52.072166Z",
+      "ended_at": "2026-09-21T03:56:07.511761Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-source.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:07.511971Z",
+      "ended_at": "2026-09-21T03:56:07.549353Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-evidence.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:07.549567Z",
+      "ended_at": "2026-09-21T03:56:07.626139Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-evidence.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:07.626378Z",
+      "ended_at": "2026-09-21T03:56:10.447545Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-ci.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:10.447788Z",
+      "ended_at": "2026-09-21T03:56:10.528001Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-ci.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:10.528261Z",
+      "ended_at": "2026-09-21T03:56:10.927417Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-rust-components.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:10.927650Z",
+      "ended_at": "2026-09-21T03:56:12.079805Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:12.080045Z",
+      "ended_at": "2026-09-21T03:56:15.144507Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.357812Z",
+      "ended_at": "2026-09-21T03:55:51.898806Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.357468Z",
+      "ended_at": "2026-09-21T03:55:51.791674Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--target",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.357659Z",
+      "ended_at": "2026-09-21T03:55:51.891114Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.357918Z",
+      "ended_at": "2026-09-21T03:55:51.898263Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "--workspace",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.358109Z",
+      "ended_at": "2026-09-21T03:57:53.616630Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:57:53.617360Z",
+      "ended_at": "2026-09-21T03:57:55.457220Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--workspace",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:15.144795Z",
+      "ended_at": "2026-09-21T03:56:15.282913Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "deny",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:15.283252Z",
+      "ended_at": "2026-09-21T03:56:15.966343Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "audit",
+        "--deny",
+        "warnings"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:15.966616Z",
+      "ended_at": "2026-09-21T03:56:16.914342Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-coverage.py",
+        "self-test",
+        "conformance/critical-coverage.toml"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:16.914646Z",
+      "ended_at": "2026-09-21T03:56:17.934850Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "llvm-cov",
+        "nextest",
+        "--workspace",
+        "--all-features",
+        "--branch",
+        "--locked",
+        "--json",
+        "--output-path",
+        "target/stage-zero-coverage.json"
+      ],
+      "environment": {
+        "RUSTC_BOOTSTRAP": "1"
+      },
+      "started_at": "2026-09-21T03:57:53.617391Z",
+      "ended_at": "2026-09-21T04:00:45.742848Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-coverage.py",
+        "check",
+        "target/stage-zero-coverage.json",
+        "conformance/critical-coverage.toml"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:00:45.743788Z",
+      "ended_at": "2026-09-21T04:00:47.354993Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-one"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:17.935141Z",
+      "ended_at": "2026-09-21T03:56:18.034944Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-one.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.035154Z",
+      "ended_at": "2026-09-21T03:56:18.240719Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-one.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.240948Z",
+      "ended_at": "2026-09-21T03:56:18.269498Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-two"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.269752Z",
+      "ended_at": "2026-09-21T03:56:18.365527Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/generate-stage-two.py",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.365825Z",
+      "ended_at": "2026-09-21T03:56:18.382950Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-two.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.383180Z",
+      "ended_at": "2026-09-21T03:56:18.440040Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-two.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.440323Z",
+      "ended_at": "2026-09-21T03:56:18.471286Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "fmt",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.358464Z",
+      "ended_at": "2026-09-21T03:55:51.405040Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "check",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--bins",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.405291Z",
+      "ended_at": "2026-09-21T03:55:51.878253Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "deny",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.878493Z",
+      "ended_at": "2026-09-21T03:55:52.597678Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-two-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:52.597959Z",
+      "ended_at": "2026-09-21T03:56:07.136993Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-three"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.471561Z",
+      "ended_at": "2026-09-21T03:56:18.575373Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/generate-stage-three.py",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.575673Z",
+      "ended_at": "2026-09-21T03:56:18.589695Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-three.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.589948Z",
+      "ended_at": "2026-09-21T03:56:18.637725Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-three.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.637979Z",
+      "ended_at": "2026-09-21T03:56:18.662824Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-testkit",
+        "--test",
+        "domain_channels",
+        "--test",
+        "domain_commands",
+        "--test",
+        "domain_lifecycle",
+        "--test",
+        "domain_reference_model",
+        "--test",
+        "domain_stage_three_matrix",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.358956Z",
+      "ended_at": "2026-09-21T03:55:53.054487Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-four"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.663064Z",
+      "ended_at": "2026-09-21T03:56:18.764622Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-four.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.764919Z",
+      "ended_at": "2026-09-21T03:56:18.810149Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-four.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.810404Z",
+      "ended_at": "2026-09-21T03:56:18.837415Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-auth",
+        "--test",
+        "stage_four",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:53.054846Z",
+      "ended_at": "2026-09-21T03:56:00.792122Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-crypto",
+        "--test",
+        "stage_four",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:00.792464Z",
+      "ended_at": "2026-09-21T03:56:05.473630Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-testkit",
+        "--test",
+        "stage_four_domain_auth",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:05.473977Z",
+      "ended_at": "2026-09-21T03:56:05.723816Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-four-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:07.137388Z",
+      "ended_at": "2026-09-21T03:56:14.195091Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-five"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.837640Z",
+      "ended_at": "2026-09-21T03:56:18.944547Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-five.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.944826Z",
+      "ended_at": "2026-09-21T03:56:18.972680Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-five.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.972886Z",
+      "ended_at": "2026-09-21T03:56:18.996031Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-storage",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.359424Z",
+      "ended_at": "2026-09-21T03:57:21.399330Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-storage",
+        "--all-features",
+        "--locked",
+        "--profile",
+        "disk"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:03:19.639748Z",
+      "ended_at": "2026-09-21T04:03:55.790188Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "fmt",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:14.195395Z",
+      "ended_at": "2026-09-21T03:56:14.258083Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "check",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--bins",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:14.258399Z",
+      "ended_at": "2026-09-21T03:56:14.362733Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "deny",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:14.363031Z",
+      "ended_at": "2026-09-21T03:56:15.088288Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-five-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:15.088720Z",
+      "ended_at": "2026-09-21T03:56:16.357013Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-six"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.996265Z",
+      "ended_at": "2026-09-21T03:56:19.100147Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-six.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.100396Z",
+      "ended_at": "2026-09-21T03:56:19.163064Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-six.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.163313Z",
+      "ended_at": "2026-09-21T03:56:19.189812Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-config",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:05.724199Z",
+      "ended_at": "2026-09-21T03:56:06.061569Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-admin",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:06.061903Z",
+      "ended_at": "2026-09-21T03:56:06.432768Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-runtime",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:06.433104Z",
+      "ended_at": "2026-09-21T03:56:43.914155Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-testkit",
+        "--test",
+        "stage_six_persistence",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:43.914828Z",
+      "ended_at": "2026-09-21T03:56:44.159383Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-six-loom.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.359659Z",
+      "ended_at": "2026-09-21T03:55:51.895819Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-six-transcripts.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:00:45.743862Z",
+      "ended_at": "2026-09-21T04:01:50.067478Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-six-soak.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:01:50.067809Z",
+      "ended_at": "2026-09-21T04:01:50.191685Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-deploy.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.190061Z",
+      "ended_at": "2026-09-21T03:56:19.212625Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-deploy.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.212795Z",
+      "ended_at": "2026-09-21T03:56:19.238072Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/qualify-stage-six.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.238251Z",
+      "ended_at": "2026-09-21T03:56:19.346712Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "fmt",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:16.357298Z",
+      "ended_at": "2026-09-21T03:56:16.401164Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "check",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--bins",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:16.401395Z",
+      "ended_at": "2026-09-21T03:56:16.458960Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "deny",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:16.459194Z",
+      "ended_at": "2026-09-21T03:56:17.111479Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-six-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:17.111719Z",
+      "ended_at": "2026-09-21T03:56:17.922616Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-seven"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.346963Z",
+      "ended_at": "2026-09-21T03:56:19.447969Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-seven.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.448256Z",
+      "ended_at": "2026-09-21T03:56:19.512873Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-seven.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.513092Z",
+      "ended_at": "2026-09-21T03:56:19.542584Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-federation-wire",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:44.159715Z",
+      "ended_at": "2026-09-21T03:56:44.394903Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-domain",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:44.395194Z",
+      "ended_at": "2026-09-21T03:56:45.294181Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-storage",
+        "--test",
+        "stage_five",
+        "--locked",
+        "federation_records"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:57:21.399682Z",
+      "ended_at": "2026-09-21T03:57:21.610837Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-crypto",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:45.294504Z",
+      "ended_at": "2026-09-21T03:56:49.658960Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-seven-model.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:01:50.191859Z",
+      "ended_at": "2026-09-21T04:01:54.037886Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-seven-transcripts.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:01:54.038180Z",
+      "ended_at": "2026-09-21T04:02:18.789059Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-seven-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:17.922982Z",
+      "ended_at": "2026-09-21T03:56:18.822745Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-eight"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.542774Z",
+      "ended_at": "2026-09-21T03:56:19.650604Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-eight.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.650810Z",
+      "ended_at": "2026-09-21T03:56:19.736288Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-eight.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.736561Z",
+      "ended_at": "2026-09-21T03:56:19.771080Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/generate-e2ee-wire-budget.py",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.771307Z",
+      "ended_at": "2026-09-21T03:56:19.785640Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/generate-e2ee-vectors.py",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.785835Z",
+      "ended_at": "2026-09-21T03:56:19.822683Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/generate-e2ee-fuzz-seeds.py",
+        "--check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.823030Z",
+      "ended_at": "2026-09-21T03:56:18.842567Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-e2ee",
+        "--all-features",
+        "--locked"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:49.659290Z",
+      "ended_at": "2026-09-21T03:56:51.781926Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "agenc-relay-storage",
+        "--test",
+        "stage_five",
+        "--locked",
+        "e2ee_records"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:57:21.611131Z",
+      "ended_at": "2026-09-21T03:57:21.837497Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-eight-model.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:02:18.789465Z",
+      "ended_at": "2026-09-21T04:02:18.889119Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-eight-transcripts.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:02:18.889281Z",
+      "ended_at": "2026-09-21T04:03:19.524229Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-eight-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:18.842789Z",
+      "ended_at": "2026-09-21T03:56:20.925373Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-eight-load.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T04:03:19.524647Z",
+      "ended_at": "2026-09-21T04:03:19.639344Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/test-release-qualification.py"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:19.822911Z",
+      "ended_at": "2026-09-21T03:56:24.988085Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/requirements.py",
+        "check-stage-nine"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:24.988366Z",
+      "ended_at": "2026-09-21T03:56:25.095323Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-nine.py",
+        "check"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:25.095582Z",
+      "ended_at": "2026-09-21T03:56:25.124756Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "scripts/check-stage-nine.py",
+        "self-test"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:25.124984Z",
+      "ended_at": "2026-09-21T03:56:25.152768Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/check-stage-nine-matrix.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:55:51.359791Z",
+      "ended_at": "2026-09-21T03:56:35.277356Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-nine-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:20.925780Z",
+      "ended_at": "2026-09-21T03:56:21.609025Z",
+      "exit_code": 0
+    },
+    {
+      "argv": [
+        "bash",
+        "scripts/run-stage-nine-history-fuzz.sh"
+      ],
+      "environment": {},
+      "started_at": "2026-09-21T03:56:21.609332Z",
+      "ended_at": "2026-09-21T03:56:22.057924Z",
+      "exit_code": 0
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "EVID-ARCH-PRV-03",
+      "kind": "normative-requirement"
+    },
+    {
+      "evidence_id": "EVID-ARCH-REQ-09CFFBA54F24F91ED37D",
+      "kind": "normative-requirement"
+    },
+    {
+      "evidence_id": "EVID-ARCH-STA-05",
+      "kind": "normative-requirement"
+    },
+    {
+      "evidence_id": "EVID-ARCH-STA-09",
+      "kind": "normative-requirement"
+    },
+    {
+      "evidence_id": "EVID-S09-001-WSS",
+      "kind": "wss-profile"
+    },
+    {
+      "evidence_id": "EVID-S09-002-EQUIVALENCE",
+      "kind": "transport-equivalence"
+    },
+    {
+      "evidence_id": "EVID-S09-003-HISTORY",
+      "kind": "plaintext-history"
+    },
+    {
+      "evidence_id": "EVID-S09-004-ENCRYPTED-EXCLUSION",
+      "kind": "encrypted-history-exclusion"
+    },
+    {
+      "evidence_id": "EVID-S09-005-PROFILE-MATRIX",
+      "kind": "optional-profile-matrix"
+    },
+    {
+      "evidence_id": "EVID-S09-900-STAGE-GATE",
+      "kind": "stage-gate"
+    }
+  ]
+}
