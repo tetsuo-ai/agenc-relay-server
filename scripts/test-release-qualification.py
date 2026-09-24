@@ -1127,7 +1127,7 @@ class DependencyDecisionTests(unittest.TestCase):
 
     def sbom(self, decisions: dict) -> dict:
         packages = [{"SPDXID": f"SPDXRef-Package-{index}", "name": entry["name"], "versionInfo": "0.0.0", "downloadLocation": "NOASSERTION",
-                     "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION"}
+                     "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "MIT OR Apache-2.0", "copyrightText": "NOASSERTION"}
                     for index, entry in enumerate(decisions["workspace"])]
         packages.append({"SPDXID": "SPDXRef-Package-90", "name": "opaque-ke", "versionInfo": "4.0.1", "downloadLocation": "NOASSERTION",
                          "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "MIT OR Apache-2.0", "copyrightText": "NOASSERTION"})
@@ -1165,13 +1165,14 @@ class DependencyDecisionTests(unittest.TestCase):
             ("tokio", lambda sbom: sbom["packages"][-3].__setitem__("licenseDeclared", "NOASSERTION")),
             ("opaque-ke", lambda sbom: sbom["packages"][-4].__setitem__("licenseDeclared", "NOASSERTION")),
             ("workspace", lambda sbom: sbom["packages"].pop(0)),
+            ("does not declare", lambda sbom: sbom["packages"][0].__setitem__("licenseDeclared", "NOASSERTION")),
             ("download", lambda sbom: sbom["packages"].append({"SPDXID": "SPDXRef-Package-99", "name": "mystery", "versionInfo": "1", "downloadLocation": "NOASSERTION", "licenseDeclared": "MIT"})),
             ("SPDX", lambda sbom: sbom.__setitem__("spdxVersion", "SPDX-2.2")),
         ]
         for label, mutate in cases:
             changed = self.sbom(decisions)
             mutate(changed)
-            with self.subTest(label=label), self.assertRaisesRegex(QualificationError, label if label in ("libc6", "tokio", "opaque-ke", "mystery") else "."):
+            with self.subTest(label=label), self.assertRaisesRegex(QualificationError, label if label in ("libc6", "tokio", "opaque-ke", "mystery", "does not declare") else "."):
                 check_dependency_decisions(changed, decisions, libraries)
         with self.assertRaisesRegex(QualificationError, "native libraries differ"):
             check_dependency_decisions(self.sbom(decisions), decisions, [self.LIBC])

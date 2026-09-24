@@ -25,6 +25,7 @@ BUILD_FIELDS = {"schema_version", "source", "target", "features", "image", "sour
                 "notices_sha256", "archive", "archive_sha256", "tools", "logs"}
 DECISIONS_PATH = "conformance/release-dependency-decisions.toml"
 PURL = re.compile(r"pkg:deb/ubuntu/([a-z0-9][a-z0-9+.-]*)@([A-Za-z0-9:.+~-]+)\?arch=([a-z0-9-]+)\Z")
+WORKSPACE_LICENSE = "MIT OR Apache-2.0"
 SPDX_EXPRESSION = re.compile(r"[A-Za-z0-9.+-]+(?: WITH [A-Za-z0-9.+-]+)?(?: (?:AND|OR) [A-Za-z0-9.+-]+(?: WITH [A-Za-z0-9.+-]+)?)*\Z")
 MAX_SBOM_PACKAGES = 4096
 
@@ -81,6 +82,8 @@ def check_dependency_decisions(sbom: dict[str, Any], decisions: dict[str, Any], 
             continue
         if package.get("downloadLocation") == "NOASSERTION":
             if name in workspace:
+                if package.get("licenseDeclared") != WORKSPACE_LICENSE:
+                    raise QualificationError(f"workspace package {name} does not declare {WORKSPACE_LICENSE}")
                 summary["workspace"].append(name)
             elif (name, package.get("versionInfo")) in patched and package.get("licenseDeclared") != "NOASSERTION":
                 summary["patched"].append(f"{name} {package.get('versionInfo')}")

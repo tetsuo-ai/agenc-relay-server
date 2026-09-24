@@ -136,5 +136,38 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing code or specification
 changes. Security findings belong in the private process described by
 [SECURITY.md](SECURITY.md), never in a public issue.
 
-No software license has been selected yet. Until a `LICENSE` file is added,
-this repository is not offered under an open-source license.
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+These terms cover everything in this repository, in this and every earlier
+revision, except the material below. Third-party material keeps its own terms,
+including:
+
+- the vendored crates under [`vendor/`](vendor), which carry their upstream
+  license files; the AgenC changes recorded in their `AGENC-PATCH.md` files
+  are offered under the same dual license;
+- the IETF RFC texts under [`rfcs/`](rfcs);
+- the upstream source context in the client patches under
+  [`conformance/clients/`](conformance/clients) (WeeChat, GPL-3.0-or-later;
+  Irssi, GPL-2.0-or-later) and in the redb patch under
+  [`docs/upstream/`](docs/upstream) (MIT OR Apache-2.0);
+- the MLS interoperability vectors under
+  [`test-data/interoperability/mls/`](test-data/interoperability/mls), taken
+  from `mlswg/mls-implementations` under that project's terms.
+
+The artwork under [`assets/`](assets) is not licensed under these terms, and
+neither license grants trademark rights to the AgenC or AgenC Relay names or
+logos.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

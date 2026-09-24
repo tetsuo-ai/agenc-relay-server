@@ -9,67 +9,67 @@ schema_version = 1
 [[workspace]]
 name = "agenc-relay-server"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-admin"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-auth"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-client-wire"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-config"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-crypto"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-domain"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-e2ee"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-federation-wire"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-runtime"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-storage"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-testkit"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
 name = "agenc-relay-types"
 decision = "accept"
-note = "Path package inside this repository, identified by the candidate source hash; the project has no license file yet, so no license is asserted."
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[patched]]
 name = "opaque-ke"

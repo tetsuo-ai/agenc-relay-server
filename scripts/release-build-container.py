@@ -111,7 +111,10 @@ def main() -> None:
     metadata = json.loads(run(["cargo", "metadata", "--all-features", "--frozen", "--format-version", "1"]))
     lock = tomllib.loads(Path("Cargo.lock").read_text())
     checksums = {(item["name"], item["version"], item.get("source")): item.get("checksum") for item in lock["package"]}
-    packages, notices = [], []
+    packages, notices = [], ["AgenC Relay workspace packages\n"]
+    for notice in sorted(Path(".").iterdir()):
+        if notice.is_file() and notice.name.upper().startswith(("LICENSE", "COPYING", "NOTICE")):
+            notices.append(notice.name + "\n" + notice.read_text(errors="replace") + "\n")
     for index, package in enumerate(sorted(metadata["packages"], key=lambda item: item["id"])):
         checksum = checksums.get((package["name"], package["version"], package["source"]))
         item = {"SPDXID": f"SPDXRef-Package-{index}", "name": package["name"], "versionInfo": package["version"],

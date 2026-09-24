@@ -398,6 +398,7 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
         "version": "1.0.0-rc.3",
         "edition": EDITION,
         "rust-version": RUST_VERSION,
+        "license": "MIT OR Apache-2.0",
         "publish": False,
     }
     if package != expected_package:
@@ -511,7 +512,7 @@ def validate_package_manifest(manifest_path: Path, manifest: dict[str, object]) 
     package = manifest.get("package")
     if not isinstance(package, dict) or package.get("name") not in CRATE_NAMES:
         raise WorkspaceError(f"invalid package metadata in {manifest_path}")
-    for field in ("version", "edition", "rust-version", "publish"):
+    for field in ("version", "edition", "rust-version", "license", "publish"):
         if package.get(field) != {"workspace": True}:
             raise WorkspaceError(f"{manifest_path} does not inherit package.{field}")
     if manifest.get("lints") != {"workspace": True}:
@@ -1112,6 +1113,15 @@ def self_test(root: Path) -> int:
         "unreviewed binary external dev dependency",
         lambda: validate_package_manifest(binary_manifest_path, extra_external_dev),
         "external dependency set differs",
+    )
+    cases += 1
+
+    unlicensed = copy.deepcopy(binary_manifest)
+    del unlicensed["package"]["license"]  # type: ignore[index]
+    expect_rejection(
+        "package without the workspace license",
+        lambda: validate_package_manifest(binary_manifest_path, unlicensed),
+        "does not inherit package.license",
     )
     cases += 1
 

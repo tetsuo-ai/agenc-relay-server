@@ -174,8 +174,8 @@ SPDX license expression for a native package comes only from
 `conformance/release-dependency-decisions.toml`, which names the reviewed
 expression for an exact package, version, architecture, and copyright
 digest. The same file records an explicit decision for each workspace crate,
-which has no download location and no license file, and for the patched
-`opaque-ke` tree. `build-release.py verify`, the reproducibility job, refuses
+a path package with no download location that declares the workspace license
+`MIT OR Apache-2.0`, and for the patched `opaque-ke` tree. `build-release.py verify`, the reproducibility job, refuses
 a build whose SBOM still carries a `NOASSERTION` without a matching decision.
 A rebuilt image with a newer libc therefore fails until the new version is
 reviewed and recorded.
@@ -194,9 +194,10 @@ build logs. The dependency report includes build and test dependencies as well
 as production dependencies. `NOASSERTION` identifies unavailable license or
 native-package information and must be resolved during release review.
 
-The workspace currently uses version `0.0.0`; source-qualified archive names
-identify development candidates without inventing a release version or a
-license for the project.
+Source-qualified archive names (`arcd-<commit>-<target>.tar.gz`) identify
+development candidates without inventing a release version.
+`THIRD-PARTY-NOTICES.txt` begins with the repository's `LICENSE-MIT` and
+`LICENSE-APACHE` texts for the workspace packages.
 
 ## Required campaign lengths
 
