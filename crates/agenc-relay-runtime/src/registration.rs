@@ -91,6 +91,8 @@ struct RegistrationRuntimeConfig {
     display_name: Arc<str>,
     allow_guests: bool,
     access_token: Option<Zeroizing<[u8; 32]>>,
+    /// The epoch `agenc.ag/recovery` advertises, repeated by the welcome NOTE.
+    recovery_epoch: RecoveryEpoch,
 }
 
 struct NicknameLease {
@@ -284,6 +286,7 @@ impl RegistrationRouter {
                 display_name: Arc::from(display_name),
                 allow_guests,
                 access_token,
+                recovery_epoch,
             },
             advertised,
             accounts: hosted.map(AccountServiceCoordinator::new).transpose()?,
@@ -2403,12 +2406,30 @@ impl RegistrationRouter {
                     .map_err(|_| RuntimeError::InvalidValue)?,
                 ),
                 WelcomeStep::Motd => self.append_motd(context, target, &mut frames)?,
-                WelcomeStep::RecoveryEpoch
-                | WelcomeStep::AccountState
-                | WelcomeStep::RegistrationBatches => {}
+                WelcomeStep::RecoveryEpoch => frames.push(self.recovery_epoch_note()?),
+                WelcomeStep::AccountState | WelcomeStep::RegistrationBatches => {}
             }
         }
         Ok(frames)
+    }
+
+    /// `NOTE * RECOVERY_EPOCH <epoch> :Current server recovery identity`, the
+    /// welcome group the state machine plans only for a connection that
+    /// negotiated `agenc.ag/recovery` (architecture 10.2 step 5). That
+    /// standalone capability enables the reply by itself, so, like the
+    /// account-service NOTEs, it is not gated on `standard-replies`.
+    fn recovery_epoch_note(&self) -> Result<WireMessage, RuntimeError> {
+        WireMessage::new(
+            &self.config.server_prefix,
+            "NOTE",
+            &[
+                "*",
+                agenc_relay_types::PublicErrorCode::RECOVERYEPOCH.as_str(),
+                &self.config.recovery_epoch.to_base64url(),
+            ],
+            Some("Current server recovery identity"),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
     }
 
     #[cfg(feature = "history")]
@@ -3938,6 +3959,10 @@ mod e2ee_line_tests;
 #[cfg(test)]
 #[path = "registration/tests/core_lines.rs"]
 mod core_line_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/welcome.rs"]
+mod welcome_tests;
 
 #[cfg(test)]
 mod tests {
