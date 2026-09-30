@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 999
-reviewed_source_sha256 = "ae827d4ea87de1a062a77ba8fc396afe4dbc137b581bbe7c22a6cd0c30bb5320"
+reviewed_source_sha256 = "0c26cf3ddeb855284eb1f65936823f39a87b307952e809918dd85a600db75f1e"
 deferred = []
 
 [[region]]
@@ -7543,7 +7543,7 @@ id = "cap13-registration-index-refreshed"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/registration.rs"
 item = "index_refreshed"
-source_sha256 = "a3bfe1450a3b28fea62176f1b1cca6611523edd5f73a59fecbde9aad6933ba89"
+source_sha256 = "b8f8c3267219288d46d354e17e1760a70fd2c25e79148941d8aec21972dd550e"
 start_line = 3254
 end_line = 3259
 span_sha256 = "8c4281019a6c9db3d359e4615563bbe5b1568d083dcd98e6d10451010d6c936c"
@@ -12979,7 +12979,7 @@ id = "edge-account-response-phase"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/registration.rs"
 item = "edge_account_answer"
-source_sha256 = "a3bfe1450a3b28fea62176f1b1cca6611523edd5f73a59fecbde9aad6933ba89"
+source_sha256 = "b8f8c3267219288d46d354e17e1760a70fd2c25e79148941d8aec21972dd550e"
 start_line = 3803
 end_line = 3847
 span_sha256 = "a66a7f9827662924da299693d580cb6e4c878d73b88ac3a49bed62ccbdbb6f19"

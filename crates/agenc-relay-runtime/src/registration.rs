@@ -2415,9 +2415,9 @@ impl RegistrationRouter {
 
     /// `NOTE * RECOVERY_EPOCH <epoch> :Current server recovery identity`, the
     /// welcome group the state machine plans only for a connection that
-    /// negotiated `agenc.ag/recovery` (architecture 10.2 step 5). That
-    /// standalone capability enables the reply by itself, so, like the
-    /// account-service NOTEs, it is not gated on `standard-replies`.
+    /// negotiated `agenc.ag/recovery` (architecture 10.2 step 5). That capability
+    /// enables it alone: ungated like `NOTE ACCTCREATE`/`ACCTCRED`, unlike the
+    /// `standard-replies`-gated `NOTE ACCT` and `NOTE CHANCTL` replies.
     fn recovery_epoch_note(&self) -> Result<WireMessage, RuntimeError> {
         WireMessage::new(
             &self.config.server_prefix,
