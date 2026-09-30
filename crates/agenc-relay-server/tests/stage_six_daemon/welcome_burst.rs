@@ -1,7 +1,8 @@
-//! Architecture 10.2 step 5 through the production binary: a guest that
-//! negotiated `agenc.ag/recovery` receives `NOTE * RECOVERY_EPOCH` with the
-//! epoch its `CAP LS` pinned, right after the MOTD group and as the last line
-//! of the burst; a guest that did not negotiate it receives no NOTE.
+//! Architecture 10.2 step 5 through the production binary: a guest, or a
+//! client that authenticated with SASL before registration, that negotiated
+//! `agenc.ag/recovery` receives `NOTE * RECOVERY_EPOCH` with the epoch its
+//! `CAP LS` pinned, right after the MOTD group and as the last line of the
+//! burst; a connection that did not negotiate it receives no NOTE.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -24,10 +25,17 @@ fn command(line: &str) -> &str {
 }
 
 /// Registers `nickname` on a fresh connection after negotiating `request`
-/// (`None` never starts CAP). Input that arrives behind the registration
-/// commit runs after the welcome, so the PONG of a PING sent last proves that
-/// nothing of the burst is still in flight.
-fn welcomed(fixture: &LiveFixture, nickname: &str, request: Option<&str>) -> TestResult<Welcomed> {
+/// (`None` never starts CAP) and, when `login` names an account and a request
+/// seed, after authenticating to that account with SASL before registration.
+/// Input that arrives behind the registration commit runs after the welcome,
+/// so the PONG of a PING sent last proves that nothing of the burst is still
+/// in flight.
+fn welcomed(
+    fixture: &LiveFixture,
+    nickname: &str,
+    request: Option<&str>,
+    login: Option<(AccountId, u8)>,
+) -> TestResult<Welcomed> {
     let mut client = ArcClient::connect(fixture)?;
     let mut advertised = Vec::new();
     if let Some(request) = request {
@@ -37,6 +45,15 @@ fn welcomed(fixture: &LiveFixture, nickname: &str, request: Option<&str>) -> Tes
         })?;
         let acknowledged = client.send_until(&format!("CAP REQ :{request}"), " CAP * ")?;
         assert_contains(&acknowledged, &format!(" CAP * ACK :{request}"))?;
+    }
+    if let Some((account_id, request_seed)) = login {
+        authenticate_live_account(
+            &mut client,
+            fixture,
+            ACCOUNT_PASSWORD,
+            request_seed,
+            account_id,
+        )?;
     }
     client.send(&format!("NICK {nickname}"))?;
     client.send(&format!("USER {nickname} 0 * :Welcome Burst"))?;
@@ -64,7 +81,7 @@ fn production_daemon_sends_the_recovery_note_only_to_a_recovery_client() -> Test
     let mut daemon = DaemonProcess::start(&fixture.config_path)?;
     let epoch = RecoveryEpoch::from_bytes(FIXTURE_RECOVERY_EPOCH).to_base64url();
 
-    let recovery = welcomed(&fixture, "keeper", Some("agenc.ag/recovery"))?;
+    let recovery = welcomed(&fixture, "keeper", Some("agenc.ag/recovery"), None)?;
     assert_contains(
         &recovery.advertised,
         &format!("agenc.ag/recovery=v1.{epoch}"),
@@ -92,10 +109,15 @@ fn production_daemon_sends_the_recovery_note_only_to_a_recovery_client() -> Test
     );
 
     // standard-replies neither replaces nor gates the recovery capability.
-    let both = welcomed(&fixture, "both", Some("agenc.ag/recovery standard-replies"))?;
+    let both = welcomed(
+        &fixture,
+        "both",
+        Some("agenc.ag/recovery standard-replies"),
+        None,
+    )?;
     assert_eq!(both.burst.last(), recovery.burst.last());
     for (nickname, request) in [("replies", Some("standard-replies")), ("plain", None)] {
-        let quiet = welcomed(&fixture, nickname, request)?;
+        let quiet = welcomed(&fixture, nickname, request, None)?;
         assert!(
             quiet.burst.iter().all(|line| command(line) != "NOTE"),
             "no NOTE without agenc.ag/recovery: {:?}",
@@ -111,6 +133,73 @@ fn production_daemon_sends_the_recovery_note_only_to_a_recovery_client() -> Test
 
     let mut admin = AdminClient::connect(&fixture)?;
     admin.confirm_process("DIE :welcome burst complete")?;
+    assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
+    Ok(())
+}
+
+#[test]
+fn production_daemon_sends_the_recovery_note_after_preregistration_sasl() -> TestResult {
+    let fixture = LiveFixture::create()?;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let epoch = RecoveryEpoch::from_bytes(FIXTURE_RECOVERY_EPOCH).to_base64url();
+    let account_id = {
+        let mut creation = ArcClient::connect(&fixture)?;
+        creation.negotiate_sasl()?;
+        create_live_account(&mut creation, &fixture)?
+    };
+
+    // SASL completes (903) before CAP END. Step 6, the authenticated account
+    // state, is not implemented, so nothing comes between the MOTD group and
+    // the NOTE yet, and the burst matches the unauthenticated one.
+    let recovery = welcomed(
+        &fixture,
+        "signed",
+        Some("sasl agenc.ag/recovery"),
+        Some((account_id, 50)),
+    )?;
+    assert_contains(
+        &recovery.advertised,
+        &format!("agenc.ag/recovery=v1.{epoch}"),
+    )?;
+    let codes: Vec<&str> = recovery.burst.iter().map(|line| command(line)).collect();
+    assert_eq!(
+        codes,
+        [
+            "001", "002", "003", "004", "005", "005", "005", "251", "422", "NOTE"
+        ],
+        "{:?}",
+        recovery.burst
+    );
+    let server = recovery
+        .burst
+        .first()
+        .and_then(|line| line.split(' ').next())
+        .ok_or_else(|| failure("the welcome has no prefix"))?;
+    assert_eq!(
+        recovery.burst.last().map(String::as_str),
+        Some(
+            format!("{server} NOTE * RECOVERY_EPOCH {epoch} :Current server recovery identity")
+                .as_str()
+        )
+    );
+
+    // The same authenticated registration without the capability ends with
+    // the MOTD group.
+    let quiet = welcomed(&fixture, "unsigned", Some("sasl"), Some((account_id, 52)))?;
+    assert!(
+        quiet.burst.iter().all(|line| command(line) != "NOTE"),
+        "no NOTE without agenc.ag/recovery: {:?}",
+        quiet.burst
+    );
+    assert_eq!(
+        quiet.burst.last().map(|line| command(line)),
+        Some("422"),
+        "{:?}",
+        quiet.burst
+    );
+
+    let mut admin = AdminClient::connect(&fixture)?;
+    admin.confirm_process("DIE :welcome burst after SASL complete")?;
     assert!(daemon.wait()?.success(), "{}", fixture.log_excerpt());
     Ok(())
 }

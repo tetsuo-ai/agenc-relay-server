@@ -116,6 +116,8 @@ mod stage_ten_capacity;
 mod stage_ten_drills;
 #[path = "stage_eight_e2ee/stage_ten_login_index.rs"]
 mod stage_ten_login_index;
+#[path = "stage_eight_e2ee/welcome_recovery.rs"]
+mod welcome_recovery;
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 /// The edge registers a client only once its coordinator link is ACTIVE;
 /// registration attempts before that fail closed and are retried.
