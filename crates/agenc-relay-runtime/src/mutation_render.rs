@@ -1405,6 +1405,27 @@ fn session_prefix(session: &agenc_relay_domain::SessionState) -> Result<String, 
     ))
 }
 
+/// What a `900` names for one authenticated session in this node's domain.
+/// A session that is missing, holds no account, or names an account the
+/// domain does not hold has no logged-in state.
+pub(crate) fn logged_in(
+    domain: &DomainState,
+    user_id: UserId,
+) -> Result<crate::client_render::LoggedIn, RuntimeError> {
+    let session = domain.session(user_id).ok_or(RuntimeError::InvalidValue)?;
+    let account_id = session.account_id().ok_or(RuntimeError::InvalidValue)?;
+    let account = domain
+        .account(account_id)
+        .ok_or(RuntimeError::InvalidValue)?;
+    Ok(crate::client_render::LoggedIn {
+        mask: session_prefix(session)?,
+        label: account
+            .label()
+            .map_or("*", agenc_relay_domain::AccountLabelValue::as_str)
+            .to_owned(),
+    })
+}
+
 pub(crate) fn server_time(timestamp: UtcSecond) -> Result<String, RuntimeError> {
     let seconds = timestamp.get();
     let days = seconds / 86_400;

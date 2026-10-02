@@ -1,10 +1,11 @@
-//! Architecture 10.2 step 5 through a production edge daemon: a client that
-//! negotiated `agenc.ag/recovery` and authenticated with SASL before
-//! registration receives `NOTE * RECOVERY_EPOCH` with the epoch the edge's
-//! `CAP LS` pinned, right after the MOTD group and as the last line of the
-//! burst; the same registration without the capability receives no NOTE.
-//! Step 6, the authenticated account state, is not implemented, so nothing
-//! comes between the MOTD group and the NOTE yet.
+//! Architecture 10.2 steps 5 and 6 through a production edge daemon: a
+//! client that negotiated `agenc.ag/recovery` and authenticated with SASL
+//! before registration receives `NOTE * RECOVERY_EPOCH` with the epoch the
+//! edge's `CAP LS` pinned, right after the MOTD group; the same registration
+//! without the capability receives no NOTE. Either burst ends with the
+//! authenticated account state, a `900` whose mask is the session's own
+//! prefix, which the edge reads from the session projection its coordinator
+//! installed.
 #![forbid(unsafe_code)]
 
 use super::stage_ten_drills::wait_for_account_authority;
@@ -14,11 +15,13 @@ use super::*;
 const BARRIER: &str = "welcome-end";
 
 /// One authenticated registration: the advertised capability lines, every
-/// line from `RPL_WELCOME` up to the barrier PONG, which is excluded, and the
+/// line from `RPL_WELCOME` up to the barrier PONG, which is excluded, the
+/// session's own prefix as the echo of its first JOIN shows it, and the
 /// registered connection, which stays open until the scenario ends.
 struct Welcomed {
     advertised: Vec<String>,
     burst: Vec<String>,
+    prefix: String,
     _client: ArcClient,
 }
 
@@ -73,9 +76,17 @@ fn authenticated_welcome(
         .iter()
         .position(|line| command(line) == "001")
         .ok_or_else(|| failure(format!("no welcome in {lines:?}")))?;
+    let joined = client.send_until(&format!("JOIN #{nickname}"), " JOIN ")?;
+    let prefix = joined
+        .last()
+        .and_then(|line| line.split(' ').next())
+        .and_then(|prefix| prefix.strip_prefix(':'))
+        .ok_or_else(|| failure(format!("no JOIN echo in {joined:?}")))?
+        .to_owned();
     Ok(Welcomed {
         advertised,
         burst: lines.split_off(first),
+        prefix,
         _client: client,
     })
 }
@@ -111,38 +122,59 @@ fn recovery_note_on_an_edge(
         .ok_or_else(|| failure(format!("no recovery epoch in {:?}", recovery.advertised)))?;
     assert_eq!(epoch.len(), 22, "{:?}", recovery.advertised);
 
-    // Without the capability the burst ends with the MOTD group.
-    assert!(
-        quiet.burst.iter().all(|line| command(line) != "NOTE"),
-        "no NOTE without agenc.ag/recovery: {:?}",
-        quiet.burst
-    );
-    assert!(
-        matches!(
-            quiet.burst.last().map(|line| command(line)),
-            Some("376" | "422")
-        ),
-        "{:?}",
-        quiet.burst
-    );
-
-    // With it, the same burst gains exactly the NOTE, right after the MOTD
-    // group, repeating the advertised epoch byte for byte.
-    let mut expected: Vec<&str> = quiet.burst.iter().map(|line| command(line)).collect();
-    expected.push("NOTE");
-    let codes: Vec<&str> = recovery.burst.iter().map(|line| command(line)).collect();
-    assert_eq!(codes, expected, "{:?}", recovery.burst);
     let server = recovery
         .burst
         .first()
         .and_then(|line| line.split(' ').next())
         .ok_or_else(|| failure("the welcome has no prefix"))?;
+
+    // Without the capability the burst ends with the MOTD group and the
+    // account state: the session's own prefix, and `*` for an account
+    // without a public label.
+    assert!(
+        quiet.burst.iter().all(|line| command(line) != "NOTE"),
+        "no NOTE without agenc.ag/recovery: {:?}",
+        quiet.burst
+    );
+    let quiet_codes: Vec<&str> = quiet.burst.iter().map(|line| command(line)).collect();
+    assert!(
+        matches!(
+            quiet_codes.get(quiet_codes.len().saturating_sub(2)..),
+            Some(["376" | "422", "900"])
+        ),
+        "{:?}",
+        quiet.burst
+    );
     assert_eq!(
-        recovery.burst.last().map(String::as_str),
+        quiet.burst.last(),
+        Some(&format!(
+            "{server} 900 quiet {} * :You are now logged in",
+            quiet.prefix
+        )),
+        "{:?}",
+        quiet.burst
+    );
+
+    // With it, the same burst gains exactly the NOTE, right after the MOTD
+    // group and before the account state, repeating the advertised epoch
+    // byte for byte.
+    let mut expected = quiet_codes;
+    expected.insert(expected.len().saturating_sub(1), "NOTE");
+    let codes: Vec<&str> = recovery.burst.iter().map(|line| command(line)).collect();
+    assert_eq!(codes, expected, "{:?}", recovery.burst);
+    assert_eq!(
+        recovery.burst.get(recovery.burst.len().saturating_sub(2)..),
         Some(
-            format!("{server} NOTE * RECOVERY_EPOCH {epoch} :Current server recovery identity")
-                .as_str()
-        )
+            &[
+                format!("{server} NOTE * RECOVERY_EPOCH {epoch} :Current server recovery identity"),
+                format!(
+                    "{server} 900 keeper {} * :You are now logged in",
+                    recovery.prefix
+                ),
+            ][..]
+        ),
+        "{:?}",
+        recovery.burst
     );
     Ok(())
 }

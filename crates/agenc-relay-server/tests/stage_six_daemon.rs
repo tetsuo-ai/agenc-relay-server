@@ -1282,6 +1282,9 @@ impl<T: io::Read + io::Write> ClientIo for T {}
 
 struct ArcClient {
     reader: BufReader<Box<dyn ClientIo>>,
+    /// SASL completed on this connection, so its welcome burst ends with the
+    /// authenticated account state (architecture 10.2 step 6).
+    logged_in: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1369,6 +1372,7 @@ impl ArcClient {
         };
         Ok(Self {
             reader: BufReader::new(stream),
+            logged_in: false,
         })
     }
 
@@ -1405,9 +1409,13 @@ impl ArcClient {
         self.send(&format!("NICK {nickname}"))?;
         self.send(&format!("USER {nickname} 0 * :Stage Six Account"))?;
         self.send("CAP END")?;
-        read_until(&mut self.reader, |line| {
+        let mut welcome = read_until(&mut self.reader, |line| {
             line.contains(" 376 ") || line.contains(" 422 ")
-        })
+        })?;
+        if self.logged_in {
+            welcome.push(read_account_state(&mut self.reader, nickname)?);
+        }
+        Ok(welcome)
     }
 
     fn account_exchange(
@@ -1942,7 +1950,23 @@ fn authenticate_live_account(
     if !numeric.contains(" 903 ") {
         return Err(failure("successful authentication omitted numeric 903"));
     }
+    client.logged_in = true;
     Ok(())
+}
+
+/// The `900` that ends an authenticated registration's welcome burst
+/// (architecture 10.2 step 6): the session's own mask and its account's
+/// public label, or `*`.
+fn read_account_state<R: BufRead>(reader: &mut R, nickname: &str) -> TestResult<String> {
+    let line = read_line_for(reader, "authenticated account state")?;
+    if !line.contains(&format!(" 900 {nickname} {nickname}!"))
+        || !line.ends_with(" :You are now logged in")
+    {
+        return Err(failure(format!(
+            "an authenticated welcome did not end with its account state: {line}"
+        )));
+    }
+    Ok(line)
 }
 
 fn replace_live_credential(

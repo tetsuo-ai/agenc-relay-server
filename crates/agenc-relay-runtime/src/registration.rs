@@ -2407,10 +2407,34 @@ impl RegistrationRouter {
                 ),
                 WelcomeStep::Motd => self.append_motd(context, target, &mut frames)?,
                 WelcomeStep::RecoveryEpoch => frames.push(self.recovery_epoch_note()?),
-                WelcomeStep::AccountState | WelcomeStep::RegistrationBatches => {}
+                WelcomeStep::AccountState => {
+                    frames.push(self.account_state_numeric(context, state, target)?);
+                }
+                WelcomeStep::RegistrationBatches => {}
             }
         }
         Ok(frames)
+    }
+
+    /// `900 <nick> <nick>!<user>@<host> <label-or-*> :You are now logged in`,
+    /// the authenticated account state the state machine plans only for a
+    /// registration that bound an account (architecture 10.2 step 6). A
+    /// coordinator or standalone node reads the session from its domain; an
+    /// edge reads the session projection its coordinator installed before the
+    /// registration completed. A session or account the router cannot find
+    /// fails the whole burst closed rather than welcoming without it.
+    fn account_state_numeric(
+        &self,
+        context: &StateCoreContext,
+        state: &ConnectionState,
+        target: &str,
+    ) -> Result<WireMessage, RuntimeError> {
+        let bound = state.bound.ok_or(RuntimeError::InvalidValue)?;
+        let logged_in = match self.edge.as_ref() {
+            Some(edge) => edge.logged_in(bound.user_id)?,
+            None => crate::mutation_render::logged_in(context.domain(), bound.user_id)?,
+        };
+        logged_in.numeric(&self.config.server_prefix, target)
     }
 
     /// `NOTE * RECOVERY_EPOCH <epoch> :Current server recovery identity`, the
@@ -3963,6 +3987,10 @@ mod core_line_tests;
 #[cfg(test)]
 #[path = "registration/tests/welcome.rs"]
 mod welcome_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/account_state.rs"]
+mod account_state_tests;
 
 #[cfg(test)]
 mod tests {

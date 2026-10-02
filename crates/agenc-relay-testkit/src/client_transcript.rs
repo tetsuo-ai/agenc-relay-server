@@ -20,6 +20,7 @@ const TRANSCRIPT_SERVER: &str = "server.example";
 const TRANSCRIPT_NETWORK_ID: NetworkId = NetworkId::from_bytes([0; 32]);
 const TRANSCRIPT_PING_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAA";
 const TRANSCRIPT_CONFIGURED_ACCESS_TOKEN: [u8; 32] = [0; 32];
+const TRANSCRIPT_CLOAK_SEED: u8 = 0;
 
 /// Direction or deterministic-time operation in one fixture step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -786,7 +787,17 @@ impl ClientTranscriptHarness {
                     Some("Current server recovery identity"),
                 )?)?;
             }
-            WelcomeStep::AccountState | WelcomeStep::RegistrationBatches => {}
+            WelcomeStep::AccountState => {
+                let mask = transcript_mask(target)?;
+                self.queue_wire(numeric_reply(
+                    TRANSCRIPT_SERVER,
+                    900,
+                    target,
+                    &[&mask, "*"],
+                    Some("You are now logged in"),
+                )?)?;
+            }
+            WelcomeStep::RegistrationBatches => {}
         }
         Ok(())
     }
@@ -820,6 +831,19 @@ impl ClientTranscriptHarness {
         self.expected_server.push_back(rendered);
         Ok(())
     }
+}
+
+/// The public prefix the model gives its registered session: the nickname
+/// and the deterministic cloak of fixture seed zero. The model's account has
+/// no public label, so its `900` names `*`.
+fn transcript_mask(nickname: &str) -> Result<String, ClientTranscriptError> {
+    let cloak = crate::deterministic_cloak(TRANSCRIPT_CLOAK_SEED)
+        .map_err(|_| ClientTranscriptError::Rendering)?;
+    let user = std::str::from_utf8(cloak.user_component())
+        .map_err(|_| ClientTranscriptError::Rendering)?;
+    let host = std::str::from_utf8(cloak.host_component())
+        .map_err(|_| ClientTranscriptError::Rendering)?;
+    Ok(format!("{nickname}!{user}@{host}"))
 }
 
 fn recovery_epoch(profile: &CapabilityProfile) -> Result<String, ClientTranscriptError> {

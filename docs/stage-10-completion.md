@@ -216,8 +216,10 @@ issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
 The recovery epoch NOTE the welcome burst now sends to a client that
 negotiated `agenc.ag/recovery`, whether or not it negotiated
-`standard-replies` (SC-007, SDK program, outside master #35), is recorded in
-[the login state record](stage-10-login-state.md).
+`standard-replies`, and the `900` that now ends an authenticated
+registration's burst, read from the domain on a coordinator and from the
+session projection on an edge (SC-007, SDK program, outside master #35), are
+recorded in [the login state record](stage-10-login-state.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

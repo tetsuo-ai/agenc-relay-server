@@ -715,6 +715,37 @@ impl EdgeFederation {
         &self.replica
     }
 
+    /// What a `900` names for one authenticated session this edge homes,
+    /// read from the session projection its coordinator installed. A session
+    /// the replica does not hold, or one without an account, has no
+    /// logged-in state.
+    pub(crate) fn logged_in(
+        &self,
+        user_id: UserId,
+    ) -> Result<crate::client_render::LoggedIn, RuntimeError> {
+        let record = self
+            .replica
+            .session(user_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if record.account.is_none() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(crate::client_render::LoggedIn {
+            mask: render::prefix(&record.source_view())?,
+            label: record
+                .account_label
+                .as_ref()
+                .map_or("*", agenc_relay_domain::AccountLabelValue::as_str)
+                .to_owned(),
+        })
+    }
+
+    /// Lets a router test install the projections a coordinator would send.
+    #[cfg(test)]
+    pub(crate) fn replica_mut(&mut self) -> &mut EdgeReplica {
+        &mut self.replica
+    }
+
     /// Dispatches one link message; completions are returned to the router.
     pub fn inbound(
         &mut self,
