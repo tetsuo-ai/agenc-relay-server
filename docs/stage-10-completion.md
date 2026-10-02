@@ -221,6 +221,10 @@ network, and roster certificates whose enrollment issuance is not shown,
 together with the first-contact roster admission that takes that issuance as
 explicit evidence (X-10, SDK program, outside master #35), are recorded in
 [the shared verifier predicates record](stage-10-shared-verifier-predicates.md).
+The thirteen endpoint scalars of companion Section 16 that had no constant,
+and the table test that compares every Section 16 row with the `limits`
+module (X-11, SDK program, outside master #35), are recorded in
+[the companion client scalars record](stage-10-companion-client-scalars.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

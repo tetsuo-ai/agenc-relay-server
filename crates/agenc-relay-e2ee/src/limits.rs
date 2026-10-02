@@ -4,6 +4,12 @@
 //! Every `MAX_*_OBJECT` value measures the complete encoded `ArcWireObject`
 //! including its six-byte envelope. The embedded-value limits named below
 //! measure the canonical encoding of that value alone.
+//!
+//! Section 16 also names limits only an endpoint applies: the MLS ratchet
+//! and application replay windows and the update and idle defaults. They are
+//! defined here so that clients share one definition; the server holds no
+//! ratchet or replay state and enforces none of them. Durations are in
+//! seconds.
 
 /// Companion profile version carried in every `profile_version` field.
 pub const PROFILE_VERSION: u16 = 1;
@@ -216,6 +222,36 @@ pub const REINIT_STAGING_TIMEOUT_SECONDS: u64 = 60 * 60;
 pub const MAX_COMMIT_SUBMISSIONS_PER_LEAF_PER_MINUTE: u32 = 2;
 /// `MAX_COMMIT_SUBMISSIONS_PER_CONVERSATION_PER_MINUTE`.
 pub const MAX_COMMIT_SUBMISSIONS_PER_CONVERSATION_PER_MINUTE: u32 = 16;
+/// `MAX_RATCHET_FORWARD_JUMP`: MLS sender generations a receiver may skip
+/// ahead in one message (endpoint only).
+pub const MAX_RATCHET_FORWARD_JUMP: u32 = 1_024;
+/// `MAX_SKIPPED_KEYS_PER_SENDER`: skipped-generation keys an endpoint
+/// retains for one sender.
+pub const MAX_SKIPPED_KEYS_PER_SENDER: usize = 1_024;
+/// `MAX_SKIPPED_KEY_BYTES_PER_CONVERSATION`: retained skipped-key state of
+/// one conversation (endpoint only).
+pub const MAX_SKIPPED_KEY_BYTES_PER_CONVERSATION: u64 = 67_108_864;
+/// `SKIPPED_KEY_RETENTION` in seconds (endpoint only).
+pub const SKIPPED_KEY_RETENTION_SECONDS: u64 = 5 * 60;
+/// `MAX_RETAINED_PAST_EPOCHS`: past epochs whose unconsumed receive keys an
+/// endpoint keeps (companion 14).
+pub const MAX_RETAINED_PAST_EPOCHS: u64 = 2;
+/// `PAST_EPOCH_RECEIVE_RETENTION` in seconds; zero for a removed leaf
+/// (endpoint only).
+pub const PAST_EPOCH_RECEIVE_RETENTION_SECONDS: u64 = 5 * 60;
+/// `MAX_APPLICATION_SEQUENCE_FORWARD_JUMP`: how far beyond the highest
+/// accepted `sender_sequence` an application message may land (companion
+/// 14).
+pub const MAX_APPLICATION_SEQUENCE_FORWARD_JUMP: u64 = 4_096;
+/// `MAX_APPLICATION_SEQUENCE_GAPS`: outstanding application-sequence gaps
+/// per leaf (companion 14).
+pub const MAX_APPLICATION_SEQUENCE_GAPS: usize = 1_024;
+/// `MAX_RECENT_MESSAGE_IDS_PER_LEAF`: recent message IDs an endpoint keeps
+/// per leaf for replay detection (companion 14).
+pub const MAX_RECENT_MESSAGE_IDS_PER_LEAF: usize = 8_192;
+/// `MAX_REPLAY_GAP_STATE_BYTES_PER_CONVERSATION`: the conversation-wide
+/// replay-state ceiling, at which new gaps are refused (companion 14).
+pub const MAX_REPLAY_GAP_STATE_BYTES_PER_CONVERSATION: u64 = 16_777_216;
 /// `MAX_PROPOSALS_PER_COMMIT`.
 pub const MAX_PROPOSALS_PER_COMMIT: usize = 512;
 /// `MAX_GROUP_LEAVES`.
@@ -280,6 +316,16 @@ pub const MAX_SEQUENCER_KEY_OVERLAP_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const REINIT_RESUMPTION_PSK_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 /// `MAX_SIGNATURE_VERIFICATIONS_PER_ACCOUNT_PER_MINUTE`.
 pub const MAX_SIGNATURE_VERIFICATIONS_PER_ACCOUNT_PER_MINUTE: u32 = 1_024;
+/// `DEFAULT_ACTIVE_UPDATE_PERIOD` in seconds: an active device's longest
+/// interval between its own UpdatePath Commits (companion 13.6).
+pub const DEFAULT_ACTIVE_UPDATE_PERIOD_SECONDS: u64 = 24 * 60 * 60;
+/// `DEFAULT_ACTIVE_UPDATE_MESSAGES`: the application messages an active
+/// device sends before its next UpdatePath Commit (companion 13.6).
+pub const DEFAULT_ACTIVE_UPDATE_MESSAGES: u64 = 10_000;
+/// `DEFAULT_IDLE_DEVICE_EVICTION` in seconds: the silence after which a
+/// client warns about one of its account's devices; a local reminder, never
+/// an automatic removal (companion 13.6).
+pub const DEFAULT_IDLE_DEVICE_EVICTION_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// Client-added tag data budget in bytes (IRCv3).
 pub const MAX_CLIENT_TAG_DATA: usize = 4_094;
 /// Server-added tag data budget in bytes (IRCv3).
