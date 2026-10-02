@@ -42,7 +42,7 @@ Every renderer of a user now takes its text from that one place:
 
 | Renderer | What it renders |
 | --- | --- |
-| `mutation_render::session_prefix` | The source of every line a local user originates: `JOIN`, `PART`, `QUIT`, `NICK`, `PRIVMSG`, `NOTICE`, `TAGMSG`, `TOPIC`, `MODE`, `KICK`, `INVITE`, `AWAY`, `SETNAME` and `ACCOUNT`. SC-007's welcome `900` (SDK program B-02) renders its mask from the same function. |
+| `mutation_render::session_prefix` | The source of every line a local user originates: `JOIN`, `PART`, `QUIT`, `NICK`, `PRIVMSG`, `NOTICE`, `TAGMSG`, `TOPIC`, `MODE`, `KICK`, `INVITE`, `AWAY`, `SETNAME` and `ACCOUNT`. SC-007's welcome `900` (SDK program B-02, on sdk/b-welcome) takes its mask from this function once both branches are merged. |
 | `mutation_render::names_token` | The `userhost-in-names` token of a JOIN's own NAMES reply. |
 | `query_render::names_entry` | The `userhost-in-names` tokens of NAMES and of the local JOIN snapshot. |
 | `query_render::render_who_session`, `render_whois`, `render_whowas_row` | The user and host fields of 352, 311 and 314. |
@@ -112,12 +112,21 @@ in [the explicit NAMES pages record](stage-10-explicit-names-pages.md).
   accepts every user prefix the daemon sends.
 - Federation, storage and registries: unchanged. `PublicCloak`,
   `SourceView`, `SessionRecord` and the stored session and history records
-  keep the bare components, and each node frames them when it renders. While
-  one network runs nodes built before and after this change, each client
-  reads the spelling of the node it is connected to, so one user can read
-  bare on one edge and framed on another; no node refuses the other's
-  objects. Storage generation 5 is unchanged and nothing persisted is
-  rewritten, so no restore test applies.
+  keep the bare components, and each node frames them when it renders, so no
+  node refuses another's objects. Storage generation 5 is unchanged and
+  nothing persisted is rewritten, so no restore test applies.
+- Mixed builds: while one network runs nodes built before and after this
+  change, the node that renders a field decides its spelling. The source of
+  every event, the sender of a history replay and every reply a node renders
+  for its own clients follow the client's own node. The user and host fields
+  of `WHO`, `WHOIS`, `WHOWAS` and `USERHOST` (352, 311, 314 and 302) for a
+  client of an edge are rendered by the coordinator
+  (`federated_query_frames`) and relayed by the edge field for field, so they
+  follow the coordinator's build. One connection can therefore read both
+  spellings for the same user, and a client of an edge reads only the framed
+  spelling once both its edge and the coordinator carry this change. An edge
+  built before it sends bare source prefixes, which a decoder that enforces
+  Section 7.4 refuses, whichever build the coordinator runs.
 - Cloak masks: a `$c:` mask was already matched against the framed host
   before this change, so a ban written in the framed form behaves the same
   across such a mixed network.
@@ -162,12 +171,16 @@ stored components; none takes its expectation from the formatter.
 
 The revert proof restores one part of the change at a time in the worktree,
 with lints capped to warnings so that a binding a partial revert leaves unused
-does not stop the build, runs the seventeen tests above, and restores the
-file. It first ran at 29e61c8 with the sixteen tests of that commit; the
-table is its second run, at 026611d, which adds the `$c:` ban test, and its
-last row a third, which also reverts the formatter's own nickname check. The
-scripts (`mutate-b12.py`, `mutate-b12-v2.py` and `mutate-b12-v3.py`) and their
-logs are kept with the SDK program's records.
+does not stop the build, runs the B-12 regressions of 026611d, seventeen
+tests, and restores the file. It first ran with the sixteen tests of 29e61c8 on that commit's
+uncommitted tree (its parent f7b8f0a and its diff); the table is its second
+run, at 026611d, which adds the `$c:` ban test, and its last row a third,
+which also reverts the formatter's own nickname check. The scripts
+(`mutate-b12.py`, `mutate-b12-v2.py` and `mutate-b12-v3.py`, and the later
+`mutate-fix.py` with its campaign files), every run's summary and logs, and
+the coverage outputs below belong with the SDK program's evidence for the
+push that carries this branch (agenc-relay-sdk `evidence/<date>-server-program/`,
+plan item G-11); they are not part of this repository.
 
 | Part reverted | Tests that then fail |
 | --- | --- |
@@ -205,53 +218,80 @@ reply does today, so only the unit test sees it.
 - Section 14.5 has `WHOWAS` keep the "ephemeral user/host mask", and Appendix
   A.2 has 314 carry the "ephemeral public user and host components". This
   change renders those components in the same visible fields `WHOIS` and
-  `WHO` use, so one session reads the same in all three.
+  `WHO` use, so one session reads the same in all three. That reads A.2's
+  components of 314, like the user and host fields of 311 and 352, as the
+  visible fields Section 7.4 frames, not the bare random components it
+  generates (review finding B12-R0-5). The text is not changed here: it is
+  outside the program's normative cutoff (decision D-10), and a clarification
+  of A.2 to "the visible user and host fields" is listed for the owner's next
+  normative revision.
 - The welcome `900` of SC-007 and the later `900` and `ACCOUNT` of a
   post-registration login (SDK program B-02 and B-03) are not on this branch.
   They take their masks from `session_prefix` and from the edge's `prefix`,
   so they are framed wherever both changes are merged, and any test of them
-  that spells the mask bare has to take the framed spelling then.
+  that spells the mask bare has to take the framed spelling then. A trial
+  merge with sdk/b-welcome at 892b157 builds and fails eight runtime tests
+  that do: the `mask` helpers of `registration/tests/account_state.rs` and
+  `tests/account_login_render.rs` and the `900` line of
+  `registration/tests/edge_login.rs`. With those three framed, and the
+  testkit transcript model's `transcript_mask` and its `900` expectation in
+  `client_transcript_branches.rs` framed to match, the runtime, testkit and
+  client-wire suites pass on the merge.
 - The conventional-client qualification
   (`stage_ten::conventional_clients_exchange_public_messages_and_cannot_enter_secret_channels`)
   was not rerun; it needs the pinned container and asserts no mask.
 - The SDK's opt-in for the bare spelling (its wire mismatch WD-1) can be
-  retired once the SDK pins a commit that carries this change.
+  retired once the SDK pins a commit that carries this change. Evidence
+  taken without it needs every node a client talks through, its edge and the
+  coordinator, built with this change (Mixed builds, above).
 
 ## Release regions measured
 
 The gate's coverage command
 (`RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest --workspace --all-features --branch --locked`)
-ran at 026611d and on an export of 70c832c under the same procedure, and each
-region below was scored with `check-coverage.py`'s own counting on the span
-its policy reviews at that commit. These are the release regions in every
-production file this branch changes; covered over total, in the region's
-metric.
+ran at 026611d, at ea08c8a after the review fixes, and on an export of
+70c832c under the same procedure, and each region below was scored with
+`check-coverage.py`'s own counting on the span its policy reviews at that
+commit. These are the release regions in every production file this branch
+changes; covered over total, in the region's metric.
 
-| Region | Metric | 70c832c | 026611d |
-| --- | --- | --- | --- |
-| `client-registration-grammar-error-arms` | regions | 13/13 | 13/13 |
-| `client-render-error-arms` | regions | 18/18 | 18/18 |
-| `runtime-whowas-current-cloak-authority` | branches | 4/4 | 4/4 |
-| `runtime-local-join-snapshot-identity` | branches | 4/6 | 4/6 |
-| `runtime-userhost-disclosure` | branches | 6/6 | 6/6 |
-| `runtime-monitor-status-disclosure` | branches | 2/2 | 2/2 |
-| `cap81-shape-bounds` | regions | 47/56 | 47/56 |
-| `cap81-shape-names` | regions | 45/72 | 45/72 |
-| `cap81-shape-user-query` | regions | 43/48 | 43/48 |
-| `cap81-shape-whois` | regions | 35/40 | 35/40 |
-| `cap81-shape-mode` | regions | 33/39 | 33/39 |
-| `cap81-shape-presence` | regions | 37/45 | 37/45 |
-| `cap81-shape-information` | regions | 0/31 | 0/31 |
-| `cap13-render-render-event-strict` | regions | 43/46 | 43/46 |
+| Region | Metric | 70c832c | 026611d | ea08c8a |
+| --- | --- | --- | --- | --- |
+| `client-registration-grammar-error-arms` | regions | 13/13 | 13/13 | 13/13 |
+| `client-render-error-arms` | regions | 18/18 | 18/18 | 18/18 |
+| `runtime-whowas-current-cloak-authority` | branches | 4/4 | 4/4 | 4/4 |
+| `runtime-local-join-snapshot-identity` | branches | 4/6 | 4/6 | 4/6 |
+| `runtime-userhost-disclosure` | branches | 6/6 | 6/6 | 6/6 |
+| `runtime-monitor-status-disclosure` | branches | 2/2 | 2/2 | 2/2 |
+| `cap81-shape-bounds` | regions | 47/56 | 47/56 | 47/56 |
+| `cap81-shape-names` | regions | 45/72 | 45/72 | 45/72 |
+| `cap81-shape-user-query` | regions | 43/48 | 43/48 | 43/48 |
+| `cap81-shape-whois` | regions | 35/40 | 35/40 | 35/40 |
+| `cap81-shape-mode` | regions | 33/39 | 33/39 | 33/39 |
+| `cap81-shape-presence` | regions | 37/45 | 37/45 | 37/45 |
+| `cap81-shape-information` | regions | 0/31 | 0/31 | 0/31 |
+| `cap13-render-render-event-strict` | regions | 43/46 | 43/46 | 43/46 |
+| `companion-mod-statecorecontext-backing-reservations` | regions | 5/5 | | 5/5 |
+| `cap13-registration-index-refreshed` | regions | 12/12 | | 12/12 |
+| `cap13-mod-complete-index-refresh` | regions | 43/45 | | 43/45 |
+| `reload-admission-outcome` | branches | 2/2 | | 2/2 |
+| `reload-audit-submission-outcome` | regions | 23/26 | | 23/26 |
+| `edge-account-response-phase` | branches | 10/10 | | 10/10 |
 
-Each region reads the same in its metric at both commits. The respanned
-`runtime-userhost-disclosure` keeps all six branches covered; its regions went
-from 36 of 38 to 36 of 37, because the two `?` exits of the component
-conversions, which no input reaches, became the one exit of the formatter
-call. The regions below 100 percent are below it at 70c832c as well; the
-release policy is read by the Stage 10 runner, not by the Stage 09 gate. The
-interim policy, which the gate checks, passes at both commits: branches 84.53
-percent, lines 93.94 percent, all 21 critical regions at 100 percent.
+The last six rows are in files only the explicit NAMES change touches, so
+they were not scored at 026611d. Each region reads the same in its metric at
+every commit. The respanned `runtime-userhost-disclosure` keeps all six
+branches covered; its regions went from 36 of 38 to 36 of 37, because the two
+`?` exits of the component conversions, which no input reaches, became the
+one exit of the formatter call. The respanned
+`runtime-local-join-snapshot-identity` keeps 4 of 6 branches: the two it
+misses are its frame and row ceiling guards, which neither change touches;
+its regions went from 51 of 57 to 60 of 66, the explicit NAMES path's new
+regions all covered. The regions below 100 percent are below it at 70c832c
+as well; the release policy is read by the Stage 10 runner, not by the Stage
+09 gate. The interim policy, which the gate checks, passes at every commit:
+branches 84.53 percent at 70c832c and 026611d and 84.54 percent at ea08c8a,
+lines 93.94 and 93.95 percent, all 21 critical regions at 100 percent.
 
 ## Validation
 
@@ -287,3 +327,26 @@ private `TMPDIR`; the commit that follows it changes only this record:
 - Not run: the Stage 09 implementation gate (`check-stage-nine.sh`), the
   storage disk profile (no storage change) and the conventional-client
   qualification.
+
+At ea08c8a, after the review fixes (the worst-case bound tests, the explicit
+NAMES pages and the moves that keep them clear of the sibling topics), whose
+code the commit that follows keeps:
+
+- `cargo fmt --all --check` and
+  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
+  ok.
+- `cargo nextest run --workspace --all-features --locked`: 4,534 passed, 24
+  skipped.
+- The SDK program's fast static gate (`fast-gates.sh`, 59 commands): all pass.
+- `check-coverage.py` self-test and audit on both policies: ok (21 and 1,145
+  reviewed spans).
+- The coverage measurement above: under `cargo llvm-cov`, 4,534 tests passed,
+  and the gate's interim policy check passes.
+- The revert runs of both review fixes: every control passes, and every
+  revert fails at least one test (the B12-R1-01 rows above, and the table of
+  [the explicit NAMES pages record](stage-10-explicit-names-pages.md)).
+- A trial merge with each sibling topic of the SDK program (`git merge-tree`,
+  no reference or worktree touched): no conflict in any Rust file; the
+  b-welcome merge's tests as the limitations above describe.
+- Not run: the Stage 09 implementation gate, the storage disk profile and the
+  conventional-client qualification.
