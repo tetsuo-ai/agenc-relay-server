@@ -171,6 +171,35 @@ the later-target unit test fail; with the earlier-target requirement
 removed, the continuing-certificate and first-contact unit tests fail; with
 both restored, all pass. The named-roster tests pass either way.
 
+## A certificate listed both active and revoked
+
+### Finding
+
+Companion 8.4 makes `(Device ID, certificate_serial)` unique and reads
+absence from the active set as revocation. `verify_roster_lineage` checked
+that each of a roster's two vectors is canonical but never compared the
+active set with the roster's own `revocations`, so a root-signed roster that
+lists one certificate both active and revoked verified on every path, and on
+succession the predecessor's revocation was carried while the certificate
+stayed active. The independent review of this branch found it; it predates
+the branch (`70c832c` admits the same roster).
+
+### Change
+
+- `crates/agenc-relay-e2ee/src/identity.rs`: `verify_roster_lineage` refuses
+  a roster in which an active certificate's `(device_id,
+  certificate_serial)` also appears in its `revocations` (`InvalidValue`),
+  on the checked, first-contact and restore paths alike.
+
+### Tests
+
+| Test | What it pins |
+| --- | --- |
+| `src/tests/identity.rs::a_certificate_listed_active_and_revoked_is_refused_on_every_path` | A generation-zero roster, and a successor that carries the predecessor's revocation while listing the certificate, are refused on the checked, first-contact and restore paths; a successor that drops the certificate and revokes it verifies on all three. |
+
+Written before the change, the test fails (the generation-zero roster
+verifies); with the change it passes.
+
 ## Compatibility
 
 - Wire: unchanged. The runtime answers every refusal on these paths as before.
@@ -181,10 +210,11 @@ both restored, all pass. The named-roster tests pass either way.
   reconstruction re-verifies every stored statement with
   `restore_capabilities`, so such a row is now skipped at startup, as is
   any stored row that does not re-verify. The same holds for a stored
-  roster holding a certificate enrolled for a later generation. `EKEY
-  PUBLISH ROSTER` refuses a roster breaking the issuance rules with the same
-  reply as any refused roster, and a historical chain refuses the record
-  whose roster transition installs one.
+  roster holding a certificate enrolled for a later generation, or one
+  listing a certificate both active and revoked. `EKEY PUBLISH ROSTER`
+  refuses a roster breaking the issuance rules, or listing a certificate
+  both active and revoked, with the same reply as any refused roster, and a
+  historical chain refuses the record whose roster transition installs one.
 - API: `VerifiedRoster` has one more public field, and
   `verify_first_contact_roster` is new; existing signatures are unchanged.
 - Privacy and dependencies: unchanged.

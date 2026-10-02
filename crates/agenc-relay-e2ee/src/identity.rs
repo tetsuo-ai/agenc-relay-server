@@ -415,7 +415,7 @@ pub fn restore_roster(
     verify_roster_lineage(root, roster, RosterAdmission::Restored)
 }
 
-// agenc-review: focus owner=e2ee reviewed=2026-10-01 reason=the roster rules of Sections 8.3 and 8.4 are one closed checklist whose ordering the reviewer reads top to bottom; the admission mode selects only the lineage step, the issuance evidence and the revocation carry-over
+// agenc-review: focus owner=e2ee reviewed=2026-10-02 reason=the roster rules of Sections 8.3 and 8.4 are one closed checklist whose ordering the reviewer reads top to bottom; the admission mode selects only the lineage step, the issuance evidence and the revocation carry-over
 fn verify_roster_lineage(
     root: &VerifiedRoot,
     roster: &ArcDeviceRoster,
@@ -477,6 +477,14 @@ fn verify_roster_lineage(
         .iter()
         .map(|entry| (entry.device_id, entry.certificate_serial))
         .collect();
+    // `(Device ID, certificate_serial)` is unique and absence means revoked
+    // (companion 8.4): no active certificate is also listed as revoked.
+    if devices
+        .values()
+        .any(|certificate| revocations.contains(&(certificate.device_id, certificate.serial)))
+    {
+        return Err(E2eeError::InvalidValue);
+    }
     if let RosterAdmission::Checked(Some(previous)) = admission
         && !previous
             .revocations
