@@ -1922,3 +1922,46 @@ fn first_contact_admits_a_capability_head_at_any_generation() -> TestResult {
     );
     Ok(())
 }
+
+/// Companion 8.3: a certificate enrolled for the roster's own generation
+/// needs an enrollment interval that covers the roster's `not_before`, both
+/// ends inclusive, on the checked, first-contact and restore paths alike.
+#[test]
+fn the_current_target_enrollment_interval_includes_both_ends() -> TestResult {
+    let account = account_with(&[7])?;
+    let root = &account.verified_root;
+    let not_before = ROSTER_INTERVAL.0;
+    let decisions = |enrollment: (u64, u64)| -> Result<Vec<bool>, Box<dyn Error>> {
+        let certificate = certificate(
+            &account.root_secret,
+            &account.root,
+            &DeviceSpec {
+                enrollment,
+                ..DeviceSpec::new(7)
+            },
+        )?;
+        let roster = roster(
+            &account.root_secret,
+            &account.root,
+            0,
+            [0; 32],
+            ROSTER_INTERVAL,
+            vec![certificate],
+            Vec::new(),
+        )?;
+        Ok(vec![
+            verify_roster(root, &roster, None).is_ok(),
+            verify_first_contact_roster(root, &roster, &[]).is_ok(),
+            restore_roster(root, &roster).is_ok(),
+        ])
+    };
+    for (enrollment, admitted) in [
+        ((not_before, not_before + 10), true),
+        ((not_before - 10, not_before), true),
+        ((not_before + 1, not_before + 11), false),
+        ((not_before - 11, not_before - 1), false),
+    ] {
+        assert_eq!(decisions(enrollment)?, vec![admitted; 3], "{enrollment:?}");
+    }
+    Ok(())
+}

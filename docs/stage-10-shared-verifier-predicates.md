@@ -52,6 +52,8 @@ a client importing a public credentials file has no such step.
 | `tests/shared_predicate_counterexamples.rs::a_key_set_whose_successor_reuses_the_current_key_is_refused` | Audit counterexample: the overlap set, through both `verify` and `verify_opened`. |
 | `tests/shared_predicate_counterexamples.rs::control_distinct_key_successor_is_accepted` | Control: a fresh successor key still verifies, alone and in a set. |
 | `src/tests/sequencer.rs::a_successor_reusing_its_predecessors_key_is_refused_on_every_chained_path` | The anchored successor, the overlap set, a set opening at the successor with its predecessor at hand, and credentials files opening at and above generation zero; the same chains with a fresh key verify. |
+| `src/tests/context.rs::a_context_sequencer_successor_needs_a_fresh_key` | `verify_context` with a previous sequencer refuses a context whose sequencer reuses the predecessor's key and verifies one with a fresh key. |
+| `tests/history.rs::a_sequencer_rotation_changes_the_committed_credential_for_later_positions` | The historical chain's `SEQUENCER` transition refuses a successor credential that reuses the current key (the chain is unchanged) and installs the fresh-key successor. |
 | runtime `sequencer_eligibility::rotation::signer_installation_refuses_keys_outside_their_role` | The verifier refuses the shared-key set; installation still refuses it when assembled without the verifier. |
 | runtime `sequencer_eligibility::installation::shared_public_key_does_not_select_another_credential` | The verifier refuses the set; installation selects by credential identity. |
 | runtime `sequencer_eligibility::terminal::*` (four tests) | Unchanged assertions; their key-reuse cases now assemble the set without the verifier. |
@@ -60,6 +62,10 @@ At `70c832c` the two counterexamples fail and the control passes. With the new
 condition removed from this commit's tree, the three e2ee tests above that
 expect a refusal and the first two runtime tests fail; with it, all pass. The
 terminal tests pass either way: they exercise the daemon, not the predicate.
+The context and historical-chain cases were added after the independent
+review of the branch noted that no test exercised those two paths with a
+same-key successor; with the condition removed, both fail, beside the three
+e2ee tests above.
 
 ## Signed network on capability and leaf statements
 
@@ -171,6 +177,7 @@ from generation one and active now; their assertions are unchanged.
 | `tests/shared_predicate_counterexamples.rs::an_initial_roster_holding_a_future_target_certificate_is_refused` | Audit counterexample: generation zero holding a certificate enrolled for generation five. |
 | `tests/shared_predicate_counterexamples.rs::control_current_target_certificate_outside_enrollment_window_is_refused` | Control: the existing current-target interval rule. |
 | `src/tests/identity.rs::a_certificate_enrolled_for_a_later_generation_is_refused_on_every_path` | A later target at generation zero and at generation one, on the checked, first-contact and restore paths. |
+| `src/tests/identity.rs::the_current_target_enrollment_interval_includes_both_ends` | A certificate enrolled for the roster's own generation is admitted with `issued_at` or `expires_at` equal to the roster's `not_before`, and refused one second outside either end, on the checked, first-contact and restore paths. With either comparison made strict, it fails. |
 | `src/tests/identity.rs::a_continuing_certificate_must_be_active_unchanged_in_the_predecessor` | Continuing certificates verify after their enrollment interval closed and restore without the predecessor; a new device claiming an earlier target, a replacement certificate under an active Device ID, and a dropped certificate returning are refused. |
 | `src/tests/identity.rs::first_contact_requires_the_issuance_of_every_continuing_certificate` | First contact at generation zero equals the initial check; above it, continuing certificates need their exact target roster (either order), and the wrong generation, another root, a target-generation roster without the device or holding another certificate for its Device ID, a late current enrollment, a generation-one roster naming no predecessor and a generation-zero roster naming one are refused; with the evidence the result equals the checked one. |
 | `src/tests/identity.rs::first_contact_holds_a_roster_to_every_supplied_roster_of_its_root` | Given the complete chain from generation zero, first contact decides as the checked path does for a certificate dropped by a supplied roster between its target and the roster (with and without a revocation entry), a revocation dropped, a supplied previous generation that is not the named predecessor, and the conforming continuations; without the roster that dropped a certificate nothing shows the drop; supplied rosters of another root or of the roster's own generation are not consulted. |

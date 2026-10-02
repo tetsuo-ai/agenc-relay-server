@@ -653,6 +653,29 @@ fn a_sequencer_rotation_changes_the_committed_credential_for_later_positions() -
         log.finalization_request(&candidate, council.authorization(tbs)?, &council)?;
     let policy_id = log.policy_id;
     let record = log.finalization(request, id, policy_id)?;
+    // A successor reusing the current credential's key is refused in its
+    // place (companion 9.2.1), though that key signs its continuity.
+    let same_key = sequencer_credential(
+        &key(SEQUENCER_SEED),
+        1,
+        (100, 1_000_000),
+        Some((&key(SEQUENCER_SEED), &genesis.credential)),
+    )?
+    .encode()?;
+    let mut probe = chain.clone();
+    assert_eq!(
+        probe
+            .advance(
+                &record.bytes,
+                &RecordReferences {
+                    sequencer_credential: Some(&same_key),
+                    ..RecordReferences::default()
+                },
+                &mut budget(),
+            )
+            .err(),
+        Some(E2eeError::InvalidValue)
+    );
     let credential_bytes = successor.encode()?;
     let step = chain.advance(
         &record.bytes,
