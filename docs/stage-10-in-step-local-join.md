@@ -61,7 +61,8 @@ seeds after resuming, as every other point that resumes or routes commands
 already did: each routed line, `resume_ready_join_commands`, the JOIN
 continuation timer, `batch_applied` and a command's crypto completion.
 Without it the seed, now committed, would open only at the next unrelated
-line or commit.
+line or commit. The fix relies on each of these drains, so each point where
+a local JOIN can run outside a routed line has its own regression below.
 
 This is the program register's decision D-22 (a). Its alternative, settling
 the seed before staging and rolling it back on a refusal, was not needed.
@@ -82,24 +83,41 @@ plain or labeled, answers and then releases the command behind it.
 | `state_core::tests::local_join::an_in_step_local_join_answers_its_label_batch_and_the_next_command` | Through the live router, `@label=join JOIN &loc` then `@label=time TIME` get one label batch of JOIN, `331`, `353` and `366`, closed before the labeled `391`. |
 | `state_core::tests::local_join::a_staged_global_join_answers_its_label_batch_and_the_next_command` | The same exchange for `#room`, whose JOIN is staged. |
 | `registration::core_line_tests::a_local_join_released_by_a_response_floor_answers_in_the_same_step` | Through the state core with its clock frozen, `TOPIC #missing` holds its `403` until the floor and the `JOIN &loc` behind it waits; firing the floor's timer publishes the `403` and then the JOIN's `366` in that one step, and no seed is left pending. |
+| `registration::core_line_tests::a_keyed_local_join_answers_in_its_crypto_completion_step` | With a key set on `&locked`, a joiner's `JOIN &locked secretkey` waits for its key verification job; stepping that job's completion, and nothing else, delivers the JOIN echo through the `366`. |
+| `registration::core_line_tests::a_local_join_resumed_by_a_refused_batch_answers_in_that_step` | `JOIN #room`, then `JOIN &loc` behind it; refusing the staged batch before submission answers `&loc` in that step, and `#room` gets no NAMES. |
+| `registration::core_line_tests::a_local_join_resumed_by_the_names_timer_answers_in_that_step` | `JOIN #slow` while the queue is full, then `JOIN &loc` behind its NAMES continuation; once the queue drains, the continuation's timer step delivers `#slow`'s `366` and then `&loc`'s. |
+| `registration::core_line_tests::a_local_join_behind_a_staged_join_answers_in_its_commit_step` | `JOIN #room`, `JOIN &loc` and `TIME`; the step that applies the batch answers `#room`, then `&loc`, then the `391`. |
+| `registration::core_line_tests::a_local_join_sent_before_the_welcome_answers_in_its_commit_step` | `JOIN &loc` and `TIME` sent before the welcome; the registration's commit step sends the welcome, then `&loc`'s `366`, then the `391`. |
 | `stage_six_daemon::local_join::a_lone_local_join_is_answered_and_the_next_command_still_runs` | The production binary on a core-only node: `JOIN &plain` then `TIME`, and the labeled `JOIN &labeled` then `TIME`. |
 | `stage_seven_federation::an_edge_join_continuation_answers_and_releases_the_next_command` | A coordinator and an edge: `JOIN #plain` then `AWAY`, and the labeled `JOIN #labeled` then `AWAY`, on the edge. |
 
-The existing `local_join_snapshot_opens_after_commit_and_keeps_its_membership_preimage`
+Each `core_line_tests` regression also requires that no seed is left
+pending. The existing `local_join_snapshot_opens_after_commit_and_keeps_its_membership_preimage`
 and `a_committed_local_join_opens_while_the_next_batch_is_pending` still
 require that a staged seed does not open before its batch commits, and
 `a_refused_local_join_releases_its_reserved_snapshot` that a refused JOIN
 releases its snapshot.
 
 With `settle_local_join` reverted to its `70c832c` body and everything else
-kept, the in-step unit test, the live-router `&loc` test, the response-floor
-test and the core-only daemon test fail: the seed is never taken, the router
-never sends the `391` its script waits for, the floor's timer publishes the
-`403` and nothing after it, and the daemon test reads nothing after
-`JOIN &plain` until its 15-second socket timeout. With only the new drain in
-`resume_deferred_commands` removed, the response-floor test alone fails, the
-same way. The staged `#room` test and the edge test pass either way; they
-guard the paths the fix must leave unchanged.
+kept, every test above fails except the staged `#room` test and the edge
+test, which pass either way: they guard the paths the fix must leave
+unchanged. The in-step seed is never taken, the router never sends the
+`391` its script waits for, each `core_line_tests` regression receives
+nothing after the step that applies its `&` JOIN (the floor's timer, for
+one, publishes the `403` and nothing after it), and the daemon test reads
+nothing after `JOIN &plain` until its 15-second socket timeout. The keyed
+test fails earlier, at the owner's own `JOIN &locked`, a routed line its
+setup needs.
+
+With the fix kept and a single drain removed, the regression of that
+drain's point fails. Without the crypto completion's drain the keyed test
+alone fails: the joiner receives nothing after its welcome. Without the
+drain of `resume_ready_join_commands`, of the JOIN continuation timer or of
+`resume_deferred_commands`, the refused-batch, NAMES-timer or
+response-floor test alone fails. Without the drain of `batch_applied` the
+staged-JOIN and welcome tests fail together with older tests of staged
+JOINs, and without the drain after each routed line the live-router `&loc`
+test and the keyed test's setup fail.
 
 ## Coverage
 
@@ -108,11 +126,12 @@ Both production source inventories are refreshed. The reviewed release region
 its reviewed span unchanged. The new release region
 `runtime-local-join-settled-commit` binds `settle_local_join`, the decision
 this record changes, under the branch metric. Over the runtime library tests
-(`cargo llvm-cov nextest -p agenc-relay-runtime --lib --all-features
---branch`, 2,616 passed) it measures 6/6 branches and 14/14 regions: an
-absent seed, a refused JOIN, a staged seed and an in-step seed. `open`
-measures 4/6 branches there; the two it misses are its frame and row
-ceiling guards, which this change does not touch.
+with every regression above in place (`cargo llvm-cov nextest -p
+agenc-relay-runtime --lib --all-features --branch`, 2,622 passed) it
+measures 6/6 branches and 14/14 regions: an absent seed, a refused JOIN, a
+staged seed and an in-step seed. `open` measures 4/6 branches there; the
+two it misses are its frame and row ceiling guards, which this change does
+not touch.
 
 ## Limitations
 

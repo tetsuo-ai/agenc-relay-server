@@ -81,6 +81,20 @@ impl Core {
         assert!(exit.is_none());
         Ok(())
     }
+
+    /// Whether connection `number` still holds a local JOIN snapshot that
+    /// has not been opened.
+    fn holds_local_join_seed(&mut self, number: u64) -> TestResult<bool> {
+        Ok(self
+            .fixture
+            .context_mut()?
+            .has_local_join_seed(ConnectionGeneration::new(number)))
+    }
+}
+
+/// The index of the first line that contains `text`.
+fn line_index(lines: &[String], text: &str) -> Option<usize> {
+    lines.iter().position(|line| line.contains(text))
 }
 
 #[tokio::test]
@@ -175,19 +189,173 @@ async fn a_local_join_released_by_a_response_floor_answers_in_the_same_step() ->
     );
     assert!(core.fixture.state_mut()?.step_wake().is_none());
     let lines = sink.lines();
-    let refused = lines
-        .iter()
-        .position(|line| line.contains(" 403 floored #missing "));
-    let names_end = lines
-        .iter()
-        .position(|line| line.contains(" 366 floored &loc "));
+    let refused = line_index(&lines, " 403 floored #missing ");
+    let names_end = line_index(&lines, " 366 floored &loc ");
     assert!(refused.is_some() && refused < names_end, "lines: {lines:?}");
+    assert!(!core.holds_local_join_seed(1)?);
+    Ok(())
+}
+
+/// AUD-16 at a crypto completion. A keyed JOIN of a local channel waits for
+/// its channel-key verification job, whose completion plans the JOIN and
+/// applies it in that same step. Nothing else follows to open its snapshot:
+/// the completion step must, or the JOIN and every later command on its
+/// connection wait.
+#[tokio::test]
+async fn a_keyed_local_join_answers_in_its_crypto_completion_step() -> TestResult {
+    let mut core = Core::new()?;
+    let owner = core.open(1)?;
+    core.line(1, "NICK owner")?;
+    core.line(1, "USER owner 0 * :Owner")?;
+    core.settle().await?;
+    core.line(1, "JOIN &locked")?;
     assert!(
-        !core
-            .fixture
-            .context_mut()?
-            .has_local_join_seed(ConnectionGeneration::new(1))
+        saw(&owner, " 366 owner &locked "),
+        "lines: {:?}",
+        owner.lines()
     );
+    core.line(1, "MODE &locked +k secretkey")?;
+    assert_eq!(
+        core.fixture
+            .context_mut()?
+            .crypto_mut()
+            .snapshot_in_flight(),
+        1
+    );
+    let completion = core.fixture.next_crypto_completion().await?;
+    core.fixture.state_mut()?.step_crypto(completion);
+    assert!(
+        saw(&owner, " MODE &locked +k"),
+        "lines: {:?}",
+        owner.lines()
+    );
+    let joiner = core.open(2)?;
+    core.line(2, "NICK joiner")?;
+    core.line(2, "USER joiner 0 * :Joiner")?;
+    core.settle().await?;
+    core.line(2, "JOIN &locked secretkey")?;
+    assert_eq!(
+        core.fixture
+            .context_mut()?
+            .crypto_mut()
+            .snapshot_in_flight(),
+        1
+    );
+    assert!(
+        !saw(&joiner, " JOIN &locked"),
+        "lines: {:?}",
+        joiner.lines()
+    );
+    let completion = core.fixture.next_crypto_completion().await?;
+    core.fixture.state_mut()?.step_crypto(completion);
+    let lines = joiner.lines();
+    let echo = line_index(&lines, " JOIN &locked");
+    let names_end = line_index(&lines, " 366 joiner &locked ");
+    assert!(echo.is_some() && echo < names_end, "lines: {lines:?}");
+    assert!(!core.holds_local_join_seed(2)?);
+    Ok(())
+}
+
+/// AUD-16 at a refused batch. A local JOIN deferred behind a staged `#` JOIN
+/// resumes in the step where storage refuses that JOIN's batch, and is applied
+/// in that same step, which must open its snapshot.
+#[tokio::test]
+async fn a_local_join_resumed_by_a_refused_batch_answers_in_that_step() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = core.open(1)?;
+    core.line(1, "NICK refused")?;
+    core.line(1, "USER refused 0 * :Refused")?;
+    core.settle().await?;
+    core.line(1, "JOIN #room")?;
+    core.line(1, "JOIN &loc")?;
+    assert!(!saw(&sink, " JOIN &loc"), "lines: {:?}", sink.lines());
+    core.fixture
+        .state_mut()?
+        .reject_fixture_batch_before_submission(agenc_relay_storage::StorageError::QueueFull)?;
+    let lines = sink.lines();
+    assert!(
+        line_index(&lines, " 366 refused #room ").is_none(),
+        "lines: {lines:?}"
+    );
+    let echo = line_index(&lines, " JOIN &loc");
+    let names_end = line_index(&lines, " 366 refused &loc ");
+    assert!(echo.is_some() && echo < names_end, "lines: {lines:?}");
+    assert!(!core.holds_local_join_seed(1)?);
+    Ok(())
+}
+
+/// AUD-16 at the NAMES continuation timer. A local JOIN deferred behind a
+/// NAMES continuation that waits on a full queue resumes when the timer
+/// delivers that continuation's last page, and is applied in that same timer
+/// step, which must open its snapshot.
+#[tokio::test]
+async fn a_local_join_resumed_by_the_names_timer_answers_in_that_step() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = congested_join(&mut core).await?;
+    core.line(1, "JOIN &loc")?;
+    assert!(!saw(&sink, " JOIN &loc"), "lines: {:?}", sink.lines());
+    sink.set_congested(false);
+    let now = core.fixture.context_mut()?.now().get();
+    core.fixture.context_mut()?.set_monotonic_for_test(now + 50);
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    let lines = sink.lines();
+    let slow = line_index(&lines, " 366 waiter #slow ");
+    let local = line_index(&lines, " 366 waiter &loc ");
+    assert!(slow.is_some() && slow < local, "lines: {lines:?}");
+    assert!(!core.holds_local_join_seed(1)?);
+    Ok(())
+}
+
+/// AUD-16 behind a staged JOIN. A local JOIN deferred behind a `#` JOIN
+/// resumes in the commit step of that JOIN's batch, once its NAMES end, and is
+/// applied in that same step. The commit step must open this snapshot too, so
+/// the JOIN answers and the TIME behind it runs.
+#[tokio::test]
+async fn a_local_join_behind_a_staged_join_answers_in_its_commit_step() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = core.open(1)?;
+    core.line(1, "NICK piper")?;
+    core.line(1, "USER piper 0 * :Piper")?;
+    core.settle().await?;
+    core.line(1, "JOIN #room")?;
+    core.line(1, "JOIN &loc")?;
+    core.line(1, "TIME")?;
+    assert!(!saw(&sink, " 366 "), "lines: {:?}", sink.lines());
+    core.settle().await?;
+    let lines = sink.lines();
+    let room = line_index(&lines, " 366 piper #room ");
+    let local = line_index(&lines, " 366 piper &loc ");
+    let time = line_index(&lines, " 391 piper ");
+    assert!(
+        room.is_some() && room < local && local < time,
+        "lines: {lines:?}"
+    );
+    assert!(!core.holds_local_join_seed(1)?);
+    Ok(())
+}
+
+/// AUD-16 at the welcome. A local JOIN sent before registration completes
+/// runs in the commit step of the registration, after the welcome, and is
+/// applied in that same step. The commit step must open its snapshot, so the
+/// JOIN answers and the TIME behind it runs.
+#[tokio::test]
+async fn a_local_join_sent_before_the_welcome_answers_in_its_commit_step() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = core.open(1)?;
+    core.line(1, "NICK early")?;
+    core.line(1, "USER early 0 * :Early")?;
+    core.line(1, "JOIN &loc")?;
+    core.line(1, "TIME")?;
+    core.settle().await?;
+    let lines = sink.lines();
+    let welcome = line_index(&lines, " 001 early ");
+    let local = line_index(&lines, " 366 early &loc ");
+    let time = line_index(&lines, " 391 early ");
+    assert!(
+        welcome.is_some() && welcome < local && local < time,
+        "lines: {lines:?}"
+    );
+    assert!(!core.holds_local_join_seed(1)?);
     Ok(())
 }
 
