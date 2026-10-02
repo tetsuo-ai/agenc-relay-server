@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_client_wire::{
     CapabilityState, ReplyKind, SafeReplyContext, SafeReplyDescription, WireMessage, numeric_reply,
-    standard_reply,
+    standard_reply, user_mask,
 };
 use agenc_relay_domain::{
     AccountCommand, CanonicalCommand, CanonicalCommandView, ChannelCommand, ChannelNameValue,
@@ -679,13 +679,10 @@ fn names_token(
     if let Some(prefix) = role_prefix(role) {
         token.push(prefix);
     }
-    token.push_str(session.nickname().presentation());
     if include_userhost {
-        let cloak = session.public_cloak();
-        token.push('!');
-        token.push_str(ascii(cloak.user_component())?);
-        token.push('@');
-        token.push_str(ascii(cloak.host_component())?);
+        token.push_str(&session_prefix(session)?);
+    } else {
+        token.push_str(session.nickname().presentation());
     }
     Ok(token)
 }
@@ -1395,14 +1392,11 @@ fn message_capability_key(capabilities: &CapabilityState) -> u8 {
         | (u8::from(capabilities.enabled("account-tag")) << 3)
 }
 
+/// The visible user mask of one session, from the shared Architecture 7.4
+/// formatter that every other user renderer also uses.
 fn session_prefix(session: &agenc_relay_domain::SessionState) -> Result<String, RuntimeError> {
-    let cloak = session.public_cloak();
-    Ok(format!(
-        "{}!{}@{}",
-        session.nickname().presentation(),
-        ascii(cloak.user_component())?,
-        ascii(cloak.host_component())?
-    ))
+    user_mask(session.nickname().presentation(), &session.public_cloak())
+        .map_err(|_| RuntimeError::InvalidValue)
 }
 
 pub(crate) fn server_time(timestamp: UtcSecond) -> Result<String, RuntimeError> {
@@ -1499,10 +1493,6 @@ fn typed_mask_text(mask: &TypedMask) -> String {
     } else {
         subject
     }
-}
-
-fn ascii(bytes: &[u8]) -> Result<&str, RuntimeError> {
-    std::str::from_utf8(bytes).map_err(|_| RuntimeError::InvalidValue)
 }
 
 #[cfg(test)]
@@ -1639,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_and_ascii_helpers_fail_closed_at_their_outer_bounds() {
+    fn the_timestamp_helper_fails_closed_at_its_outer_bounds() {
         assert_eq!(
             server_time(UtcSecond::from_unix_seconds(253_402_300_799)),
             Ok("9999-12-31T23:59:59.000Z".to_owned())
@@ -1652,8 +1642,6 @@ mod tests {
             server_time(UtcSecond::from_unix_seconds(u64::MAX)),
             Err(RuntimeError::InvalidValue)
         );
-        assert_eq!(ascii(b"ascii"), Ok("ascii"));
-        assert_eq!(ascii(&[0xff]), Err(RuntimeError::InvalidValue));
     }
 
     #[test]
@@ -2213,6 +2201,129 @@ mod tests {
         })?;
         assert!(owner_sink.commits() > 0);
         assert!(member_sink.commits() > 0);
+        Ok(())
+    }
+
+    /// AUD-18: the source prefix of a user's line and its `userhost-in-names`
+    /// token spell the public cloak as Architecture 7.4 frames it. The
+    /// expected text is built from the stored components, not the formatter.
+    #[test]
+    fn user_sources_and_names_tokens_render_the_framed_public_cloak()
+    -> Result<(), Box<dyn core::error::Error>> {
+        use agenc_relay_domain::{
+            DomainError, MessageCommand, MessageKind, MessageTarget, MessageText, PlanDecision,
+        };
+
+        use crate::connection::ConnectionGeneration;
+        use crate::test_support::{
+            StateCoreFixture, apply_live_plan, bind_live_session, bound, negotiated_capabilities,
+            plan_live, seed_session,
+        };
+
+        let mut fixture = StateCoreFixture::new(Vec::new())?;
+        let context = fixture.context_mut()?;
+        let longest = format!("L{}", "o".repeat(31));
+        let owner = seed_session(context, 1, &longest, None)?;
+        let member = seed_session(context, 2, "FramedMember", None)?;
+        let names_caps = || negotiated_capabilities(&["userhost-in-names"]);
+        let owner_sink = bind_live_session(context, 1, owner, names_caps()?, true)?;
+        let member_sink = bind_live_session(context, 2, member, names_caps()?, true)?;
+        let mask = |identity: agenc_relay_testkit::DomainTestIdentity,
+                    context: &StateCoreContext|
+         -> Result<String, Box<dyn core::error::Error>> {
+            let session = context
+                .domain()
+                .session(identity.user_id)
+                .ok_or("session")?;
+            let cloak = session.public_cloak();
+            Ok(format!(
+                "{}!u-{}@h-{}.invalid",
+                session.nickname().presentation(),
+                std::str::from_utf8(cloak.user_component())?,
+                std::str::from_utf8(cloak.host_component())?,
+            ))
+        };
+        let owner_mask = mask(owner, context)?;
+        let member_mask = mask(member, context)?;
+        assert_eq!(
+            owner_mask.len(),
+            agenc_relay_client_wire::MAX_USER_MASK_BYTES
+        );
+
+        let capabilities = names_caps()?;
+        let drive = |context: &mut StateCoreContext,
+                     identity: agenc_relay_testkit::DomainTestIdentity,
+                     generation: u64,
+                     line: &str,
+                     command: &dyn Fn() -> Result<CanonicalCommand, DomainError>|
+         -> Result<(), Box<dyn core::error::Error>> {
+            let request = parsed(line)?;
+            let PlanDecision::Mutation(plan) = plan_live(context, identity, command)? else {
+                return Err(format!("{line} was not planned as a mutation").into());
+            };
+            let reply = ReplyInput {
+                requester: identity.user_id,
+                generation: ConnectionGeneration::new(generation),
+                capabilities: &capabilities,
+                request: &request,
+            };
+            let fanout =
+                render_mutation(context, bound(identity), Some(reply), &command()?, &plan)?;
+            context
+                .fanout_now(fanout)
+                .map_err(|_| format!("{line} fanout was refused"))?;
+            apply_live_plan(context, plan)
+        };
+        let name = ChannelNameValue::parse("#framed")?;
+        let join = || CanonicalCommand::join(vec![ChannelTarget::new(name.clone(), false)]);
+        drive(context, owner, 1, "JOIN #framed", &join)?;
+        drive(context, member, 2, "JOIN #framed", &join)?;
+        drive(context, owner, 1, "PRIVMSG #framed :hello", &|| {
+            Ok(CanonicalCommand::message(MessageCommand::new(
+                MessageKind::Privmsg,
+                vec![MessageTarget::Channel(name.clone())],
+                Some(MessageText::parse("hello")?),
+            )?))
+        })?;
+
+        let owner_lines = owner_sink.lines();
+        let member_lines = member_sink.lines();
+        let owner_token = format!("~{owner_mask}");
+        assert_eq!(
+            owner_token.len(),
+            1 + agenc_relay_client_wire::MAX_USER_MASK_BYTES
+        );
+        for expected in [
+            format!(":{owner_mask} JOIN #framed"),
+            format!(":server.example 353 {longest} = #framed :{owner_token}"),
+            format!(":{member_mask} JOIN #framed"),
+        ] {
+            assert!(
+                owner_lines.contains(&expected),
+                "{expected}: {owner_lines:?}"
+            );
+        }
+        let names = member_lines
+            .iter()
+            .find(|line| line.contains(" 353 FramedMember = #framed :"))
+            .ok_or("member NAMES")?;
+        let mut tokens: Vec<_> = names
+            .rsplit_once(" :")
+            .ok_or("NAMES trailing")?
+            .1
+            .split(' ')
+            .collect();
+        tokens.sort_unstable();
+        assert_eq!(tokens, [member_mask.as_str(), owner_token.as_str()]);
+        for expected in [
+            format!(":{member_mask} JOIN #framed"),
+            format!(":{owner_mask} PRIVMSG #framed :hello"),
+        ] {
+            assert!(
+                member_lines.contains(&expected),
+                "{expected}: {member_lines:?}"
+            );
+        }
         Ok(())
     }
 }

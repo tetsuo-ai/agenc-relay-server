@@ -803,6 +803,60 @@ fn register_when_available(fixture: &NodeFixture, nickname: &str) -> TestResult<
     }
 }
 
+/// Whether `user` and `host` are a public cloak framed as Architecture 7.4
+/// specifies, `u-<10 base32>` and `h-<16 base32>.invalid` (AUD-18), checked
+/// independently of the daemon's formatter.
+fn is_framed_cloak(user: &str, host: &str) -> bool {
+    fn base32(text: &str, length: usize) -> bool {
+        text.len() == length
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'a'..=b'z' | b'2'..=b'7'))
+    }
+    user.strip_prefix("u-").is_some_and(|user| base32(user, 10))
+        && host
+            .strip_prefix("h-")
+            .and_then(|host| host.strip_suffix(".invalid"))
+            .is_some_and(|host| base32(host, 16))
+}
+
+/// Requires a line `:<nickname>!<user>@<host><rest>` with a framed cloak.
+fn assert_remote_mask(lines: &[String], nickname: &str, rest: &str) -> TestResult {
+    let framed = lines.iter().any(|line| {
+        line.strip_prefix(':')
+            .and_then(|line| line.strip_suffix(rest))
+            .and_then(|source| source.strip_prefix(nickname))
+            .and_then(|source| source.strip_prefix('!'))
+            .and_then(|source| source.split_once('@'))
+            .is_some_and(|(user, host)| is_framed_cloak(user, host))
+    });
+    if framed {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "no framed {nickname} mask before {rest:?}: {lines:?}"
+        )))
+    }
+}
+
+/// Requires a WHOIS 311 for `nickname` whose user and host fields are framed.
+fn assert_remote_whois(lines: &[String], nickname: &str) -> TestResult {
+    let framed = lines.iter().any(|line| {
+        matches!(
+            line.split(' ').collect::<Vec<_>>().as_slice(),
+            [_, "311", _, target, user, host, ..]
+                if *target == nickname && is_framed_cloak(user, host)
+        )
+    });
+    if framed {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "no framed WHOIS fields for {nickname}: {lines:?}"
+        )))
+    }
+}
+
 fn assert_contains(lines: &[String], expected: &str) -> TestResult {
     if lines.iter().any(|line| line.contains(expected)) {
         Ok(())
@@ -896,7 +950,13 @@ fn exercise_network(network: &Network, coordinator: &mut DaemonProcess) -> TestR
     assert_contains(&seen, " JOIN #fed")?;
     bob.send("PRIVMSG #fed :hello from edge b")?;
     let relayed = alice.read_until(|line| line.contains("PRIVMSG #fed :hello from edge b"))?;
-    assert_contains(&relayed, ":bob!")?;
+    // AUD-18: edge A renders bob, a user homed on edge B, with the framed
+    // Architecture 7.4 mask, and the WHOIS reply the coordinator renders for
+    // edge A frames bob's user and host fields.
+    assert_remote_mask(&relayed, "bob", " PRIVMSG #fed :hello from edge b")?;
+    alice.send("WHOIS bob")?;
+    let whois = alice.read_until(|line| line.contains(" 318 alice bob "))?;
+    assert_remote_whois(&whois, "bob")?;
     alice.send("TOPIC #fed :federated topic")?;
     let topic = bob.read_until(|line| line.contains("TOPIC #fed :federated topic"))?;
     assert_contains(&topic, ":alice!")?;

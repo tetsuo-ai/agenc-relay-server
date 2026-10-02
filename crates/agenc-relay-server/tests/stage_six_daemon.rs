@@ -5,6 +5,8 @@
 #[path = "support/loopback_ports.rs"]
 mod loopback_ports;
 
+#[path = "stage_six_daemon/cloak_spelling.rs"]
+mod cloak_spelling;
 #[path = "stage_six_daemon/idle_capacity.rs"]
 mod idle_capacity;
 

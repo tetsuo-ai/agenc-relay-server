@@ -2430,12 +2430,18 @@ async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResu
     assert!(
         lines
             .iter()
-            .any(|line| line.starts_with(":tess!") && line.contains(" JOIN #bridge")),
+            .any(|line| has_framed_source(line, "tess") && line.contains(" JOIN #bridge")),
         "{lines:?}"
     );
     tess.line("PRIVMSG #bridge :hello sam").await?;
     let lines = sam.wait_for("PRIVMSG #bridge :hello sam").await?;
-    assert!(lines.iter().any(|line| line.starts_with(":tess!")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| has_framed_source(line, "tess")
+                && line.ends_with(" PRIVMSG #bridge :hello sam")),
+        "{lines:?}"
+    );
     assert!(
         !tess
             .sink
@@ -2518,7 +2524,10 @@ async fn exchange_more_over_bridge(sam: &mut Client, tess: &mut Client) -> TestR
     sam.wait_for("MODE #bridge -m").await?;
     tess.line("PRIVMSG sam :direct hello").await?;
     let lines = sam.wait_for("PRIVMSG sam :direct hello").await?;
-    assert!(lines.iter().any(|line| line.starts_with(":tessa!")));
+    assert!(
+        lines.iter().any(|line| has_framed_source(line, "tessa")),
+        "{lines:?}"
+    );
     explicit_queries_over_bridge(sam).await?;
     tess.line("MODE tessa").await?;
     tess.wait_for(" 221 tessa +i").await?;
@@ -2551,6 +2560,14 @@ async fn explicit_queries_over_bridge(client: &mut Client) -> TestResult {
         assert!(
             replies.iter().any(|line| line.contains(ending)),
             "explicit query {command} failed: {replies:?}"
+        );
+        let framed = framed_query_fields(command, &replies);
+        let names_a_cloak = ["WHO ", "WHOIS ", "USERHOST ", "WHOWAS "]
+            .iter()
+            .any(|query| command.starts_with(query));
+        assert!(
+            framed > 0 || !names_a_cloak,
+            "{command} named no framed cloak: {replies:?}"
         );
     }
     let before = client.sink.lines().len();
@@ -2640,6 +2657,78 @@ async fn explicit_queries_over_bridge(client: &mut Client) -> TestResult {
     client.line("NICK sammy").await?;
     client.wait_for("NICK :sammy").await?;
     Ok(())
+}
+
+/// AUD-18: whether a user field and a host field are a public cloak framed as
+/// Architecture 7.4 specifies, checked independently of the formatter.
+fn is_framed_cloak(user: &str, host: &str) -> bool {
+    fn base32(text: &str, length: usize) -> bool {
+        text.len() == length
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'a'..=b'z' | b'2'..=b'7'))
+    }
+    user.strip_prefix("u-").is_some_and(|user| base32(user, 10))
+        && host
+            .strip_prefix("h-")
+            .and_then(|host| host.strip_suffix(".invalid"))
+            .is_some_and(|host| base32(host, 16))
+}
+
+/// The space-separated fields of a line after its tag section.
+fn untagged_fields(line: &str) -> Vec<&str> {
+    let body = match line.strip_prefix('@') {
+        Some(tagged) => tagged.split_once(' ').map_or("", |(_, body)| body),
+        None => line,
+    };
+    body.split(' ').collect()
+}
+
+/// Whether a line's source prefix is `nickname`'s framed user mask.
+fn has_framed_source(line: &str, nickname: &str) -> bool {
+    untagged_fields(line)
+        .first()
+        .and_then(|source| source.strip_prefix(':'))
+        .and_then(|source| source.strip_prefix(nickname))
+        .and_then(|source| source.strip_prefix('!'))
+        .and_then(|source| source.split_once('@'))
+        .is_some_and(|(user, host)| is_framed_cloak(user, host))
+}
+
+/// Counts the cloaks of the WHO, WHOIS, WHOWAS and USERHOST replies among
+/// `replies`, and fails on any that is not framed.
+fn framed_query_fields(command: &str, replies: &[String]) -> usize {
+    let mut framed = 0;
+    for line in replies {
+        let fields = untagged_fields(line);
+        let cloaks: Vec<(&str, &str)> = match fields.get(1).copied() {
+            Some("311" | "314" | "352") => fields
+                .get(4)
+                .zip(fields.get(5))
+                .map(|(user, host)| (*user, *host))
+                .into_iter()
+                .collect(),
+            Some("302") => line
+                .rsplit_once(" :")
+                .map_or("", |(_, users)| users)
+                .split(' ')
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    entry
+                        .split_once('=')
+                        .and_then(|(_, reply)| reply.get(1..))
+                        .and_then(|address| address.split_once('@'))
+                        .unwrap_or(("", ""))
+                })
+                .collect(),
+            _ => continue,
+        };
+        for (user, host) in cloaks {
+            assert!(is_framed_cloak(user, host), "{command}: {line}");
+            framed += 1;
+        }
+    }
+    framed
 }
 
 async fn new_query_reply(client: &Client, before: usize, ending: &str) -> TestResult<Vec<String>> {

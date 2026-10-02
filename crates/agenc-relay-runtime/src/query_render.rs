@@ -3,13 +3,13 @@
 use std::collections::BTreeSet;
 use std::mem::size_of;
 
-use agenc_relay_client_wire::{WireMessage, numeric_reply};
+use agenc_relay_client_wire::{VisibleCloak, WireMessage, numeric_reply, user_mask};
 use agenc_relay_domain::{
     CanonicalCommandView, ChannelListProjection, ChannelProjection, DomainState, InformationQuery,
     MaskList, ModeCommand, PresenceCommand, ProjectionDecision, QueryPlan, Role, SessionProjection,
     TopicProjection, UserQuery, Visibility, WhoTarget,
 };
-use agenc_relay_types::{ChannelInstanceId, MaskSubject, TypedMask, UserId};
+use agenc_relay_types::{ChannelInstanceId, MaskSubject, PublicCloak, TypedMask, UserId};
 
 use crate::RuntimeError;
 use crate::client_render::ReplyInput;
@@ -861,14 +861,14 @@ fn names_entry(
     if let Some(prefix) = role_prefix(role) {
         entry.push(prefix);
     }
-    entry.push_str(nickname);
     if include_userhost {
         let session = domain.session(user_id).ok_or(RuntimeError::InvalidValue)?;
-        let cloak = session.public_cloak();
-        entry.push('!');
-        entry.push_str(ascii(cloak.user_component())?);
-        entry.push('@');
-        entry.push_str(ascii(cloak.host_component())?);
+        entry.push_str(
+            &user_mask(nickname, &session.public_cloak())
+                .map_err(|_| RuntimeError::InvalidValue)?,
+        );
+    } else {
+        entry.push_str(nickname);
     }
     Ok(entry)
 }
@@ -975,6 +975,7 @@ fn render_whowas_row(
     record: &crate::state_core::whowas::WhowasRecord,
     frames: &mut Vec<WireMessage>,
 ) -> Result<(), RuntimeError> {
+    let cloak = visible_cloak(&record.cloak)?;
     push_numeric(
         frames,
         prefix,
@@ -982,8 +983,8 @@ fn render_whowas_row(
         nickname,
         &[
             record.nickname.presentation(),
-            ascii(record.cloak.user_component())?,
-            ascii(record.cloak.host_component())?,
+            cloak.user(),
+            cloak.host(),
             "*",
         ],
         record
@@ -1116,7 +1117,7 @@ fn render_who_session(
     role: Option<char>,
     frames: &mut Vec<WireMessage>,
 ) -> Result<(), RuntimeError> {
-    let cloak = session.public_cloak();
+    let cloak = visible_cloak(&session.public_cloak())?;
     let mut flags = String::from(if session.away_text().is_some() {
         "G"
     } else {
@@ -1133,8 +1134,8 @@ fn render_who_session(
         nickname,
         &[
             channel,
-            ascii(cloak.user_component())?,
-            ascii(cloak.host_component())?,
+            cloak.user(),
+            cloak.host(),
             prefix,
             session.nickname().presentation(),
             &flags,
@@ -1156,7 +1157,7 @@ fn render_whois(
     let ProjectionDecision::Visible(session) = domain.project_session(requester, user_id) else {
         return missing_whois(prefix, nickname, target.presentation());
     };
-    let cloak = session.public_cloak();
+    let cloak = visible_cloak(&session.public_cloak())?;
     let mut frames = Vec::new();
     push_numeric(
         &mut frames,
@@ -1165,8 +1166,8 @@ fn render_whois(
         nickname,
         &[
             session.nickname().presentation(),
-            ascii(cloak.user_component())?,
-            ascii(cloak.host_component())?,
+            cloak.user(),
+            cloak.host(),
             "*",
         ],
         session.display_name().as_str(),
@@ -1332,7 +1333,7 @@ fn render_userhost(
         else {
             continue;
         };
-        let cloak = session.public_cloak();
+        let cloak = visible_cloak(&session.public_cloak())?;
         let presence = if session.away_text().is_some() {
             '-'
         } else {
@@ -1341,8 +1342,8 @@ fn render_userhost(
         users.push(format!(
             "{}={presence}{}@{}",
             session.nickname().presentation(),
-            ascii(cloak.user_component())?,
-            ascii(cloak.host_component())?,
+            cloak.user(),
+            cloak.host(),
         ));
     }
     one_numeric(prefix, 302, nickname, &[], &users.join(" "))
@@ -1467,8 +1468,10 @@ const fn role_prefix(role: Role) -> Option<char> {
     }
 }
 
-fn ascii(bytes: &[u8]) -> Result<&str, RuntimeError> {
-    std::str::from_utf8(bytes).map_err(|_| RuntimeError::InvalidValue)
+/// The visible user and host fields of one public cloak, from the shared
+/// Architecture 7.4 formatter that every user renderer uses.
+fn visible_cloak(cloak: &PublicCloak) -> Result<VisibleCloak, RuntimeError> {
+    VisibleCloak::new(cloak).map_err(|_| RuntimeError::InvalidValue)
 }
 
 fn one_numeric(
@@ -2243,14 +2246,16 @@ mod tests {
             .state
             .session(fixture.member.user_id)
             .ok_or("member")?;
+        // Architecture 7.4 frames the components: u-<user>@h-<host>.invalid.
         assert_eq!(
             replies,
             vec![format!(
-                ":server.test 302 owner :RenderOwner=+{}@{} RenderMember=-{}@{}\r\n",
-                ascii(owner.public_cloak().user_component())?,
-                ascii(owner.public_cloak().host_component())?,
-                ascii(member.public_cloak().user_component())?,
-                ascii(member.public_cloak().host_component())?,
+                ":server.test 302 owner :RenderOwner=+u-{}@h-{}.invalid \
+                 RenderMember=-u-{}@h-{}.invalid\r\n",
+                std::str::from_utf8(owner.public_cloak().user_component())?,
+                std::str::from_utf8(owner.public_cloak().host_component())?,
+                std::str::from_utf8(member.public_cloak().user_component())?,
+                std::str::from_utf8(member.public_cloak().host_component())?,
             )]
         );
         let hidden = render_user_query(
@@ -2266,6 +2271,111 @@ mod tests {
         .map(encoded)
         .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(hidden, vec![":server.test 302 outsider :\r\n"]);
+        Ok(())
+    }
+
+    /// AUD-18: `userhost-in-names` tokens and the user and host fields of
+    /// WHO and WHOIS spell the public cloak as Architecture 7.4 frames it,
+    /// and no reply carries the bare components. The expected text is built
+    /// from the stored components, not the formatter.
+    #[test]
+    fn names_who_and_whois_render_the_framed_public_cloak() -> Result<(), Box<dyn Error>> {
+        let fixture = fixture()?;
+        let cloak_of = |user_id| -> Result<(String, String), Box<dyn Error>> {
+            let cloak = fixture
+                .state
+                .session(user_id)
+                .ok_or("session")?
+                .public_cloak();
+            Ok((
+                std::str::from_utf8(cloak.user_component())?.to_owned(),
+                std::str::from_utf8(cloak.host_component())?.to_owned(),
+            ))
+        };
+        let (owner_user, owner_host) = cloak_of(fixture.owner.user_id)?;
+        let (member_user, member_host) = cloak_of(fixture.member.user_id)?;
+
+        let names = render_names(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            true,
+            std::slice::from_ref(&fixture.listed),
+        )?;
+        let mut tokens: Vec<_> = names
+            .iter()
+            .filter(|frame| frame.command() == "353")
+            .filter_map(WireMessage::trailing)
+            .flat_map(|text| text.split(' '))
+            .collect();
+        tokens.sort_unstable();
+        assert_eq!(
+            tokens,
+            [
+                format!("&RenderMember!u-{member_user}@h-{member_host}.invalid"),
+                format!("~RenderOwner!u-{owner_user}@h-{owner_host}.invalid"),
+            ]
+        );
+
+        let who = render_user_query(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            &UserQuery::Who(Some(WhoTarget::Channel(fixture.listed.clone()))),
+        )?;
+        let mut rows: Vec<Vec<String>> = who
+            .iter()
+            .filter(|frame| frame.command() == "352")
+            .map(|frame| frame.middle().to_vec())
+            .collect();
+        rows.sort_unstable();
+        let row = |nickname: &str, user: &str, host: &str, flags: &str| {
+            [
+                "owner".to_owned(),
+                "#render-listed".to_owned(),
+                format!("u-{user}"),
+                format!("h-{host}.invalid"),
+                "server.test".to_owned(),
+                nickname.to_owned(),
+                flags.to_owned(),
+            ]
+        };
+        let mut expected = vec![
+            row("RenderOwner", &owner_user, &owner_host, "H~"),
+            row("RenderMember", &member_user, &member_host, "G&"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(rows, expected);
+
+        let whois = render_user_query(
+            &fixture.state,
+            "server.test",
+            "owner",
+            fixture.owner.user_id,
+            &UserQuery::Whois(agenc_relay_domain::NicknameValue::parse("RenderMember")?),
+        )?;
+        let first = whois.first().ok_or("WHOIS 311")?;
+        assert_eq!(first.command(), "311");
+        assert_eq!(
+            first.middle(),
+            [
+                "owner".to_owned(),
+                "RenderMember".to_owned(),
+                format!("u-{member_user}"),
+                format!("h-{member_host}.invalid"),
+                "*".to_owned(),
+            ]
+        );
+
+        for frame in names.into_iter().chain(who).chain(whois) {
+            let line = encoded(frame)?;
+            for (user, host) in [(&owner_user, &owner_host), (&member_user, &member_host)] {
+                assert!(!line.contains(&format!("!{user}@{host}")), "{line}");
+                assert!(!line.contains(&format!(" {user} {host} ")), "{line}");
+            }
+        }
         Ok(())
     }
 

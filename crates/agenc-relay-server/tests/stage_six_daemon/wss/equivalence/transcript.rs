@@ -99,7 +99,7 @@ impl Normalizer {
             let Some((user, host)) = address.split_once('@') else {
                 continue;
             };
-            let _validated = agenc_relay_types::PublicCloak::parse(user, host)?;
+            framed_cloak(user, host)?;
             let next = format!("<cloak-{}>", self.cloaks.len());
             self.cloaks.entry(address.into()).or_insert(next);
         }
@@ -108,12 +108,27 @@ impl Normalizer {
         if fields.get(1) == Some(&"311") {
             let user = fields.get(4).ok_or_else(|| failure("WHOIS user missing"))?;
             let host = fields.get(5).ok_or_else(|| failure("WHOIS host missing"))?;
-            let _validated = agenc_relay_types::PublicCloak::parse(user, host)?;
+            framed_cloak(user, host)?;
             let next = format!("<cloak-{}>", self.cloaks.len());
             self.cloaks.entry(format!("{user} {host}")).or_insert(next);
         }
         Ok(())
     }
+}
+
+/// Validates one user and host field pair as a public cloak in the
+/// Architecture 7.4 framing, `u-<10 base32>` and `h-<16 base32>.invalid`
+/// (AUD-18); the bare components are refused.
+fn framed_cloak(user: &str, host: &str) -> TestResult {
+    let user = user
+        .strip_prefix("u-")
+        .ok_or_else(|| failure(format!("unframed cloak user {user:?}")))?;
+    let host = host
+        .strip_prefix("h-")
+        .and_then(|host| host.strip_suffix(".invalid"))
+        .ok_or_else(|| failure(format!("unframed cloak host {host:?}")))?;
+    let _validated = agenc_relay_types::PublicCloak::parse(user, host)?;
+    Ok(())
 }
 
 fn normalize_numeric_time(line: &str) -> TestResult<String> {
@@ -174,5 +189,22 @@ fn membership_normalization_retains_roles_duplicates_and_nonmembership_bytes() -
     }
     let message = ":Member PRIVMSG #room :Visitor ~Member";
     assert_eq!(normalize_membership_order(message)?, message);
+    Ok(())
+}
+
+#[test]
+fn cloak_normalization_accepts_only_the_framed_spelling() -> TestResult {
+    framed_cloak("u-aaaaaaaaaa", "h-bbbbbbbbbbbbbbbb.invalid")?;
+    for (user, host) in [
+        ("aaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        ("u-aaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        ("aaaaaaaaaa", "h-bbbbbbbbbbbbbbbb.invalid"),
+        ("u-aaaaaaaaaa", "h-bbbbbbbbbbbbbbbb"),
+        ("u-aaaaaaaaaa", "bbbbbbbbbbbbbbbb.invalid"),
+        ("u-AAAAAAAAAA", "h-bbbbbbbbbbbbbbbb.invalid"),
+        ("u-aaaaaaaaa", "h-bbbbbbbbbbbbbbbb.invalid"),
+    ] {
+        assert!(framed_cloak(user, host).is_err(), "{user}@{host}");
+    }
     Ok(())
 }
