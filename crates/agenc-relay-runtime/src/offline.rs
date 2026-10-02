@@ -2634,10 +2634,10 @@ mod tests {
         Ok(())
     }
 
-    /// AUD-02: an empty or reversed interval, an unsafe output, one below a
-    /// group-writable directory at any depth or below a symbolic link, and a
-    /// key file outside the protected-file rules are refused before anything
-    /// is written.
+    /// AUD-02: an empty or reversed interval, a relative output or one whose
+    /// name is not UTF-8, one below a group-writable directory at any depth
+    /// or below a symbolic link, and a key file outside the protected-file
+    /// rules are refused before anything is written.
     #[test]
     fn sequencer_credentials_refuse_bad_intervals_outputs_and_keys() -> Result<(), OfflineError> {
         let root = TestDirectory::create()?;
@@ -2656,6 +2656,15 @@ mod tests {
         let relative = credentials_request(&root.0, PathBuf::from("credentials.bin"));
         assert_eq!(
             create_sequencer_credentials(&relative),
+            Err(OfflineError::InvalidRequest)
+        );
+        // A final name that is not UTF-8 below a valid directory: only the
+        // output's own path check refuses it.
+        let non_utf8 = root.0.join(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"credentials-\xff.bin"),
+        );
+        assert_eq!(
+            create_sequencer_credentials(&credentials_request(&root.0, non_utf8.clone())),
             Err(OfflineError::InvalidRequest)
         );
         // The daemon's protected read refuses a file below any group- or
@@ -2698,6 +2707,7 @@ mod tests {
             );
         }
         assert!(fs::symlink_metadata(&output).is_err());
+        assert!(fs::symlink_metadata(&non_utf8).is_err());
         assert!(fs::symlink_metadata(shared.join("credentials.bin")).is_err());
         assert!(fs::symlink_metadata(nested.join("credentials.bin")).is_err());
         assert!(fs::symlink_metadata(root.0.join("etc/credentials.bin")).is_err());

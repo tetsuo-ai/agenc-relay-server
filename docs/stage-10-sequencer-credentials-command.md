@@ -48,13 +48,13 @@ a partial document. The command prints the key set's
 descriptor's form, so an operator can compare them with every node's
 `print-onboarding`.
 
-Refused before anything is written: an empty or reversed interval, an
-output that is relative, unnamed or already present, an output whose parent
-directory or any directory above it is group- or world-writable or a
+Refused before anything is written: an empty or reversed interval, an output
+that is relative, unnamed, not UTF-8 or already present, an output whose
+parent directory or any directory above it is group- or world-writable or a
 symbolic link, a configuration that does not validate, a key file that fails
 the protected-file rules or is not 32 bytes, and an unknown or unpermitted
-`--service-user`. The output's directory chain is checked from the root
-down with the protected-ancestor rule the daemon's protected read applies
+`--service-user`. The output's directory chain is checked from the root down
+with the protected-ancestor rule the daemon's protected read applies
 (Section 22.2), so the command does not publish a document that rule makes
 unreadable to startup and `print-onboarding`. `init` still checks only the
 immediate parent of its targets, a gap the SDK program lists for the owner.
@@ -79,11 +79,12 @@ and no dependency is added: the runtime already depends on
   generation and hash the command reports; the output has mode 0644; a
   second run is refused with the document unchanged.
 - `offline::tests::sequencer_credentials_refuse_bad_intervals_outputs_and_keys`:
-  an empty and a reversed interval, a relative output, an output directly
-  below a group-writable directory, one in a private directory inside that
-  group-writable directory, one below a symbolic link to a private
-  directory, a 31-byte key file and a world-readable key file are each
-  refused, with nothing written.
+  an empty and a reversed interval, a relative output, an output whose
+  final name is not UTF-8 (which only the output's own path check refuses),
+  an output directly below a group-writable directory, one in a private
+  directory inside that group-writable directory, one below a symbolic link
+  to a private directory, a 31-byte key file and a world-readable key file
+  are each refused, with nothing written.
 - `tests::sequencer_credentials_parser_requires_every_value_in_canonical_form`
   in `crates/agenc-relay-server/src/daemon_cli.rs`: every option is
   required, values are canonical, other subcommands print the usage, and an
