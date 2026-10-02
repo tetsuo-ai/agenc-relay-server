@@ -20,10 +20,12 @@ because it fails a gate that the frozen architecture names (below).
   in it changed.
 - `scripts/check-stage-four.py` requires the fuzz workspace's override to
   name the reviewed directory and requires both `Cargo.lock` and
-  `fuzz/Cargo.lock` to resolve exactly one `opaque-ke` 4.0.1 without a
-  registry source. Four new self-test cases cover a missing or moved fuzz
-  override, a registry entry in the fuzz lock and a second package in a lock
-  (8 cases, 4 before).
+  `fuzz/Cargo.lock` to resolve exactly one `opaque-ke` 4.0.1 with neither a
+  source nor a checksum, which is how Cargo records a local path. Six new
+  self-test cases cover a missing or moved fuzz
+  override, a registry entry in the fuzz lock, a second package in a lock, a
+  Git entry without a checksum and a local entry at another version (10
+  cases, 4 before).
 - `conformance/stage-four-evidence.md` describes the comparison.
 
 The root manifest, `Cargo.lock`, the vendored tree and its digest

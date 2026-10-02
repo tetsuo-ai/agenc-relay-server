@@ -876,7 +876,27 @@ def self_test(root: Path) -> int:
         lambda: validate_opaque_lock(duplicated, "Cargo.lock"),
         "does not resolve exactly one reviewed OPAQUE package",
     )
-    cases += 2
+    # A Git source has no checksum; its source key alone must be refused.
+    git_lock = copy.deepcopy(root_lock)
+    for package in git_lock["package"]:  # type: ignore[union-attr]
+        if package.get("name") == "opaque-ke":
+            package["source"] = "git+https://github.com/facebook/opaque-ke?tag=v4.0.1#0000000"
+            package.pop("checksum", None)
+    expect_failure(
+        "Git OPAQUE without a checksum in a lock",
+        lambda: validate_opaque_lock(git_lock, "Cargo.lock"),
+        "does not select the reviewed local OPAQUE source",
+    )
+    other_version = copy.deepcopy(fuzz_lock)
+    for package in other_version["package"]:  # type: ignore[union-attr]
+        if package.get("name") == "opaque-ke":
+            package["version"] = "4.0.2"
+    expect_failure(
+        "local OPAQUE at another version in a lock",
+        lambda: validate_opaque_lock(other_version, "fuzz/Cargo.lock"),
+        "does not resolve exactly one reviewed OPAQUE package",
+    )
+    cases += 4
     return cases
 
 
