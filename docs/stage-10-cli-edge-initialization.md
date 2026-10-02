@@ -158,9 +158,13 @@ Nothing here claims #134 or #175 fixed.
 - The daemon test enrolls TLS certificates from the testkit CA and writes
   the federation peer records by hand, as an operator does; the federation
   signing public keys it pins are derived from the seeds `arcd init` wrote.
-- At this commit the test's public sequencer credentials document still comes
-  from the testkit builder, and the edge's own recovery epoch for the
-  coordinator's peer record comes from the edge's `print-onboarding`.
+- When this record was written, the test's public sequencer credentials
+  document came from the testkit builder and the edge's own recovery epoch
+  for the coordinator's peer record from the edge's `print-onboarding`. AUD-03
+  moved that epoch to the `arcd init` receipt
+  ([the edge descriptor epoch record](stage-10-edge-descriptor-epoch.md)),
+  and AUD-02 creates the document with `arcd sequencer-credentials create`
+  ([the sequencer credentials record](stage-10-sequencer-credentials-command.md)).
 - The kill experiments ran a debug build on a shared, heavily loaded host and
   are evidence about this mechanism, not a capacity or soak result; their
   logs are not part of this repository.

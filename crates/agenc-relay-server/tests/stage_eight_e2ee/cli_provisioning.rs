@@ -5,7 +5,11 @@
 //! coordinator's public pins to the edge's initialization, and the TLS,
 //! federation and E2EE settings are the edits an operator makes to the
 //! generated configuration. AUD-03: an edge's own descriptor pins the
-//! coordinator epoch it advertises.
+//! coordinator epoch it advertises. AUD-02: `arcd sequencer-credentials
+//! create` publishes the sequencer credentials every node names, so no
+//! node's database, keys or credentials document comes from a library
+//! initializer or a testkit builder; the TLS certificates come from the
+//! test CA, as an operator's come from its CA.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -262,6 +266,50 @@ impl CliNode {
         Ok(String::from_utf8(output.stderr)?)
     }
 
+    /// AUD-02: runs `arcd sequencer-credentials create` on the coordinator
+    /// with the sequencer key `init` wrote, and returns the public document
+    /// with the key-set hash the command printed. The document must equal,
+    /// byte for byte, the one the testkit builds for the same key.
+    fn create_sequencer_credentials(&self, descriptor: &str) -> TestResult<(Vec<u8>, String)> {
+        let key_file = self.data_dir.join("keys/sequencer.key");
+        let output = self.root.path().join("sequencer-credentials.bin");
+        let printed = arcd(&[
+            "sequencer-credentials".as_ref(),
+            "create".as_ref(),
+            "--config".as_ref(),
+            self.config_path.as_os_str(),
+            "--sequencer-key-file".as_ref(),
+            key_file.as_os_str(),
+            "--not-before".as_ref(),
+            SEQUENCER_INTERVAL.0.to_string().as_ref(),
+            "--not-after".as_ref(),
+            SEQUENCER_INTERVAL.1.to_string().as_ref(),
+            "--output".as_ref(),
+            output.as_os_str(),
+        ])?;
+        if line_value(&printed, "sequencer-key-set-generation=")? != "0" {
+            return Err(failure(format!("unexpected key set: {printed:?}")));
+        }
+        let key_set_hash = line_value(&printed, "sequencer-key-set-hash=")?.to_owned();
+        let document = fs::read(&output)?;
+        let seed: [u8; 32] = fs::read(&key_file)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| failure("sequencer key is not 32 bytes"))?;
+        let network_id = NetworkId::parse(line_value(descriptor, "network-id=")?)?;
+        let expected = builders::sequencer_credentials_document(
+            *network_id.as_bytes(),
+            &Ed25519SecretKey::from_bytes(seed),
+            SEQUENCER_INTERVAL,
+        )?;
+        if document != expected {
+            return Err(failure(
+                "the arcd credentials document differs from the testkit document",
+            ));
+        }
+        Ok((document, key_set_hash))
+    }
+
     /// The public half of the federation signing key `init` generated, the
     /// value a peer record pins.
     fn federation_signing_public_key(&self) -> TestResult<[u8; 32]> {
@@ -380,8 +428,8 @@ struct CliNetwork {
 
 /// Provisions a coordinator and one edge per name with `arcd init` and
 /// `arcd print-onboarding`, then makes the operator's federation and E2EE
-/// edits. The public credentials document is built from the sequencer key
-/// `init` wrote on the coordinator.
+/// edits. `arcd sequencer-credentials create` writes the public credentials
+/// document from the sequencer key `init` wrote on the coordinator.
 fn provision_cli_network(edge_names: &[&'static str]) -> TestResult<CliNetwork> {
     let coordinator = CliNode::init("core.test", 120, &CliInit::Coordinator)?;
     let descriptor = coordinator.print_onboarding()?;
@@ -413,16 +461,7 @@ fn provision_cli_network(edge_names: &[&'static str]) -> TestResult<CliNetwork> 
             return Err(failure(format!("unexpected refusal: {refused}")));
         }
     }
-    let sequencer_seed: [u8; 32] = fs::read(coordinator.data_dir.join("keys/sequencer.key"))?
-        .as_slice()
-        .try_into()
-        .map_err(|_| failure("sequencer key is not 32 bytes"))?;
-    let network_id = NetworkId::parse(line_value(&descriptor, "network-id=")?)?;
-    let credentials = builders::sequencer_credentials_document(
-        *network_id.as_bytes(),
-        &Ed25519SecretKey::from_bytes(sequencer_seed),
-        SEQUENCER_INTERVAL,
-    )?;
+    let (credentials, key_set_hash) = coordinator.create_sequencer_credentials(&descriptor)?;
     let federation_address = reserve_loopback_address()?;
     let coordinator_entry =
         coordinator.peer_entry(&coordinator_epoch, &format!("\"tcp:{federation_address}\""))?;
@@ -440,6 +479,16 @@ fn provision_cli_network(edge_names: &[&'static str]) -> TestResult<CliNetwork> 
         {
             return Err(failure(format!(
                 "{} descriptor does not pin its coordinator's epoch",
+                edge.name
+            )));
+        }
+        // AUD-02: the descriptor's E2EE lines name the key set the command
+        // published.
+        if line_value(&edge_descriptor, "sequencer-key-set-generation=")? != "0"
+            || line_value(&edge_descriptor, "sequencer-key-set-hash=")? != key_set_hash
+        {
+            return Err(failure(format!(
+                "{} descriptor does not name the published key set",
                 edge.name
             )));
         }
@@ -550,6 +599,37 @@ fn a_cli_initialized_edge_serves_links_and_advertises_e2ee() -> TestResult {
     let mut client = register_when_available(edge, "CliAgain")?;
     client.send("QUIT :done")?;
     assert!(restarted.process.stop()?.success());
+    assert!(coordinator.process.stop()?.success());
+    Ok(())
+}
+
+/// AUD-02: a coordinator and two edges provisioned only through `arcd`
+/// (`init`, `print-onboarding` and `sequencer-credentials create`) plus the
+/// operator's TLS, federation and E2EE edits: both edges link, advertise the
+/// encrypted profile and the coordinator's recovery epoch, and register a
+/// client.
+#[test]
+fn a_network_provisioned_only_with_arcd_links_and_advertises_e2ee() -> TestResult {
+    let network = provision_cli_network(&["edge-a.test", "edge-b.test"])?;
+    let mut coordinator = CliDaemon::start(&network.coordinator)?;
+    let mut daemons = Vec::new();
+    for edge in &network.edges {
+        daemons.push(CliDaemon::start(edge)?);
+    }
+    for (edge, daemon) in network.edges.iter().zip(daemons.iter_mut()) {
+        daemon.wait_for_link(edge, 0)?;
+        let advertised = advertised_capabilities(edge)?;
+        assert_contains(&advertised, "agenc.ag/e2ee-mls=v1,profile=")?;
+        assert_contains(
+            &advertised,
+            &format!("agenc.ag/recovery=v1.{}", network.coordinator_epoch),
+        )?;
+        let mut client = register_when_available(edge, "CliMember")?;
+        client.send("QUIT :done")?;
+    }
+    for daemon in &mut daemons {
+        assert!(daemon.process.stop()?.success());
+    }
     assert!(coordinator.process.stop()?.success());
     Ok(())
 }

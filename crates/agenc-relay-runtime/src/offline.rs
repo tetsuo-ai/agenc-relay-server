@@ -13,6 +13,11 @@ pub use crate::daemon::login_index::{
 mod restore;
 pub use restore::execute_stopped_restore;
 
+mod sequencer_credentials;
+pub use sequencer_credentials::{
+    SequencerCredentialsReceipt, SequencerCredentialsRequest, create_sequencer_credentials,
+};
+
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -2528,6 +2533,120 @@ mod tests {
         assert_eq!(rendered.recovery_epoch, own);
         assert_eq!(receipt.recovery_epoch, own);
         assert_ne!(rendered.recovery_epoch, edge_epoch);
+        Ok(())
+    }
+
+    /// A request for the coordinator `test_request` initializes, over the
+    /// interval the daemon fixtures use.
+    fn credentials_request(root: &Path, output: PathBuf) -> SequencerCredentialsRequest {
+        SequencerCredentialsRequest {
+            config_path: root.join("etc/config.toml"),
+            sequencer_key_file: root.join("data/keys/sequencer.key"),
+            not_before: 0,
+            not_after: 4_000_000_000,
+            output,
+        }
+    }
+
+    /// AUD-02: `arcd sequencer-credentials create` writes, byte for byte,
+    /// the document the testkit builds for the same network, sequencer key
+    /// and interval; startup's own reader accepts it with the key-set facts
+    /// the command reports; and it never replaces a file.
+    #[test]
+    fn sequencer_credentials_equal_the_testkit_document() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        initialize_node(test_request(&root.0)?)?;
+        enable_test_listener(&root.0)?;
+        let output = root.0.join("sequencer-credentials.bin");
+        let request = credentials_request(&root.0, output.clone());
+        let receipt = create_sequencer_credentials(&request)?;
+
+        let written = fs::read(&output).map_err(|_| OfflineError::Filesystem)?;
+        let seed: [u8; 32] = fs::read(&request.sequencer_key_file)
+            .map_err(|_| OfflineError::Filesystem)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| OfflineError::Configuration)?;
+        let expected = agenc_relay_testkit::e2ee_client::sequencer_credentials_document(
+            [1; 32],
+            &Ed25519SecretKey::from_bytes(seed),
+            (0, 4_000_000_000),
+        )
+        .map_err(|_| OfflineError::Cryptography)?;
+        assert_eq!(written, expected);
+        let (_, key_set) = crate::daemon::load_sequencer_credentials(&output, &[1; 32], || {})
+            .map_err(|_| OfflineError::Configuration)?;
+        assert_eq!(
+            receipt,
+            SequencerCredentialsReceipt {
+                set_generation: 0,
+                key_set_hash: key_set.digest,
+            }
+        );
+        let mode = fs::symlink_metadata(&output)
+            .map_err(|_| OfflineError::Filesystem)?
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o022, 0);
+        assert_eq!(mode & 0o400, 0o400);
+
+        assert_eq!(
+            create_sequencer_credentials(&request),
+            Err(OfflineError::ExistingTarget)
+        );
+        assert_eq!(fs::read(&output).ok(), Some(written));
+        Ok(())
+    }
+
+    /// AUD-02: an empty or reversed interval, an unsafe or unprotected
+    /// output, and a key file outside the protected-file rules are refused
+    /// before anything is written.
+    #[test]
+    fn sequencer_credentials_refuse_bad_intervals_outputs_and_keys() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        initialize_node(test_request(&root.0)?)?;
+        enable_test_listener(&root.0)?;
+        let output = root.0.join("refused-credentials.bin");
+        for (not_before, not_after) in [(5, 5), (6, 5)] {
+            let mut request = credentials_request(&root.0, output.clone());
+            request.not_before = not_before;
+            request.not_after = not_after;
+            assert_eq!(
+                create_sequencer_credentials(&request),
+                Err(OfflineError::InvalidRequest)
+            );
+        }
+        let relative = credentials_request(&root.0, PathBuf::from("credentials.bin"));
+        assert_eq!(
+            create_sequencer_credentials(&relative),
+            Err(OfflineError::InvalidRequest)
+        );
+        let shared = root.0.join("shared");
+        create_private_directory(&shared)?;
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o770))
+            .map_err(|_| OfflineError::Filesystem)?;
+        let exposed = credentials_request(&root.0, shared.join("credentials.bin"));
+        assert_eq!(
+            create_sequencer_credentials(&exposed),
+            Err(OfflineError::Filesystem)
+        );
+
+        let short_key = root.0.join("short-sequencer.key");
+        write_secret(&short_key, &[7; 31])?;
+        let readable_key = root.0.join("readable-sequencer.key");
+        write_secret(&readable_key, &[7; 32])?;
+        fs::set_permissions(&readable_key, fs::Permissions::from_mode(0o644))
+            .map_err(|_| OfflineError::Filesystem)?;
+        for key in [short_key, readable_key] {
+            let mut request = credentials_request(&root.0, output.clone());
+            request.sequencer_key_file = key;
+            assert_eq!(
+                create_sequencer_credentials(&request),
+                Err(OfflineError::Configuration)
+            );
+        }
+        assert!(fs::symlink_metadata(&output).is_err());
+        assert!(fs::symlink_metadata(shared.join("credentials.bin")).is_err());
         Ok(())
     }
 

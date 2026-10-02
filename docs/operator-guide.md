@@ -109,6 +109,40 @@ must preserve their authenticated relationships.
 Optional WSS and plaintext history settings are described in
 [Stage 09 operations](stage-09-operations.md).
 
+## Enable the encrypted profile
+
+The encrypted profile rides on the federation link between the coordinator and its edges, and only edges offer it to clients. Enable federation on every node first. Each `[[federation.peer]]` record pins its peer exactly:
+
+- `server_id` and `recovery_epoch` are the `server-id=` and `recovery-epoch=` lines the peer's `arcd init` printed; a later `storage restore` of that peer prints its new epoch.
+- `certificate_spki_sha256` is the SHA-256 hash of the subject public key info of the peer's federation certificate.
+- `signing_public_key` is the Ed25519 public key of the raw 32-byte seed the peer's `init` wrote to `keys/federation-signing.key`. No `arcd` command prints it.
+- On an edge, the coordinator record's `endpoints` lists the coordinator's federation listener. A coordinator's edge records keep `endpoints = []`, because each edge dials its coordinator.
+
+Every node then names the same public sequencer credentials document, and the coordinator also holds the sequencer key `init` wrote. Create the document of a new network once, on the coordinator, after its configuration passes `check-config`:
+
+```sh
+arcd sequencer-credentials create \
+  --config /etc/arcd/config.toml \
+  --sequencer-key-file /var/lib/arcd/keys/sequencer.key \
+  --not-before 1791000000 \
+  --not-after 1822536000 \
+  --output /etc/arcd/sequencer-credentials.bin \
+  --service-user arcd
+```
+
+The command takes the network ID from the configuration and reads the key under the protected-file rules. It writes set generation zero with one credential at key generation zero, valid from `--not-before` through `--not-after`, both canonical decimal Unix seconds and both inclusive. The coordinator signs a record only under a credential whose interval covers that record's validation time, so start the interval no later than the network's first start and end it after the key's planned lifetime. Before publishing, the command verifies the document with the parser and key-set check startup runs. It creates the output as a new file, refuses an existing path instead of replacing it, and prints the document's `sequencer-key-set-generation=` and `sequencer-key-set-hash=` lines. The document holds no private material. `--service-user` has the meaning described above.
+
+Install the same bytes on every node under the protected-file rules: a single-link regular file owned by root or the service account, with neither the file nor any ancestor directory group- or world-writable. `init` already wrote each node's `coordinator_server_id`. On the coordinator, set:
+
+```toml
+[e2ee]
+enabled = true
+sequencer_private_key_file = "/var/lib/arcd/keys/sequencer.key"
+sequencer_credentials_file = "/etc/arcd/sequencer-credentials.bin"
+```
+
+On each edge, set `enabled = true` and the same `sequencer_credentials_file`, without a sequencer key. Restart every node, because the credentials file is restart-only. Then `print-onboarding` on each node prints the four E2EE lines, with the generation and hash the command printed. The command creates only a new network's first document; later rotation and retirement documents are provisioned as described in [Rotate the sequencer credential](#rotate-the-sequencer-credential).
+
 ## Print onboarding data and account invitations
 
 After enabling at least one reviewed client endpoint, print the canonical connection descriptor:

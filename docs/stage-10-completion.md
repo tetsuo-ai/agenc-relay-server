@@ -224,6 +224,12 @@ through the daemon's own selection, the refusal of an edge with no enabled
 coordinator record, and the node's own epoch printed by `arcd init` for its
 peers' records (AUD-03, SDK program, outside master #35) are recorded in
 [the edge descriptor epoch record](stage-10-edge-descriptor-epoch.md).
+The offline `arcd sequencer-credentials create` command that writes a new
+network's generation-zero sequencer credentials document from the shared
+encoders, byte-equal to the testkit's, the operator-guide procedure that
+enables the encrypted profile with it, and the three-node network provisioned
+through `arcd` (AUD-02, SDK program, outside master #35) are recorded in
+[the sequencer credentials record](stage-10-sequencer-credentials-command.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

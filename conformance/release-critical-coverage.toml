@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 998
-reviewed_source_sha256 = "867621e0fdb14c1d31925774ddea45062a7adf4a029300bf4ec5951f6b22bfc5"
+reviewed_source_files = 999
+reviewed_source_sha256 = "d09ac429652df91559c441685c7410c0c0c72a3e7ae0b2f95669d49b4730216c"
 deferred = []
 
 [[region]]
@@ -43,9 +43,9 @@ id = "cli-account-invite-expiry"
 category = "parser-error-discriminants"
 file = "crates/agenc-relay-server/src/daemon_cli.rs"
 item = "account_invite"
-source_sha256 = "536e95060e4c6b5e1ef7c4977a4d16b665534db7e77a47fde94f606bbfeed44b"
-start_line = 329
-end_line = 369
+source_sha256 = "7825ef8d80b2d4daefbe496d89b9c0c0e9bbd93d7610527ae52fa0f4441be09c"
+start_line = 332
+end_line = 372
 span_sha256 = "9eb9a1e1941b4d0fd9a4f50ec869700e0c4d327a5770d114056111403600b471"
 metric = "branches"
 reason = "Account invitation expiry must be canonical ASCII decimal and fit u64 before protected descriptor or signing-key access."
