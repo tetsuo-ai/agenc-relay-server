@@ -780,12 +780,14 @@ mod tests {
         Ok(())
     }
 
-    /// AUD-18: with `userhost-in-names` every NAMES token is a role byte and
-    /// a framed user mask, 73 bytes for a 32-byte nickname, so an 8,000-byte
-    /// chunk holds 109 or fewer of them. A channel of 219 such members needs
-    /// three 353 chunks and the 366, and the snapshot's frame bound must
-    /// admit all four; under the bare-cloak bound of 61 bytes it admitted
-    /// three and refused the JOIN's NAMES with `LimitExceeded`.
+    /// AUD-18: with `userhost-in-names` a NAMES token is an optional role
+    /// byte and a framed user mask, at most 73 bytes for a 32-byte nickname.
+    /// Here only the founder's token carries a role byte, so 218 of the 219
+    /// tokens are 72 bytes and the two full chunks hold 109 each. The channel
+    /// needs three 353 chunks and the 366, and the snapshot's frame bound
+    /// must admit all four; under the bare-cloak bound of 61 bytes it
+    /// admitted three and refused the JOIN's NAMES with `LimitExceeded`. The
+    /// next test holds the bound at its worst case, every token 73 bytes.
     #[test]
     fn a_local_join_of_the_longest_framed_tokens_fits_its_frame_bound() -> TestResult {
         let entropy = (0..8_192)
@@ -865,6 +867,119 @@ mod tests {
                 .take(2)
                 .all(|chunk| chunk.split(' ').count() >= MIN_FULL_CHUNK_ROWS)
         );
+        Ok(())
+    }
+
+    /// AUD-18, the worst case of the page arithmetic: every member token
+    /// carries a role byte and a framed mask for a 32-byte nickname, 73
+    /// bytes, so with its separator an 8,000-byte chunk holds exactly 108 of
+    /// them, `MIN_FULL_CHUNK_ROWS`. The founder and 215 voiced members, then
+    /// the requester, are 217 rows rendered as chunks of 108, 108 and 1 and
+    /// the 366, and the snapshot's frame bound, 217 / 108 + 2, admits all
+    /// four. Counting 109 to a full chunk would bound it at three and refuse
+    /// the JOIN's NAMES with `LimitExceeded`.
+    #[test]
+    fn a_local_join_of_role_prefixed_framed_tokens_fits_its_frame_bound() -> TestResult {
+        let entropy = (0..8_192)
+            .map(|value| u8::try_from(value % 251).unwrap_or(0))
+            .collect();
+        let mut fixture = StateCoreFixture::new(entropy)?;
+        let context = fixture.context_mut()?;
+        let channel = ChannelNameValue::parse("#voiced-tokens")?;
+        let command = || CanonicalCommand::join(vec![ChannelTarget::new(channel.clone(), false)]);
+        let mut founder = None;
+        for seed in 1..=216_u8 {
+            let nickname = format!("M{seed:031}");
+            let member = test_support::seed_session(context, seed, &nickname, None)?;
+            let PlanDecision::Mutation(plan) = test_support::plan_live(context, member, &command)?
+            else {
+                return Err("member JOIN plan".into());
+            };
+            test_support::apply_live_plan(context, plan)?;
+            let Some(owner) = founder else {
+                founder = Some(member);
+                continue;
+            };
+            let target = agenc_relay_domain::NicknameValue::parse(&nickname)?;
+            let voice = || {
+                CanonicalCommand::mode(
+                    channel.clone(),
+                    vec![agenc_relay_domain::ModeChange::Role {
+                        operation: agenc_relay_domain::ModeOperation::Add,
+                        target: target.clone(),
+                        role: agenc_relay_domain::Role::Voice,
+                    }],
+                )
+            };
+            let PlanDecision::Mutation(plan) = test_support::plan_live(context, owner, &voice)?
+            else {
+                return Err("voice plan".into());
+            };
+            test_support::apply_live_plan(context, plan)?;
+        }
+        let requester = test_support::seed_session(context, 217, &format!("R{:031}", 217), None)?;
+        let names_caps = || test_support::negotiated_capabilities(&["userhost-in-names"]);
+        let _sink = test_support::bind_live_session(context, 1, requester, names_caps()?, true)?;
+        let capabilities = names_caps()?;
+        let request = parse_message(FramedLine::new("JOIN #voiced-tokens")?)?.ok_or("request")?;
+        let reply = ReplyInput {
+            requester: requester.user_id,
+            generation: ConnectionGeneration::new(1),
+            capabilities: &capabilities,
+            request: &request,
+        };
+        let PlanDecision::Mutation(plan) = test_support::plan_live(context, requester, &command)?
+        else {
+            return Err("requester JOIN plan".into());
+        };
+        let mut prepared = context
+            .prepare_local_join(
+                test_support::bound(requester),
+                Some(reply),
+                &command()?,
+                &plan,
+            )?
+            .ok_or("prepared snapshot")?;
+        let bounds = (prepared.max_rows, prepared.max_frames);
+        test_support::apply_live_plan(context, plan)?;
+        prepared.request = Some(Box::new(request));
+        let seed = prepared
+            .open(context)
+            .map_err(|error| format!("open refused with bounds {bounds:?}: {error:?}"))?;
+        assert_eq!(bounds, (217, 4));
+        let frames = &seed.source.frames;
+        assert_eq!(
+            frames.iter().map(WireMessage::command).collect::<Vec<_>>(),
+            vec!["353", "353", "353", "366"]
+        );
+        let chunks: Vec<&str> = frames.iter().filter_map(WireMessage::trailing).collect();
+        assert_eq!(
+            chunks
+                .iter()
+                .take(3)
+                .map(|chunk| chunk.split(' ').count())
+                .collect::<Vec<_>>(),
+            vec![108, 108, 1]
+        );
+        let tokens: Vec<&str> = chunks
+            .iter()
+            .take(3)
+            .flat_map(|chunk| chunk.split(' '))
+            .collect();
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.len() == MAX_NAMES_TOKEN_BYTES)
+                .count(),
+            216
+        );
+        assert!(
+            tokens
+                .iter()
+                .all(|token| token.contains("!u-") && token.ends_with(".invalid"))
+        );
+        assert!(chunks.iter().all(|chunk| chunk.len() <= NAMES_CHUNK_BYTES));
+        assert_eq!((MAX_NAMES_TOKEN_BYTES, MIN_FULL_CHUNK_ROWS), (73, 108));
         Ok(())
     }
 

@@ -77,6 +77,16 @@ the 366 against a bound of three frames, and its JOIN's NAMES fails. The
 are unchanged; a large channel's snapshot reserves one frame of backing per
 108 members instead of per 129.
 
+The bound is tight only when every token carries a role byte. A channel whose
+founder and 215 voiced members have 32-byte nicknames renders, with the
+requester, 217 tokens as chunks of exactly 108, 108 and 1 and the 366: four
+frames, which `217 / 108 + 2` admits. Counting 109 tokens to a full chunk, by
+dropping either the role byte or the separator from the divisor, bounds the
+same snapshot at three frames and refuses the JOIN's NAMES. In the 219-member
+channel only the founder holds a role, so its full chunks hold 109 tokens and
+it cannot tell 108 from 109; the role-prefixed channel can, and both the local
+JOIN bound and the coordinator's bound are tested against it.
+
 The coordinator's directory query shape (`federation/coordinator/query/shape.rs`)
 bounds NAMES the same way, and its `MIN_FULL_NAMES_ROWS` now derives from the
 same constant. The coordinator renders federated NAMES without user masks
@@ -121,8 +131,10 @@ but it is again an honest bound on the renderer it describes.
 | `federation::edge::render::tests::a_projected_source_renders_the_framed_public_cloak` | The edge's `prefix` and `actor_prefix` for a projected source. |
 | `federation::edge::history::tests::rendering_callback_rechecks_link_state_and_preserves_original_tags` | A history page replayed on an edge names the original sender with the framed mask. |
 | `federation::edge::tests::edge_and_coordinator_interoperate_over_a_bridged_link` | Over a live in-process link: JOIN, channel and private message sources rendered by the edge, and every cloak in the WHO, WHOIS, USERHOST and WHOWAS replies the coordinator renders. |
-| `state_core::local_join::tests::a_local_join_of_the_longest_framed_tokens_fits_its_frame_bound` | 219 members with 32-byte nicknames: the snapshot's bound is four frames, it opens, and its chunks hold 109, 109 and 1 framed tokens of at most 73 bytes. |
-| `federation::coordinator::query::shape::tests::the_names_frame_bound_covers_the_longest_framed_tokens` | The same channel against the coordinator's NAMES bound. |
+| `state_core::local_join::tests::a_local_join_of_the_longest_framed_tokens_fits_its_frame_bound` | 219 members with 32-byte nicknames, only the founder holding a role: the snapshot's bound is four frames, it opens, and its chunks hold 109, 109 and 1 framed tokens of at most 73 bytes. |
+| `state_core::local_join::tests::a_local_join_of_role_prefixed_framed_tokens_fits_its_frame_bound` | The worst case: the founder, 215 voiced members and the requester, every member token 73 bytes. The bound is `(217, 4)`, the snapshot opens, and its chunks hold exactly 108, 108 and 1 tokens; it also pins `MIN_FULL_CHUNK_ROWS` at 108. |
+| `federation::coordinator::query::shape::tests::the_names_frame_bound_covers_the_longest_framed_tokens` | The 219-member channel against the coordinator's NAMES bound. |
+| `federation::coordinator::query::shape::tests::the_names_frame_bound_covers_role_prefixed_framed_tokens` | The role-prefixed channel against the coordinator's NAMES bound: four frames rendered with `userhost-in-names`, a bound of four, and `MIN_FULL_NAMES_ROWS` pinned at 108. |
 | `stage_six_daemon` `cloak_spelling::every_user_mask_in_a_two_guest_transcript_uses_the_framed_cloak` | A real daemon and two guests: JOIN, an echoed message, NAMES with `userhost-in-names`, WHO, WHOIS, USERHOST, a rename with WHOWAS, and MONITOR. The transcript names exactly 18 masks and field pairs, a count the test pins; every one is framed, each user is spelled identically on every line, and no bare component appears. |
 | `stage_seven_federation` `clients_on_two_edges_share_channels_through_the_coordinator` | Three daemons: edge A renders bob, homed on edge B, with a framed source, and the WHOIS reply the coordinator renders for edge A frames bob's fields. |
 | `stage_six_daemon` `wss::equivalence` | The S09-002 transcript normalizer validates every cloak it learns as framed, and refuses the bare spelling (`cloak_normalization_accepts_only_the_framed_spelling`). |
@@ -156,7 +168,13 @@ logs are kept with the SDK program's records.
 | The history replay sender | the edge history test |
 | The local JOIN token bound, 73 back to 61 | the local JOIN page test (`LimitExceeded`) |
 | The coordinator's NAMES bound | the coordinator bound test |
+| The local JOIN full-chunk count without the separator, 109 (review finding B12-R1-01: it passed all eighteen tests of the earlier runs) | the role-prefixed local JOIN test (`open refused with bounds (217, 3): LimitExceeded`) |
+| The coordinator's full-chunk count without the role byte, 109 (B12-R1-01, likewise) | the role-prefixed coordinator test (`4 frames exceed the bound 3`) |
 | The formatter's nickname check (`mutate-b12-v3.py`, which adds the refusal test to the set; its control passes all eighteen) | the `visible_cloak` refusal test |
+
+The two rows marked B12-R1-01 come from a later run over the four NAMES bound
+tests, each count changed in turn; its control passes all four, and each
+change fails the role-prefixed test of its bound with the message shown.
 
 `names_token` is reached only when a JOIN's own NAMES is rendered with the
 fanout rather than as a local JOIN snapshot, which no production JOIN with a

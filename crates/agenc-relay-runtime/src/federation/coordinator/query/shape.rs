@@ -259,10 +259,12 @@ mod tests {
 
     use super::*;
 
-    /// AUD-18: the NAMES frame bound still covers the longest token the NAMES
-    /// renderer can produce, a role byte and a framed 72-byte user mask, even
-    /// though federated NAMES replies carry no masks today. 219 such members
-    /// need three 353 chunks and the 366; the bare-cloak bound allowed three.
+    /// AUD-18: the NAMES frame bound still covers framed user masks for
+    /// 32-byte nicknames, even though federated NAMES replies carry no masks
+    /// today. Only the founder's token here carries a role byte, so 218 of
+    /// the 219 tokens are 72 bytes; they need three 353 chunks and the 366,
+    /// and the bare-cloak bound allowed three. The next test holds the bound
+    /// at its worst case, every token a role byte and a framed mask.
     #[test]
     fn the_names_frame_bound_covers_the_longest_framed_tokens()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -311,6 +313,109 @@ mod tests {
             frames.len(),
             bounds.frames
         );
+        Ok(())
+    }
+
+    /// AUD-18, the worst case of the NAMES frame bound: the founder and 215
+    /// voiced members each render a role byte and a framed mask for a 32-byte
+    /// nickname, 73 bytes, and with its separator a full 8,000-byte chunk
+    /// holds exactly 108 of them, `MIN_FULL_NAMES_ROWS`. With the requester
+    /// the channel has 217 members, rendered as chunks of 108, 108 and 1 and
+    /// the 366: four frames, which 217 / 108 + 2 admits and 217 / 109 + 2
+    /// would not.
+    #[test]
+    fn the_names_frame_bound_covers_role_prefixed_framed_tokens()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = DomainState::new()?;
+        let channel = ChannelNameValue::parse("#voiced-tokens")?;
+        let external = |first: bool| {
+            Some(ExternalInputs {
+                utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_000)),
+                channel_ids: first.then(|| channel_id(80)).into_iter().collect(),
+                ..ExternalInputs::default()
+            })
+        };
+        let join = || CanonicalCommand::join(vec![ChannelTarget::new(channel.clone(), false)]);
+        let mut founder = None;
+        for seed in 1..=216_u8 {
+            let nickname = format!("M{seed:031}");
+            let member = open_session(&mut state, seed, &nickname, None)?;
+            apply_command(
+                &mut state,
+                member,
+                join()?,
+                &registered_admission(member.user_id)?,
+                external(founder.is_none()),
+            )?;
+            let Some(owner) = founder else {
+                founder = Some(member);
+                continue;
+            };
+            apply_command(
+                &mut state,
+                owner,
+                CanonicalCommand::mode(
+                    channel.clone(),
+                    vec![agenc_relay_domain::ModeChange::Role {
+                        operation: agenc_relay_domain::ModeOperation::Add,
+                        target: NicknameValue::parse(&nickname)?,
+                        role: agenc_relay_domain::Role::Voice,
+                    }],
+                )?,
+                &registered_admission(owner.user_id)?,
+                None,
+            )?;
+        }
+        let nickname = format!("R{:031}", 217);
+        let requester = open_session(&mut state, 217, &nickname, None)?;
+        apply_command(
+            &mut state,
+            requester,
+            join()?,
+            &registered_admission(requester.user_id)?,
+            external(false),
+        )?;
+        let bounds = names(&state, requester.user_id, std::slice::from_ref(&channel))?;
+        let frames = crate::query_render::render_names(
+            &state,
+            "hub.example",
+            &nickname,
+            requester.user_id,
+            true,
+            std::slice::from_ref(&channel),
+        )?;
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| frame.command())
+                .collect::<Vec<_>>(),
+            ["353", "353", "353", "366"]
+        );
+        let chunks: Vec<&str> = frames.iter().filter_map(|frame| frame.trailing()).collect();
+        assert_eq!(
+            chunks
+                .iter()
+                .take(3)
+                .map(|chunk| chunk.split(' ').count())
+                .collect::<Vec<_>>(),
+            [108, 108, 1]
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .take(3)
+                .flat_map(|chunk| chunk.split(' '))
+                .filter(|token| token.len() == 1 + agenc_relay_client_wire::MAX_USER_MASK_BYTES)
+                .count(),
+            216
+        );
+        assert!(
+            frames.len() <= bounds.frames,
+            "{} frames exceed the bound {}",
+            frames.len(),
+            bounds.frames
+        );
+        assert_eq!((bounds.frames, MIN_FULL_NAMES_ROWS), (4, 108));
         Ok(())
     }
 }
