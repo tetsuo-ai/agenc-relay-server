@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 998
-reviewed_source_sha256 = "f6314b666d63375cad4b4415c73bf5a03950e05535deaf79aab307551c4e4ec4"
+reviewed_source_sha256 = "46dc8b68794d1f2ab0988886c3c3edbefbf4a848da78d227ab56c5cf8fc40132"
 deferred = []
 
 [[region]]
@@ -1339,12 +1339,24 @@ id = "runtime-local-join-snapshot-identity"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/state_core/local_join.rs"
 item = "open"
-source_sha256 = "a7ca59aedb97f884e947e7b4b62dec440c91d674e3cd52230b006d882802e8a3"
-start_line = 227
-end_line = 267
+source_sha256 = "153845b2f1b071774ff02d0ad15720fae2835dd0568e38e88acf621ed579a83e"
+start_line = 238
+end_line = 278
 span_sha256 = "854978334fadbcc0f1189c958b0c6279f93b602c3d54f3ff604b2f508e53e5c0"
 metric = "branches"
 reason = "A committed JOIN snapshot may only be opened for its original bound connection and session."
+
+[[region]]
+id = "runtime-local-join-settled-commit"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/state_core/local_join.rs"
+item = "settle_local_join"
+source_sha256 = "153845b2f1b071774ff02d0ad15720fae2835dd0568e38e88acf621ed579a83e"
+start_line = 167
+end_line = 183
+span_sha256 = "df13c78f51356f9158c93127c5247a612068219d9f10e189c2c8a9b076ad1ea4"
+metric = "branches"
+reason = "An accepted JOIN snapshot opens only after the domain applies its plan: at settlement for a plan applied in that same step, otherwise through the batch commit that applies it; a refused JOIN releases its snapshot. AUD-16: an in-step seed is committed here, or it never opens and its connection's later commands wait behind it."
 
 [[region]]
 id = "runtime-edge-user-mode-identity"

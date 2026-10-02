@@ -156,15 +156,26 @@ impl StateCoreContext {
         }))
     }
 
+    /// Retains the snapshot of an accepted JOIN until its plan is applied, or
+    /// releases the snapshot of a refused one.
+    ///
+    /// A plan with no persisted delta is applied inside the staging step, so
+    /// `apply_plan` ran its commit hook before this seed was retained and no
+    /// later commit carries its revision. A seed whose revision the domain has
+    /// already reached is therefore committed here; a staged seed is still
+    /// committed only by the batch that applies it.
     pub(crate) fn settle_local_join(
         &mut self,
         prepared: Option<PreparedLocalJoin>,
         accepted: bool,
     ) {
-        let Some(prepared) = prepared else {
+        let Some(mut prepared) = prepared else {
             return;
         };
         if accepted {
+            if self.domain.revision() >= prepared.revision {
+                prepared.committed = true;
+            }
             self.local_joins.pending.push(prepared);
         } else {
             self.sessions.end_active_query(prepared.generation);
@@ -568,6 +579,94 @@ mod tests {
         context.sessions.end_active_query(generation);
         drop(seed);
         assert_eq!(context.pending_len(), 1);
+        Ok(())
+    }
+
+    /// AUD-16: a `&` channel is never persisted, so a guest's JOIN of one
+    /// projects no durable write and staging applies it inside the same step,
+    /// before the router settles the snapshot. That seed must open at once:
+    /// no later commit carries its revision, and an unopened seed defers
+    /// every later command on its connection.
+    #[tokio::test]
+    async fn an_in_step_local_join_opens_its_snapshot_as_soon_as_it_settles() -> TestResult {
+        let entropy = (0..8_192)
+            .map(|value| u8::try_from(value % 251).unwrap_or(0))
+            .collect();
+        let mut fixture = StateCoreFixture::new(entropy)?;
+        let context = fixture.context_mut()?;
+        let owner = test_support::seed_session(context, 1, "LocalOwner", None)?;
+        let caps = || {
+            test_support::negotiated_capabilities(&["message-tags", "batch", "labeled-response"])
+        };
+        let owner_sink = test_support::bind_live_session(context, 1, owner, caps()?, true)?;
+        let capabilities = caps()?;
+        let generation = ConnectionGeneration::new(1);
+        let channel = ChannelNameValue::parse("&local-names")?;
+        let command = || CanonicalCommand::join(vec![ChannelTarget::new(channel.clone(), false)]);
+        let request =
+            parse_message(FramedLine::new("@label=local JOIN &local-names")?)?.ok_or("request")?;
+        let reply = ReplyInput {
+            requester: owner.user_id,
+            generation,
+            capabilities: &capabilities,
+            request: &request,
+        };
+        let PlanDecision::Mutation(plan) = test_support::plan_live(context, owner, &command)?
+        else {
+            return Err("local JOIN plan".into());
+        };
+        assert!(plan.durable_writes().is_empty());
+        let command = command()?;
+        let mut prepared = context
+            .prepare_local_join(test_support::bound(owner), Some(reply), &command, &plan)?
+            .ok_or("prepared snapshot")?;
+        let (fanout, frames) = crate::mutation_render::render_local_join_start(
+            context,
+            test_support::bound(owner),
+            reply,
+            &command,
+            &plan,
+        )?;
+        prepared.frames = frames;
+        let staged = context
+            .stage_durable(plan, fanout, None, 0)
+            .map_err(|error| format!("local JOIN stage: {error:?}"))?;
+        assert!(matches!(
+            staged,
+            crate::state_core::StageAccepted::AppliedInStep(_)
+        ));
+        assert_eq!(context.pending_len(), 0);
+        context.settle_local_join(Some(prepared), true);
+        context.attach_local_join_request(generation, request);
+        let (opened, seed) = context
+            .take_local_join_seed()
+            .ok_or("an in-step JOIN is already applied when it settles")?;
+        assert_eq!(opened, generation);
+        assert!(!context.has_local_join_seed(generation));
+        let mut seed = seed?;
+        assert_eq!(
+            seed.frames
+                .iter()
+                .map(WireMessage::command)
+                .collect::<Vec<_>>(),
+            vec!["JOIN", "331"]
+        );
+        assert_eq!(
+            seed.request.tags().first().map(|tag| tag.key()),
+            Some("label")
+        );
+        let (page, more) = seed.source.next_page()?;
+        assert!(!more);
+        assert_eq!(
+            page.iter().map(WireMessage::command).collect::<Vec<_>>(),
+            vec!["353", "366"]
+        );
+        assert!(owner_sink.lines().is_empty());
+        let permit = seed.source.take_permit()?;
+        drop(seed);
+        context.sessions.end_active_query(generation);
+        drop(permit);
+        assert_eq!(context.sessions.queue_snapshot().query_snapshots(), 0);
         Ok(())
     }
 

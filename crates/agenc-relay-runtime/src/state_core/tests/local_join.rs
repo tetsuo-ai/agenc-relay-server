@@ -235,3 +235,89 @@ async fn local_deferred_input_refuses_exhausted_backing_and_releases_every_permi
     );
     Ok(())
 }
+
+/// Registers one guest with labeled responses, sends a labeled JOIN of
+/// `channel` and then a labeled TIME, and returns every line it received.
+async fn labeled_join_then_time(channel: &str) -> TestResult<Vec<String>> {
+    let join = format!("@label=join JOIN {channel}");
+    let script = [
+        (1, "CAP LS 302"),
+        (1, "NICK alice"),
+        (1, "USER alice 0 * :Alice"),
+        (1, "CAP REQ :message-tags batch labeled-response"),
+        (1, "CAP END"),
+        (1, "WAIT  001 "),
+        (1, join.as_str()),
+        (1, "@label=time TIME"),
+        (1, "WAIT  391 "),
+        (1, "QUIT :done"),
+    ];
+    let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
+    let (exit, (_inbox, sinks, stopped)) = run_core(true, |inbox, lifecycle, _token| async move {
+        let _outcomes = open_connections(&inbox, &sinks).await?;
+        drive_script(&inbox, &sinks, &script).await?;
+        let stopped = lifecycle.request(LifecyclePhase::Stop).await;
+        Ok((inbox, sinks, stopped))
+    })
+    .await?;
+    assert!(stopped.is_ok());
+    assert!(matches!(exit, StateCoreExit::Stopped), "{exit:?}");
+    Ok(sinks.first().ok_or("no sink")?.lines())
+}
+
+/// The JOIN's label opens exactly one batch carrying the JOIN echo, the topic
+/// reply, the names and their end, and that batch closes before the labeled
+/// TIME reply.
+fn assert_join_batch_then_time(lines: &[String], channel: &str) -> TestResult {
+    let opened: Vec<_> = lines
+        .iter()
+        .filter(|line| line.starts_with("@label=join "))
+        .collect();
+    let [opening] = opened.as_slice() else {
+        return Err(format!("expected one labeled JOIN reply: {lines:?}").into());
+    };
+    let reference = opening
+        .split_once(" BATCH +")
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .map(|(reference, _)| reference)
+        .ok_or("the JOIN label must open a batch")?;
+    let tag = format!("@batch={reference} ");
+    let batched: Vec<_> = lines.iter().filter(|line| line.starts_with(&tag)).collect();
+    assert_eq!(batched.len(), 4, "{lines:?}");
+    for (frame, expected) in batched.iter().zip([
+        format!(" JOIN {channel}"),
+        format!(" 331 alice {channel} "),
+        format!(" 353 alice = {channel} "),
+        format!(" 366 alice {channel} "),
+    ]) {
+        assert!(frame.contains(&expected), "{expected}: {lines:?}");
+    }
+    let ending = format!(" BATCH -{reference}");
+    let ended = lines
+        .iter()
+        .position(|line| line.ends_with(&ending))
+        .ok_or("the JOIN batch must end")?;
+    let answered = lines
+        .iter()
+        .position(|line| line.starts_with("@label=time ") && line.contains(" 391 alice "))
+        .ok_or("the labeled TIME must be answered")?;
+    assert!(ended < answered, "{lines:?}");
+    Ok(())
+}
+
+/// AUD-16: a `&` channel is never persisted, so this JOIN projects no durable
+/// write and the state core applies it inside the routing step. Its label
+/// batch must still open, and the TIME behind it must not wait forever.
+#[tokio::test]
+async fn an_in_step_local_join_answers_its_label_batch_and_the_next_command() -> TestResult {
+    let lines = labeled_join_then_time("&loc").await?;
+    assert_join_batch_then_time(&lines, "&loc")
+}
+
+/// The staged order of the same exchange: a `#` channel is persisted, so the
+/// JOIN waits for its storage commit before its snapshot opens.
+#[tokio::test]
+async fn a_staged_global_join_answers_its_label_batch_and_the_next_command() -> TestResult {
+    let lines = labeled_join_then_time("#room").await?;
+    assert_join_batch_then_time(&lines, "#room")
+}

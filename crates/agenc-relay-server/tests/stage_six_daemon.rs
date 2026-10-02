@@ -8,6 +8,8 @@ mod loopback_ports;
 #[path = "stage_six_daemon/idle_capacity.rs"]
 mod idle_capacity;
 
+#[path = "stage_six_daemon/local_join.rs"]
+mod local_join;
 #[path = "stage_six_daemon/pipelined_commands.rs"]
 mod pipelined_commands;
 #[path = "stage_six_daemon/runtime_regressions.rs"]
