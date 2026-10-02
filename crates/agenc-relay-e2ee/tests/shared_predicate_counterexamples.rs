@@ -420,3 +420,27 @@ fn a_leaf_authorization_signed_for_another_network_is_refused() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn an_initial_roster_holding_a_future_target_certificate_is_refused() -> TestResult {
+    let root_secret = key(10);
+    let root = root(&root_secret, NET_A)?;
+    let verified_root = verify_root_identity(&NET_A, &root, None)?;
+    // Enrolled for roster generation 5 but placed in the initial roster; its
+    // enrollment interval (90, 100) does not cover the roster's not_before.
+    let certificate = certificate(&root_secret, &root, 7, 5, (90, 100))?;
+    let roster = roster(
+        &root_secret,
+        &root,
+        0,
+        [0; 32],
+        (500, 900),
+        vec![certificate],
+    )?;
+    let got = verify_roster(&verified_root, &roster, None);
+    assert!(
+        got.is_err(),
+        "a certificate enrolled for a future roster generation was admitted"
+    );
+    Ok(())
+}

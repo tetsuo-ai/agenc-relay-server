@@ -7,6 +7,7 @@
 //! Endpoint-only: trust-on-first-use pins, verified-mode policy, safety
 //! numbers, and the stale-send grace, which need a client's local pin store.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_crypto::{SemanticHashDomain, SignatureDomain};
@@ -22,8 +23,8 @@ use crate::limits::{
 use crate::mls_outer::PublicKeyPackage;
 use crate::objects::identity::{
     ArcCredentialBundle, ArcDeviceCapabilities, ArcDeviceCertificate, ArcDeviceCertificateTbs,
-    ArcDeviceEnrollmentTbs, ArcDeviceRoster, ArcLeafAuthorization, ArcLeafAuthorizationTbs,
-    ArcRootIdentity, KNOWN_AUTHORIZATION_FLAGS,
+    ArcDeviceEnrollmentTbs, ArcDeviceRoster, ArcDeviceRosterTbs, ArcLeafAuthorization,
+    ArcLeafAuthorizationTbs, ArcRootIdentity, KNOWN_AUTHORIZATION_FLAGS,
 };
 use crate::objects::{ACCOUNT_ID_BYTES, account_id_bytes};
 use crate::signature::{RoleKey, SignerRole};
@@ -348,28 +349,77 @@ pub enum Lineage<'a, T> {
     Restored,
 }
 
-/// Verifies one roster under its root and optional predecessor.
+/// How a roster is admitted: which lineage step applies, and where a
+/// certificate enrolled for an earlier roster generation shows its issuance
+/// (companion 8.3 and 8.4).
+#[derive(Clone, Copy)]
+enum RosterAdmission<'a> {
+    /// Succession from the pinned head, or generation zero without one.
+    Checked(Option<&'a VerifiedRoster>),
+    /// No pinned head yet: earlier rosters of the same root this caller
+    /// already verified.
+    FirstContact(&'a [VerifiedRoster]),
+    /// A roster this node accepted before, reloaded from durable storage.
+    Restored,
+}
+
+/// Verifies one roster under its root and optional predecessor: generation
+/// zero without one, otherwise the generation after it.
+///
+/// A certificate enrolled for this generation needs an enrollment interval
+/// that covers the roster's `not_before`; one enrolled for an earlier
+/// generation must be active, unchanged, in the predecessor, since absence
+/// there means it was revoked; one enrolled for a later generation is
+/// refused (companion 8.3).
 pub fn verify_roster(
     root: &VerifiedRoot,
     roster: &ArcDeviceRoster,
     predecessor: Option<&VerifiedRoster>,
 ) -> Result<VerifiedRoster, E2eeError> {
-    verify_roster_lineage(root, roster, Lineage::Checked(predecessor))
+    verify_roster_lineage(root, roster, RosterAdmission::Checked(predecessor))
+}
+
+/// Verifies a roster of a root whose roster lineage this caller has never
+/// pinned (first contact), at any generation.
+///
+/// No predecessor is checked, so the result says nothing about whether a
+/// newer roster exists or one was withheld; only the lineage shape applies,
+/// generation zero alone naming the all-zero predecessor. A certificate
+/// enrolled for an earlier generation is admitted only when it is active,
+/// unchanged, in the roster of exactly that generation among `issuance`:
+/// earlier rosters of the same root this caller already verified, such as a
+/// Welcome's roster chain or imported roster proofs. Missing issuance refuses
+/// the roster. The lookup is linear in `issuance`, which the caller bounds by
+/// the rosters it already paid to verify. Every other rule of
+/// [`verify_roster`] applies. Once a head is pinned, later rosters use
+/// [`verify_roster`]; reloading one uses [`restore_roster`].
+pub fn verify_first_contact_roster(
+    root: &VerifiedRoot,
+    roster: &ArcDeviceRoster,
+    issuance: &[VerifiedRoster],
+) -> Result<VerifiedRoster, E2eeError> {
+    verify_roster_lineage(root, roster, RosterAdmission::FirstContact(issuance))
 }
 
 /// Re-verifies a roster this node accepted before, without its predecessor.
+///
+/// Its lineage, and the issuance of every certificate enrolled for an
+/// earlier generation, were shown when it was accepted; every other rule
+/// still applies, and a certificate enrolled for a later generation is
+/// refused. It never admits a roster received from another party: that is
+/// [`verify_roster`] or [`verify_first_contact_roster`].
 pub fn restore_roster(
     root: &VerifiedRoot,
     roster: &ArcDeviceRoster,
 ) -> Result<VerifiedRoster, E2eeError> {
-    verify_roster_lineage(root, roster, Lineage::Restored)
+    verify_roster_lineage(root, roster, RosterAdmission::Restored)
 }
 
-// agenc-review: focus owner=e2ee reviewed=2026-09-03 reason=the roster rules of Section 8.4 are one closed checklist whose ordering the reviewer reads top to bottom
+// agenc-review: focus owner=e2ee reviewed=2026-10-01 reason=the roster rules of Sections 8.3 and 8.4 are one closed checklist whose ordering the reviewer reads top to bottom; the admission mode selects only the lineage step, the issuance evidence and the revocation carry-over
 fn verify_roster_lineage(
     root: &VerifiedRoot,
     roster: &ArcDeviceRoster,
-    lineage: Lineage<'_, VerifiedRoster>,
+    admission: RosterAdmission<'_>,
 ) -> Result<VerifiedRoster, E2eeError> {
     let tbs = &roster.tbs;
     if tbs.profile_version != PROFILE_VERSION {
@@ -391,8 +441,14 @@ fn verify_roster_lineage(
         &tbs.encode()?,
         &roster.root_signature,
     )?;
-    if let Lineage::Checked(predecessor) = lineage {
-        check_roster_lineage(tbs.roster_generation, &tbs.previous_roster_id, predecessor)?;
+    match admission {
+        RosterAdmission::Checked(predecessor) => {
+            check_roster_lineage(tbs.roster_generation, &tbs.previous_roster_id, predecessor)?;
+        }
+        RosterAdmission::FirstContact(_) => {
+            check_roster_shape(tbs.roster_generation, &tbs.previous_roster_id)?;
+        }
+        RosterAdmission::Restored => {}
     }
     let active = tbs.active_devices.as_slice();
     if active.len() > usize::from(MAX_ACTIVE_DEVICES_PER_ACCOUNT) {
@@ -412,12 +468,7 @@ fn verify_roster_lineage(
         {
             return Err(E2eeError::InvalidValue);
         }
-        if certificate.target_roster_generation == tbs.roster_generation {
-            let (issued_at, expires_at) = certificate.enrollment_interval;
-            if tbs.not_before < issued_at || tbs.not_before > expires_at {
-                return Err(E2eeError::InvalidValue);
-            }
-        }
+        check_issuance(&certificate, tbs, root, admission)?;
         devices.insert(entry.device_id, certificate);
     }
     let revocations: Vec<([u8; 16], u64)> = tbs
@@ -426,7 +477,7 @@ fn verify_roster_lineage(
         .iter()
         .map(|entry| (entry.device_id, entry.certificate_serial))
         .collect();
-    if let Lineage::Checked(Some(previous)) = lineage
+    if let RosterAdmission::Checked(Some(previous)) = admission
         && !previous
             .revocations
             .iter()
@@ -461,6 +512,68 @@ fn check_roster_lineage(
             Ok(())
         }
         _ => Err(E2eeError::InvalidValue),
+    }
+}
+
+/// The lineage shape a roster keeps without its predecessor: generation zero,
+/// and only it, names the all-zero predecessor.
+fn check_roster_shape(generation: u64, previous_id: &[u8; 32]) -> Result<(), E2eeError> {
+    if (generation == 0) == (*previous_id == [0; 32]) {
+        Ok(())
+    } else {
+        Err(E2eeError::InvalidValue)
+    }
+}
+
+/// Companion 8.3: a certificate is issued in exactly its target roster, whose
+/// `not_before` lies in the enrollment interval, and then continues unchanged
+/// in every later roster. One enrolled for a later generation than `roster`
+/// was never issued; one enrolled for an earlier generation must show its
+/// issuance as [`issued_before`] requires.
+fn check_issuance(
+    certificate: &VerifiedCertificate,
+    roster: &ArcDeviceRosterTbs,
+    root: &VerifiedRoot,
+    admission: RosterAdmission<'_>,
+) -> Result<(), E2eeError> {
+    let issued = match certificate
+        .target_roster_generation
+        .cmp(&roster.roster_generation)
+    {
+        Ordering::Greater => false,
+        Ordering::Equal => {
+            let (issued_at, expires_at) = certificate.enrollment_interval;
+            issued_at <= roster.not_before && roster.not_before <= expires_at
+        }
+        Ordering::Less => issued_before(certificate, root, admission),
+    };
+    if issued {
+        Ok(())
+    } else {
+        Err(E2eeError::InvalidValue)
+    }
+}
+
+/// Whether a certificate enrolled for an earlier generation shows the
+/// issuance its admission requires: on succession it is active, unchanged,
+/// in the predecessor; on first contact, in the supplied roster of the same
+/// root at its target generation. A restored roster's continuing
+/// certificates showed it when the roster was accepted.
+fn issued_before(
+    certificate: &VerifiedCertificate,
+    root: &VerifiedRoot,
+    admission: RosterAdmission<'_>,
+) -> bool {
+    let continues_in =
+        |roster: &VerifiedRoster| roster.device(&certificate.device_id) == Some(certificate);
+    match admission {
+        RosterAdmission::Checked(predecessor) => predecessor.is_some_and(continues_in),
+        RosterAdmission::FirstContact(issuance) => issuance.iter().any(|issued| {
+            issued.root_fingerprint == root.fingerprint
+                && issued.generation == certificate.target_roster_generation
+                && continues_in(issued)
+        }),
+        RosterAdmission::Restored => true,
     }
 }
 

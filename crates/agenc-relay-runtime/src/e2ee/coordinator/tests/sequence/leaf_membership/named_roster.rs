@@ -19,23 +19,37 @@ use agenc_relay_e2ee::objects::identity::ArcDeviceRoster;
 const THIRD_DEVICE: u8 = 9;
 
 /// The principal's roster `generation` continuing `previous` with only the
-/// `kept` devices active. It is signed by the root but not published.
+/// `kept` devices active. A kept device that `previous` lists keeps its
+/// certificate unchanged; one that `previous` dropped was revoked there, so
+/// its old certificate can never be listed again (companion 8.3 and 8.4) and
+/// it returns with a fresh enrollment for `generation`. The roster is signed
+/// by the root but not published.
 fn successor(
     harness: &Harness,
     generation: u64,
     previous: &ArcDeviceRoster,
     kept: &[u8],
 ) -> TestResult<ArcDeviceRoster> {
-    let certificates = harness
-        .principal
-        .roster
-        .tbs
-        .active_devices
-        .as_slice()
+    let held = previous.tbs.active_devices.as_slice();
+    let mut certificates = kept
         .iter()
-        .filter(|entry| kept.iter().any(|seed| entry.device_id == [*seed; 16]))
-        .map(|entry| entry.certificate.clone())
-        .collect();
+        .map(
+            |seed| match held.iter().find(|entry| entry.device_id == [*seed; 16]) {
+                Some(entry) => Ok(entry.certificate.clone()),
+                None => {
+                    let mut device = support::DeviceSpec::new(*seed);
+                    device.target_roster_generation = generation;
+                    device.serial = generation.saturating_add(1);
+                    support::certificate(
+                        &harness.principal.root_secret,
+                        &harness.principal.root,
+                        &device,
+                    )
+                }
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    certificates.sort_by_key(|certificate| certificate.tbs.device_id);
     Ok(roster(
         &harness.principal.root_secret,
         &harness.principal.root,

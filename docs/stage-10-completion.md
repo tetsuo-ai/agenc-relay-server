@@ -216,8 +216,10 @@ issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
 The shared public verifiers corrected where they admitted correctly signed
 objects the companion refuses, a sequencer successor that reuses its
-predecessor's key and capability and leaf statements signed for another
-network (X-10, SDK program, outside master #35), are recorded in
+predecessor's key, capability and leaf statements signed for another
+network, and roster certificates whose enrollment issuance is not shown,
+together with the first-contact roster admission that takes that issuance as
+explicit evidence (X-10, SDK program, outside master #35), are recorded in
 [the shared verifier predicates record](stage-10-shared-verifier-predicates.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
