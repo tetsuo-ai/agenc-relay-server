@@ -3912,6 +3912,10 @@ mod nickname_in_use_tests;
 mod timer_tests;
 
 #[cfg(test)]
+#[path = "registration/tests/explicit_names.rs"]
+mod explicit_names_tests;
+
+#[cfg(test)]
 #[path = "registration/tests/edge_answers.rs"]
 mod edge_answer_tests;
 
@@ -3938,10 +3942,6 @@ mod e2ee_line_tests;
 #[cfg(test)]
 #[path = "registration/tests/core_lines.rs"]
 mod core_line_tests;
-
-#[cfg(test)]
-#[path = "registration/tests/explicit_names.rs"]
-mod explicit_names_tests;
 
 #[cfg(test)]
 mod tests {

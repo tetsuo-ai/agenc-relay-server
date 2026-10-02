@@ -172,53 +172,6 @@ impl StateCoreContext {
         }))
     }
 
-    /// Retains an explicit NAMES reply too large for one response batch as a
-    /// local NAMES snapshot that is already committed (Section 14.3). The
-    /// caller reserved `permit` for exactly these frames before rendering
-    /// them; the router opens the snapshot after this routing step, holds
-    /// the connection's later commands behind it, and delivers it in pages
-    /// of at most 512 users with the output state machine of a local JOIN's
-    /// NAMES (Section 14.2).
-    pub(crate) fn retain_local_names(
-        &mut self,
-        generation: ConnectionGeneration,
-        include_userhost: bool,
-        frames: Vec<WireMessage>,
-        permit: QuerySnapshotPermit,
-    ) -> Result<(), RuntimeError> {
-        let bound = self
-            .sessions
-            .connection(generation)
-            .and_then(|entry| entry.session())
-            .ok_or(RuntimeError::InvalidValue)?;
-        if self.has_local_join_seed(generation) {
-            return Err(RuntimeError::InvalidValue);
-        }
-        if self.local_joins.pending.len() >= agenc_relay_storage::MAX_TRANSACTION_PLANS {
-            return Err(RuntimeError::LimitExceeded);
-        }
-        let channels = ending_channels(&frames)?;
-        let max_rows = usize::try_from(permit.rows()).map_err(|_| RuntimeError::Overflow)?;
-        self.local_joins.reserve(self.budget.as_ref())?;
-        self.sessions
-            .begin_active_query(generation, permit.rows(), permit.bytes())?;
-        self.local_joins.pending.push(PreparedLocalJoin {
-            generation,
-            revision: self.domain.revision(),
-            committed: true,
-            bound,
-            channels,
-            include_userhost,
-            request: None,
-            frames: Vec::new(),
-            permit,
-            max_rows,
-            max_frames: frames.len(),
-            rendered: Some(frames),
-        });
-        Ok(())
-    }
-
     pub(crate) fn settle_local_join(
         &mut self,
         prepared: Option<PreparedLocalJoin>,
@@ -283,6 +236,53 @@ impl StateCoreContext {
             .pending
             .retain(|seed| seed.generation != generation);
         self.sessions.end_active_query(generation);
+    }
+
+    /// Retains an explicit NAMES reply too large for one response batch as a
+    /// local NAMES snapshot that is already committed (Section 14.3). The
+    /// caller reserved `permit` for exactly these frames before rendering
+    /// them; the router opens the snapshot after this routing step, holds
+    /// the connection's later commands behind it, and delivers it in pages
+    /// of at most 512 users with the output state machine of a local JOIN's
+    /// NAMES (Section 14.2).
+    pub(crate) fn retain_local_names(
+        &mut self,
+        generation: ConnectionGeneration,
+        include_userhost: bool,
+        frames: Vec<WireMessage>,
+        permit: QuerySnapshotPermit,
+    ) -> Result<(), RuntimeError> {
+        let bound = self
+            .sessions
+            .connection(generation)
+            .and_then(|entry| entry.session())
+            .ok_or(RuntimeError::InvalidValue)?;
+        if self.has_local_join_seed(generation) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        if self.local_joins.pending.len() >= agenc_relay_storage::MAX_TRANSACTION_PLANS {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let channels = ending_channels(&frames)?;
+        let max_rows = usize::try_from(permit.rows()).map_err(|_| RuntimeError::Overflow)?;
+        self.local_joins.reserve(self.budget.as_ref())?;
+        self.sessions
+            .begin_active_query(generation, permit.rows(), permit.bytes())?;
+        self.local_joins.pending.push(PreparedLocalJoin {
+            generation,
+            revision: self.domain.revision(),
+            committed: true,
+            bound,
+            channels,
+            include_userhost,
+            request: None,
+            frames: Vec::new(),
+            permit,
+            max_rows,
+            max_frames: frames.len(),
+            rendered: Some(frames),
+        });
+        Ok(())
     }
 }
 
