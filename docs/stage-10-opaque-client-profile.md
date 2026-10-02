@@ -33,9 +33,14 @@ the frozen `opaque_profile` descriptor.
 `login_finish`. Every message it produces is the exact serialization the
 coordinator's validators take. The client states are move-only wrappers the
 library zeroizes on drop. The library returns the export and session keys
-unzeroized, so each finish copies them into zeroizing arrays and wipes the
-library's copies. Passwords follow Section 11.1 (UTF-8 by type, 12 through
-1,024 bytes). `OpaqueClientError` keeps the library's invalid login, which
+unzeroized, so each finish moves them into zeroizing arrays and wipes the
+library's copies as soon as the library returns them, including from a
+result that the random-number latch then discards: the library still
+returns a registration whose envelope-nonce draw failed. Every call also
+refuses a generator that has already latched before it does any work. A
+login finish draws nothing, so the library would otherwise complete the
+login and derive live keys under a failed generator. Passwords follow
+Section 11.1 (UTF-8 by type, 12 through 1,024 bytes). `OpaqueClientError` keeps the library's invalid login, which
 Section 11.4 answers with a dummy KE3 the caller sends, apart from a
 malformed or reflected server message, failed entropy and an internal
 failure. The daemon does not call the client module.
@@ -74,7 +79,16 @@ an auth source.
 - `reflected_or_undecodable_server_messages_are_refused` and
   `failed_entropy_and_out_of_profile_passwords_are_refused` cover the other
   refusals.
-- `cargo nextest run -p agenc-relay-auth --all-features --locked` passes 79
+- `a_latched_generator_is_refused_before_any_work` hands each call a
+  generator that has already latched, with an out-of-profile password, an
+  undecodable server message or a KE2 for a real record, and every call
+  reports the entropy failure. The client module's unit tests show that a
+  result the latch discards had its key wiped before it dropped, and that
+  taking a key wipes the library's copy even when the copy fails. Each of
+  these tests fails with its part of the fix reverted: the latch checked
+  before the keys are taken, any one of the four refusals removed, or the
+  wipe removed.
+- `cargo nextest run -p agenc-relay-auth --all-features --locked` passes 83
   tests with the generator skipped; the migrated daemon suites pass under
   `cargo nextest run -p agenc-relay-server --all-features --locked`.
 

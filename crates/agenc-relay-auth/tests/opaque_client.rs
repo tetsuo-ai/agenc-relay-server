@@ -79,6 +79,13 @@ struct FailsAfter {
     remaining: usize,
 }
 
+/// A generator whose source has already failed once.
+fn latched_generator() -> FallibleOpaqueRng<FailsAfter> {
+    let mut rng = FallibleOpaqueRng::new(FailsAfter { remaining: 0 });
+    rng.fill_bytes(&mut [0_u8; 1]);
+    rng
+}
+
 impl EntropySource for FailsAfter {
     fn fill_exact(&mut self, destination: &mut [u8]) -> Result<(), EntropyError> {
         self.remaining = self
@@ -585,6 +592,118 @@ fn failed_entropy_and_out_of_profile_passwords_are_refused() -> TestResult {
         .err(),
         Some(OpaqueClientError::InvalidPassword)
     );
+    assert!(rng.succeeded());
+    Ok(())
+}
+
+/// A generator that has already latched is refused before any work: before
+/// the password bounds, before a server message is decoded and before the
+/// library runs, so no finish derives keys under a failed generator, even a
+/// login finish, which draws nothing.
+#[test]
+fn a_latched_generator_is_refused_before_any_work() -> TestResult {
+    let network = NetworkId::from_bytes([0x79; 32]);
+    let credential = OpaqueCredentialId::from_bytes([0x7a; 32]);
+    let profile = OpaqueProfile::generate(network)?;
+    let password = "a password of some length";
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+
+    for refused in ["eleven byte", password] {
+        assert_eq!(
+            registration_start(&mut latched_generator(), refused).err(),
+            Some(OpaqueClientError::EntropyUnavailable)
+        );
+        assert_eq!(
+            login_start(&mut latched_generator(), refused).err(),
+            Some(OpaqueClientError::EntropyUnavailable)
+        );
+    }
+
+    let registration = registration_start(&mut rng, password)?;
+    let mut undecodable = [0_u8; 64];
+    undecodable[..32].fill(0xff);
+    assert_eq!(
+        registration_finish(
+            &mut latched_generator(),
+            registration.state,
+            password,
+            &undecodable,
+            &network,
+            &credential,
+        )
+        .err(),
+        Some(OpaqueClientError::EntropyUnavailable)
+    );
+    let login = login_start(&mut rng, password)?;
+    let mut undecodable = [0_u8; 320];
+    undecodable[..32].fill(0xff);
+    assert_eq!(
+        login_finish(
+            &mut latched_generator(),
+            login.state,
+            password,
+            &undecodable,
+            &network,
+            &credential,
+        )
+        .err(),
+        Some(OpaqueClientError::EntropyUnavailable)
+    );
+
+    // A KE2 for the real record would authenticate with a working generator.
+    let registration = registration_start(&mut rng, password)?;
+    let request = OpaqueRegistrationRequest::from_bytes(registration.request)?;
+    let response = profile.registration_start(&credential, &request)?;
+    let registered = registration_finish(
+        &mut rng,
+        registration.state,
+        password,
+        response.expose_for_account_response(),
+        &network,
+        &credential,
+    )?;
+    let record = OpaqueRegistrationRecord::from_bytes(*registered.record)?;
+    let login = login_start(&mut rng, password)?;
+    let (ke2, _state) = profile.authentication_start(
+        network,
+        &credential,
+        Some(&record),
+        &OpaqueKe1::from_bytes(login.ke1)?,
+    )?;
+    assert_eq!(
+        login_finish(
+            &mut latched_generator(),
+            login.state,
+            password,
+            ke2.expose_for_account_response(),
+            &network,
+            &credential,
+        )
+        .err(),
+        Some(OpaqueClientError::EntropyUnavailable)
+    );
+    let login = login_start(&mut rng, password)?;
+    let (ke2, state) = profile.authentication_start(
+        network,
+        &credential,
+        Some(&record),
+        &OpaqueKe1::from_bytes(login.ke1)?,
+    )?;
+    let finished = login_finish(
+        &mut rng,
+        login.state,
+        password,
+        ke2.expose_for_account_response(),
+        &network,
+        &credential,
+    )?;
+    finish_authentication(
+        network,
+        &credential,
+        state,
+        &OpaqueKe3::from_bytes(finished.ke3)?,
+    )?
+    .authorize_account_transition();
     assert!(rng.succeeded());
     Ok(())
 }
