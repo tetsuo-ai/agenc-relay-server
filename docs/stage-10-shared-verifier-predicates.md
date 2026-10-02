@@ -60,12 +60,59 @@ condition removed from this commit's tree, the three e2ee tests above that
 expect a refusal and the first two runtime tests fail; with it, all pass. The
 terminal tests pass either way: they exercise the daemon, not the predicate.
 
+## Signed network on capability and leaf statements
+
+### Finding
+
+A capability statement and a leaf authorization each sign their own
+`network_id`. `verify_capabilities_lineage` and `verify_leaf_authorization`
+compared the statement's account, root, roster and device with the trusted
+roster but never its network, because `VerifiedRoster` did not carry one. A
+statement correctly signed for network B that repeats network A's exact
+account, root and roster references therefore verified under the network A
+roster, on the checked path and on `restore_capabilities`, and the credential
+bundle and KeyPackage checks inherited the omission through the leaf.
+
+### Change
+
+- `crates/agenc-relay-e2ee/src/identity.rs`: `VerifiedRoster` gains a public
+  `network_id`, set from the verified root that signed the roster (the roster
+  verifiers already require the roster's own `network_id` to equal it). The
+  capability verifier (both its checked and restored paths) and
+  `verify_leaf_authorization` refuse a statement whose signed network differs
+  (`ProfileMismatch`, the variant the crate documents for a network mismatch
+  and the one the root and sequencer verifiers use). The signed field is
+  compared, never rewritten.
+- `VerifiedRoster` is constructed only inside the crate, so the new field is
+  an additive change for callers that read it.
+
+### Tests
+
+| Test | What it pins |
+| --- | --- |
+| `tests/shared_predicate_counterexamples.rs::a_capability_statement_signed_for_another_network_is_refused` | Audit counterexample on `verify_capabilities` and `restore_capabilities`. |
+| `tests/shared_predicate_counterexamples.rs::a_leaf_authorization_signed_for_another_network_is_refused` | Audit counterexample on `verify_leaf_authorization`. |
+| `tests/shared_predicate_counterexamples.rs::control_valid_same_network_capability_and_leaf_are_accepted` | Control: the same statements for the roster's network verify, the capability statement on both paths. |
+| `src/tests/identity.rs::statements_signed_for_another_network_are_refused_under_this_roster` | Re-signed foreign statements refused on the checked and restored capability paths, the leaf path and through a credential bundle; the same statements re-signed for the roster's network verify; the verified roster names its root's network. |
+
+The audit executed only the checked half of the capability case; the restore
+half was a reading. At `70c832c`, a probe (not committed) ran
+`restore_capabilities` on the network B statement under the network A roster
+and it returned `Ok`, so both halves are executed. With the two new
+comparisons removed from this commit's tree, the two counterexamples and the
+unit test fail; with them, all pass.
+
 ## Compatibility
 
 - Wire: unchanged. The runtime answers every refusal on these paths as before.
 - Persistence: unchanged format (storage generation 5). A coordinator could
   never install a same-key set (installation refused it), so no accepted
-  durable credential history holds one.
+  durable credential history holds one. A capability statement that names
+  another network could have been accepted by an earlier binary; startup
+  reconstruction re-verifies every stored statement with
+  `restore_capabilities`, so such a row is now skipped at startup, as is
+  any stored row that does not re-verify.
+- API: `VerifiedRoster` has one more public field.
 - Privacy and dependencies: unchanged.
 
 ## Limitations

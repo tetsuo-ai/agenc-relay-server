@@ -1266,3 +1266,67 @@ fn leaf_authorizations_and_bundles_are_checked_against_their_roster() -> TestRes
     assert!(!client.same_client(&other_account, never));
     Ok(())
 }
+
+/// Capability statements and leaf authorizations sign their own
+/// `network_id`. A correctly signed statement for another network is
+/// refused under this network's roster on the checked and the restored
+/// path, and a credential bundle inherits the leaf refusal.
+#[test]
+fn statements_signed_for_another_network_are_refused_under_this_roster() -> TestResult {
+    let account = account_with(&[7])?;
+    assert_eq!(account.verified_roster.network_id, NETWORK);
+    let resigned_statement = |network: [u8; 32]| -> Result<ArcDeviceCapabilities, Box<dyn Error>> {
+        let mut statement = capabilities(7, &account.roster, 0, [0; 32], (100, 1_000), vec![1])?;
+        statement.tbs.network_id = network;
+        statement.device_signature =
+            sign(&key(7), SignatureDomain::DeviceCapabilities, &statement.tbs)?;
+        Ok(statement)
+    };
+    let foreign = resigned_statement([9; 32])?;
+    assert_eq!(
+        verify_capabilities(&account.verified_roster, &foreign, None),
+        Err(E2eeError::ProfileMismatch)
+    );
+    assert_eq!(
+        restore_capabilities(&account.verified_roster, &foreign),
+        Err(E2eeError::ProfileMismatch)
+    );
+    let own = resigned_statement(NETWORK)?;
+    assert!(verify_capabilities(&account.verified_roster, &own, None).is_ok());
+    assert!(restore_capabilities(&account.verified_roster, &own).is_ok());
+
+    let resigned_leaf = |network: [u8; 32]| -> Result<ArcLeafAuthorization, Box<dyn Error>> {
+        let mut leaf = leaf_authorization(&account.roster, &LeafSpec::new(7, 30))?;
+        leaf.tbs.network_id = network;
+        leaf.device_signature = sign(&key(7), SignatureDomain::LeafAuthorization, &leaf.tbs)?;
+        Ok(leaf)
+    };
+    let foreign_leaf = resigned_leaf([9; 32])?;
+    assert_eq!(
+        verify_leaf_authorization(&account.verified_roster, &foreign_leaf),
+        Err(E2eeError::ProfileMismatch)
+    );
+    let bundle =
+        |leaf_authorization: ArcLeafAuthorization| -> Result<ArcCredentialBundle, Box<dyn Error>> {
+            Ok(ArcCredentialBundle {
+                root: account.root.clone(),
+                device_certificate: certificate(
+                    &account.root_secret,
+                    &account.root,
+                    &DeviceSpec::new(7),
+                )?,
+                leaf_authorization,
+            })
+        };
+    assert_eq!(
+        verify_credential_bundle(&NETWORK, &account.verified_roster, &bundle(foreign_leaf)?),
+        Err(E2eeError::ProfileMismatch),
+        "the bundle inherits the leaf refusal"
+    );
+    let own_leaf = resigned_leaf(NETWORK)?;
+    assert!(verify_leaf_authorization(&account.verified_roster, &own_leaf).is_ok());
+    assert!(
+        verify_credential_bundle(&NETWORK, &account.verified_roster, &bundle(own_leaf)?).is_ok()
+    );
+    Ok(())
+}

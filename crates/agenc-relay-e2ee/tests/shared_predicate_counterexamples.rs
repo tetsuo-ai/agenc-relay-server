@@ -28,6 +28,7 @@ use agenc_relay_e2ee::tls::{Opaque, TlsEncode, TlsVec};
 type TestResult = Result<(), Box<dyn Error>>;
 
 const NET_A: [u8; 32] = [1; 32];
+const NET_B: [u8; 32] = [2; 32];
 const ACCOUNT: [u8; 24] = [b'a'; 24];
 
 fn key(seed: u8) -> Ed25519SecretKey {
@@ -363,6 +364,59 @@ fn a_key_set_whose_successor_reuses_the_current_key_is_refused() -> TestResult {
     assert!(
         SequencerKeySet::verify_opened(&NET_A, &[first, same], 1).is_err(),
         "a credentials file set with one public key was admitted"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_capability_statement_signed_for_another_network_is_refused() -> TestResult {
+    let root_secret = key(10);
+    let root = root(&root_secret, NET_A)?;
+    let verified_root = verify_root_identity(&NET_A, &root, None)?;
+    let certificate = certificate(&root_secret, &root, 7, 0, (90, 100))?;
+    let roster = roster(
+        &root_secret,
+        &root,
+        0,
+        [0; 32],
+        (100, 900),
+        vec![certificate],
+    )?;
+    let verified_roster = verify_roster(&verified_root, &roster, None)?;
+    let foreign = capabilities(7, &roster, NET_B)?;
+    let checked = verify_capabilities(&verified_roster, &foreign, None);
+    assert!(
+        checked.is_err(),
+        "a statement signed for network B was admitted under a network A roster"
+    );
+    let restored = restore_capabilities(&verified_roster, &foreign);
+    assert!(
+        restored.is_err(),
+        "the restore path admitted the same cross-network statement"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_leaf_authorization_signed_for_another_network_is_refused() -> TestResult {
+    let root_secret = key(10);
+    let root = root(&root_secret, NET_A)?;
+    let verified_root = verify_root_identity(&NET_A, &root, None)?;
+    let certificate = certificate(&root_secret, &root, 7, 0, (90, 100))?;
+    let roster = roster(
+        &root_secret,
+        &root,
+        0,
+        [0; 32],
+        (100, 900),
+        vec![certificate],
+    )?;
+    let verified_roster = verify_roster(&verified_root, &roster, None)?;
+    let foreign = leaf_authorization(7, &roster, NET_B)?;
+    let got = verify_leaf_authorization(&verified_roster, &foreign);
+    assert!(
+        got.is_err(),
+        "a leaf authorization signed for network B was admitted under a network A roster"
     );
     Ok(())
 }

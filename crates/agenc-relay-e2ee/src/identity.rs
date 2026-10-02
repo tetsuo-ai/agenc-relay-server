@@ -300,6 +300,9 @@ fn check_certificate_windows(
 /// A verified complete device roster.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedRoster {
+    /// Network identity of the root that signed the roster, which every
+    /// device-signed statement naming the roster must carry.
+    pub network_id: [u8; 32],
     /// Root fingerprint.
     pub root_fingerprint: SemanticId,
     /// Root generation.
@@ -432,6 +435,7 @@ fn verify_roster_lineage(
         return Err(E2eeError::InvalidValue);
     }
     Ok(VerifiedRoster {
+        network_id: root.network_id,
         root_fingerprint: root.fingerprint,
         root_generation: root.generation,
         account_id: root.account_id,
@@ -493,7 +497,8 @@ pub struct VerifiedCapabilities {
     pub versions: Vec<u16>,
 }
 
-/// Verifies a capability statement for a device active in `roster`.
+/// Verifies a capability statement for a device active in `roster`. The
+/// statement's signed network must be the roster's.
 pub fn verify_capabilities(
     roster: &VerifiedRoster,
     capabilities: &ArcDeviceCapabilities,
@@ -503,7 +508,8 @@ pub fn verify_capabilities(
 }
 
 /// Re-verifies a capability statement this node accepted before, without
-/// its predecessor.
+/// its predecessor. Every other rule, the signed network included, still
+/// applies.
 pub fn restore_capabilities(
     roster: &VerifiedRoster,
     capabilities: &ArcDeviceCapabilities,
@@ -517,7 +523,7 @@ fn verify_capabilities_lineage(
     lineage: Lineage<'_, VerifiedCapabilities>,
 ) -> Result<VerifiedCapabilities, E2eeError> {
     let tbs = &capabilities.tbs;
-    if tbs.profile_version != PROFILE_VERSION {
+    if tbs.profile_version != PROFILE_VERSION || tbs.network_id != roster.network_id {
         return Err(E2eeError::ProfileMismatch);
     }
     if !statement_names_roster(
@@ -622,13 +628,15 @@ pub struct VerifiedLeafAuthorization {
     pub interval: Interval,
 }
 
-/// Verifies a leaf authorization for a device active in `roster`.
+/// Verifies a leaf authorization for a device active in `roster`. The
+/// authorization's signed network must be the roster's; the credential
+/// bundle and KeyPackage checks inherit this.
 pub fn verify_leaf_authorization(
     roster: &VerifiedRoster,
     authorization: &ArcLeafAuthorization,
 ) -> Result<VerifiedLeafAuthorization, E2eeError> {
     let tbs = &authorization.tbs;
-    if !leaf_profile_is_version_one(tbs) {
+    if !leaf_profile_is_version_one(tbs) || tbs.network_id != roster.network_id {
         return Err(E2eeError::ProfileMismatch);
     }
     let names_roster = statement_names_roster(
