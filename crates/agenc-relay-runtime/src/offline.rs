@@ -807,6 +807,41 @@ fn validate_creation_parent(path: &Path, exact_mode: Option<u32>) -> Result<(), 
     Ok(())
 }
 
+/// Refuses a new file's path when its parent directory, or any directory
+/// above it, is group- or world-writable: the protected-ancestor rule the
+/// daemon's protected read applies to every file it reads (spec 22.2), so
+/// every later reader would refuse a file created there. Each directory is
+/// opened below the one before it without following a symbolic link, as
+/// `open_physical_directory` opens it.
+fn validate_protected_ancestors(path: &Path) -> Result<(), OfflineError> {
+    let parent = path.parent().ok_or(OfflineError::InvalidRequest)?;
+    if !safe_absolute_path(parent) {
+        return Err(OfflineError::InvalidRequest);
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = fs::File::from(
+        openat(CWD, Path::new("/"), flags, Mode::empty()).map_err(|_| OfflineError::Filesystem)?,
+    );
+    for component in parent.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = fs::File::from(
+                    openat(&directory, Path::new(name), flags, Mode::empty())
+                        .map_err(|_| OfflineError::Filesystem)?,
+                );
+            }
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(OfflineError::InvalidRequest);
+            }
+        }
+        if opened_directory_identity(&directory)?.mode & 0o022 != 0 {
+            return Err(OfflineError::Filesystem);
+        }
+    }
+    Ok(())
+}
+
 fn validate_data_path(path: &Path) -> Result<(), OfflineError> {
     validate_data_path_for_privilege(path, geteuid().is_root())
 }
@@ -2599,9 +2634,10 @@ mod tests {
         Ok(())
     }
 
-    /// AUD-02: an empty or reversed interval, an unsafe or unprotected
-    /// output, and a key file outside the protected-file rules are refused
-    /// before anything is written.
+    /// AUD-02: an empty or reversed interval, an unsafe output, one below a
+    /// group-writable directory at any depth or below a symbolic link, and a
+    /// key file outside the protected-file rules are refused before anything
+    /// is written.
     #[test]
     fn sequencer_credentials_refuse_bad_intervals_outputs_and_keys() -> Result<(), OfflineError> {
         let root = TestDirectory::create()?;
@@ -2622,15 +2658,30 @@ mod tests {
             create_sequencer_credentials(&relative),
             Err(OfflineError::InvalidRequest)
         );
+        // The daemon's protected read refuses a file below any group- or
+        // world-writable directory, not only below its parent.
         let shared = root.0.join("shared");
         create_private_directory(&shared)?;
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o770))
             .map_err(|_| OfflineError::Filesystem)?;
-        let exposed = credentials_request(&root.0, shared.join("credentials.bin"));
-        assert_eq!(
-            create_sequencer_credentials(&exposed),
-            Err(OfflineError::Filesystem)
-        );
+        let nested = shared.join("private");
+        create_private_directory(&nested)?;
+        // Nor does it follow a symbolic link on the way, even to a
+        // private directory.
+        let linked = root.0.join("linked");
+        std::os::unix::fs::symlink(root.0.join("etc"), &linked)
+            .map_err(|_| OfflineError::Filesystem)?;
+        for exposed in [
+            shared.join("credentials.bin"),
+            nested.join("credentials.bin"),
+            linked.join("credentials.bin"),
+        ] {
+            let request = credentials_request(&root.0, exposed);
+            assert_eq!(
+                create_sequencer_credentials(&request),
+                Err(OfflineError::Filesystem)
+            );
+        }
 
         let short_key = root.0.join("short-sequencer.key");
         write_secret(&short_key, &[7; 31])?;
@@ -2648,6 +2699,8 @@ mod tests {
         }
         assert!(fs::symlink_metadata(&output).is_err());
         assert!(fs::symlink_metadata(shared.join("credentials.bin")).is_err());
+        assert!(fs::symlink_metadata(nested.join("credentials.bin")).is_err());
+        assert!(fs::symlink_metadata(root.0.join("etc/credentials.bin")).is_err());
         Ok(())
     }
 

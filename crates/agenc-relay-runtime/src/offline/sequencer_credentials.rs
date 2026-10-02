@@ -24,7 +24,7 @@ use agenc_relay_storage::rename_path_no_replace;
 use zeroize::Zeroizing;
 
 use super::{
-    OfflineError, require_absent, safe_absolute_path, sync_parent, validate_creation_parent,
+    OfflineError, require_absent, safe_absolute_path, sync_parent, validate_protected_ancestors,
 };
 
 /// The document is public: readable by every local account, the service
@@ -74,7 +74,9 @@ pub fn create_sequencer_credentials(
     {
         return Err(OfflineError::InvalidRequest);
     }
-    validate_creation_parent(&request.output, None)?;
+    // Every node reads the document under the protected-file rules, which
+    // refuse a group- or world-writable directory anywhere above it.
+    validate_protected_ancestors(&request.output)?;
     require_absent(&request.output)?;
     let config = load_config(&request.config_path, ValidationDepth::Document)?;
     let network_id = *config.network.network_id.as_bytes();
