@@ -5,7 +5,8 @@
 //! without the capability receives no NOTE. Either burst ends with the
 //! authenticated account state, a `900` whose mask is the session's own
 //! prefix, which the edge reads from the session projection its coordinator
-//! installed.
+//! installed. A guest's burst ends with the NOTE when it negotiated the
+//! capability and with the MOTD group otherwise.
 #![forbid(unsafe_code)]
 
 use super::stage_ten_drills::wait_for_account_authority;
@@ -175,6 +176,84 @@ fn recovery_note_on_an_edge(
         ),
         "{:?}",
         recovery.burst
+    );
+    Ok(())
+}
+
+/// A guest that negotiated `request` and registered `nickname` without
+/// authenticating: the advertised capability lines and every line from
+/// `RPL_WELCOME` up to the barrier PONG, which is excluded. The connection
+/// is returned open until the scenario ends.
+fn guest_welcome(
+    fixture: &NodeFixture,
+    nickname: &str,
+    request: &str,
+) -> TestResult<(Vec<String>, Vec<String>, ArcClient)> {
+    let mut client = ArcClient::connect(fixture)?;
+    client.send("CAP LS 302")?;
+    let advertised =
+        client.read_until(|line| line.contains(" CAP * LS ") && !line.contains(" CAP * LS * :"))?;
+    let acknowledged = client.send_until(&format!("CAP REQ :{request}"), " CAP * ")?;
+    assert_contains(&acknowledged, &format!(" CAP * ACK :{request}"))?;
+    client.send(&format!("NICK {nickname}"))?;
+    client.send(&format!("USER {nickname} 0 * :Welcome Burst"))?;
+    client.send("CAP END")?;
+    client.send(&format!("PING :{BARRIER}"))?;
+    let mut lines = client.read_until(|line| line.ends_with(&format!("PONG :{BARRIER}")))?;
+    lines.pop();
+    let first = lines
+        .iter()
+        .position(|line| command(line) == "001")
+        .ok_or_else(|| failure(format!("no welcome in {lines:?}")))?;
+    Ok((advertised, lines.split_off(first), client))
+}
+
+#[test]
+fn an_edge_sends_the_recovery_note_to_a_guest() -> TestResult {
+    super::encrypted_clients::run_network(recovery_note_for_an_edge_guest)
+}
+
+/// Architecture 10.2 step 5 for a guest an edge registers: the burst of a
+/// guest that negotiated `agenc.ag/recovery` is the burst of one that did
+/// not, plus exactly the NOTE after the MOTD group, and a guest's burst
+/// holds no account state.
+fn recovery_note_for_an_edge_guest(
+    network: &Network,
+    _coordinator: &mut DaemonProcess,
+    _edge_a: &mut DaemonProcess,
+    _edge_b: &mut DaemonProcess,
+) -> TestResult {
+    wait_for_link(&network.edge_a, 0)?;
+    // The edge registers a guest only once its coordinator link is active.
+    wait_for_account_authority(&network.edge_a)?;
+    let (advertised, recovery, _recovery_client) =
+        guest_welcome(&network.edge_a, "visitor", "agenc.ag/recovery")?;
+    let (_, plain, _plain_client) = guest_welcome(&network.edge_a, "passer", "message-tags")?;
+    let epoch = advertised
+        .iter()
+        .flat_map(|line| line.split([' ', ':']))
+        .find_map(|token| token.strip_prefix("agenc.ag/recovery=v1."))
+        .ok_or_else(|| failure(format!("no recovery epoch in {advertised:?}")))?;
+    assert_eq!(epoch.len(), 22, "{advertised:?}");
+    let server = recovery
+        .first()
+        .and_then(|line| line.split(' ').next())
+        .ok_or_else(|| failure("the welcome has no prefix"))?;
+    let plain_codes: Vec<&str> = plain.iter().map(|line| command(line)).collect();
+    assert!(
+        matches!(plain_codes.last(), Some(&("376" | "422"))),
+        "a guest's burst ends with the MOTD group: {plain:?}"
+    );
+    let mut expected = plain_codes;
+    expected.push("NOTE");
+    let codes: Vec<&str> = recovery.iter().map(|line| command(line)).collect();
+    assert_eq!(codes, expected, "{recovery:?}");
+    assert_eq!(
+        recovery.last(),
+        Some(&format!(
+            "{server} NOTE * RECOVERY_EPOCH {epoch} :Current server recovery identity"
+        )),
+        "{recovery:?}"
     );
     Ok(())
 }

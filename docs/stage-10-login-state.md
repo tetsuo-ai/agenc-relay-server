@@ -286,10 +286,15 @@ record and its journal row already carry the account.
 | `welcome_burst::production_daemon_sends_the_recovery_note_only_to_a_recovery_client` | The production `arcd` binary, byte-exact against the fixture's epoch, with a `PING`/`PONG` barrier ending the burst. |
 | `welcome_burst::production_daemon_sends_the_recovery_note_after_preregistration_sasl` | A client that authenticated with SASL before `CAP END` gets the same burst and NOTE. |
 | `welcome_recovery::an_edge_sends_the_recovery_note_after_preregistration_sasl` | A production edge linked to a production coordinator: the recovery burst is the burst without the capability plus exactly the NOTE, byte for byte against the epoch the edge advertised. |
+| `welcome_recovery::an_edge_sends_the_recovery_note_to_a_guest` | The same for a guest the production edge registers without SASL: its burst ends with the NOTE, and the burst of a guest without the capability ends with the MOTD group and holds no account state. |
 
 With the `RecoveryEpoch` arm building the NOTE but not sending it, all seven
 fail at the burst comparison, which lacks the final `NOTE`; with the arm
-restored, all seven pass.
+restored, all seven pass. The guest edge test was added afterwards, as the
+plan's B-01 asks; it fails the same way with the arm reverted. One of its
+first runs failed before it waited for the edge's coordinator link to be
+active, as the authenticated test already does; with that wait it passed
+fourteen of fourteen runs.
 
 The welcome `900`:
 
@@ -395,8 +400,8 @@ scenario ends.
 
 ## Limitations
 
-- A daemon test covers the edge only after pre-registration SASL; edge guest
-  registrations are covered by the unit test of the edge completion path.
+- The recovery NOTE of an edge is covered through a production edge both
+  after pre-registration SASL and for a guest.
 - The welcome daemon tests use accounts without a public label, so a
   welcome's labeled `900` is covered by the unit tests only; the login daemon
   tests use a labeled account.
