@@ -11,9 +11,11 @@ On a core-only node a registered guest's lone `JOIN &loc` got no reply at
 all: no JOIN echo, no `366`, and with `labeled-response` not even the
 label's batch. Every later registered command on that connection (`TIME`,
 `WHO`, `NICK`, another `JOIN`) went unanswered too, while `PING` was still
-answered and `QUIT` still closed the connection. Another connection to the
-same node was unaffected. The SDK reproduced it against a daemon built from
-`b477e1b`, whose `crates/*/src` are identical to this base's.
+answered and `QUIT` still closed the connection. The SDK reproduced it
+against a daemon built from `b477e1b`, whose `crates/*/src` are identical to
+this base's. A client of a federated coordinator met the same stall when it
+joined a `&` channel of that coordinator; a client of an edge did not (see
+the federated roles below).
 
 ## Cause
 
@@ -28,8 +30,11 @@ connection's later registered commands, so they stay ordered behind the
 JOIN's reply.
 
 An ephemeral `&` channel is never persisted (`DurableChannel::from_state`
-omits it), so a guest's JOIN of one projects no durable write, and a
-core-only node projects nothing to federation either. With no batch
+omits it), so a guest's JOIN of one projects no durable write. It projects
+nothing to federation either: a core-only node has none, and a federated
+coordinator projects a channel only to the edges that host one of its
+members or invitees, so a `&` channel whose members and invitees are all
+the coordinator's own clients projects nothing. With no batch
 pending, `stage_prepared` applies such a plan inside the same step
 (`StageAccepted::AppliedInStep`), and `apply_plan` ran its commit hook
 before `execute_planned_command` settled the seed. The seed was retained
@@ -67,13 +72,20 @@ a local JOIN can run outside a routed line has its own regression below.
 This is the program register's decision D-22 (a). Its alternative, settling
 the seed before staging and rolling it back on a refusal, was not needed.
 
-## The edge role
+## The federated roles
+
+A federated coordinator routes its own clients' commands through the same
+router as a core-only node, so a `&` JOIN by one of them is applied in the
+step that admits it and stalled the same way before the fix; the same fix
+opens its snapshot. A daemon test with a real coordinator and edge sends
+`JOIN &plain` and then `TIME`, and the labeled `JOIN &labeled` and then
+`TIME`, from a client of the coordinator.
 
 An edge sends every JOIN to its coordinator as a request with a durable
 request record and continues the NAMES pages itself; its router never
-prepares a local seed, so this defect cannot arise there. A daemon test with
-a real coordinator and edge now guards that the edge's JOIN continuation,
-plain or labeled, answers and then releases the command behind it.
+prepares a local seed, so this defect cannot arise there. The same daemon
+test guards that the edge's JOIN continuation, plain or labeled, answers and
+then releases the command behind it.
 
 ## The regressions
 
@@ -89,7 +101,7 @@ plain or labeled, answers and then releases the command behind it.
 | `registration::core_line_tests::a_local_join_behind_a_staged_join_answers_in_its_commit_step` | `JOIN #room`, `JOIN &loc` and `TIME`; the step that applies the batch answers `#room`, then `&loc`, then the `391`. |
 | `registration::core_line_tests::a_local_join_sent_before_the_welcome_answers_in_its_commit_step` | `JOIN &loc` and `TIME` sent before the welcome; the registration's commit step sends the welcome, then `&loc`'s `366`, then the `391`. |
 | `stage_six_daemon::local_join::a_lone_local_join_is_answered_and_the_next_command_still_runs` | The production binary on a core-only node: `JOIN &plain` then `TIME`, and the labeled `JOIN &labeled` then `TIME`. |
-| `stage_seven_federation::an_edge_join_continuation_answers_and_releases_the_next_command` | A coordinator and an edge: `JOIN #plain` then `AWAY`, and the labeled `JOIN #labeled` then `AWAY`, on the edge. |
+| `stage_seven_federation::joins_on_a_coordinator_and_its_edge_answer_before_the_next_command` | A coordinator and an edge: on the coordinator, `JOIN &plain` then `TIME`, and the labeled `JOIN &labeled` then `TIME`; on the edge, `JOIN #plain` then `AWAY`, and the labeled `JOIN #labeled` then `AWAY`. |
 
 Each `core_line_tests` regression also requires that no seed is left
 pending. The existing `local_join_snapshot_opens_after_commit_and_keeps_its_membership_preimage`
@@ -99,15 +111,15 @@ require that a staged seed does not open before its batch commits, and
 releases its snapshot.
 
 With `settle_local_join` reverted to its `70c832c` body and everything else
-kept, every test above fails except the staged `#room` test and the edge
-test, which pass either way: they guard the paths the fix must leave
-unchanged. The in-step seed is never taken, the router never sends the
-`391` its script waits for, each `core_line_tests` regression receives
-nothing after the step that applies its `&` JOIN (the floor's timer, for
-one, publishes the `403` and nothing after it), and the daemon test reads
-nothing after `JOIN &plain` until its 15-second socket timeout. The keyed
-test fails earlier, at the owner's own `JOIN &locked`, a routed line its
-setup needs.
+kept, every test above fails except the staged `#room` test, which passes
+either way: it guards the path the fix must leave unchanged. The in-step
+seed is never taken, the router never sends the `391` its script waits for,
+each `core_line_tests` regression receives nothing after the step that
+applies its `&` JOIN (the floor's timer, for one, publishes the `403` and
+nothing after it), and both daemon tests read nothing after `JOIN &plain`
+until the socket timeout. The keyed test fails earlier, at the owner's own
+`JOIN &locked`, a routed line its setup needs. The edge half of the
+federated test passes either way.
 
 With the fix kept and a single drain removed, the regression of that
 drain's point fails. Without the crypto completion's drain the keyed test
@@ -126,19 +138,21 @@ Both production source inventories are refreshed. The reviewed release region
 its reviewed span unchanged. The new release region
 `runtime-local-join-settled-commit` binds `settle_local_join`, the decision
 this record changes, under the branch metric. Over the runtime library tests
-with every regression above in place (`cargo llvm-cov nextest -p
-agenc-relay-runtime --lib --all-features --branch`, 2,622 passed) it
-measures 6/6 branches and 14/14 regions: an absent seed, a refused JOIN, a
-staged seed and an in-step seed. `open` measures 4/6 branches there; the
-two it misses are its frame and row ceiling guards, which this change does
-not touch.
+at `f3b4fda`, which added the last of the runtime regressions above
+(`cargo llvm-cov nextest -p agenc-relay-runtime --lib --all-features
+--branch`, 2,622 passed), it measures 6/6 branches and 14/14 regions: an
+absent seed, a refused JOIN, a staged seed and an in-step seed. `open`
+measures 4/6 branches there; the two it misses are its frame and row
+ceiling guards, which this change does not touch.
 
 ## Limitations
 
-- The edge test exercises `#` channels and `AWAY`. On an edge, a JOIN of a
-  `&` channel is refused (`SERVER_BUSY`) instead of joining an edge-owned
-  channel, and `TIME` ends the connection; both were seen while writing
-  that test, are outside AUD-16, and are reported to the program for
+- On the edge the daemon test exercises `#` channels and `AWAY`. On an
+  edge, a JOIN of a `&` channel is refused (`481`, or `SERVER_BUSY` with
+  `standard-replies`) instead of joining an edge-owned channel, and `TIME`,
+  `VERSION`, `MOTD` and `LUSERS` each end the requester's connection
+  without a reply. Both are outside AUD-16; the code on both paths is
+  unchanged from `70c832c`, and both are reported to the program for
   separate work.
 - The daemon tests run on the development host, not the release
   qualification hosts.

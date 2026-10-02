@@ -214,11 +214,11 @@ that lets a bounded database grow, the resume of a construction stopped before
 its target existed, and the exact resume at a refused target batch (STO-07,
 issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
-The local JOIN that a core-only node applies in the step that admits it,
-whose NAMES snapshot now opens at once instead of never, so a lone `&` JOIN
-is answered and no longer holds the commands behind it (AUD-16, SDK program,
-outside master #35), is recorded in
-[the in-step local JOIN record](stage-10-in-step-local-join.md).
+The local JOIN that a node's own router, core-only or a federated
+coordinator, applies in the step that admits it, whose NAMES snapshot now
+opens at once instead of never, so a lone `&` JOIN is answered and no longer
+holds the commands behind it (AUD-16, SDK program, outside master #35), is
+recorded in [the in-step local JOIN record](stage-10-in-step-local-join.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

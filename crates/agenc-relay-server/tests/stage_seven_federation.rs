@@ -1029,17 +1029,30 @@ fn wait_for_partition(client: &mut ArcClient) -> TestResult<Vec<String>> {
     }
 }
 
-/// AUD-16 on the edge role. An edge sends a JOIN to its coordinator as a
-/// request with a durable record and fetches the NAMES pages itself, so the
-/// in-step local JOIN of a core-only node never arises here; this guards that
-/// the edge's own JOIN continuation, plain or labeled, still answers and then
-/// releases the command behind it.
+/// AUD-16 on a federated network. An edge sends a JOIN to its coordinator as
+/// a request with a durable record and fetches the NAMES pages itself, so it
+/// never prepares the snapshot this defect stranded; there the edge's own JOIN
+/// continuation, plain or labeled, must still answer and then release the
+/// command behind it. A JOIN of a local `&` channel by a client of the
+/// coordinator itself writes nothing durable and projects nothing to the
+/// edges, so the coordinator applies it in the step that admits it, as a
+/// core-only node does; it must still answer, plain or labeled, before the
+/// TIME behind it. The edge is checked first, so a failure on the coordinator
+/// still shows that the edge's path passed.
 #[test]
-fn an_edge_join_continuation_answers_and_releases_the_next_command() -> TestResult {
+fn joins_on_a_coordinator_and_its_edge_answer_before_the_next_command() -> TestResult {
     let network = build_network()?;
     let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
     let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
-    let outcome = exercise_edge_join_continuation(&network);
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| {
+            exercise_edge_join_continuation(&network)
+                .map_err(|error| failure(format!("on the edge: {error}")))
+        })
+        .and_then(|()| {
+            exercise_coordinator_local_join(&network)
+                .map_err(|error| failure(format!("on the coordinator: {error}")))
+        });
     let stopped_a = edge_a.stop();
     let stopped_core = coordinator.stop();
     if let Err(error) = outcome {
@@ -1059,7 +1072,6 @@ fn an_edge_join_continuation_answers_and_releases_the_next_command() -> TestResu
 }
 
 fn exercise_edge_join_continuation(network: &Network) -> TestResult {
-    wait_for_link(&network.edge_a, 0)?;
     let mut erin = register_when_available(&network.edge_a, "erin")?;
     erin.send("JOIN #plain")?;
     erin.send("AWAY :behind a join")?;
@@ -1067,7 +1079,7 @@ fn exercise_edge_join_continuation(network: &Network) -> TestResult {
     assert_contains(&replies, " 353 erin = #plain :")?;
     let names = position_of(&replies, |line| line.contains(" 366 erin #plain "))?;
     let away = position_of(&replies, |line| line.contains(" 306 erin "))?;
-    assert!(names < away, "{replies:?}");
+    require_before(&replies, names, away, "the 366 must precede the AWAY reply")?;
 
     erin.send("CAP REQ :message-tags batch labeled-response")?;
     erin.read_until(|line| line.contains(" ACK "))?;
@@ -1080,8 +1092,43 @@ fn exercise_edge_join_continuation(network: &Network) -> TestResult {
     let away = position_of(&replies, |line| {
         line.starts_with("@label=away ") && line.contains(" 305 erin ")
     })?;
-    assert!(ended < away, "{replies:?}");
-    Ok(())
+    require_before(
+        &replies,
+        ended,
+        away,
+        "the JOIN's label batch must end before the AWAY reply",
+    )
+}
+
+fn exercise_coordinator_local_join(network: &Network) -> TestResult {
+    let mut cora = register_when_available(&network.coordinator, "cora")?;
+    cora.send("JOIN &plain")?;
+    cora.send("TIME")?;
+    let replies = cora.read_until(|line| line.contains(" 391 cora "))?;
+    assert_contains(&replies, " JOIN &plain")?;
+    assert_contains(&replies, " 353 cora = &plain :")?;
+    let names = position_of(&replies, |line| line.contains(" 366 cora &plain "))?;
+    let time = position_of(&replies, |line| line.contains(" 391 cora "))?;
+    require_before(&replies, names, time, "the 366 must precede the TIME reply")?;
+
+    cora.send("CAP REQ :message-tags batch labeled-response")?;
+    cora.read_until(|line| line.contains(" ACK "))?;
+    cora.send("@label=join JOIN &labeled")?;
+    cora.send("@label=time TIME")?;
+    let labeled_time = |line: &str| line.starts_with("@label=time ") && line.contains(" 391 cora ");
+    let replies = cora.read_until(labeled_time)?;
+    assert_contains(&replies, "@label=join ")?;
+    assert_contains(&replies, " JOIN &labeled")?;
+    assert_contains(&replies, " 353 cora = &labeled :")?;
+    assert_contains(&replies, " 366 cora &labeled ")?;
+    let ended = position_of(&replies, |line| line.contains(" BATCH -"))?;
+    let time = position_of(&replies, labeled_time)?;
+    require_before(
+        &replies,
+        ended,
+        time,
+        "the JOIN's label batch must end before the TIME reply",
+    )
 }
 
 fn position_of(lines: &[String], found: impl Fn(&str) -> bool) -> TestResult<usize> {
@@ -1089,4 +1136,14 @@ fn position_of(lines: &[String], found: impl Fn(&str) -> bool) -> TestResult<usi
         .iter()
         .position(|line| found(line))
         .ok_or_else(|| failure(format!("expected reply is missing: {lines:?}")))
+}
+
+/// Requires the reply at index `first` to precede the reply at index `then`,
+/// as a failure the caller reports with both daemons' logs.
+fn require_before(lines: &[String], first: usize, then: usize, rule: &str) -> TestResult {
+    if first < then {
+        Ok(())
+    } else {
+        Err(failure(format!("{rule}: {lines:?}")))
+    }
 }
