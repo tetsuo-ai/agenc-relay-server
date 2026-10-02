@@ -94,5 +94,9 @@ Commands at this branch, from the repository root:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo nextest run -p agenc-relay-e2ee --all-features --locked
+cargo nextest run --workspace --all-features --locked
 python3 scripts/check-source.py check
 ```
+
+Each passes at the branch tip. The per-commit results and the companion
+edits each test change was checked against are in the commit messages.

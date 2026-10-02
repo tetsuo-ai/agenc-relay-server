@@ -188,7 +188,7 @@ now includes the rotation, and their assertions are unchanged.
 | `tests/shared_predicate_counterexamples.rs::control_current_target_certificate_outside_enrollment_window_is_refused` | Control: the existing current-target interval rule. |
 | `src/tests/identity.rs::a_certificate_enrolled_for_a_later_generation_is_refused_on_every_path` | A later target at generation zero and at generation one, on the checked, first-contact and restore paths. |
 | `src/tests/identity.rs::the_current_target_enrollment_interval_includes_both_ends` | A certificate enrolled for the roster's own generation is admitted with `issued_at` or `expires_at` equal to the roster's `not_before`, and refused one second outside either end, on the checked, first-contact and restore paths. With either comparison made strict, it fails. |
-| `src/tests/identity.rs::a_continuing_certificate_must_be_active_unchanged_in_the_predecessor` | Continuing certificates verify after their enrollment interval closed and restore without the predecessor; a new device claiming an earlier target, a replacement certificate under an active Device ID, and a dropped certificate returning are refused. |
+| `src/tests/identity.rs::a_continuing_certificate_must_be_active_unchanged_in_the_predecessor` | Continuing certificates verify after their enrollment interval closed and restore without the predecessor; a new device claiming an earlier target, a replacement certificate under an active Device ID claiming the old target generation, and a dropped certificate returning are refused. |
 | `src/tests/identity.rs::first_contact_requires_the_issuance_of_every_continuing_certificate` | First contact at generation zero equals the initial check; above it, continuing certificates need their exact target roster (either order), and the wrong generation, another root, a target-generation roster without the device or holding another certificate for its Device ID, a late current enrollment, a generation-one roster naming no predecessor and a generation-zero roster naming one are refused; with the evidence the result equals the checked one. |
 | `src/tests/identity.rs::first_contact_holds_a_roster_to_every_supplied_roster_of_its_root` | Given the complete chain from generation zero, first contact decides as the checked path does for a certificate dropped by a supplied roster between its target and the roster (with and without a revocation entry), a revocation dropped, a supplied previous generation that is not the named predecessor, and the conforming continuations; without the roster that dropped a certificate nothing shows the drop; supplied rosters of another root or of the roster's own generation are not consulted. |
 | runtime `leaf_membership::named_roster::*` (nine tests) | Unchanged assertions; in the two tests whose device returns, it returns through a continuous root rotation. With a device absent from the named roster classified as invalid rather than inactive, exactly those two fail. |
@@ -284,6 +284,13 @@ without a predecessor, the test fails; with the change it passes.
 ## Compatibility
 
 - Wire: unchanged. The runtime answers every refusal on these paths as before.
+- Startup: an edge, and offline `print-onboarding` on either role, read the
+  sequencer credentials file through the same key-set verifier but install
+  no signers. A file whose successor reuses the current key, which they
+  loaded at `70c832c`, is now refused at load: by an edge with
+  `E2eeCredentials`, by `print-onboarding` with `InvalidRequest`. A
+  coordinator already refused it at signer installation, so no working
+  network depends on such a file.
 - Persistence: unchanged format (storage generation 5). A coordinator could
   never install a same-key set (installation refused it), so no accepted
   durable credential history holds one. A capability statement that names
@@ -327,7 +334,13 @@ without a predecessor, the test fails; with the change it passes.
   history it does not hold; that stays the checked path's job when the
   roster is first accepted.
 - The client consumption rules of 8.3 (a challenge, Device ID, serial or
-  target generation already used under a root) remain endpoint checks.
+  target generation already used under a root) remain endpoint checks. In
+  particular, a replacement or re-enrollment under a reused Device ID,
+  device key or enrollment challenge, enrolled for the roster's own
+  generation, satisfies the interval rule and is admitted by every shared
+  path, on succession with the predecessor at hand too; only a replacement
+  claiming an earlier target generation is refused. The endpoint's durable
+  consumption records must refuse the rest.
 - The changed predicates are not release-critical coverage regions; the
   inventory is unchanged apart from the two moved `sequencer.rs` spans.
 - The implementation gate (`scripts/check-stage-nine.sh`) was not run on this
@@ -348,6 +361,15 @@ python3 scripts/check-source.py check
 python3 scripts/check-coverage.py audit conformance/release-critical-coverage.toml
 ```
 
-Each passes at the branch tip. The per-commit results and the runs with
-each correction removed are in the commit messages. The storage `disk`
-profile was not run: the host was not quiet.
+Each passes at the branch tip: the whole workspace suite runs 4,535 tests,
+all passing (3 slow), with 24 skipped. The per-commit results and the runs
+with each correction removed or mutated are in the commit messages.
+
+The storage `disk` profile
+(`cargo nextest run -p agenc-relay-storage --all-features --locked --profile disk`)
+was not run on this branch. It needs an exclusive quiet window: its
+qualification workload measures free space to the byte with a ballast on
+the shared filesystem, the host's load average was between 27 and 65
+during this work, and it already fails with `StaleState` on this host at
+`70c832c` (the program's base gate run). It belongs to the integration
+gate's exclusive storage lane before the push, which records its result.

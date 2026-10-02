@@ -1460,8 +1460,10 @@ fn a_certificate_enrolled_for_a_later_generation_is_refused_on_every_path() -> T
 /// On succession a certificate enrolled for an earlier generation must be
 /// active, unchanged, in the predecessor: it keeps working after its short
 /// enrollment interval, but a certificate never issued there, a replacement
-/// under a reused Device ID, and a revoked certificate coming back are
-/// refused.
+/// under a reused Device ID that claims the old target generation, and a
+/// revoked certificate coming back are refused. (A replacement enrolled for
+/// the roster's own generation passes the interval rule; refusing a reused
+/// Device ID, key or challenge is the endpoint's consumption check.)
 #[test]
 fn a_continuing_certificate_must_be_active_unchanged_in_the_predecessor() -> TestResult {
     let account = account_with(&[7, 8])?;
