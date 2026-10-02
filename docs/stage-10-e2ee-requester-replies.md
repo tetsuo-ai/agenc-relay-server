@@ -66,6 +66,28 @@ renders instead of being refused, and a ReInit activation batch names an
 `@label=l35 :edge-a.test EGROUP ACKED …` where `REINIT-STAGED` is required.
 With the fix restored, all six pass.
 
+### An attempt abort through the daemons
+
+The rehearsal checked `REINIT-ABORTED` at the unit level only.
+`encrypted_clients::reinit::a_reinit_attempt_aborts_when_its_second_vote_arrives`
+stages a real two-leaf ReInit attempt through the production coordinator and
+both edges, then aborts it with the two council votes in separate requests
+(companion 13.8: an abort is certified at the derived old-policy quorum,
+which is two for this two-principal council):
+
+- alice's vote alone is below the quorum and is answered
+  `PENDING <conversation-id> REINIT-ABORT <request-object-id>`;
+- bob's vote completes the abort and is answered
+  `REINIT-ABORTED <old-conversation-id> <reinit-attempt-id> <abort-id> <certificate-object-id>`,
+  whose abort ID equals the one recomputed from the abort core;
+- alice then reads the untagged `REINIT-ABORTED` broadcast naming the same
+  abort, as Section 11.7 gives a requester answered `PENDING`.
+
+With only the `reinit_aborted` arm of `quad_line` rendering `ABORTED`, the
+test fails at bob's completion (`@label=l6 :edge-b.test EGROUP ABORTED …`
+where `REINIT-ABORTED` is required); with the whole of `result.rs` reverted
+it fails earlier, at the staged attempt's `ACKED`.
+
 ### Wire effect
 
 Only the requester's labeled completion of the four ReInit submissions changes
@@ -81,3 +103,8 @@ broadcasts and the ordinary `ACKED` and `ABORTED` replies are unchanged.
 - ReInit's own target-commitment correction (the SDK program's PC-001) is a
   separate change; this one only makes the edge render the result kind the
   coordinator already sends.
+- Through the daemons the results are checked on the ordinary path, where the
+  completion event is applied before the labeled result. A completion that
+  arrives after its result and a retry answered from the reply cache are
+  checked at the unit level only, and no daemon test restarts an edge between
+  a ReInit result and its completion.
