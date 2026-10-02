@@ -10,7 +10,7 @@ exists for it. SC-007 has three parts, worked in this order:
 | The recovery epoch NOTE in the welcome burst | Architecture Section 10.2 step 5 | Implemented |
 | The authenticated account state (`900`) in the welcome burst | Section 10.2 step 6, Appendix E.2 | Implemented |
 | `900` after a post-registration login, and `ACCOUNT` to `account-notify` peers, on a coordinator or standalone node | Section 11.4 | Implemented |
-| The same for a session an edge homes, and `ACCOUNT` to the peers other edges home | Section 11.4 | Not implemented |
+| The same for a session an edge homes, with `ACCOUNT` to that edge's `account-notify` peers | Section 11.4 | Implemented |
 
 The login of a session an edge homes also needed two corrections on the path
 it takes through the coordinator. Each has its own commit and regression:
@@ -178,6 +178,45 @@ The account service now renders a registered session's successful finish with
 
 No `901` is sent on logout, and a logout is unchanged.
 
+### Across a federated network
+
+The coordinator commits every login, so the account switch reaches the
+edges as projected events, and the edge that homes the session renders the
+lines for its own clients:
+
+- The coordinator now also projects a guest's login as `account_label_changed`
+  to the session's home edge and to every edge that shares a channel with it
+  (`project_login` in the federation projection), carrying the session's
+  source view with the account's public label, as a label change does. An
+  edge renders that event as `ACCOUNT <label-or-*>` to each of its
+  `account-notify` clients that shares a channel with the session, and to the
+  session itself. A logout is not projected this way: edges refuse
+  `AUTHENTICATE *` (SC-012), and a coordinator's logout still names
+  `ACCOUNT *` to its own clients only.
+- The edge that homes the session renders its `900`. The coordinator sends
+  the login's result before the events that give the session its account, so
+  the edge keeps a login it answered with `903` (`awaited_logins` in the
+  registration router, at most one per connection) and sends the `900` once
+  its replica's session projection names that account, with the mask and
+  label the welcome reads (`EdgeFederation::logged_in`). The first projected
+  event of the switch already carries that projection, so the `900` follows
+  the `903` before the edge applies the event that renders `ACCOUNT`. A
+  same-account reauthentication finds the account projected and reads the
+  `900` right after its `903`. A login before registration is named by the
+  welcome instead, an awaited login is forgotten with its connection, and a
+  `900` the edge cannot render closes the connection, as a welcome does.
+- A coordinator's own clients read the `ACCOUNT` line of a session an edge
+  homes from the coordinator's rendering above.
+
+An edge renders the user events of a session another node homes (`NICK`,
+`AWAY`, `SETNAME`, and now this `ACCOUNT`) to none of its clients, because
+its replica keeps the channel memberships of its own sessions only and so
+finds no local member that shares a channel with the remote session. A
+temporary daemon scenario confirmed it for `ACCOUNT`, `AWAY` and `NICK`
+before and after this change. That is outside SC-007 and not changed here;
+the login is projected to those edges anyway, the same way a label change
+is, so a later correction of the edge's recipients covers it.
+
 ## Account switches of channel members on a federated network
 
 An account switch rewrites the session's membership in every channel it
@@ -323,6 +362,32 @@ edge A logs in and then authenticates again) read `904` for the
 reauthentication, with the coordinator logging `principal_mismatch`, without
 the declaration, and `903` with it.
 
+The login across a federated network:
+
+| Test | What it pins |
+| --- | --- |
+| `federation::projection::tests::revision_drift::a_login_names_its_public_label_to_the_home_and_member_edges_and_a_logout_does_not` | The projection of a labeled login: one `account_label_changed` with the label to the home edge, carrying the session projection, and one to the other member edge, without it; nothing to an edge that shares no channel; nothing for the logout. The replicas then match the coordinator's cut. |
+| `federation::projection::tests::revision_drift` and `invites` (five existing tests) | The event lists of an account switch now include the `account_label_changed` copies on the home and member edges. |
+| `registration::edge_login_tests::an_edge_login_sends_900_once_the_projection_names_the_account` | The edge router: `903` alone while the replica names no account, then the `900` with the edge-projected label once the projection is applied. |
+| `registration::edge_login_tests::an_edge_reauthentication_sends_900_right_after_903` | A replica that already names the account: `903` then `900`. |
+| `registration::edge_login_tests::a_login_before_registration_awaits_no_900` | A login before registration ends with `903` and awaits nothing. |
+| `registration::edge_login_tests::an_awaited_login_is_forgotten_with_its_connection` | A closed connection forgets its awaited login; a later projection sends nothing. |
+| `login_after_registration::an_edge_login_after_registration_sends_900_and_names_the_account` | Production edges and coordinator: a guest on edge A, in a channel with members on edge A, on the coordinator and on edge B, logs in: `903`, then the `900` byte-exact with the label; `ACCOUNT Kestrel` to the guest, to edge A's and the coordinator's `account-notify` members, nothing to a member without it; the guest's next message reaches edge B; a reauthentication repeats the `900` alone. |
+| `login_after_registration::a_coordinator_login_after_registration_sends_900_and_names_the_account` | A guest on the coordinator, in a channel with a member on edge B: `903` and the `900` from `core.test`, `ACCOUNT Kestrel` to a coordinator `account-notify` member, nothing more to the guest, and its next message reaches edge B. |
+| `credential_replacement::edge_credential_replacement_survives_coordinator_restart` | Its existing reauthentication of a registered edge session now reads the `900` after the `903`. |
+
+With the login left out of the projection, the new domain test and the five
+updated ones fail, and the edge daemon test fails waiting for the guest's own
+`ACCOUNT` line, while the coordinator daemon test passes. With the edge router
+never awaiting a login, three of the four router tests fail, the edge daemon
+login test reads the guest's `ACCOUNT` line where its `900` belongs, and the
+credential replacement fails waiting for its reauthentication's `900`.
+Restored, all pass. At this commit, restoring the recompute equality makes
+both daemon login tests fail (the edge answers its guest `904`, the
+coordinator closes its guest's connection without an answer), and leaving out
+the origin declaration makes the edge login test fail at its reauthentication
+with `904`.
+
 The Stage 08 edge test keeps every registered connection open until its
 scenario ends.
 
@@ -330,16 +395,24 @@ scenario ends.
 
 - A daemon test covers the edge only after pre-registration SASL; edge guest
   registrations are covered by the unit test of the edge completion path.
-- The daemon tests use accounts without a public label, so the labeled `900`
-  is covered by the unit tests only.
+- The welcome daemon tests use accounts without a public label, so a
+  welcome's labeled `900` is covered by the unit tests only; the login daemon
+  tests use a labeled account.
 - The capacity campaign's login, which now reads the `900`, is an ignored
   qualification scenario; it was compiled, not run. The drills' login helper
   is run by the ordinary Stage 08 recovery submission test.
-- The post-registration login of a session an edge homes is not implemented
-  at this revision: its edge sends no `900`, and peers that other edges home
-  read no `ACCOUNT` line.
-- The local `ACCOUNT` line follows a login and a logout only; an account
-  label change still reaches only the peers that edges home, as before.
+- A client of one edge reads no `ACCOUNT` line for a session another node
+  homes, as it reads no `NICK`, `AWAY` or `SETNAME` line for one (see
+  "Across a federated network"); the coordinator's own clients do read it.
+- The daemon tests cover the edge's `900` with `account-notify` peers on the
+  same edge and on the coordinator; the edge-to-edge membership recompute is
+  covered by a message that reaches the other edge after the login.
+- A coordinator or standalone node renders `ACCOUNT` for a login and a logout
+  only; an account label change still reaches only the clients of the edges,
+  as before.
+- A login to an account without a public label names `ACCOUNT *`, as decision
+  D-13 and the welcome's `900` do; a peer cannot tell it from a guest, but it
+  does see that the session authenticated.
 - These are development-host runs. The full Stage 09 gate runs at the
   integration tip, not on this branch.
 
@@ -359,6 +432,15 @@ Sources:
   `render_account_login`)
 - `crates/agenc-relay-runtime/src/account_service.rs` (`stage_finish`)
 - `docs/arc-architecture-and-implementation-spec.md` Section 20.6
+- `crates/agenc-relay-domain/src/federation/projection.rs` (`project_login`)
+  and `replica.rs` (`shared_recipients`)
+- `crates/agenc-relay-runtime/src/registration.rs` (`awaited_logins`,
+  `edge_login_answered`, `settle_awaited_logins`)
+- `crates/agenc-relay-runtime/src/federation/edge/mod.rs`
+  (`EdgeFederation::home_session_account`) and `render.rs`
+  (`account_label_changed`)
+- `crates/agenc-relay-runtime/src/registration/tests/edge_login.rs`
+- `crates/agenc-relay-server/tests/stage_eight_e2ee/login_after_registration.rs`
 - `crates/agenc-relay-federation-wire/src/semantics.rs`
   (`validate_membership_recompute`) and `src/tests/semantics.rs`
 - `crates/agenc-relay-domain/src/federation/projection.rs`
@@ -438,4 +520,15 @@ cargo nextest run -p agenc-relay-runtime -p agenc-relay-server --all-features --
 cargo nextest run -p agenc-relay-runtime --all-features --locked --lib \
   -E 'test(a_login_after_registration_declares_its_account_before_the_next_carrier) | test(sasl_crosses_the_federation)'
 # 2 passed (ten of ten repeated runs); without the declaration: 1 failed, 1 passed
+
+# the federated login, on the tree of its commit
+cargo nextest run --workspace --all-features --locked
+# 4543 tests run: 4543 passed, 24 skipped
+cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-server \
+  --all-features --locked -E 'test(projection::tests::revision_drift) | test(projection::tests::invites) | test(edge_login_tests) | test(login_after_registration) | test(credential_replacement)'
+# 30 passed; without the login projection: 7 failed; without the awaited 900: 5 failed
+cargo nextest run -p agenc-relay-server --all-features --locked --test stage_eight_e2ee \
+  -E 'test(login_after_registration) | test(credential_replacement)'
+# 3 passed (four repeated runs); with the recompute equality: 2 failed;
+# without the origin declaration: 1 failed
 ```

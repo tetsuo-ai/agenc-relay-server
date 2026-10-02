@@ -164,16 +164,19 @@ fn a_member_switching_account_advances_the_channel_on_every_member_edge() -> Res
         join(&mut harness, member)?;
     }
     let account = create_account(&mut harness, 41)?;
+    // The login also names the account to every member edge for
+    // `account-notify`; the logout below does not.
     assert_eq!(
         switch(&mut harness, bob, Some(account))?,
         [
-            vec![K::ChannelMembershipsRecomputed],
+            vec![K::AccountLabelChanged, K::ChannelMembershipsRecomputed],
             vec![
                 K::SessionVisible,
+                K::AccountLabelChanged,
                 K::AccountStateChanged,
                 K::ChannelMembershipsRecomputed
             ],
-            vec![K::ChannelMembershipsRecomputed]
+            vec![K::AccountLabelChanged, K::ChannelMembershipsRecomputed]
         ]
     );
     assert_eq!(say(&mut harness, alice)?, heard(&EDGES));
@@ -290,6 +293,8 @@ fn a_reprojected_invite_repeats_the_current_channel_revision() -> Result<(), Dom
         ..MutationContext::default()
     };
     harness.run(alice, topic, &context)?;
+    // The login names the account to carol's home edge, which shares no
+    // channel with anyone else yet.
     assert_eq!(
         switch(&mut harness, carol, Some(account))?,
         [
@@ -298,6 +303,7 @@ fn a_reprojected_invite_repeats_the_current_channel_revision() -> Result<(), Dom
             vec![
                 K::SessionVisible,
                 K::ChannelVisible,
+                K::AccountLabelChanged,
                 K::AccountStateChanged,
                 K::Invited
             ]
@@ -317,12 +323,14 @@ fn a_guest_logging_in_leaves_no_guest_invite_behind() -> Result<(), DomainError>
     join(&mut harness, carol)?;
     invite_user(&mut harness, alice, 2)?;
     let account = create_account(&mut harness, 41)?;
+    // Bob is invited, not a member, so only his home edge learns the login.
     assert_eq!(
         switch(&mut harness, bob, Some(account))?,
         [
             vec![K::ChannelPolicyChanged],
             vec![
                 K::SessionVisible,
+                K::AccountLabelChanged,
                 K::AccountStateChanged,
                 K::InviteRemoved,
                 K::ChannelHidden
@@ -396,5 +404,75 @@ fn a_mode_command_without_an_effective_change_keeps_the_channel_revision_edges_h
     );
     assert_replicas_match_the_cut(&harness)?;
     assert_eq!(say(&mut harness, alice)?, heard(&[EDGE_A, EDGE_B]));
+    Ok(())
+}
+
+#[test]
+fn a_login_names_its_public_label_to_the_home_and_member_edges_and_a_logout_does_not()
+-> Result<(), DomainError> {
+    let mut harness = three_edges()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    // Alice and bob share the room; carol, alone on edge C, shares nothing.
+    let _carol = harness.open(3, EDGE_C)?;
+    join(&mut harness, alice)?;
+    join(&mut harness, bob)?;
+    let account_id =
+        AccountId::from_random(agenc_relay_types::AccountRandomId::from_bytes([43; 16]));
+    let mut account =
+        crate::AccountState::new(account_id, Generation::new(1)?, harness.state.revision());
+    account.label = Some(crate::AccountLabelValue::parse("Kestrel")?);
+    let plan = harness.state.plan_account_created(account)?;
+    harness.commit(plan, &MutationContext::default())?;
+
+    let session = harness.state.session(bob).ok_or(DomainError::NotFound)?;
+    let plan = harness.state.plan_session_account_switch(
+        bob,
+        session.generation(),
+        Some((account_id, Generation::new(1)?)),
+    )?;
+    let (projection, revision) = harness.advance(plan, &MutationContext::default())?;
+    assert_eq!(replicate(&mut harness, &projection, revision)?, ACCEPTED);
+    for (edge, home) in [(EDGE_A, false), (EDGE_B, true)] {
+        let named: Vec<_> = events_for(&projection, edge)
+            .into_iter()
+            .filter_map(|event| match event {
+                ProjectedEvent::AccountLabelChanged(view) => Some(view),
+                _ => None,
+            })
+            .collect();
+        let [view] = named.as_slice() else {
+            return Err(DomainError::InvariantViolation);
+        };
+        assert_eq!(view.source.user_id, bob);
+        assert_eq!(
+            view.source
+                .account_label
+                .as_ref()
+                .map(|label| label.as_str()),
+            Some("Kestrel")
+        );
+        // Only the home edge receives the session's own projection.
+        assert_eq!(view.home_projection.is_some(), home);
+    }
+    assert!(
+        events_for(&projection, EDGE_C)
+            .iter()
+            .all(|event| event.kind() != K::AccountLabelChanged)
+    );
+
+    let session = harness.state.session(bob).ok_or(DomainError::NotFound)?;
+    let plan = harness
+        .state
+        .plan_session_account_switch(bob, session.generation(), None)?;
+    let logout = deliver(&mut harness, plan)?;
+    assert!(
+        logout
+            .iter()
+            .flatten()
+            .all(|kind| *kind != K::AccountLabelChanged),
+        "{logout:?}"
+    );
+    assert_replicas_match_the_cut(&harness)?;
     Ok(())
 }

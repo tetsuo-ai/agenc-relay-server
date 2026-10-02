@@ -161,6 +161,10 @@ pub struct RegistrationRouter {
     edge: Option<EdgeFederation>,
     e2ee: Option<crate::e2ee::edge::E2eeEdge>,
     edge_carriers: BTreeMap<ConnectionGeneration, EdgeCarrier>,
+    /// Registered edge clients whose post-registration login was answered
+    /// with `903` and whose `900` waits for the session projection that
+    /// names the account they logged in to; at most one per connection.
+    awaited_logins: BTreeMap<ConnectionGeneration, agenc_relay_types::AccountId>,
 }
 
 /// The carrier transports of one pre-registration client on an edge; the
@@ -300,6 +304,7 @@ impl RegistrationRouter {
             edge: None,
             e2ee: None,
             edge_carriers: BTreeMap::new(),
+            awaited_logins: BTreeMap::new(),
         })
     }
 
@@ -1279,6 +1284,8 @@ impl RegistrationRouter {
         for completion in completions {
             self.apply_edge_completion(context, completion);
         }
+        // Every edge interaction that can apply a projection ends here.
+        self.settle_awaited_logins(context);
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match dispatches every edge completion kind to its handler with the exact fields the result carried
@@ -1690,6 +1697,7 @@ impl RegistrationRouter {
     /// The coordinator answered one forwarded carrier envelope: the edge
     /// transport renders the sealed response and outcome for the client,
     /// and a successful SASL finish keeps its grant for session open.
+    // agenc-review: focus owner=runtime reviewed=2026-10-02 reason=one forwarded carrier answer renders the sealed response, then awaits a registered login's later 900, then records the carrier completion, in that order
     fn edge_carrier_answered(
         &mut self,
         context: &mut StateCoreContext,
@@ -1703,6 +1711,13 @@ impl RegistrationRouter {
             &outcome,
             crate::federation::edge::RemoteCarrierOutcome::CredentialChanged { .. }
         );
+        let login = match (&outcome, kind) {
+            (
+                crate::federation::edge::RemoteCarrierOutcome::Authenticated { account_id, .. },
+                RegistrationAuthCarrier::Sasl,
+            ) if finish => Some(*account_id),
+            _ => None,
+        };
         let now = context.now().get();
         let prefix = self.config.server_prefix.clone();
         let target = self
@@ -1744,6 +1759,9 @@ impl RegistrationRouter {
         let completion = match answered {
             Some((frames, result)) => {
                 let sent = context.send_to(generation, frames).is_ok();
+                if let Some(account_id) = login.filter(|_| sent && result == ResultClass::Ok) {
+                    self.edge_login_answered(context, generation, account_id);
+                }
                 let result = if sent { result } else { ResultClass::Error };
                 CarrierCompletion {
                     generation,
@@ -1760,6 +1778,72 @@ impl RegistrationRouter {
             },
         };
         self.apply_account_completions(context, vec![completion]);
+    }
+
+    /// A registered edge client's post-registration login was answered with
+    /// `903`; the later `900` (architecture 11.4) names the account the
+    /// session now holds, which the edge reads from the session projection.
+    /// The coordinator sends a login's result before the projection that
+    /// gives the session its account, so the `900` follows at once only when
+    /// the replica already holds that account, as for a reauthentication of
+    /// the same account, and otherwise once the projection is applied. A
+    /// login before registration is named by the welcome instead.
+    fn edge_login_answered(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        account_id: agenc_relay_types::AccountId,
+    ) {
+        if self
+            .connections
+            .get(&generation)
+            .is_some_and(|state| state.bound.is_some())
+        {
+            self.awaited_logins.insert(generation, account_id);
+            self.settle_awaited_logins(context);
+        }
+    }
+
+    /// Sends the `900` of every awaited login whose account the session
+    /// projection now names, and forgets those whose connection is gone. A
+    /// `900` the edge cannot render closes its connection.
+    fn settle_awaited_logins(&mut self, context: &mut StateCoreContext) {
+        if self.awaited_logins.is_empty() {
+            return;
+        }
+        let Some(edge) = self.edge.as_ref() else {
+            self.awaited_logins.clear();
+            return;
+        };
+        let mut settled = Vec::new();
+        for (generation, account_id) in &self.awaited_logins {
+            let Some((state, bound)) = self
+                .connections
+                .get(generation)
+                .and_then(|state| state.bound.map(|bound| (state, bound)))
+            else {
+                settled.push((*generation, None));
+                continue;
+            };
+            if edge.home_session_account(bound.user_id) != Some(*account_id) {
+                continue;
+            }
+            let frame = edge.logged_in(bound.user_id).and_then(|logged_in| {
+                logged_in.numeric(&self.config.server_prefix, self.target(state))
+            });
+            settled.push((*generation, Some(frame)));
+        }
+        for (generation, frame) in settled {
+            self.awaited_logins.remove(&generation);
+            let sent = match frame {
+                Some(Ok(frame)) => context.send_to(generation, vec![frame]).is_ok(),
+                Some(Err(_)) => false,
+                None => true,
+            };
+            if !sent {
+                close_transport(context, generation);
+            }
+        }
     }
 
     fn deliver_edge_replies(
@@ -3212,6 +3296,7 @@ impl CommandRouter for RegistrationRouter {
             .unwrap_or("connection closed")
             .to_owned();
         self.edge_carriers.remove(&generation);
+        self.awaited_logins.remove(&generation);
         if let Some(edge) = self.edge.as_mut() {
             if let Some(e2ee) = self.e2ee.as_mut() {
                 e2ee.delete_origin(context, edge, generation);
@@ -3991,6 +4076,10 @@ mod welcome_tests;
 #[cfg(test)]
 #[path = "registration/tests/account_state.rs"]
 mod account_state_tests;
+
+#[cfg(test)]
+#[path = "registration/tests/edge_login.rs"]
+mod edge_login_tests;
 
 #[cfg(test)]
 mod tests {

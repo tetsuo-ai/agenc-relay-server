@@ -941,7 +941,34 @@ impl Derivation<'_> {
             self.emit(index, home, ProjectedEvent::SessionVisible(view));
         }
         self.project_account_hosting(index, user_id, home);
-        self.reproject_account_invites(index, user_id, home)
+        self.reproject_account_invites(index, user_id, home)?;
+        self.project_login(index, user_id);
+        Ok(())
+    }
+
+    /// A guest session that logged in names its account, as an account label
+    /// change does, to every edge that shares a channel with it and to its
+    /// home edge, which render `ACCOUNT` for their `account-notify` clients
+    /// (architecture 11.4). A logout is not projected this way.
+    fn project_login(&mut self, index: u16, user_id: UserId) {
+        let logged_in = self
+            .view
+            .pre_session(user_id)
+            .is_some_and(|session| session.account_id.is_none())
+            && self
+                .view
+                .post_session(user_id)
+                .is_some_and(|session| session.account_id.is_some());
+        if !logged_in {
+            return;
+        }
+        let mut edges = self.shared_edges(user_id);
+        edges.extend(self.home_of(user_id));
+        for edge in edges {
+            if let Some(view) = self.event_view(user_id, edge) {
+                self.emit(index, edge, ProjectedEvent::AccountLabelChanged(view));
+            }
+        }
     }
 
     /// An account switch recomputes the session's membership in every joined

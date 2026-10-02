@@ -218,11 +218,12 @@ The recovery epoch NOTE the welcome burst now sends to a client that
 negotiated `agenc.ag/recovery`, whether or not it negotiated
 `standard-replies`, the `900` that now ends an authenticated registration's
 burst, read from the domain on a coordinator and from the session projection
-on an edge, the `900` and `ACCOUNT` lines a coordinator or standalone node
-now sends after a registered session's login, the federation codec rule
-that lets a recomputed channel membership keep the revision it joined at, and
-the origin generation an edge now declares after a registered connection's
-login (SC-007, SDK program, outside master #35), are recorded in
+on an edge, the `900` and `ACCOUNT` lines that now follow a registered
+session's login on a coordinator, a standalone node or an edge, with the
+login projected to the edges, the federation codec rule that lets a
+recomputed channel membership keep the revision it joined at, and the origin
+generation an edge now declares after a registered connection's login
+(SC-007, SDK program, outside master #35), are recorded in
 [the login state record](stage-10-login-state.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).

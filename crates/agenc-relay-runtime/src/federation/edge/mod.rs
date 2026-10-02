@@ -740,6 +740,15 @@ impl EdgeFederation {
         })
     }
 
+    /// The account the session projection of one session this edge homes
+    /// names, if any.
+    pub(crate) fn home_session_account(&self, user_id: UserId) -> Option<AccountId> {
+        self.replica
+            .session(user_id)?
+            .account
+            .map(|(account_id, _)| account_id)
+    }
+
     /// Lets a router test install the projections a coordinator would send.
     #[cfg(test)]
     pub(crate) fn replica_mut(&mut self) -> &mut EdgeReplica {

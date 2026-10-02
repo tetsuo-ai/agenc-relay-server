@@ -106,6 +106,8 @@ mod credential_bounds;
 mod credential_replacement;
 #[path = "stage_eight_e2ee/encrypted_clients.rs"]
 mod encrypted_clients;
+#[path = "stage_eight_e2ee/login_after_registration.rs"]
+mod login_after_registration;
 #[path = "support/loopback_ports.rs"]
 mod loopback_ports;
 #[path = "stage_eight_e2ee/recovery_submission.rs"]
@@ -920,6 +922,11 @@ struct ArcClient {
     /// SASL completed on this connection, so its welcome burst ends with the
     /// authenticated account state (architecture 10.2 step 6).
     logged_in: bool,
+    /// The nickname the connection registered under; a login after
+    /// registration follows its `903` with `900` (architecture 11.4).
+    registered: Option<String>,
+    /// The last `900` the connection read.
+    account_state: Option<String>,
 }
 
 /// Companion Section 16 admits four E2EE command lines a second per session
@@ -1036,6 +1043,8 @@ impl ArcClient {
             e2ee_refilled: Instant::now(),
             e2ee_bytes: E2EE_INGRESS_BURST,
             logged_in: false,
+            registered: None,
+            account_state: None,
         })
     }
 
@@ -1154,6 +1163,7 @@ impl ArcClient {
             let unavailable = line.contains("NETWORK_UNAVAILABLE");
             lines.push(line);
             if welcome {
+                self.registered = Some(nickname.to_owned());
                 return Ok(Registration::Welcome(lines));
             }
             if unavailable {
@@ -1645,8 +1655,11 @@ impl ArcClient {
             line.contains(" 376 ") || line.contains(" 422 ")
         })?;
         if self.logged_in {
-            welcome.push(read_account_state(&mut self.reader, nickname)?);
+            let account_state = read_account_state(&mut self.reader, nickname)?;
+            self.account_state = Some(account_state.clone());
+            welcome.push(account_state);
         }
+        self.registered = Some(nickname.to_owned());
         Ok(welcome)
     }
 
@@ -2034,6 +2047,10 @@ fn authenticate_live_account_with(
         return Err(failure("successful authentication omitted numeric 903"));
     }
     client.logged_in = true;
+    if let Some(nickname) = client.registered.clone() {
+        // A registered session's login follows 903 with 900 (11.4).
+        client.account_state = Some(read_account_state(&mut client.reader, &nickname)?);
+    }
     Ok(())
 }
 
