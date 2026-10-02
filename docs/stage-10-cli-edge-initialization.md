@@ -166,5 +166,9 @@ Nothing here claims #134 or #175 fixed.
   and AUD-02 creates the document with `arcd sequencer-credentials create`
   ([the sequencer credentials record](stage-10-sequencer-credentials-command.md)).
 - The kill experiments ran a debug build on a shared, heavily loaded host and
-  are evidence about this mechanism, not a capacity or soak result; their
-  logs are not part of this repository.
+  are evidence about this mechanism, not a capacity or soak result. Their
+  logs, drill reports and the scratch test variant are not part of this
+  repository: they go, unchanged and with their checksums, to the SDK
+  program's evidence record of its first push (decision D-05). The refused
+  restart's durable state was not preserved, so that refusal is recorded
+  only by its standard-error line and the drill's logs.
