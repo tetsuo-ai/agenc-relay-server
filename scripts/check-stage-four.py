@@ -705,6 +705,7 @@ def validate_vectors(root: Path) -> None:
         "reflected_or_undecodable_server_messages_are_refused",
         "failed_entropy_and_out_of_profile_passwords_are_refused",
         "a_latched_generator_is_refused_before_any_work",
+        "the_adapter_stays_latched_after_its_source_recovers",
     )
     if any(marker not in crypto_source for marker in crypto_markers):
         raise StageFourError("crypto golden-vector suite misses a required negative")

@@ -69,13 +69,19 @@ an auth source.
 ## Evidence
 
 - `public_modules_reproduce_vec_s04_007_opaque_byte_for_byte` reproduces
-  every field of the immutable `VEC-S04-007-OPAQUE` vector and its output
-  digest through the public profile and client calls, from the vector's own
-  seeds; the server half calls the pinned library with the public suite.
+  every field of the immutable `VEC-S04-007-OPAQUE` vector through the
+  public profile and client calls: every byte field and the output digest,
+  drawn from the seeds `rng_seeds` lists, `lengths_decimal` against the
+  public length constants, and both rejection outcomes, including the dummy
+  state's refusal of the real KE3 (`dummy_finish_rejected`). The server half
+  calls the pinned library with the public suite. The export keys, which
+  the vector does not record, equal the pinned library's own for the same
+  seeds and agree between registration and login.
 - `client_calls_interoperate_with_the_coordinator_profile` registers and
-  authenticates against `OpaqueProfile` and `finish_authentication`; a wrong
-  password, an unknown login (the fixed fake record) and a client bound to
-  another Network ID end in the invalid login.
+  authenticates against `OpaqueProfile` and `finish_authentication`; the
+  login's export key equals the registration's and differs from the session
+  key. A wrong password, an unknown login (the fixed fake record) and a
+  client bound to another Network ID end in the invalid login.
 - `reflected_or_undecodable_server_messages_are_refused` and
   `failed_entropy_and_out_of_profile_passwords_are_refused` cover the other
   refusals.
@@ -88,7 +94,16 @@ an auth source.
   these tests fails with its part of the fix reverted: the latch checked
   before the keys are taken, any one of the four refusals removed, or the
   wipe removed.
-- `cargo nextest run -p agenc-relay-auth --all-features --locked` passes 83
+- `the_adapter_stays_latched_after_its_source_recovers` shows that once a
+  draw has failed, the adapter keeps writing the sentinel and reporting the
+  failure after its source works again, and that a call cannot proceed on
+  it.
+- The export-key and latch checks have mutation evidence: with the login's
+  export key replaced by its session key, or one bit flipped in either
+  export key, the vector and interoperation tests fail; with the latch
+  removed from the adapter, the latch test fails. Each of these mutants
+  passed the suite before the checks were added.
+- `cargo nextest run -p agenc-relay-auth --all-features --locked` passes 84
   tests with the generator skipped; the migrated daemon suites pass under
   `cargo nextest run -p agenc-relay-server --all-features --locked`.
 
