@@ -586,7 +586,7 @@ fn quad_line(
     })
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match maps every scalar result value to its 11.7 success line
+// agenc-review: focus owner=runtime reviewed=2026-10-02 reason=one match maps every scalar result value to its 11.7 success line, choosing the line of a three- or four-identifier tuple that several result kinds share by the decoded kind
 /// The labeled scalar success line of a result without responses; a
 /// `STORED` group line names the request's conversation and subject.
 fn scalar_line(result: &DecodedResult, pending: &PendingRequest) -> Option<SuccessLine> {
