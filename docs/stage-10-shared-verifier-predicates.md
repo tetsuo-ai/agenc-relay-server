@@ -164,11 +164,21 @@ stands in for that roster's omitted history (see Limitations).
 
 One runtime fixture modelled what this refuses:
 `leaf_membership::named_roster::successor` built a generation that drops
-device 8 and a later one that lists its original certificate again. The
-helper now keeps a certificate the predecessor lists and gives a device the
-predecessor dropped a fresh enrollment for the new generation, so the two
-tests using it still exercise a device active in generation zero, absent
-from generation one and active now; their assertions are unchanged.
+device 8 and a later one that lists its original certificate again. Under
+one root no conforming roster does that: the dropped certificate was
+revoked (8.4), and a root uses a Device ID, enrollment challenge and serial
+once (8.3). The first version of this change re-enrolled the returning
+device under the same root with its old Device ID, key and challenge, which
+8.3 has clients reject, and so changed the tests' scenario while saying it
+kept it; the independent review of the branch found both. The fixture now
+returns the device the conforming way: a continuous root rotation (8.2),
+whose first roster issues every kept device a fresh certificate under the
+new root, makes it roster-active again (13.7.3).
+`AccountRoot::successor` keeps every certificate under the same root and
+refuses to return a dropped device there. The two tests using it still
+exercise a device active in generation zero, absent from generation one and
+roster-active now by Device ID, which is the daemon's rule; their scenario
+now includes the rotation, and their assertions are unchanged.
 
 ### Tests
 
@@ -181,7 +191,7 @@ from generation one and active now; their assertions are unchanged.
 | `src/tests/identity.rs::a_continuing_certificate_must_be_active_unchanged_in_the_predecessor` | Continuing certificates verify after their enrollment interval closed and restore without the predecessor; a new device claiming an earlier target, a replacement certificate under an active Device ID, and a dropped certificate returning are refused. |
 | `src/tests/identity.rs::first_contact_requires_the_issuance_of_every_continuing_certificate` | First contact at generation zero equals the initial check; above it, continuing certificates need their exact target roster (either order), and the wrong generation, another root, a target-generation roster without the device or holding another certificate for its Device ID, a late current enrollment, a generation-one roster naming no predecessor and a generation-zero roster naming one are refused; with the evidence the result equals the checked one. |
 | `src/tests/identity.rs::first_contact_holds_a_roster_to_every_supplied_roster_of_its_root` | Given the complete chain from generation zero, first contact decides as the checked path does for a certificate dropped by a supplied roster between its target and the roster (with and without a revocation entry), a revocation dropped, a supplied previous generation that is not the named predecessor, and the conforming continuations; without the roster that dropped a certificate nothing shows the drop; supplied rosters of another root or of the roster's own generation are not consulted. |
-| runtime `leaf_membership::named_roster::*` (nine tests) | Unchanged assertions over the corrected fixture. |
+| runtime `leaf_membership::named_roster::*` (nine tests) | Unchanged assertions; in the two tests whose device returns, it returns through a continuous root rotation. With a device absent from the named roster classified as invalid rather than inactive, exactly those two fail. |
 
 At `70c832c` the counterexample fails and the control passes. With the
 later-target refusal removed from this commit's tree, the counterexample and

@@ -13,52 +13,98 @@ use super::super::super::{ROOT_SEED, support};
 use super::finalization::{finalize_both, rotate_roster};
 use super::restart::{conversation_of, inject, memberships_of};
 use super::*;
-use agenc_relay_e2ee::objects::identity::ArcDeviceRoster;
+use agenc_relay_e2ee::objects::identity::{ArcDeviceRoster, ArcRootIdentity};
 
 /// A third device of the principal, which publishes no proof of its own.
 const THIRD_DEVICE: u8 = 9;
 
-/// The principal's roster `generation` continuing `previous` with only the
-/// `kept` devices active. A kept device that `previous` lists keeps its
-/// certificate unchanged; one that `previous` dropped was revoked there, so
-/// its old certificate can never be listed again (companion 8.3 and 8.4) and
-/// it returns with a fresh enrollment for `generation`. The roster is signed
-/// by the root but not published.
-fn successor(
-    harness: &Harness,
-    generation: u64,
-    previous: &ArcDeviceRoster,
-    kept: &[u8],
-) -> TestResult<ArcDeviceRoster> {
-    let held = previous.tbs.active_devices.as_slice();
-    let mut certificates = kept
-        .iter()
-        .map(
-            |seed| match held.iter().find(|entry| entry.device_id == [*seed; 16]) {
-                Some(entry) => Ok(entry.certificate.clone()),
-                None => {
+/// One root of the harness principal's account: its signing seed and its
+/// identity.
+struct AccountRoot {
+    seed: u8,
+    root: ArcRootIdentity,
+}
+
+impl AccountRoot {
+    /// The principal's root at binding time.
+    fn original(harness: &Harness) -> Self {
+        Self {
+            seed: ROOT_SEED,
+            root: harness.principal.root.clone(),
+        }
+    }
+
+    /// Publishes a continuous rotation of the principal's root to generation
+    /// one (companion 8.2) and returns the new root.
+    fn rotated(harness: &mut Harness) -> TestResult<Self> {
+        let seed = ROOT_SEED + 1;
+        let root = support::root(
+            &support::key(seed),
+            &harness.account,
+            1,
+            (0, 2_000_000),
+            Some((&harness.principal.root_secret, &harness.principal.root)),
+        )?;
+        let bytes = wire(ArcWireObjectKind::RootIdentity, &root)?;
+        ok(harness.run(Op::PublishIdentity, &[], Some(&bytes))?)?;
+        Ok(Self { seed, root })
+    }
+
+    /// This root's roster `generation` continuing `previous` with only the
+    /// `kept` devices active, signed but not published. Under the root that
+    /// signed `previous`, each kept device keeps the certificate `previous`
+    /// lists: a certificate continues unchanged, and a device a roster
+    /// dropped was revoked there and never returns under that root, which
+    /// uses a Device ID once (companion 8.3 and 8.4). The first roster of a
+    /// rotated root issues every kept device a fresh certificate for
+    /// `generation` (companion 8.2), which is how a device dropped under the
+    /// old root becomes roster-active again (companion 13.7.3).
+    fn successor(
+        &self,
+        generation: u64,
+        previous: &ArcDeviceRoster,
+        kept: &[u8],
+    ) -> TestResult<ArcDeviceRoster> {
+        let secret = support::key(self.seed);
+        let continued = previous.tbs.root_fingerprint == support::root_fingerprint(&self.root)?;
+        let held = previous.tbs.active_devices.as_slice();
+        let mut certificates = kept
+            .iter()
+            .map(|seed| -> TestResult<_> {
+                if continued {
+                    let entry = held
+                        .iter()
+                        .find(|entry| entry.device_id == [*seed; 16])
+                        .ok_or("under one root a dropped device never returns")?;
+                    Ok(entry.certificate.clone())
+                } else {
                     let mut device = support::DeviceSpec::new(*seed);
                     device.target_roster_generation = generation;
-                    device.serial = generation.saturating_add(1);
-                    support::certificate(
-                        &harness.principal.root_secret,
-                        &harness.principal.root,
-                        &device,
-                    )
+                    Ok(support::certificate(&secret, &self.root, &device)?)
                 }
-            },
-        )
-        .collect::<Result<Vec<_>, _>>()?;
-    certificates.sort_by_key(|certificate| certificate.tbs.device_id);
-    Ok(roster(
-        &harness.principal.root_secret,
-        &harness.principal.root,
-        generation,
-        roster_id(previous)?,
-        (100, 100 + 6 * 24 * 3600),
-        certificates,
-        Vec::new(),
-    )?)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        certificates.sort_by_key(|certificate| certificate.tbs.device_id);
+        Ok(roster(
+            &secret,
+            &self.root,
+            generation,
+            roster_id(previous)?,
+            (100, 100 + 6 * 24 * 3600),
+            certificates,
+            Vec::new(),
+        )?)
+    }
+
+    /// The harness principal under this root, its statements naming `named`.
+    fn naming(&self, harness: &Harness, named: &ArcDeviceRoster) -> Principal {
+        Principal {
+            root_secret: support::key(self.seed),
+            root: self.root.clone(),
+            roster: named.clone(),
+            devices: harness.principal.devices.clone(),
+        }
+    }
 }
 
 /// Publishes `next` as the account's roster head.
@@ -66,16 +112,6 @@ fn publish(harness: &mut Harness, next: &ArcDeviceRoster) -> TestResult {
     let bytes = wire(ArcWireObjectKind::DeviceRoster, next)?;
     ok(harness.run(Op::PublishRoster, &[], Some(&bytes))?)?;
     Ok(())
-}
-
-/// The harness principal as a signer whose statements name `named`.
-fn naming(harness: &Harness, named: &ArcDeviceRoster) -> Principal {
-    Principal {
-        root_secret: support::key(ROOT_SEED),
-        root: harness.principal.root.clone(),
-        roster: named.clone(),
-        devices: harness.principal.devices.clone(),
-    }
 }
 
 /// The devices whose claims continue while the directory still lists them.
@@ -131,13 +167,9 @@ fn a_proof_naming_a_roster_that_was_never_retained_is_refused() -> TestResult {
     let conversation = harness.bind_channel()?;
     harness.attach_as(SECOND_DEVICE)?;
     // The root signed this roster, but the server never retained it.
-    let unpublished = successor(
-        &harness,
-        1,
-        &harness.principal.roster,
-        &[DEVICE, SECOND_DEVICE],
-    )?;
-    let signer = naming(&harness, &unpublished);
+    let original = AccountRoot::original(&harness);
+    let unpublished = original.successor(1, &harness.principal.roster, &[DEVICE, SECOND_DEVICE])?;
+    let signer = original.naming(&harness, &unpublished);
     let spec =
         MembershipSpec::continuing(&signer, conversation, SECOND_DEVICE, SECOND_LEAF_SEED, 1);
     let never = proof_bytes(&membership_proof(&spec)?)?;
@@ -197,14 +229,18 @@ fn a_proof_naming_another_accounts_retained_roster_is_refused() -> TestResult {
 fn a_proof_naming_a_retained_roster_without_its_device_is_refused() -> TestResult {
     let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
     let conversation = harness.bind_channel()?;
-    // Generation one drops device 8 and generation two restores it, so it
-    // is roster-active now but was never active in generation one.
-    let without = successor(&harness, 1, &harness.principal.roster, &[DEVICE])?;
+    // Generation one drops device 8, revoking it under the original root,
+    // and the rotated root's first roster, generation two, issues it a new
+    // certificate, so it is roster-active now but was never active in
+    // generation one.
+    let original = AccountRoot::original(&harness);
+    let without = original.successor(1, &harness.principal.roster, &[DEVICE])?;
     publish(&mut harness, &without)?;
-    let restored = successor(&harness, 2, &without, &[DEVICE, SECOND_DEVICE])?;
+    let rotated = AccountRoot::rotated(&mut harness)?;
+    let restored = rotated.successor(2, &without, &[DEVICE, SECOND_DEVICE])?;
     publish(&mut harness, &restored)?;
     harness.attach_as(SECOND_DEVICE)?;
-    let signer = naming(&harness, &without);
+    let signer = original.naming(&harness, &without);
     let spec =
         MembershipSpec::continuing(&signer, conversation, SECOND_DEVICE, SECOND_LEAF_SEED, 1);
     let absent = proof_bytes(&membership_proof(&spec)?)?;
@@ -281,12 +317,16 @@ fn a_revoked_device_states_no_removed_proof_and_is_not_expected() -> TestResult 
 fn live_admission_and_reconstruction_agree_on_the_named_roster() -> TestResult {
     let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE, THIRD_DEVICE])?;
     let conversation = harness.bind_channel()?;
-    let without = successor(&harness, 1, &harness.principal.roster, &[DEVICE])?;
+    // Generation one drops devices 8 and 9; the rotated root's first
+    // roster returns them, and its next one is never published.
+    let original = AccountRoot::original(&harness);
+    let without = original.successor(1, &harness.principal.roster, &[DEVICE])?;
     publish(&mut harness, &without)?;
     let everyone = [DEVICE, SECOND_DEVICE, THIRD_DEVICE];
-    let restored = successor(&harness, 2, &without, &everyone)?;
+    let rotated = AccountRoot::rotated(&mut harness)?;
+    let restored = rotated.successor(2, &without, &everyone)?;
     publish(&mut harness, &restored)?;
-    let unpublished = successor(&harness, 3, &restored, &everyone)?;
+    let unpublished = rotated.successor(3, &restored, &everyone)?;
     // Admitted live: device 8 names the retained generation-zero roster.
     harness.attach_as(SECOND_DEVICE)?;
     let held = harness.leaf_proof(conversation, SECOND_DEVICE, SECOND_LEAF_SEED, 1)?;
@@ -294,7 +334,7 @@ fn live_admission_and_reconstruction_agree_on_the_named_roster() -> TestResult {
     // Refused live: device 9 names a roster that was never retained, and a
     // retained roster in which it was not active.
     harness.attach_as(THIRD_DEVICE)?;
-    let signer = naming(&harness, &unpublished);
+    let signer = rotated.naming(&harness, &unpublished);
     let never = membership_proof(&MembershipSpec::continuing(
         &signer,
         conversation,
@@ -302,7 +342,7 @@ fn live_admission_and_reconstruction_agree_on_the_named_roster() -> TestResult {
         32,
         2,
     ))?;
-    let signer = naming(&harness, &without);
+    let signer = original.naming(&harness, &without);
     let inactive = membership_proof(&MembershipSpec::continuing(
         &signer,
         conversation,
