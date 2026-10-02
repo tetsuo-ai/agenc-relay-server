@@ -212,8 +212,8 @@ An edge renders the user events of a session another node homes (`NICK`,
 `AWAY`, `SETNAME`, and now this `ACCOUNT`) to none of its clients, because
 its replica keeps the channel memberships of its own sessions only and so
 finds no local member that shares a channel with the remote session. A
-temporary daemon scenario confirmed it for `ACCOUNT`, `AWAY` and `NICK`
-before and after this change. That is outside SC-007 and not changed here;
+temporary daemon scenario on this branch confirmed it for `ACCOUNT`, `AWAY`
+and `NICK`. That is outside SC-007 and not changed here;
 the login is projected to those edges anyway, the same way a label change
 is, so a later correction of the edge's recipients covers it.
 
@@ -229,8 +229,10 @@ federation codec's semantic check `validate_membership_recompute` required
 every membership in the event to carry the event's resulting revision
 instead. The projector therefore could not encode the event, the coordinator
 refused to stage the switch, and a session that shared a channel with any
-member an edge homes could neither log in after registration (its node
-answered `904`) nor log out, whichever node homed it.
+member an edge homes could not log in after registration, whichever node
+homed it: an edge answered its client `904`, and the coordinator closed its
+own client's connection without an answer. A logout of such a session plans
+the same recompute and was refused the same way (read from the code).
 
 Section 20.6 does not ask for the equality: the recompute arm, like PART,
 KICK, mode and topic, "carries the resulting revision explicitly", while
