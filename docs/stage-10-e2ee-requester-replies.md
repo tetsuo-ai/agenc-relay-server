@@ -124,10 +124,16 @@ or a generic `request_completed`, which renders no copy), so such an event
 always completes that request, and its labeled scalar follows once the result
 is present, in either arrival order. Every other attached connection, another
 session of the requester's own account included, still receives the untagged
-copy. A request answered `PENDING` is no longer held once that line renders,
-so its later terminal event reaches it as the untagged broadcast, as Section
-11.7 requires. The ordinary event path and the cross-profile barrier path both
-render through `fanout`.
+copy. A request answered `PENDING` is completed by its generic
+`request_completed` event, and the edge retires it when that line renders.
+The terminal that a later request completes is correlated only on the copy
+the coordinator sends to that later request's home edge (`mark_completion`
+in `crates/agenc-relay-runtime/src/e2ee/coordinator/execute.rs`), and it
+names that request. The connection of the earlier `PENDING` request
+therefore receives the terminal as the untagged broadcast, as Section 11.7
+requires, unless that same connection submitted the completing request (see
+Limitations). The ordinary event path and the cross-profile barrier path
+both render through `fanout`.
 
 ### Regressions
 
@@ -167,6 +173,27 @@ completion from bob, and, for each ReInit ACK, no `REINIT-ACK` notice of the
 submitter's own ACK object. bob reads the activation, and alice the abort,
 as the untagged broadcast naming the same identifiers.
 
+The shared Stage 08 helpers apply the same check to every commit ACK,
+finalization and close a daemon scenario submits: `real_clients::acknowledge`
+requires the submitter's reply to carry no `ACK` notice of its own ACK
+object, and `real_clients::finalize`, `activate_bootstrap_with` and
+`close_conversation_at` require the labeled `FINALIZED` or `CLOSED` line to
+be the only line of the reply that names that result. A line naming another
+result is earlier traffic the connection had not read yet and is allowed;
+the ReInit checks above follow the same rule.
+
+`requester_copies::a_member_on_the_requesters_edge_reads_each_copy_the_requester_does_not`
+(`crates/agenc-relay-server/tests/stage_eight_e2ee/requester_copies.rs`)
+checks the copies on the requester's own edge. carol, an account outside the
+council, attaches her device and joins the bound channel on alice's edge.
+alice then finalizes the bootstrap activation, aborts a sequenced candidate
+with both council votes (through the new `real_clients::abort_candidate`),
+acknowledges and finalizes a close-intent Commit, and closes the
+conversation. Each time alice reads only her labeled result, while carol on
+her edge and bob on the other each read the untagged copy naming the same
+result: `FINALIZED`, `ABORTED`, the `ACK` notice, `FINALIZED` and `CLOSED`.
+carol's account is created on the coordinator's own client listener.
+
 Each unit test reports every case that mismatches. With `events.rs` reverted
 to its previous commit, the three tests that complete a request fail in all
 48 of their cases, the eight kinds in both arrival orders for the
@@ -174,10 +201,26 @@ requester's request, for the peer's request and through the barrier: in
 each, the connection whose request completes receives the untagged `ACK`,
 `REINIT-ACK`, `FINALIZED`, `ABORTED`, `CLOSED`, `REINIT-STAGED`,
 `REINIT-ACTIVATED` or `REINIT-ABORTED` copy before its labeled scalar, and
-the control passes. Both daemon scenarios fail at the staged attempt: "the
-requester received 2 REINIT-STAGED lines, not one labeled completion"
-(`:edge-a.test EGROUP REINIT-STAGED …` before `@label=l35 :edge-a.test EGROUP
-REINIT-STAGED …`). With the change restored, all pass.
+the control passes. Through the daemons, eight Stage 08 scenarios fail at
+their first ACK or terminal request, each requester reading its own `ACK`
+notice or `FINALIZED` broadcast before its labeled line: both ReInit
+scenarios, the rotation, recovery and restored-lineage scenarios, both
+pinned transcripts
+(`encrypted_clients_on_two_edges_bind_a_channel_through_the_coordinator` and
+`real_mls_clients_run_the_encrypted_lifecycle_through_the_daemon`) and
+`requester_copies`. (Before the shared helpers carried the check, the ReInit
+scenarios failed only later, at the staged attempt: "the requester received
+2 REINIT-STAGED lines, not one labeled completion".)
+
+Each single-kind mutant of the rule is caught through the daemons as well.
+With the commit ACK kind added to `echoes_to_requester`, eight scenarios
+fail; with the finalization kind, eight; with the close kind, five; and with
+the abort kind, `requester_copies` fails at its abort ("the requester
+received 2 ABORTED lines naming its result"). With the requesting test
+widened to any held request (`requester.is_some()`), which withholds the
+copy from every sink on the requester's edge, `requester_copies` fails when
+carol waits for the activation's `FINALIZED` copy. Before these checks, all
+five mutants passed every daemon test. With the change restored, all pass.
 
 ### Wire effect
 
@@ -201,11 +244,23 @@ echo, is unchanged.
   arrives after its result and a retry answered from the reply cache are
   checked at the unit level only, and no daemon test restarts an edge between
   a ReInit result and its completion.
-- The withheld copies are checked through the daemons for the ReInit kinds
-  only; the commit ACK, finalization, abort and close kinds, a second session
-  of the requester's account and the barrier path are checked at the unit
-  level. The existing daemon scenarios for those kinds read the broadcast on
-  the other edge and keep passing.
+- Through the daemons, the requesting connection's own reply is checked for
+  every ACK and terminal kind, but a second sink on the requester's own edge
+  is checked only for the commit ACK, finalization, abort and close kinds.
+  The ReInit scenarios read their copies on the other edge, so an edge that
+  withheld a ReInit copy from every local sink would be caught by the unit
+  tests only. A second session of the requester's own account and the
+  barrier path are also checked at the unit level only; no daemon scenario
+  runs a cross-profile barrier.
+- A connection whose earlier request was answered `PENDING` and that then
+  submits the request completing the same terminal itself receives that
+  terminal once, as the later request's labeled completion. One device can
+  do this by relaying a missing council vote after its own vote was answered
+  `PENDING`, since the coordinator keeps a subject's vote ledger across
+  requests. Section 11.7 promises the `PENDING` request a later untagged
+  terminal, while Section 12.5 suppresses that broadcast on the requesting
+  connection; the edge follows 12.5 and keeps no record of the retired
+  `PENDING` request.
 - The requesting connection is matched by its pending request. A client that
   disconnects before its result loses that request, as before, and a new
   connection receives the untagged copy.

@@ -298,9 +298,11 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
 /// Companion 11.7, 12.5 and 13.8 through the production daemons: the two
 /// council votes of one attempt abort arrive in separate requests. alice's
 /// vote alone is below the quorum and is answered `PENDING`; bob's completes
-/// the abort and is answered `REINIT-ABORTED`; and alice, whose request is
-/// still open only as `PENDING`, then reads the untagged `REINIT-ABORTED`
-/// broadcast naming the same abort.
+/// the abort and is answered `REINIT-ABORTED`; and alice, answered
+/// `PENDING` earlier, then reads the untagged `REINIT-ABORTED` broadcast
+/// naming the same abort. The coordinator correlates the abort event only
+/// on the copy for bob's edge, the home of the request that completed it,
+/// so alice's edge renders its copy as the broadcast.
 #[test]
 fn a_reinit_attempt_aborts_when_its_second_vote_arrives() -> TestResult {
     run_network(|network, _coordinator, _edge_a, _edge_b| reinit_abort_with_real_clients(network))
@@ -764,56 +766,6 @@ fn stage_attempt(clients: &mut Clients, attempt: &ArcReInitAttempt) -> TestResul
     hash_at(completion, "REINIT-STAGED", 4)
 }
 
-/// The requester's labeled completion, which `labeled_reply` returns last.
-/// The unlabeled broadcast or notice that can arrive before it is not the
-/// command's result (companion 11.7), so a reply token is checked here.
-fn completion_line(reply: &[String]) -> TestResult<&String> {
-    reply
-        .last()
-        .filter(|line| tag_value(line, "label").is_some())
-        .ok_or_else(|| failure(format!("no labeled completion in {reply:?}")))
-}
-
-/// The requester's labeled `verb` completion, required to be the only line
-/// of its reply naming `verb`: companion 11.7 and 12.5 answer the requesting
-/// connection with exactly one labeled scalar and send the untagged
-/// broadcast of the same result only to the other eligible sinks.
-fn only_completion<'a>(reply: &'a [String], verb: &str) -> TestResult<&'a String> {
-    let completion = completion_line(reply)?;
-    let token = format!(" EGROUP {verb} ");
-    if !completion.contains(&token) {
-        return Err(failure(format!(
-            "the labeled completion is not {verb}: {reply:?}"
-        )));
-    }
-    let naming = reply.iter().filter(|line| line.contains(&token)).count();
-    if naming != 1 {
-        return Err(failure(format!(
-            "the requester received {naming} {verb} lines, not one labeled completion: {reply:?}"
-        )));
-    }
-    Ok(completion)
-}
-
-/// Requires the last of `lines`, which another sink read, to be the
-/// untagged broadcast of the terminal `completion` names: the same verb and
-/// identifiers, without a label.
-fn assert_same_terminal(lines: &[String], completion: &[String]) -> TestResult {
-    let broadcast = lines
-        .last()
-        .ok_or_else(|| failure("no terminal broadcast was read"))?;
-    if tag_value(broadcast, "label").is_some() {
-        return Err(failure(format!("the broadcast is labeled: {broadcast}")));
-    }
-    let terminal = |line: &String| words(line).get(1..).map(<[String]>::to_vec);
-    assert_eq!(
-        terminal(broadcast),
-        completion.first().and_then(terminal),
-        "the broadcast and the labeled completion name the same terminal"
-    );
-    Ok(())
-}
-
 /// Reads the attempt receipt the coordinator sequenced for the conversation.
 fn attempt_receipt(clients: &mut Clients) -> TestResult<ArcReInitAttemptReceipt> {
     let token = base64url_encode(&clients.bound.conversation);
@@ -937,18 +889,7 @@ fn submit_ack(
         std::slice::from_ref(completion_line(&reply)?),
         " EGROUP REINIT-ACKED ",
     )?;
-    // The submitter receives only its labeled REINIT-ACKED; the untagged
-    // REINIT-ACK notice of its own ACK goes to the other sessions (11.7).
-    let own = base64url_encode(e2ee::ObjectId::compute(&object).as_bytes());
-    if reply
-        .iter()
-        .any(|line| line.contains(" EGROUP REINIT-ACK ") && line.contains(&own))
-    {
-        return Err(failure(format!(
-            "the submitter received the notice of its own ACK: {reply:?}"
-        )));
-    }
-    Ok(())
+    assert_no_own_notice(&reply, "REINIT-ACK", &object)
 }
 
 /// Submits one activation request carrying `acks` and the votes of the
