@@ -214,6 +214,10 @@ that lets a bounded database grow, the resume of a construction stopped before
 its target existed, and the exact resume at a refused target batch (STO-07,
 issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
+The recovery epoch NOTE the welcome burst now sends to a client that
+negotiated `agenc.ag/recovery`, whether or not it negotiated
+`standard-replies` (SC-007, SDK program, outside master #35), is recorded in
+[the login state record](stage-10-login-state.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
