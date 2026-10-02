@@ -37,10 +37,13 @@ the document of a new network:
 Before anything is published, the document is parsed and verified as the
 network's key set by the same `SequencerCredentialsFile::parse` and
 `key_set` that startup's `load_sequencer_credentials` runs. It is written to
-a staged name in the output's directory with mode 0644 (before the umask),
-synchronized, and moved into place with a no-replace rename, so an existing
-output path is refused and never replaced and no reader sees a partial
-document. The command prints the key set's `sequencer-key-set-generation=`
+a staged name in the output's directory whose mode is then set to exactly
+0644, so the caller's umask cannot narrow it: under root's umask 027 or 077
+a creation mode alone would leave a root-owned 0640 or 0600 file that the
+service account cannot open, and the coordinator would refuse to start. The
+staged file is synchronized and moved into place with a no-replace rename,
+so an existing output path is refused and never replaced and no reader sees
+a partial document. The command prints the key set's `sequencer-key-set-generation=`
 and `sequencer-key-set-hash=` lines in the descriptor's form, so an operator
 can compare them with every node's `print-onboarding`.
 
@@ -67,9 +70,8 @@ and no dependency is added: the runtime already depends on
 - `offline::tests::sequencer_credentials_equal_the_testkit_document`: the
   document equals, byte for byte, the testkit's for the same network, key
   and interval; the daemon's own reader accepts it with exactly the
-  generation and hash the command reports; the output is owner-readable and
-  neither group- nor world-writable; a second run is refused with the
-  document unchanged.
+  generation and hash the command reports; the output has mode 0644; a
+  second run is refused with the document unchanged.
 - `offline::tests::sequencer_credentials_refuse_bad_intervals_outputs_and_keys`:
   an empty and a reversed interval, a relative output, an output below a
   group-writable directory, a 31-byte key file and a world-readable key
@@ -81,8 +83,9 @@ and no dependency is added: the runtime already depends on
 - `stage_zero_refusal`: the usage text names the command.
 - `stage_eight_e2ee::cli_provisioning::a_network_provisioned_only_with_arcd_links_and_advertises_e2ee`:
   a coordinator and two edges created by `arcd init`, the coordinator's
-  credentials created by `arcd sequencer-credentials create` (byte-equal to
-  the testkit document for the key `init` wrote), and each edge's
+  credentials created by `arcd sequencer-credentials create` under umask 077
+  (mode 0644, and byte-equal to the testkit document for the key `init`
+  wrote), and each edge's
   `print-onboarding` naming the printed generation and hash. Both edges
   link, advertise `agenc.ag/e2ee-mls` and the coordinator's recovery epoch,
   and register a client. The AUD-01 daemon case uses the same provisioning.
@@ -93,7 +96,12 @@ with the usage refusal. With the credential's `not_after` one second short of
 the request, the offline case and both daemon cases fail at the byte
 comparison with the testkit document; with the document at set generation 1,
 the offline case fails at that comparison and the daemon cases at the printed
-generation.
+generation. With the explicit mode removed, so that only the creation mode
+and the umask decide it, both daemon cases fail at provisioning with `the
+credentials document has mode 600, not 644`, and the offline case fails
+under any test umask that clears a bit of 0644 (it did under the umask 007
+of the host this was proved on); with the mode set to 0600 instead, the
+offline case and both daemon cases fail.
 
 ## Limitations
 
@@ -105,7 +113,7 @@ generation.
   its CA, and each `[[federation.peer]]` record's `signing_public_key` is
   derived from the seed `init` wrote, because no `arcd` command prints a
   federation signing public key; the operator guide says so.
-- The output's mode is subject to the caller's umask. The daemon's
-  protected read accepts the file whatever mode results, provided it is not
-  group- or world-writable and the file is owned by root or the service
-  account.
+- The command sets the document's mode, not its owner: the file belongs to
+  the account that ran the command. The daemon's protected read accepts a
+  file owned by root or by the service account, so the command runs as one
+  of them, as the guide runs every offline command.

@@ -2550,8 +2550,8 @@ mod tests {
 
     /// AUD-02: `arcd sequencer-credentials create` writes, byte for byte,
     /// the document the testkit builds for the same network, sequencer key
-    /// and interval; startup's own reader accepts it with the key-set facts
-    /// the command reports; and it never replaces a file.
+    /// and interval, at mode 0644; startup's own reader accepts it with the
+    /// key-set facts the command reports; and it never replaces a file.
     #[test]
     fn sequencer_credentials_equal_the_testkit_document() -> Result<(), OfflineError> {
         let root = TestDirectory::create()?;
@@ -2583,12 +2583,13 @@ mod tests {
                 key_set_hash: key_set.digest,
             }
         );
+        // Public and never group- or world-writable, whatever the umask of
+        // the process that created it.
         let mode = fs::symlink_metadata(&output)
             .map_err(|_| OfflineError::Filesystem)?
             .permissions()
             .mode();
-        assert_eq!(mode & 0o022, 0);
-        assert_eq!(mode & 0o400, 0o400);
+        assert_eq!(mode & 0o7777, 0o644);
 
         assert_eq!(
             create_sequencer_credentials(&request),

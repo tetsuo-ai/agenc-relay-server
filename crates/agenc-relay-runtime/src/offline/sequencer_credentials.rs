@@ -11,7 +11,7 @@
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use agenc_relay_config::{SecretLength, ValidationDepth, load_config, open_secret_file};
@@ -27,8 +27,10 @@ use super::{
     OfflineError, require_absent, safe_absolute_path, sync_parent, validate_creation_parent,
 };
 
-/// The document is public: readable, and never group- or world-writable,
-/// which the daemon's protected read requires (spec 22.2).
+/// The document is public: readable by every local account, the service
+/// account included, and never group- or world-writable, which the
+/// daemon's protected read requires (spec 22.2). The staged file is set to
+/// exactly this mode, so the caller's umask cannot narrow it.
 const PUBLIC_DOCUMENT_MODE: u32 = 0o644;
 
 /// One `arcd sequencer-credentials create` request.
@@ -146,6 +148,10 @@ fn write_staged(path: &Path, bytes: &[u8]) -> Result<(), OfflineError> {
         .create_new(true)
         .mode(PUBLIC_DOCUMENT_MODE);
     let mut file = options.open(path).map_err(|_| OfflineError::Filesystem)?;
+    // The creation mode passes through the umask: under root's 027 or 077
+    // the service account could not open the document it must read.
+    file.set_permissions(fs::Permissions::from_mode(PUBLIC_DOCUMENT_MODE))
+        .map_err(|_| OfflineError::Filesystem)?;
     file.write_all(bytes)
         .map_err(|_| OfflineError::Filesystem)?;
     file.sync_all().map_err(|_| OfflineError::Filesystem)

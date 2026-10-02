@@ -24,10 +24,28 @@ const SEQUENCER_INTERVAL: (u64, u64) = (0, 4_000_000_000);
 /// Runs one `arcd` command and returns its standard output, failing with
 /// its standard error when the command exits unsuccessfully.
 fn arcd(arguments: &[&std::ffi::OsStr]) -> TestResult<String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_arcd"))
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arcd"));
+    command.args(arguments);
+    arcd_output(command, arguments)
+}
+
+/// Runs one `arcd` command under `umask 077`, as a hardened host's root
+/// shell runs it: a file the command creates keeps no group or other
+/// permission unless the command sets it explicitly. The shell replaces
+/// itself with `arcd`, and the test's own umask is unchanged.
+fn arcd_under_strict_umask(arguments: &[&std::ffi::OsStr]) -> TestResult<String> {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("umask 077 && exec \"$@\"")
+        .arg("agenc-strict-umask")
+        .arg(env!("CARGO_BIN_EXE_arcd"))
+        .args(arguments);
+    arcd_output(command, arguments)
+}
+
+fn arcd_output(mut command: Command, arguments: &[&std::ffi::OsStr]) -> TestResult<String> {
+    let output = command.stdin(Stdio::null()).output()?;
     if !output.status.success() {
         return Err(failure(format!(
             "arcd {:?} exited with {}: {}",
@@ -267,13 +285,15 @@ impl CliNode {
     }
 
     /// AUD-02: runs `arcd sequencer-credentials create` on the coordinator
-    /// with the sequencer key `init` wrote, and returns the public document
-    /// with the key-set hash the command printed. The document must equal,
-    /// byte for byte, the one the testkit builds for the same key.
+    /// with the sequencer key `init` wrote, under a strict umask, and
+    /// returns the public document with the key-set hash the command
+    /// printed. The document must have mode 0644, so a service account can
+    /// read it whoever created it, and must equal, byte for byte, the one
+    /// the testkit builds for the same key.
     fn create_sequencer_credentials(&self, descriptor: &str) -> TestResult<(Vec<u8>, String)> {
         let key_file = self.data_dir.join("keys/sequencer.key");
         let output = self.root.path().join("sequencer-credentials.bin");
-        let printed = arcd(&[
+        let printed = arcd_under_strict_umask(&[
             "sequencer-credentials".as_ref(),
             "create".as_ref(),
             "--config".as_ref(),
@@ -291,6 +311,12 @@ impl CliNode {
             return Err(failure(format!("unexpected key set: {printed:?}")));
         }
         let key_set_hash = line_value(&printed, "sequencer-key-set-hash=")?.to_owned();
+        let mode = fs::symlink_metadata(&output)?.permissions().mode() & 0o7777;
+        if mode != 0o644 {
+            return Err(failure(format!(
+                "the credentials document has mode {mode:o}, not 644"
+            )));
+        }
         let document = fs::read(&output)?;
         let seed: [u8; 32] = fs::read(&key_file)?
             .as_slice()
