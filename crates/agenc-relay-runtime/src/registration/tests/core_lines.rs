@@ -154,6 +154,43 @@ async fn command_behind_an_unfinished_join_waits_for_the_join_response() -> Test
     Ok(())
 }
 
+/// AUD-16 behind a response floor. The refused lookup of a missing channel
+/// holds its answer until the floor, and the local JOIN sent behind it waits.
+/// The floor's timer publishes the refusal and runs the JOIN, which is applied
+/// in that same step; its answer must follow at once, not wait for a later
+/// line or commit to open its snapshot.
+#[tokio::test]
+async fn a_local_join_released_by_a_response_floor_answers_in_the_same_step() -> TestResult {
+    let mut core = Core::new()?;
+    let sink = core.open(1)?;
+    core.line(1, "NICK floored")?;
+    core.line(1, "USER floored 0 * :Floored")?;
+    core.settle().await?;
+    core.line(1, "TOPIC #missing")?;
+    core.line(1, "JOIN &loc")?;
+    assert!(!saw(&sink, " 403 "), "lines: {:?}", sink.lines());
+    assert!(!saw(&sink, " JOIN &loc"), "lines: {:?}", sink.lines());
+    core.fixture.context_mut()?.set_monotonic_for_test(
+        FROZEN_TICKS + crate::state_core::timers::SECRET_CHANNEL_FLOOR_MILLIS,
+    );
+    assert!(core.fixture.state_mut()?.step_wake().is_none());
+    let lines = sink.lines();
+    let refused = lines
+        .iter()
+        .position(|line| line.contains(" 403 floored #missing "));
+    let names_end = lines
+        .iter()
+        .position(|line| line.contains(" 366 floored &loc "));
+    assert!(refused.is_some() && refused < names_end, "lines: {lines:?}");
+    assert!(
+        !core
+            .fixture
+            .context_mut()?
+            .has_local_join_seed(ConnectionGeneration::new(1))
+    );
+    Ok(())
+}
+
 /// A registered owner of `#locked` whose key MODE is waiting on its
 /// channel-key construction job.
 async fn pending_key_mode(core: &mut Core) -> TestResult<Arc<FrameSink>> {

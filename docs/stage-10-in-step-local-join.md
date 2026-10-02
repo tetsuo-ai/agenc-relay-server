@@ -52,6 +52,17 @@ The seed is opened by the drain that already follows every routed line
 the label context onto it, so the in-step JOIN gets exactly the reply a
 staged JOIN gets.
 
+A local JOIN can also run outside a routed line. A command deferred behind a
+floored refusal (the secret-lookup response floor of Section 13.5) is
+resumed by the floor's timer, and a JOIN among those commands is applied in
+that step too. `resume_deferred_commands`
+(`crates/agenc-relay-runtime/src/registration/join_names.rs`) now opens the
+seeds after resuming, as every other point that resumes or routes commands
+already did: each routed line, `resume_ready_join_commands`, the JOIN
+continuation timer, `batch_applied` and a command's crypto completion.
+Without it the seed, now committed, would open only at the next unrelated
+line or commit.
+
 This is the program register's decision D-22 (a). Its alternative, settling
 the seed before staging and rolling it back on a refusal, was not needed.
 
@@ -70,6 +81,7 @@ plain or labeled, answers and then releases the command behind it.
 | `state_core::local_join::tests::an_in_step_local_join_opens_its_snapshot_as_soon_as_it_settles` | A guest's `&` JOIN plan has no durable write and is applied in step; settled after that, its seed opens at once with the JOIN echo and topic reply, then one NAMES page, and no seed is left pending. |
 | `state_core::tests::local_join::an_in_step_local_join_answers_its_label_batch_and_the_next_command` | Through the live router, `@label=join JOIN &loc` then `@label=time TIME` get one label batch of JOIN, `331`, `353` and `366`, closed before the labeled `391`. |
 | `state_core::tests::local_join::a_staged_global_join_answers_its_label_batch_and_the_next_command` | The same exchange for `#room`, whose JOIN is staged. |
+| `registration::core_line_tests::a_local_join_released_by_a_response_floor_answers_in_the_same_step` | Through the state core with its clock frozen, `TOPIC #missing` holds its `403` until the floor and the `JOIN &loc` behind it waits; firing the floor's timer publishes the `403` and then the JOIN's `366` in that one step, and no seed is left pending. |
 | `stage_six_daemon::local_join::a_lone_local_join_is_answered_and_the_next_command_still_runs` | The production binary on a core-only node: `JOIN &plain` then `TIME`, and the labeled `JOIN &labeled` then `TIME`. |
 | `stage_seven_federation::an_edge_join_continuation_answers_and_releases_the_next_command` | A coordinator and an edge: `JOIN #plain` then `AWAY`, and the labeled `JOIN #labeled` then `AWAY`, on the edge. |
 
@@ -80,11 +92,14 @@ require that a staged seed does not open before its batch commits, and
 releases its snapshot.
 
 With `settle_local_join` reverted to its `70c832c` body and everything else
-kept, the first, second and fourth tests fail: the seed is never taken, the
-router never sends the `391` its script waits for, and the daemon test reads
-nothing after `JOIN &plain` until its 15-second socket timeout. The staged
-`#room` test and the edge test pass either way; they guard the paths the fix
-must leave unchanged.
+kept, the in-step unit test, the live-router `&loc` test, the response-floor
+test and the core-only daemon test fail: the seed is never taken, the router
+never sends the `391` its script waits for, the floor's timer publishes the
+`403` and nothing after it, and the daemon test reads nothing after
+`JOIN &plain` until its 15-second socket timeout. With only the new drain in
+`resume_deferred_commands` removed, the response-floor test alone fails, the
+same way. The staged `#room` test and the edge test pass either way; they
+guard the paths the fix must leave unchanged.
 
 ## Coverage
 

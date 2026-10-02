@@ -180,12 +180,16 @@ impl RegistrationRouter {
 
     /// Resumes the commands one connection deferred, whatever deferred
     /// them: an open JOIN/NAMES continuation or a floored response.
+    ///
+    /// A resumed local JOIN may be applied in this step, so its seed is
+    /// opened here; no later commit carries its revision.
     pub(super) fn resume_deferred_commands(
         &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) {
         self.resume_join_commands(context, generation);
+        self.drain_local_join_seeds(context);
     }
 
     fn resume_join_commands(
