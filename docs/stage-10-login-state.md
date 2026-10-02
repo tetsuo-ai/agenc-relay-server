@@ -1,4 +1,4 @@
-# The recovery NOTE and the logged-in state in the welcome (SC-007)
+# The recovery NOTE and the logged-in state (SC-007)
 
 This record covers SC-007, a server prerequisite the AgenC Relay SDK's server
 cross-check lists as blocking its account flows. It is worked in the SDK
@@ -9,7 +9,8 @@ exists for it. SC-007 has three parts, worked in this order:
 | --- | --- | --- |
 | The recovery epoch NOTE in the welcome burst | Architecture Section 10.2 step 5 | Implemented |
 | The authenticated account state (`900`) in the welcome burst | Section 10.2 step 6, Appendix E.2 | Implemented |
-| `900` after a post-registration login, and `ACCOUNT` to `account-notify` peers | Section 11.4 | Not implemented |
+| `900` after a post-registration login, and `ACCOUNT` to `account-notify` peers, on a coordinator or standalone node | Section 11.4 | Implemented |
+| The same for a session an edge homes, and `ACCOUNT` to the peers other edges home | Section 11.4 | Not implemented |
 
 No specification text, wire registry, profile hash, persistent format or
 dependency changes. No Stage 10 task box changes.
@@ -135,6 +136,40 @@ binaries, the Stage 10 drills' `account_login_named` and the capacity
 campaign's `opaque_login_once`, each through `read_account_state`, which
 requires the line's shape.
 
+## The post-registration login
+
+Section 11.4 ends a successful SASL exchange with the fixed sealed response and
+`903`, and requires the client to check the committed completion against "the
+later 900/session state". A login before registration is named by the
+welcome's `900`. A registered session that logs in, or authenticates again to
+the account it holds, read only the `903`: the account service rendered the
+carrier's frames and nothing else.
+
+The account service now renders a registered session's successful finish with
+`mutation_render::render_account_login` (decision D-13 of the SDK program):
+
+- The connection that logged in receives the carrier's frames, which end with
+  `903`, and then `900 <nick> <nick>!<user>@<host> <label-or-*> :You are now
+  logged in`, built by the same `client_render::LoggedIn` as the welcome's.
+  The `903` stays first, so a client that reads exactly one line after the
+  completion still reads it.
+- A guest that logged in changes its public account state. Every local
+  recipient of the account switch that negotiated `account-notify`, the
+  session itself included, receives `:<mask> ACCOUNT <label-or-*>`, after the
+  `900` on the requester's own connection. That is the set and the form a
+  logout already uses for `ACCOUNT *`.
+- A same-account reauthentication changes no public state: its plan is the
+  account-service checkpoint, so only the `900` repeats.
+- A coordinator serving the login of a session an edge homes does so through
+  an internal carrier, which is not that session's connection on the
+  coordinator. It gets no `900`, because the captured carrier frames become
+  the federated result the edge renders. The coordinator's own clients that
+  share a channel with that session still receive the `ACCOUNT` line.
+- The frames are part of the same fanout that commits with the login's
+  durable batch, so nothing is sent for a refused login.
+
+No `901` is sent on logout, and a logout is unchanged.
+
 ## The regressions
 
 | Test | What it pins |
@@ -173,6 +208,29 @@ all eleven transcript branch tests pass. Every authenticated registration of
 the Stage 06 and Stage 08 suites now also checks its `900` through
 `read_account_state`.
 
+The post-registration login:
+
+| Test | What it pins |
+| --- | --- |
+| `mutation_render::account_login_render::a_guest_login_answers_903_then_900_and_names_its_account_to_notify_peers` | The requester reads its carrier frames, `903`, the `900` with the account's label and then its own `ACCOUNT` line; an `account-notify` peer reads only the `ACCOUNT` line, a peer without the capability nothing. |
+| `mutation_render::account_login_render::a_reauthentication_repeats_900_alone` | A same-account reauthentication's checkpoint plan: `903` and the `900` naming `*`, and nothing to a peer. |
+| `mutation_render::account_login_render::an_internal_carrier_gets_no_900_while_local_peers_learn_the_account` | The coordinator's internal carrier for an edge client reads only the carrier frames; the coordinator's own `account-notify` peer reads the `ACCOUNT` line. |
+| `mutation_render::account_login_render::a_login_rendering_refuses_a_stale_plan_or_an_absent_account` | A plan for another revision, or an account the domain does not hold, renders nothing. |
+| `login_after_registration::a_login_after_registration_follows_903_with_900_and_names_the_account` | The production binary: a registered guest's login reads `903` and then the `900`, byte-exact against its own `JOIN` echo and the account's public label; an `account-notify` peer reads `ACCOUNT <label>`, a peer without it and the guest itself (no `account-notify`) nothing more; a reauthentication repeats the `900` alone; a logout still names `ACCOUNT *` to the peer and answers the client with nothing. |
+
+With the account service rendering a registered login's frames as before (no
+`render_account_login`), the daemon test above and the account edge exercise
+`production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion`
+fail waiting for a `900`, and the four unit tests pass; with the `900` left
+out of `render_account_login`, the guest-login and reauthentication unit
+tests and both daemon tests fail; with the `ACCOUNT` line left out, the
+guest-login and internal-carrier unit tests and the login daemon test fail.
+Restored, all six pass. The Stage 06 registration helpers remember the
+nickname a connection registered under, and `authenticate_live_account`
+reads the `900` after the `903` of such a connection, so the account edge
+exercise's reauthentication after a wrong deletion token checks its `900`
+too.
+
 The Stage 08 edge test keeps every registered connection open until its
 scenario ends.
 
@@ -185,7 +243,11 @@ scenario ends.
 - The capacity campaign's login, which now reads the `900`, is an ignored
   qualification scenario; it was compiled, not run. The drills' login helper
   is run by the ordinary Stage 08 recovery submission test.
-- The post-registration login is not implemented at this revision.
+- The post-registration login of a session an edge homes is not implemented
+  at this revision: its edge sends no `900`, and peers that other edges home
+  read no `ACCOUNT` line.
+- The local `ACCOUNT` line follows a login and a logout only; an account
+  label change still reaches only the peers that edges home, as before.
 - These are development-host runs. The full Stage 09 gate runs at the
   integration tip, not on this branch.
 
@@ -199,7 +261,13 @@ Sources:
   (`RegistrationRuntimeConfig::recovery_epoch`, `welcome_frames`,
   `recovery_epoch_note`, `account_state_numeric`)
 - `crates/agenc-relay-runtime/src/client_render.rs` (`LoggedIn`)
-- `crates/agenc-relay-runtime/src/mutation_render.rs` (`logged_in`)
+- `docs/arc-architecture-and-implementation-spec.md` Section 11.4, and
+  Appendix A.3 (`account-notify`)
+- `crates/agenc-relay-runtime/src/mutation_render.rs` (`logged_in`,
+  `render_account_login`)
+- `crates/agenc-relay-runtime/src/account_service.rs` (`stage_finish`)
+- `crates/agenc-relay-runtime/src/tests/account_login_render.rs`
+- `crates/agenc-relay-server/tests/stage_six_daemon/login_after_registration.rs`
 - `crates/agenc-relay-runtime/src/federation/edge/mod.rs`
   (`EdgeFederation::logged_in`)
 - `crates/agenc-relay-testkit/src/client_transcript.rs` (`transcript_mask`)
@@ -241,4 +309,14 @@ cargo nextest run -p agenc-relay-testkit --all-features --locked --test client_t
 python3 scripts/check-coverage.py audit conformance/release-critical-coverage.toml
 # region anchors: ok (1145 reviewed spans hold the item they name); ten regions in
 # client_render.rs, federation/edge/mod.rs and registration.rs moved, spans unchanged
+
+# the post-registration login on its own node, on the tree of its commit
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+# clean
+cargo nextest run -p agenc-relay-runtime -p agenc-relay-server --all-features --locked
+# 2827 tests run: 2827 passed, 21 skipped
+cargo nextest run -p agenc-relay-runtime -p agenc-relay-server --all-features --locked \
+  -E 'test(account_login_render) | test(login_after_registration) | test(production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion)'
+# 6 passed; the account service rendering as before: 2 failed, 4 passed;
+# no 900: 4 failed, 2 passed; no ACCOUNT line: 3 failed, 3 passed
 ```

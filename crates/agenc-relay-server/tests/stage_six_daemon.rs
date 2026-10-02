@@ -24,6 +24,9 @@ mod stage_ten_tor;
 #[path = "stage_six_daemon/welcome_burst.rs"]
 mod welcome_burst;
 
+#[path = "stage_six_daemon/login_after_registration.rs"]
+mod login_after_registration;
+
 #[cfg(feature = "history")]
 #[path = "stage_six_daemon/history.rs"]
 mod history;
@@ -1285,6 +1288,11 @@ struct ArcClient {
     /// SASL completed on this connection, so its welcome burst ends with the
     /// authenticated account state (architecture 10.2 step 6).
     logged_in: bool,
+    /// The nickname the connection registered under; a login after
+    /// registration follows its `903` with `900` (architecture 11.4).
+    registered: Option<String>,
+    /// The last `900` the connection read.
+    account_state: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -1373,6 +1381,8 @@ impl ArcClient {
         Ok(Self {
             reader: BufReader::new(stream),
             logged_in: false,
+            registered: None,
+            account_state: None,
         })
     }
 
@@ -1413,8 +1423,11 @@ impl ArcClient {
             line.contains(" 376 ") || line.contains(" 422 ")
         })?;
         if self.logged_in {
-            welcome.push(read_account_state(&mut self.reader, nickname)?);
+            let account_state = read_account_state(&mut self.reader, nickname)?;
+            self.account_state = Some(account_state.clone());
+            welcome.push(account_state);
         }
+        self.registered = Some(nickname.to_owned());
         Ok(welcome)
     }
 
@@ -1596,9 +1609,11 @@ impl ArcClient {
         self.send("NICK LiveUser")?;
         self.send("USER live 0 * :Live User")?;
         self.send("CAP END")?;
-        read_until(&mut self.reader, |line| {
+        let welcome = read_until(&mut self.reader, |line| {
             line.contains(" 376 ") || line.contains(" 422 ")
-        })
+        })?;
+        self.registered = Some("LiveUser".to_owned());
+        Ok(welcome)
     }
 
     fn shutdown_lines(&mut self) -> TestResult<Vec<String>> {
@@ -1951,6 +1966,10 @@ fn authenticate_live_account(
         return Err(failure("successful authentication omitted numeric 903"));
     }
     client.logged_in = true;
+    if let Some(nickname) = client.registered.clone() {
+        // A registered session's login follows 903 with 900 (11.4).
+        client.account_state = Some(read_account_state(&mut client.reader, &nickname)?);
+    }
     Ok(())
 }
 
