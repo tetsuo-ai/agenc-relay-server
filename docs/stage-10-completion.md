@@ -214,6 +214,11 @@ that lets a bounded database grow, the resume of a construction stopped before
 its target existed, and the exact resume at a refused target batch (STO-07,
 issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
+The edge initialized by `arcd init` that starts, links and advertises the
+encrypted profile, its database complete without the fake OPAQUE record only a
+coordinator must hold, and the kill-and-restart comparison showing that this
+refusal does not explain RUN-08 (AUD-01, SDK program, outside master #35) are
+recorded in [the CLI edge initialization record](stage-10-cli-edge-initialization.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

@@ -2354,6 +2354,86 @@ mod tests {
         Ok(())
     }
 
+    /// Opens the database `init` wrote under `config_path` and runs the
+    /// startup reconstruction `serve` runs, under `role`.
+    fn reconstruct_initialized(
+        config_path: &Path,
+        role: NodeRole,
+    ) -> Result<
+        Result<crate::state_core::reconstruct::Reconstruction, crate::RuntimeError>,
+        OfflineError,
+    > {
+        let config = load_config(config_path, ValidationDepth::Document)?;
+        let secrets = SecretSet::load(&config)?;
+        let qualifications = embedded_storage_qualifications()?;
+        let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
+        let owner = StorageOwner::start(StorageOpenConfig {
+            expected_network_id: config.network.network_id,
+            expected_server_id: config.server.server_id,
+            state_directory,
+            storage_master_key: StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(
+                *secrets.rollback_guard_root().expose(),
+            ),
+            login_index_key: LoginIndexKey::from_bytes(*secrets.login_index().expose()),
+            previous_login_index_key: None,
+            limits: limits_from_config(&config),
+        })?;
+        let seed = crate::StateCoreSeed::from_storage(&owner)?;
+        let keys = crate::state_core::durable::KeyDeriver::new(
+            StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
+            seed.storage().database_binding(),
+            seed.storage().storage_key_generation(),
+        )
+        .map_err(|_| OfflineError::Storage)?;
+        let reconstruction = crate::state_core::reconstruct::reconstruct(
+            &seed,
+            &owner.port(),
+            &keys,
+            role,
+            agenc_relay_types::MonotonicTick::from_ticks(1),
+            UtcSecond::from_unix_seconds(1),
+        );
+        owner.shutdown()?;
+        Ok(reconstruction)
+    }
+
+    /// AUD-01: `serve` reconstructs an edge database exactly as `init`
+    /// wrote it, without the fake OPAQUE record it never had; a coordinator
+    /// database keeps its record and the edge database is still refused
+    /// under the coordinator role.
+    #[test]
+    fn initialized_databases_reconstruct_under_their_own_role() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        let coordinator_config = request.config_path.clone();
+        initialize_node(request)?;
+        enable_test_listener(&root.0)?;
+        let coordinator = reconstruct_initialized(&coordinator_config, NodeRole::Coordinator)?
+            .map_err(|_| OfflineError::Storage)?;
+        assert!(coordinator.account_service.fake_opaque_record().is_some());
+
+        let edge_root = TestDirectory::create()?;
+        let descriptor_path = edge_root.0.join("trusted-edge-connect.txt");
+        write_secret(&descriptor_path, valid_descriptor()?.as_bytes())?;
+        let mut request = test_request(&edge_root.0)?;
+        request.mode = InitMode::Edge {
+            coordinator_descriptor: descriptor_path,
+            coordinator_server_id: ServerId::from_bytes([8; 16]),
+        };
+        let edge_config = request.config_path.clone();
+        initialize_node(request)?;
+        enable_test_listener(&edge_root.0)?;
+        let edge = reconstruct_initialized(&edge_config, NodeRole::Edge)?
+            .map_err(|_| OfflineError::Storage)?;
+        assert!(edge.account_service.fake_opaque_record().is_none());
+        assert!(matches!(
+            reconstruct_initialized(&edge_config, NodeRole::Coordinator)?,
+            Err(crate::RuntimeError::Storage(StorageError::StaleState))
+        ));
+        Ok(())
+    }
+
     #[test]
     fn edge_init_rejects_a_forged_hpke_id_before_creating_targets() -> Result<(), OfflineError> {
         let root = TestDirectory::create()?;
