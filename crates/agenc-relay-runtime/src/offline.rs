@@ -111,6 +111,9 @@ pub struct InitReceipt {
     pub network_id: NetworkId,
     /// Fresh local server identity.
     pub server_id: ServerId,
+    /// Fresh recovery epoch of the new database: the epoch this node's
+    /// federation hello carries, which a peer's record for it pins.
+    pub recovery_epoch: RecoveryEpoch,
     /// Fresh local operator identity.
     pub operator_id: OperatorId,
     /// Offline operator signing-key path.
@@ -1286,6 +1289,7 @@ fn init_receipt(request: &InitRequest, identity: InitIdentity) -> InitReceipt {
     InitReceipt {
         network_id: identity.network_id,
         server_id: identity.server_id,
+        recovery_epoch: identity.recovery_epoch,
         operator_id: identity.operator_id,
         operator_signing_key_file: request.operator_signing_key_file.clone(),
         tor_snippet: format!(
@@ -1357,7 +1361,11 @@ fn validate_account_hpke_pin(config: &Config, secrets: &SecretSet) -> Result<(),
     Ok(())
 }
 
-/// Renders the canonical stopped-node onboarding descriptor.
+/// Renders the canonical stopped-node onboarding descriptor. Its
+/// `recovery-epoch` is the epoch the node advertises in `agenc.ag/recovery`:
+/// a coordinator's own database epoch, and on an edge the pin of its enabled
+/// coordinator record. An edge without one advertises no coordinator and is
+/// refused.
 pub fn render_onboarding(config_path: &Path) -> Result<String, OfflineError> {
     let config = load_config(config_path, ValidationDepth::Document)?;
     let secrets = SecretSet::load(&config)?;
@@ -1389,11 +1397,26 @@ pub fn render_onboarding(config_path: &Path) -> Result<String, OfflineError> {
         None => None,
     };
     let facts = OnboardingFacts {
-        recovery_epoch: header.recovery_epoch,
+        recovery_epoch: advertised_recovery_epoch(&config, header.recovery_epoch)?,
         account_service_hpke_key_id: *hpke.key_id().as_bytes(),
         sequencer_key_set,
     };
     Ok(render_config_onboarding(&config, &facts)?)
+}
+
+/// The epoch a descriptor pins, the one the daemon's CAP advertises (spec
+/// 9.3, invariant ID-06): a coordinator's database epoch, or an edge's
+/// coordinator record pin through the daemon's own selection.
+fn advertised_recovery_epoch(
+    config: &Config,
+    database_epoch: RecoveryEpoch,
+) -> Result<RecoveryEpoch, OfflineError> {
+    match config.network.role {
+        NodeRole::Coordinator => Ok(database_epoch),
+        NodeRole::Edge => {
+            crate::daemon::edge_advertised_recovery_epoch(config).ok_or(OfflineError::Configuration)
+        }
+    }
 }
 
 /// Issues one canonical three-line account-creation invitation envelope.
@@ -2326,6 +2349,105 @@ mod tests {
         Ok(())
     }
 
+    /// Enables federation in a test node's configuration with one peer
+    /// record, the shape the coordinator or edge enrollment edit writes.
+    fn enroll_test_peer(
+        root: &Path,
+        role: NodeRole,
+        server_id: ServerId,
+        recovery_epoch: RecoveryEpoch,
+        enabled: bool,
+    ) -> Result<(), OfflineError> {
+        let config_path = root.join("etc/config.toml");
+        let text = fs::read_to_string(&config_path).map_err(|_| OfflineError::Filesystem)?;
+        let endpoints = match role {
+            NodeRole::Coordinator => "\"tcp:127.0.0.1:7000\"",
+            NodeRole::Edge => "",
+        };
+        let peer = format!(
+            "[[federation.peer]]\nserver_id = \"{}\"\nserver_name = \"peer.example\"\nrole = \"{}\"\nrecovery_epoch = \"{}\"\nendpoints = [{endpoints}]\ncertificate_spki_sha256 = \"{}\"\nsigning_public_key = \"{}\"\nenabled = {enabled}\n\n",
+            server_id.to_base64url(),
+            role.as_str(),
+            recovery_epoch.to_base64url(),
+            encode_base64url_32(&[5; 32]),
+            encode_base64url_32(&[6; 32]),
+        );
+        let tls = root.join("etc/tls");
+        let ca_file = tls.join("federation-ca.pem");
+        let mut enrolled = text
+            .replacen(
+                "enabled = false\nsigning_private_key_file",
+                &format!(
+                    "enabled = true\nprivate_ca_file = \"{}\"\nsigning_private_key_file",
+                    ca_file.display()
+                ),
+                1,
+            )
+            .replacen(
+                "connect_timeout_seconds = 10\n\n",
+                &format!("connect_timeout_seconds = 10\n\n{peer}"),
+                1,
+            );
+        // A federated coordinator serves exactly one federation listener.
+        if role == NodeRole::Edge {
+            write_secret(&tls.join("federation.key"), &[43; 64])?;
+            let listener = format!(
+                "[[listeners.endpoint]]\nname = \"federation\"\nenabled = true\npurpose = \"federation\"\nbind = \"127.0.0.1:7001\"\nmax_connections = 64\ntls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\nclient_ca_file = \"{}\"\n\n",
+                tls.join("federation.crt").display(),
+                tls.join("federation.key").display(),
+                ca_file.display(),
+            );
+            enrolled = enrolled.replacen(
+                "[[listeners.endpoint]]\nname = \"admin-local\"",
+                &format!("{listener}[[listeners.endpoint]]\nname = \"admin-local\""),
+                1,
+            );
+        }
+        if enrolled == text {
+            return Err(OfflineError::Configuration);
+        }
+        fs::write(&config_path, enrolled).map_err(|_| OfflineError::Filesystem)
+    }
+
+    /// Replaces the one peer record's recovery epoch and enabled flag.
+    fn repin_test_peer(
+        root: &Path,
+        from: RecoveryEpoch,
+        to: RecoveryEpoch,
+        enabled: bool,
+    ) -> Result<(), OfflineError> {
+        let config_path = root.join("etc/config.toml");
+        let text = fs::read_to_string(&config_path).map_err(|_| OfflineError::Filesystem)?;
+        let old = format!("recovery_epoch = \"{}\"", from.to_base64url());
+        if text.matches(&old).count() != 1 {
+            return Err(OfflineError::Configuration);
+        }
+        let repinned = text
+            .replacen(
+                &old,
+                &format!("recovery_epoch = \"{}\"", to.to_base64url()),
+                1,
+            )
+            .replacen(
+                "\nenabled = true\n\n[storage]",
+                &format!("\nenabled = {enabled}\n\n[storage]"),
+                1,
+            );
+        fs::write(&config_path, repinned).map_err(|_| OfflineError::Filesystem)
+    }
+
+    fn database_recovery_epoch(config_path: &Path) -> Result<RecoveryEpoch, OfflineError> {
+        let config = load_config(config_path, ValidationDepth::Document)?;
+        let secrets = SecretSet::load(&config)?;
+        Ok(verify_database_header(&config, &secrets)?.recovery_epoch)
+    }
+
+    /// AUD-03: an edge's descriptor pins the epoch the edge advertises, the
+    /// pin of its enabled coordinator record, read without fake OPAQUE
+    /// state. It never pins the edge's own database epoch: an edge with no
+    /// enabled coordinator record gets no descriptor, and when the
+    /// coordinator's epoch changes and the record is re-pinned the
+    /// descriptor follows it.
     #[test]
     fn edge_onboarding_uses_read_only_reconstruction_without_fake_opaque_state()
     -> Result<(), OfflineError> {
@@ -2335,14 +2457,26 @@ mod tests {
         let descriptor_path = root.0.join("trusted-edge-connect.txt");
         write_secret(&descriptor_path, trusted.as_bytes())?;
         let mut request = test_request(&root.0)?;
+        let coordinator_server_id = ServerId::from_bytes([8; 16]);
         request.mode = InitMode::Edge {
             coordinator_descriptor: descriptor_path,
-            coordinator_server_id: ServerId::from_bytes([8; 16]),
+            coordinator_server_id,
         };
         let config_path = request.config_path.clone();
-        initialize_node(request)?;
+        let receipt = initialize_node(request)?;
         enable_test_listener(&root.0)?;
+        assert_eq!(
+            render_onboarding(&config_path),
+            Err(OfflineError::Configuration)
+        );
 
+        enroll_test_peer(
+            &root.0,
+            NodeRole::Coordinator,
+            coordinator_server_id,
+            parsed.recovery_epoch,
+            true,
+        )?;
         let rendered = render_onboarding(&config_path)?;
         let rendered = parse_onboarding_descriptor(&rendered)?;
         assert_eq!(rendered.network_id, parsed.network_id);
@@ -2350,7 +2484,50 @@ mod tests {
             rendered.account_service_hpke_public_key,
             parsed.account_service_hpke_public_key
         );
-        assert_ne!(rendered.recovery_epoch, parsed.recovery_epoch);
+        assert_eq!(rendered.recovery_epoch, parsed.recovery_epoch);
+        let own = database_recovery_epoch(&config_path)?;
+        assert_eq!(receipt.recovery_epoch, own);
+        assert_ne!(rendered.recovery_epoch, own);
+
+        let changed = RecoveryEpoch::from_bytes([9; 16]);
+        repin_test_peer(&root.0, parsed.recovery_epoch, changed, true)?;
+        let followed = parse_onboarding_descriptor(&render_onboarding(&config_path)?)?;
+        assert_eq!(followed.recovery_epoch, changed);
+        assert_eq!(
+            parse_onboarding_descriptor(&trusted)?.recovery_epoch,
+            parsed.recovery_epoch
+        );
+
+        repin_test_peer(&root.0, changed, changed, false)?;
+        assert_eq!(
+            render_onboarding(&config_path),
+            Err(OfflineError::Configuration)
+        );
+        Ok(())
+    }
+
+    /// AUD-03: a coordinator's descriptor still pins its own database epoch,
+    /// which its receipt printed, whatever its edge records pin.
+    #[test]
+    fn coordinator_onboarding_pins_its_own_database_epoch() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        let config_path = request.config_path.clone();
+        let receipt = initialize_node(request)?;
+        enable_test_listener(&root.0)?;
+        let edge_epoch = RecoveryEpoch::from_bytes([11; 16]);
+        enroll_test_peer(
+            &root.0,
+            NodeRole::Edge,
+            ServerId::from_bytes([12; 16]),
+            edge_epoch,
+            true,
+        )?;
+        let rendered = parse_onboarding_descriptor(&render_onboarding(&config_path)?)?;
+        let own = database_recovery_epoch(&config_path)?;
+        assert_eq!(rendered.recovery_epoch, own);
+        assert_eq!(receipt.recovery_epoch, own);
+        assert_ne!(rendered.recovery_epoch, edge_epoch);
         Ok(())
     }
 

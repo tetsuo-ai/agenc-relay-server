@@ -219,6 +219,11 @@ encrypted profile, its database complete without the fake OPAQUE record only a
 coordinator must hold, and the kill-and-restart comparison showing that this
 refusal does not explain RUN-08 (AUD-01, SDK program, outside master #35) are
 recorded in [the CLI edge initialization record](stage-10-cli-edge-initialization.md).
+The edge descriptor that pins the coordinator epoch the edge advertises,
+through the daemon's own selection, the refusal of an edge with no enabled
+coordinator record, and the node's own epoch printed by `arcd init` for its
+peers' records (AUD-03, SDK program, outside master #35) are recorded in
+[the edge descriptor epoch record](stage-10-edge-descriptor-epoch.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

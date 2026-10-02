@@ -43,8 +43,8 @@ use agenc_relay_storage::{
     embedded_storage_qualifications,
 };
 use agenc_relay_types::{
-    EntropySource as _, FederationRole, Generation, MonotonicClock as _, OriginId, ServerId,
-    TransactionId, UserId, WallClock as _,
+    EntropySource as _, FederationRole, Generation, MonotonicClock as _, OriginId, RecoveryEpoch,
+    ServerId, TransactionId, UserId, WallClock as _,
 };
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -987,15 +987,8 @@ fn registration_config(
         // that opens them (spec 22.2).
         NodeRole::Edge => AccountServiceRole::Advertised {
             creation_policy: creation_policy(config, secrets)?,
-            recovery_epoch: config
-                .federation
-                .peers
-                .iter()
-                .find(|peer| peer.enabled && peer.role == NodeRole::Coordinator)
-                .map_or_else(
-                    || seed.storage().recovery_epoch(),
-                    |peer| peer.recovery_epoch,
-                ),
+            recovery_epoch: edge_advertised_recovery_epoch(config)
+                .unwrap_or_else(|| seed.storage().recovery_epoch()),
         },
     };
     let access_token = secrets
@@ -1010,6 +1003,21 @@ fn registration_config(
         access_token,
         account_service,
     })
+}
+
+/// The recovery epoch an edge advertises in `agenc.ag/recovery` and pins in
+/// its onboarding descriptor: the pin of its enabled coordinator record, the
+/// epoch of the account service that opens its clients' sealed account
+/// requests (spec 22.2). `None` when the configuration names no enabled
+/// coordinator record; no such edge serves, because its coordinator dial
+/// plan requires that record.
+pub(crate) fn edge_advertised_recovery_epoch(config: &Config) -> Option<RecoveryEpoch> {
+    config
+        .federation
+        .peers
+        .iter()
+        .find(|peer| peer.enabled && peer.role == NodeRole::Coordinator)
+        .map(|peer| peer.recovery_epoch)
 }
 
 fn account_service_config(

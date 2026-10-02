@@ -4,7 +4,8 @@
 //! coordinator and the edge, `arcd print-onboarding` carries the
 //! coordinator's public pins to the edge's initialization, and the TLS,
 //! federation and E2EE settings are the edits an operator makes to the
-//! generated configuration.
+//! generated configuration. AUD-03: an edge's own descriptor pins the
+//! coordinator epoch it advertises.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -96,6 +97,9 @@ struct CliNode {
     runtime_dir: PathBuf,
     tls_dir: PathBuf,
     server_id: ServerId,
+    /// The `recovery-epoch` of the init receipt: the node's own database
+    /// epoch, which its federation hello carries and a peer record pins.
+    own_epoch: String,
     operator_id: OperatorId,
     public_address: SocketAddr,
     client_tls: TlsFixture,
@@ -168,6 +172,7 @@ impl CliNode {
         let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(AsRef::as_ref).collect();
         let receipt = arcd(&arguments)?;
         let server_id = ServerId::parse(line_value(&receipt, "server-id=")?)?;
+        let own_epoch = RecoveryEpoch::parse(line_value(&receipt, "recovery-epoch=")?)?;
         let operator_id = OperatorId::parse(line_value(&receipt, "operator-id=")?)?;
         let public_address = reserve_loopback_address()?;
         let client_tls = TlsFixture::mint([seed; 32], &dns_name)?;
@@ -182,6 +187,7 @@ impl CliNode {
             runtime_dir,
             tls_dir,
             server_id,
+            own_epoch: own_epoch.to_base64url(),
             operator_id,
             public_address,
             client_tls,
@@ -237,6 +243,23 @@ impl CliNode {
             "--config".as_ref(),
             self.config_path.as_os_str(),
         ])
+    }
+
+    /// The standard error of a `print-onboarding` that must be refused.
+    fn print_onboarding_refusal(&self) -> TestResult<String> {
+        let output = Command::new(env!("CARGO_BIN_EXE_arcd"))
+            .arg("print-onboarding")
+            .arg("--config")
+            .arg(&self.config_path)
+            .stdin(Stdio::null())
+            .output()?;
+        if output.status.success() || !output.stdout.is_empty() {
+            return Err(failure(format!(
+                "print-onboarding was not refused for {}",
+                self.name
+            )));
+        }
+        Ok(String::from_utf8(output.stderr)?)
     }
 
     /// The public half of the federation signing key `init` generated, the
@@ -350,6 +373,9 @@ struct CliNetwork {
     edges: Vec<NodeFixture>,
     /// The `recovery-epoch` of the coordinator's onboarding descriptor.
     coordinator_epoch: String,
+    /// Each edge's `arcd print-onboarding` descriptor, printed once its
+    /// coordinator record is enabled.
+    edge_descriptors: Vec<String>,
 }
 
 /// Provisions a coordinator and one edge per name with `arcd init` and
@@ -360,6 +386,10 @@ fn provision_cli_network(edge_names: &[&'static str]) -> TestResult<CliNetwork> 
     let coordinator = CliNode::init("core.test", 120, &CliInit::Coordinator)?;
     let descriptor = coordinator.print_onboarding()?;
     let coordinator_epoch = line_value(&descriptor, "recovery-epoch=")?.to_owned();
+    // AUD-03: a coordinator's descriptor pins its own database epoch.
+    if coordinator_epoch != coordinator.own_epoch {
+        return Err(failure("the coordinator descriptor left its own epoch"));
+    }
     let mut edges = Vec::new();
     for (index, name) in edge_names.iter().enumerate() {
         let seed = u8::try_from(index)?
@@ -375,6 +405,14 @@ fn provision_cli_network(edge_names: &[&'static str]) -> TestResult<CliNetwork> 
             },
         )?);
     }
+    for edge in &edges {
+        // An edge with no enabled coordinator record advertises no
+        // coordinator epoch, so it gets no descriptor.
+        let refused = edge.print_onboarding_refusal()?;
+        if !refused.contains("configuration validation failed") {
+            return Err(failure(format!("unexpected refusal: {refused}")));
+        }
+    }
     let sequencer_seed: [u8; 32] = fs::read(coordinator.data_dir.join("keys/sequencer.key"))?
         .as_slice()
         .try_into()
@@ -389,13 +427,23 @@ fn provision_cli_network(edge_names: &[&'static str]) -> TestResult<CliNetwork> 
     let coordinator_entry =
         coordinator.peer_entry(&coordinator_epoch, &format!("\"tcp:{federation_address}\""))?;
     let mut edge_entries = String::new();
+    let mut edge_descriptors = Vec::new();
     for edge in &edges {
         edge.enable_federation(&[&coordinator], &coordinator_entry, None)?;
         edge.enable_e2ee(&credentials)?;
-        // The epoch the edge's own FHELLO carries, which the coordinator's
-        // record pins.
-        let edge_epoch = line_value(&edge.print_onboarding()?, "recovery-epoch=")?.to_owned();
-        edge_entries.push_str(&edge.peer_entry(&edge_epoch, "")?);
+        // The coordinator's record pins the edge's own epoch, which its
+        // init receipt printed; the edge's descriptor pins the coordinator's.
+        edge_entries.push_str(&edge.peer_entry(&edge.own_epoch, "")?);
+        let edge_descriptor = edge.print_onboarding()?;
+        if line_value(&edge_descriptor, "recovery-epoch=")? != coordinator_epoch
+            || edge.own_epoch == coordinator_epoch
+        {
+            return Err(failure(format!(
+                "{} descriptor does not pin its coordinator's epoch",
+                edge.name
+            )));
+        }
+        edge_descriptors.push(edge_descriptor);
     }
     let edge_nodes: Vec<&CliNode> = edges.iter().collect();
     coordinator.enable_federation(&edge_nodes, &edge_entries, Some(federation_address))?;
@@ -404,6 +452,7 @@ fn provision_cli_network(edge_names: &[&'static str]) -> TestResult<CliNetwork> 
         coordinator: coordinator.into_fixture(),
         edges: edges.into_iter().map(CliNode::into_fixture).collect(),
         coordinator_epoch,
+        edge_descriptors,
     })
 }
 
@@ -463,6 +512,7 @@ fn advertised_capabilities(fixture: &NodeFixture) -> TestResult<Vec<String>> {
 /// AUD-01: an edge initialized by `arcd init --coordinator-descriptor`
 /// starts, links to its coordinator, advertises the encrypted profile and
 /// registers a client; after a SIGKILL it restarts and links again.
+/// AUD-03: the edge's own descriptor pins the epoch its CAP advertises.
 #[test]
 fn a_cli_initialized_edge_serves_links_and_advertises_e2ee() -> TestResult {
     let network = provision_cli_network(&["edge-a.test"])?;
@@ -470,11 +520,22 @@ fn a_cli_initialized_edge_serves_links_and_advertises_e2ee() -> TestResult {
         .edges
         .first()
         .ok_or_else(|| failure("the network has no edge"))?;
+    let edge_descriptor = network
+        .edge_descriptors
+        .first()
+        .ok_or_else(|| failure("the edge has no descriptor"))?;
     let mut coordinator = CliDaemon::start(&network.coordinator)?;
     let mut daemon = CliDaemon::start(edge)?;
     daemon.wait_for_link(edge, 0)?;
     let advertised = advertised_capabilities(edge)?;
     assert_contains(&advertised, "agenc.ag/e2ee-mls=v1,profile=")?;
+    assert_contains(
+        &advertised,
+        &format!(
+            "agenc.ag/recovery=v1.{}",
+            line_value(edge_descriptor, "recovery-epoch=")?
+        ),
+    )?;
     assert_contains(
         &advertised,
         &format!("agenc.ag/recovery=v1.{}", network.coordinator_epoch),

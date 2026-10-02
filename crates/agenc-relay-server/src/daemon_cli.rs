@@ -296,6 +296,7 @@ fn init_dns_name(
 fn print_init_receipt(receipt: &InitReceipt) {
     println!("network-id={}", receipt.network_id.to_base64url());
     println!("server-id={}", receipt.server_id.to_base64url());
+    println!("recovery-epoch={}", receipt.recovery_epoch.to_base64url());
     println!("operator-id={}", receipt.operator_id.to_base64url());
     println!(
         "operator-signing-key-file={}",
