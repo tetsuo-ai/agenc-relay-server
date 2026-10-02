@@ -62,9 +62,8 @@ tree.
 
 With `claim_status` alone reverted to its previous commit, the coordinator
 test fails (`Claimed([8; 16], …)` where `Claimed([7; 16], …)` is required), and
-the two daemon tests run with it reverted fail: `CLAIM STATUS` names alice's
-device `Pj4-Pj4-Pj4-Pj4-Pj4-Pg` where bob's `SEhISEhISEhISEhISEhISA` is
-required, in
+both daemon tests fail: `CLAIM STATUS` names alice's device
+`Pj4-Pj4-Pj4-Pj4-Pj4-Pg` where bob's `SEhISEhISEhISEhISEhISA` is required, in
 `real_clients::real_mls_clients_run_the_encrypted_lifecycle_through_the_daemon`
 through the shared helper and in the restart test. The domain test covers the
 accessor only and passes either way. With the fix restored, all pass.
@@ -79,17 +78,24 @@ returned. Nothing else changes.
 
 SC-002 asked whether an `EKEY EMPTY PACKAGE` claim result must survive a
 coordinator restart. The Section 11.6 paragraph that defines the claim mapping
-maps every claim result, but it uses no BCP 14 keyword and phrases its
-retention for a claimed package, and Section 12.5 gives an empty claim no
-completion event; the SDK's readiness audit rated SC-002 a hardening gap, not
-an interoperability defect.
+maps every claim result, and its retention sentence covers every mapping, not
+only a claimed package: "The mapping survives reconnect and is retained
+through at least the later of the claimed package lifetime and
+`KEY_PACKAGE_CLAIM_TIMEOUT`". Section 13.1 adds that
+`KEY_PACKAGE_CLAIM_TIMEOUT` bounds the claimant's stable operation mapping.
+An `EMPTY` mapping should therefore last at least `KEY_PACKAGE_CLAIM_TIMEOUT`
+(seven days). The paragraph uses no BCP 14 keyword, Section 12.5 gives an
+empty claim no completion event, and the SDK's readiness audit rated SC-002
+a hardening gap, not an interoperability defect.
 
-The disposition is no change. An empty result stays recorded in memory under
-its operation, so an identical retry before a restart still answers
-`EMPTY PACKAGE`, and after a coordinator restart the same operation is
-evaluated again. The SDK rehearsal's patch 0004, which made empty results
-durable, is not adopted; the retention of claim records is the owner's
-decision.
+The disposition is no change, and it leaves that gap open. An empty result
+stays recorded in memory under its operation, so an identical retry before a
+restart still answers `EMPTY PACKAGE`. It is never written to storage, so a
+coordinator restart drops it, and the same operation is then evaluated
+again, even when the restart comes well within `KEY_PACKAGE_CLAIM_TIMEOUT`
+of the first claim. The SDK rehearsal's patch 0004, which made empty
+results durable, is not adopted; the retention of claim records is the
+owner's decision.
 
 ## Limitations
 
