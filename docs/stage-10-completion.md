@@ -214,6 +214,11 @@ that lets a bounded database grow, the resume of a construction stopped before
 its target existed, and the exact resume at a refused target batch (STO-07,
 issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
+The public OPAQUE profile and client modules of the auth crate, which give
+a client the coordinator's exact suite, key-stretching function, context and
+identities and the client half of registration and login (X-08, SDK program,
+outside master #35), are recorded in
+[the OPAQUE client profile record](stage-10-opaque-client-profile.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
