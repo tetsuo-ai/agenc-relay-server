@@ -303,3 +303,39 @@ fn packages_are_one_use_and_claims_are_idempotent() -> Result<(), DirectoryError
     assert!(!DirectoryError::Overflow.to_string().is_empty());
     Ok(())
 }
+
+#[test]
+fn a_stored_claim_keeps_the_parameters_it_was_made_with() -> Result<(), DirectoryError> {
+    let mut directory = provisioned()?;
+    let now = 1_000;
+    directory.publish_package(vec![1], package(DEVICE_B, 1, now + 7_200), now)?;
+    let target_b = ClaimParameters {
+        target_account_digest: ACCOUNT,
+        target_device_id: DEVICE_B,
+        suite: 1,
+    };
+    let claimant = [7; 32];
+    let claimed = directory.claim_package(claimant, [1; 16], target_b, now)?;
+    let target_a = ClaimParameters {
+        target_device_id: DEVICE_A,
+        ..target_b
+    };
+    let empty = directory.claim_package(claimant, [2; 16], target_a, now)?;
+    assert_eq!(empty, ClaimOutcome::Unavailable);
+    assert_eq!(
+        directory.stored_claim(&claimant, &[1; 16]),
+        Some((target_b, &claimed))
+    );
+    assert_eq!(
+        directory.stored_claim(&claimant, &[2; 16]),
+        Some((target_a, &ClaimOutcome::Unavailable))
+    );
+    assert_eq!(directory.stored_claim(&claimant, &[3; 16]), None);
+    assert_eq!(directory.stored_claim(&[8; 32], &[1; 16]), None);
+    directory.restore_claim(claimant, [4; 16], target_a, ClaimOutcome::Unavailable, now);
+    assert_eq!(
+        directory.stored_claim(&claimant, &[4; 16]),
+        Some((target_a, &ClaimOutcome::Unavailable))
+    );
+    Ok(())
+}

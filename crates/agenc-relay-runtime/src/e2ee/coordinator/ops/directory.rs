@@ -756,18 +756,20 @@ pub fn claim_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     Ok(outcome)
 }
 
-/// `claim_status`.
+/// `claim_status`: the stored result of the original claim, whose device is
+/// the claim's target rather than the device that asks (companion 11.6).
 pub fn claim_status(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let operation_id = exec.params().read(|reader| reader.fixed::<16>())?;
     let claimant = exec.account_digest()?;
-    let claim = exec
+    let (device, claim) = exec
         .coordinator
         .state
         .directory
-        .claim_status(&claimant, &operation_id)
-        .cloned()
-        .unwrap_or(ClaimOutcome::Unavailable);
-    let device = exec.origin.device.map_or([0; 16], |(device, _)| device);
+        .stored_claim(&claimant, &operation_id)
+        .map_or(
+            ([0; 16], ClaimOutcome::Unavailable),
+            |(parameters, claim)| (parameters.target_device_id, claim.clone()),
+        );
     claimed(exec, device, &claim)
 }
 

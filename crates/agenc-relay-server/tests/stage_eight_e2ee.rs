@@ -98,6 +98,8 @@ const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "stage_eight_e2ee/claim_restart.rs"]
+mod claim_restart;
 #[path = "stage_eight_e2ee/close_authority.rs"]
 mod close_authority;
 #[path = "stage_eight_e2ee/credential_bounds.rs"]
@@ -4172,7 +4174,10 @@ mod real_clients {
     }
 
     /// Claims one package of `target` under the claim nonce `nonce`, so a
-    /// second claim for the same device is a distinct request.
+    /// second claim for the same device is a distinct request. The claimant
+    /// then asks `CLAIM STATUS` for the same operation, as after a lost
+    /// reply, and receives the stored result of the claim: the target's
+    /// device, reference and object, not its own device (companion 11.6).
     pub(super) fn claim_package_with(
         client: &mut ArcClient,
         claimant: &mut Principal,
@@ -4188,7 +4193,30 @@ mod real_clients {
         ))?;
         let reply = labeled_reply(client, &label)?;
         assert_contains(&reply, " EKEY CLAIMED ")?;
-        mls_body(&batch_object(&reply)?, ArcWireObjectKind::KeyPackageMls)
+        let claimed = claimed_words(&reply)?;
+        assert_eq!(claimed.get(3), Some(&target.device_token()), "{claimed:?}");
+        let object = batch_object(&reply)?;
+        let label = claimant.label();
+        client.send(&format!(
+            "@label={label} EKEY CLAIM STATUS {}",
+            base64url_encode(&nonce)
+        ))?;
+        let status = labeled_reply(client, &label)?;
+        assert_eq!(claimed_words(&status)?, claimed, "{status:?}");
+        assert_eq!(batch_object(&status)?, object);
+        mls_body(&object, ArcWireObjectKind::KeyPackageMls)
+    }
+
+    /// The words of the `EKEY CLAIMED` metadata line of a claim reply.
+    pub(super) fn claimed_words(reply: &[String]) -> TestResult<Vec<String>> {
+        reply
+            .iter()
+            .map(|line| words(line))
+            .find(|words| {
+                words.get(1).is_some_and(|word| word == "EKEY")
+                    && words.get(2).is_some_and(|word| word == "CLAIMED")
+            })
+            .ok_or_else(|| failure(format!("no EKEY CLAIMED line in {reply:?}")))
     }
 
     /// Delivers `welcome` to `target` under the finalization that added it,

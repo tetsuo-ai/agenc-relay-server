@@ -220,6 +220,11 @@ or `ABORTED`, and the untagged ACK notice or terminal broadcast the edge no
 longer sends to the connection whose request it completes (SC-013, SDK
 program, outside master #35), are recorded in
 [the requester replies record](stage-10-e2ee-requester-replies.md).
+`EKEY CLAIM STATUS` answered with the claim's stored target device instead of
+the asking device, and the disposition that leaves an empty claim result
+re-evaluated after a coordinator restart (SC-001 and SC-002, SDK program,
+outside master #35), are recorded in
+[the claim status record](stage-10-claim-status-target.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

@@ -605,6 +605,20 @@ impl Directory {
             .map(|record| &record.outcome)
     }
 
+    /// The parameters and outcome stored for a claim operation: the result
+    /// `CLAIM STATUS` returns names the original claim's target, not the
+    /// device that asks (companion 11.6).
+    #[must_use]
+    pub fn stored_claim(
+        &self,
+        claimant_digest: &Id,
+        operation_id: &Id16,
+    ) -> Option<(ClaimParameters, &ClaimOutcome)> {
+        self.claims
+            .get(&(*claimant_digest, *operation_id))
+            .map(|record| (record.parameters, &record.outcome))
+    }
+
     /// Published packages of one device.
     #[must_use]
     pub fn stock(&self, account_digest: &Id, device_id: &Id16) -> usize {
