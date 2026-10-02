@@ -9,7 +9,9 @@
 //! create` publishes the sequencer credentials every node names, so no
 //! node's database, keys or credentials document comes from a library
 //! initializer or a testkit builder; the TLS certificates come from the
-//! test CA, as an operator's come from its CA.
+//! test CA, as an operator's come from its CA, and the federation signing
+//! public keys the peer records pin are derived from the seeds `init`
+//! wrote, because no `arcd` command prints them.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -629,13 +631,15 @@ fn a_cli_initialized_edge_serves_links_and_advertises_e2ee() -> TestResult {
     Ok(())
 }
 
-/// AUD-02: a coordinator and two edges provisioned only through `arcd`
-/// (`init`, `print-onboarding` and `sequencer-credentials create`) plus the
+/// AUD-02: a coordinator and two edges provisioned through `arcd` (`init`,
+/// `print-onboarding` and `sequencer-credentials create`) plus the
 /// operator's TLS, federation and E2EE edits: both edges link, advertise the
 /// encrypted profile and the coordinator's recovery epoch, and register a
-/// client.
+/// client. No `arcd` command prints a federation signing public key, so each
+/// peer record's key is derived from the seed `init` wrote, as an operator
+/// derives it with another tool.
 #[test]
-fn a_network_provisioned_only_with_arcd_links_and_advertises_e2ee() -> TestResult {
+fn a_network_provisioned_through_arcd_links_and_advertises_e2ee() -> TestResult {
     let network = provision_cli_network(&["edge-a.test", "edge-b.test"])?;
     let mut coordinator = CliDaemon::start(&network.coordinator)?;
     let mut daemons = Vec::new();

@@ -90,14 +90,14 @@ and no dependency is added: the runtime already depends on
   required, values are canonical, other subcommands print the usage, and an
   unknown service user is refused before any file is read.
 - `stage_zero_refusal`: the usage text names the command.
-- `stage_eight_e2ee::cli_provisioning::a_network_provisioned_only_with_arcd_links_and_advertises_e2ee`:
+- `stage_eight_e2ee::cli_provisioning::a_network_provisioned_through_arcd_links_and_advertises_e2ee`:
   a coordinator and two edges created by `arcd init`, the coordinator's
   credentials created by `arcd sequencer-credentials create` under umask 077
   (mode 0644, and byte-equal to the testkit document for the key `init`
-  wrote), and each edge's
-  `print-onboarding` naming the printed generation and hash. Both edges
-  link, advertise `agenc.ag/e2ee-mls` and the coordinator's recovery epoch,
-  and register a client. The AUD-01 daemon case uses the same provisioning.
+  wrote), and each edge's `print-onboarding` naming the printed generation
+  and hash. Both edges link, advertise `agenc.ag/e2ee-mls` and the
+  coordinator's recovery epoch, and register a client. The AUD-01 daemon
+  case uses the same provisioning.
 
 With the command's dispatch disabled, the CLI parser case and both daemon
 cases fail, the daemon cases at their first `arcd sequencer-credentials` call
@@ -123,8 +123,23 @@ the document in the private directory below the group-writable one.
   their TLS certificates come from the test CA, as an operator's come from
   its CA, and each `[[federation.peer]]` record's `signing_public_key` is
   derived from the seed `init` wrote, because no `arcd` command prints a
-  federation signing public key; the operator guide says so.
+  federation signing public key; the operator guide says so. The network is
+  therefore provisioned through `arcd` but not only with it, and the daemon
+  case is named accordingly. An `arcd` output for that key, for example an
+  additive init receipt line, is left for the owner.
 - The command sets the document's mode, not its owner: the file belongs to
   the account that ran the command. The daemon's protected read accepts a
   file owned by root or by the service account, so the command runs as one
   of them, as the guide runs every offline command.
+- Its refusals reuse the closed offline error set: an existing output is
+  refused with `initialization target already exists`, the set's message
+  for an existing target, although the command is not `init`. The operator
+  guide names that message.
+- No normative text covers the command. Section 22.3 states the
+  offline-command trust rule for `check-config`, `print-onboarding` and
+  `account-invite create` and says that each of the three accepts
+  `--service-user`; Appendix C.7 defines the document without naming a
+  producer. The command follows both, but it is outside the frozen
+  specification: its text is listed for the owner or a later normative
+  revision, and the program's normative revision (decision D-10) does not
+  take it.
