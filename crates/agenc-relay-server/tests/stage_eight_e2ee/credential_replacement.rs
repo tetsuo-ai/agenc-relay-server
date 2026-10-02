@@ -7,8 +7,8 @@ use agenc_relay_auth::{CredentialChangeFinish, CredentialChangeStart};
 const REPLACEMENT: &[u8] = b"a different credential for the edge regression";
 
 fn replace(client: &mut ArcClient, fixture: &NodeFixture, account_id: AccountId) -> TestResult {
-    let mut rng = TestOpaqueRng::new();
-    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, REPLACEMENT)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, REPLACEMENT)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -39,17 +39,17 @@ fn replace(client: &mut ArcClient, fixture: &NodeFixture, account_id: AccountId)
     let finish = registration.state.finish(
         &mut rng,
         REPLACEMENT,
-        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+        RegistrationResponse::<AgencOpaqueSuite>::deserialize(
             response.expose_for_account_response(),
         )?,
         ClientRegistrationFinishParameters::new(
             opaque_identifiers(&NETWORK_ID, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let registration_record =
         finish_registration(finish.message.serialize().as_slice().try_into()?)?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
     let (finish, token) = seal_account_payload(
         fixture,
         NETWORK_ID,

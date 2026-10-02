@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use agenc_relay_auth::profile::{
+    AgencOpaqueSuite, FallibleOpaqueRng, FixedArgon2id, opaque_context, opaque_identifiers,
+};
 use agenc_relay_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountRequestPayload,
     AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
@@ -73,17 +76,11 @@ use agenc_relay_types::{
     AccountId, AccountServiceCompletionStatus, DatabaseId, NetworkId, NormalizedLogin,
     OpaqueCredentialId, OperatorId, RecoveryEpoch, RequestId, ServerId, ServerIncarnation,
 };
-use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use opaque_ke::errors::InternalError;
-use opaque_ke::generic_array::{ArrayLength, GenericArray};
-use opaque_ke::ksf::Ksf;
-use opaque_ke::rand::{CryptoRng, Error as RandError, RngCore};
 use opaque_ke::{
-    CipherSuite, ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
-    Ristretto255, TripleDh,
+    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+    ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -1297,7 +1294,6 @@ const ACCOUNT_HPKE_PRIVATE: [u8; 32] = [33; 32];
 /// envelope binds to it.
 const COORDINATOR_RECOVERY_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([22; 16]);
 const ACCOUNT_PASSWORD: &[u8] = b"stage eight account password";
-const TEST_ARGON2_SALT: [u8; 16] = [0; 16];
 const AUTH_CHUNK_CHARACTERS: usize = 400;
 const ACCOUNT_REQUEST_CHARACTERS: usize = 6_302;
 const ACCOUNT_RESPONSE_CHARACTERS: usize = 5_790;
@@ -1349,98 +1345,11 @@ fn apply_e2ee_overrides(
     Ok(())
 }
 
-struct TestOpaqueSuite;
-
-impl CipherSuite for TestOpaqueSuite {
-    type OprfCs = Ristretto255;
-    type KeyExchange = TripleDh<Ristretto255, opaque_sha2::Sha512>;
-    type Ksf = TestArgon2id;
-}
-
-#[derive(Default)]
-struct TestArgon2id;
-
-impl Ksf for TestArgon2id {
-    fn hash<L: ArrayLength<u8>>(
-        &self,
-        input: GenericArray<u8, L>,
-    ) -> Result<GenericArray<u8, L>, InternalError> {
-        if input.len() != 64 {
-            return Err(InternalError::KsfError);
-        }
-        let parameters =
-            Params::new(65_536, 3, 4, Some(64)).map_err(|_| InternalError::KsfError)?;
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, parameters);
-        let mut output = GenericArray::default();
-        argon2
-            .hash_password_into(&input, &TEST_ARGON2_SALT, &mut output)
-            .map_err(|_| InternalError::KsfError)?;
-        Ok(output)
-    }
-}
-
-struct TestOpaqueRng {
-    failed: bool,
-}
-
-impl TestOpaqueRng {
-    const fn new() -> Self {
-        Self { failed: false }
-    }
-
-    fn fill_or_latch(&mut self, destination: &mut [u8]) {
-        if self.failed || OsEntropy::fill(destination).is_err() {
-            destination.fill(0);
-            self.failed = true;
-        }
-    }
-
-    fn require_success(&self) -> TestResult {
-        if self.failed {
-            Err(failure("test OPAQUE entropy was unavailable"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl RngCore for TestOpaqueRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0; 4];
-        self.fill_or_latch(&mut bytes);
-        u32::from_be_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0; 8];
-        self.fill_or_latch(&mut bytes);
-        u64::from_be_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, destination: &mut [u8]) {
-        self.fill_or_latch(destination);
-    }
-
-    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandError> {
-        self.fill_or_latch(destination);
+fn require_entropy(rng: &FallibleOpaqueRng<OsEntropy>) -> TestResult {
+    if rng.succeeded() {
         Ok(())
-    }
-}
-
-impl CryptoRng for TestOpaqueRng {}
-fn opaque_context(network_id: NetworkId) -> Vec<u8> {
-    let mut context = b"agenc-chat account authentication v1".to_vec();
-    context.extend_from_slice(network_id.as_bytes());
-    context
-}
-
-fn opaque_identifiers<'a>(
-    network_id: &'a NetworkId,
-    credential_id: &'a OpaqueCredentialId,
-) -> Identifiers<'a> {
-    Identifiers {
-        client: Some(credential_id.expose_for_account_service()),
-        server: Some(network_id.as_bytes()),
+    } else {
+        Err(failure("test OPAQUE entropy was unavailable"))
     }
 }
 
@@ -1855,8 +1764,8 @@ fn create_live_account_with(
     requests: [RequestId; 2],
 ) -> TestResult<AccountId> {
     let [start_request, finish_request] = requests;
-    let mut rng = TestOpaqueRng::new();
-    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -1888,12 +1797,12 @@ fn create_live_account_with(
     let registration_finish = registration.state.finish(
         &mut rng,
         ACCOUNT_PASSWORD,
-        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+        RegistrationResponse::<AgencOpaqueSuite>::deserialize(
             response.expose_for_account_response(),
         )?,
         ClientRegistrationFinishParameters::new(
             opaque_identifiers(&NETWORK_ID, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let registration_record = finish_registration(
@@ -1903,7 +1812,7 @@ fn create_live_account_with(
             .as_slice()
             .try_into()?,
     )?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
 
     let (finish_envelope, finish_token) = seal_account_payload(
         fixture,
@@ -1962,8 +1871,8 @@ fn authenticate_live_account_with(
     expected_account: AccountId,
 ) -> TestResult {
     let [start_request, finish_request] = requests;
-    let mut rng = TestOpaqueRng::new();
-    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let login = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (start_envelope, start_token) = seal_account_payload(
         fixture,
@@ -1985,19 +1894,19 @@ fn authenticate_live_account_with(
     else {
         return Err(failure("authentication returned the wrong challenge"));
     };
-    let context = opaque_context(NETWORK_ID);
+    let context = opaque_context(&NETWORK_ID);
     let login_finish = login.state.finish(
         &mut rng,
         password,
-        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        CredentialResponse::<AgencOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
         ClientLoginFinishParameters::new(
             Some(&context),
             opaque_identifiers(&NETWORK_ID, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
     let (finish_envelope, finish_token) = seal_account_payload(
         fixture,
         NETWORK_ID,

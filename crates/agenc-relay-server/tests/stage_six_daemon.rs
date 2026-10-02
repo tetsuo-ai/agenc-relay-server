@@ -42,6 +42,9 @@ use agenc_relay_admin::{
     AdminChallenge, AdminCommandTbs, AdminSessionId, Challenge, ConfirmationToken,
     TransportBinding, TransportKind, decode_fixed_base64url, encode_base64url, render_admin_tag,
 };
+use agenc_relay_auth::profile::{
+    AgencOpaqueSuite, FallibleOpaqueRng, FixedArgon2id, opaque_context, opaque_identifiers,
+};
 use agenc_relay_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountRequestPayload,
     AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
@@ -73,20 +76,14 @@ use agenc_relay_storage::{
 use agenc_relay_testkit::TlsFixture;
 use agenc_relay_types::{
     AccountId, AccountRandomId, AccountServiceCompletionStatus, ChannelInstanceId, DatabaseId,
-    NetworkId, NormalizedLogin, OpaqueCredentialId, OperatorId, RecoveryEpoch, RequestId, ServerId,
-    ServerIncarnation, UserId,
+    NetworkId, NormalizedLogin, OperatorId, RecoveryEpoch, RequestId, ServerId, ServerIncarnation,
+    UserId,
 };
-use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use opaque_ke::errors::InternalError;
-use opaque_ke::generic_array::{ArrayLength, GenericArray};
-use opaque_ke::ksf::Ksf;
-use opaque_ke::rand::{CryptoRng, Error as RandError, RngCore};
 use opaque_ke::{
-    CipherSuite, ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
-    Ristretto255, TripleDh,
+    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+    ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -94,6 +91,8 @@ use rustls::{ClientConfig, ClientConnection, StreamOwned};
 type TestError = Box<dyn Error + Send + Sync>;
 type TestResult<T = ()> = Result<T, TestError>;
 type TlsClient = StreamOwned<ClientConnection, TcpStream>;
+/// The public profile's latched OPAQUE random-number adapter over the operating system.
+type OpaqueClientRng = FallibleOpaqueRng<OsEntropy>;
 
 const DNS_NAME: &str = "node.test";
 const ADMIN_EXPORTER_LABEL: &[u8] = b"EXPORTER-agenc-chat-admin-v1";
@@ -132,7 +131,6 @@ const DIAGNOSTIC_ENTRIES: usize = 256;
 const ACCOUNT_HPKE_PRIVATE: [u8; 32] = [14; 32];
 const ACCOUNT_PASSWORD: &[u8] = b"stage six live account password";
 const REPLACEMENT_PASSWORD: &[u8] = b"stage six replacement password";
-const TEST_ARGON2_SALT: [u8; 16] = [0; 16];
 const AUTH_CHUNK_CHARACTERS: usize = 400;
 const ACCOUNT_REQUEST_CHARACTERS: usize = 6_302;
 const ACCOUNT_RESPONSE_CHARACTERS: usize = 5_790;
@@ -141,103 +139,15 @@ const SASL_RESPONSE_CHARACTERS: usize = 5_792;
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-struct TestOpaqueSuite;
-
-impl CipherSuite for TestOpaqueSuite {
-    type OprfCs = Ristretto255;
-    type KeyExchange = TripleDh<Ristretto255, opaque_sha2::Sha512>;
-    type Ksf = TestArgon2id;
-}
-
-#[derive(Default)]
-struct TestArgon2id;
-
-impl Ksf for TestArgon2id {
-    fn hash<L: ArrayLength<u8>>(
-        &self,
-        input: GenericArray<u8, L>,
-    ) -> Result<GenericArray<u8, L>, InternalError> {
-        if input.len() != 64 {
-            return Err(InternalError::KsfError);
-        }
-        let parameters =
-            Params::new(65_536, 3, 4, Some(64)).map_err(|_| InternalError::KsfError)?;
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, parameters);
-        let mut output = GenericArray::default();
-        argon2
-            .hash_password_into(&input, &TEST_ARGON2_SALT, &mut output)
-            .map_err(|_| InternalError::KsfError)?;
-        Ok(output)
-    }
-}
-
-struct TestOpaqueRng {
-    failed: bool,
-}
-
-impl TestOpaqueRng {
-    const fn new() -> Self {
-        Self { failed: false }
-    }
-
-    fn fill_or_latch(&mut self, destination: &mut [u8]) {
-        if self.failed || OsEntropy::fill(destination).is_err() {
-            destination.fill(0);
-            self.failed = true;
-        }
-    }
-
-    fn require_success(&self) -> TestResult {
-        if self.failed {
-            Err(failure("test OPAQUE entropy was unavailable"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl RngCore for TestOpaqueRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0; 4];
-        self.fill_or_latch(&mut bytes);
-        u32::from_be_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0; 8];
-        self.fill_or_latch(&mut bytes);
-        u64::from_be_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, destination: &mut [u8]) {
-        self.fill_or_latch(destination);
-    }
-
-    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandError> {
-        self.fill_or_latch(destination);
-        Ok(())
-    }
-}
-
-impl CryptoRng for TestOpaqueRng {}
-
 fn failure(message: impl Into<String>) -> TestError {
     io::Error::other(message.into()).into()
 }
 
-fn opaque_context(network_id: NetworkId) -> Vec<u8> {
-    let mut context = b"agenc-chat account authentication v1".to_vec();
-    context.extend_from_slice(network_id.as_bytes());
-    context
-}
-
-fn opaque_identifiers<'a>(
-    network_id: &'a NetworkId,
-    credential_id: &'a OpaqueCredentialId,
-) -> Identifiers<'a> {
-    Identifiers {
-        client: Some(credential_id.expose_for_account_service()),
-        server: Some(network_id.as_bytes()),
+fn require_entropy(rng: &OpaqueClientRng) -> TestResult {
+    if rng.succeeded() {
+        Ok(())
+    } else {
+        Err(failure("test OPAQUE entropy was unavailable"))
     }
 }
 
@@ -1798,8 +1708,8 @@ fn committed_account(completion: Completion, expected: Option<AccountId>) -> Tes
 }
 
 fn create_live_account(client: &mut ArcClient, fixture: &LiveFixture) -> TestResult<AccountId> {
-    let mut rng = TestOpaqueRng::new();
-    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -1830,12 +1740,12 @@ fn create_live_account(client: &mut ArcClient, fixture: &LiveFixture) -> TestRes
     let registration_finish = registration.state.finish(
         &mut rng,
         ACCOUNT_PASSWORD,
-        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+        RegistrationResponse::<AgencOpaqueSuite>::deserialize(
             response.expose_for_account_response(),
         )?,
         ClientRegistrationFinishParameters::new(
             opaque_identifiers(&fixture.network_id, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let registration_record = finish_registration(
@@ -1845,7 +1755,7 @@ fn create_live_account(client: &mut ArcClient, fixture: &LiveFixture) -> TestRes
             .as_slice()
             .try_into()?,
     )?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
 
     let (finish_envelope, finish_token) = seal_account_payload(
         fixture.network_id,
@@ -1883,8 +1793,8 @@ fn authenticate_live_account(
     request_seed: u8,
     expected_account: AccountId,
 ) -> TestResult {
-    let mut rng = TestOpaqueRng::new();
-    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let login = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (start_envelope, start_token) = seal_account_payload(
         fixture.network_id,
@@ -1905,19 +1815,19 @@ fn authenticate_live_account(
     else {
         return Err(failure("authentication returned the wrong challenge"));
     };
-    let context = opaque_context(fixture.network_id);
+    let context = opaque_context(&fixture.network_id);
     let login_finish = login.state.finish(
         &mut rng,
         password,
-        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        CredentialResponse::<AgencOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
         ClientLoginFinishParameters::new(
             Some(&context),
             opaque_identifiers(&fixture.network_id, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
     let finish_seed = request_seed
         .checked_add(1)
         .ok_or_else(|| failure("authentication request seed overflow"))?;
@@ -1947,9 +1857,9 @@ fn replace_live_credential(
     fixture: &LiveFixture,
     account_id: AccountId,
 ) -> TestResult {
-    let mut rng = TestOpaqueRng::new();
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
     let registration =
-        ClientRegistration::<TestOpaqueSuite>::start(&mut rng, REPLACEMENT_PASSWORD)?;
+        ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, REPLACEMENT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -1979,12 +1889,12 @@ fn replace_live_credential(
     let registration_finish = registration.state.finish(
         &mut rng,
         REPLACEMENT_PASSWORD,
-        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+        RegistrationResponse::<AgencOpaqueSuite>::deserialize(
             response.expose_for_account_response(),
         )?,
         ClientRegistrationFinishParameters::new(
             opaque_identifiers(&fixture.network_id, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let registration_record = finish_registration(
@@ -1994,7 +1904,7 @@ fn replace_live_credential(
             .as_slice()
             .try_into()?,
     )?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
     let (finish_envelope, finish_token) = seal_account_payload(
         fixture.network_id,
         46,
@@ -2298,7 +2208,7 @@ fn stopped_runtime_check_rejects_cross_purpose_public_identity_reuse() -> TestRe
         .expose()
         .try_into()
         .map_err(|_| failure("fixture OPAQUE setup has the wrong length"))?;
-    let parsed_setup = opaque_ke::ServerSetup::<TestOpaqueSuite>::deserialize(setup)?;
+    let parsed_setup = opaque_ke::ServerSetup::<AgencOpaqueSuite>::deserialize(setup)?;
     let opaque_public: [u8; 32] = parsed_setup
         .keypair()
         .public()
@@ -2639,11 +2549,11 @@ fn authentication_start_envelope(
 ) -> TestResult<(
     [u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
     AccountResponseOpenToken,
-    ClientLogin<TestOpaqueSuite>,
-    TestOpaqueRng,
+    ClientLogin<AgencOpaqueSuite>,
+    OpaqueClientRng,
 )> {
-    let mut rng = TestOpaqueRng::new();
-    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let login = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (envelope, token) = seal_account_payload(
         fixture.network_id,
@@ -2681,15 +2591,15 @@ fn production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion() -
     else {
         return Err(failure("authentication returned the wrong challenge"));
     };
-    let context = opaque_context(fixture.network_id);
+    let context = opaque_context(&fixture.network_id);
     let login_finish = login_state.finish(
         &mut rng,
         ACCOUNT_PASSWORD,
-        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        CredentialResponse::<AgencOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
         ClientLoginFinishParameters::new(
             Some(&context),
             opaque_identifiers(&fixture.network_id, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
@@ -2968,8 +2878,8 @@ fn credential_and_lookup_edges(fixture: &LiveFixture) -> TestResult {
     unknown
         .negotiate_sasl()
         .map_err(|error| failure(format!("unknown negotiate: {error}")))?;
-    let mut rng = TestOpaqueRng::new();
-    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let login = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (start_envelope, start_token) = seal_account_payload(
         fixture.network_id,
@@ -2994,15 +2904,15 @@ fn credential_and_lookup_edges(fixture: &LiveFixture) -> TestResult {
     else {
         return Err(failure("unknown login did not receive a challenge"));
     };
-    let context = opaque_context(fixture.network_id);
+    let context = opaque_context(&fixture.network_id);
     let finish = login.state.finish(
         &mut rng,
         ACCOUNT_PASSWORD,
-        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        CredentialResponse::<AgencOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
         ClientLoginFinishParameters::new(
             Some(&context),
             opaque_identifiers(&fixture.network_id, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     );
     // The client cannot complete against a fake record; send a structurally
@@ -3030,9 +2940,9 @@ fn credential_and_lookup_edges(fixture: &LiveFixture) -> TestResult {
     early
         .negotiate_sasl()
         .map_err(|error| failure(format!("early negotiate: {error}")))?;
-    let mut rng = TestOpaqueRng::new();
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
     let registration =
-        ClientRegistration::<TestOpaqueSuite>::start(&mut rng, REPLACEMENT_PASSWORD)?;
+        ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, REPLACEMENT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
