@@ -12,6 +12,13 @@ exists for it. SC-007 has three parts, worked in this order:
 | `900` after a post-registration login, and `ACCOUNT` to `account-notify` peers, on a coordinator or standalone node | Section 11.4 | Implemented |
 | The same for a session an edge homes, and `ACCOUNT` to the peers other edges home | Section 11.4 | Not implemented |
 
+The login of a session an edge homes also needed two corrections on the path
+it takes through the coordinator. Each has its own commit and regression:
+
+| Correction | Specification | State at this revision |
+| --- | --- | --- |
+| A recomputed channel membership keeps the revision it joined at on the federation wire | Section 20.6 | Implemented |
+
 No specification text, wire registry, profile hash, persistent format or
 dependency changes. No Stage 10 task box changes.
 
@@ -170,6 +177,35 @@ The account service now renders a registered session's successful finish with
 
 No `901` is sent on logout, and a logout is unchanged.
 
+## Account switches of channel members on a federated network
+
+An account switch rewrites the session's membership in every channel it
+joined and advances each of those channels, so the coordinator projects one
+`channel_memberships_recomputed` event per joined channel to every edge with
+a member in it. The domain keeps each membership at the accepted revision it
+joined at: that revision is immutable, fences history reads, and is what the
+coordinator's history authorization tuple and the edges' copies carry. The
+federation codec's semantic check `validate_membership_recompute` required
+every membership in the event to carry the event's resulting revision
+instead. The projector therefore could not encode the event, the coordinator
+refused to stage the switch, and a session that shared a channel with any
+member an edge homes could neither log in after registration (its node
+answered `904`) nor log out, whichever node homed it.
+
+Section 20.6 does not ask for the equality: the recompute arm, like PART,
+KICK, mode and topic, "carries the resulting revision explicitly", while
+`member_joined` is the event that uses its membership revision as the
+resulting one. The check now binds each recomputed membership to the event's
+channel and requires its revision to be nonzero and not above the resulting
+revision. Both the coordinator's encoder and an edge's decoder apply it. The
+account-grant recompute of a registered channel (a prefix mode on an
+authenticated target) is encoded under the same rule. No producer, schema,
+registry, vector or profile hash changes.
+
+Compatibility: an edge built from 70c832c or earlier still requires the
+equality when it decodes such an event, so it refuses the event a corrected
+coordinator sends; the coordinator and its edges are upgraded together.
+
 ## The regressions
 
 | Test | What it pins |
@@ -231,6 +267,20 @@ reads the `900` after the `903` of such a connection, so the account edge
 exercise's reauthentication after a wrong deletion token checks its `900`
 too.
 
+The recomputed membership revision:
+
+| Test | What it pins |
+| --- | --- |
+| `semantics::tests::a_recomputed_membership_keeps_the_revision_it_joined_at` | Membership revisions 1, 8 and 9 under resulting revision 9 are accepted; 0 and 10 are refused. |
+| `semantics::tests::recomputed_memberships_bind_the_outer_channel_and_revision` | Unchanged: a membership of another channel, a zero resulting revision and a membership above it are refused. |
+| `federation::codec::tests::recompute::a_recomputed_membership_round_trips_at_the_revision_it_joined_at` | The runtime codec encodes a membership joined at 3 under resulting revision 7 and decodes it back unchanged; one joined at 8 is refused. |
+| `federation::codec::tests::recompute::a_member_edge_receives_the_recompute_of_its_member_login` | The coordinator's projector encodes the login of a guest an edge homes, alone in a channel, for that edge. |
+
+With the equality restored, the three new tests fail and the unchanged one
+passes; restored, all four pass. A temporary, uncommitted daemon scenario (a
+guest on one edge and a peer on the other in the same channel, then the
+guest's login) read `904` with the equality and `903` with the correction.
+
 The Stage 08 edge test keeps every registered connection open until its
 scenario ends.
 
@@ -266,6 +316,12 @@ Sources:
 - `crates/agenc-relay-runtime/src/mutation_render.rs` (`logged_in`,
   `render_account_login`)
 - `crates/agenc-relay-runtime/src/account_service.rs` (`stage_finish`)
+- `docs/arc-architecture-and-implementation-spec.md` Section 20.6
+- `crates/agenc-relay-federation-wire/src/semantics.rs`
+  (`validate_membership_recompute`) and `src/tests/semantics.rs`
+- `crates/agenc-relay-domain/src/federation/projection.rs`
+  (`project_member_authority`, `project_recompute`)
+- `crates/agenc-relay-runtime/src/federation/codec/tests/recompute.rs`
 - `crates/agenc-relay-runtime/src/tests/account_login_render.rs`
 - `crates/agenc-relay-server/tests/stage_six_daemon/login_after_registration.rs`
 - `crates/agenc-relay-runtime/src/federation/edge/mod.rs`
@@ -319,4 +375,11 @@ cargo nextest run -p agenc-relay-runtime -p agenc-relay-server --all-features --
   -E 'test(account_login_render) | test(login_after_registration) | test(production_daemon_account_edges_cover_replay_mismatch_logout_and_deletion)'
 # 6 passed; the account service rendering as before: 2 failed, 4 passed;
 # no 900: 4 failed, 2 passed; no ACCOUNT line: 3 failed, 3 passed
+
+# the recomputed membership revision, on the tree of its commit
+cargo nextest run --workspace --all-features --locked
+# 4535 tests run: 4535 passed, 24 skipped
+cargo nextest run -p agenc-relay-runtime -p agenc-relay-federation-wire --all-features --locked \
+  -E 'test(recompute) | test(recomputed)'
+# 4 passed; with the equality restored: 3 failed, 1 passed
 ```

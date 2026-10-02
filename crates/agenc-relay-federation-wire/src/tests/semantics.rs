@@ -1949,6 +1949,29 @@ fn recomputed_memberships_bind_the_outer_channel_and_revision() {
     assert_eq!(recompute(1, 2, 1, 3), Err(CodecError::CrossReference));
 }
 
+/// Architecture 20.6: a recompute carries its resulting revision explicitly,
+/// and the account switch and the account-grant recompute keep each
+/// membership at the revision it joined at, which only that resulting
+/// revision bounds.
+#[test]
+fn a_recomputed_membership_keeps_the_revision_it_joined_at() {
+    let recompute = |member_revision| {
+        let mut memberships = Some(vec![membership_view(1, 1, member_revision)]);
+        validate("event.channel_memberships_recomputed", |name| match name {
+            "channel_instance_id" => Some(opaque([1; 16])),
+            "resulting_revision" => Some(unsigned(9)),
+            "memberships" => Some(WireValue::Vector(memberships.take().unwrap_or_default())),
+            _ => None,
+        })
+    };
+
+    assert_eq!(recompute(1), Ok(()));
+    assert_eq!(recompute(8), Ok(()));
+    assert_eq!(recompute(9), Ok(()));
+    assert_eq!(recompute(0), Err(CodecError::CrossReference));
+    assert_eq!(recompute(10), Err(CodecError::CrossReference));
+}
+
 #[test]
 fn event_target_binding_skips_unrelated_fields_and_rejects_short_projections() {
     let envelope_schema = schema("FederationEvent");

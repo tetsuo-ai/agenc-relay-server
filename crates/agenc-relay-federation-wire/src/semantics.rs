@@ -1251,7 +1251,11 @@ fn validate_membership_recompute(
             opaque_field(membership.schema, &membership.fields, "channel_instance_id")?;
         let member_revision =
             unsigned_field(membership.schema, &membership.fields, "membership_revision")?;
-        semantic(member_channel == channel && member_revision == revision)?;
+        // A recompute changes roles, not when a member joined: it carries its
+        // resulting revision explicitly, and each membership keeps the
+        // accepted revision it joined at, which that resulting revision can
+        // only follow (architecture 20.6).
+        semantic(member_channel == channel && member_revision != 0 && member_revision <= revision)?;
     }
     Ok(())
 }
