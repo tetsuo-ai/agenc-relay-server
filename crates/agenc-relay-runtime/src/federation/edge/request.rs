@@ -1701,6 +1701,19 @@ fn completed_request(
                     outcome: credential_outcome(result, &pending.replies),
                 }]
             } else {
+                if let ResultArm::Authenticated {
+                    account_id,
+                    account_session_generation,
+                    ..
+                } = &result
+                {
+                    declare_logged_in_account(
+                        edge,
+                        context,
+                        generation,
+                        (*account_id, *account_session_generation),
+                    );
+                }
                 vec![EdgeCompletion::AccountCarrier {
                     generation,
                     carrier_generation,
@@ -1791,6 +1804,32 @@ fn completed_request(
         completions.push(EdgeCompletion::SessionRevoked { generation });
     }
     completions
+}
+
+/// A registered connection's committed login replaces its security
+/// principal, so its origin declares the account in the next generation, and
+/// every later request of the connection waits for that declaration's
+/// acknowledgement and travels under it (architecture 20.7). A login before
+/// registration is declared by the session open instead, and a
+/// reauthentication to the account the origin already names changes nothing.
+fn declare_logged_in_account(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    account: (agenc_relay_types::AccountId, u64),
+) {
+    let Some(origin) = edge.origins.get_mut(&generation) else {
+        return;
+    };
+    if origin.deleted || origin.session.is_none() || origin.account == Some(account) {
+        return;
+    }
+    origin.account = Some(account);
+    if let Err(violation) = super::journal::queue_update(edge, generation) {
+        edge.fail_link(context, violation);
+        return;
+    }
+    declare_origin(edge, context, generation, true);
 }
 
 fn is_committed_account_deletion(

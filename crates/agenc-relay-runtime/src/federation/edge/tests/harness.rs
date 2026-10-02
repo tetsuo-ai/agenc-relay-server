@@ -3910,6 +3910,208 @@ mod accounts {
         })
         .await
     }
+
+    /// One SASL exchange from the mechanism selection to the client's `903`,
+    /// answered by the scripted coordinator as `account`. Returns the finish
+    /// request's header.
+    async fn authenticate(
+        hub: &mut Hub,
+        client: &mut Client,
+        account: AccountId,
+        seed: u8,
+        earlier_chunks: usize,
+    ) -> TestResult<RequestHeader> {
+        client.line("AUTHENTICATE AGENC-OPAQUE").await?;
+        let start = crate::test_support::sealed_authentication_start(
+            NETWORK,
+            RecoveryEpoch::from_bytes([34; 16]),
+            "quinn-account",
+            seed,
+        )?;
+        send_envelope(client, &start).await?;
+        let (header, _, bytes) = hub.next_request().await?;
+        let response = challenge_response()?;
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::AuthChallenge(response.try_clone()?),
+            Vec::new(),
+            None,
+        )
+        .await?;
+        wait_for_chunks(client, earlier_chunks, 15).await?;
+        let finish = crate::test_support::sealed_authentication_finish(
+            NETWORK,
+            RecoveryEpoch::from_bytes([34; 16]),
+            seed.wrapping_add(1),
+        )?;
+        send_envelope(client, &finish).await?;
+        let (header, operation, bytes) = hub.next_request().await?;
+        let FederatedOperation::AccountService {
+            opcode: FederationOpcode::OpaqueAuthFinish,
+            ..
+        } = operation
+        else {
+            return Err("expected a forwarded authentication finish".into());
+        };
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::Authenticated {
+                account_id: account,
+                account_session_generation: 1,
+                auth_grant_id: [9; 32],
+            },
+            response_chunks(&response)?,
+            None,
+        )
+        .await?;
+        wait_for_chunks(client, earlier_chunks.saturating_add(15), 15).await?;
+        Ok(header)
+    }
+
+    /// Architecture 20.7: a login, like a session registration, is the next
+    /// origin generation before any request under it. A registered guest's
+    /// committed login declares the account it now holds, and the
+    /// connection's next carrier waits for that declaration's
+    /// acknowledgement and travels under it, so the coordinator checks it
+    /// against the session's current account.
+    #[tokio::test]
+    async fn a_login_after_registration_declares_its_account_before_the_next_carrier() -> TestResult
+    {
+        run_edge(|federation, inbox| async move {
+            let mut hub = Hub::new(federation);
+            hub.establish().await?;
+            hub.synchronize().await?;
+            let mut client = Client::open(inbox, 1).await?;
+            hub.ack_origin().await?;
+            client.line("CAP LS 302").await?;
+            client.line("CAP REQ :sasl").await?;
+            client.line("NICK quinn").await?;
+            client.line("USER quinn 0 * :Quinn Real").await?;
+            client.line("CAP END").await?;
+            let (header, operation, bytes) = hub.next_request().await?;
+            let FederatedOperation::SessionOpen {
+                auth_grant_id: None,
+                ..
+            } = operation
+            else {
+                return Err("expected a guest session_open".into());
+            };
+            let session_id = SessionId::from_bytes([61; 16]);
+            let user_id = UserId::from_bytes([62; 16]);
+            hub.state_generation += 1;
+            let generation = hub.state_generation;
+            hub.event(
+                &ProjectedEvent::SessionVisible(SessionEventView {
+                    source: source(user_id, "quinn", 1)?,
+                    home_projection: Some(session_record(
+                        session_id, user_id, "quinn", generation, 1,
+                    )?),
+                }),
+                None,
+            )
+            .await?;
+            let completion = hub
+                .event(
+                    &ProjectedEvent::RequestCompleted {
+                        resulting_state_generation: generation,
+                    },
+                    Some(RequestCorrelation {
+                        replay_key: header.replay_key,
+                        request_id: header.request_id,
+                    }),
+                )
+                .await?;
+            hub.result(
+                &header,
+                &bytes,
+                &ResultArm::SessionRegistered(SessionRegistered {
+                    session_id,
+                    user_id,
+                    session_revision: generation,
+                    account: None,
+                    resulting_state_generation: generation,
+                }),
+                Vec::new(),
+                Some(completion),
+            )
+            .await?;
+            client.wait_for(" 001 quinn ").await?;
+            // Generation one carries the guest session.
+            hub.ack_origin().await?;
+
+            let account = AccountId::parse("a_AAAAAAAAAAAAAAAAAAAAAA")?;
+            let login = authenticate(&mut hub, &mut client, account, 81, 0).await?;
+            assert_eq!(login.replay_key.origin_generation, 1);
+            client.wait_for(" 903 quinn ").await?;
+
+            // The next carrier of the connection, a reauthentication.
+            client.line("AUTHENTICATE AGENC-OPAQUE").await?;
+            let start = crate::test_support::sealed_authentication_start(
+                NETWORK,
+                RecoveryEpoch::from_bytes([34; 16]),
+                "quinn-account",
+                83,
+            )?;
+            send_envelope(&mut client, &start).await?;
+            let (frame, object) = hub
+                .expect_frame(|frame, object| {
+                    object.is_some()
+                        && match frame {
+                            FederationFrame::Request { .. } => true,
+                            // A journal commit replays the acknowledged
+                            // declaration unchanged.
+                            FederationFrame::OriginUpdate { descriptor, .. } => {
+                                descriptor.generation > 1
+                            }
+                            _ => false,
+                        }
+                })
+                .await?;
+            let FederationFrame::OriginUpdate { descriptor, .. } = frame else {
+                return Err("the next carrier left under the guest generation".into());
+            };
+            let object = object.ok_or("origin without object")?;
+            let mut budget = DecodeBudget::new(8_192, 64);
+            let record = agenc_relay_federation_wire::OriginRecord::from_object(
+                &SchemaObject::decode_exact("FederationOrigin", object.as_slice(), &mut budget)?,
+            )?;
+            assert_eq!(descriptor.generation, 2);
+            assert_eq!(record.generation, 2);
+            assert_eq!(
+                record
+                    .session
+                    .map(|session| (session.session_id, session.user_id)),
+                Some((session_id, user_id))
+            );
+            assert_eq!(
+                record
+                    .account
+                    .map(|declared| (declared.account_id, declared.account_session_generation)),
+                Some((account, 1))
+            );
+            hub.frame(FederationFrame::OriginAck {
+                edge_server_id: EDGE,
+                server_incarnation: descriptor.server_incarnation,
+                origin_id: descriptor.origin_id,
+                generation: descriptor.generation,
+                object_id: Some(object.object_id()),
+            })
+            .await?;
+            let (header, operation, _) = hub.next_request().await?;
+            assert!(matches!(
+                operation,
+                FederatedOperation::AccountService {
+                    opcode: FederationOpcode::OpaqueAuthStart,
+                    ..
+                }
+            ));
+            assert_eq!(header.replay_key.origin_generation, 2);
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@ it takes through the coordinator. Each has its own commit and regression:
 | Correction | Specification | State at this revision |
 | --- | --- | --- |
 | A recomputed channel membership keeps the revision it joined at on the federation wire | Section 20.6 | Implemented |
+| An edge declares the account of a registered connection's login in its next origin generation | Section 20.7 | Implemented |
 
 No specification text, wire registry, profile hash, persistent format or
 dependency changes. No Stage 10 task box changes.
@@ -206,6 +207,33 @@ Compatibility: an edge built from 70c832c or earlier still requires the
 equality when it decodes such an event, so it refuses the event a corrected
 coordinator sends; the coordinator and its edges are upgraded together.
 
+## An edge's origin after a post-registration login
+
+An edge declares every client connection to the coordinator as an origin
+whose principal (the session and the account) the coordinator checks before
+it serves an account-service request under it. Section 20.7 requires "a
+session registration, login, logout, account switch, or companion device
+attach/detach" to be "represented by the next generation before requests
+under it are accepted". The edge did this for a session registration, but
+not for a login after registration: the origin kept declaring a guest. The
+coordinator commits such a login and switches the session's account, so the
+connection's next account-service request named a principal that no longer
+matched the session, and the coordinator refused it. A same-account
+reauthentication therefore failed with `904` after the first login. The edge
+also builds a credential change only for an origin that declares an account,
+so it refused one for such a connection without sending it (read from the
+code; not exercised by a test here).
+
+When a registered connection's SASL finish comes back authenticated, the edge
+now records the account in the origin and declares the next generation, as it
+does for a registration. Every later request of the connection already waits
+for an outstanding declaration's acknowledgement and then travels under it.
+A login before registration is declared by the session open, as before, and a
+reauthentication to the account the origin already names declares nothing.
+The companion origin mirrors each acknowledged base generation and follows
+the same way. No wire, registry or persistent format change: the origin
+record and its journal row already carry the account.
+
 ## The regressions
 
 | Test | What it pins |
@@ -281,6 +309,20 @@ passes; restored, all four pass. A temporary, uncommitted daemon scenario (a
 guest on one edge and a peer on the other in the same channel, then the
 guest's login) read `904` with the equality and `903` with the correction.
 
+The edge origin after a login:
+
+| Test | What it pins |
+| --- | --- |
+| `federation::edge::tests::accounts::a_login_after_registration_declares_its_account_before_the_next_carrier` | Through the edge router and a scripted coordinator: a registered guest's authenticated SASL finish is followed by `FORIGIN UPDATE` generation 2 naming the session and the account, and the connection's next SASL start waits for that acknowledgement and leaves under generation 2. |
+| `federation::edge::tests::accounts::sasl_crosses_the_federation_and_its_grant_opens_the_session` | Unchanged: a login before registration is declared by the session open. |
+
+With the declaration left out, the new test fails because the next carrier
+leaves under the guest generation, and the unchanged one passes; restored,
+both pass. A temporary, uncommitted Stage 08 scenario (a registered guest on
+edge A logs in and then authenticates again) read `904` for the
+reauthentication, with the coordinator logging `principal_mismatch`, without
+the declaration, and `903` with it.
+
 The Stage 08 edge test keeps every registered connection open until its
 scenario ends.
 
@@ -322,6 +364,13 @@ Sources:
 - `crates/agenc-relay-domain/src/federation/projection.rs`
   (`project_member_authority`, `project_recompute`)
 - `crates/agenc-relay-runtime/src/federation/codec/tests/recompute.rs`
+- `docs/arc-architecture-and-implementation-spec.md` Section 20.7
+- `crates/agenc-relay-runtime/src/federation/edge/request.rs`
+  (`completed_request`, `declare_logged_in_account`)
+- `crates/agenc-relay-runtime/src/federation/coordinator/accounts.rs`
+  (`validate_remote_principal`)
+- `crates/agenc-relay-runtime/src/federation/edge/tests/harness.rs`
+  (`accounts::a_login_after_registration_declares_its_account_before_the_next_carrier`)
 - `crates/agenc-relay-runtime/src/tests/account_login_render.rs`
 - `crates/agenc-relay-server/tests/stage_six_daemon/login_after_registration.rs`
 - `crates/agenc-relay-runtime/src/federation/edge/mod.rs`
@@ -382,4 +431,11 @@ cargo nextest run --workspace --all-features --locked
 cargo nextest run -p agenc-relay-runtime -p agenc-relay-federation-wire --all-features --locked \
   -E 'test(recompute) | test(recomputed)'
 # 4 passed; with the equality restored: 3 failed, 1 passed
+
+# the edge origin after a login, on the tree of its commit
+cargo nextest run -p agenc-relay-runtime -p agenc-relay-server --all-features --locked
+# 2830 tests run: 2830 passed, 21 skipped
+cargo nextest run -p agenc-relay-runtime --all-features --locked --lib \
+  -E 'test(a_login_after_registration_declares_its_account_before_the_next_carrier) | test(sasl_crosses_the_federation)'
+# 2 passed (ten of ten repeated runs); without the declaration: 1 failed, 1 passed
 ```
