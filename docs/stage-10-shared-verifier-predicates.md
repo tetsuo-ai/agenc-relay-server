@@ -35,8 +35,9 @@ a client importing a public credentials file has no such step.
   generation zero still has no predecessor at hand; its opened credential is
   checked structurally as before, and the coordinator's durable credential
   history remains the check of that succession.
-- Three runtime regressions built a same-key set through the shared verifier
-  to exercise the daemon's own checks. They now assert that the verifier
+- Three places in the runtime regressions (two tests and the set helper of
+  four terminal tests) built a same-key set through the shared verifier to
+  exercise the daemon's own checks. They now assert that the verifier
   refuses the set, and assemble it without the verifier
   (`sequencer_eligibility::unverified_set`, which checks each credential only
   structurally) so those daemon checks stay covered: installation refuses two
@@ -222,10 +223,15 @@ Commands at this branch, from the repository root:
 
 ```sh
 cargo fmt --all --check
-cargo clippy -p agenc-relay-e2ee -p agenc-relay-runtime --all-targets --all-features --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo nextest run -p agenc-relay-e2ee --all-features --locked
 cargo nextest run -p agenc-relay-runtime --all-features --locked
 cargo nextest run -p agenc-relay-testkit -p agenc-relay-storage -p agenc-relay-server --all-features --locked
+cargo nextest run --workspace --all-features --locked
 python3 scripts/check-source.py check
 python3 scripts/check-coverage.py audit conformance/release-critical-coverage.toml
 ```
+
+Each passes at the branch tip. The per-commit results and the runs with
+each correction removed are in the commit messages. The storage `disk`
+profile was not run: the host was not quiet.
