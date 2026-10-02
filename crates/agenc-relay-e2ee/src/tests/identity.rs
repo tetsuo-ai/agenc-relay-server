@@ -1588,6 +1588,37 @@ fn first_contact_requires_the_issuance_of_every_continuing_certificate() -> Test
         Err(E2eeError::InvalidValue),
         "issuance under another root"
     );
+    // The target-generation roster must hold the exact certificate: one of
+    // that root and generation without the device, or holding another
+    // certificate for its Device ID, shows no issuance.
+    let issued_without = |certificates: Vec<ArcDeviceCertificate>| -> TestResult {
+        let other = roster(
+            &account.root_secret,
+            &account.root,
+            0,
+            [0; 32],
+            ROSTER_INTERVAL,
+            certificates,
+            Vec::new(),
+        )?;
+        let other = verify_roster(root, &other, None)?;
+        assert_eq!(
+            verify_first_contact_roster(root, &later, &[other, gen1.clone()]),
+            Err(E2eeError::InvalidValue),
+            "device 8's certificate was not issued in that generation-zero roster"
+        );
+        Ok(())
+    };
+    issued_without(vec![kept(7)?])?;
+    let replaced = certificate(
+        &account.root_secret,
+        &account.root,
+        &DeviceSpec {
+            serial: 2,
+            ..DeviceSpec::new(8)
+        },
+    )?;
+    issued_without(vec![kept(7)?, replaced])?;
     // The current-target enrollment rule applies unchanged.
     let late = signed_roster(
         &account,
@@ -1675,5 +1706,155 @@ fn a_certificate_listed_active_and_revoked_is_refused_on_every_path() -> TestRes
         gen1
     );
     assert_eq!(restore_roster(root, &dropped)?, gen1);
+    Ok(())
+}
+
+/// First contact given `chain`, the complete chain from generation zero
+/// below `roster` under its root, decides exactly as succession from the
+/// chain's last roster does; returns that decision.
+fn first_contact_as_succession(
+    root: &VerifiedRoot,
+    roster: &ArcDeviceRoster,
+    chain: &[VerifiedRoster],
+) -> Result<VerifiedRoster, E2eeError> {
+    let checked = verify_roster(root, roster, chain.last());
+    assert_eq!(
+        verify_first_contact_roster(root, roster, chain),
+        checked,
+        "first contact agrees with succession"
+    );
+    checked
+}
+
+/// First contact holds a roster to every supplied roster of its root below
+/// it, as succession holds it to its predecessor (companion 8.3 and 8.4): a
+/// continuing certificate is listed, unchanged, by each one from its target
+/// generation on; the one just below is the predecessor the roster names;
+/// and every revocation they list is still listed. Given the complete chain
+/// from generation zero under its root, first contact decides exactly as the
+/// checked path does.
+#[test]
+fn first_contact_holds_a_roster_to_every_supplied_roster_of_its_root() -> TestResult {
+    let account = account_with(&[7, 8])?;
+    let root = &account.verified_root;
+    let gen0 = account.verified_roster.clone();
+    let kept = |seed: u8| certificate(&account.root_secret, &account.root, &DeviceSpec::new(seed));
+    let first = ROSTER_INTERVAL.1;
+    let second = first + 1_000;
+    // Generation one drops device 8 without a revocation entry; generation
+    // two lists its certificate again.
+    let dropped = signed_roster(&account, 1, gen0.roster_id, first, vec![kept(7)?])?;
+    let dropped = verify_roster(root, &dropped, Some(&gen0))?;
+    let relisted = signed_roster(
+        &account,
+        2,
+        dropped.roster_id,
+        second,
+        vec![kept(7)?, kept(8)?],
+    )?;
+    assert_eq!(
+        first_contact_as_succession(root, &relisted, &[gen0.clone(), dropped.clone()]),
+        Err(E2eeError::InvalidValue),
+        "the roster between shows the certificate dropped"
+    );
+    assert!(
+        verify_first_contact_roster(root, &relisted, std::slice::from_ref(&gen0)).is_ok(),
+        "without the roster that dropped it nothing shows the drop: first contact \
+         claims no complete history"
+    );
+    // Generation one revokes device 8's certificate. Listing it again in
+    // generation two is refused whether the revocation is carried or not,
+    // and so is dropping the revocation alone; carrying it is admitted.
+    let revoked = signed_roster_revoking(
+        &account,
+        1,
+        gen0.roster_id,
+        first,
+        vec![kept(7)?],
+        vec![revocation(8, 1, 1)],
+    )?;
+    let revoked = verify_roster(root, &revoked, Some(&gen0))?;
+    let chain = [gen0.clone(), revoked.clone()];
+    for (certificates, revocations) in [
+        (vec![kept(7)?, kept(8)?], vec![revocation(8, 1, 1)]),
+        (vec![kept(7)?, kept(8)?], Vec::new()),
+        (vec![kept(7)?], Vec::new()),
+    ] {
+        let next = signed_roster_revoking(
+            &account,
+            2,
+            revoked.roster_id,
+            second,
+            certificates,
+            revocations,
+        )?;
+        assert_eq!(
+            first_contact_as_succession(root, &next, &chain),
+            Err(E2eeError::InvalidValue)
+        );
+    }
+    let carried = signed_roster_revoking(
+        &account,
+        2,
+        revoked.roster_id,
+        second,
+        vec![kept(7)?],
+        vec![revocation(8, 1, 1)],
+    )?;
+    assert_eq!(
+        first_contact_as_succession(root, &carried, &chain)?.revocations,
+        vec![([8; 16], 1)]
+    );
+    // A supplied generation-one roster that is not the predecessor the
+    // roster names (another root-signed generation one) refuses it, though
+    // it lists the same certificates.
+    let gen1 = signed_roster(&account, 1, gen0.roster_id, first, vec![kept(7)?, kept(8)?])?;
+    let gen1 = verify_roster(root, &gen1, Some(&gen0))?;
+    let fork = signed_roster(
+        &account,
+        1,
+        gen0.roster_id,
+        first + 1,
+        vec![kept(7)?, kept(8)?],
+    )?;
+    let fork = verify_roster(root, &fork, Some(&gen0))?;
+    let gen2 = signed_roster(
+        &account,
+        2,
+        gen1.roster_id,
+        second,
+        vec![kept(7)?, kept(8)?],
+    )?;
+    assert_eq!(
+        first_contact_as_succession(root, &gen2, &[gen0.clone(), fork]),
+        Err(E2eeError::InvalidValue)
+    );
+    let verified = first_contact_as_succession(root, &gen2, &[gen0.clone(), gen1.clone()])?;
+    // A supplied roster of another root is not its history either, whatever
+    // its generation, identifier and revocations.
+    let mut foreign = gen1.clone();
+    foreign.root_fingerprint = [9; 32];
+    foreign.roster_id = [5; 32];
+    foreign.revocations = vec![([8; 16], 1)];
+    assert_eq!(
+        verify_first_contact_roster(root, &gen2, &[gen0.clone(), gen1.clone(), foreign])?,
+        verified
+    );
+    // A supplied roster at the roster's own generation is not its history:
+    // another root-signed generation two that drops and revokes device 8 is
+    // not consulted (comparing heads is the caller's PinnedHead).
+    let other = signed_roster_revoking(
+        &account,
+        2,
+        gen1.roster_id,
+        second + 1,
+        vec![kept(7)?],
+        vec![revocation(8, 1, 2)],
+    )?;
+    let other = verify_roster(root, &other, Some(&gen1))?;
+    assert_eq!(
+        verify_first_contact_roster(root, &gen2, &[gen0, gen1, other])?,
+        verified
+    );
     Ok(())
 }

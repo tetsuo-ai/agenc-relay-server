@@ -356,8 +356,9 @@ pub enum Lineage<'a, T> {
 enum RosterAdmission<'a> {
     /// Succession from the pinned head, or generation zero without one.
     Checked(Option<&'a VerifiedRoster>),
-    /// No pinned head yet: earlier rosters of the same root this caller
-    /// already verified.
+    /// No pinned head yet: earlier rosters this caller already verified, of
+    /// which those of the roster's root below its generation are the history
+    /// it must continue.
     FirstContact(&'a [VerifiedRoster]),
     /// A roster this node accepted before, reloaded from durable storage.
     Restored,
@@ -382,16 +383,28 @@ pub fn verify_roster(
 /// Verifies a roster of a root whose roster lineage this caller has never
 /// pinned (first contact), at any generation.
 ///
-/// No predecessor is checked, so the result says nothing about whether a
-/// newer roster exists or one was withheld; only the lineage shape applies,
-/// generation zero alone naming the all-zero predecessor. A certificate
-/// enrolled for an earlier generation is admitted only when it is active,
-/// unchanged, in the roster of exactly that generation among `issuance`:
-/// earlier rosters of the same root this caller already verified, such as a
-/// Welcome's roster chain or imported roster proofs. Missing issuance refuses
-/// the roster. The lookup is linear in `issuance`, which the caller bounds by
-/// the rosters it already paid to verify. Every other rule of
-/// [`verify_roster`] applies. Once a head is pinned, later rosters use
+/// `issuance` holds earlier rosters this caller already verified, such as a
+/// Welcome's roster chain or imported roster proofs. Those of this roster's
+/// root below its generation are history the roster must continue, as
+/// succession holds a roster to its predecessor (companion 8.3 and 8.4):
+///
+/// - a certificate enrolled for an earlier generation must be active,
+///   unchanged, in the supplied roster of exactly that generation, which
+///   must be present, and in every supplied roster after it;
+/// - the supplied roster one generation below, if present, must be the
+///   predecessor this roster names;
+/// - every revocation a supplied roster lists must still be listed.
+///
+/// Every rule of [`verify_roster`] that needs no predecessor applies
+/// unchanged, and when the supplied rosters are the complete chain from
+/// generation zero under this roster's root, the decision is the checked
+/// path's. Nothing is inferred about a roster that is not supplied: the
+/// result says nothing about a gap in the evidence, a newer roster or one
+/// withheld, and without the predecessor only the lineage shape applies,
+/// generation zero alone naming the all-zero predecessor. Supplied rosters of
+/// other roots, or at or above this generation, are not consulted. The
+/// lookups are linear in `issuance`, which the caller bounds by the rosters
+/// it already paid to verify. Once a head is pinned, later rosters use
 /// [`verify_roster`]; reloading one uses [`restore_roster`].
 pub fn verify_first_contact_roster(
     root: &VerifiedRoot,
@@ -401,13 +414,17 @@ pub fn verify_first_contact_roster(
     verify_roster_lineage(root, roster, RosterAdmission::FirstContact(issuance))
 }
 
-/// Re-verifies a roster this node accepted before, without its predecessor.
+/// Re-verifies a roster without its predecessor or the issuance of its
+/// continuing certificates.
 ///
-/// Its lineage, and the issuance of every certificate enrolled for an
-/// earlier generation, were shown when it was accepted; every other rule
-/// still applies, and a certificate enrolled for a later generation is
-/// refused. It never admits a roster received from another party: that is
-/// [`verify_roster`] or [`verify_first_contact_roster`].
+/// It is for a roster this node accepted before, reloaded from durable
+/// storage, whose lineage and issuance were shown when it was accepted, and
+/// for a principal roster an independently pinned binding names (initial
+/// authority, companion 13.7.2), where the pin stands in for the omitted
+/// history. Every other rule still applies, and a certificate enrolled for a
+/// later generation is refused. It never admits a roster on another party's
+/// say-so: a received roster without such a pin is [`verify_roster`] or
+/// [`verify_first_contact_roster`].
 pub fn restore_roster(
     root: &VerifiedRoot,
     roster: &ArcDeviceRoster,
@@ -485,12 +502,7 @@ fn verify_roster_lineage(
     {
         return Err(E2eeError::InvalidValue);
     }
-    if let RosterAdmission::Checked(Some(previous)) = admission
-        && !previous
-            .revocations
-            .iter()
-            .all(|old| revocations.contains(old))
-    {
+    if !continues_history(tbs, root, admission, &revocations) {
         return Err(E2eeError::InvalidValue);
     }
     Ok(VerifiedRoster {
@@ -533,6 +545,42 @@ fn check_roster_shape(generation: u64, previous_id: &[u8; 32]) -> Result<(), E2e
     }
 }
 
+/// Whether a roster continues the history its admission holds it to
+/// (companion 8.4: a successor names the previous accepted ID, and
+/// revocations are append-only within a root generation). On succession the
+/// predecessor's revocations are still listed. On first contact the supplied
+/// roster of the root one generation below is the predecessor the roster
+/// names, and every revocation a supplied roster of the root below it lists
+/// is still listed.
+fn continues_history(
+    roster: &ArcDeviceRosterTbs,
+    root: &VerifiedRoot,
+    admission: RosterAdmission<'_>,
+    revocations: &[([u8; 16], u64)],
+) -> bool {
+    let carried = |earlier: &VerifiedRoster| {
+        earlier
+            .revocations
+            .iter()
+            .all(|old| revocations.contains(old))
+    };
+    match admission {
+        RosterAdmission::Checked(predecessor) => predecessor.is_none_or(carried),
+        RosterAdmission::FirstContact(issuance) => issuance
+            .iter()
+            .filter(|earlier| {
+                earlier.root_fingerprint == root.fingerprint
+                    && earlier.generation < roster.roster_generation
+            })
+            .all(|earlier| {
+                let named = earlier.generation.checked_add(1) != Some(roster.roster_generation)
+                    || earlier.roster_id == roster.previous_roster_id;
+                named && carried(earlier)
+            }),
+        RosterAdmission::Restored => true,
+    }
+}
+
 /// Companion 8.3: a certificate is issued in exactly its target roster, whose
 /// `not_before` lies in the enrollment interval, and then continues unchanged
 /// in every later roster. One enrolled for a later generation than `roster`
@@ -553,7 +601,7 @@ fn check_issuance(
             let (issued_at, expires_at) = certificate.enrollment_interval;
             issued_at <= roster.not_before && roster.not_before <= expires_at
         }
-        Ordering::Less => issued_before(certificate, root, admission),
+        Ordering::Less => issued_before(certificate, root, roster.roster_generation, admission),
     };
     if issued {
         Ok(())
@@ -562,25 +610,31 @@ fn check_issuance(
     }
 }
 
-/// Whether a certificate enrolled for an earlier generation shows the
-/// issuance its admission requires: on succession it is active, unchanged,
-/// in the predecessor; on first contact, in the supplied roster of the same
-/// root at its target generation. A restored roster's continuing
-/// certificates showed it when the roster was accepted.
+/// Whether a certificate enrolled for an earlier generation than the roster's
+/// `generation` shows the issuance its admission requires: on succession it
+/// is active, unchanged, in the predecessor; on first contact, in the
+/// supplied roster of the root at its target generation and in every
+/// supplied roster of the root after that one and below `generation`, since
+/// absence from any of them means it was revoked. A restored roster's
+/// continuing certificates showed it when the roster was accepted.
 fn issued_before(
     certificate: &VerifiedCertificate,
     root: &VerifiedRoot,
+    generation: u64,
     admission: RosterAdmission<'_>,
 ) -> bool {
     let continues_in =
         |roster: &VerifiedRoster| roster.device(&certificate.device_id) == Some(certificate);
+    let target = certificate.target_roster_generation;
     match admission {
         RosterAdmission::Checked(predecessor) => predecessor.is_some_and(continues_in),
-        RosterAdmission::FirstContact(issuance) => issuance.iter().any(|issued| {
-            issued.root_fingerprint == root.fingerprint
-                && issued.generation == certificate.target_roster_generation
-                && continues_in(issued)
-        }),
+        RosterAdmission::FirstContact(issuance) => {
+            let mut history = issuance.iter().filter(|issued| {
+                issued.root_fingerprint == root.fingerprint
+                    && (target..generation).contains(&issued.generation)
+            });
+            history.clone().any(|issued| issued.generation == target) && history.all(continues_in)
+        }
         RosterAdmission::Restored => true,
     }
 }

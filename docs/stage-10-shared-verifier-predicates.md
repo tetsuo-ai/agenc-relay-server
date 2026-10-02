@@ -130,17 +130,27 @@ itself accepted before.
 | Path | Lineage step | Certificate enrolled for a later generation | Certificate enrolled for an earlier generation |
 | --- | --- | --- | --- |
 | `verify_roster` (checked) | generation zero without a predecessor, else exactly the next one | refused | active, unchanged, in the predecessor |
-| `verify_first_contact_roster` (new) | none; only the shape: generation zero, and only it, names the all-zero predecessor | refused | active, unchanged, in the supplied verified roster of the same root at exactly its target generation |
+| `verify_first_contact_roster` (new) | the predecessor the roster names, when the supplied rosters hold its root's previous generation; otherwise only the shape: generation zero, and only it, names the all-zero predecessor | refused | active, unchanged, in the supplied roster of its root at exactly its target generation, and in every supplied roster of its root after that one |
 | `restore_roster` | none | refused | admitted: shown when this node accepted the roster |
 
 A certificate enrolled for the roster's own generation keeps the existing
 interval rule on every path. Every refusal is `InvalidValue`.
 `verify_first_contact_roster` takes the issuance evidence as earlier
 verified rosters (`&[VerifiedRoster]`), such as a Welcome's roster chain or
-imported roster proofs; missing evidence refuses the roster, and the result
-makes no claim that no newer roster exists. `restore_roster`'s documentation
-now says it never admits a roster received from another party. Neither
-existing signature changed, so no runtime call site changed.
+imported roster proofs. Those of the roster's root below its generation are
+history the roster must continue, as succession holds a roster to its
+predecessor: besides the two columns above, every revocation a supplied
+roster of the root lists must still be listed. A missing target-generation
+roster refuses the roster; a roster that is not supplied is not inferred,
+and supplied rosters of other roots, or at or above the roster's
+generation, are not consulted. When the supplied rosters are the complete
+chain from generation zero under the root, first contact decides exactly as
+the checked path does from the predecessor; the result makes no claim that
+no newer roster exists. `restore_roster`'s documentation now names its two
+uses, a roster this node accepted before and a principal roster an
+independently pinned binding names (initial authority), and says it never
+admits a roster on another party's say-so. Neither existing signature
+changed, so no runtime call site changed.
 
 `initial_authority` keeps admitting each principal's roster with
 `restore_roster` under the independently pinned binding, which already
@@ -162,7 +172,8 @@ from generation one and active now; their assertions are unchanged.
 | `tests/shared_predicate_counterexamples.rs::control_current_target_certificate_outside_enrollment_window_is_refused` | Control: the existing current-target interval rule. |
 | `src/tests/identity.rs::a_certificate_enrolled_for_a_later_generation_is_refused_on_every_path` | A later target at generation zero and at generation one, on the checked, first-contact and restore paths. |
 | `src/tests/identity.rs::a_continuing_certificate_must_be_active_unchanged_in_the_predecessor` | Continuing certificates verify after their enrollment interval closed and restore without the predecessor; a new device claiming an earlier target, a replacement certificate under an active Device ID, and a dropped certificate returning are refused. |
-| `src/tests/identity.rs::first_contact_requires_the_issuance_of_every_continuing_certificate` | First contact at generation zero equals the initial check; above it, continuing certificates need their exact target roster (either order), and the wrong generation, another root, a late current enrollment, a generation-one roster naming no predecessor and a generation-zero roster naming one are refused; with the evidence the result equals the checked one. |
+| `src/tests/identity.rs::first_contact_requires_the_issuance_of_every_continuing_certificate` | First contact at generation zero equals the initial check; above it, continuing certificates need their exact target roster (either order), and the wrong generation, another root, a target-generation roster without the device or holding another certificate for its Device ID, a late current enrollment, a generation-one roster naming no predecessor and a generation-zero roster naming one are refused; with the evidence the result equals the checked one. |
+| `src/tests/identity.rs::first_contact_holds_a_roster_to_every_supplied_roster_of_its_root` | Given the complete chain from generation zero, first contact decides as the checked path does for a certificate dropped by a supplied roster between its target and the roster (with and without a revocation entry), a revocation dropped, a supplied previous generation that is not the named predecessor, and the conforming continuations; without the roster that dropped a certificate nothing shows the drop; supplied rosters of another root or of the roster's own generation are not consulted. |
 | runtime `leaf_membership::named_roster::*` (nine tests) | Unchanged assertions over the corrected fixture. |
 
 At `70c832c` the counterexample fails and the control passes. With the
@@ -170,6 +181,21 @@ later-target refusal removed from this commit's tree, the counterexample and
 the later-target unit test fail; with the earlier-target requirement
 removed, the continuing-certificate and first-contact unit tests fail; with
 both restored, all pass. The named-roster tests pass either way.
+
+The independent review of the branch found that the first version of
+`verify_first_contact_roster` consulted only the supplied roster at a
+certificate's target generation, so it admitted a certificate that a
+supplied later roster showed dropped, which the checked path refuses, and
+that no test pinned the exact-certificate condition. The rules above are
+the correction: written first, the second first-contact test fails against
+the first version (first contact admits what succession refuses) and passes
+with the correction. Each of these mutations of the correction fails at
+least one of the two first-contact tests: requiring no supplied roster to
+hold the certificate, comparing Device IDs instead of certificates,
+dropping the target-generation requirement, the predecessor rule or the
+revocation rule, consulting supplied rosters of other roots or at the
+roster's own generation, and counting history from generation zero rather
+than from the target.
 
 ## A certificate listed both active and revoked
 
@@ -237,6 +263,11 @@ verifies); with the change it passes.
 - On first contact the issuance evidence is the roster at exactly the
   certificate's target generation; a later roster that lists the certificate
   is not accepted in its place.
+- First contact cannot see a drop, a revocation or a fork in a roster it is
+  not given, and it does not consult supplied rosters of another root, so
+  the step from a previous root's last roster after a root rotation is the
+  checked path's. Contiguous history at hand is verified step by step with
+  `verify_roster`.
 - Restore cannot see a certificate that was dropped and listed again within
   history it does not hold; that stays the checked path's job when the
   roster is first accepted.
