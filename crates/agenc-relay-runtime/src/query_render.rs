@@ -3,7 +3,9 @@
 use std::collections::BTreeSet;
 use std::mem::size_of;
 
-use agenc_relay_client_wire::{VisibleCloak, WireMessage, numeric_reply, user_mask};
+use agenc_relay_client_wire::{
+    MAX_SEMANTIC_REPLIES, VisibleCloak, WireMessage, numeric_reply, user_mask,
+};
 use agenc_relay_domain::{
     CanonicalCommandView, ChannelListProjection, ChannelProjection, DomainState, InformationQuery,
     MaskList, ModeCommand, PresenceCommand, ProjectionDecision, QueryPlan, Role, SessionProjection,
@@ -50,6 +52,9 @@ pub(crate) fn render_query(
     if let CanonicalCommandView::UserQuery(UserQuery::Who(target)) = plan.command().view() {
         return render_who_snapshot(context, reply, &nickname, target.as_ref());
     }
+    if let CanonicalCommandView::Names(channels) = plan.command().view() {
+        return render_names_reply(context, reply, &nickname, channels);
+    }
     let frames = render_non_snapshot_query(context, reply, plan, &nickname)?;
     crate::client_render::send_logical(
         context,
@@ -81,14 +86,6 @@ fn render_non_snapshot_query(
             reply.requester,
             channel,
         ),
-        CanonicalCommandView::Names(channels) => render_names(
-            context.domain(),
-            context.server_prefix(),
-            nickname,
-            reply.requester,
-            reply.capabilities.enabled("userhost-in-names"),
-            channels,
-        ),
         CanonicalCommandView::Information(query) => render_information(context, nickname, query),
         CanonicalCommandView::UserQuery(query) => {
             render_state_user_query(context, nickname, reply.requester, query)
@@ -103,6 +100,68 @@ fn render_non_snapshot_query(
         CanonicalCommandView::Chathistory(_, _) => Ok(Vec::new()),
         _ => Err(RuntimeError::InvalidValue),
     }
+}
+
+/// Answers an explicit NAMES. A reply whose logical frames fit one response
+/// batch is sent whole, exactly as before. A larger one, which used to be
+/// refused and close the connection, is reserved as a query snapshot and
+/// retained as a local NAMES snapshot that the router delivers in pages of
+/// at most 512 users (Section 14.3), as it delivers a local JOIN's NAMES.
+fn render_names_reply(
+    context: &mut StateCoreContext,
+    reply: ReplyInput<'_>,
+    nickname: &str,
+    channels: &[agenc_relay_domain::ChannelNameValue],
+) -> Result<(), RuntimeError> {
+    let include_userhost = reply.capabilities.enabled("userhost-in-names");
+    let render = |context: &StateCoreContext| {
+        render_names(
+            context.domain(),
+            context.server_prefix(),
+            nickname,
+            reply.requester,
+            include_userhost,
+            channels,
+        )
+    };
+    let frames = render(context)?;
+    let rows = crate::state_core::local_join::names_users(&frames)?;
+    let frame_count = frames.len();
+    if frame_count <= MAX_SEMANTIC_REPLIES {
+        let logical = crate::client_render::logical_frames(
+            context.server_prefix(),
+            reply.capabilities,
+            reply.request,
+            frames,
+        )?;
+        if encoded_bytes(&logical)? <= context.response_batch_bytes() {
+            context
+                .send_to(reply.generation, logical)
+                .map_err(|_| RuntimeError::MemoryExhausted)?;
+            return Ok(());
+        }
+    }
+    // The snapshot is admitted and charged before the reply it retains is
+    // rendered again, from the same revision: nothing in this routing step
+    // changes the domain in between.
+    let backing = crate::state_core::local_join::backing_bytes(rows, frame_count)?;
+    let prepared = context.prepare_query_snapshot(reply.generation, rows, backing)?;
+    let frames = render(context)?;
+    if frames.len() != frame_count || crate::state_core::local_join::names_users(&frames)? != rows {
+        return Err(RuntimeError::InvalidValue);
+    }
+    let permit = prepared.finish(rows, backing)?;
+    context.retain_local_names(reply.generation, include_userhost, frames, permit)
+}
+
+fn encoded_bytes(frames: &[WireMessage]) -> Result<usize, RuntimeError> {
+    frames.iter().try_fold(0_usize, |total, frame| {
+        let bytes = frame
+            .measure()
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .bytes();
+        total.checked_add(bytes).ok_or(RuntimeError::Overflow)
+    })
 }
 
 fn snapshot_backing_bytes<Row>(rows: usize) -> Result<usize, RuntimeError> {

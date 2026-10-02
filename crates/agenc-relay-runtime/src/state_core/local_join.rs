@@ -1,4 +1,5 @@
-//! Bounded local JOIN snapshots prepared before admission and opened after commit.
+//! Bounded local JOIN snapshots prepared before admission and opened after
+//! commit, and explicit NAMES snapshots too large for one response batch.
 
 use super::{StateCoreContext, session::BoundSession};
 use crate::RuntimeError;
@@ -22,6 +23,11 @@ const MAX_NAMES_TOKEN_BYTES: usize = 1 + agenc_relay_client_wire::MAX_USER_MASK_
 const MIN_FULL_CHUNK_ROWS: usize = NAMES_CHUNK_BYTES / (MAX_NAMES_TOKEN_BYTES + 1);
 // The bounded original parsed command, topic/failure prefix, and scratch chunks.
 const FIXED_BACKING_BYTES: usize = 262_144;
+// The tag a NAMES frame gains on a labeled page: `@batch=<id> `, where the
+// router's `ReplyPages` names a continuation's batch `fq` and a 64-bit counter
+// of at most 20 digits. A page counted with it still fits the smallest
+// response batch once its frames are tagged.
+const BATCH_TAG_ALLOWANCE: usize = "@batch=fq ".len() + 20;
 
 #[derive(Default)]
 pub(super) struct LocalJoins {
@@ -42,6 +48,9 @@ pub(crate) struct PreparedLocalJoin {
     permit: QuerySnapshotPermit,
     max_rows: usize,
     max_frames: usize,
+    // An explicit NAMES rendered when it was answered; a JOIN renders its
+    // NAMES only when its snapshot opens.
+    rendered: Option<Vec<WireMessage>>,
 }
 
 pub(crate) struct LocalJoinNamesSeed {
@@ -49,6 +58,9 @@ pub(crate) struct LocalJoinNamesSeed {
     pub(crate) request: Box<ParsedMessage>,
     pub(crate) frames: Vec<WireMessage>,
     pub(crate) source: LocalJoinNames,
+    /// The channels an explicit NAMES ends, one 366 each; `None` for a JOIN,
+    /// whose accepted channels its topic replies name.
+    pub(crate) explicit: Option<Vec<ChannelNameValue>>,
 }
 
 pub(crate) struct LocalJoinNames {
@@ -156,7 +168,55 @@ impl StateCoreContext {
             permit,
             max_rows: rows,
             max_frames,
+            rendered: None,
         }))
+    }
+
+    /// Retains an explicit NAMES reply too large for one response batch as a
+    /// local NAMES snapshot that is already committed (Section 14.3). The
+    /// caller reserved `permit` for exactly these frames before rendering
+    /// them; the router opens the snapshot after this routing step, holds
+    /// the connection's later commands behind it, and delivers it in pages
+    /// of at most 512 users with the output state machine of a local JOIN's
+    /// NAMES (Section 14.2).
+    pub(crate) fn retain_local_names(
+        &mut self,
+        generation: ConnectionGeneration,
+        include_userhost: bool,
+        frames: Vec<WireMessage>,
+        permit: QuerySnapshotPermit,
+    ) -> Result<(), RuntimeError> {
+        let bound = self
+            .sessions
+            .connection(generation)
+            .and_then(|entry| entry.session())
+            .ok_or(RuntimeError::InvalidValue)?;
+        if self.has_local_join_seed(generation) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        if self.local_joins.pending.len() >= agenc_relay_storage::MAX_TRANSACTION_PLANS {
+            return Err(RuntimeError::LimitExceeded);
+        }
+        let channels = ending_channels(&frames)?;
+        let max_rows = usize::try_from(permit.rows()).map_err(|_| RuntimeError::Overflow)?;
+        self.local_joins.reserve(self.budget.as_ref())?;
+        self.sessions
+            .begin_active_query(generation, permit.rows(), permit.bytes())?;
+        self.local_joins.pending.push(PreparedLocalJoin {
+            generation,
+            revision: self.domain.revision(),
+            committed: true,
+            bound,
+            channels,
+            include_userhost,
+            request: None,
+            frames: Vec::new(),
+            permit,
+            max_rows,
+            max_frames: frames.len(),
+            rendered: Some(frames),
+        });
+        Ok(())
     }
 
     pub(crate) fn settle_local_join(
@@ -235,15 +295,22 @@ impl PreparedLocalJoin {
         if bound != Some(self.bound) {
             return Err(RuntimeError::InvalidValue);
         }
-        let nickname = crate::client_render::requester_nickname(context, self.bound.user_id);
-        let frames = crate::query_render::render_names(
-            context.domain(),
-            context.server_prefix(),
-            &nickname,
-            self.bound.user_id,
-            self.include_userhost,
-            &self.channels,
-        )?;
+        let explicit = self.rendered.is_some();
+        let frames = match self.rendered.take() {
+            Some(frames) => frames,
+            None => {
+                let nickname =
+                    crate::client_render::requester_nickname(context, self.bound.user_id);
+                crate::query_render::render_names(
+                    context.domain(),
+                    context.server_prefix(),
+                    &nickname,
+                    self.bound.user_id,
+                    self.include_userhost,
+                    &self.channels,
+                )?
+            }
+        };
         if frames.len() > self.max_frames {
             return Err(RuntimeError::LimitExceeded);
         }
@@ -266,8 +333,49 @@ impl PreparedLocalJoin {
                 terminal_count,
                 permit: Some(self.permit),
             },
+            explicit: explicit.then_some(self.channels),
         })
     }
+}
+
+/// The channels a NAMES reply ends, read from its closing 366 replies.
+fn ending_channels(frames: &[WireMessage]) -> Result<Vec<ChannelNameValue>, RuntimeError> {
+    let endings = frames
+        .iter()
+        .rev()
+        .take_while(|frame| frame.command() == "366")
+        .count();
+    let start = frames
+        .len()
+        .checked_sub(endings)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let mut channels = Vec::new();
+    channels
+        .try_reserve_exact(endings)
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for frame in frames.get(start..).ok_or(RuntimeError::InvalidValue)? {
+        let name = frame.middle().get(1).ok_or(RuntimeError::InvalidValue)?;
+        channels.push(ChannelNameValue::parse(name).map_err(|_| RuntimeError::InvalidValue)?);
+    }
+    if channels.is_empty() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    Ok(channels)
+}
+
+/// The users a NAMES reply lists: every token of its 353 replies.
+pub(crate) fn names_users(frames: &[WireMessage]) -> Result<usize, RuntimeError> {
+    frames
+        .iter()
+        .filter(|frame| frame.command() == "353")
+        .try_fold(0_usize, |sum, frame| {
+            sum.checked_add(
+                frame
+                    .trailing()
+                    .map_or(0, |text| text.split_ascii_whitespace().count()),
+            )
+        })
+        .ok_or(RuntimeError::Overflow)
 }
 
 fn accepted_channels(
@@ -321,7 +429,10 @@ fn maximum_rows(
     })
 }
 
-fn backing_bytes(rows: usize, frames: usize) -> Result<usize, RuntimeError> {
+/// The query snapshot backing of a NAMES reply of at most `rows` users in
+/// `frames` frames: the retained frames, the membership projection that
+/// renders them, and the fixed request and scratch allowance.
+pub(crate) fn backing_bytes(rows: usize, frames: usize) -> Result<usize, RuntimeError> {
     let frame_bytes = agenc_relay_client_wire::MAX_COMMAND_BYTES
         + 2 * std::mem::size_of::<WireMessage>()
         + 3 * std::mem::size_of::<String>()
@@ -336,18 +447,25 @@ fn backing_bytes(rows: usize, frames: usize) -> Result<usize, RuntimeError> {
         .ok_or(RuntimeError::Overflow)
 }
 
+/// Sizes every NAMES frame for `page_count`: `rendered` is the frame as
+/// rendered and `encoded` the same frame with the batch tag it gains on a
+/// labeled page, so a page's tagged frames and its closing BATCH line, which
+/// the page allowance covers, fit 65,536 bytes.
 fn measure_names(frames: &[WireMessage]) -> Result<Vec<ReplySize>, RuntimeError> {
     let mut sizes = Vec::new();
     sizes
         .try_reserve_exact(frames.len())
         .map_err(|_| RuntimeError::MemoryExhausted)?;
     for frame in frames {
+        let rendered = frame
+            .measure()
+            .map_err(|_| RuntimeError::InvalidValue)?
+            .bytes();
         sizes.push(ReplySize {
-            encoded: 0,
-            rendered: frame
-                .measure()
-                .map_err(|_| RuntimeError::InvalidValue)?
-                .bytes(),
+            encoded: rendered
+                .checked_add(BATCH_TAG_ALLOWANCE)
+                .ok_or(RuntimeError::Overflow)?,
+            rendered,
             names_users: if frame.command() == "353" {
                 frame
                     .trailing()
@@ -980,6 +1098,81 @@ mod tests {
         );
         assert!(chunks.iter().all(|chunk| chunk.len() <= NAMES_CHUNK_BYTES));
         assert_eq!((MAX_NAMES_TOKEN_BYTES, MIN_FULL_CHUNK_ROWS), (73, 108));
+        Ok(())
+    }
+
+    /// Inside a labeled reply every page frame gains a batch tag, and the last
+    /// page also carries the closing BATCH line. Pages are therefore cut with
+    /// the tag counted: nine 353 lines and the 366 that fit 65,536 bytes
+    /// untagged would exceed it tagged, so they become two pages, each of
+    /// which fits the smallest response batch with the longest generated ID.
+    #[test]
+    fn a_names_page_fits_one_response_batch_once_its_frames_are_tagged() -> TestResult {
+        use agenc_relay_client_wire::{BatchStack, numeric_reply};
+        let line = |bytes: usize| {
+            numeric_reply(
+                "server.example",
+                353,
+                "alice",
+                &["=", "#tagged"],
+                Some(&"x".repeat(bytes)),
+            )
+        };
+        let mut frames = Vec::new();
+        for _ in 0..8 {
+            frames.push(line(7_990)?);
+        }
+        frames.push(line(1_200)?);
+        frames.push(numeric_reply(
+            "server.example",
+            366,
+            "alice",
+            &["#tagged"],
+            Some("End of NAMES list"),
+        )?);
+        let bytes = |frames: &[WireMessage]| -> TestResult<usize> {
+            let mut total = 0;
+            for frame in frames {
+                total += frame.measure()?.bytes();
+            }
+            Ok(total)
+        };
+        let id = format!("fq{}", u64::MAX);
+        let tag = "@batch= ".len() + id.len();
+        assert_eq!(tag, BATCH_TAG_ALLOWANCE);
+        let untagged = bytes(&frames)?;
+        assert!(untagged <= crate::query_pages::MAX_PAGE_BYTES);
+        assert!(untagged + frames.len() * tag > crate::query_pages::MAX_PAGE_BYTES);
+        let sizes = measure_names(&frames)?;
+        let mut source = LocalJoinNames {
+            frames,
+            sizes,
+            terminal_count: 1,
+            permit: None,
+        };
+        let capabilities =
+            test_support::negotiated_capabilities(&["message-tags", "batch", "labeled-response"])?;
+        let mut pages = Vec::new();
+        loop {
+            let (mut page, more) = source.next_page()?;
+            let mut batches = BatchStack::default();
+            let _opening = batches.open(&capabilities, "server.example", &id, "label")?;
+            for frame in &mut page {
+                batches.attach(&id, frame)?;
+            }
+            let count = page.len();
+            page.push(batches.close("server.example", &id)?);
+            let tagged = bytes(&page)?;
+            assert!(
+                tagged <= 65_536,
+                "a page of {count} frames is {tagged} bytes"
+            );
+            pages.push(count);
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(pages, vec![8, 2]);
         Ok(())
     }
 

@@ -93,6 +93,15 @@ same constant. The coordinator renders federated NAMES without user masks
 (`federated_query_frames(.., false, ..)`), so its old figure was never exceeded,
 but it is again an honest bound on the renderer it describes.
 
+One more NAMES path had a bound, and the framed tokens moved it. A node that
+answers its own clients sent an explicit `NAMES` as one logical reply, which
+the fanout refuses above `response_batch_bytes` (65,536 bytes by default),
+closing the connection. With `userhost-in-names` the framed tokens make that
+reply about a fifth larger, so the largest NAMES still answered fell by as
+much (review finding B12-R0-1). Such a reply is now delivered in pages
+instead, as a JOIN's NAMES is; the change and its measurements are recorded
+in [the explicit NAMES pages record](stage-10-explicit-names-pages.md).
+
 ## Compatibility
 
 - Clients: every user mask is 12 bytes longer, and so is every user and host
@@ -114,9 +123,16 @@ but it is again an honest bound on the renderer it describes.
   across such a mixed network.
 - Privacy: none. The frame is fixed text around the same two random
   components.
-- Limits: the only bounds that change are the two NAMES frame bounds above.
-  A server line holds 8,701 command bytes and the longest mask is 72, and a
-  history page is already sized for seven maximum-sized lines.
+- Limits: the two NAMES frame bounds above change, and an explicit NAMES
+  reply larger than one response batch, which the framed tokens made about a
+  fifth more common with `userhost-in-names`, is now paged rather than closing
+  the connection ([the explicit NAMES pages record](stage-10-explicit-names-pages.md)).
+  `WHO #channel` keeps its single logical reply, which closes the connection
+  above 512 visible members or one response batch, as it did before; each
+  352 is 12 bytes longer, so with long display names the byte bound binds a
+  few percent earlier. That is listed for the owner. A server line holds 8,701
+  command bytes and the longest mask is 72, and a history page is already
+  sized for seven maximum-sized lines.
 
 ## Regressions
 

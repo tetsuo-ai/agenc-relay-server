@@ -3940,6 +3940,10 @@ mod e2ee_line_tests;
 mod core_line_tests;
 
 #[cfg(test)]
+#[path = "registration/tests/explicit_names.rs"]
+mod explicit_names_tests;
+
+#[cfg(test)]
 mod tests {
     use agenc_relay_client_wire::{FramedLine, parse_message};
     use agenc_relay_types::MonotonicTick;

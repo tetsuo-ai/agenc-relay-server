@@ -180,12 +180,16 @@ impl RegistrationRouter {
 
     /// Resumes the commands one connection deferred, whatever deferred
     /// them: an open JOIN/NAMES continuation or a floored response.
+    ///
+    /// A resumed local JOIN may be applied in this step, so its seed is
+    /// opened here; no later commit carries its revision.
     pub(super) fn resume_deferred_commands(
         &mut self,
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
     ) {
         self.resume_join_commands(context, generation);
+        self.drain_local_join_seeds(context);
     }
 
     fn resume_join_commands(
@@ -430,10 +434,22 @@ impl RegistrationRouter {
         generation: ConnectionGeneration,
         seed: LocalJoinNamesSeed,
     ) -> Result<(), RuntimeError> {
-        if seed.generation != generation {
+        let LocalJoinNamesSeed {
+            generation: seeded,
+            request,
+            frames,
+            source,
+            explicit,
+        } = seed;
+        if seeded != generation {
             return Err(RuntimeError::InvalidValue);
         }
-        let channels = accepted_channels(&seed.frames)?;
+        // An explicit NAMES names the channels its 366 replies end; a JOIN's
+        // accepted channels are those its topic replies name.
+        let channels = match explicit {
+            Some(channels) => channels,
+            None => accepted_channels(&frames)?,
+        };
         if channels.is_empty() {
             return Err(RuntimeError::InvalidValue);
         }
@@ -447,14 +463,14 @@ impl RegistrationRouter {
         let frames = state.reply_pages.start_continuation(
             state.registration.capability_state(),
             &self.config.server_prefix,
-            &seed.request,
-            seed.frames,
+            &request,
+            frames,
         )?;
         state.join_names = Some(JoinNamesContinuation::new_local(
             channels,
-            seed.request,
+            request,
             context.now(),
-            Box::new(seed.source),
+            Box::new(source),
         )?);
         send_frames(context, generation, frames)?;
         self.pump_join_names(context, generation)
