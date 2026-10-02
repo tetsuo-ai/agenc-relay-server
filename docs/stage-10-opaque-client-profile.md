@@ -40,10 +40,11 @@ returns a registration whose envelope-nonce draw failed. Every call also
 refuses a generator that has already latched before it does any work. A
 login finish draws nothing, so the library would otherwise complete the
 login and derive live keys under a failed generator. Passwords follow
-Section 11.1 (UTF-8 by type, 12 through 1,024 bytes). `OpaqueClientError` keeps the library's invalid login, which
-Section 11.4 answers with a dummy KE3 the caller sends, apart from a
-malformed or reflected server message, failed entropy and an internal
-failure. The daemon does not call the client module.
+Section 11.1 (UTF-8 by type, 12 through 1,024 bytes). `OpaqueClientError`
+keeps the library's invalid login, which Section 11.4 answers with a dummy
+KE3 the caller sends, apart from a malformed or reflected server message,
+failed entropy and an internal failure. The daemon does not call the client
+module.
 
 The daemon's own suites use the public profile: the test-local suites of
 `crates/agenc-relay-auth/tests/stage_four.rs`,
@@ -104,8 +105,14 @@ an auth source.
   removed from the adapter, the latch test fails. Each of these mutants
   passed the suite before the checks were added.
 - `cargo nextest run -p agenc-relay-auth --all-features --locked` passes 84
-  tests with the generator skipped; the migrated daemon suites pass under
-  `cargo nextest run -p agenc-relay-server --all-features --locked`.
+  tests with the generator skipped. At the topic tip,
+  `cargo clippy --workspace --all-targets --all-features --locked -- -D
+  warnings` is clean and `cargo nextest run --workspace --all-features
+  --locked` passes all 4,531 tests it runs, the migrated daemon suites
+  included (24 skipped). The fuzz workspace's format, deny and check
+  commands and the auth doctests pass. The storage disk-profile workload,
+  which needs a filesystem no other process writes to, is left to the full
+  gate's exclusive lane; this topic does not change the storage crate.
 
 ## Limits
 
@@ -114,6 +121,14 @@ an auth source.
 - The server crate's `argon2` and `opaque-sha2` test dependencies are no
   longer named by its tests. They stay, because the workspace checker pins
   the binary's test dependency set and removing them changes `Cargo.lock`.
+- The client module is only as careful with secrets as the `opaque-ke`
+  source it is linked with. In this workspace and the fuzz workspace that is
+  the reviewed local copy, whose patch keeps the password-derived OPRF and
+  KSF outputs in zeroizing wrappers inside `get_password_derived_key`, which
+  both client finishes call. A consumer with its own workspace root, such as
+  the SDK, resolves the unpatched crates.io release unless it repeats the
+  root `[patch]`, because the explicit edge of X-09 is not applied (see
+  [the OPAQUE fuzz source record](stage-10-opaque-fuzz-source.md)).
 - The SDK keeps its own OPAQUE module and comparison tests until the owner
   accepts this extraction.
 

@@ -9,7 +9,8 @@ resolvers outside the root workspace therefore took the unpatched crates.io
 release without a warning: the fuzz workspace and any separately rooted
 consumer of the auth crate, such as the SDK. This change repairs the fuzz
 workspace. The explicit edge was built and measured, and it is not applied,
-because it fails a gate that the frozen architecture names (below).
+because it fails a gate that the frozen architecture names (below). X-09
+therefore stays open; this record covers its fuzz half.
 
 ## What changed
 
@@ -69,17 +70,27 @@ manifests only, so its declared tests, benches and examples and its
 `src/tests.rs` module are absent and cannot be formatted. Architecture
 Section 28.8 lists `cargo fmt --all --check` among the mandatory release
 gates, and `conformance/gates.toml`, `scripts/check-ci.py` and
-`scripts/run-stage-ten-workspace.py` pin it, so the edge would need either a
-Section 28.8 amendment to `cargo fmt --check` (equivalent here, because the
-workspace has no path dependency outside its members) in a normative series,
-or a complete vendored crate with a new tree digest. Both are left to the
-owner; until then a separately rooted consumer must repeat the root `[patch]`.
+`scripts/run-stage-ten-workspace.py` pin it. The edge therefore needs
+either a Section 28.8 amendment to `cargo fmt --check` (equivalent here,
+because the workspace has no path dependency outside its members) in a
+normative series, or a vendored tree that `cargo fmt --all` can format.
+
+The second takes more than vendoring the complete published crate. The
+published 4.0.1 package itself omits `src/tests.rs`, which its `lib.rs`
+declares under `#[cfg(test)]`, so formatting it fails the same way. Measured
+on 2026-10-02 with rustfmt 1.98.0 at the crate's edition 2024, every source
+file of the vendored tree and every bench, example and integration test of
+the published package already matches this repository's `rustfmt.toml`, so
+the missing module is the only obstacle. It would have to come from outside
+the reviewed package, or `lib.rs` would need a further reviewed patch, and
+either changes the tree digest. Both choices are the owner's; until one is
+made, a separately rooted consumer must repeat the root `[patch]`.
 
 ## Limits
 
-- Separately rooted consumers still resolve the unpatched release unless
-  they repeat the root `[patch]`; the SDK's interim root patch remains
-  necessary.
+- X-09 stays open: separately rooted consumers still resolve the unpatched
+  release unless they repeat the root `[patch]`, and the SDK's interim root
+  patch remains necessary.
 - The redb fork stays a root and fuzz `[patch]` as before.
 
 No Stage 04 or Stage 10 task changes state.
