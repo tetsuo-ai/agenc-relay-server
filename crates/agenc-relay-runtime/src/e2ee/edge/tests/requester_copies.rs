@@ -5,10 +5,10 @@
 //! abort that completes a local request answers the requesting connection
 //! with exactly one labeled scalar, and sends its untagged copy to every
 //! other eligible local sink but never to the requesting connection, in
-//! either arrival order of the result and its completion and through a
-//! cross-profile barrier. An event that completes no request of a
-//! connection, such as the later terminal of a request answered `PENDING`,
-//! reaches that connection as the untagged copy.
+//! either arrival order of the result and its completion, on the ordinary
+//! event path and through a cross-profile barrier. An event that completes
+//! no request of a connection, such as the later terminal of a request
+//! answered `PENDING`, reaches that connection as the untagged copy.
 
 use std::collections::BTreeMap;
 
@@ -489,26 +489,39 @@ async fn a_completed_request_reaches_its_requesting_connection_only_as_its_label
 async fn the_untagged_copy_is_withheld_only_from_the_connection_whose_request_completes()
 -> TestResult {
     let mut failures = Vec::new();
-    for case in &CASES {
-        let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
-        let mut edge = hosting_edge()?;
-        // The peer's request completes; the requester's own earlier request
-        // of the same operation was answered `PENDING` and is no longer held.
-        edge.pending.insert(REQUEST, submission(case, PEER));
-        let ack = ack_object(case)?;
-        let open = event(case, Some(REQUEST), ack.as_deref())?;
-        let mut outputs = deliver_result(&mut edge, &mut fixture, case)?;
-        outputs.extend(deliver_event(
-            &mut edge,
-            &mut fixture,
-            &open,
-            ack.as_deref(),
-        )?);
-        let context = format!("{:?}", case.event);
-        failures.extend(mismatch(&outputs, PEER, &labeled_scalar(case)?, &context)?);
-        let copy = untagged_copy(case, ack.as_deref())?;
-        for sink in [REQUESTER, SIBLING] {
-            failures.extend(mismatch(&outputs, sink, &copy, &context)?);
+    for order in [Order::ResultFirst, Order::CompletionFirst] {
+        for case in &CASES {
+            let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+            let mut edge = hosting_edge()?;
+            // The peer's request completes; the requester's own earlier
+            // request of the same operation was answered `PENDING` and is
+            // no longer held.
+            edge.pending.insert(REQUEST, submission(case, PEER));
+            let ack = ack_object(case)?;
+            let open = event(case, Some(REQUEST), ack.as_deref())?;
+            let mut outputs = Vec::new();
+            if matches!(order, Order::ResultFirst) {
+                let early = deliver_result(&mut edge, &mut fixture, case)?;
+                assert!(early.is_empty(), "{:?}: no completion yet", case.event);
+            }
+            outputs.extend(deliver_event(
+                &mut edge,
+                &mut fixture,
+                &open,
+                ack.as_deref(),
+            )?);
+            if matches!(order, Order::CompletionFirst) {
+                outputs.extend(deliver_result(&mut edge, &mut fixture, case)?);
+            }
+            let context = format!("{:?} with {order:?}", case.event);
+            failures.extend(mismatch(&outputs, PEER, &labeled_scalar(case)?, &context)?);
+            let copy = untagged_copy(case, ack.as_deref())?;
+            for sink in [REQUESTER, SIBLING] {
+                failures.extend(mismatch(&outputs, sink, &copy, &context)?);
+            }
+            if edge.pending.contains_key(&REQUEST) {
+                failures.push(format!("{context}: the request is still held"));
+            }
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
@@ -545,32 +558,47 @@ async fn an_event_that_completes_no_local_request_reaches_every_sink() -> TestRe
 async fn a_barrier_completion_reaches_its_requesting_connection_only_as_its_labeled_result()
 -> TestResult {
     let mut failures = Vec::new();
-    for case in &CASES {
-        let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
-        let mut edge = hosting_edge()?;
-        edge.pending.insert(REQUEST, submission(case, REQUESTER));
-        let ack = ack_object(case)?;
-        let mut open = event(case, Some(REQUEST), ack.as_deref())?;
-        open.event.cross_profile_mutation_id = Opaque::new(MUTATION.to_vec())?;
-        open.event.cross_profile_part_index = 1;
-        open.event.cross_profile_part_count = 2;
-        let early = deliver_result(&mut edge, &mut fixture, case)?;
-        assert!(early.is_empty(), "{:?}: no completion yet", case.event);
-        edge.barrier_parts
-            .insert(MUTATION, BTreeMap::from([(1, (open, ack.clone()))]));
-        let (_, outputs) = edge
-            .prepare_barrier(fixture.context_mut()?, &base_edge(), MUTATION)
-            .map_err(|code| code.to_string())?;
-        let context = format!("{:?} in a barrier", case.event);
-        failures.extend(mismatch(
-            &outputs,
-            REQUESTER,
-            &labeled_scalar(case)?,
-            &context,
-        )?);
-        let copy = untagged_copy(case, ack.as_deref())?;
-        for sink in [PEER, SIBLING] {
-            failures.extend(mismatch(&outputs, sink, &copy, &context)?);
+    for order in [Order::ResultFirst, Order::CompletionFirst] {
+        for case in &CASES {
+            let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+            let mut edge = hosting_edge()?;
+            edge.pending.insert(REQUEST, submission(case, REQUESTER));
+            let ack = ack_object(case)?;
+            let mut open = event(case, Some(REQUEST), ack.as_deref())?;
+            open.event.cross_profile_mutation_id = Opaque::new(MUTATION.to_vec())?;
+            open.event.cross_profile_part_index = 1;
+            open.event.cross_profile_part_count = 2;
+            if matches!(order, Order::ResultFirst) {
+                let early = deliver_result(&mut edge, &mut fixture, case)?;
+                assert!(early.is_empty(), "{:?}: no completion yet", case.event);
+            }
+            edge.barrier_parts
+                .insert(MUTATION, BTreeMap::from([(1, (open, ack.clone()))]));
+            let (_, mut outputs) = edge
+                .prepare_barrier(fixture.context_mut()?, &base_edge(), MUTATION)
+                .map_err(|code| code.to_string())?;
+            // Once the base edge's receipt stands, `barrier_outputs` commits
+            // the completions the barrier prepared.
+            for completion in std::mem::take(&mut edge.barrier_completions) {
+                outputs.extend(edge.commit_completion(fixture.context_mut()?, completion));
+            }
+            if matches!(order, Order::CompletionFirst) {
+                outputs.extend(deliver_result(&mut edge, &mut fixture, case)?);
+            }
+            let context = format!("{:?} in a barrier with {order:?}", case.event);
+            failures.extend(mismatch(
+                &outputs,
+                REQUESTER,
+                &labeled_scalar(case)?,
+                &context,
+            )?);
+            let copy = untagged_copy(case, ack.as_deref())?;
+            for sink in [PEER, SIBLING] {
+                failures.extend(mismatch(&outputs, sink, &copy, &context)?);
+            }
+            if edge.pending.contains_key(&REQUEST) {
+                failures.push(format!("{context}: the request is still held"));
+            }
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");

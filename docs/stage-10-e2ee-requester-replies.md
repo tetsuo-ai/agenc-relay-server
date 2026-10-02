@@ -141,18 +141,24 @@ requester's account and the peer. Each connection must receive exactly the
 expected line:
 
 - `a_completed_request_reaches_its_requesting_connection_only_as_its_labeled_result`:
-  the result before its completion and the completion before its result;
-  the requester receives its one labeled scalar and both other connections
-  the untagged copy;
+  the requester's request completes; the requester receives its one labeled
+  scalar and both other connections the untagged copy;
 - `the_untagged_copy_is_withheld_only_from_the_connection_whose_request_completes`:
-  the peer's request completes, so the requester, whose own earlier request
-  is no longer held, receives the untagged copy;
+  the peer's request completes, so the peer receives its one labeled scalar
+  and the requester, whose own earlier request is no longer held, receives
+  the untagged copy;
 - `an_event_that_completes_no_local_request_reaches_every_sink`: without a
   correlation, or naming a request the edge does not hold, every connection
   receives the copy and the held request stays open (this one passes with
   and without the change, as a control);
 - `a_barrier_completion_reaches_its_requesting_connection_only_as_its_labeled_result`:
-  the same through `prepare_barrier`.
+  the requester's request completes through `prepare_barrier`, and the
+  barrier's completions are committed as `barrier_outputs` commits them once
+  the base receipt stands.
+
+The three tests that complete a request run every kind in both arrival
+orders, the result before its completion and the completion before its
+result, and require the completed request to be retired.
 
 Through the daemons, the Stage 08 ReInit scenarios now require the
 requester's reply to name its result exactly once, in the labeled
@@ -162,13 +168,14 @@ submitter's own ACK object. bob reads the activation, and alice the abort,
 as the untagged broadcast naming the same identifiers.
 
 Each unit test reports every case that mismatches. With `events.rs` reverted
-to its previous commit, the three unit tests above fail in all 32 of their
-cases, the eight kinds in both arrival orders, with the peer's request and
-through the barrier: in each, the connection whose request completes receives
-the untagged `ACK`, `REINIT-ACK`, `FINALIZED`, `ABORTED`, `CLOSED`,
-`REINIT-STAGED`, `REINIT-ACTIVATED` or `REINIT-ABORTED` copy before its
-labeled scalar. Both daemon scenarios fail at the staged attempt: "the requester
-received 2 REINIT-STAGED lines, not one labeled completion"
+to its previous commit, the three tests that complete a request fail in all
+48 of their cases, the eight kinds in both arrival orders for the
+requester's request, for the peer's request and through the barrier: in
+each, the connection whose request completes receives the untagged `ACK`,
+`REINIT-ACK`, `FINALIZED`, `ABORTED`, `CLOSED`, `REINIT-STAGED`,
+`REINIT-ACTIVATED` or `REINIT-ABORTED` copy before its labeled scalar, and
+the control passes. Both daemon scenarios fail at the staged attempt: "the
+requester received 2 REINIT-STAGED lines, not one labeled completion"
 (`:edge-a.test EGROUP REINIT-STAGED …` before `@label=l35 :edge-a.test EGROUP
 REINIT-STAGED …`). With the change restored, all pass.
 
