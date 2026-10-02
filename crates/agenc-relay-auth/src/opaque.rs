@@ -1,29 +1,20 @@
 //! Exact RFC 9807 OPAQUE profile for coordinator-owned account records.
 
 use agenc_relay_crypto::OsEntropy;
-use agenc_relay_types::{NetworkId, OpaqueCredentialId};
-use argon2::{Algorithm, Argon2, Params, Version};
-use opaque_ke::errors::InternalError;
-use opaque_ke::generic_array::{ArrayLength, GenericArray};
-use opaque_ke::ksf::Ksf;
-use opaque_ke::rand::{CryptoRng, Error as RandError, RngCore};
+use agenc_relay_types::{EntropySource, NetworkId, OpaqueCredentialId};
+use opaque_ke::rand::RngCore as _;
 use opaque_ke::{
-    CipherSuite, ClientLogin, CredentialFinalization, CredentialRequest, CredentialResponse,
-    Identifiers, RegistrationRequest, RegistrationResponse, RegistrationUpload, Ristretto255,
-    ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup, TripleDh,
+    ClientLogin, CredentialFinalization, CredentialRequest, CredentialResponse,
+    RegistrationRequest, RegistrationResponse, RegistrationUpload, ServerLogin,
+    ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use crate::AuthError;
+use crate::profile::{AgencOpaqueSuite, FallibleOpaqueRng, opaque_context, opaque_identifiers};
 
-const OPAQUE_CONTEXT_LABEL: &[u8] = b"agenc-chat account authentication v1";
 const DUMMY_CLIENT_PASSWORD: &[u8] = b"agenc-chat internal dummy OPAQUE client v1";
-const ARGON2_MEMORY_KIB: u32 = 65_536;
-const ARGON2_ITERATIONS: u32 = 3;
-const ARGON2_LANES: u32 = 4;
-const ARGON2_OUTPUT_BYTES: usize = 64;
-const ARGON2_SALT: [u8; 16] = [0_u8; 16];
 const FAKE_ENVELOPE_RANGE: core::ops::RangeFrom<usize> = 96..;
 
 /// Exact serialized OPAQUE setup length for the pinned suite.
@@ -57,101 +48,6 @@ pub fn opaque_server_public_key(
         .map_err(|_| AuthError::InvalidEncoding)
 }
 
-struct AgencOpaqueSuite;
-
-impl CipherSuite for AgencOpaqueSuite {
-    type OprfCs = Ristretto255;
-    type KeyExchange = TripleDh<Ristretto255, opaque_sha2::Sha512>;
-    type Ksf = FixedArgon2id;
-}
-
-struct FixedArgon2id;
-
-impl Default for FixedArgon2id {
-    fn default() -> Self {
-        Self
-    }
-}
-
-impl Ksf for FixedArgon2id {
-    fn hash<L: ArrayLength<u8>>(
-        &self,
-        input: GenericArray<u8, L>,
-    ) -> Result<GenericArray<u8, L>, InternalError> {
-        let input = Zeroizing::new(input);
-        if input.len() != ARGON2_OUTPUT_BYTES {
-            return Err(InternalError::KsfError);
-        }
-        let parameters = Params::new(
-            ARGON2_MEMORY_KIB,
-            ARGON2_ITERATIONS,
-            ARGON2_LANES,
-            Some(ARGON2_OUTPUT_BYTES),
-        )
-        .map_err(|_| InternalError::KsfError)?;
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, parameters);
-        let mut output: Zeroizing<GenericArray<u8, L>> = Zeroizing::new(GenericArray::default());
-        argon2
-            .hash_password_into(input.as_ref(), &ARGON2_SALT, output.as_mut())
-            .map_err(|_| InternalError::KsfError)?;
-        Ok(GenericArray::clone_from_slice(output.as_ref()))
-    }
-}
-
-struct FallibleOpaqueRng {
-    failed: bool,
-}
-
-impl FallibleOpaqueRng {
-    const fn new() -> Self {
-        Self { failed: false }
-    }
-
-    const fn succeeded(&self) -> bool {
-        !self.failed
-    }
-
-    fn fill_or_latch(&mut self, destination: &mut [u8]) {
-        if self.failed || OsEntropy::fill(destination).is_err() {
-            destination.fill(0);
-            // The pinned Ristretto generators reject an all-zero scalar and
-            // retry through this infallible `RngCore` interface. Supply a
-            // nonzero sentinel so that failed entropy cannot trap the worker
-            // in that rejection loop. `failed` remains latched, and every
-            // caller discards the library result before it can become state.
-            if let Some(first) = destination.first_mut() {
-                *first = 1;
-            }
-            self.failed = true;
-        }
-    }
-}
-
-impl RngCore for FallibleOpaqueRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0_u8; 4];
-        self.fill_or_latch(&mut bytes);
-        u32::from_be_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0_u8; 8];
-        self.fill_or_latch(&mut bytes);
-        u64::from_be_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, destination: &mut [u8]) {
-        self.fill_or_latch(destination);
-    }
-
-    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandError> {
-        self.fill_or_latch(destination);
-        Ok(())
-    }
-}
-
-impl CryptoRng for FallibleOpaqueRng {}
-
 /// Coordinator OPAQUE setup, stable fake record, and dummy-finish work state.
 pub struct OpaqueProfile {
     setup: Zeroizing<[u8; OPAQUE_SERVER_SETUP_BYTES]>,
@@ -162,7 +58,7 @@ pub struct OpaqueProfile {
 impl OpaqueProfile {
     /// Generates independently random setup material and one fixed fake record.
     pub fn generate(network_id: NetworkId) -> Result<Self, AuthError> {
-        let mut rng = FallibleOpaqueRng::new();
+        let mut rng = FallibleOpaqueRng::new(OsEntropy);
         let setup = ServerSetup::<AgencOpaqueSuite>::new(&mut rng);
         if !rng.succeeded() {
             return Err(AuthError::EntropyUnavailable);
@@ -202,7 +98,7 @@ impl OpaqueProfile {
         if !bool::from(dummy_public_key.ct_eq(fake_public_key)) {
             return Err(AuthError::InvalidEncoding);
         }
-        let mut rng = FallibleOpaqueRng::new();
+        let mut rng = FallibleOpaqueRng::new(OsEntropy);
         let dummy_login_state =
             build_dummy_login_state(&setup, &fake_record, network_id, &mut rng)?;
         if !rng.succeeded() {
@@ -264,9 +160,9 @@ impl OpaqueProfile {
         let record = deserialize_record(record_bytes)?;
         let request = CredentialRequest::<AgencOpaqueSuite>::deserialize(&ke1.0)
             .map_err(|_| AuthError::InvalidEncoding)?;
-        let context = opaque_context(network_id)?;
+        let context = opaque_context(&network_id);
         let parameters = server_parameters(&network_id, credential_id, &context);
-        let mut rng = FallibleOpaqueRng::new();
+        let mut rng = FallibleOpaqueRng::new(OsEntropy);
         let result = ServerLogin::<AgencOpaqueSuite>::start(
             &mut rng,
             &setup,
@@ -307,7 +203,7 @@ impl OpaqueProfile {
 
 fn build_fixed_fake_record(
     setup_bytes: &[u8; OPAQUE_SERVER_SETUP_BYTES],
-    rng: &mut FallibleOpaqueRng,
+    rng: &mut FallibleOpaqueRng<OsEntropy>,
 ) -> Result<Zeroizing<[u8; OPAQUE_REGISTRATION_RECORD_BYTES]>, AuthError> {
     let dummy_public_key = setup_bytes.get(96..128).ok_or(AuthError::InvalidEncoding)?;
     let mut fake_record = Zeroizing::new([0_u8; OPAQUE_REGISTRATION_RECORD_BYTES]);
@@ -343,12 +239,12 @@ fn build_dummy_login_state(
     setup: &ServerSetup<AgencOpaqueSuite>,
     fake_record: &[u8; OPAQUE_REGISTRATION_RECORD_BYTES],
     network_id: NetworkId,
-    rng: &mut FallibleOpaqueRng,
+    rng: &mut FallibleOpaqueRng<OsEntropy>,
 ) -> Result<Zeroizing<[u8; OPAQUE_SERVER_LOGIN_STATE_BYTES]>, AuthError> {
     let client = ClientLogin::<AgencOpaqueSuite>::start(rng, DUMMY_CLIENT_PASSWORD);
     let client = opaque_rng_result(rng, client)?;
     let credential_id = OpaqueCredentialId::from_bytes([0_u8; 32]);
-    let context = opaque_context(network_id)?;
+    let context = opaque_context(&network_id);
     let parameters = server_parameters(&network_id, &credential_id, &context);
     let result = ServerLogin::<AgencOpaqueSuite>::start(
         rng,
@@ -368,7 +264,10 @@ fn build_dummy_login_state(
     ))
 }
 
-fn opaque_rng_result<T, E>(rng: &FallibleOpaqueRng, result: Result<T, E>) -> Result<T, AuthError> {
+fn opaque_rng_result<T, E, S: EntropySource>(
+    rng: &FallibleOpaqueRng<S>,
+    result: Result<T, E>,
+) -> Result<T, AuthError> {
     if !rng.succeeded() {
         return Err(AuthError::EntropyUnavailable);
     }
@@ -390,20 +289,6 @@ fn deserialize_record(bytes: &[u8]) -> Result<ServerRegistration<AgencOpaqueSuit
         .map_err(|_| AuthError::InvalidEncoding)
 }
 
-fn opaque_context(network_id: NetworkId) -> Result<Vec<u8>, AuthError> {
-    let capacity = OPAQUE_CONTEXT_LABEL
-        .len()
-        .checked_add(32)
-        .ok_or(AuthError::Overflow)?;
-    let mut context = Vec::new();
-    context
-        .try_reserve_exact(capacity)
-        .map_err(|_| AuthError::AllocationFailed)?;
-    context.extend_from_slice(OPAQUE_CONTEXT_LABEL);
-    context.extend_from_slice(network_id.as_bytes());
-    Ok(context)
-}
-
 fn server_parameters<'a>(
     network_id: &'a NetworkId,
     credential_id: &'a OpaqueCredentialId,
@@ -411,10 +296,7 @@ fn server_parameters<'a>(
 ) -> ServerLoginParameters<'a, 'a> {
     ServerLoginParameters {
         context: Some(context),
-        identifiers: Identifiers {
-            client: Some(credential_id.expose_for_account_service()),
-            server: Some(network_id.as_bytes()),
-        },
+        identifiers: opaque_identifiers(network_id, credential_id),
     }
 }
 
@@ -429,7 +311,7 @@ pub fn finish_authentication(
         .map_err(|_| AuthError::InvalidEncoding)?;
     let message = CredentialFinalization::<AgencOpaqueSuite>::deserialize(&ke3.0)
         .map_err(|_| AuthError::InvalidEncoding)?;
-    let context = opaque_context(network_id)?;
+    let context = opaque_context(&network_id);
     let parameters = server_parameters(&network_id, credential_id, &context);
     let result = state
         .finish(message, parameters)
@@ -607,48 +489,41 @@ impl OpaqueAuthentication {
 
 #[cfg(test)]
 mod tests {
-    use opaque_ke::generic_array::GenericArray;
-    use opaque_ke::generic_array::typenum::{U32, U64};
-    use opaque_ke::ksf::Ksf as _;
+    use agenc_relay_crypto::OsEntropy;
+    use agenc_relay_types::{EntropyError, EntropySource};
     use opaque_ke::rand::RngCore as _;
 
     use super::{
-        AgencOpaqueSuite, AuthError, FallibleOpaqueRng, FixedArgon2id, deserialize_record,
-        deserialize_setup,
+        AuthError, FallibleOpaqueRng, deserialize_record, deserialize_setup, opaque_rng_result,
     };
 
-    #[test]
-    fn fixed_ksf_accepts_only_the_profile_width() {
-        assert!(
-            FixedArgon2id
-                .hash(GenericArray::<u8, U32>::default())
-                .is_err()
-        );
-        assert!(
-            FixedArgon2id
-                .hash(GenericArray::<u8, U64>::default())
-                .is_ok()
-        );
+    struct Exhausted;
+
+    impl EntropySource for Exhausted {
+        fn fill_exact(&mut self, _destination: &mut [u8]) -> Result<(), EntropyError> {
+            Err(EntropyError::Unavailable)
+        }
     }
 
     #[test]
     fn latched_entropy_and_internal_lengths_fail_closed() {
-        let mut rng = FallibleOpaqueRng { failed: true };
+        let mut rng = FallibleOpaqueRng::new(Exhausted);
         let mut bytes = [9_u8; 8];
         rng.fill_bytes(&mut bytes);
-        assert_eq!(bytes, [1, 0, 0, 0, 0, 0, 0, 0]);
         assert!(!rng.succeeded());
         assert_eq!(
-            super::opaque_rng_result::<(), ()>(&rng, Err(())).err(),
-            Some(crate::AuthError::EntropyUnavailable)
+            opaque_rng_result::<(), (), _>(&rng, Ok(())).err(),
+            Some(AuthError::EntropyUnavailable)
         );
-        assert_eq!(rng.next_u32(), u32::from_be_bytes([1, 0, 0, 0]));
-        assert_eq!(rng.next_u64(), u64::from_be_bytes([1, 0, 0, 0, 0, 0, 0, 0]));
-        assert!(rng.try_fill_bytes(&mut bytes).is_ok());
-
-        let mut setup_rng = FallibleOpaqueRng { failed: true };
-        let _discarded_setup = opaque_ke::ServerSetup::<AgencOpaqueSuite>::new(&mut setup_rng);
-        assert!(!setup_rng.succeeded());
+        assert_eq!(
+            opaque_rng_result::<(), (), _>(&rng, Err(())).err(),
+            Some(AuthError::EntropyUnavailable)
+        );
+        let fresh = FallibleOpaqueRng::new(OsEntropy);
+        assert_eq!(
+            opaque_rng_result::<(), (), _>(&fresh, Err(())).err(),
+            Some(AuthError::AuthenticationFailed)
+        );
 
         assert_eq!(
             deserialize_setup(&[0_u8; 127]).err(),
