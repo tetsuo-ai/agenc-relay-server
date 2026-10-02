@@ -235,7 +235,7 @@ pub const MAX_SKIPPED_KEY_BYTES_PER_CONVERSATION: u64 = 67_108_864;
 pub const SKIPPED_KEY_RETENTION_SECONDS: u64 = 5 * 60;
 /// `MAX_RETAINED_PAST_EPOCHS`: past epochs whose unconsumed receive keys an
 /// endpoint keeps (companion 14).
-pub const MAX_RETAINED_PAST_EPOCHS: u64 = 2;
+pub const MAX_RETAINED_PAST_EPOCHS: usize = 2;
 /// `PAST_EPOCH_RECEIVE_RETENTION` in seconds; zero for a removed leaf
 /// (endpoint only).
 pub const PAST_EPOCH_RECEIVE_RETENTION_SECONDS: u64 = 5 * 60;

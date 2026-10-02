@@ -23,7 +23,8 @@ one-off script, and nothing kept it so.
   order, durations in seconds as the module's other durations are:
   `MAX_RATCHET_FORWARD_JUMP` (MLS sender generations, `u32`),
   `MAX_SKIPPED_KEYS_PER_SENDER`, `MAX_SKIPPED_KEY_BYTES_PER_CONVERSATION`,
-  `SKIPPED_KEY_RETENTION_SECONDS`, `MAX_RETAINED_PAST_EPOCHS`,
+  `SKIPPED_KEY_RETENTION_SECONDS`, `MAX_RETAINED_PAST_EPOCHS` (a count,
+  `usize` like the other count limits and the SDK's current copy),
   `PAST_EPOCH_RECEIVE_RETENTION_SECONDS` (zero for a removed leaf, as the
   table qualifies it), `MAX_APPLICATION_SEQUENCE_FORWARD_JUMP` (a
   `sender_sequence` distance, `u64`), `MAX_APPLICATION_SEQUENCE_GAPS`,
@@ -36,23 +37,39 @@ one-off script, and nothing kept it so.
   companion at build time, parses every Section 16 row and compares its
   default, converted once to canonical units (seconds for durations), with
   the constant that names it. The two reassembly timeouts map to their
-  absolute and idle constants, and `SECURITY_PROOF_RETENTION`, a rule rather
-  than a scalar, is compared as exact text. The test lists the rows in table
-  order, so a changed value, a new row without a constant, or a constant left
-  behind by a removed row fails; an unknown unit in a default cell fails too.
+  absolute and idle constants, the qualifiers after `; ` of
+  `COMMIT_STAGING_TIMEOUT` and `PAST_EPOCH_RECEIVE_RETENTION` are compared
+  as exact text, and `SECURITY_PROOF_RETENTION`, a rule rather than a
+  scalar, is compared as exact text. The parser reads the section's one
+  table from its header line: every line of it is a row of two cells whose
+  name is one code span, and a line it cannot read, or a table line outside
+  that table, fails rather than being skipped. The test lists the rows in
+  table order, so a changed value or qualifier, a new row without a
+  constant, or a constant left behind by a removed row fails; an unknown
+  unit in a default cell fails too.
 
 ## Tests
 
 | Test | What it pins |
 | --- | --- |
-| `every_section_16_row_equals_its_limits_constant` | All 125 rows, in order, equal their constants. |
+| `every_section_16_row_equals_its_limits_constant` | All 125 rows, in order, equal their constants, with their qualifiers exact; the table parses as one table of readable rows. |
 | `the_endpoint_scalars_are_named_by_the_table` | Each of the 13 endpoint scalars is exactly one table row. |
-| `the_default_grammar_is_read_in_canonical_units` | The cell grammar: thousands separators, a two-quantity cell, a `;` qualifier, hours and days; an unknown unit, a rule cell and an overflowing value are errors. |
+| `the_default_grammar_is_read_in_canonical_units` | The cell grammar: thousands separators, a two-quantity cell, `; ` qualifiers (one containing a comma), hours and days; an unknown unit, a qualifier without its space, a rule cell and an overflowing value are errors. |
 
 At the parent commit the test does not compile: the 13 constants are
 undefined, and the compiler names exactly those 13. With the constants it
 passes; with `MAX_RATCHET_FORWARD_JUMP` changed to 1,023 the table test fails
 on that row.
+
+The independent review of the branch found that the first version selected
+rows by a `` | ` `` prefix and dropped everything after `;`: a new row whose
+name had no backticks, or extra spacing or indentation, was silently
+skipped, and a qualifier could change without notice. Against that version,
+companion edits that add such a row, or change, drop or add a qualifier,
+all passed; against the current test each fails, as do a changed value, a
+removed row, a backticked new row, a name cell holding two code spans and a
+second table in the section. The companion edits were made in the working
+tree and restored byte for byte; it is unchanged.
 
 ## Compatibility
 

@@ -3,9 +3,10 @@
 //! Companion Section 16 is the normative table of profile limits and
 //! defaults, and `agenc_relay_e2ee::limits` is their shared code owner. This
 //! test parses every row of the pinned companion's table and compares its
-//! default, in canonical units, with the constant that names it: a changed
-//! value, a row without a constant, or a constant left behind by a removed
-//! row fails here.
+//! default, in canonical units, with the constant that names it, and any
+//! qualifier as exact text: a changed value or qualifier, a row without a
+//! constant, a constant left behind by a removed row, or a row this parser
+//! cannot read fails here.
 
 use std::error::Error;
 
@@ -20,6 +21,8 @@ const COMPANION: &str = include_str!("../../../docs/arc-mls-e2ee-extension.md");
 enum Expected {
     /// Its default, one value per stated quantity, durations in seconds.
     Values(Vec<u64>),
+    /// Its default, then `; ` and a qualifier compared as exact text.
+    Qualified(Vec<u64>, &'static str),
     /// A retention rule with no scalar, compared as exact text.
     Rule(&'static str),
 }
@@ -33,7 +36,15 @@ where
     Ok(u64::try_from(constant)?)
 }
 
+/// The header and alignment lines that open the Section 16 table.
+const TABLE_HEAD: [&str; 2] = ["| Named limit | Default |", "| --- | ---: |"];
+
 /// Every row of the companion's Section 16 table as `(name, default)`.
+///
+/// The section holds exactly one table, opened by [`TABLE_HEAD`]; every line
+/// of it is a row of two cells whose name is one code span, and no other
+/// line of the section is a table line, so a row this parser cannot read is
+/// an error rather than skipped.
 fn section_16_rows() -> Result<Vec<(String, String)>, Box<dyn Error>> {
     let (_, rest) = COMPANION
         .split_once("\n## 16. Resource and timing limits\n")
@@ -41,17 +52,35 @@ fn section_16_rows() -> Result<Vec<(String, String)>, Box<dyn Error>> {
     let (section, _) = rest
         .split_once("\n## 17. ")
         .ok_or("the companion has no Section 17")?;
+    let is_table = |line: &str| line.trim_start().starts_with('|');
+    let mut lines = section.lines().skip_while(|line| !is_table(line));
+    for head in TABLE_HEAD {
+        if lines.next() != Some(head) {
+            return Err(format!("the Section 16 table does not open with {head:?}").into());
+        }
+    }
     let mut rows = Vec::new();
-    for line in section.lines().filter(|line| line.starts_with("| `")) {
-        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+    for line in lines.by_ref().take_while(|line| is_table(line)) {
+        let cells: Vec<&str> = line
+            .trim()
+            .strip_prefix('|')
+            .and_then(|line| line.strip_suffix('|'))
+            .ok_or_else(|| format!("a Section 16 row is not delimited: {line}"))?
+            .split('|')
+            .map(str::trim)
+            .collect();
         let [name, default] = cells.as_slice() else {
             return Err(format!("a Section 16 row is not two cells: {line}").into());
         };
         let name = name
             .strip_prefix('`')
             .and_then(|name| name.strip_suffix('`'))
-            .ok_or_else(|| format!("a Section 16 name is not code: {line}"))?;
+            .filter(|name| !name.is_empty() && !name.contains('`'))
+            .ok_or_else(|| format!("a Section 16 name is not one code span: {line}"))?;
         rows.push((name.to_owned(), (*default).to_owned()));
+    }
+    if lines.any(is_table) {
+        return Err("Section 16 has a table line outside its one table".into());
     }
     Ok(rows)
 }
@@ -85,11 +114,21 @@ fn quantity(text: &str) -> Result<u64, Box<dyn Error>> {
         .ok_or("a Section 16 default overflows")?)
 }
 
-/// A default cell: the quantities before any `;` qualifier, separated by
-/// `, ` (numbers group thousands with a bare comma).
-fn quantities(cell: &str) -> Result<Vec<u64>, Box<dyn Error>> {
-    let stated = cell.split(';').next().unwrap_or(cell);
-    stated.split(", ").map(quantity).collect()
+/// A default cell's quantities in canonical units and its qualifier, if any.
+type Stated<'a> = (Vec<u64>, Option<&'a str>);
+
+/// A default cell: its quantities, separated by `, ` (numbers group
+/// thousands with a bare comma), and the qualifier after `; `, if any.
+fn stated(cell: &str) -> Result<Stated<'_>, Box<dyn Error>> {
+    let (quantities, qualifier) = match cell.split_once("; ") {
+        Some((quantities, qualifier)) => (quantities, Some(qualifier)),
+        None => (cell, None),
+    };
+    let values = quantities
+        .split(", ")
+        .map(quantity)
+        .collect::<Result<_, _>>()?;
+    Ok((values, qualifier))
 }
 
 /// The expected table, in companion order.
@@ -421,7 +460,10 @@ fn expected() -> Result<Vec<(&'static str, Expected)>, Box<dyn Error>> {
         ),
         (
             "COMMIT_STAGING_TIMEOUT",
-            Expected::Values(vec![value(l::COMMIT_STAGING_TIMEOUT_SECONDS)?]),
+            Expected::Qualified(
+                vec![value(l::COMMIT_STAGING_TIMEOUT_SECONDS)?],
+                "pause only, never auto-skip",
+            ),
         ),
         (
             "JOIN_CONFIRMATION_TIMEOUT",
@@ -471,7 +513,10 @@ fn expected() -> Result<Vec<(&'static str, Expected)>, Box<dyn Error>> {
         ),
         (
             "PAST_EPOCH_RECEIVE_RETENTION",
-            Expected::Values(vec![value(l::PAST_EPOCH_RECEIVE_RETENTION_SECONDS)?]),
+            Expected::Qualified(
+                vec![value(l::PAST_EPOCH_RECEIVE_RETENTION_SECONDS)?],
+                "zero for removed leaves",
+            ),
         ),
         (
             "MAX_APPLICATION_SEQUENCE_FORWARD_JUMP",
@@ -621,12 +666,19 @@ fn every_section_16_row_equals_its_limits_constant() -> TestResult {
         "the table and this test name the same rows in order"
     );
     for ((name, default), (_, expected)) in rows.iter().zip(&expected) {
-        match expected {
-            Expected::Values(values) => {
-                assert_eq!(&quantities(default)?, values, "{name}: {default}");
+        let (values, qualifier) = match expected {
+            Expected::Values(values) => (values, None),
+            Expected::Qualified(values, qualifier) => (values, Some(*qualifier)),
+            Expected::Rule(rule) => {
+                assert_eq!(default, rule, "{name}");
+                continue;
             }
-            Expected::Rule(rule) => assert_eq!(default, rule, "{name}"),
-        }
+        };
+        assert_eq!(
+            stated(default)?,
+            (values.clone(), qualifier),
+            "{name}: {default}"
+        );
     }
     Ok(())
 }
@@ -660,17 +712,25 @@ fn the_endpoint_scalars_are_named_by_the_table() -> TestResult {
 
 #[test]
 fn the_default_grammar_is_read_in_canonical_units() -> TestResult {
-    assert_eq!(quantities("32,768 bytes")?, vec![32_768]);
+    assert_eq!(stated("32,768 bytes")?, (vec![32_768], None));
     assert_eq!(
-        quantities("2 minutes absolute, 15 seconds idle")?,
-        vec![120, 15]
+        stated("2 minutes absolute, 15 seconds idle")?,
+        (vec![120, 15], None)
     );
-    assert_eq!(quantities("5 minutes; zero for removed leaves")?, vec![300]);
-    assert_eq!(quantities("1 hour")?, vec![3_600]);
-    assert_eq!(quantities("30 days")?, vec![2_592_000]);
-    assert_eq!(quantities("8 per conversation")?, vec![8]);
-    assert!(quantities("3 fortnights").is_err());
-    assert!(quantities("live semantic lineage").is_err());
-    assert!(quantities("18446744073709551615 days").is_err());
+    assert_eq!(
+        stated("5 minutes; zero for removed leaves")?,
+        (vec![300], Some("zero for removed leaves"))
+    );
+    assert_eq!(
+        stated("10 minutes; pause only, never auto-skip")?,
+        (vec![600], Some("pause only, never auto-skip"))
+    );
+    assert_eq!(stated("1 hour")?, (vec![3_600], None));
+    assert_eq!(stated("30 days")?, (vec![2_592_000], None));
+    assert_eq!(stated("8 per conversation")?, (vec![8], None));
+    assert!(stated("3 fortnights").is_err());
+    assert!(stated("5 minutes;zero for removed leaves").is_err());
+    assert!(stated("live semantic lineage").is_err());
+    assert!(stated("18446744073709551615 days").is_err());
     Ok(())
 }
