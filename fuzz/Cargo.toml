@@ -178,6 +178,9 @@ bench = false
 members = ["."]
 
 # The fuzz workspace resolves its own dependencies, so it must select the same
-# project-owned redb fork the main workspace does (vendor/redb-4.2.0).
+# reviewed local sources the main workspace does: the reviewed opaque-ke patch
+# (vendor/opaque-ke-4.0.1, checked by scripts/check-stage-four.py) and the
+# project-owned redb fork (vendor/redb-4.2.0).
 [patch.crates-io]
+opaque-ke = { path = "../vendor/opaque-ke-4.0.1" }
 redb = { path = "../vendor/redb-4.2.0" }

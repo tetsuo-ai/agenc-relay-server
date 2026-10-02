@@ -9,6 +9,7 @@ import hashlib
 import re
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
 
@@ -429,6 +430,31 @@ def validate_modules(root: Path) -> None:
         raise StageFourError("crypto/auth source exposes a forbidden algorithm or serialization surface")
 
 
+def validate_fuzz_opaque_patch(manifest: dict[str, object]) -> None:
+    """Require the separately resolved fuzz workspace to select the reviewed source."""
+    patches = manifest.get("patch")
+    crates_io = patches.get("crates-io") if isinstance(patches, dict) else None
+    opaque_patch = crates_io.get("opaque-ke") if isinstance(crates_io, dict) else None
+    if opaque_patch != {"path": f"../{EXPECTED_SOURCE_PATCH['path']}"}:
+        raise StageFourError("fuzz workspace does not select the reviewed local OPAQUE source")
+
+
+def validate_opaque_lock(lock: dict[str, object], name: str) -> None:
+    """Require one OPAQUE package in a lockfile, resolved from the reviewed local source."""
+    packages = lock.get("package")
+    if not isinstance(packages, list):
+        raise StageFourError(f"{name} has no package records")
+    matches = [
+        package
+        for package in packages
+        if isinstance(package, dict) and package.get("name") == EXPECTED_SOURCE_PATCH["package"]
+    ]
+    if len(matches) != 1 or matches[0].get("version") != EXPECTED_SOURCE_PATCH["version"]:
+        raise StageFourError(f"{name} does not resolve exactly one reviewed OPAQUE package")
+    if "checksum" in matches[0] or "source" in matches[0]:
+        raise StageFourError(f"{name} does not select the reviewed local OPAQUE source")
+
+
 def validate_manifests(root: Path, profile: dict[str, object]) -> None:
     """Check exact direct dependency sets, features, sources, and checksums."""
     crypto = load_toml(root / "crates/agenc-relay-crypto/Cargo.toml")
@@ -510,6 +536,11 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
                 )
             if matches[0].get("source") != "registry+https://github.com/rust-lang/crates.io-index":
                 raise StageFourError(f"Cargo.lock source differs for {record['logical_name']}")
+    # The fuzz workspace resolves its own lockfile and links the auth crate
+    # too; the root [patch] does not reach it, so it repeats the selection.
+    validate_fuzz_opaque_patch(load_toml(root / "fuzz/Cargo.toml"))
+    validate_opaque_lock(lock, "Cargo.lock")
+    validate_opaque_lock(load_toml(root / "fuzz/Cargo.lock"), "fuzz/Cargo.lock")
     for package_name, expected_versions in EXPECTED_DUPLICATE_GENERATIONS.items():
         actual_versions = {
             str(package.get("version"))
@@ -763,8 +794,13 @@ def validate(root: Path) -> None:
 
 def expect_rejection(label: str, document: dict[str, object], fragment: str) -> None:
     """Require one profile mutation to reach its intended rejection."""
+    expect_failure(label, lambda: validate_profile(document), fragment)
+
+
+def expect_failure(label: str, action: Callable[[], None], fragment: str) -> None:
+    """Require one seeded mutation to reach its intended rejection."""
     try:
-        validate_profile(document)
+        action()
     except StageFourError as error:
         if fragment not in str(error):
             raise StageFourError(f"self-test {label!r} reached the wrong branch: {error}") from error
@@ -788,7 +824,58 @@ def self_test(root: Path) -> int:
     malformed = copy.deepcopy(valid)
     malformed["source_patch"]["tree_sha256"] = "0" * 64  # type: ignore[index]
     expect_rejection("vendored patch digest", malformed, "source profile")
-    return 4
+    cases = 4
+
+    fuzz_manifest = load_toml(root / "fuzz/Cargo.toml")
+    validate_fuzz_opaque_patch(fuzz_manifest)
+    unpatched = copy.deepcopy(fuzz_manifest)
+    del unpatched["patch"]["crates-io"]["opaque-ke"]  # type: ignore[index]
+    expect_failure(
+        "fuzz workspace without the OPAQUE patch",
+        lambda: validate_fuzz_opaque_patch(unpatched),
+        "fuzz workspace does not select the reviewed local OPAQUE source",
+    )
+    moved = copy.deepcopy(fuzz_manifest)
+    moved["patch"]["crates-io"]["opaque-ke"] = {  # type: ignore[index]
+        "path": "../vendor/opaque-ke-4.0.2"
+    }
+    expect_failure(
+        "fuzz OPAQUE patch naming another directory",
+        lambda: validate_fuzz_opaque_patch(moved),
+        "fuzz workspace does not select the reviewed local OPAQUE source",
+    )
+    cases += 2
+
+    root_lock = load_toml(root / "Cargo.lock")
+    fuzz_lock = load_toml(root / "fuzz/Cargo.lock")
+    validate_opaque_lock(root_lock, "Cargo.lock")
+    validate_opaque_lock(fuzz_lock, "fuzz/Cargo.lock")
+    registry_lock = copy.deepcopy(fuzz_lock)
+    for package in registry_lock["package"]:  # type: ignore[union-attr]
+        if package.get("name") == "opaque-ke":
+            package["source"] = "registry+https://github.com/rust-lang/crates.io-index"
+            package["checksum"] = EXPECTED_SOURCE_PATCH["upstream_checksum"]
+    expect_failure(
+        "registry OPAQUE in the fuzz lock",
+        lambda: validate_opaque_lock(registry_lock, "fuzz/Cargo.lock"),
+        "does not select the reviewed local OPAQUE source",
+    )
+    duplicated = copy.deepcopy(root_lock)
+    duplicated["package"].append(  # type: ignore[union-attr]
+        {
+            "name": "opaque-ke",
+            "version": "4.0.1",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "checksum": EXPECTED_SOURCE_PATCH["upstream_checksum"],
+        }
+    )
+    expect_failure(
+        "second OPAQUE package in a lock",
+        lambda: validate_opaque_lock(duplicated, "Cargo.lock"),
+        "does not resolve exactly one reviewed OPAQUE package",
+    )
+    cases += 2
+    return cases
 
 
 def fail(message: str) -> NoReturn:

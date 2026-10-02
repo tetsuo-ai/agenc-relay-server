@@ -219,6 +219,11 @@ a client the coordinator's exact suite, key-stretching function, context and
 identities and the client half of registration and login (X-08, SDK program,
 outside master #35), are recorded in
 [the OPAQUE client profile record](stage-10-opaque-client-profile.md).
+The fuzz workspace's own selection of the reviewed local OPAQUE source,
+which it resolved from the unpatched release before, and the explicit root
+path edge that was measured but not applied because it fails the Section
+28.8 formatting gate (X-09, SDK program, outside master #35), are recorded in
+[the OPAQUE fuzz source record](stage-10-opaque-fuzz-source.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
