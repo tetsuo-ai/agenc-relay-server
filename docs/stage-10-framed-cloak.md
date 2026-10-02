@@ -54,7 +54,9 @@ The domain's cloak-mask matcher already compared a `$c:` glob against the
 framed host `h-<16>.invalid` (`decision.rs`, `mask_strength`). The host field a
 client reads in `WHO` or `WHOIS` is now the text such a mask matches; before,
 a host copied from those replies into a `$c:` mask did not match the user it
-came from.
+came from. The domain crate depends on `agenc-relay-types` alone, so the
+matcher keeps its own spelling of the host field, and a runtime test that
+bans the host a `WHO` row shows holds the two together.
 
 ## The page arithmetic
 
@@ -88,6 +90,7 @@ but it is again an honest bound on the renderer it describes.
 | `client-wire` `visible_cloak` (five tests) | The exact fields and mask for a known cloak, the 311 parameters, a 32-byte nickname filling exactly `MAX_USER_MASK_BYTES`, and a nickname outside Section 7.2 refused. |
 | `mutation_render::tests::user_sources_and_names_tokens_render_the_framed_public_cloak` | Through `render_mutation` and the fanout: the requester's JOIN echo, its 353 token for a 32-byte nickname (73 bytes), the member's view of both JOINs and its 353, and the delivered `PRIVMSG` source. |
 | `query_render::tests::names_who_and_whois_render_the_framed_public_cloak` | NAMES `userhost-in-names` tokens, every 352 row and the 311 fields, and no bare component anywhere in the encoded replies. |
+| `query_render::tests::a_cloak_ban_on_the_who_host_field_matches_the_user_it_names` | A `$c:` ban on the host field of a user's own `WHO` row refuses that user's JOIN with `Forbidden`, and a ban on the bare host component, the text `WHO` showed before, admits it. |
 | `query_render::tests::userhost_uses_public_cloaks_away_flags_and_presence_privacy` | The 302 entries, now framed. |
 | `state_core::whowas::tests::whowas_count_and_rows_contain_only_retired_public_facts` | The 314 fields, now framed. |
 | `federation::edge::render::tests::a_projected_source_renders_the_framed_public_cloak` | The edge's `prefix` and `actor_prefix` for a projected source. |
@@ -95,7 +98,7 @@ but it is again an honest bound on the renderer it describes.
 | `federation::edge::tests::edge_and_coordinator_interoperate_over_a_bridged_link` | Over a live in-process link: JOIN, channel and private message sources rendered by the edge, and every cloak in the WHO, WHOIS, USERHOST and WHOWAS replies the coordinator renders. |
 | `state_core::local_join::tests::a_local_join_of_the_longest_framed_tokens_fits_its_frame_bound` | 219 members with 32-byte nicknames: the snapshot's bound is four frames, it opens, and its chunks hold 109, 109 and 1 framed tokens of at most 73 bytes. |
 | `federation::coordinator::query::shape::tests::the_names_frame_bound_covers_the_longest_framed_tokens` | The same channel against the coordinator's NAMES bound. |
-| `stage_six_daemon` `cloak_spelling::every_user_mask_in_a_two_guest_transcript_uses_the_framed_cloak` | A real daemon and two guests: JOIN, an echoed message, NAMES with `userhost-in-names`, WHO, WHOIS, USERHOST, a rename with WHOWAS, and MONITOR. Every one of the 18 masks and field pairs in the transcript is framed, each user is spelled identically on every line, and no bare component appears. |
+| `stage_six_daemon` `cloak_spelling::every_user_mask_in_a_two_guest_transcript_uses_the_framed_cloak` | A real daemon and two guests: JOIN, an echoed message, NAMES with `userhost-in-names`, WHO, WHOIS, USERHOST, a rename with WHOWAS, and MONITOR. The transcript names exactly 18 masks and field pairs, a count the test pins; every one is framed, each user is spelled identically on every line, and no bare component appears. |
 | `stage_seven_federation` `clients_on_two_edges_share_channels_through_the_coordinator` | Three daemons: edge A renders bob, homed on edge B, with a framed source, and the WHOIS reply the coordinator renders for edge A frames bob's fields. |
 | `stage_six_daemon` `wss::equivalence` | The S09-002 transcript normalizer validates every cloak it learns as framed, and refuses the bare spelling (`cloak_normalization_accepts_only_the_framed_spelling`). |
 

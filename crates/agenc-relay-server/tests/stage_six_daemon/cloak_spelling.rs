@@ -267,7 +267,10 @@ fn two_guest_transcript(fixture: &LiveFixture) -> TestResult {
             }
         }
     }
-    // JOINs, NAMES tokens, message, rename and each query's fields.
-    assert!(named >= 14, "only {named} masks were checked");
+    // Alice reads 7: her JOIN and its one NAMES token, bob's JOIN, her echo,
+    // bob's rename, 311 and 314. Bob reads 11: his JOIN and its two NAMES
+    // tokens, alice's message, two NAMES tokens, two 352 rows, two 302
+    // entries and his rename. MONITOR's 730 names nicknames only.
+    assert_eq!(named, 18, "masks and field pairs checked");
     Ok(())
 }

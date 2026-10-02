@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 998
-reviewed_source_sha256 = "e558cd4c530d657f617360fece1df354eccb01fae0322cf0da902476d7f3e4ca"
+reviewed_source_sha256 = "7aefa6af425015f1f3347275cb1a960887c62193dd26fe2f9a298477162d90ee"
 deferred = []
 
 [[region]]
@@ -1387,7 +1387,7 @@ id = "runtime-userhost-disclosure"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/query_render.rs"
 item = "render_userhost"
-source_sha256 = "202cb0ae54a680fe4883a877fe2b4a1b8a08d1892f9d74906d3b2889670b5c81"
+source_sha256 = "5d0e23126b8ad8821e0906ba792f4b6a1aa6e8232ecae0ae350c20c5c93e3a32"
 start_line = 1320
 end_line = 1350
 span_sha256 = "6733b163b6e95400fe52283a6ef4b857a8cfa209fb02cd7379be0328d60fcb87"
@@ -1399,7 +1399,7 @@ id = "runtime-monitor-status-disclosure"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/query_render.rs"
 item = "monitor_status_frames"
-source_sha256 = "202cb0ae54a680fe4883a877fe2b4a1b8a08d1892f9d74906d3b2889670b5c81"
+source_sha256 = "5d0e23126b8ad8821e0906ba792f4b6a1aa6e8232ecae0ae350c20c5c93e3a32"
 start_line = 1394
 end_line = 1418
 span_sha256 = "fffb8cd6d8d6f41e8dab69cd1365661474d5ab42f53f3e385650a0ac48e72bb2"

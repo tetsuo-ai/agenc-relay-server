@@ -2379,6 +2379,82 @@ mod tests {
         Ok(())
     }
 
+    /// AUD-18: the host field of a WHO row is the visible text a `$c:` cloak
+    /// mask matches (Architecture 13.4), so a ban on the host a user's own
+    /// WHO row shows keeps that user out of a channel. A ban on the bare host
+    /// component, the text WHO showed before the framing, matches no one.
+    /// Each ban is on its own channel; the bare component comes from the
+    /// stored cloak, not from the reply.
+    #[test]
+    fn a_cloak_ban_on_the_who_host_field_matches_the_user_it_names() -> Result<(), Box<dyn Error>> {
+        let mut fixture = fixture()?;
+        let who = render_user_query(
+            &fixture.state,
+            "server.test",
+            "RenderOutsider",
+            fixture.outsider.user_id,
+            &UserQuery::Who(None),
+        )?;
+        let row = who
+            .iter()
+            .find(|frame| frame.command() == "352")
+            .ok_or("outsider WHO row")?;
+        let who_host = row.middle().get(3).ok_or("WHO host field")?.clone();
+        let bare_host = std::str::from_utf8(
+            fixture
+                .state
+                .session(fixture.outsider.user_id)
+                .ok_or("outsider session")?
+                .public_cloak()
+                .host_component(),
+        )?
+        .to_owned();
+
+        for (seed, name, host, banned) in [
+            (23, "#render-cloak-bare", bare_host, false),
+            (24, "#render-cloak-who", who_host, true),
+        ] {
+            let channel = ChannelNameValue::parse(name)?;
+            join_new(&mut fixture.state, fixture.owner, &channel, seed)?;
+            apply_command(
+                &mut fixture.state,
+                fixture.owner,
+                CanonicalCommand::mode(
+                    channel.clone(),
+                    vec![ModeChange::AddMask {
+                        list: MaskList::Ban,
+                        mask: TypedMask::parse(&format!("$c:{host}"))?,
+                    }],
+                )?,
+                &registered_admission(fixture.owner.user_id)?,
+                Some(ExternalInputs {
+                    utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_030)),
+                    entry_ids: vec![EntryId::from_bytes(bytes(seed))],
+                    ..ExternalInputs::default()
+                }),
+            )?;
+            let decision = agenc_relay_testkit::plan(
+                &fixture.state,
+                fixture.outsider,
+                CanonicalCommand::join(vec![ChannelTarget::new(channel, false)])?,
+                &registered_admission(fixture.outsider.user_id)?,
+                Some(ExternalInputs {
+                    utc_now: Some(UtcSecond::from_unix_seconds(1_720_000_031)),
+                    ..ExternalInputs::default()
+                }),
+            )?;
+            match decision {
+                agenc_relay_domain::PlanDecision::Rejected(rejected) if banned => {
+                    let failure = rejected.failures().first().ok_or("JOIN failure")?;
+                    assert_eq!(failure.error(), agenc_relay_domain::DomainError::Forbidden);
+                }
+                agenc_relay_domain::PlanDecision::Mutation(_) if !banned => {}
+                _ => return Err(format!("a ban on $c:{host} decided {name} wrongly").into()),
+            }
+        }
+        Ok(())
+    }
+
     fn wide_names_member(
         state: &mut DomainState,
         index: u16,
