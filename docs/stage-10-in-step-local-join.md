@@ -59,7 +59,9 @@ the seed before staging and rolling it back on a refusal, was not needed.
 
 An edge sends every JOIN to its coordinator as a request with a durable
 request record and continues the NAMES pages itself; its router never
-prepares a local seed, so this defect cannot arise there.
+prepares a local seed, so this defect cannot arise there. A daemon test with
+a real coordinator and edge now guards that the edge's JOIN continuation,
+plain or labeled, answers and then releases the command behind it.
 
 ## The regressions
 
@@ -69,6 +71,7 @@ prepares a local seed, so this defect cannot arise there.
 | `state_core::tests::local_join::an_in_step_local_join_answers_its_label_batch_and_the_next_command` | Through the live router, `@label=join JOIN &loc` then `@label=time TIME` get one label batch of JOIN, `331`, `353` and `366`, closed before the labeled `391`. |
 | `state_core::tests::local_join::a_staged_global_join_answers_its_label_batch_and_the_next_command` | The same exchange for `#room`, whose JOIN is staged. |
 | `stage_six_daemon::local_join::a_lone_local_join_is_answered_and_the_next_command_still_runs` | The production binary on a core-only node: `JOIN &plain` then `TIME`, and the labeled `JOIN &labeled` then `TIME`. |
+| `stage_seven_federation::an_edge_join_continuation_answers_and_releases_the_next_command` | A coordinator and an edge: `JOIN #plain` then `AWAY`, and the labeled `JOIN #labeled` then `AWAY`, on the edge. |
 
 The existing `local_join_snapshot_opens_after_commit_and_keeps_its_membership_preimage`
 and `a_committed_local_join_opens_while_the_next_batch_is_pending` still
@@ -80,8 +83,8 @@ With `settle_local_join` reverted to its `70c832c` body and everything else
 kept, the first, second and fourth tests fail: the seed is never taken, the
 router never sends the `391` its script waits for, and the daemon test reads
 nothing after `JOIN &plain` until its 15-second socket timeout. The staged
-`#room` test passes either way; it guards the path the fix must leave
-unchanged.
+`#room` test and the edge test pass either way; they guard the paths the fix
+must leave unchanged.
 
 ## Coverage
 
@@ -98,5 +101,10 @@ ceiling guards, which this change does not touch.
 
 ## Limitations
 
-- The daemon test runs on the development host, not the release
+- The edge test exercises `#` channels and `AWAY`. On an edge, a JOIN of a
+  `&` channel is refused (`SERVER_BUSY`) instead of joining an edge-owned
+  channel, and `TIME` ends the connection; both were seen while writing
+  that test, are outside AUD-16, and are reported to the program for
+  separate work.
+- The daemon tests run on the development host, not the release
   qualification hosts.

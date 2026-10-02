@@ -1028,3 +1028,65 @@ fn wait_for_partition(client: &mut ArcClient) -> TestResult<Vec<String>> {
         thread::sleep(Duration::from_millis(250));
     }
 }
+
+/// AUD-16 on the edge role. An edge sends a JOIN to its coordinator as a
+/// request with a durable record and fetches the NAMES pages itself, so the
+/// in-step local JOIN of a core-only node never arises here; this guards that
+/// the edge's own JOIN continuation, plain or labeled, still answers and then
+/// releases the command behind it.
+#[test]
+fn an_edge_join_continuation_answers_and_releases_the_next_command() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let outcome = exercise_edge_join_continuation(&network);
+    let stopped_a = edge_a.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text()
+        )));
+    }
+    for (label, status) in [("edge a", stopped_a), ("coordinator", stopped_core)] {
+        let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+        if !status.success() {
+            return Err(failure(format!("{label} exited with {status}")));
+        }
+    }
+    Ok(())
+}
+
+fn exercise_edge_join_continuation(network: &Network) -> TestResult {
+    wait_for_link(&network.edge_a, 0)?;
+    let mut erin = register_when_available(&network.edge_a, "erin")?;
+    erin.send("JOIN #plain")?;
+    erin.send("AWAY :behind a join")?;
+    let replies = erin.read_until(|line| line.contains(" 306 erin "))?;
+    assert_contains(&replies, " 353 erin = #plain :")?;
+    let names = position_of(&replies, |line| line.contains(" 366 erin #plain "))?;
+    let away = position_of(&replies, |line| line.contains(" 306 erin "))?;
+    assert!(names < away, "{replies:?}");
+
+    erin.send("CAP REQ :message-tags batch labeled-response")?;
+    erin.read_until(|line| line.contains(" ACK "))?;
+    erin.send("@label=join JOIN #labeled")?;
+    erin.send("@label=away AWAY")?;
+    let replies = erin.read_until(|line| line.contains(" 305 erin "))?;
+    assert_contains(&replies, "@label=join ")?;
+    assert_contains(&replies, " 366 erin #labeled ")?;
+    let ended = position_of(&replies, |line| line.contains(" BATCH -"))?;
+    let away = position_of(&replies, |line| {
+        line.starts_with("@label=away ") && line.contains(" 305 erin ")
+    })?;
+    assert!(ended < away, "{replies:?}");
+    Ok(())
+}
+
+fn position_of(lines: &[String], found: impl Fn(&str) -> bool) -> TestResult<usize> {
+    lines
+        .iter()
+        .position(|line| found(line))
+        .ok_or_else(|| failure(format!("expected reply is missing: {lines:?}")))
+}
