@@ -107,7 +107,9 @@ fn edge_login(
 ) -> TestResult {
     wait_for_link(&network.edge_a, 0)?;
     wait_for_link(&network.edge_b, 0)?;
+    // Each edge registers clients only once its coordinator link is active.
     wait_for_account_authority(&network.edge_a)?;
+    wait_for_account_authority(&network.edge_b)?;
     // Every connection stays open until the scenario ends.
     let (account_id, creation, holder) = labeled_account(network)?;
     let (mut local, _) = joined(&network.edge_a, "local", "account-notify", "#login")?;
@@ -178,7 +180,9 @@ fn coordinator_login(
 ) -> TestResult {
     wait_for_link(&network.edge_a, 0)?;
     wait_for_link(&network.edge_b, 0)?;
+    // Each edge registers clients only once its coordinator link is active.
     wait_for_account_authority(&network.edge_a)?;
+    wait_for_account_authority(&network.edge_b)?;
     let (account_id, creation, holder) = labeled_account(network)?;
     let (mut local, _) = joined(&network.coordinator, "local", "account-notify", "#core")?;
     let (mut member, _) = joined(&network.edge_b, "member", "account-notify", "#core")?;
