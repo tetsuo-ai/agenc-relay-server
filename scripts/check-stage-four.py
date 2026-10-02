@@ -30,6 +30,7 @@ EXPECTED_CRYPTO_MODULES = {
 }
 EXPECTED_AUTH_MODULES = {
     "channel_key.rs",
+    "client.rs",
     "error.rs",
     "invitation.rs",
     "opaque.rs",
@@ -218,6 +219,11 @@ REQUIRED_SURFACES = (
     "pub struct FallibleOpaqueRng<E>",
     "pub fn opaque_context",
     "pub fn opaque_identifiers",
+    "pub fn registration_start<E: EntropySource>",
+    "pub fn registration_finish<E: EntropySource>",
+    "pub fn login_start<E: EntropySource>",
+    "pub fn login_finish<E: EntropySource>",
+    "pub enum OpaqueClientError",
     "pub struct AccountServiceEnvelope",
     "pub fn begin_account_creation",
     "pub fn begin_authentication",
@@ -632,12 +638,14 @@ def validate_vectors(root: Path) -> None:
     crypto_test = root / "crates/agenc-relay-crypto/tests/stage_four_vectors.rs"
     auth_test = root / "crates/agenc-relay-auth/tests/stage_four_vectors.rs"
     security_test = root / "crates/agenc-relay-auth/tests/stage_four_security.rs"
-    for path in (crypto_test, auth_test, security_test):
+    client_test = root / "crates/agenc-relay-auth/tests/opaque_client.rs"
+    for path in (crypto_test, auth_test, security_test, client_test):
         if not path.is_file():
             raise StageFourError(f"Stage-04 vector or security test is absent: {path}")
     crypto_source = crypto_test.read_text(encoding="utf-8")
     auth_source = auth_test.read_text(encoding="utf-8")
     security_source = security_test.read_text(encoding="utf-8")
+    client_source = client_test.read_text(encoding="utf-8")
     crypto_markers = (
         "stage-four-crypto-v1.vectors",
         "immutable_storage_vector_rejects_tamper_and_context_substitution",
@@ -657,12 +665,23 @@ def validate_vectors(root: Path) -> None:
         "CryptoWorkerError::WorkerPanicked",
         "CryptoWorkerError::CancelledBeforeStart",
     )
+    # The public profile and client modules reproduce the immutable OPAQUE
+    # vector byte for byte and keep their refusal paths distinct.
+    client_markers = (
+        "stage-four-opaque-v1.vectors",
+        "public_modules_reproduce_vec_s04_007_opaque_byte_for_byte",
+        "client_calls_interoperate_with_the_coordinator_profile",
+        "reflected_or_undecodable_server_messages_are_refused",
+        "failed_entropy_and_out_of_profile_passwords_are_refused",
+    )
     if any(marker not in crypto_source for marker in crypto_markers):
         raise StageFourError("crypto golden-vector suite misses a required negative")
     if any(marker not in auth_source for marker in auth_markers):
         raise StageFourError("auth golden-vector suite misses a required negative")
     if any(marker not in security_source for marker in security_markers):
         raise StageFourError("Stage-04 security suite misses timing or secret-canary coverage")
+    if any(marker not in client_source for marker in client_markers):
+        raise StageFourError("public OPAQUE client suite misses its vector or a required negative")
 
 
 def validate_constant_time_review(root: Path) -> None:

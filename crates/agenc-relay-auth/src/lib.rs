@@ -7,9 +7,11 @@
 //! completion receipts remain coordinator-owned and move-only.
 //!
 //! The public [`profile`] module owns the exact OPAQUE suite, key-stretching
-//! function, context and identities that both protocol halves use.
+//! function, context and identities that both protocol halves use, and the
+//! public [`client`] module computes the client half over exact-size arrays.
 
 mod channel_key;
+pub mod client;
 mod error;
 mod invitation;
 mod opaque;
