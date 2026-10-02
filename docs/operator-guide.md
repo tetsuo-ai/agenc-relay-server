@@ -34,7 +34,7 @@ The `public`, `onion`, and `dual` profiles write a complete configuration with e
 
 Initialization prints a Tor fragment, the service-unit reminder, and certificate enrollment instructions. It does not install them. It does not contact a certificate authority or bind a public socket.
 
-Before them it prints the new node's `network-id=`, `server-id=`, `recovery-epoch=` and `operator-id=` lines. The `recovery-epoch` is the node's own database epoch, which its federation hello carries: a peer's `[[federation.peer]]` record for this node pins it together with the `server-id`. A later `storage restore` prints the new epoch it declares.
+Before them it prints the new node's `network-id=`, `server-id=`, `recovery-epoch=`, `operator-id=` and `operator-signing-key-file=` lines. The `recovery-epoch` is the node's own database epoch, which its federation hello carries: a peer's `[[federation.peer]]` record for this node pins it together with the `server-id`. Keep the printed lines. For an edge the receipt is the only `arcd` output that prints its own epoch, because the edge's `print-onboarding` prints its coordinator's; a later `storage restore` prints the new epoch it declares. An earlier `arcd init` printed no `recovery-epoch=` line: before upgrading such an edge, record its own epoch from that earlier `arcd print-onboarding`, or initialize the edge again.
 
 ## Enroll certificates and enable listeners
 
@@ -153,7 +153,7 @@ arcd print-onboarding --config /etc/arcd/config.toml
 
 The command reconstructs the database through the same read-only inspection path while it reads the authenticated recovery epoch. A running writer causes the read-only database open to fail.
 
-The descriptor pins the recovery epoch the node advertises in `agenc.ag/recovery`. A coordinator advertises its own database epoch. An edge advertises its coordinator's, the `recovery_epoch` of its enabled coordinator `[[federation.peer]]` record, so its descriptor pins that value and not the edge's own database epoch; an edge without an enabled coordinator record cannot serve and is refused. When the coordinator's recovery epoch changes, update the edge's record, restart the edge and distribute its new descriptor: clients treat the change as an identity transition that needs their explicit confirmation.
+The descriptor pins the recovery epoch the node advertises in `agenc.ag/recovery`. A coordinator advertises its own database epoch. An edge advertises its coordinator's, the `recovery_epoch` of its enabled coordinator `[[federation.peer]]` record, so its descriptor pins that value and not the edge's own database epoch; an edge without an enabled coordinator record cannot serve and is refused with `configuration validation failed`. When the coordinator's recovery epoch changes, update the edge's record, restart the edge and distribute its new descriptor: clients treat the change as an identity transition that needs their explicit confirmation.
 
 Create a time-limited account invitation with a separate offline Ed25519 invitation key:
 

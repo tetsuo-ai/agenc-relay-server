@@ -35,6 +35,18 @@ program's single normative revision (P-01); the current ID-06 already
 implies this code, since the only descriptor epoch a client of the edge can
 use is the one the edge advertises.
 
+The rule replaces two passages of the frozen architecture text, which this
+change leaves untouched:
+
+- Section 9.3: the `agenc.ag/recovery` value is literal `v1.` followed by
+  "canonical unpadded base64url for the live header's 16-byte recovery
+  epoch". An edge's CAP already departs from it at `70c832c`, advertising
+  its coordinator record's pin rather than the edge's own header epoch.
+- Appendix C.8: the descriptor line
+  `recovery-epoch=<22-char-random-recovery-epoch>`, which on an edge now
+  carries that same coordinator pin rather than the edge's own random
+  epoch.
+
 ## What changed
 
 - `edge_advertised_recovery_epoch` (`daemon.rs`) is the one selection of
@@ -54,9 +66,11 @@ use is the one the edge advertises.
 - `arcd init` prints `recovery-epoch=<22 characters>` after `server-id=`.
   The coordinator's record for an edge pins the epoch the edge's federation
   hello carries, its own database epoch (FED-10), and the edge's descriptor
-  was until now the only `arcd` output that carried it. The receipt line
-  keeps that value available to an operator; `storage restore` already
-  prints every epoch change.
+  was until now the only `arcd` output that carried it. From this change on
+  the receipt line is the only `arcd` output that prints an edge's own
+  epoch, once, at initialization; `storage restore` prints the new epoch it
+  declares. The operator keeps the receipt with the node's other identity
+  lines (see Limitations for an edge without one).
 - The operator guide states both rules.
 
 No wire byte, configuration key, stored row or protocol identifier changes.
@@ -75,7 +89,10 @@ A coordinator's descriptor is byte-identical to before.
   unchanged.
 - `offline::tests::coordinator_onboarding_pins_its_own_database_epoch`: a
   federated coordinator with an edge record still pins its own database
-  epoch, which its receipt printed.
+  epoch, which its receipt printed. It guards the coordinator branch and the
+  receipt, not the edge branch: it fails when a coordinator's descriptor
+  pins its enabled peer record's epoch, or when the receipt's epoch is not
+  the database's, and passes with the edge branch reverted.
 - `stage_eight_e2ee::cli_provisioning::a_cli_initialized_edge_serves_links_and_advertises_e2ee`:
   `print-onboarding` refuses the freshly initialized edge; the coordinator's
   record for the edge pins the epoch the edge's init receipt printed, and the
@@ -85,17 +102,34 @@ A coordinator's descriptor is byte-identical to before.
 
 With the edge branch of the descriptor reverted to the database epoch (the
 `70c832c` behaviour), the owner's test fails at the refusal and the daemon
-case fails with `print-onboarding was not refused for edge-a.test`. With the
+cases fail with `print-onboarding was not refused for edge-a.test`. With the
 refusal kept but the epoch reverted, the owner's test fails at the epoch
-equality and the daemon case fails with `edge-a.test descriptor does not pin
-its coordinator's epoch`.
+equality and the daemon cases fail with `edge-a.test descriptor does not pin
+its coordinator's epoch`. The AUD-02 daemon case, which provisions through
+the same steps, fails with the AUD-01 daemon case in both.
 
 ## Limitations
 
-- The welcome `NOTE * RECOVERY_EPOCH` (SC-007) is not on this branch. It
-  renders the same router epoch as the CAP, so once both land the daemon
-  case should also compare the NOTE with the edge's descriptor.
+- The welcome `NOTE * RECOVERY_EPOCH` (SC-007) is not on this branch, so
+  the planned comparison of an edge's descriptor with its NOTE is not made
+  here. The NOTE renders the same router epoch as the CAP
+  (`self.config.recovery_epoch`), and in review a scratch merge of the
+  SC-007 topic showed a CLI-initialized edge's NOTE carrying its
+  descriptor's epoch, which is also its coordinator's. That observation is
+  not evidence of this branch: the program's integration merge of the two
+  topics adds the NOTE assertion to the daemon case.
 - The descriptor follows the configured coordinator pin. When the
   coordinator's epoch changes, the edge's record is updated by the operator
   (a restart-only change, Appendix C.4); nothing re-pins it automatically.
-- The architecture text for the rule arrives with P-01.
+- The architecture text for the rule arrives with P-01 (see The rule).
+- Only the init receipt prints an edge's own epoch, which the coordinator's
+  record for that edge needs. An edge initialized by an earlier `arcd`,
+  whose receipt has no `recovery-epoch=` line, or one whose receipt was
+  lost, has no `arcd` read of it: its `print-onboarding` now prints the
+  coordinator's epoch, and `check-config` prints only host controls.
+  Before upgrading such an edge, record its own epoch with the earlier
+  `arcd print-onboarding`, which printed it; otherwise initialize the edge
+  again. An edge an earlier `arcd init` created could not start before the
+  AUD-01 fix unless its operator seeded the fake OPAQUE record by hand. An
+  explicit read of a node's own epoch, for example an additive line in an
+  existing offline command, is listed for the owner.
