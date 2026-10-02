@@ -53,54 +53,52 @@ const REQUESTER: u64 = 1;
 const PEER: u64 = 2;
 const SIBLING: u64 = 3;
 
-/// One submission, the event that completes it and the result that
-/// answers it.
+/// One request, the event that completes it and the result that answers
+/// it. `submit` names an `EGROUP SUBMIT` kind; `None` is `EGROUP CLOSE`.
 struct Case {
-    submit: SubmitKind,
+    submit: Option<SubmitKind>,
     event: E,
     result: K,
 }
 
 const CASES: [Case; 8] = [
     Case {
-        submit: SubmitKind::Ack,
+        submit: Some(SubmitKind::Ack),
         event: E::CommitAckEvent,
         result: K::CommitAcked,
     },
     Case {
-        submit: SubmitKind::ReinitAck,
+        submit: Some(SubmitKind::ReinitAck),
         event: E::ReinitAckEvent,
         result: K::ReinitAcked,
     },
     Case {
-        submit: SubmitKind::Finalization,
+        submit: Some(SubmitKind::Finalization),
         event: E::FinalizedEvent,
         result: K::Finalized,
     },
     Case {
-        submit: SubmitKind::Abort,
+        submit: Some(SubmitKind::Abort),
         event: E::AbortedEvent,
         result: K::Aborted,
     },
-    // `EGROUP CLOSE` is not a submission; the command a close result answers
-    // does not change its rendering.
     Case {
-        submit: SubmitKind::Abort,
+        submit: None,
         event: E::ClosedEvent,
         result: K::Closed,
     },
     Case {
-        submit: SubmitKind::ReinitAttempt,
+        submit: Some(SubmitKind::ReinitAttempt),
         event: E::ReinitStagedEvent,
         result: K::ReinitStaged,
     },
     Case {
-        submit: SubmitKind::ReinitActivate,
+        submit: Some(SubmitKind::ReinitActivate),
         event: E::ReinitActivatedEvent,
         result: K::ReinitActivated,
     },
     Case {
-        submit: SubmitKind::ReinitAbort,
+        submit: Some(SubmitKind::ReinitAbort),
         event: E::ReinitAbortedEvent,
         result: K::ReinitAborted,
     },
@@ -175,14 +173,21 @@ fn hosting_edge() -> TestResult<E2eeEdge> {
     Ok(edge)
 }
 
-/// The labeled request `case` submits from `generation`.
+/// The labeled request of `case` that `generation` sent.
 fn submission(case: &Case, generation: u64) -> PendingRequest {
     let mut request = pending(generation, 0, false);
     request.label = Some(LABEL.to_owned());
-    request.command = Resolved::Command(ClientCommand::Egroup(EgroupCommand::Submit {
-        kind: case.submit,
-        conversation_id: CONVERSATION,
-    }));
+    let command = match case.submit {
+        Some(kind) => EgroupCommand::Submit {
+            kind,
+            conversation_id: CONVERSATION,
+        },
+        None => EgroupCommand::Close {
+            conversation_id: CONVERSATION,
+            reason_code: 1,
+        },
+    };
+    request.command = Resolved::Command(ClientCommand::Egroup(command));
     request
 }
 
@@ -402,29 +407,30 @@ fn deliver_event(
     Ok(edge.batch_applied(fixture.context_mut()?, &mut base))
 }
 
-/// Requires `outputs` to carry exactly `line` to `generation`, as one frame.
-fn assert_receives(
+/// What a connection received when it was not exactly `line`, as one frame,
+/// for the failure report of a whole case table.
+fn mismatch(
     outputs: &[ClientOutput],
     generation: u64,
     line: &str,
     context: &str,
-) -> TestResult {
+) -> TestResult<Option<String>> {
     let received: Vec<&WireMessage> = outputs
         .iter()
         .filter(|output| output.generation == ConnectionGeneration::new(generation))
         .flat_map(|output| output.frames.iter())
         .collect();
     let expected = WireMessage::extension_line(line)?;
+    if received == [&expected] {
+        return Ok(None);
+    }
     let shown: Vec<(&str, &[String])> = received
         .iter()
         .map(|frame| (frame.command(), frame.middle()))
         .collect();
-    assert_eq!(
-        received,
-        vec![&expected],
+    Ok(Some(format!(
         "{context}: connection {generation} received {shown:?}"
-    );
-    Ok(())
+    )))
 }
 
 /// The order in which the request's result and its completion arrive.
@@ -437,6 +443,7 @@ enum Order {
 #[tokio::test]
 async fn a_completed_request_reaches_its_requesting_connection_only_as_its_labeled_result()
 -> TestResult {
+    let mut failures = Vec::new();
     for order in [Order::ResultFirst, Order::CompletionFirst] {
         for case in &CASES {
             let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
@@ -459,20 +466,29 @@ async fn a_completed_request_reaches_its_requesting_connection_only_as_its_label
                 outputs.extend(deliver_result(&mut edge, &mut fixture, case)?);
             }
             let context = format!("{:?} with {order:?}", case.event);
-            assert_receives(&outputs, REQUESTER, &labeled_scalar(case)?, &context)?;
+            failures.extend(mismatch(
+                &outputs,
+                REQUESTER,
+                &labeled_scalar(case)?,
+                &context,
+            )?);
             let copy = untagged_copy(case, ack.as_deref())?;
             for sink in [PEER, SIBLING] {
-                assert_receives(&outputs, sink, &copy, &context)?;
+                failures.extend(mismatch(&outputs, sink, &copy, &context)?);
             }
-            assert!(!edge.pending.contains_key(&REQUEST), "{context}");
+            if edge.pending.contains_key(&REQUEST) {
+                failures.push(format!("{context}: the request is still held"));
+            }
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
     Ok(())
 }
 
 #[tokio::test]
 async fn the_untagged_copy_is_withheld_only_from_the_connection_whose_request_completes()
 -> TestResult {
+    let mut failures = Vec::new();
     for case in &CASES {
         let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
         let mut edge = hosting_edge()?;
@@ -489,17 +505,19 @@ async fn the_untagged_copy_is_withheld_only_from_the_connection_whose_request_co
             ack.as_deref(),
         )?);
         let context = format!("{:?}", case.event);
-        assert_receives(&outputs, PEER, &labeled_scalar(case)?, &context)?;
+        failures.extend(mismatch(&outputs, PEER, &labeled_scalar(case)?, &context)?);
         let copy = untagged_copy(case, ack.as_deref())?;
         for sink in [REQUESTER, SIBLING] {
-            assert_receives(&outputs, sink, &copy, &context)?;
+            failures.extend(mismatch(&outputs, sink, &copy, &context)?);
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
     Ok(())
 }
 
 #[tokio::test]
 async fn an_event_that_completes_no_local_request_reaches_every_sink() -> TestResult {
+    let mut failures = Vec::new();
     for case in &CASES {
         for request in [None, Some(UNKNOWN_REQUEST)] {
             let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
@@ -511,18 +529,22 @@ async fn an_event_that_completes_no_local_request_reaches_every_sink() -> TestRe
             let context = format!("{:?} naming {request:?}", case.event);
             let copy = untagged_copy(case, ack.as_deref())?;
             for sink in [REQUESTER, PEER, SIBLING] {
-                assert_receives(&outputs, sink, &copy, &context)?;
+                failures.extend(mismatch(&outputs, sink, &copy, &context)?);
             }
             // The held request is not this event's: it is still open.
-            assert!(edge.pending.contains_key(&REQUEST), "{context}");
+            if !edge.pending.contains_key(&REQUEST) {
+                failures.push(format!("{context}: the held request was retired"));
+            }
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
     Ok(())
 }
 
 #[tokio::test]
 async fn a_barrier_completion_reaches_its_requesting_connection_only_as_its_labeled_result()
 -> TestResult {
+    let mut failures = Vec::new();
     for case in &CASES {
         let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
         let mut edge = hosting_edge()?;
@@ -540,11 +562,17 @@ async fn a_barrier_completion_reaches_its_requesting_connection_only_as_its_labe
             .prepare_barrier(fixture.context_mut()?, &base_edge(), MUTATION)
             .map_err(|code| code.to_string())?;
         let context = format!("{:?} in a barrier", case.event);
-        assert_receives(&outputs, REQUESTER, &labeled_scalar(case)?, &context)?;
+        failures.extend(mismatch(
+            &outputs,
+            REQUESTER,
+            &labeled_scalar(case)?,
+            &context,
+        )?);
         let copy = untagged_copy(case, ack.as_deref())?;
         for sink in [PEER, SIBLING] {
-            assert_receives(&outputs, sink, &copy, &context)?;
+            failures.extend(mismatch(&outputs, sink, &copy, &context)?);
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
     Ok(())
 }

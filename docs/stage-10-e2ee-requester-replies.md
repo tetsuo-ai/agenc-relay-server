@@ -121,13 +121,13 @@ events, whose copy to the requester is the request's labeled echo
 request the event's correlation names. The coordinator correlates an event
 only when it is a request's completion (the home copy of the semantic event,
 or a generic `request_completed`, which renders no copy), so such an event
-always completes that request, and its labeled scalar follows once the
-result is present, in either arrival order. Every other attached connection, another
-session of the requester's own account included, still receives the
-untagged copy. A request answered `PENDING` is no longer held once that line
-renders, so its later terminal event reaches it as the untagged broadcast,
-as Section 11.7 requires. The ordinary event path and the cross-profile
-barrier path both render through `fanout`.
+always completes that request, and its labeled scalar follows once the result
+is present, in either arrival order. Every other attached connection, another
+session of the requester's own account included, still receives the untagged
+copy. A request answered `PENDING` is no longer held once that line renders,
+so its later terminal event reaches it as the untagged broadcast, as Section
+11.7 requires. The ordinary event path and the cross-profile barrier path both
+render through `fanout`.
 
 ### Regressions
 
@@ -161,9 +161,13 @@ completion from bob, and, for each ReInit ACK, no `REINIT-ACK` notice of the
 submitter's own ACK object. bob reads the activation, and alice the abort,
 as the untagged broadcast naming the same identifiers.
 
-With `events.rs` reverted to its previous commit, the three unit tests above
-fail at their first case (the requester receives `ACK` and then `ACKED`),
-and both daemon scenarios fail at the staged attempt: "the requester
+Each unit test reports every case that mismatches. With `events.rs` reverted
+to its previous commit, the three unit tests above fail in all 32 of their
+cases, the eight kinds in both arrival orders, with the peer's request and
+through the barrier: in each, the connection whose request completes receives
+the untagged `ACK`, `REINIT-ACK`, `FINALIZED`, `ABORTED`, `CLOSED`,
+`REINIT-STAGED`, `REINIT-ACTIVATED` or `REINIT-ABORTED` copy before its
+labeled scalar. Both daemon scenarios fail at the staged attempt: "the requester
 received 2 REINIT-STAGED lines, not one labeled completion"
 (`:edge-a.test EGROUP REINIT-STAGED …` before `@label=l35 :edge-a.test EGROUP
 REINIT-STAGED …`). With the change restored, all pass.
@@ -198,3 +202,10 @@ echo, is unchanged.
 - The requesting connection is matched by its pending request. A client that
   disconnects before its result loses that request, as before, and a new
   connection receives the untagged copy.
+- No critical-coverage region was added. The changed items render or route
+  client lines and parse nothing; the file's closed decoder `decode_value`
+  has no region in either policy, and neither do `scalar_line` or `fanout`.
+  Whether the release inventory should gain `protocol-enum-arms` regions for
+  `triple_line`, `quad_line`, `metadata_child` and `echoes_to_requester` is
+  the owner's decision; the release region `edge-route-projection-writes` in
+  `events.rs` was only re-anchored, its span unchanged.
