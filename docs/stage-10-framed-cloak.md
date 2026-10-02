@@ -83,6 +83,31 @@ same constant. The coordinator renders federated NAMES without user masks
 (`federated_query_frames(.., false, ..)`), so its old figure was never exceeded,
 but it is again an honest bound on the renderer it describes.
 
+## Compatibility
+
+- Clients: every user mask is 12 bytes longer, and so is every user and host
+  field pair of 311, 314, 352 and 302: `u-` goes before the user component,
+  and `h-` before and `.invalid` after the host component. Conventional
+  clients treat the user and host as opaque text, and the conventional-client
+  qualification asserts no mask. A decoder that enforces Section 7.4 now
+  accepts every user prefix the daemon sends.
+- Federation, storage and registries: unchanged. `PublicCloak`,
+  `SourceView`, `SessionRecord` and the stored session and history records
+  keep the bare components, and each node frames them when it renders. While
+  one network runs nodes built before and after this change, each client
+  reads the spelling of the node it is connected to, so one user can read
+  bare on one edge and framed on another; no node refuses the other's
+  objects. Storage generation 5 is unchanged and nothing persisted is
+  rewritten, so no restore test applies.
+- Cloak masks: a `$c:` mask was already matched against the framed host
+  before this change, so a ban written in the framed form behaves the same
+  across such a mixed network.
+- Privacy: none. The frame is fixed text around the same two random
+  components.
+- Limits: the only bounds that change are the two NAMES frame bounds above.
+  A server line holds 8,701 command bytes and the longest mask is 72, and a
+  history page is already sized for seven maximum-sized lines.
+
 ## Regressions
 
 | Test | What it pins |
@@ -107,27 +132,31 @@ stored components; none takes its expectation from the formatter.
 
 ## Each part, reverted
 
-The revert proof restored one part of the change at a time in the worktree,
+The revert proof restores one part of the change at a time in the worktree,
 with lints capped to warnings so that a binding a partial revert leaves unused
-does not stop the build, ran the sixteen tests above, and restored the file.
-The script (`mutate-b12.py`) and its logs are kept with the SDK program's
-records.
+does not stop the build, runs the seventeen tests above, and restores the
+file. It first ran at 29e61c8 with the sixteen tests of that commit; the
+table is its second run, at 026611d, which adds the `$c:` ban test, and its
+last row a third, which also reverts the formatter's own nickname check. The
+scripts (`mutate-b12.py`, `mutate-b12-v2.py` and `mutate-b12-v3.py`) and their
+logs are kept with the SDK program's records.
 
 | Part reverted | Tests that then fail |
 | --- | --- |
-| None (control) | none: all sixteen pass |
-| The formatter's framing, which returns every renderer and both bounds to the 70c832c output | 16: four `visible_cloak` tests, all nine runtime tests above, the two-guest transcript, the three-daemon federation test and the WSS equivalence test |
+| None (control) | none: all seventeen pass |
+| The formatter's framing, which returns every renderer and both bounds to the 70c832c output | all 17: four `visible_cloak` tests, all ten runtime tests above, the two-guest transcript, the three-daemon federation test and the WSS equivalence test |
 | `session_prefix` | the `mutation_render` test, the two-guest transcript, WSS equivalence |
 | `names_token` | the `mutation_render` test |
 | `names_entry` | the `query_render` test, the local JOIN page test, the coordinator bound test, the two-guest transcript |
 | 314 fields | the `whowas` test, the bridged-link test, the two-guest transcript |
-| 352 fields | the `query_render` test, the bridged-link test, the two-guest transcript |
+| 352 fields | the `query_render` test, the `$c:` ban test ("a ban on $c:bbbbbbbbbbbbbbf5 decided #render-cloak-who wrongly"), the bridged-link test, the two-guest transcript |
 | 311 fields | the `query_render` test, the bridged-link test, the two-guest transcript, the three-daemon federation test, WSS equivalence |
 | 302 entries | the `userhost` test, the bridged-link test, the two-guest transcript |
 | The edge's `prefix` | the edge render test, the bridged-link test, the three-daemon federation test |
 | The history replay sender | the edge history test |
 | The local JOIN token bound, 73 back to 61 | the local JOIN page test (`LimitExceeded`) |
 | The coordinator's NAMES bound | the coordinator bound test |
+| The formatter's nickname check (`mutate-b12-v3.py`, which adds the refusal test to the set; its control passes all eighteen) | the `visible_cloak` refusal test |
 
 `names_token` is reached only when a JOIN's own NAMES is rendered with the
 fanout rather than as a local JOIN snapshot, which no production JOIN with a
@@ -143,40 +172,84 @@ reply does today, so only the unit test sees it.
   A.2 has 314 carry the "ephemeral public user and host components". This
   change renders those components in the same visible fields `WHOIS` and
   `WHO` use, so one session reads the same in all three.
-- The welcome `900` of SC-007 (SDK program B-02) is not on this branch. It
-  takes its mask from `session_prefix` and from the edge's `prefix`, so it is
-  framed wherever both changes are merged, and any test of it that spells the
-  mask bare has to take the framed spelling then.
+- The welcome `900` of SC-007 and the later `900` and `ACCOUNT` of a
+  post-registration login (SDK program B-02 and B-03) are not on this branch.
+  They take their masks from `session_prefix` and from the edge's `prefix`,
+  so they are framed wherever both changes are merged, and any test of them
+  that spells the mask bare has to take the framed spelling then.
 - The conventional-client qualification
   (`stage_ten::conventional_clients_exchange_public_messages_and_cannot_enter_secret_channels`)
   was not rerun; it needs the pinned container and asserts no mask.
 - The SDK's opt-in for the bare spelling (its wire mismatch WD-1) can be
   retired once the SDK pins a commit that carries this change.
 
+## Release regions measured
+
+The gate's coverage command
+(`RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest --workspace --all-features --branch --locked`)
+ran at 026611d and on an export of 70c832c under the same procedure, and each
+region below was scored with `check-coverage.py`'s own counting on the span
+its policy reviews at that commit. These are the release regions in every
+production file this branch changes; covered over total, in the region's
+metric.
+
+| Region | Metric | 70c832c | 026611d |
+| --- | --- | --- | --- |
+| `client-registration-grammar-error-arms` | regions | 13/13 | 13/13 |
+| `client-render-error-arms` | regions | 18/18 | 18/18 |
+| `runtime-whowas-current-cloak-authority` | branches | 4/4 | 4/4 |
+| `runtime-local-join-snapshot-identity` | branches | 4/6 | 4/6 |
+| `runtime-userhost-disclosure` | branches | 6/6 | 6/6 |
+| `runtime-monitor-status-disclosure` | branches | 2/2 | 2/2 |
+| `cap81-shape-bounds` | regions | 47/56 | 47/56 |
+| `cap81-shape-names` | regions | 45/72 | 45/72 |
+| `cap81-shape-user-query` | regions | 43/48 | 43/48 |
+| `cap81-shape-whois` | regions | 35/40 | 35/40 |
+| `cap81-shape-mode` | regions | 33/39 | 33/39 |
+| `cap81-shape-presence` | regions | 37/45 | 37/45 |
+| `cap81-shape-information` | regions | 0/31 | 0/31 |
+| `cap13-render-render-event-strict` | regions | 43/46 | 43/46 |
+
+Each region reads the same in its metric at both commits. The respanned
+`runtime-userhost-disclosure` keeps all six branches covered; its regions went
+from 36 of 38 to 36 of 37, because the two `?` exits of the component
+conversions, which no input reaches, became the one exit of the formatter
+call. The regions below 100 percent are below it at 70c832c as well; the
+release policy is read by the Stage 10 runner, not by the Stage 09 gate. The
+interim policy, which the gate checks, passes at both commits: branches 84.53
+percent, lines 93.94 percent, all 21 critical regions at 100 percent.
+
 ## Validation
 
-On this branch, with `CARGO_TARGET_DIR` on `/mnt/data` and a short private
-`TMPDIR`:
+On this branch at 026611d, with `CARGO_TARGET_DIR` on `/mnt/data` and a short
+private `TMPDIR`; the commit that follows it changes only this record:
 
 - `cargo fmt --all --check`: ok.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
   ok.
-- `cargo nextest run --workspace --all-features --locked`: 4,526 passed, 24
+- `cargo nextest run --workspace --all-features --locked`: 4,527 passed, 24
   skipped. The 70c832c base under the same procedure: 4,514 passed, 24
   skipped.
-- The SDK program's fast static gate, 59 commands: `check-spec.sh`,
-  `check-baseline.py`, `requirements.py` with every stage and its self-test,
-  `check-workspace.py`, `check-source.py`, `check-evidence.py`, `check-ci.py`
-  and their self-tests, rustfmt, `cargo tree`, `cargo deny`, `cargo audit`,
-  both coverage policies' self-test and audit, every `generate-*` `--check`,
-  the Stage 01 to 09 checkers, `qualify-stage-six.sh` and
-  `test-release-qualification.py`: all pass.
+- The SDK program's fast static gate (`fast-gates.sh`, 59 commands):
+  `check-spec.sh`, `check-baseline.py`, `requirements.py` with every stage
+  and its self-test, `check-workspace.py`, `check-source.py`,
+  `check-evidence.py`, `check-ci.py` and their self-tests, rustfmt,
+  `cargo tree`, `cargo deny`, `cargo audit`, both coverage policies'
+  self-test and audit, every `generate-*` `--check`, the Stage 01 to 09
+  checkers, `qualify-stage-six.sh` and `test-release-qualification.py`: all
+  pass.
 - `check-coverage.py audit` on the release policy: all 1,145 reviewed spans
   hold their items. The drifted regions moved with their span text unchanged;
   `runtime-userhost-disclosure` was re-reviewed and respanned, since
   `render_userhost` now takes its fields from the formatter.
+- The document lint of `check-release-claims.py` on its policy documents and
+  this record: no completion phrase. The whole script runs only under
+  `qualify-release.py`, with a candidate binary.
 - The revert campaign above: the control passes and every revert fails at
   least one test.
-- Not run: the Stage 09 implementation gate (`check-stage-nine.sh`), a branch
-  measurement of the touched release regions, the storage disk profile (no
-  storage change) and the conventional-client qualification.
+- The coverage measurement above: under `cargo llvm-cov`, 4,527 tests
+  passed (70c832c: 4,514), and the gate's interim policy check passes at
+  both commits.
+- Not run: the Stage 09 implementation gate (`check-stage-nine.sh`), the
+  storage disk profile (no storage change) and the conventional-client
+  qualification.
