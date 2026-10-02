@@ -343,6 +343,10 @@ impl VerifiedRoster {
 pub enum Lineage<'a, T> {
     /// The predecessor is known (or known absent) and the lineage rules apply.
     Checked(Option<&'a T>),
+    /// No head is pinned yet (first contact): the predecessor is not at hand,
+    /// so only the lineage shape applies, generation zero alone naming the
+    /// all-zero predecessor, while every other rule still applies.
+    FirstContact,
     /// The statement was accepted before and is being reloaded from durable
     /// storage; its predecessor may no longer be retained, so the lineage
     /// rules are skipped while every other rule still applies.
@@ -463,7 +467,7 @@ fn verify_roster_lineage(
             check_roster_lineage(tbs.roster_generation, &tbs.previous_roster_id, predecessor)?;
         }
         RosterAdmission::FirstContact(_) => {
-            check_roster_shape(tbs.roster_generation, &tbs.previous_roster_id)?;
+            check_lineage_shape(tbs.roster_generation, &tbs.previous_roster_id)?;
         }
         RosterAdmission::Restored => {}
     }
@@ -535,9 +539,9 @@ fn check_roster_lineage(
     }
 }
 
-/// The lineage shape a roster keeps without its predecessor: generation zero,
-/// and only it, names the all-zero predecessor.
-fn check_roster_shape(generation: u64, previous_id: &[u8; 32]) -> Result<(), E2eeError> {
+/// The lineage shape a roster or capability statement keeps without its
+/// predecessor: generation zero, and only it, names the all-zero predecessor.
+fn check_lineage_shape(generation: u64, previous_id: &[u8; 32]) -> Result<(), E2eeError> {
     if (generation == 0) == (*previous_id == [0; 32]) {
         Ok(())
     } else {
@@ -682,9 +686,27 @@ pub fn verify_capabilities(
     verify_capabilities_lineage(roster, capabilities, Lineage::Checked(predecessor))
 }
 
+/// Verifies a capability statement of a device whose capability lineage this
+/// caller has never pinned (first contact), at any generation, for a device
+/// active in `roster`.
+///
+/// No predecessor is checked, so the result says nothing about whether a
+/// newer statement exists or one was withheld; only the lineage shape
+/// applies, generation zero alone naming the all-zero predecessor. Every
+/// other rule of [`verify_capabilities`] applies, the signed network
+/// included. Once a head is pinned, later statements use
+/// [`verify_capabilities`]; reloading one uses [`restore_capabilities`].
+pub fn verify_first_contact_capabilities(
+    roster: &VerifiedRoster,
+    capabilities: &ArcDeviceCapabilities,
+) -> Result<VerifiedCapabilities, E2eeError> {
+    verify_capabilities_lineage(roster, capabilities, Lineage::FirstContact)
+}
+
 /// Re-verifies a capability statement this node accepted before, without
 /// its predecessor. Every other rule, the signed network included, still
-/// applies.
+/// applies. It never admits a statement received from another party: that
+/// is [`verify_capabilities`] or [`verify_first_contact_capabilities`].
 pub fn restore_capabilities(
     roster: &VerifiedRoster,
     capabilities: &ArcDeviceCapabilities,
@@ -726,13 +748,17 @@ fn verify_capabilities_lineage(
     ] {
         ensure_canonical(vector, |value| *value)?;
     }
-    if let Lineage::Checked(predecessor) = lineage {
-        check_capability_lineage(
+    match lineage {
+        Lineage::Checked(predecessor) => check_capability_lineage(
             tbs.device_id,
             tbs.capability_generation,
             &tbs.previous_capability_id,
             predecessor,
-        )?;
+        )?,
+        Lineage::FirstContact => {
+            check_lineage_shape(tbs.capability_generation, &tbs.previous_capability_id)?;
+        }
+        Lineage::Restored => {}
     }
     certificate.key.verify(
         SignatureDomain::DeviceCapabilities,

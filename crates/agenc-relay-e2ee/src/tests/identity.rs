@@ -1858,3 +1858,67 @@ fn first_contact_holds_a_roster_to_every_supplied_roster_of_its_root() -> TestRe
     );
     Ok(())
 }
+
+/// First contact admits a capability statement of a device active in the
+/// roster at any generation with no predecessor at hand, so an imported
+/// nonzero head needs neither succession nor restore. Only the lineage shape
+/// replaces the predecessor step, generation zero alone naming the all-zero
+/// predecessor; every other rule of the checked path applies, and with the
+/// predecessor the result equals the checked one.
+#[test]
+fn first_contact_admits_a_capability_head_at_any_generation() -> TestResult {
+    let account = account_with(&[7])?;
+    let roster = &account.verified_roster;
+    let statement = |device: u8, generation: u64, previous: [u8; 32]| {
+        capabilities(
+            device,
+            &account.roster,
+            generation,
+            previous,
+            (100, 200),
+            vec![1, 3],
+        )
+    };
+    let genesis = statement(7, 0, [0; 32])?;
+    let first = verify_capabilities(roster, &genesis, None)?;
+    assert_eq!(verify_first_contact_capabilities(roster, &genesis)?, first);
+    let next = statement(7, 1, first.capability_id)?;
+    let checked = verify_capabilities(roster, &next, Some(&first))?;
+    assert_eq!(
+        verify_capabilities(roster, &next, None),
+        Err(E2eeError::InvalidValue),
+        "succession needs the predecessor"
+    );
+    assert_eq!(verify_first_contact_capabilities(roster, &next)?, checked);
+    let later = statement(7, 5, [4; 32])?;
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &later)?.generation,
+        5
+    );
+    for (generation, previous) in [(1, [0; 32]), (0, [3; 32])] {
+        assert_eq!(
+            verify_first_contact_capabilities(roster, &statement(7, generation, previous)?),
+            Err(E2eeError::InvalidValue),
+            "generation zero, and only it, names the all-zero predecessor"
+        );
+    }
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &statement(8, 1, first.capability_id)?),
+        Err(E2eeError::InvalidValue),
+        "a device the roster does not list"
+    );
+    let mut foreign = next.clone();
+    foreign.tbs.network_id = [9; 32];
+    foreign.device_signature = sign(&key(7), SignatureDomain::DeviceCapabilities, &foreign.tbs)?;
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &foreign),
+        Err(E2eeError::ProfileMismatch)
+    );
+    let mut forged = next;
+    forged.device_signature = [1; 64];
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &forged),
+        Err(E2eeError::SignatureInvalid)
+    );
+    Ok(())
+}

@@ -217,9 +217,11 @@ issue #69) are recorded in
 The shared public verifiers corrected where they admitted correctly signed
 objects the companion refuses, a sequencer successor that reuses its
 predecessor's key, capability and leaf statements signed for another
-network, and roster certificates whose enrollment issuance is not shown,
-together with the first-contact roster admission that takes that issuance as
-explicit evidence (X-10, SDK program, outside master #35), are recorded in
+network, roster certificates whose enrollment issuance is not shown and a
+roster listing one certificate both active and revoked, together with the
+first-contact roster admission that takes that issuance as explicit
+evidence and the first-contact capability admission (X-10, SDK program,
+outside master #35), are recorded in
 [the shared verifier predicates record](stage-10-shared-verifier-predicates.md).
 The thirteen endpoint scalars of companion Section 16 that had no constant,
 and the table test that compares every Section 16 row with the `limits`

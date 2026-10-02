@@ -226,6 +226,44 @@ the branch (`70c832c` admits the same roster).
 Written before the change, the test fails (the generation-zero roster
 verifies); with the change it passes.
 
+## First contact for capability statements
+
+### Finding
+
+The SDK's shared-verifier design asks the shared API for an explicit
+first-contact admission of a nonzero roster or capability head, so that a
+client with no pinned head never calls a `restore_*` helper on received
+bytes. The roster gained `verify_first_contact_roster` above, but a
+capability statement above generation zero with no pinned head was
+refused by `verify_capabilities` (no predecessor means generation zero)
+and admitted only by `restore_capabilities`, which exists for a statement
+the caller accepted before. A client importing a peer device's rotated
+capabilities therefore had no sanctioned shared path. The independent
+review of this branch raised it.
+
+### Change
+
+- `crates/agenc-relay-e2ee/src/identity.rs`: the new
+  `verify_first_contact_capabilities(roster, statement)` applies every rule
+  of `verify_capabilities` (active device, exact roster references, signed
+  network, bounded interval, canonical vectors, device signature) except
+  the predecessor step, which the lineage shape replaces: generation zero,
+  and only it, names the all-zero predecessor (`InvalidValue`). The public
+  `Lineage` mode gains a `FirstContact` variant for it; no public function
+  takes a `Lineage`, and no code in this workspace or the SDK matches on
+  it. `restore_capabilities`'s documentation now says it never admits a
+  statement received from another party.
+
+### Tests
+
+| Test | What it pins |
+| --- | --- |
+| `src/tests/identity.rs::first_contact_admits_a_capability_head_at_any_generation` | First contact admits generations zero, one and five with no predecessor, and equals the checked result where succession applies; a generation-one statement naming the all-zero predecessor, a generation-zero one naming another, a device the roster does not list, a statement signed for another network and a forged signature are refused. |
+
+Before the change the test does not compile (the function does not
+exist). With the shape check removed, or replaced by the checked rule
+without a predecessor, the test fails; with the change it passes.
+
 ## Compatibility
 
 - Wire: unchanged. The runtime answers every refusal on these paths as before.
@@ -241,8 +279,10 @@ verifies); with the change it passes.
   refuses a roster breaking the issuance rules, or listing a certificate
   both active and revoked, with the same reply as any refused roster, and a
   historical chain refuses the record whose roster transition installs one.
-- API: `VerifiedRoster` has one more public field, and
-  `verify_first_contact_roster` is new; existing signatures are unchanged.
+- API: `VerifiedRoster` has one more public field,
+  `verify_first_contact_roster` and `verify_first_contact_capabilities`
+  are new, and `Lineage` has one more variant; existing signatures are
+  unchanged.
 - Privacy and dependencies: unchanged.
 
 ## Limitations
@@ -258,8 +298,6 @@ verifies); with the change it passes.
   issuance evidence (it now refuses a later target). Requiring that evidence
   there would need a new evidence input; the SDK's verification design asks
   for it at first contact, and it is left to that decision.
-- There is no capability first-contact function; a capability head above
-  generation zero is still admitted only by succession or restore.
 - On first contact the issuance evidence is the roster at exactly the
   certificate's target generation; a later roster that lists the certificate
   is not accepted in its place.
