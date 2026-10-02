@@ -17,6 +17,7 @@ mod event_faults;
 mod ingress;
 mod projection;
 mod responses;
+mod result_kinds;
 mod retry;
 mod scope;
 mod snapshot;

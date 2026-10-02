@@ -405,8 +405,7 @@ impl E2eeEdge {
                 Ok(Vec::new())
             }
             _ if result.descriptors.is_empty() => {
-                let line =
-                    scalar_line(&result.value, pending).ok_or(E2eeReplyCode::InvalidFragment)?;
+                let line = scalar_line(result, pending).ok_or(E2eeReplyCode::InvalidFragment)?;
                 let rendered = match label {
                     Some(label) => render_labeled(label, &server, &line),
                     None => render_broadcast(&server, &line),
@@ -456,7 +455,7 @@ impl E2eeEdge {
                 .render(&server)
                 .map_err(|_| E2eeReplyCode::InvalidFragment)?,
         ];
-        if let Some(child) = metadata_child(&result.value) {
+        if let Some(child) = metadata_child(result) {
             lines.push(
                 child
                     .render(&server, &batch_id)
@@ -556,13 +555,44 @@ fn empty_line(kind: ArcFederationEmptyKind) -> SuccessLine {
     }
 }
 
+/// The success line of a three-identifier tuple, which `commit_acked`,
+/// `reinit_staged` and `reinit_acked` share: each kind keeps its own 11.7
+/// result (12.5 maps every selector one-to-one).
+fn triple_line(
+    kind: ArcFederationResultKind,
+    (a, b, c): ([u8; 32], [u8; 32], [u8; 32]),
+) -> Option<SuccessLine> {
+    use ArcFederationResultKind as K;
+    Some(match kind {
+        K::CommitAcked => SuccessLine::Acked(a, b, c),
+        K::ReinitStaged => SuccessLine::ReinitStaged(a, b, c),
+        K::ReinitAcked => SuccessLine::ReinitAcked(a, b, c),
+        _ => return None,
+    })
+}
+
+/// The success line of a four-identifier tuple, which `aborted`,
+/// `reinit_activated` and `reinit_aborted` share, chosen by its kind.
+fn quad_line(
+    kind: ArcFederationResultKind,
+    (a, b, c, d): ([u8; 32], [u8; 32], [u8; 32], [u8; 32]),
+) -> Option<SuccessLine> {
+    use ArcFederationResultKind as K;
+    Some(match kind {
+        K::Aborted => SuccessLine::Aborted(a, b, c, d),
+        K::ReinitActivated => SuccessLine::ReinitActivated(a, b, c, d),
+        K::ReinitAborted => SuccessLine::ReinitAborted(a, b, c, d),
+        _ => return None,
+    })
+}
+
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match maps every scalar result value to its 11.7 success line
 /// The labeled scalar success line of a result without responses; a
 /// `STORED` group line names the request's conversation and subject.
-fn scalar_line(value: &ResultValue, pending: &PendingRequest) -> Option<SuccessLine> {
+fn scalar_line(result: &DecodedResult, pending: &PendingRequest) -> Option<SuccessLine> {
     let route = pending.command.route_key();
     let subject = pending.subject.unwrap_or([0; 32]);
-    Some(match value {
+    Some(match &result.value {
         ResultValue::Bound(conversation, binding, _) => SuccessLine::Bound(*conversation, *binding),
         ResultValue::Closed(conversation, close) => SuccessLine::Closed(*conversation, *close),
         ResultValue::Stored(ArcFederationStoreKind::StoreAuthorization, object) => {
@@ -575,7 +605,7 @@ fn scalar_line(value: &ResultValue, pending: &PendingRequest) -> Option<SuccessL
             SuccessLine::StoredMembership(route, subject, *object)
         }
         ResultValue::Stored(kind, object) => SuccessLine::Stored(store_kind(*kind)?, *object),
-        ResultValue::Triple(a, b, c) => SuccessLine::Acked(*a, *b, *c),
+        ResultValue::Triple(a, b, c) => triple_line(result.kind, (*a, *b, *c))?,
         ResultValue::Pending(conversation, kind, object) => {
             SuccessLine::Pending(*conversation, pending_kind(*kind), *object)
         }
@@ -584,7 +614,7 @@ fn scalar_line(value: &ResultValue, pending: &PendingRequest) -> Option<SuccessL
         ResultValue::Attached(device, generation) => SuccessLine::Attached(*device, *generation),
         ResultValue::Revoked(reference) => SuccessLine::Revoked(reference.clone()),
         ResultValue::Finalized(a, epoch, c, d) => SuccessLine::Finalized(*a, *epoch, *c, *d),
-        ResultValue::Quad(a, b, c, d) => SuccessLine::Aborted(*a, *b, *c, *d),
+        ResultValue::Quad(a, b, c, d) => quad_line(result.kind, (*a, *b, *c, *d))?,
         ResultValue::MailboxAcked(token, object) => SuccessLine::MailboxAcked(*token, *object),
         ResultValue::RecoveryAccepted(a, b) => SuccessLine::RecoveryAccepted(*a, *b),
         ResultValue::RecoveryExtended(a, sequence, c) => {
@@ -602,9 +632,11 @@ fn scalar_line(value: &ResultValue, pending: &PendingRequest) -> Option<SuccessL
     })
 }
 
-/// The metadata child of an object batch, when the result carries one.
-fn metadata_child(value: &ResultValue) -> Option<BatchChild> {
-    Some(match value {
+/// The metadata child of an object batch, when the result carries one. Only
+/// an `aborted` four-identifier tuple has a child form; a ReInit terminal
+/// sharing its shape never renders as `ABORTED`.
+fn metadata_child(result: &DecodedResult) -> Option<BatchChild> {
+    Some(match &result.value {
         ResultValue::Reserved(reservation, object) => BatchChild::Reserved(*reservation, *object),
         ResultValue::Bound(conversation, binding, object) => {
             BatchChild::Bound(*conversation, *binding, *object)
@@ -616,7 +648,9 @@ fn metadata_child(value: &ResultValue) -> Option<BatchChild> {
             BatchChild::Claimed(*device, reference.clone(), *object)
         }
         ResultValue::Finalized(a, epoch, c, d) => BatchChild::Finalized(*a, *epoch, *c, *d),
-        ResultValue::Quad(a, b, c, d) => BatchChild::Aborted(*a, *b, *c, *d),
+        ResultValue::Quad(a, b, c, d) if result.kind == ArcFederationResultKind::Aborted => {
+            BatchChild::Aborted(*a, *b, *c, *d)
+        }
         _ => return None,
     })
 }

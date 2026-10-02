@@ -248,13 +248,14 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
             (vec![creator_ack, joiner_ack], &[0, 1]),
         ),
     )?;
-    assert_contains(&activated, " EGROUP REINIT-ACTIVATED ")?;
+    let completion = std::slice::from_ref(completion_line(&activated)?);
+    assert_contains(completion, " EGROUP REINIT-ACTIVATED ")?;
     assert_eq!(
-        hash_at(&activated, "REINIT-ACTIVATED", 3)?,
+        hash_at(completion, "REINIT-ACTIVATED", 3)?,
         clients.bound.conversation
     );
     assert_eq!(
-        hash_at(&activated, "REINIT-ACTIVATED", 4)?,
+        hash_at(completion, "REINIT-ACTIVATED", 4)?,
         target.conversation
     );
 
@@ -686,16 +687,27 @@ fn stage_attempt(clients: &mut Clients, attempt: &ArcReInitAttempt) -> TestResul
         &object,
     )?;
     let reply = labeled_reply(&mut clients.alice, &label)?;
-    assert_contains(&reply, " EGROUP REINIT-STAGED ")?;
+    let completion = std::slice::from_ref(completion_line(&reply)?);
+    assert_contains(completion, " EGROUP REINIT-STAGED ")?;
     assert_eq!(
-        hash_at(&reply, "REINIT-STAGED", 3)?,
+        hash_at(completion, "REINIT-STAGED", 3)?,
         clients.bound.conversation
     );
     assert_eq!(
-        hash_at(&reply, "REINIT-STAGED", 5)?,
+        hash_at(completion, "REINIT-STAGED", 5)?,
         *e2ee::ObjectId::compute(&object).as_bytes()
     );
-    hash_at(&reply, "REINIT-STAGED", 4)
+    hash_at(completion, "REINIT-STAGED", 4)
+}
+
+/// The requester's labeled completion, which `labeled_reply` returns last.
+/// The unlabeled broadcast or notice that can arrive before it is not the
+/// command's result (companion 11.7), so a reply token is checked here.
+fn completion_line(reply: &[String]) -> TestResult<&String> {
+    reply
+        .last()
+        .filter(|line| tag_value(line, "label").is_some())
+        .ok_or_else(|| failure(format!("no labeled completion in {reply:?}")))
 }
 
 /// Reads the attempt receipt the coordinator sequenced for the conversation.
@@ -816,7 +828,11 @@ fn submit_ack(
         ),
         &object,
     )?;
-    assert_contains(&labeled_reply(client, label)?, " EGROUP ACKED ")
+    let reply = labeled_reply(client, label)?;
+    assert_contains(
+        std::slice::from_ref(completion_line(&reply)?),
+        " EGROUP REINIT-ACKED ",
+    )
 }
 
 /// Submits one activation request carrying `acks` and the votes of the
