@@ -1,9 +1,10 @@
-# Requester replies of ReInit results (SC-013)
+# Requester replies of ReInit results and terminal events (SC-013)
 
 This record covers SC-013 of the SDK server program (2026-10-01, outside
 master #35): the labeled result a requesting connection receives for the four
-ReInit submissions. No wire object, registry, profile hash, limit,
-persistent format or normative text changed.
+ReInit submissions, and the untagged copies of an ACK or terminal event that
+the requesting connection no longer receives. No wire object, registry,
+profile hash, limit, persistent format or normative text changed.
 
 ## Each ReInit result keeps its own token
 
@@ -95,6 +96,87 @@ token: `ACKED` becomes `REINIT-STAGED` or `REINIT-ACKED`, and `ABORTED`
 becomes `REINIT-ACTIVATED` or `REINIT-ABORTED`. The identifiers, the untagged
 broadcasts and the ordinary `ACKED` and `ABORTED` replies are unchanged.
 
+## The requesting connection receives only its labeled result
+
+Companion Section 12.5 (the paragraph that begins "Labels never cross
+federation") states that an ACK submission gets one labeled `ACKED`, a ReInit
+ACK submission one labeled `REINIT-ACKED`, and that an immediate close,
+ReInit stage, finalization, abort, ReInit activation or ReInit abort "uses
+its semantic completion to send exactly one labeled scalar to the requesting
+connection and the registered untagged broadcast to other eligible local
+sinks; it suppresses that broadcast on the requesting connection". Section
+11.7 repeats it for ACKs ("ACK submission gets only the labeled `ACKED`
+scalar; the final unlabeled line merely notifies other sessions") and states
+that a requesting connection receives its one labeled terminal line, or an
+earlier labeled `PENDING` followed later by the untagged broadcast.
+
+The edge rendered an event's copies for every attached connection of the
+conversation, the requesting connection included, and then the request's
+labeled result: the requester read the untagged `ACK`, `REINIT-ACK` notice or
+terminal broadcast first and its labeled line second. `fanout`
+(`crates/agenc-relay-runtime/src/e2ee/edge/events.rs`) now skips the
+requesting connection for every kind except the application and candidate
+events, whose copy to the requester is the request's labeled echo
+(`echoes_to_requester`). The requesting connection is the one whose pending
+request the event's correlation names. The coordinator correlates an event
+only when it is a request's completion (the home copy of the semantic event,
+or a generic `request_completed`, which renders no copy), so such an event
+always completes that request, and its labeled scalar follows once the
+result is present, in either arrival order. Every other attached connection, another
+session of the requester's own account included, still receives the
+untagged copy. A request answered `PENDING` is no longer held once that line
+renders, so its later terminal event reaches it as the untagged broadcast,
+as Section 11.7 requires. The ordinary event path and the cross-profile
+barrier path both render through `fanout`.
+
+### Regressions
+
+`crates/agenc-relay-runtime/src/e2ee/edge/tests/requester_copies.rs` drives
+the eight kinds (commit ACK, ReInit ACK, finalized, aborted, closed, ReInit
+staged, ReInit activated and ReInit aborted) through the edge's own entry
+points, a real `federation_event` (with its ACK object as `EDATA` for the
+two ACK kinds) and a real `federation_result`, on a direct route that three
+attached connections share: the requester, a second session of the
+requester's account and the peer. Each connection must receive exactly the
+expected line:
+
+- `a_completed_request_reaches_its_requesting_connection_only_as_its_labeled_result`:
+  the result before its completion and the completion before its result;
+  the requester receives its one labeled scalar and both other connections
+  the untagged copy;
+- `the_untagged_copy_is_withheld_only_from_the_connection_whose_request_completes`:
+  the peer's request completes, so the requester, whose own earlier request
+  is no longer held, receives the untagged copy;
+- `an_event_that_completes_no_local_request_reaches_every_sink`: without a
+  correlation, or naming a request the edge does not hold, every connection
+  receives the copy and the held request stays open (this one passes with
+  and without the change, as a control);
+- `a_barrier_completion_reaches_its_requesting_connection_only_as_its_labeled_result`:
+  the same through `prepare_barrier`.
+
+Through the daemons, the Stage 08 ReInit scenarios now require the
+requester's reply to name its result exactly once, in the labeled
+completion: the staged attempt and the activation from alice, the abort
+completion from bob, and, for each ReInit ACK, no `REINIT-ACK` notice of the
+submitter's own ACK object. bob reads the activation, and alice the abort,
+as the untagged broadcast naming the same identifiers.
+
+With `events.rs` reverted to its previous commit, the three unit tests above
+fail at their first case (the requester receives `ACK` and then `ACKED`),
+and both daemon scenarios fail at the staged attempt: "the requester
+received 2 REINIT-STAGED lines, not one labeled completion"
+(`:edge-a.test EGROUP REINIT-STAGED …` before `@label=l35 :edge-a.test EGROUP
+REINIT-STAGED …`). With the change restored, all pass.
+
+### Wire effect
+
+A requesting connection no longer receives the untagged `ACK` or
+`REINIT-ACK` notice of its own ACK submission, or the untagged `CLOSED`,
+`REINIT-STAGED`, `FINALIZED`, `ABORTED`, `REINIT-ACTIVATED` or
+`REINIT-ABORTED` broadcast of the request it submitted; its labeled result
+is unchanged. Every other connection, and every application and candidate
+echo, is unchanged.
+
 ## Limitations
 
 - The meaning of the last identifier of `REINIT-ACTIVATED` and
@@ -108,3 +190,11 @@ broadcasts and the ordinary `ACKED` and `ABORTED` replies are unchanged.
   arrives after its result and a retry answered from the reply cache are
   checked at the unit level only, and no daemon test restarts an edge between
   a ReInit result and its completion.
+- The withheld copies are checked through the daemons for the ReInit kinds
+  only; the commit ACK, finalization, abort and close kinds, a second session
+  of the requester's account and the barrier path are checked at the unit
+  level. The existing daemon scenarios for those kinds read the broadcast on
+  the other edge and keep passing.
+- The requesting connection is matched by its pending request. A client that
+  disconnects before its result loses that request, as before, and a new
+  connection receives the untagged copy.

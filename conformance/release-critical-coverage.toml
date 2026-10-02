@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 999
-reviewed_source_sha256 = "59a4803895cdaa6b2c98b41e0368532c02460f0150cffbb4dd4e4c5dbb615b79"
+reviewed_source_files = 1000
+reviewed_source_sha256 = "d510bb5564f6b417fed530aece5f4da77e6c9f224378266b5e3ec671d821e4b0"
 deferred = []
 
 [[region]]
@@ -13687,7 +13687,7 @@ id = "edge-route-projection-writes"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/events.rs"
 item = "decode_route"
-source_sha256 = "a5de15de5d493d53f2266dfddfdde9c2623eb858bd606844b9b8d2a102f16ead"
+source_sha256 = "1db5a372cb2040b7676f48515ad88ab95d87b241c782c179bed3c89ba26e1b70"
 start_line = 600
 end_line = 676
 span_sha256 = "eb27370dcc1c557b03c93a8908f093482f7ad5d31cbd9fa61bc0302683216c8e"

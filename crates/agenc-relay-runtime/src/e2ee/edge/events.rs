@@ -682,7 +682,7 @@ impl E2eeEdge {
 
     /// The client lines one semantic event produces for the local
     /// sessions attached to its conversation.
-    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one match renders every event kind's copies for the recipients its conversation names
+    // agenc-review: focus owner=runtime reviewed=2026-10-01 reason=one match renders every event kind's copies for the recipients its conversation names, withholding an ACK or terminal copy from the connection whose request it completes
     fn fanout(
         &mut self,
         context: &mut StateCoreContext,
@@ -715,9 +715,19 @@ impl E2eeEdge {
         });
         let mut outputs = Vec::new();
         for (generation, _) in recipients {
+            let requesting = requester
+                .as_ref()
+                .is_some_and(|(request_generation, _)| *request_generation == generation);
+            // An ACK or terminal event that completes a local request
+            // answers the requesting connection with that request's one
+            // labeled scalar; its untagged copy goes only to the other
+            // eligible sinks (11.7, 12.5).
+            if requesting && !echoes_to_requester(kind) {
+                continue;
+            }
             let label = requester
                 .as_ref()
-                .filter(|(request_generation, _)| *request_generation == generation)
+                .filter(|_| requesting)
                 .and_then(|(_, label)| label.clone());
             let lines = match kind {
                 ArcFederationEventKind::ChannelApplication
@@ -742,9 +752,7 @@ impl E2eeEdge {
                 }
                 _ => terminal_lines(&self.config.server_name, conversation, event)?,
             };
-            if requester
-                .as_ref()
-                .is_some_and(|(request_generation, _)| *request_generation == generation)
+            if requesting
                 && let Some(request_id) = optional::<16>(event.request_id.as_slice())
                 && let Some(pending) = self.pending.get_mut(&request_id)
             {
@@ -1096,6 +1104,20 @@ fn route_entry(state: &ArcFederationRouteState) -> Result<(RouteEntry, Conversat
         },
         conversation,
     ))
+}
+
+/// Whether the requesting connection's copy of an event is its request's
+/// labeled echo (11.7): an application or candidate event is. An ACK or
+/// terminal event answers its request with the result's labeled scalar
+/// instead, so its untagged copy goes only to the other eligible sinks
+/// (12.5).
+const fn echoes_to_requester(kind: ArcFederationEventKind) -> bool {
+    matches!(
+        kind,
+        ArcFederationEventKind::ChannelApplication
+            | ArcFederationEventKind::DirectApplication
+            | ArcFederationEventKind::CandidateEvent
+    )
 }
 
 /// The untagged terminal broadcasts (11.7).

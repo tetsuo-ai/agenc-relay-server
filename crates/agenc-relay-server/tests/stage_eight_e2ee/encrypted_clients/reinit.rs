@@ -251,8 +251,7 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
             (vec![creator_ack, joiner_ack], &[0, 1]),
         ),
     )?;
-    let completion = std::slice::from_ref(completion_line(&activated)?);
-    assert_contains(completion, " EGROUP REINIT-ACTIVATED ")?;
+    let completion = std::slice::from_ref(only_completion(&activated, "REINIT-ACTIVATED")?);
     assert_eq!(
         hash_at(completion, "REINIT-ACTIVATED", 3)?,
         clients.bound.conversation
@@ -261,6 +260,14 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
         hash_at(completion, "REINIT-ACTIVATED", 4)?,
         target.conversation
     );
+    // bob, on the other edge, reads the activation as the untagged broadcast.
+    let lines = step(
+        "bob reads the activation broadcast",
+        clients
+            .bob
+            .read_until(|line| line.contains(" EGROUP REINIT-ACTIVATED ")),
+    )?;
+    assert_same_terminal(&lines, completion)?;
 
     // What each endpoint can derive: the continuing joiner reads the
     // successor's minutes, and the removed leaf's state derives nothing.
@@ -327,8 +334,7 @@ fn reinit_abort_with_real_clients(network: &Network) -> TestResult {
         "bob's abort vote",
         submit_abort(&mut clients, &staged, &core, Voter::Bob),
     )?;
-    let completion = std::slice::from_ref(completion_line(&second)?);
-    assert_contains(completion, " EGROUP REINIT-ABORTED ")?;
+    let completion = std::slice::from_ref(only_completion(&second, "REINIT-ABORTED")?);
     assert_eq!(hash_at(completion, "REINIT-ABORTED", 3)?, conversation);
     assert_eq!(hash_at(completion, "REINIT-ABORTED", 4)?, staged.attempt_id);
     assert_eq!(hash_at(completion, "REINIT-ABORTED", 5)?, abort_id);
@@ -341,17 +347,7 @@ fn reinit_abort_with_real_clients(network: &Network) -> TestResult {
             .alice
             .read_until(|line| line.contains(" EGROUP REINIT-ABORTED ")),
     )?;
-    let broadcast = lines
-        .last()
-        .ok_or_else(|| failure("alice read no abort broadcast"))?;
-    assert_eq!(tag_value(broadcast, "label"), None, "{broadcast}");
-    let terminal = |line: &String| words(line).get(1..).map(<[String]>::to_vec);
-    assert_eq!(
-        terminal(broadcast),
-        completion.first().and_then(terminal),
-        "the broadcast and the labeled completion name the same abort"
-    );
-    Ok(())
+    assert_same_terminal(&lines, completion)
 }
 
 /// Builds and returns one real mls-rs Commit of the old group under the
@@ -756,8 +752,7 @@ fn stage_attempt(clients: &mut Clients, attempt: &ArcReInitAttempt) -> TestResul
         &object,
     )?;
     let reply = labeled_reply(&mut clients.alice, &label)?;
-    let completion = std::slice::from_ref(completion_line(&reply)?);
-    assert_contains(completion, " EGROUP REINIT-STAGED ")?;
+    let completion = std::slice::from_ref(only_completion(&reply, "REINIT-STAGED")?);
     assert_eq!(
         hash_at(completion, "REINIT-STAGED", 3)?,
         clients.bound.conversation
@@ -777,6 +772,46 @@ fn completion_line(reply: &[String]) -> TestResult<&String> {
         .last()
         .filter(|line| tag_value(line, "label").is_some())
         .ok_or_else(|| failure(format!("no labeled completion in {reply:?}")))
+}
+
+/// The requester's labeled `verb` completion, required to be the only line
+/// of its reply naming `verb`: companion 11.7 and 12.5 answer the requesting
+/// connection with exactly one labeled scalar and send the untagged
+/// broadcast of the same result only to the other eligible sinks.
+fn only_completion<'a>(reply: &'a [String], verb: &str) -> TestResult<&'a String> {
+    let completion = completion_line(reply)?;
+    let token = format!(" EGROUP {verb} ");
+    if !completion.contains(&token) {
+        return Err(failure(format!(
+            "the labeled completion is not {verb}: {reply:?}"
+        )));
+    }
+    let naming = reply.iter().filter(|line| line.contains(&token)).count();
+    if naming != 1 {
+        return Err(failure(format!(
+            "the requester received {naming} {verb} lines, not one labeled completion: {reply:?}"
+        )));
+    }
+    Ok(completion)
+}
+
+/// Requires the last of `lines`, which another sink read, to be the
+/// untagged broadcast of the terminal `completion` names: the same verb and
+/// identifiers, without a label.
+fn assert_same_terminal(lines: &[String], completion: &[String]) -> TestResult {
+    let broadcast = lines
+        .last()
+        .ok_or_else(|| failure("no terminal broadcast was read"))?;
+    if tag_value(broadcast, "label").is_some() {
+        return Err(failure(format!("the broadcast is labeled: {broadcast}")));
+    }
+    let terminal = |line: &String| words(line).get(1..).map(<[String]>::to_vec);
+    assert_eq!(
+        terminal(broadcast),
+        completion.first().and_then(terminal),
+        "the broadcast and the labeled completion name the same terminal"
+    );
+    Ok(())
 }
 
 /// Reads the attempt receipt the coordinator sequenced for the conversation.
@@ -901,7 +936,19 @@ fn submit_ack(
     assert_contains(
         std::slice::from_ref(completion_line(&reply)?),
         " EGROUP REINIT-ACKED ",
-    )
+    )?;
+    // The submitter receives only its labeled REINIT-ACKED; the untagged
+    // REINIT-ACK notice of its own ACK goes to the other sessions (11.7).
+    let own = base64url_encode(e2ee::ObjectId::compute(&object).as_bytes());
+    if reply
+        .iter()
+        .any(|line| line.contains(" EGROUP REINIT-ACK ") && line.contains(&own))
+    {
+        return Err(failure(format!(
+            "the submitter received the notice of its own ACK: {reply:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Submits one activation request carrying `acks` and the votes of the

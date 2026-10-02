@@ -216,7 +216,9 @@ issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
 The edge's labeled `REINIT-STAGED`, `REINIT-ACKED`, `REINIT-ACTIVATED` and
 `REINIT-ABORTED` replies, rendered by the result kind instead of as `ACKED`
-or `ABORTED` (SC-013, SDK program, outside master #35), are recorded in
+or `ABORTED`, and the untagged ACK notice or terminal broadcast the edge no
+longer sends to the connection whose request it completes (SC-013, SDK
+program, outside master #35), are recorded in
 [the requester replies record](stage-10-e2ee-requester-replies.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).

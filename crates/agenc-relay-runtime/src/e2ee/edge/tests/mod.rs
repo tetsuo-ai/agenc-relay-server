@@ -16,6 +16,7 @@ use crate::connection::ConnectionGeneration;
 mod event_faults;
 mod ingress;
 mod projection;
+mod requester_copies;
 mod responses;
 mod result_kinds;
 mod retry;
