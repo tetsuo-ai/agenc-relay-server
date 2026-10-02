@@ -71,7 +71,9 @@ and no dependency is added: the runtime already depends on
   neither group- nor world-writable; a second run is refused with the
   document unchanged.
 - `offline::tests::sequencer_credentials_refuse_bad_intervals_outputs_and_keys`:
-  the refusals above, with nothing written.
+  an empty and a reversed interval, a relative output, an output below a
+  group-writable directory, a 31-byte key file and a world-readable key
+  file are each refused, with nothing written.
 - `tests::sequencer_credentials_parser_requires_every_value_in_canonical_form`
   in `crates/agenc-relay-server/src/daemon_cli.rs`: every option is
   required, values are canonical, other subcommands print the usage, and an
@@ -103,6 +105,7 @@ generation.
   its CA, and each `[[federation.peer]]` record's `signing_public_key` is
   derived from the seed `init` wrote, because no `arcd` command prints a
   federation signing public key; the operator guide says so.
-- The output's mode is subject to the caller's umask; the daemon's
-  protected read accepts any resulting mode that is not group- or
-  world-writable, owned by root or the service account.
+- The output's mode is subject to the caller's umask. The daemon's
+  protected read accepts the file whatever mode results, provided it is not
+  group- or world-writable and the file is owned by root or the service
+  account.
