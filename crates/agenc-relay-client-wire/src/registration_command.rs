@@ -25,7 +25,7 @@ const MAX_REALNAME_BYTES: usize = 64;
 const MAX_SASL_MECHANISM_BYTES: usize = 20;
 const MAX_AUTH_CHUNK_BYTES: usize = AUTH_CHUNK_CHARACTERS / 4 * 3;
 const MAX_CHANNEL_BYTES: usize = 64;
-const MAX_NICKNAME_BYTES: usize = 32;
+pub(crate) const MAX_NICKNAME_BYTES: usize = 32;
 const MAX_SERVER_NAME_BYTES: usize = 253;
 const MAX_CHANNEL_TARGETS: usize = 20;
 const MAX_MESSAGE_TARGETS: usize = 4;
@@ -1015,7 +1015,7 @@ fn validate_channel(value: &str) -> Result<(), RegistrationGrammarError> {
     Ok(())
 }
 
-fn validate_nickname(value: &str) -> Result<(), RegistrationGrammarError> {
+pub(crate) fn validate_nickname(value: &str) -> Result<(), RegistrationGrammarError> {
     if value.len() > MAX_NICKNAME_BYTES {
         return Err(RegistrationGrammarError::InputTooLong);
     }

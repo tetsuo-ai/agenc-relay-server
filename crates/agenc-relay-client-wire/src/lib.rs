@@ -34,10 +34,11 @@ pub use registration_command::{
     validate_post_registration_command,
 };
 pub use render::{
-    BatchStack, LogicalReply, MAX_BATCH_NESTING, MAX_SEMANTIC_REPLIES, MeasuredMessage,
-    OutputBudget, RenderError, RenderedMessage, ReplyKind, SafeReplyContext, SafeReplyDescription,
+    BatchStack, LogicalReply, MAX_BATCH_NESTING, MAX_SEMANTIC_REPLIES, MAX_USER_MASK_BYTES,
+    MeasuredMessage, OutputBudget, RenderError, RenderedMessage, ReplyKind, SafeReplyContext,
+    SafeReplyDescription, VISIBLE_CLOAK_HOST_BYTES, VISIBLE_CLOAK_USER_BYTES, VisibleCloak,
     WireMessage, isupport_messages, labeled_response, numeric_reply, slow_consumer_warning,
-    standard_reply,
+    standard_reply, user_mask,
 };
 pub use tags::{
     MessageTag, MessageTagRef, MessageTagSource, ParsedTagIter, ParsedTags, TagError,
