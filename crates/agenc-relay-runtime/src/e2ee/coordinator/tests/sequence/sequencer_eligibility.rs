@@ -1,8 +1,13 @@
 //! Real sequencer keys and binding approvals; MLS ciphertext remains a public-envelope fixture.
 #![forbid(unsafe_code)]
 
-use agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage;
-use agenc_relay_e2ee::sequencer::SequencerKeySet;
+use agenc_relay_e2ee::ids::sequencer_key_set_digest;
+use agenc_relay_e2ee::objects::conversation::{
+    ArcConversationBindingPackage, ArcSequencerCredential,
+};
+use agenc_relay_e2ee::sequencer::{
+    SequencerKeySet, verify_opened_credential, verify_sequencer_credential,
+};
 
 use super::super::support::sequencer_credential;
 
@@ -10,6 +15,34 @@ mod installation;
 mod rotation;
 mod terminal;
 use super::*;
+
+/// A key set holding `credentials` exactly as given, assembled without the
+/// shared key-set verifier: each credential is checked only structurally, so
+/// installation's own checks can be exercised on a set that verifier refuses.
+fn unverified_set(
+    credentials: &[ArcSequencerCredential],
+    set_generation: u64,
+) -> TestResult<SequencerKeySet> {
+    let credentials = credentials
+        .iter()
+        .map(|credential| {
+            if credential.tbs.key_generation == 0 {
+                verify_sequencer_credential(&NETWORK, credential, None)
+            } else {
+                verify_opened_credential(&NETWORK, credential)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ids: Vec<[u8; 32]> = credentials
+        .iter()
+        .map(|credential| credential.credential_id)
+        .collect();
+    Ok(SequencerKeySet {
+        credentials,
+        set_generation,
+        digest: sequencer_key_set_digest(&ids)?,
+    })
+}
 
 fn install_interval(harness: &mut Harness, interval: (u64, u64)) -> TestResult<[u8; 32]> {
     let credential = sequencer_credential(&key(90), 0, interval, None)?;

@@ -214,6 +214,10 @@ that lets a bounded database grow, the resume of a construction stopped before
 its target existed, and the exact resume at a refused target batch (STO-07,
 issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
+The shared public verifiers corrected where they admitted correctly signed
+objects the companion refuses, starting with a sequencer successor that reuses
+its predecessor's key (X-10, SDK program, outside master #35), are recorded in
+[the shared verifier predicates record](stage-10-shared-verifier-predicates.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

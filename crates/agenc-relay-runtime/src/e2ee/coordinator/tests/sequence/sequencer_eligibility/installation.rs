@@ -111,7 +111,14 @@ fn shared_public_key_does_not_select_another_credential() -> TestResult {
     let mut harness = Harness::new()?;
     let old = sequencer_credential(&key(90), 0, (0, 2_000_000), None)?;
     let next = sequencer_credential(&key(90), 1, (100, 3_000_000), Some((&key(90), &old)))?;
-    let set = SequencerKeySet::verify(&NETWORK, &[old, next.clone()], 1, None)?;
+    // The shared key-set verifier refuses a successor reusing its
+    // predecessor's key (companion 9.2.1); given such a set assembled without
+    // it, installation still selects the credential by identity, not by key.
+    assert_eq!(
+        SequencerKeySet::verify(&NETWORK, &[old.clone(), next.clone()], 1, None),
+        Err(agenc_relay_e2ee::E2eeError::InvalidValue)
+    );
+    let set = unverified_set(&[old, next.clone()], 1)?;
     let expected = semantic_id_of(SemanticHashDomain::SequencerKey, &next.tbs)?;
     harness.coordinator.install_sequencer(key(90), set, next)?;
     assert_eq!(
