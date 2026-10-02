@@ -56,8 +56,9 @@ a byte-identical `Cargo.lock`, and a separately rooted consumer depending on
 `agenc-relay-auth` by Git resolved exactly one `opaque-ke`, from the Git
 source's `vendor/opaque-ke-4.0.1` with the reviewed tree digest, where the
 same consumer of the base tree (`70c832c`) resolves the unpatched crates.io
-release. A consumer that also names crates.io `opaque-ke` resolves two
-packages under either layout.
+release. A consumer that also names crates.io `opaque-ke` itself resolves two
+packages with the edge, the registry release and the vendored copy, with no
+warning; on the base tree it resolves one, the unpatched release.
 
 It also makes `cargo fmt --all --check` fail. Cargo-fmt's `--all` formats
 every package and its local path dependencies; a `[patch]` entry is not one,
