@@ -300,3 +300,58 @@ fn a_login_rendering_refuses_a_stale_plan_or_an_absent_account() -> TestResult {
     ));
     Ok(())
 }
+
+/// A guest that logs in to an account without a public label is named
+/// `ACCOUNT *` (decision D-13), the same line a logout sends. A peer cannot
+/// tell that account from a guest, but the line shows it that, and when,
+/// the session authenticated.
+#[test]
+fn a_login_to_an_unlabeled_account_names_it_with_a_star() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let account = seed_account(context, 7, 1)?;
+    let guest = seed_session(context, 6, "Guest", None)?;
+    let peer = seed_session(context, 8, "Peer", None)?;
+    for member in [guest, peer] {
+        join(context, member)?;
+    }
+    let guest_sink = bind_live_session(context, 1, guest, negotiated_capabilities(&[])?, true)?;
+    let peer_sink = bind_live_session(
+        context,
+        2,
+        peer,
+        negotiated_capabilities(&["account-notify"])?,
+        true,
+    )?;
+    let generation = context
+        .domain()
+        .session(guest.user_id)
+        .ok_or("guest")?
+        .generation();
+    let plan =
+        context
+            .domain()
+            .plan_session_account_switch(guest.user_id, generation, Some(account))?;
+    let request = render_account_login(
+        context,
+        ConnectionGeneration::new(1),
+        bound(guest),
+        account.0,
+        &plan,
+        carrier_frames("Guest")?,
+        "Guest",
+    )?;
+    context.fanout_now(request)?;
+    let mask = mask(context, guest.user_id, "Guest", 6)?;
+    let [chunk, success] = carrier_lines("Guest");
+    assert_eq!(
+        guest_sink.lines(),
+        [
+            chunk,
+            success,
+            format!(":{SERVER} 900 Guest {mask} * :You are now logged in"),
+        ]
+    );
+    assert_eq!(peer_sink.lines(), [format!(":{mask} ACCOUNT *")]);
+    Ok(())
+}

@@ -180,6 +180,14 @@ The account service now renders a registered session's successful finish with
   session itself included, receives `:<mask> ACCOUNT <label-or-*>`, after the
   `900` on the requester's own connection. That is the set and the form a
   logout already uses for `ACCOUNT *`.
+- An account without a public label is named `*`, as in its `900` (D-13). In
+  IRCv3, `ACCOUNT *` means that the user logged out, and `extended-join` and
+  `account-tag` also render such an account as `*`, so a peer cannot tell the
+  session from a guest. The line still tells every `account-notify` peer that
+  shares a channel with the session that, and when, it authenticated, though
+  not to which account. A logout sends the same line at 70c832c. Sending
+  nothing for such an account, since its public state does not change, would
+  depart from D-13; that choice is listed for the owner.
 - A same-account reauthentication changes no public state: its plan is the
   account-service checkpoint, so only the `900` repeats.
 - A coordinator serving the login of a session an edge homes does so through
@@ -424,6 +432,7 @@ The post-registration login:
 | `mutation_render::account_login_render::a_reauthentication_repeats_900_alone` | A same-account reauthentication's checkpoint plan: `903` and the `900` naming `*`, and nothing to a peer. |
 | `mutation_render::account_login_render::an_internal_carrier_gets_no_900_while_local_peers_learn_the_account` | The coordinator's internal carrier for an edge client reads only the carrier frames; the coordinator's own `account-notify` peer reads the `ACCOUNT` line. |
 | `mutation_render::account_login_render::a_login_rendering_refuses_a_stale_plan_or_an_absent_account` | A plan for another revision, or an account the domain does not hold, renders nothing. |
+| `mutation_render::account_login_render::a_login_to_an_unlabeled_account_names_it_with_a_star` | A guest's login to an account without a public label: `903`, the `900` naming `*`, and `:<mask> ACCOUNT *` to an `account-notify` peer. Added later to pin D-13's behaviour for such an account. |
 | `login_after_registration::a_login_after_registration_follows_903_with_900_and_names_the_account` | The production binary: a registered guest's login reads `903` and then the `900`, byte-exact against its own `JOIN` echo and the account's public label; an `account-notify` peer reads `ACCOUNT <label>`, a peer without it and the guest itself (no `account-notify`) nothing more; a reauthentication repeats the `900` alone; a logout still names `ACCOUNT *` to the peer and answers the client with nothing. |
 
 With the account service rendering a registered login's frames as before (no
@@ -548,7 +557,8 @@ scenario ends.
   channel. The gap is listed for the owner.
 - A login to an account without a public label names `ACCOUNT *`, as decision
   D-13 and the welcome's `900` do; a peer cannot tell it from a guest, but it
-  does see that the session authenticated.
+  does see that, and when, the session authenticated. Whether to send nothing
+  instead is listed for the owner.
 - These are development-host runs. The full Stage 09 gate runs at the
   integration tip, not on this branch.
 
@@ -713,4 +723,8 @@ cargo nextest run -p agenc-relay-domain --all-features --locked
 cargo nextest run -p agenc-relay-server --all-features --locked --test stage_eight_e2ee \
   -E 'test(login_after_registration)'
 # 2 passed
+
+# the unlabeled login's ACCOUNT *, on the tree of its commit
+cargo nextest run -p agenc-relay-runtime --all-features --locked
+# 2745 tests run: 2745 passed, 2 skipped
 ```
