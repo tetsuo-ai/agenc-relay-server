@@ -166,12 +166,11 @@ fn numeric(
         .map_err(|_| RuntimeError::InvalidValue)
 }
 
+/// The visible user mask of an event's source, from the shared Architecture
+/// 7.4 formatter the coordinator's own renderer uses.
 pub(crate) fn prefix(source: &SourceView) -> Result<String, RuntimeError> {
-    let user = std::str::from_utf8(source.public_cloak.user_component())
-        .map_err(|_| RuntimeError::InvalidValue)?;
-    let host = std::str::from_utf8(source.public_cloak.host_component())
-        .map_err(|_| RuntimeError::InvalidValue)?;
-    Ok(format!("{}!{user}@{host}", source.nickname.presentation()))
+    agenc_relay_client_wire::user_mask(source.nickname.presentation(), &source.public_cloak)
+        .map_err(|_| RuntimeError::InvalidValue)
 }
 
 fn actor_prefix(edge: &EdgeFederation, actor: &ActorView) -> Result<String, RuntimeError> {

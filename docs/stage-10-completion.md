@@ -226,6 +226,15 @@ check that a recompute changes only a member's role, and the origin
 generation an edge now declares after a registered connection's login
 (SC-007, SDK program, outside master #35), are recorded in
 [the login state record](stage-10-login-state.md).
+The one formatter that now frames the public cloak in every user mask and in
+every separate user and host field as Architecture Section 7.4 specifies, the
+local JOIN token bound grown for the framed mask, and the revert of each
+rendering site (AUD-18, SDK program item B-12, outside master #35) are
+recorded in [the framed cloak record](stage-10-framed-cloak.md). An explicit
+NAMES reply larger than one response batch, which closed the requester's
+connection on a node answering its own clients and which the framed tokens
+made more common, is delivered in pages as a JOIN's NAMES is (AUD-18 review,
+outside master #35); see [the explicit NAMES pages record](stage-10-explicit-names-pages.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

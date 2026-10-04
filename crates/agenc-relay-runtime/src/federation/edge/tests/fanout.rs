@@ -129,3 +129,41 @@ async fn shared_frames_keep_recipient_specific_tags_separate() -> TestResult {
     );
     Ok(())
 }
+
+/// AUD-18: an event's projected source renders as the framed user mask of
+/// Architecture 7.4, here built from the stored components rather than the
+/// formatter, so a remote user is spelled as the coordinator spells it.
+#[test]
+fn a_projected_source_renders_the_framed_public_cloak() -> TestResult {
+    let public_cloak = agenc_relay_testkit::deterministic_cloak(9)?;
+    let source = SourceView {
+        user_id: UserId::from_bytes([9; 16]),
+        nickname: agenc_relay_domain::NicknameValue::parse("remote")?,
+        public_cloak,
+        account_label: None,
+    };
+    let expected = format!(
+        "remote!u-{}@h-{}.invalid",
+        std::str::from_utf8(public_cloak.user_component())?,
+        std::str::from_utf8(public_cloak.host_component())?,
+    );
+    assert_eq!(prefix(&source)?, expected);
+    let actor = ActorView(Some(source));
+    let edge = EdgeFederation::new(super::super::EdgeConfig {
+        network_id: agenc_relay_types::NetworkId::from_bytes([1; 32]),
+        server_id: agenc_relay_types::ServerId::from_bytes([2; 16]),
+        server_name: "edge.example".into(),
+        incarnation: agenc_relay_types::ServerIncarnation::from_bytes([3; 16]),
+        coordinator: crate::federation::PeerIdentity::new(
+            agenc_relay_types::ServerId::from_bytes([4; 16]),
+            "hub.example",
+            agenc_relay_types::FederationRole::Coordinator,
+            agenc_relay_types::RecoveryEpoch::from_bytes([0; 16]),
+            agenc_relay_crypto::Ed25519SecretKey::from_bytes([5; 32]).public_key(),
+            [6; 32],
+        ),
+    });
+    assert_eq!(actor_prefix(&edge, &actor)?, expected);
+    assert_eq!(actor_prefix(&edge, &ActorView(None))?, "edge.example");
+    Ok(())
+}

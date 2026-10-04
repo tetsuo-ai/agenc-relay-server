@@ -9,7 +9,7 @@ use agenc_relay_client_wire::{
     MAX_TRADITIONAL_LINE_BYTES, OutputBudget, RegisteredCommandKind, RegistrationAction,
     RegistrationAuthCarrier, RegistrationError, RegistrationEvent, RegistrationPhase,
     RegistrationState, RenderedMessage, SecretBytes, StreamFramer, WelcomeStep, WireMessage,
-    isupport_messages, numeric_reply, parse_message, split_capability_lines,
+    isupport_messages, numeric_reply, parse_message, split_capability_lines, user_mask,
 };
 use agenc_relay_types::NetworkId;
 use subtle::ConstantTimeEq as _;
@@ -835,10 +835,11 @@ impl ClientTranscriptHarness {
 
 /// The user mask the transcript model gives its registered session
 /// `nickname`: the nickname and the deterministic cloak of fixture seed
-/// zero, in the spelling the runtime gives every user prefix. The model's
-/// account has no public label, so its `900` names `*`. The runtime's
-/// account-state tests compare this mask with the runtime's own renderers,
-/// so a change to the visible cloak spelling must change it too.
+/// zero, spelled by [`user_mask`], the formatter the runtime uses for every
+/// user prefix (the framed cloak of Architecture 7.4). The model's account
+/// has no public label, so its `900` names `*`. The runtime's account-state
+/// tests compare this mask with the runtime's own renderers, so a change to
+/// the visible cloak spelling must change it too.
 ///
 /// # Errors
 ///
@@ -847,11 +848,7 @@ impl ClientTranscriptHarness {
 pub fn transcript_mask(nickname: &str) -> Result<String, ClientTranscriptError> {
     let cloak = crate::deterministic_cloak(TRANSCRIPT_CLOAK_SEED)
         .map_err(|_| ClientTranscriptError::Rendering)?;
-    let user = std::str::from_utf8(cloak.user_component())
-        .map_err(|_| ClientTranscriptError::Rendering)?;
-    let host = std::str::from_utf8(cloak.host_component())
-        .map_err(|_| ClientTranscriptError::Rendering)?;
-    Ok(format!("{nickname}!{user}@{host}"))
+    user_mask(nickname, &cloak).map_err(|_| ClientTranscriptError::Rendering)
 }
 
 fn recovery_epoch(profile: &CapabilityProfile) -> Result<String, ClientTranscriptError> {

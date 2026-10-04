@@ -4043,6 +4043,10 @@ mod nickname_in_use_tests;
 mod timer_tests;
 
 #[cfg(test)]
+#[path = "registration/tests/explicit_names.rs"]
+mod explicit_names_tests;
+
+#[cfg(test)]
 #[path = "registration/tests/edge_answers.rs"]
 mod edge_answer_tests;
 

@@ -227,6 +227,15 @@ impl RuntimeResourceLimits {
         self.response_batch_bytes
     }
 
+    /// These ceilings with another response batch ceiling, for tests.
+    #[cfg(test)]
+    pub(crate) const fn with_response_batch_bytes(self, response_batch_bytes: usize) -> Self {
+        Self {
+            response_batch_bytes,
+            ..self
+        }
+    }
+
     pub(crate) fn admits_query(
         self,
         session: ClientQueueSnapshot,

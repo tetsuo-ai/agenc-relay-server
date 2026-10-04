@@ -88,14 +88,9 @@ fn message_frame(
 ) -> Result<WireMessage, RuntimeError> {
     message.validate()?;
     let source = &message.sender;
-    let prefix = format!(
-        "{}!{}@{}",
-        source.nickname.presentation(),
-        std::str::from_utf8(source.public_cloak.user_component())
-            .map_err(|_| RuntimeError::InvalidValue)?,
-        std::str::from_utf8(source.public_cloak.host_component())
-            .map_err(|_| RuntimeError::InvalidValue)?
-    );
+    let prefix =
+        agenc_relay_client_wire::user_mask(source.nickname.presentation(), &source.public_cloak)
+            .map_err(|_| RuntimeError::InvalidValue)?;
     let command = match message.kind {
         MessageKind::Privmsg => "PRIVMSG",
         MessageKind::Notice => "NOTICE",
