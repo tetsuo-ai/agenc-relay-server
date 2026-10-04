@@ -4,6 +4,8 @@
 //! edge, by closing, logging in or logging out, takes its invite copies along.
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::federation::replica::ReplicaError;
 use agenc_relay_types::{AccountId, FederationEventKind as K};
@@ -472,6 +474,91 @@ fn a_login_names_its_public_label_to_the_home_and_member_edges_and_a_logout_does
             .flatten()
             .all(|kind| *kind != K::AccountLabelChanged),
         "{logout:?}"
+    );
+    assert_replicas_match_the_cut(&harness)?;
+    Ok(())
+}
+
+/// Commits one plan, applies every event copy to its edge's replica, and
+/// returns, per edge, the local recipients of its `kind` events, or `None`
+/// when the edge receives no such event.
+fn recipients(
+    harness: &mut Harness,
+    plan: crate::MutationPlan,
+    kind: K,
+) -> Result<[Option<BTreeSet<UserId>>; 3], DomainError> {
+    let (projection, revision) = harness.advance(plan, &MutationContext::default())?;
+    let mut found = [None, None, None];
+    for (edge, found) in EDGES.iter().zip(found.iter_mut()) {
+        let replica = harness
+            .replicas
+            .get_mut(edge)
+            .ok_or(DomainError::NotFound)?;
+        for event in events_for(&projection, *edge) {
+            let outcome = replica
+                .apply(event, revision.get())
+                .map_err(|_| DomainError::InvariantViolation)?;
+            if event.kind() == kind {
+                found
+                    .get_or_insert_with(BTreeSet::new)
+                    .extend(outcome.local_recipients);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The recipients each edge finds for one session's user events. The home
+/// edge finds the session and every local member that shares a channel
+/// with it. An edge that homes another member of the same channel finds
+/// none: its replica holds only its own sessions' memberships, and
+/// `nickname_changed` and `account_label_changed` carry no channel
+/// (Appendix B.5), so it cannot tell which of its members share one. This
+/// pins a recorded limitation: such an edge renders a remote session's
+/// `NICK` (as at 70c832c) and its login's `ACCOUNT` to none of its clients.
+#[test]
+fn only_the_home_edge_finds_recipients_for_a_sessions_login_and_nick_change()
+-> Result<(), DomainError> {
+    let mut harness = three_edges()?;
+    let alice = harness.open(1, EDGE_A)?;
+    let bob = harness.open(2, EDGE_B)?;
+    let dave = harness.open(4, EDGE_B)?;
+    // Carol, alone on edge C, shares no channel.
+    let _carol = harness.open(3, EDGE_C)?;
+    for member in [alice, bob, dave] {
+        join(&mut harness, member)?;
+    }
+    let account_id =
+        AccountId::from_random(agenc_relay_types::AccountRandomId::from_bytes([43; 16]));
+    let mut account =
+        crate::AccountState::new(account_id, Generation::new(1)?, harness.state.revision());
+    account.label = Some(crate::AccountLabelValue::parse("Kestrel")?);
+    let plan = harness.state.plan_account_created(account)?;
+    harness.commit(plan, &MutationContext::default())?;
+    // Edge A homes alice, who shares the room with bob; edge B homes bob and
+    // dave; edge C receives nothing.
+    let expected = [
+        Some(BTreeSet::new()),
+        Some(BTreeSet::from([bob, dave])),
+        None,
+    ];
+
+    let session = harness.state.session(bob).ok_or(DomainError::NotFound)?;
+    let login = harness.state.plan_session_account_switch(
+        bob,
+        session.generation(),
+        Some((account_id, Generation::new(1)?)),
+    )?;
+    assert_eq!(
+        recipients(&mut harness, login, K::AccountLabelChanged)?,
+        expected
+    );
+    let rename = harness.plan(bob, || {
+        Ok(CanonicalCommand::nick(NicknameValue::parse("bobby")?))
+    })?;
+    assert_eq!(
+        recipients(&mut harness, rename, K::NicknameChanged)?,
+        expected
     );
     assert_replicas_match_the_cut(&harness)?;
     Ok(())

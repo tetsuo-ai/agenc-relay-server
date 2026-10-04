@@ -142,7 +142,10 @@ fn edge_login(
     // The quiet member shares the local member's edge and its fanout.
     assert_eq!(drained(&mut quiet)?, Vec::<String>::new());
     // Edge B applied the recomputed membership: the channel still carries
-    // the logged-in guest's messages to it.
+    // the logged-in guest's messages to it. Its member negotiated
+    // account-notify, yet this PRIVMSG, projected after the login, is the
+    // only line it reads: an edge renders no `ACCOUNT` (nor `NICK`, `AWAY`
+    // or `SETNAME`) for a session another node homes, a recorded limitation.
     guest.send("PRIVMSG #login :logged in")?;
     let said = format!(":{prefix} PRIVMSG #login :logged in");
     for client in [&mut remote, &mut core, &mut local, &mut quiet] {
@@ -210,7 +213,10 @@ fn coordinator_login(
     );
     // The guest did not negotiate account-notify: nothing follows its 900.
     assert_eq!(drained(&mut guest)?, Vec::<String>::new());
-    // Edge B applied the recomputed membership of its channel.
+    // Edge B applied the recomputed membership of its channel. Its member
+    // negotiated account-notify, yet this PRIVMSG is the only line it reads:
+    // an edge renders no `ACCOUNT` for a session another node homes, a
+    // recorded limitation.
     guest.send("PRIVMSG #core :logged in")?;
     assert_eq!(
         next_line(&mut member, " PRIVMSG ")?,

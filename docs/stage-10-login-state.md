@@ -228,14 +228,37 @@ lines for its own clients:
 - A coordinator's own clients read the `ACCOUNT` line of a session an edge
   homes from the coordinator's rendering above.
 
-An edge renders the user events of a session another node homes (`NICK`,
-`AWAY`, `SETNAME`, and now this `ACCOUNT`) to none of its clients, because
-its replica keeps the channel memberships of its own sessions only and so
-finds no local member that shares a channel with the remote session. A
-temporary daemon scenario on this branch confirmed it for `ACCOUNT`, `AWAY`
-and `NICK`. That is outside SC-007 and not changed here;
-the login is projected to those edges anyway, the same way a label change
-is, so a later correction of the edge's recipients covers it.
+### Who reads the `ACCOUNT` line
+
+Decision D-13 asks for `ACCOUNT <label-or-*>` to `account-notify` peers on
+both roles. At this revision a login reaches these peers, each of which
+shares a channel with the session and negotiated `account-notify`:
+
+- on the node that homes the session, coordinator or edge, every such local
+  peer, and the session itself when it negotiated the capability;
+- on the coordinator, when an edge homes the session, the coordinator's own
+  such clients, from the coordinator's rendering of the login it commits;
+- on any other edge, nobody.
+
+Another edge cannot find its peers of the session. Its replica keeps the
+channel memberships of its own sessions only (Appendix B.4 and B.5), and
+`account_label_changed`, like `nickname_changed`, `away_changed` and
+`display_name_changed`, carries no channel. `session_hidden` is different:
+its channel vector lets such an edge find its members of each departed
+channel. The same gap applies at 70c832c to the `NICK`, `AWAY` and `SETNAME`
+of a session another node homes, which a temporary daemon scenario on this
+branch confirmed for `ACCOUNT`, `AWAY` and `NICK`. Closing it needs a
+normative change, such as a channel vector on these events like
+`session_hidden`'s, or remote memberships in an edge's replica. That is
+outside this source-only change: it is a limitation of D-13 here and is
+listed for the owner as a normative candidate, together with the same gap for
+`NICK`, `AWAY` and `SETNAME`. The coordinator still projects the login's
+`account_label_changed` to every edge that shares a channel with the session,
+as it projects a label change at 70c832c, so such a correction covers the
+login without another projection change. The domain test
+`only_the_home_edge_finds_recipients_for_a_sessions_login_and_nick_change`
+pins the recipients each edge finds, and both Stage 08 login tests pin that an
+`account-notify` member on another edge reads no `ACCOUNT` line.
 
 ## Account switches of channel members on a federated network
 
@@ -473,6 +496,7 @@ The login across a federated network:
 | `registration::edge_login_tests::an_awaited_login_the_router_cannot_answer_closes_its_connection` | An awaited login whose connection state is held outside the router while the account's projection is applied, and one whose state is unbound, each close the connection; the client read `903` and no `900`. |
 | `registration::edge_login_tests::an_awaited_login_without_an_edge_role_closes_its_connection` | A router without an edge role that holds an awaited login closes that connection rather than forget the login. |
 | `registration::edge_login_tests::a_connection_closed_after_its_state_was_dropped_forgets_its_login` | A connection whose state a closing path already dropped still forgets its awaited login when its close is reported. |
+| `federation::projection::tests::revision_drift::only_the_home_edge_finds_recipients_for_a_sessions_login_and_nick_change` | Three edges: a guest's login and its later `NICK`. The home edge finds the session and its local channel peer as recipients of each event; an edge homing another member of the channel receives each event and finds no recipient; an edge sharing nothing receives neither. It pins the limitation above. |
 | `login_after_registration::an_edge_login_after_registration_sends_900_and_names_the_account` | Production edges and coordinator: a guest on edge A, in a channel with members on edge A, on the coordinator and on edge B, logs in: `903`, then the `900` byte-exact with the label; `ACCOUNT Kestrel` to the guest, to edge A's and the coordinator's `account-notify` members, nothing to a member without it; the guest's next message reaches edge B; a reauthentication repeats the `900` alone. |
 | `login_after_registration::a_coordinator_login_after_registration_sends_900_and_names_the_account` | A guest on the coordinator, in a channel with a member on edge B: `903` and the `900` from `core.test`, `ACCOUNT Kestrel` to a coordinator `account-notify` member, nothing more to the guest, and its next message reaches edge B. |
 | `credential_replacement::edge_credential_replacement_survives_coordinator_restart` | Its existing reauthentication of a registered edge session now reads the `900` after the `903`. |
@@ -507,8 +531,10 @@ scenario ends.
   qualification scenario; it was compiled, not run. The drills' login helper
   is run by the ordinary Stage 08 recovery submission test.
 - A client of one edge reads no `ACCOUNT` line for a session another node
-  homes, as it reads no `NICK`, `AWAY` or `SETNAME` line for one (see
-  "Across a federated network"); the coordinator's own clients do read it.
+  homes, as it reads no `NICK`, `AWAY` or `SETNAME` line for one (see "Who
+  reads the `ACCOUNT` line"); the coordinator's own clients do read it. This
+  falls short of D-13's "on both roles" for peers on other edges; closing it
+  is normative and listed for the owner.
 - The daemon tests cover the edge's `900` with `account-notify` peers on the
   same edge and on the coordinator; the edge-to-edge membership recompute is
   covered by a message that reaches the other edge after the login.
@@ -680,4 +706,11 @@ cargo nextest run -p agenc-relay-runtime -p agenc-relay-testkit --all-features -
 # framed cloak of AUD-18: 27 passed and the model comparison failed; with the
 # model's transcript_mask framed as well: 28 passed. The same tests as they were
 # before this change, under that spelling: 8 of 27 failed.
+
+# the recipients each edge finds, on the tree of its commit
+cargo nextest run -p agenc-relay-domain --all-features --locked
+# 259 tests run: 259 passed; with project_login disabled the recipients test fails
+cargo nextest run -p agenc-relay-server --all-features --locked --test stage_eight_e2ee \
+  -E 'test(login_after_registration)'
+# 2 passed
 ```
