@@ -239,14 +239,51 @@ KICK, mode and topic, "carries the resulting revision explicitly", while
 `member_joined` is the event that uses its membership revision as the
 resulting one. The check now binds each recomputed membership to the event's
 channel and requires its revision to be nonzero and not above the resulting
-revision. Both the coordinator's encoder and an edge's decoder apply it. The
-account-grant recompute of a registered channel (a prefix mode on an
-authenticated target) is encoded under the same rule. No producer, schema,
-registry, vector or profile hash changes.
+revision, which is the domain's own invariant for a membership and its
+channel. Both the coordinator's encoder and an edge's decoder apply it. No
+producer, schema, registry, vector or profile hash changes.
 
 Compatibility: an edge built from 70c832c or earlier still requires the
 equality when it decodes such an event, so it refuses the event a corrected
 coordinator sends; the coordinator and its edges are upgraded together.
+
+### What else the correction changes
+
+The rule applies to every `channel_memberships_recomputed` event, whichever
+change produced it, so the correction does more than SC-007's login needs.
+The coordinator emits the event, to every edge that homes a member of the
+channel, for three changes. Each recomputes memberships that keep the
+revision they joined at, so at 70c832c the projector could not encode any of
+them, and the coordinator refused to stage the change whenever an edge homed
+a member of the channel:
+
+| Change | Memberships the event carries | At 70c832c, with an edge member in the channel | At this revision |
+| --- | --- | --- | --- |
+| A login after registration | The session's own, one event per channel it joined | Refused | Staged; SC-007 needs this |
+| A logout | The same | Refused | Staged |
+| A prefix mode on a registered channel whose target holds an account, which changes that account's grant (Section 13.2) | Every live membership of the account in the channel | Refused | Staged |
+
+The wire event is the same for all three, so the rule cannot accept the
+login's recompute alone without a protocol change. Refusing the logout and
+the account grant on purpose would keep refusing a valid logout and a valid
+channel-operator command. Neither change was available on such a channel at
+70c832c; both are now.
+
+What clients read for these changes:
+
+- A coordinator renders an account-grant MODE to its own clients from the
+  command, like any MODE, and a logout as `ACCOUNT *`, as at 70c832c.
+- An edge renders `channel_memberships_recomputed` to none of its clients.
+  Its replica takes the recomputed role of each member it homes, and a later
+  `NAMES`, which the coordinator answers, shows the new role. But an edge
+  client reads no MODE line for an account grant, and no line at all for
+  someone else's logout. Section 13.2 has the server render one MODE change
+  for each affected nickname, and Appendix B.5 has each edge recompute the
+  prefix rendering of every user the event includes. This rendering gap is
+  outside SC-007 and is not changed here; it is listed for the owner.
+- No node renders a MODE line for a role that a login or a logout changes
+  through the account's grant. The coordinator's rendering of a login names
+  the account, and its rendering of a logout names `ACCOUNT *`, as at 70c832c.
 
 ## An edge's origin after a post-registration login
 
@@ -349,11 +386,16 @@ The recomputed membership revision:
 | `semantics::tests::recomputed_memberships_bind_the_outer_channel_and_revision` | Unchanged: a membership of another channel, a zero resulting revision and a membership above it are refused. |
 | `federation::codec::tests::recompute::a_recomputed_membership_round_trips_at_the_revision_it_joined_at` | The runtime codec encodes a membership joined at 3 under resulting revision 7 and decodes it back unchanged; one joined at 8 is refused. |
 | `federation::codec::tests::recompute::a_member_edge_receives_the_recompute_of_its_member_login` | The coordinator's projector encodes the login of a guest an edge homes, alone in a channel, for that edge. |
+| `federation::codec::tests::recompute::a_registered_channel_account_grant_reaches_the_member_edge` | A coordinator channel owner gives `+v` to an account-holding member an edge homes in a registered channel: the edge receives exactly one recompute, naming that member with the voice role at the revision it joined at, and the projector encodes it. |
+| `federation::codec::tests::recompute::a_coordinator_logout_beside_an_edge_member_reaches_that_edge` | A coordinator session logs out of its account in a channel with a member an edge homes: that edge receives exactly one recompute of the session's membership and no `account_label_changed`, and the projector encodes it. |
 
-With the equality restored, the three new tests fail and the unchanged one
-passes; restored, all four pass. A temporary, uncommitted daemon scenario (a
-guest on one edge and a peer on the other in the same channel, then the
-guest's login) read `904` with the equality and `903` with the correction.
+With the equality restored, the three tests of the correction's commit fail
+and the unchanged one passes; restored, all four pass. A temporary,
+uncommitted daemon scenario (a guest on one edge and a peer on the other in
+the same channel, then the guest's login) read `904` with the equality and
+`903` with the correction. The account-grant and logout tests were added
+afterwards, for the effects above; with the equality restored both fail at
+the projector's encoding (`InvalidValue`), and restored both pass.
 
 The edge origin after a login:
 
@@ -417,6 +459,11 @@ scenario ends.
 - A coordinator or standalone node renders `ACCOUNT` for a login and a logout
   only; an account label change still reaches only the clients of the edges,
   as before.
+- An edge renders no line for `channel_memberships_recomputed`, so its
+  clients read no MODE line for an account grant on a registered channel and
+  nothing for another node's logout (see "What else the correction changes").
+  Both changes were refused at 70c832c whenever an edge homed a member of the
+  channel. The gap is listed for the owner.
 - A login to an account without a public label names `ACCOUNT *`, as decision
   D-13 and the welcome's `900` do; a peer cannot tell it from a guest, but it
   does see that the session authenticated.
@@ -520,6 +567,13 @@ cargo nextest run --workspace --all-features --locked
 cargo nextest run -p agenc-relay-runtime -p agenc-relay-federation-wire --all-features --locked \
   -E 'test(recompute) | test(recomputed)'
 # 4 passed; with the equality restored: 3 failed, 1 passed
+
+# the account-grant and logout regressions, on the tree of their commit
+cargo nextest run -p agenc-relay-runtime --all-features --locked
+# 2740 tests run: 2740 passed, 2 skipped
+cargo nextest run -p agenc-relay-runtime --all-features --locked --lib \
+  -E 'test(federation::codec::tests::recompute)'
+# 4 passed; with the recompute equality restored: 4 failed
 
 # the edge origin after a login, on the tree of its commit
 cargo nextest run -p agenc-relay-runtime -p agenc-relay-server --all-features --locked
