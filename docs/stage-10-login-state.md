@@ -323,7 +323,8 @@ channel-operator command. Neither change was available on such a channel at
 What clients read for these changes:
 
 - A coordinator renders an account-grant MODE to its own clients from the
-  command, like any MODE, and a logout as `ACCOUNT *`, as at 70c832c.
+  command, as it renders any MODE, and a logout as `ACCOUNT *`, as it does in
+  a channel without edge members.
 - An edge renders `channel_memberships_recomputed` to none of its clients.
   Its replica takes the recomputed role of each member it homes, and a later
   `NAMES`, which the coordinator answers, shows the new role. But an edge
@@ -405,7 +406,7 @@ The welcome `900`:
 
 | Test | What it pins |
 | --- | --- |
-| `registration::account_state_tests::an_authenticated_local_burst_ends_with_the_logged_in_state_after_the_note` | The local burst `001 002 003 004 005 005 005 251 422 NOTE 900`, the `900` byte-exact against a mask built from the session's cloak, with `*` for an account without a label. |
+| `registration::account_state_tests::an_authenticated_local_burst_ends_with_the_logged_in_state_after_the_note` | The local burst `001 002 003 004 005 005 005 251 422 NOTE 900`, the `900` byte-exact against the session's prefix from the renderer, checked against the session's cloak, with `*` for an account without a label. |
 | `registration::account_state_tests::the_logged_in_state_names_the_public_label_right_after_the_motd_group` | Without the recovery NOTE the `900` directly follows `422`, and names the account's public label. |
 | `registration::account_state_tests::a_local_burst_whose_session_has_no_account_state_fails_closed` | A bound session the domain does not hold, and one without an account, close the connection with nothing sent. |
 | `registration::account_state_tests::an_authenticated_edge_burst_reads_the_logged_in_state_from_the_replica` | The edge completion path: the `900` reads the coordinator's session projection, label included. |
@@ -727,4 +728,17 @@ cargo nextest run -p agenc-relay-server --all-features --locked --test stage_eig
 # the unlabeled login's ACCOUNT *, on the tree of its commit
 cargo nextest run -p agenc-relay-runtime --all-features --locked
 # 2745 tests run: 2745 passed, 2 skipped
+
+# the topic tip after the review follow-ups (the Rust tree of 92621b7)
+cargo fmt --all --check
+# clean
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+# clean
+cargo nextest run --workspace --all-features --locked
+# 4553 tests run: 4553 passed (2 slow), 24 skipped
+python3 scripts/check-coverage.py self-test conformance/critical-coverage.toml
+python3 scripts/check-coverage.py self-test conformance/release-critical-coverage.toml
+# coverage self-test: ok (28 rejection cases), for each policy
+python3 scripts/check-coverage.py audit conformance/release-critical-coverage.toml
+# region anchors: ok (1145 reviewed spans hold the item they name)
 ```
