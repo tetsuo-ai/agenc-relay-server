@@ -1530,6 +1530,15 @@ fn logged_in_as(
     })
 }
 
+/// The prefix this node renders on every line `session` originates, which a
+/// `900` repeats, for tests that compare a line with the renderer itself.
+#[cfg(test)]
+pub(crate) fn rendered_prefix(
+    session: &agenc_relay_domain::SessionState,
+) -> Result<String, RuntimeError> {
+    session_prefix(session)
+}
+
 pub(crate) fn server_time(timestamp: UtcSecond) -> Result<String, RuntimeError> {
     let seconds = timestamp.get();
     let days = seconds / 86_400;

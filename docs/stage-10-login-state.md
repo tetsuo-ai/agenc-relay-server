@@ -130,6 +130,18 @@ the local and edge paths, and the post-registration login, share one
 rendering. The testkit transcript model renders the same step for its
 authenticated scenario, with the model's deterministic cloak and `*`.
 
+The unit tests take each expected mask from the renderer every other line of
+the session uses, `session_prefix` on a coordinator and `render::prefix` on an
+edge, through two test-only accessors, and check it against the session's
+deterministic cloak without fixing its visible spelling: the nickname, then a
+user field holding the cloak's user component and a host field holding its
+host component. A change of that spelling, such as AUD-18's framed cloak,
+therefore changes their expectations together with the code. The model's mask
+(`transcript_mask`, exported by the testkit) is not reachable from the
+runtime's renderers, so a runtime test compares the two, and the model must
+follow such a change. The testkit's welcome-order test takes its `900` from
+`transcript_mask` and checks its shape the same way.
+
 Appendix E.2 shows `001` directly followed by `900`, which conflicts with
 Section 10.2's order; Section 10.2 governs. Correcting E.2 is a normative
 change and is not part of this branch.
@@ -371,6 +383,7 @@ The welcome `900`:
 | `welcome_recovery::an_edge_sends_the_recovery_note_after_preregistration_sasl` | The same through a production edge linked to a production coordinator. |
 | `client_transcript_branches::harness_observes_and_renders_the_complete_welcome_order` | The testkit model ends its authenticated burst with the NOTE and then its `900`. |
 | `client_transcript_branches::harness_renders_no_account_state_for_a_guest` | The model's guest burst plans and renders no account state. |
+| `registration::account_state_tests::the_900_mask_is_spelled_alike_by_both_paths_and_the_transcript_model` | A coordinator and an edge render the same prefix for one session, and the testkit model's `transcript_mask` equals the edge renderer's prefix for the model's session (`Alice`, fixture-zero cloak). |
 
 With the `AccountState` arm computing the logged-in state but neither sending
 it nor failing closed, the five unit tests and both daemon tests fail, and the
@@ -657,4 +670,14 @@ cargo nextest run -p agenc-relay-server --all-features --locked --test stage_eig
 cargo nextest run -p agenc-relay-runtime --all-features --locked --lib -E 'test(edge_login_tests)'
 # 7 passed; settling an unanswerable login as sent: 2 failed;
 # forgetting it only with the connection's state: 1 failed
+
+# the 900 masks taken from the renderers, on the tree of their commit
+cargo nextest run -p agenc-relay-runtime -p agenc-relay-testkit --all-features --locked
+# 2868 tests run: 2868 passed, 2 skipped
+cargo nextest run -p agenc-relay-runtime -p agenc-relay-testkit --all-features --locked \
+  -E 'test(account_state_tests) | test(edge_login_tests) | test(account_login_render) | binary(client_transcript_branches)'
+# 28 passed. With session_prefix and render::prefix temporarily spelling the
+# framed cloak of AUD-18: 27 passed and the model comparison failed; with the
+# model's transcript_mask framed as well: 28 passed. The same tests as they were
+# before this change, under that spelling: 8 of 27 failed.
 ```

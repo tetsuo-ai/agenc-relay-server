@@ -833,10 +833,18 @@ impl ClientTranscriptHarness {
     }
 }
 
-/// The public prefix the model gives its registered session: the nickname
-/// and the deterministic cloak of fixture seed zero. The model's account has
-/// no public label, so its `900` names `*`.
-fn transcript_mask(nickname: &str) -> Result<String, ClientTranscriptError> {
+/// The user mask the transcript model gives its registered session
+/// `nickname`: the nickname and the deterministic cloak of fixture seed
+/// zero, in the spelling the runtime gives every user prefix. The model's
+/// account has no public label, so its `900` names `*`. The runtime's
+/// account-state tests compare this mask with the runtime's own renderers,
+/// so a change to the visible cloak spelling must change it too.
+///
+/// # Errors
+///
+/// Returns [`ClientTranscriptError::Rendering`] when the fixture cloak
+/// cannot be built or spelled.
+pub fn transcript_mask(nickname: &str) -> Result<String, ClientTranscriptError> {
     let cloak = crate::deterministic_cloak(TRANSCRIPT_CLOAK_SEED)
         .map_err(|_| ClientTranscriptError::Rendering)?;
     let user = std::str::from_utf8(cloak.user_component())

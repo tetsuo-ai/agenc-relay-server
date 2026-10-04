@@ -122,12 +122,29 @@ fn login_answered(harness: &mut Harness) -> TestResult {
     Ok(())
 }
 
-fn logged_in_line() -> TestResult<String> {
+/// The `900` the edge renders for the projected session. Its mask is the
+/// prefix the edge renders on every line of that session, taken from the
+/// renderer itself so the line holds whatever the cloak's visible spelling,
+/// and checked against the session's deterministic cloak: the nickname, then
+/// a user field holding the cloak's user component and a host field holding
+/// its host component.
+fn logged_in_line(harness: &Harness) -> TestResult<String> {
+    let projection = record(harness, 2, Some(account()))?;
+    let mask = crate::federation::edge::EdgeFederation::rendered_prefix(&projection.source_view())?;
     let cloak = agenc_relay_testkit::deterministic_cloak(CLOAK_SEED)?;
+    let (nickname, fields) = mask.split_once('!').ok_or("a mask without a nickname")?;
+    let (user, host) = fields.split_once('@').ok_or("a mask without a host")?;
+    assert_eq!(nickname, "remote");
+    assert!(
+        user.contains(std::str::from_utf8(cloak.user_component())?),
+        "user field {user}"
+    );
+    assert!(
+        host.contains(std::str::from_utf8(cloak.host_component())?),
+        "host field {host}"
+    );
     Ok(format!(
-        ":server.example 900 remote remote!{}@{} EdgeLabel :You are now logged in",
-        std::str::from_utf8(cloak.user_component())?,
-        std::str::from_utf8(cloak.host_component())?
+        ":server.example 900 remote {mask} EdgeLabel :You are now logged in"
     ))
 }
 
@@ -164,7 +181,11 @@ async fn an_edge_login_sends_900_once_the_projection_names_the_account() -> Test
         ends_with_903(tail.get(..1).ok_or("no 903")?),
         "lines: {lines:?}"
     );
-    assert_eq!(tail.get(1), Some(&logged_in_line()?), "lines: {lines:?}");
+    assert_eq!(
+        tail.get(1),
+        Some(&logged_in_line(&harness)?),
+        "lines: {lines:?}"
+    );
     assert!(harness.router.awaited_logins.is_empty());
     Ok(())
 }
@@ -183,7 +204,11 @@ async fn an_edge_reauthentication_sends_900_right_after_903() -> TestResult {
         ends_with_903(tail.get(..1).ok_or("no 903")?),
         "lines: {lines:?}"
     );
-    assert_eq!(tail.get(1), Some(&logged_in_line()?), "lines: {lines:?}");
+    assert_eq!(
+        tail.get(1),
+        Some(&logged_in_line(&harness)?),
+        "lines: {lines:?}"
+    );
     assert!(harness.router.awaited_logins.is_empty());
     Ok(())
 }

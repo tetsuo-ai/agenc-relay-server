@@ -755,6 +755,16 @@ impl EdgeFederation {
         &mut self.replica
     }
 
+    /// The prefix an edge renders on every line of `source`, which a `900`
+    /// repeats, for router tests that compare a line with the renderer
+    /// itself.
+    #[cfg(test)]
+    pub(crate) fn rendered_prefix(
+        source: &agenc_relay_domain::federation::SourceView,
+    ) -> Result<String, RuntimeError> {
+        render::prefix(source)
+    }
+
     /// Dispatches one link message; completions are returned to the router.
     pub fn inbound(
         &mut self,

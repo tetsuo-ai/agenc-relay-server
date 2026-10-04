@@ -36,15 +36,28 @@ fn join(context: &mut StateCoreContext, identity: DomainTestIdentity) -> TestRes
     apply_live_plan(context, plan)
 }
 
-/// The prefix of `nick` under the deterministic cloak of fixture `seed`,
-/// built independently of the renderer under test.
-fn mask(nick: &str, seed: u8) -> TestResult<String> {
+/// The prefix this node renders on every line of `user`'s session, which
+/// its `900` and `ACCOUNT` lines repeat. It comes from the renderer itself,
+/// so the expected lines hold whatever the cloak's visible spelling, and it
+/// is checked against the session's deterministic cloak of fixture `seed`:
+/// the nickname, then a user field holding the cloak's user component and a
+/// host field holding its host component.
+fn mask(context: &StateCoreContext, user_id: UserId, nick: &str, seed: u8) -> TestResult<String> {
+    let session = context.domain().session(user_id).ok_or("no session")?;
+    let mask = session_prefix(session)?;
     let cloak = agenc_relay_testkit::deterministic_cloak(seed)?;
-    Ok(format!(
-        "{nick}!{}@{}",
-        std::str::from_utf8(cloak.user_component())?,
-        std::str::from_utf8(cloak.host_component())?
-    ))
+    let (nickname, fields) = mask.split_once('!').ok_or("a mask without a nickname")?;
+    let (user, host) = fields.split_once('@').ok_or("a mask without a host")?;
+    assert_eq!(nickname, nick);
+    assert!(
+        user.contains(std::str::from_utf8(cloak.user_component())?),
+        "user field {user}"
+    );
+    assert!(
+        host.contains(std::str::from_utf8(cloak.host_component())?),
+        "host field {host}"
+    );
+    Ok(mask)
 }
 
 /// The carrier's own last frames: one response chunk and `903`.
@@ -134,7 +147,7 @@ fn a_guest_login_answers_903_then_900_and_names_its_account_to_notify_peers() ->
         "Guest",
     )?;
     context.fanout_now(request)?;
-    let guest = mask("Guest", 6)?;
+    let guest = mask(context, room.guest.user_id, "Guest", 6)?;
     let [chunk, success] = carrier_lines("Guest");
     // The requester negotiated account-notify, so it is named as well.
     assert_eq!(
@@ -184,7 +197,7 @@ fn a_reauthentication_repeats_900_alone() -> TestResult {
             success,
             format!(
                 ":{SERVER} 900 Owner {} * :You are now logged in",
-                mask("Owner", 6)?
+                mask(context, owner.user_id, "Owner", 6)?
             ),
         ]
     );
@@ -234,7 +247,10 @@ fn an_internal_carrier_gets_no_900_while_local_peers_learn_the_account() -> Test
     assert_eq!(carrier_sink.lines(), carrier_lines("*"));
     assert_eq!(
         room.sinks[1].lines(),
-        [format!(":{} ACCOUNT Kestrel", mask("Guest", 6)?)]
+        [format!(
+            ":{} ACCOUNT Kestrel",
+            mask(context, room.guest.user_id, "Guest", 6)?
+        )]
     );
     assert!(room.sinks[0].lines().is_empty());
     assert!(room.sinks[2].lines().is_empty());

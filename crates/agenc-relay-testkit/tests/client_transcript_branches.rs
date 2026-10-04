@@ -256,6 +256,21 @@ fn harness_observes_and_renders_the_complete_welcome_order() -> Result<(), Box<d
     let frames: Vec<&[u8]> = (0..harness.pending_server_frame_count())
         .filter_map(|index| harness.pending_server_frame_bytes(index))
         .collect();
+    // The model spells its session's mask as the runtime spells every user
+    // prefix (the runtime's account-state tests compare the two): `Alice`,
+    // then a user field holding the fixture-zero cloak's user component and
+    // a host field holding its host component.
+    let mask = agenc_relay_testkit::transcript_mask("Alice")?;
+    let (nickname, fields) = mask
+        .split_once('!')
+        .ok_or("the model's mask has no nickname")?;
+    let (user, host) = fields
+        .split_once('@')
+        .ok_or("the model's mask has no host")?;
+    assert_eq!(nickname, "Alice");
+    assert!(user.contains("aaaaaaaaaa"), "user field {user}");
+    assert!(host.contains("bbbbbbbbbbbbbbff"), "host field {host}");
+    let logged_in = format!(":server.example 900 Alice {mask} * :You are now logged in\r\n");
     // Architecture 10.2: the recovery NOTE (step 5), then the authenticated
     // account state (step 6), which ends the burst.
     assert_eq!(
@@ -263,7 +278,7 @@ fn harness_observes_and_renders_the_complete_welcome_order() -> Result<(), Box<d
         Some(
             &[
                 &b":server.example NOTE * RECOVERY_EPOCH AAAAAAAAAAAAAAAAAAAAAA :Current server recovery identity\r\n"[..],
-                &b":server.example 900 Alice Alice!aaaaaaaaaa@bbbbbbbbbbbbbbff * :You are now logged in\r\n"[..],
+                logged_in.as_bytes(),
             ][..]
         )
     );

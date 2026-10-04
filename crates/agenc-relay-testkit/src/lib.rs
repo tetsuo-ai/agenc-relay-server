@@ -31,7 +31,7 @@ mod tls_fixture;
 pub use client_transcript::{
     ClientTranscript, ClientTranscriptError, ClientTranscriptHandoff, ClientTranscriptHarness,
     ClientTranscriptMessage, ClientTranscriptOperation, ClientTranscriptStep, TranscriptEncoding,
-    parse_client_transcript,
+    parse_client_transcript, transcript_mask,
 };
 
 pub use domain_fixture::{
