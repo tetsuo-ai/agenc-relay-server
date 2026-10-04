@@ -421,10 +421,36 @@ fn render_information(
     nickname: &str,
     query: InformationQuery,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
+    let counts = UserCounts {
+        users: context.domain().session_count(),
+        channels: context.domain().channel_count(),
+    };
+    information_frames(context, nickname, query, counts)
+}
+
+/// The sessions and channels a node's `LUSERS` reply counts: a node's own
+/// domain, or the projection an edge holds (Section 20.10).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UserCounts {
+    /// Sessions the node sees.
+    pub(crate) users: usize,
+    /// Channels the node sees.
+    pub(crate) channels: usize,
+}
+
+/// Renders one information query from the node's own configuration and
+/// clock and the given counts. `LUSERS` names one server whatever the
+/// topology, so an edge reveals no more than a single node.
+pub(crate) fn information_frames(
+    context: &StateCoreContext,
+    nickname: &str,
+    query: InformationQuery,
+    counts: UserCounts,
+) -> Result<Vec<WireMessage>, RuntimeError> {
     let prefix = context.server_prefix();
     match query {
         InformationQuery::Motd => render_motd(context, nickname),
-        InformationQuery::Lusers => render_lusers(context.domain(), prefix, nickname),
+        InformationQuery::Lusers => render_lusers(counts, prefix, nickname),
         InformationQuery::Version => info_lines(
             prefix,
             nickname,
@@ -512,12 +538,12 @@ fn public_info_lines(
 }
 
 fn render_lusers(
-    domain: &DomainState,
+    counts: UserCounts,
     prefix: &str,
     nickname: &str,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
-    let users = domain.session_count().to_string();
-    let channels = domain.channel_count().to_string();
+    let users = counts.users.to_string();
+    let channels = counts.channels.to_string();
     let summary = format!("There are {users} users on one server");
     let local = format!("Current local users {users}, max {users}");
     let mut frames = Vec::new();

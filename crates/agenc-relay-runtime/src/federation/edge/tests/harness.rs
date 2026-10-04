@@ -4426,3 +4426,5 @@ mod result_refusals;
 
 mod request_completion;
 mod request_refusals;
+
+mod local_information;

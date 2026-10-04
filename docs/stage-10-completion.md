@@ -240,6 +240,13 @@ coordinator, applies in the step that admits it, whose NAMES snapshot now
 opens at once instead of never, so a lone `&` JOIN is answered and no longer
 holds the commands behind it (AUD-16, SDK program, outside master #35), is
 recorded in [the in-step local JOIN record](stage-10-in-step-local-join.md).
+The edge's own answers to `MOTD`, `LUSERS`, `VERSION`, `TIME`, `ADMIN` and
+`INFO`, which closed the requester's connection on an edge, from the
+single-node renderers with `LUSERS` over the edge's projection, also while
+partitioned and always after the connection's earlier requests, and `LINKS`
+forwarded to the coordinator (BLJ-R1, SDK program decision D-28, outside
+master #35), are recorded in
+[the edge local queries record](stage-10-edge-local-queries.md).
 The edge initialized by `arcd init` that starts, links and advertises the
 encrypted profile, its database complete without the fake OPAQUE record only a
 coordinator must hold, and the kill-and-restart comparison showing that this

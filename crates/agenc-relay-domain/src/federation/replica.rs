@@ -128,6 +128,18 @@ impl EdgeReplica {
             .saturating_add(self.accounts.len())
     }
 
+    /// Returns the number of sessions the projection holds.
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Returns the number of channels the projection holds.
+    #[must_use]
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
     /// Returns one local session projection.
     #[must_use]
     pub fn session(&self, user_id: UserId) -> Option<&SessionRecord> {

@@ -1,11 +1,13 @@
 //! Requests an edge sends on behalf of its clients and the results it
 //! receives (spec 20.4, 20.5).
 
-use agenc_relay_client_wire::{ParsedMessage, RegisteredCommandKind};
+use agenc_relay_client_wire::{
+    LocalInformationCommand, ParsedMessage, PostRegistrationCommandKind, RegisteredCommandKind,
+};
 use agenc_relay_domain::federation::ModeDirection;
 use agenc_relay_domain::{
-    CanonicalCommand, CanonicalCommandView, DomainError, MessageKind, MessageTarget, ModeChange,
-    ModeCommand, ModeOperation, PresenceCommand,
+    CanonicalCommand, CanonicalCommandView, DomainError, InformationQuery, MessageKind,
+    MessageTarget, ModeChange, ModeCommand, ModeOperation, PresenceCommand,
 };
 use agenc_relay_federation_wire::{
     AssembledObject, CanonicalEncode, DecodeBudget, OperationDescriptor, OriginAccount,
@@ -65,6 +67,16 @@ pub enum EdgeCompletion {
     CommandCompleted {
         /// The client connection.
         generation: ConnectionGeneration,
+        /// The client's original line.
+        message: Box<ParsedMessage>,
+    },
+    /// A query the edge answered itself after it waited behind the
+    /// connection's earlier requests; it follows their completions.
+    LocalReply {
+        /// The client connection.
+        generation: ConnectionGeneration,
+        /// The logical reply, labeled and batched for the requester.
+        frames: Vec<agenc_relay_client_wire::WireMessage>,
         /// The client's original line.
         message: Box<ParsedMessage>,
     },
@@ -632,8 +644,33 @@ pub(super) fn send_session_close(
     }
 }
 
+/// What routing one registered command produced.
+enum Routed {
+    /// Sent to the coordinator, or held behind the connection's earlier work.
+    Forwarded,
+    /// Answered by the edge itself with this logical reply.
+    Local {
+        frames: Vec<agenc_relay_client_wire::WireMessage>,
+        message: Box<ParsedMessage>,
+    },
+}
+
+impl Routed {
+    /// The edge's own answer to `message`, or the refusal it renders.
+    fn local(
+        answered: Result<Vec<agenc_relay_client_wire::WireMessage>, DomainError>,
+        message: Box<ParsedMessage>,
+    ) -> Result<Self, (Box<ParsedMessage>, DomainError)> {
+        match answered {
+            Ok(frames) => Ok(Self::Local { frames, message }),
+            Err(error) => Err((message, error)),
+        }
+    }
+}
+
 /// Converts and sends one registered command; `Err` returns the line with
-/// the public error the router renders itself.
+/// the public error the router renders itself. A query the edge answers
+/// itself is delivered at once: nothing of its connection is in flight.
 pub(super) fn send_command(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -641,8 +678,28 @@ pub(super) fn send_command(
     kind: RegisteredCommandKind,
     message: Box<ParsedMessage>,
 ) -> Result<(), (Box<ParsedMessage>, DomainError)> {
+    match route_command(edge, context, generation, kind, message)? {
+        Routed::Forwarded => Ok(()),
+        Routed::Local { frames, message } => context
+            .send_to(generation, frames)
+            .map(|_| ())
+            .map_err(|_| (message, DomainError::ServerBusy)),
+    }
+}
+
+/// Routes one registered command: the edge's own queries are answered from
+/// its session and projection, everything else becomes a request, and a
+/// command that arrives while the connection has work in flight waits behind
+/// it.
+fn route_command(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    kind: RegisteredCommandKind,
+    message: Box<ParsedMessage>,
+) -> Result<Routed, (Box<ParsedMessage>, DomainError)> {
     if (edge.phase != Phase::Active || edge.journal.retry.recovering)
-        && !is_local_user_mode_query(&message)
+        && !served_while_unavailable(kind, &message)
     {
         return Err((message, DomainError::ServerBusy));
     }
@@ -654,7 +711,7 @@ pub(super) fn send_command(
         return Err((message, DomainError::RegistrationRequired));
     };
     if must_defer_command(edge, generation) {
-        return defer_command(edge, context, generation, kind, message);
+        return defer_command(edge, context, generation, kind, message).map(|()| Routed::Forwarded);
     }
     let has_account = edge
         .replica
@@ -668,16 +725,16 @@ pub(super) fn send_command(
         Err(crate::RuntimeError::CommandRefused(error)) => return Err((message, error)),
         Err(_) => return Err((message, DomainError::InvalidArgument)),
     };
-    if let CanonicalCommandView::Mode(ModeCommand::UserQuery(target)) = command.view() {
-        return local_user_modes(edge, context, generation, user_id, &message, target)
-            .map_err(|error| (message, error));
+    if let Some(answered) = local_answer(edge, context, kind, user_id, &message, &command) {
+        return Routed::local(answered, message);
     }
     let operation = match operation_of(edge, session_id, user_id, &message, &command) {
         Ok(operation) => operation,
         Err(error) => return Err((message, error)),
     };
     if matches!(operation, FederatedOperation::HistoryQuery { .. }) {
-        return super::history::begin(edge, context, generation, message, operation);
+        return super::history::begin(edge, context, generation, message, operation)
+            .map(|()| Routed::Forwarded);
     }
     let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
         return Err((message, DomainError::ServerBusy));
@@ -689,7 +746,7 @@ pub(super) fn send_command(
         prepared,
         PendingKind::Command { message },
     );
-    Ok(())
+    Ok(Routed::Forwarded)
 }
 
 fn defer_account_carrier(
@@ -818,11 +875,61 @@ fn defer_command(
     Ok(())
 }
 
+/// Whether the edge serves a command while its coordinator link is not
+/// active: the reads it answers from its own session and projection.
+pub(crate) fn served_while_unavailable(
+    kind: RegisteredCommandKind,
+    message: &ParsedMessage,
+) -> bool {
+    is_local_user_mode_query(message) || is_local_information_query(kind)
+}
+
+/// The edge's own answer to a read it serves from its session and
+/// projection, when `command` is one: the requester's user modes, or one of
+/// the information queries.
+fn local_answer(
+    edge: &EdgeFederation,
+    context: &mut StateCoreContext,
+    kind: RegisteredCommandKind,
+    user_id: UserId,
+    message: &ParsedMessage,
+    command: &CanonicalCommand,
+) -> Option<Result<Vec<agenc_relay_client_wire::WireMessage>, DomainError>> {
+    match command.view() {
+        CanonicalCommandView::Mode(ModeCommand::UserQuery(target)) => {
+            Some(local_user_modes(edge, context, user_id, message, target))
+        }
+        CanonicalCommandView::Information(query) if is_local_information_query(kind) => Some(
+            local_information(edge, context, user_id, message, command, query),
+        ),
+        _ => None,
+    }
+}
+
 /// Identifies the own-session read whose authority remains local during a partition.
 pub(crate) fn is_local_user_mode_query(message: &ParsedMessage) -> bool {
     message.command() == "MODE"
         && message.trailing().is_none()
         && matches!(message.middle(), [target] if agenc_relay_domain::NicknameValue::parse(target).is_ok())
+}
+
+/// Identifies the information queries an edge answers itself: `MOTD`,
+/// `LUSERS`, `VERSION`, `TIME`, `ADMIN` and `INFO` have privacy-safe static
+/// or aggregate replies (Section 14) and no federation operation (Section
+/// 20.5.2), and a partitioned edge still serves them (Section 20.10).
+/// `LINKS` is a directory query its coordinator answers.
+pub(crate) const fn is_local_information_query(kind: RegisteredCommandKind) -> bool {
+    matches!(
+        kind,
+        RegisteredCommandKind::Public(PostRegistrationCommandKind::LocalInformation(
+            LocalInformationCommand::Motd
+                | LocalInformationCommand::Lusers
+                | LocalInformationCommand::Version
+                | LocalInformationCommand::Time
+                | LocalInformationCommand::Admin
+                | LocalInformationCommand::Info
+        ))
+    )
 }
 
 fn must_defer_command(edge: &EdgeFederation, generation: ConnectionGeneration) -> bool {
@@ -839,11 +946,10 @@ fn must_defer_command(edge: &EdgeFederation, generation: ConnectionGeneration) -
 fn local_user_modes(
     edge: &EdgeFederation,
     context: &mut StateCoreContext,
-    generation: ConnectionGeneration,
     user_id: UserId,
     message: &ParsedMessage,
     target: &agenc_relay_domain::NicknameValue,
-) -> Result<(), DomainError> {
+) -> Result<Vec<agenc_relay_client_wire::WireMessage>, DomainError> {
     let command = CanonicalCommand::user_mode_query(target.clone());
     let charges = context.domain().command_charges(user_id, &command);
     let now = context.now();
@@ -875,17 +981,55 @@ fn local_user_modes(
         .sessions()
         .capabilities_for_user(user_id)
         .ok_or(DomainError::RegistrationRequired)?;
-    let frames = crate::client_render::logical_frames(
+    crate::client_render::logical_frames(
         context.server_prefix(),
         capabilities,
         message,
         vec![frame],
     )
-    .map_err(|_| DomainError::InvariantViolation)?;
+    .map_err(|_| DomainError::InvariantViolation)
+}
+
+/// Answers one of the edge's own information queries with the single-node
+/// renderers: the edge's configured MOTD and public information, its build,
+/// its clock, and `LUSERS` counted over the sessions and channels its
+/// projection holds. The command is charged as on a single node, and the
+/// reply carries its label and batch as any other reply does.
+fn local_information(
+    edge: &EdgeFederation,
+    context: &mut StateCoreContext,
+    user_id: UserId,
+    message: &ParsedMessage,
+    command: &CanonicalCommand,
+    query: InformationQuery,
+) -> Result<Vec<agenc_relay_client_wire::WireMessage>, DomainError> {
+    let charges = context.domain().command_charges(user_id, command);
+    let now = context.now();
     context
-        .send_to(generation, frames)
+        .buckets_mut()
+        .apply_domain_charges(now, &charges)
         .map_err(|_| DomainError::ServerBusy)?;
-    Ok(())
+    let session = edge
+        .replica
+        .session(user_id)
+        .ok_or(DomainError::RegistrationRequired)?;
+    let counts = crate::query_render::UserCounts {
+        users: edge.replica.session_count(),
+        channels: edge.replica.channel_count(),
+    };
+    let frames = crate::query_render::information_frames(
+        context,
+        session.nickname.presentation(),
+        query,
+        counts,
+    )
+    .map_err(|_| DomainError::InvariantViolation)?;
+    let capabilities = context
+        .sessions()
+        .capabilities_for_user(user_id)
+        .ok_or(DomainError::RegistrationRequired)?;
+    crate::client_render::logical_frames(context.server_prefix(), capabilities, message, frames)
+        .map_err(|_| DomainError::InvariantViolation)
 }
 
 fn session_revision(edge: &EdgeFederation, user_id: UserId) -> Result<u64, DomainError> {
@@ -1614,17 +1758,34 @@ pub(super) fn dispatch_deferred(
             edge.deferred.remove(&generation);
             break;
         };
-        if let Err((message, error)) =
-            send_command(edge, context, generation, next.kind, next.message)
-        {
-            completions.push(EdgeCompletion::CommandFailed {
-                generation,
-                message,
-                error,
-            });
-        }
+        completions.extend(dispatch_one(edge, context, generation, next));
     }
     completions
+}
+
+/// Routes one deferred command and returns what the router renders for it,
+/// in order after the completions before it.
+fn dispatch_one(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    next: DeferredCommand,
+) -> Option<EdgeCompletion> {
+    match route_command(edge, context, generation, next.kind, next.message) {
+        Ok(Routed::Forwarded) => None,
+        // The answer follows the completion that released it, which the
+        // router renders first.
+        Ok(Routed::Local { frames, message }) => Some(EdgeCompletion::LocalReply {
+            generation,
+            frames,
+            message,
+        }),
+        Err((message, error)) => Some(EdgeCompletion::CommandFailed {
+            generation,
+            message,
+            error,
+        }),
+    }
 }
 
 /// Resolves one finished request into its client-facing completion.

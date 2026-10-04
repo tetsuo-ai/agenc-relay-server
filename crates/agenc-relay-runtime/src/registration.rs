@@ -12,11 +12,11 @@ use std::collections::{BTreeMap, VecDeque};
 
 use agenc_relay_client_wire::{
     AccessTokenPolicy, AccountCarrierKind, CapRequestReply, CapabilityProfile, CapabilitySpec,
-    CapabilityState, KEEPALIVE_IDLE_MILLIS, KEEPALIVE_PONG_MILLIS, PostRegistrationCommandKind,
-    REGISTRATION_TIMEOUT_MILLIS, RegisteredCommandHandoff, RegisteredCommandKind,
-    RegistrationAction, RegistrationAuthCarrier, RegistrationCommand, RegistrationError,
-    RegistrationEvent, RegistrationPhase, RegistrationState, WelcomeStep, WireMessage,
-    isupport_messages, numeric_reply, parse_registration_command, split_capability_lines,
+    CapabilityState, KEEPALIVE_IDLE_MILLIS, KEEPALIVE_PONG_MILLIS, REGISTRATION_TIMEOUT_MILLIS,
+    RegisteredCommandHandoff, RegistrationAction, RegistrationAuthCarrier, RegistrationCommand,
+    RegistrationError, RegistrationEvent, RegistrationPhase, RegistrationState, WelcomeStep,
+    WireMessage, isupport_messages, numeric_reply, parse_registration_command,
+    split_capability_lines,
 };
 use agenc_relay_crypto::{SemanticHashDomain, semantic_digest};
 use agenc_relay_domain::{DisplayNameValue, DomainError, NicknameValue, SessionSeed};
@@ -1173,8 +1173,9 @@ impl RegistrationRouter {
         )
     }
 
-    /// Edge mode: local information queries stay local; everything else is
-    /// a federation request or fails closed while the link is unavailable.
+    /// Edge mode: the edge answers its own information and user-mode
+    /// queries, also while the link is unavailable; everything else is a
+    /// federation request or fails closed while the link is unavailable.
     fn route_edge_command(
         &mut self,
         context: &mut StateCoreContext,
@@ -1183,25 +1184,6 @@ impl RegistrationRouter {
         handoff: RegisteredCommandHandoff,
         observation: CommandObservation,
     ) -> Result<ActionStep, RuntimeError> {
-        if matches!(
-            handoff.kind(),
-            RegisteredCommandKind::Public(PostRegistrationCommandKind::LocalInformation(_))
-        ) {
-            let capabilities = state.registration.capability_state();
-            return self
-                .commands
-                .route_registered(
-                    context,
-                    self.accounts.as_mut(),
-                    generation,
-                    state.bound,
-                    capabilities,
-                    &mut state.nickname,
-                    handoff,
-                    observation,
-                )
-                .map(ActionStep::from);
-        }
         let (kind, message) = handoff.into_parts();
         if state.bound.is_none() {
             context.complete_command_observation(observation, ResultClass::Rejected);
@@ -1216,7 +1198,10 @@ impl RegistrationRouter {
         let Some(edge) = self.edge.as_mut() else {
             return Err(RuntimeError::InvalidValue);
         };
-        if !edge.network_available() && !crate::federation::edge::is_local_user_mode_query(&message)
+        // The edge's own session and projection answer its local queries, so
+        // they are served while the coordinator is unreachable (20.10).
+        if !edge.network_available()
+            && !crate::federation::edge::served_while_unavailable(kind, &message)
         {
             context.complete_command_observation(observation, ResultClass::Busy);
             self.send_one(
@@ -1367,6 +1352,27 @@ impl RegistrationRouter {
                 generation,
                 message,
             } => self.after_edge_completion(context, generation, &message),
+            EdgeCompletion::LocalReply {
+                generation,
+                frames,
+                message,
+            } => {
+                if context.send_to(generation, frames).is_err()
+                    && let Some(mut state) = self.connections.remove(&generation)
+                {
+                    let rendered = self.render_edge_failure(
+                        context,
+                        generation,
+                        &mut state,
+                        &message,
+                        (DomainError::ServerBusy, false),
+                    );
+                    self.connections.insert(generation, state);
+                    if rendered.is_err() {
+                        close_transport(context, generation);
+                    }
+                }
+            }
             EdgeCompletion::JoinCommitted {
                 generation,
                 frames,

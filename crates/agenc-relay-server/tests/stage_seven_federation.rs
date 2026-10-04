@@ -1207,3 +1207,129 @@ fn require_before(lines: &[String], first: usize, then: usize, rule: &str) -> Te
         Err(failure(format!("{rule}: {lines:?}")))
     }
 }
+
+/// The information queries an edge answers itself (BLJ-R1, decision D-28):
+/// `MOTD`, `LUSERS`, `VERSION`, `TIME`, `ADMIN` and `INFO`, plain and
+/// labeled, each followed by `PING`, are answered and the connection stays
+/// open; `LINKS` reaches the coordinator's directory. After the coordinator
+/// is killed the edge still answers the six (Section 20.10), while `LINKS`
+/// fails closed.
+#[test]
+fn an_edge_answers_its_information_queries_and_keeps_the_connection() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| exercise_edge_information(&network, &mut coordinator));
+    let stopped_a = edge_a.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text()
+        )));
+    }
+    let status = stopped_a.map_err(|error| failure(format!("edge a: {error}")))?;
+    if !status.success() {
+        return Err(failure(format!("edge a exited with {status}")));
+    }
+    // The scenario killed the coordinator, so it has nothing left to stop.
+    if stopped_core.is_ok() {
+        return Err(failure("the coordinator outlived its kill"));
+    }
+    Ok(())
+}
+
+/// Each query with the numeric that ends its reply; the fixture configures
+/// no MOTD.
+const EDGE_INFORMATION: [(&str, &str); 6] = [
+    ("MOTD", " 422 "),
+    ("LUSERS", " 266 "),
+    ("VERSION", " 374 "),
+    ("TIME", " 391 "),
+    ("ADMIN", " 374 "),
+    ("INFO", " 374 "),
+];
+
+fn exercise_edge_information(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
+    let mut iris = register_when_available(&network.edge_a, "iris")?;
+    edge_information_round(&mut iris, "active")?;
+    iris.send("CAP REQ :message-tags batch labeled-response")?;
+    iris.read_until(|line| line.contains(" ACK "))?;
+    labeled_edge_information_round(&mut iris, "active")?;
+    // LINKS is the coordinator's directory query; its reply follows the
+    // coordinator's single-node rendering.
+    iris.send("LINKS")?;
+    iris.read_until(|line| line.contains(" 374 iris :End of INFO"))?;
+    iris.send("PING :links")?;
+    iris.read_until(|line| line.ends_with(" :links"))?;
+
+    coordinator.kill()?;
+    let refused = wait_for_partition(&mut iris)?;
+    assert_contains(&refused, "FAIL PRIVMSG NETWORK_UNAVAILABLE")?;
+    edge_information_round(&mut iris, "partitioned")?;
+    labeled_edge_information_round(&mut iris, "partitioned")?;
+    iris.send("LINKS")?;
+    iris.read_until(|line| line.contains("FAIL LINKS NETWORK_UNAVAILABLE"))?;
+    iris.send("PING :still-open")?;
+    iris.read_until(|line| line.ends_with(" :still-open"))?;
+    Ok(())
+}
+
+/// Sends the six queries and a PING and reads until every reply and the
+/// PONG arrived. The PING is answered at once, while the queries wait behind
+/// whatever the connection still has in flight (right after registration,
+/// the origin update that carries its session), so the PONG may come first;
+/// the replies themselves arrive in order.
+fn edge_information_round(client: &mut ArcClient, phase: &str) -> TestResult {
+    for (query, _) in EDGE_INFORMATION {
+        client.send(query)?;
+    }
+    let marker = format!(" :information-{phase}");
+    client.send(&format!("PING{marker}"))?;
+    let mut answered = 0;
+    let mut ponged = false;
+    let replies = client.read_until(|line| {
+        ponged |= line.ends_with(&marker);
+        if let Some((_, ending)) = EDGE_INFORMATION.get(answered)
+            && line.starts_with(":edge-a.test")
+            && line.contains(ending)
+        {
+            answered += 1;
+        }
+        ponged && answered == EDGE_INFORMATION.len()
+    })?;
+    if replies.iter().any(|line| line.contains(" FAIL ")) {
+        return Err(failure(format!("{phase}: refused: {replies:?}")));
+    }
+    Ok(())
+}
+
+/// The same with a label on each query: each reply is one labeled line or
+/// one labeled batch, and each ends before the next begins.
+fn labeled_edge_information_round(client: &mut ArcClient, phase: &str) -> TestResult {
+    for (query, _) in EDGE_INFORMATION {
+        client.send(&format!("@label={} {query}", query.to_ascii_lowercase()))?;
+    }
+    let marker = format!(" :labeled-{phase}");
+    client.send(&format!("PING{marker}"))?;
+    let mut answered = 0;
+    let mut ponged = false;
+    let replies = client.read_until(|line| {
+        ponged |= line.ends_with(&marker);
+        if let Some((query, ending)) = EDGE_INFORMATION.get(answered) {
+            let label = query.to_ascii_lowercase();
+            let single = line.starts_with(&format!("@label={label} ")) && line.contains(ending);
+            let batch_end = line.ends_with(&format!(" BATCH -{label}"));
+            if single || batch_end {
+                answered += 1;
+            }
+        }
+        ponged && answered == EDGE_INFORMATION.len()
+    })?;
+    if replies.iter().any(|line| line.contains(" FAIL ")) {
+        return Err(failure(format!("{phase}: refused: {replies:?}")));
+    }
+    Ok(())
+}
