@@ -34,6 +34,8 @@ The `public`, `onion`, and `dual` profiles write a complete configuration with e
 
 Initialization prints a Tor fragment, the service-unit reminder, and certificate enrollment instructions. It does not install them. It does not contact a certificate authority or bind a public socket.
 
+Before them it prints the new node's `network-id=`, `server-id=`, `recovery-epoch=`, `operator-id=` and `operator-signing-key-file=` lines. The `recovery-epoch` is the node's own database epoch, which its federation hello carries: a peer's `[[federation.peer]]` record for this node pins it together with the `server-id`. Keep the printed lines. For an edge the receipt is the only `arcd` output that prints its own epoch, because the edge's `print-onboarding` prints its coordinator's; a later `storage restore` prints the new epoch it declares. An earlier `arcd init` printed no `recovery-epoch=` line: before upgrading such an edge, record its own epoch from that earlier `arcd print-onboarding`, or initialize the edge again.
+
 ## Enroll certificates and enable listeners
 
 Place each certificate and private key at the path shown in the generated configuration. Check the certificate identity and the configured DNS name or onion pin. Set `enabled = true` only for listeners whose bind address, certificate, and transport purpose have been reviewed.
@@ -107,6 +109,40 @@ must preserve their authenticated relationships.
 Optional WSS and plaintext history settings are described in
 [Stage 09 operations](stage-09-operations.md).
 
+## Enable the encrypted profile
+
+The encrypted profile rides on the federation link between the coordinator and its edges, and only edges offer it to clients. Enable federation on every node first. Each `[[federation.peer]]` record pins its peer exactly:
+
+- `server_id` and `recovery_epoch` are the `server-id=` and `recovery-epoch=` lines the peer's `arcd init` printed; a later `storage restore` of that peer prints its new epoch.
+- `certificate_spki_sha256` is the SHA-256 hash of the subject public key info of the peer's federation certificate.
+- `signing_public_key` is the Ed25519 public key of the raw 32-byte seed the peer's `init` wrote to `keys/federation-signing.key`. No `arcd` command prints it.
+- On an edge, the coordinator record's `endpoints` lists the coordinator's federation listener. A coordinator's edge records keep `endpoints = []`, because each edge dials its coordinator.
+
+Every node then names the same public sequencer credentials document, and the coordinator also holds the sequencer key `init` wrote. Create the document of a new network once, on the coordinator, after its configuration passes `check-config`:
+
+```sh
+arcd sequencer-credentials create \
+  --config /etc/arcd/config.toml \
+  --sequencer-key-file /var/lib/arcd/keys/sequencer.key \
+  --not-before 1791000000 \
+  --not-after 1822536000 \
+  --output /etc/arcd/sequencer-credentials.bin \
+  --service-user arcd
+```
+
+The command takes the network ID from the configuration and reads the key under the protected-file rules. It writes set generation zero with one credential at key generation zero, valid from `--not-before` through `--not-after`, both canonical decimal Unix seconds and both inclusive. The coordinator signs a record only under a credential whose interval covers that record's validation time, so start the interval no later than the network's first start and end it after the key's planned lifetime. Before publishing, the command verifies the document with the parser and key-set check startup runs. It creates the output as a new file with mode 0644 whatever the umask, so the service account can read a document root created. It refuses an existing path instead of replacing it, printing `initialization target already exists`, the offline commands' message for any existing target. It also refuses an output below a group- or world-writable directory or a symbolic link, which the protected-file rules would keep every node from reading. It prints the document's `sequencer-key-set-generation=` and `sequencer-key-set-hash=` lines. The document holds no private material. `--service-user` has the meaning described above.
+
+Install the same bytes on every node under the protected-file rules: a single-link regular file owned by root or the service account, with neither the file nor any ancestor directory group- or world-writable. `init` already wrote each node's `coordinator_server_id`. On the coordinator, set:
+
+```toml
+[e2ee]
+enabled = true
+sequencer_private_key_file = "/var/lib/arcd/keys/sequencer.key"
+sequencer_credentials_file = "/etc/arcd/sequencer-credentials.bin"
+```
+
+On each edge, set `enabled = true` and the same `sequencer_credentials_file`, without a sequencer key. Restart every node, because the credentials file is restart-only. Then `print-onboarding` on each node prints the four E2EE lines, with the generation and hash the command printed. The command creates only a new network's first document; later rotation and retirement documents are provisioned as described in [Rotate the sequencer credential](#rotate-the-sequencer-credential).
+
 ## Print onboarding data and account invitations
 
 After enabling at least one reviewed client endpoint, print the canonical connection descriptor:
@@ -116,6 +152,8 @@ arcd print-onboarding --config /etc/arcd/config.toml
 ```
 
 The command reconstructs the database through the same read-only inspection path while it reads the authenticated recovery epoch. A running writer causes the read-only database open to fail.
+
+The descriptor pins the recovery epoch the node advertises in `agenc.ag/recovery`. A coordinator advertises its own database epoch. An edge advertises its coordinator's, the `recovery_epoch` of its enabled coordinator `[[federation.peer]]` record, so its descriptor pins that value and not the edge's own database epoch; an edge without an enabled coordinator record cannot serve and is refused with `configuration validation failed`. When the coordinator's recovery epoch changes, update the edge's record, restart the edge and distribute its new descriptor: clients treat the change as an identity transition that needs their explicit confirmation.
 
 Create a time-limited account invitation with a separate offline Ed25519 invitation key:
 

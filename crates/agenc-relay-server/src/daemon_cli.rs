@@ -9,12 +9,13 @@ use std::process::ExitCode;
 
 use agenc_relay_config::{
     BackupTrustManifestEntry, DisplayLabel, DnsName, InitProfile, MaintenanceStorageConfig,
-    SecretSet, SystemHostReader, ValidationDepth, load_backup_trust_manifest, load_config,
-    load_maintenance_config, probe_host_controls,
+    SecretSet, SystemHostReader, ValidationDepth, encode_base64url_32, load_backup_trust_manifest,
+    load_config, load_maintenance_config, probe_host_controls,
 };
 use agenc_relay_runtime::offline::{
-    InitMode, InitReceipt, InitRequest, create_account_invite, execute_stopped_restore,
-    initialize_node, parse_network_id, parse_server_id, render_onboarding, verify_database_header,
+    InitMode, InitReceipt, InitRequest, SequencerCredentialsRequest, create_account_invite,
+    create_sequencer_credentials, execute_stopped_restore, initialize_node, parse_network_id,
+    parse_server_id, render_onboarding, verify_database_header,
 };
 use agenc_relay_storage::{
     RestoreCommandReceipt, RestoreCommandRequest, RestoreTrustKey, StorageEngineLimits,
@@ -36,6 +37,7 @@ const USAGE: &str = concat!(
     "  init --config <file> --profile <public|onion|dual> [options]\n",
     "  print-onboarding --config <file> [--service-user <name>]\n",
     "  account-invite create --descriptor <file> --signing-key-file <file> --expires-in <seconds> [--service-user <name>]\n",
+    "  sequencer-credentials create --config <file> --sequencer-key-file <file> --not-before <unix-seconds> --not-after <unix-seconds> --output <new-file> [--service-user <name>]\n",
     "  storage restore --config <file> --backup <file> [restore options]\n",
     "  storage login-index-rotate-start --config <file> --new-key-file <file>\n",
     "  storage login-index-rotate-finish --config <file>\n",
@@ -97,6 +99,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), CliFailure> {
         "init" => init(rest),
         "print-onboarding" => print_onboarding(rest),
         "account-invite" => account_invite(rest),
+        "sequencer-credentials" => sequencer_credentials(rest),
         "storage" => storage(rest),
         _ => Err(CliFailure::usage(USAGE)),
     }
@@ -296,6 +299,7 @@ fn init_dns_name(
 fn print_init_receipt(receipt: &InitReceipt) {
     println!("network-id={}", receipt.network_id.to_base64url());
     println!("server-id={}", receipt.server_id.to_base64url());
+    println!("recovery-epoch={}", receipt.recovery_epoch.to_base64url());
     println!("operator-id={}", receipt.operator_id.to_base64url());
     println!(
         "operator-signing-key-file={}",
@@ -365,6 +369,65 @@ fn account_invite(arguments: &[OsString]) -> Result<(), CliFailure> {
         .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
     print!("{envelope}");
     Ok(())
+}
+
+const SEQUENCER_CREDENTIALS_USAGE: &str = "usage: arcd sequencer-credentials create --config <file> --sequencer-key-file <file> --not-before <unix-seconds> --not-after <unix-seconds> --output <new-file> [--service-user <name>]";
+const SEQUENCER_CREDENTIALS_SPECS: &[OptionSpec] = &[
+    OptionSpec::value("--config"),
+    OptionSpec::value("--sequencer-key-file"),
+    OptionSpec::value("--not-before"),
+    OptionSpec::value("--not-after"),
+    OptionSpec::value("--output"),
+    OptionSpec::value(SERVICE_USER),
+];
+
+/// Writes the public generation-zero sequencer credentials document and
+/// prints its key-set generation and hash in the descriptor's line form.
+fn sequencer_credentials(arguments: &[OsString]) -> Result<(), CliFailure> {
+    harden_offline_process();
+    let usage = || CliFailure::usage(SEQUENCER_CREDENTIALS_USAGE);
+    if arguments.first().and_then(|value| value.to_str()) != Some("create") {
+        return Err(usage());
+    }
+    let rest = arguments.get(1..).ok_or_else(usage)?;
+    let mut parsed =
+        ParsedOptions::parse(rest, SEQUENCER_CREDENTIALS_SPECS).map_err(|()| usage())?;
+    let request = sequencer_credentials_request(&mut parsed).map_err(|()| usage())?;
+    let service_user = parsed.optional_text(SERVICE_USER).map_err(|()| usage())?;
+    trust_service_user(service_user)?;
+    let receipt = create_sequencer_credentials(&request)
+        .map_err(|error| CliFailure::command(EXIT_USAGE, error.to_string()))?;
+    println!("sequencer-key-set-generation={}", receipt.set_generation);
+    println!(
+        "sequencer-key-set-hash={}",
+        encode_base64url_32(&receipt.key_set_hash)
+    );
+    Ok(())
+}
+
+fn sequencer_credentials_request(
+    parsed: &mut ParsedOptions,
+) -> Result<SequencerCredentialsRequest, ()> {
+    Ok(SequencerCredentialsRequest {
+        config_path: parsed.required_path("--config")?,
+        sequencer_key_file: parsed.required_path("--sequencer-key-file")?,
+        not_before: canonical_unix_seconds(&parsed.required_text("--not-before")?)?,
+        not_after: canonical_unix_seconds(&parsed.required_text("--not-after")?)?,
+        output: parsed.required_path("--output")?,
+    })
+}
+
+/// One canonical ASCII decimal `u64`: digits only, no sign and no leading
+/// zero, the rule `--expires-in` follows.
+fn canonical_unix_seconds(value: &str) -> Result<u64, ()> {
+    if value.is_empty()
+        || value.len() > 20
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err(());
+    }
+    value.parse::<u64>().map_err(|_| ())
 }
 
 fn storage(arguments: &[OsString]) -> Result<(), CliFailure> {
@@ -692,6 +755,68 @@ mod tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn sequencer_credentials_parser_requires_every_value_in_canonical_form() -> Result<(), ()> {
+        let complete = [
+            "--config",
+            "/etc/arcd/config.toml",
+            "--sequencer-key-file",
+            "/var/lib/arcd/keys/sequencer.key",
+            "--not-before",
+            "0",
+            "--not-after",
+            "4000000000",
+            "--output",
+            "/etc/arcd/sequencer-credentials.bin",
+        ];
+        let mut parsed = ParsedOptions::parse(&arguments(&complete), SEQUENCER_CREDENTIALS_SPECS)?;
+        let request = sequencer_credentials_request(&mut parsed)?;
+        assert_eq!(request.config_path, PathBuf::from("/etc/arcd/config.toml"));
+        assert_eq!(request.not_before, 0);
+        assert_eq!(request.not_after, 4_000_000_000);
+        assert_eq!(
+            request.output,
+            PathBuf::from("/etc/arcd/sequencer-credentials.bin")
+        );
+        assert_eq!(canonical_unix_seconds("18446744073709551615"), Ok(u64::MAX));
+        for invalid in [
+            "",
+            "007",
+            "-1",
+            "+1",
+            "1e3",
+            "1 ",
+            "18446744073709551616",
+            "000000000000000000001",
+        ] {
+            assert!(canonical_unix_seconds(invalid).is_err(), "{invalid:?}");
+        }
+        for (index, _) in complete.iter().enumerate().step_by(2) {
+            let mut partial = complete.to_vec();
+            partial.drain(index..index + 2);
+            let mut parsed = ParsedOptions::parse(&arguments(&partial), SEQUENCER_CREDENTIALS_SPECS)?;
+            assert!(sequencer_credentials_request(&mut parsed).is_err(), "{index}");
+        }
+        for invalid in [
+            arguments(&["sequencer-credentials"]),
+            arguments(&["sequencer-credentials", "rotate"]),
+            arguments(&["sequencer-credentials", "create", "--not-before", "01"]),
+        ] {
+            assert_eq!(
+                run(invalid).err().map(|failure| failure.message),
+                Some(SEQUENCER_CREDENTIALS_USAGE.to_owned())
+            );
+        }
+        // The named service identity is resolved before any file is read.
+        let mut unknown_user = vec!["sequencer-credentials", "create"];
+        unknown_user.extend_from_slice(&complete);
+        unknown_user.extend_from_slice(&["--service-user", "agenc-no-such-account-zz"]);
+        let refused = run(arguments(&unknown_user)).err().ok_or(())?;
+        assert_eq!(refused.code, EXIT_USAGE);
+        assert!(refused.message.starts_with("service user rejected"));
+        Ok(())
     }
 
     #[test]

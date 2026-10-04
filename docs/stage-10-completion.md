@@ -240,6 +240,22 @@ coordinator, applies in the step that admits it, whose NAMES snapshot now
 opens at once instead of never, so a lone `&` JOIN is answered and no longer
 holds the commands behind it (AUD-16, SDK program, outside master #35), is
 recorded in [the in-step local JOIN record](stage-10-in-step-local-join.md).
+The edge initialized by `arcd init` that starts, links and advertises the
+encrypted profile, its database complete without the fake OPAQUE record only a
+coordinator must hold, and the kill-and-restart comparison showing that this
+refusal does not explain RUN-08 (AUD-01, SDK program, outside master #35) are
+recorded in [the CLI edge initialization record](stage-10-cli-edge-initialization.md).
+The edge descriptor that pins the coordinator epoch the edge advertises,
+through the daemon's own selection, the refusal of an edge with no enabled
+coordinator record, and the node's own epoch printed by `arcd init` for its
+peers' records (AUD-03, SDK program, outside master #35) are recorded in
+[the edge descriptor epoch record](stage-10-edge-descriptor-epoch.md).
+The offline `arcd sequencer-credentials create` command that writes a new
+network's generation-zero sequencer credentials document from the shared
+encoders, byte-equal to the testkit's, the operator-guide procedure that
+enables the encrypted profile with it, and the three-node network provisioned
+through `arcd` (AUD-02, SDK program, outside master #35) are recorded in
+[the sequencer credentials record](stage-10-sequencer-credentials-command.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

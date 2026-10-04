@@ -98,6 +98,8 @@ const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "stage_eight_e2ee/cli_provisioning.rs"]
+mod cli_provisioning;
 #[path = "stage_eight_e2ee/close_authority.rs"]
 mod close_authority;
 #[path = "stage_eight_e2ee/credential_bounds.rs"]

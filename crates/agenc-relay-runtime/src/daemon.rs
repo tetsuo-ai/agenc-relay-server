@@ -17,8 +17,8 @@ use agenc_relay_auth::{
     AuthError, CHANNEL_KEY_HASH_BYTES as AUTH_CHANNEL_HASH_BYTES,
     CHANNEL_KEY_ITERATIONS as AUTH_CHANNEL_ITERATIONS, CHANNEL_KEY_LANES as AUTH_CHANNEL_LANES,
     CHANNEL_KEY_MEMORY_KIB as AUTH_CHANNEL_MEMORY_KIB,
-    CHANNEL_KEY_SALT_BYTES as AUTH_CHANNEL_SALT_BYTES, OpaqueProfile, derive_channel_key_verifier,
-    opaque_server_public_key,
+    CHANNEL_KEY_SALT_BYTES as AUTH_CHANNEL_SALT_BYTES, OPAQUE_REGISTRATION_RECORD_BYTES,
+    OpaqueProfile, derive_channel_key_verifier, opaque_server_public_key,
 };
 use agenc_relay_config::{
     Config, ConfigError, ConfigReport, DEFAULT_REDB_CACHE_BYTES, DirectMessageDefault,
@@ -43,8 +43,8 @@ use agenc_relay_storage::{
     embedded_storage_qualifications,
 };
 use agenc_relay_types::{
-    EntropySource as _, FederationRole, Generation, MonotonicClock as _, OriginId, ServerId,
-    TransactionId, UserId, WallClock as _,
+    EntropySource as _, FederationRole, Generation, MonotonicClock as _, OriginId, RecoveryEpoch,
+    ServerId, TransactionId, UserId, WallClock as _,
 };
 use tokio::runtime::Builder;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -523,6 +523,7 @@ impl LiveStorage {
             &seed,
             &owner.port(),
             &keys,
+            config.network.role,
             process_clock.now(),
             reconstruction_utc,
         )
@@ -986,15 +987,8 @@ fn registration_config(
         // that opens them (spec 22.2).
         NodeRole::Edge => AccountServiceRole::Advertised {
             creation_policy: creation_policy(config, secrets)?,
-            recovery_epoch: config
-                .federation
-                .peers
-                .iter()
-                .find(|peer| peer.enabled && peer.role == NodeRole::Coordinator)
-                .map_or_else(
-                    || seed.storage().recovery_epoch(),
-                    |peer| peer.recovery_epoch,
-                ),
+            recovery_epoch: edge_advertised_recovery_epoch(config)
+                .unwrap_or_else(|| seed.storage().recovery_epoch()),
         },
     };
     let access_token = secrets
@@ -1009,6 +1003,21 @@ fn registration_config(
         access_token,
         account_service,
     })
+}
+
+/// The recovery epoch an edge advertises in `agenc.ag/recovery` and pins in
+/// its onboarding descriptor: the pin of its enabled coordinator record, the
+/// epoch of the account service that opens its clients' sealed account
+/// requests (spec 22.2). `None` when the configuration names no enabled
+/// coordinator record; no such edge serves, because its coordinator dial
+/// plan requires that record.
+pub(crate) fn edge_advertised_recovery_epoch(config: &Config) -> Option<RecoveryEpoch> {
+    config
+        .federation
+        .peers
+        .iter()
+        .find(|peer| peer.enabled && peer.role == NodeRole::Coordinator)
+        .map(|peer| peer.recovery_epoch)
 }
 
 fn account_service_config(
@@ -1031,7 +1040,7 @@ fn account_service_config(
         .expose()
         .try_into()
         .map_err(|_| DaemonError::Authentication(AuthError::InvalidEncoding))?;
-    let fake_record = *reconstruction.account_service.fake_opaque_record();
+    let fake_record = hosted_fake_opaque_record(reconstruction)?;
     let opaque_profile =
         OpaqueProfile::from_serialized(config.network.network_id, setup, fake_record)?;
     let fake_key = secrets
@@ -1075,6 +1084,21 @@ fn account_service_config(
         default_guest_direct_messages,
         default_direct_messages,
     })
+}
+
+/// The fake OPAQUE record the hosted account service answers an unknown
+/// login with. Reconstruction refuses a coordinator database without it, so
+/// its absence here is that same durable-state refusal.
+fn hosted_fake_opaque_record(
+    reconstruction: &Reconstruction,
+) -> Result<[u8; OPAQUE_REGISTRATION_RECORD_BYTES], DaemonError> {
+    reconstruction
+        .account_service
+        .fake_opaque_record()
+        .copied()
+        .ok_or_else(|| {
+            DaemonError::Reconstruction(ReconstructionSurface::DurableState, startup_stale_state())
+        })
 }
 
 fn creation_policy(

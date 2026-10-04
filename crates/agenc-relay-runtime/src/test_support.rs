@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use agenc_relay_auth::OpaqueProfile;
 use agenc_relay_client_wire::{CapRequestReply, CapabilityState};
+use agenc_relay_config::NodeRole;
 use agenc_relay_crypto::{
     AccountHpkePrivateKey, CryptoWorkerConfig, Ed25519SecretKey, LoginIndexKey,
     OpaqueFakeCredentialKey, RollbackGuardRootKey, StorageDigest, StorageMasterKey,
@@ -324,10 +325,13 @@ fn compose_test_state(
         storage.database_binding(),
         storage.storage_key_generation(),
     )?;
+    // The fixture database is seeded like a coordinator's, fake OPAQUE
+    // record included, so it reconstructs under the stricter role.
     let reconstruction = reconstruct(
         &seed,
         &owner.port(),
         &keys,
+        NodeRole::Coordinator,
         MonotonicTick::from_ticks(10),
         UtcSecond::from_unix_seconds(1_000),
     )?;
@@ -705,6 +709,7 @@ impl StateCoreFixture {
             &seed,
             &owner.port(),
             &keys,
+            NodeRole::Coordinator,
             MonotonicTick::from_ticks(10),
             UtcSecond::from_unix_seconds(1_000),
         )?;
