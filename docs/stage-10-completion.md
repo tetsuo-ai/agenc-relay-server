@@ -235,6 +235,11 @@ NAMES reply larger than one response batch, which closed the requester's
 connection on a node answering its own clients and which the framed tokens
 made more common, is delivered in pages as a JOIN's NAMES is (AUD-18 review,
 outside master #35); see [the explicit NAMES pages record](stage-10-explicit-names-pages.md).
+The local JOIN that a node's own router, core-only or a federated
+coordinator, applies in the step that admits it, whose NAMES snapshot now
+opens at once instead of never, so a lone `&` JOIN is answered and no longer
+holds the commands behind it (AUD-16, SDK program, outside master #35), is
+recorded in [the in-step local JOIN record](stage-10-in-step-local-join.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

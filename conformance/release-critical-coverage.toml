@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1004
-reviewed_source_sha256 = "09429d8e146b5e1b359be72046e2f6578c1e3fedb81277d6b9645cf474287c89"
+reviewed_source_sha256 = "197f4cbe31264b4e712cf3d01974f5b3849b76bd39548712b766025664b20be1"
 deferred = []
 
 [[region]]
@@ -1339,12 +1339,24 @@ id = "runtime-local-join-snapshot-identity"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/state_core/local_join.rs"
 item = "open"
-source_sha256 = "7857e57f99ca81ddc04fed6fb4ce59e3badf82686647c476e5ee49c025bf0e95"
-start_line = 290
-end_line = 338
+source_sha256 = "54e5d9173d7a97f796a2a8f42311e30e6a0b32043b0c28622a129b9905fd8825"
+start_line = 301
+end_line = 349
 span_sha256 = "1bf5d5ba77502ca992ea9354e1235c58506d310250b7550d0571159edab7c9a7"
 metric = "branches"
 reason = "A committed JOIN or explicit NAMES snapshot may only be opened for its original bound connection and session. B12-R0-1: respanned when `open` began taking the frames an explicit NAMES already rendered; the identity check still precedes both paths, and the span was re-reviewed."
+
+[[region]]
+id = "runtime-local-join-settled-commit"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/state_core/local_join.rs"
+item = "settle_local_join"
+source_sha256 = "54e5d9173d7a97f796a2a8f42311e30e6a0b32043b0c28622a129b9905fd8825"
+start_line = 183
+end_line = 199
+span_sha256 = "df13c78f51356f9158c93127c5247a612068219d9f10e189c2c8a9b076ad1ea4"
+metric = "branches"
+reason = "An accepted JOIN snapshot opens only after the domain applies its plan: at settlement for a plan applied in that same step, otherwise through the batch commit that applies it; a refused JOIN releases its snapshot. AUD-16: an in-step seed is committed here, or it never opens and its connection's later commands wait behind it."
 
 [[region]]
 id = "runtime-edge-user-mode-identity"
