@@ -5,13 +5,13 @@
 //! coordinator's public pins to the edge's initialization, and the TLS,
 //! federation and E2EE settings are the edits an operator makes to the
 //! generated configuration. AUD-03: an edge's own descriptor pins the
-//! coordinator epoch it advertises. AUD-02: `arcd sequencer-credentials
-//! create` publishes the sequencer credentials every node names, so no
-//! node's database, keys or credentials document comes from a library
-//! initializer or a testkit builder; the TLS certificates come from the
-//! test CA, as an operator's come from its CA, and the federation signing
-//! public keys the peer records pin are derived from the seeds `init`
-//! wrote, because no `arcd` command prints them.
+//! coordinator epoch it advertises in its CAP and its welcome NOTE. AUD-02:
+//! `arcd sequencer-credentials create` publishes the sequencer credentials
+//! every node names, so no node's database, keys or credentials document
+//! comes from a library initializer or a testkit builder; the TLS
+//! certificates come from the test CA, as an operator's come from its CA,
+//! and the federation signing public keys the peer records pin are derived
+//! from the seeds `init` wrote, because no `arcd` command prints them.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -579,6 +579,29 @@ impl CliDaemon {
     }
 }
 
+/// The welcome burst of a guest that negotiated `request` and registered
+/// `nickname`, with its open connection. An edge refuses a registration
+/// with `NETWORK_UNAVAILABLE` while it cannot send the session open to its
+/// coordinator, so the attempt is retried, as `register_when_available`
+/// retries.
+fn guest_welcome_when_available(
+    fixture: &NodeFixture,
+    nickname: &str,
+    request: &str,
+) -> TestResult<(Vec<String>, ArcClient)> {
+    let deadline = Instant::now() + NETWORK_WAIT;
+    loop {
+        match super::welcome_recovery::guest_welcome(fixture, nickname, request) {
+            Ok((_, burst, client)) => return Ok((burst, client)),
+            Err(error) if Instant::now() < deadline => {
+                let _transient = error;
+                thread::sleep(Duration::from_secs(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// The complete `CAP LS 302` advertisement of one node.
 fn advertised_capabilities(fixture: &NodeFixture) -> TestResult<Vec<String>> {
     let mut client = ArcClient::connect(fixture)?;
@@ -589,7 +612,8 @@ fn advertised_capabilities(fixture: &NodeFixture) -> TestResult<Vec<String>> {
 /// AUD-01: an edge initialized by `arcd init --coordinator-descriptor`
 /// starts, links to its coordinator, advertises the encrypted profile and
 /// registers a client; after a SIGKILL it restarts and links again.
-/// AUD-03: the edge's own descriptor pins the epoch its CAP advertises.
+/// AUD-03: the edge's own descriptor pins the epoch its CAP advertises and
+/// its welcome `NOTE * RECOVERY_EPOCH` (SC-007) repeats.
 #[test]
 fn a_cli_initialized_edge_serves_links_and_advertises_e2ee() -> TestResult {
     let network = provision_cli_network(&["edge-a.test"])?;
@@ -618,6 +642,18 @@ fn a_cli_initialized_edge_serves_links_and_advertises_e2ee() -> TestResult {
         &format!("agenc.ag/recovery=v1.{}", network.coordinator_epoch),
     )?;
     let mut client = register_when_available(edge, "CliGuest")?;
+    client.send("QUIT :done")?;
+    // A guest that negotiated `agenc.ag/recovery` ends its welcome with the
+    // recovery NOTE, which carries the descriptor's epoch, the coordinator's.
+    let (burst, mut client) = guest_welcome_when_available(edge, "CliNote", "agenc.ag/recovery")?;
+    assert_eq!(
+        burst.last(),
+        Some(&format!(
+            ":edge-a.test NOTE * RECOVERY_EPOCH {} :Current server recovery identity",
+            line_value(edge_descriptor, "recovery-epoch=")?
+        )),
+        "{burst:?}"
+    );
     client.send("QUIT :done")?;
 
     let before = links_established(edge);

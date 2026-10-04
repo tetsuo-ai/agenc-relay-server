@@ -183,8 +183,9 @@ fn recovery_note_on_an_edge(
 /// A guest that negotiated `request` and registered `nickname` without
 /// authenticating: the advertised capability lines and every line from
 /// `RPL_WELCOME` up to the barrier PONG, which is excluded. The connection
-/// is returned open until the scenario ends.
-fn guest_welcome(
+/// is returned open until the scenario ends. The CLI provisioning case
+/// reads an edge's recovery NOTE through it too.
+pub(super) fn guest_welcome(
     fixture: &NodeFixture,
     nickname: &str,
     request: &str,

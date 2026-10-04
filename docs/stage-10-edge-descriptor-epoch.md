@@ -98,7 +98,10 @@ A coordinator's descriptor is byte-identical to before.
   record for the edge pins the epoch the edge's init receipt printed, and the
   link it establishes proves that value; the edge's descriptor printed after
   enrollment pins the coordinator's epoch, and the live edge's CAP
-  advertises exactly the descriptor's value.
+  advertises exactly the descriptor's value. Since the program's integration
+  merge with the SC-007 topic, which sends the welcome NOTE, a guest of that
+  edge that negotiated `agenc.ag/recovery` must end its welcome with
+  `NOTE * RECOVERY_EPOCH` carrying the descriptor's epoch, the coordinator's.
 
 With the edge branch of the descriptor reverted to the database epoch (the
 `70c832c` behaviour), the owner's test fails at the refusal and the daemon
@@ -106,18 +109,14 @@ cases fail with `print-onboarding was not refused for edge-a.test`. With the
 refusal kept but the epoch reverted, the owner's test fails at the epoch
 equality and the daemon cases fail with `edge-a.test descriptor does not pin
 its coordinator's epoch`. The AUD-02 daemon case, which provisions through
-the same steps, fails with the AUD-01 daemon case in both.
+the same steps, fails with the AUD-01 daemon case in both. With the welcome
+NOTE rendering another epoch than the router's (the epoch reversed), the
+AUD-01 daemon case passes its CAP checks and fails at the NOTE comparison,
+the SC-007 edge NOTE cases fail too, and the AUD-02 case, which reads no
+NOTE, passes.
 
 ## Limitations
 
-- The welcome `NOTE * RECOVERY_EPOCH` (SC-007) is not on this branch, so
-  the planned comparison of an edge's descriptor with its NOTE is not made
-  here. The NOTE renders the same router epoch as the CAP
-  (`self.config.recovery_epoch`), and in review a scratch merge of the
-  SC-007 topic showed a CLI-initialized edge's NOTE carrying its
-  descriptor's epoch, which is also its coordinator's. That observation is
-  not evidence of this branch: the program's integration merge of the two
-  topics adds the NOTE assertion to the daemon case.
 - The descriptor follows the configured coordinator pin. When the
   coordinator's epoch changes, the edge's record is updated by the operator
   (a restart-only change, Appendix C.4); nothing re-pins it automatically.
