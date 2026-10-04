@@ -379,6 +379,34 @@ pub(crate) fn requester_nickname(context: &StateCoreContext, requester: UserId) 
         .unwrap_or_else(|| "*".to_owned())
 }
 
+/// What one `900` names for an authenticated session (architecture 10.2
+/// step 6 and 11.4; Appendix E.2 shows the line).
+pub(crate) struct LoggedIn {
+    /// The session's public prefix, `<nick>!<user>@<host>`, rendered by the
+    /// same function as every other prefix of that session.
+    pub(crate) mask: String,
+    /// The account's public label, or `*` when the account has none.
+    pub(crate) label: String,
+}
+
+impl LoggedIn {
+    /// `:<server> 900 <target> <mask> <label> :You are now logged in`.
+    pub(crate) fn numeric(
+        &self,
+        server_prefix: &str,
+        target: &str,
+    ) -> Result<WireMessage, RuntimeError> {
+        numeric_reply(
+            server_prefix,
+            900,
+            target,
+            &[&self.mask, &self.label],
+            Some("You are now logged in"),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
+    }
+}
+
 fn description(text: &'static str) -> Result<SafeReplyDescription, RuntimeError> {
     SafeReplyDescription::new(text).map_err(|_| RuntimeError::InvalidValue)
 }

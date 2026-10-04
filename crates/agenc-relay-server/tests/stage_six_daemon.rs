@@ -21,6 +21,12 @@ mod stage_ten;
 #[path = "stage_six_daemon/stage_ten_tor.rs"]
 mod stage_ten_tor;
 
+#[path = "stage_six_daemon/welcome_burst.rs"]
+mod welcome_burst;
+
+#[path = "stage_six_daemon/login_after_registration.rs"]
+mod login_after_registration;
+
 #[cfg(feature = "history")]
 #[path = "stage_six_daemon/history.rs"]
 mod history;
@@ -1279,6 +1285,14 @@ impl<T: io::Read + io::Write> ClientIo for T {}
 
 struct ArcClient {
     reader: BufReader<Box<dyn ClientIo>>,
+    /// SASL completed on this connection, so its welcome burst ends with the
+    /// authenticated account state (architecture 10.2 step 6).
+    logged_in: bool,
+    /// The nickname the connection registered under; a login after
+    /// registration follows its `903` with `900` (architecture 11.4).
+    registered: Option<String>,
+    /// The last `900` the connection read.
+    account_state: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -1366,6 +1380,9 @@ impl ArcClient {
         };
         Ok(Self {
             reader: BufReader::new(stream),
+            logged_in: false,
+            registered: None,
+            account_state: None,
         })
     }
 
@@ -1402,9 +1419,16 @@ impl ArcClient {
         self.send(&format!("NICK {nickname}"))?;
         self.send(&format!("USER {nickname} 0 * :Stage Six Account"))?;
         self.send("CAP END")?;
-        read_until(&mut self.reader, |line| {
+        let mut welcome = read_until(&mut self.reader, |line| {
             line.contains(" 376 ") || line.contains(" 422 ")
-        })
+        })?;
+        if self.logged_in {
+            let account_state = read_account_state(&mut self.reader, nickname)?;
+            self.account_state = Some(account_state.clone());
+            welcome.push(account_state);
+        }
+        self.registered = Some(nickname.to_owned());
+        Ok(welcome)
     }
 
     fn account_exchange(
@@ -1585,9 +1609,11 @@ impl ArcClient {
         self.send("NICK LiveUser")?;
         self.send("USER live 0 * :Live User")?;
         self.send("CAP END")?;
-        read_until(&mut self.reader, |line| {
+        let welcome = read_until(&mut self.reader, |line| {
             line.contains(" 376 ") || line.contains(" 422 ")
-        })
+        })?;
+        self.registered = Some("LiveUser".to_owned());
+        Ok(welcome)
     }
 
     fn shutdown_lines(&mut self) -> TestResult<Vec<String>> {
@@ -1939,7 +1965,27 @@ fn authenticate_live_account(
     if !numeric.contains(" 903 ") {
         return Err(failure("successful authentication omitted numeric 903"));
     }
+    client.logged_in = true;
+    if let Some(nickname) = client.registered.clone() {
+        // A registered session's login follows 903 with 900 (11.4).
+        client.account_state = Some(read_account_state(&mut client.reader, &nickname)?);
+    }
     Ok(())
+}
+
+/// The `900` that ends an authenticated registration's welcome burst
+/// (architecture 10.2 step 6): the session's own mask and its account's
+/// public label, or `*`.
+fn read_account_state<R: BufRead>(reader: &mut R, nickname: &str) -> TestResult<String> {
+    let line = read_line_for(reader, "authenticated account state")?;
+    if !line.contains(&format!(" 900 {nickname} {nickname}!"))
+        || !line.ends_with(" :You are now logged in")
+    {
+        return Err(failure(format!(
+            "an authenticated welcome did not end with its account state: {line}"
+        )));
+    }
+    Ok(line)
 }
 
 fn replace_live_credential(

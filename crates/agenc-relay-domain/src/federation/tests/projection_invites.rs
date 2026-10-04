@@ -145,6 +145,7 @@ fn adopting_an_invited_account_on_a_new_edge_reprojects_the_invite() -> Result<(
             vec![
                 K::SessionVisible,
                 K::ChannelVisible,
+                K::AccountLabelChanged,
                 K::AccountStateChanged,
                 K::Invited
             ]
@@ -173,7 +174,11 @@ fn a_second_session_of_the_account_on_a_holding_edge_gets_no_second_copy() -> Re
     let projection = adopt(&mut fixture.harness, erin, fixture.account)?;
     assert_eq!(
         kinds_per_edge(&projection),
-        [Vec::new(), Vec::new(), vec![K::SessionVisible]]
+        [
+            Vec::new(),
+            Vec::new(),
+            vec![K::SessionVisible, K::AccountLabelChanged]
+        ]
     );
     Ok(())
 }

@@ -762,7 +762,7 @@ pub(super) fn account_login_named(
             client.send("CAP END")?;
             client.send(&format!("NICK {nick}"))?;
             client.send(&format!("USER {nick} 0 * :{nick}"))?;
-            client.read_until(|line| line.contains(" 376 ") || line.contains(" 422 "))?;
+            client.read_welcome(nick)?;
             Ok(client)
         })();
         match attempt {

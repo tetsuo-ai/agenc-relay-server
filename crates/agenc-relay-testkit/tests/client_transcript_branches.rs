@@ -253,12 +253,74 @@ fn harness_observes_and_renders_the_complete_welcome_order() -> Result<(), Box<d
             WelcomeStep::RegistrationBatches,
         ]
     );
-    assert!((0..harness.pending_server_frame_count()).any(|index| {
-        harness.pending_server_frame_bytes(index)
-            == Some(
-                b":server.example NOTE * RECOVERY_EPOCH AAAAAAAAAAAAAAAAAAAAAA :Current server recovery identity\r\n",
-            )
-    }));
+    let frames: Vec<&[u8]> = (0..harness.pending_server_frame_count())
+        .filter_map(|index| harness.pending_server_frame_bytes(index))
+        .collect();
+    // The model spells its session's mask as the runtime spells every user
+    // prefix (the runtime's account-state tests compare the two): `Alice`,
+    // then a user field holding the fixture-zero cloak's user component and
+    // a host field holding its host component.
+    let mask = agenc_relay_testkit::transcript_mask("Alice")?;
+    let (nickname, fields) = mask
+        .split_once('!')
+        .ok_or("the model's mask has no nickname")?;
+    let (user, host) = fields
+        .split_once('@')
+        .ok_or("the model's mask has no host")?;
+    assert_eq!(nickname, "Alice");
+    assert!(user.contains("aaaaaaaaaa"), "user field {user}");
+    assert!(host.contains("bbbbbbbbbbbbbbff"), "host field {host}");
+    let logged_in = format!(":server.example 900 Alice {mask} * :You are now logged in\r\n");
+    // Architecture 10.2: the recovery NOTE (step 5), then the authenticated
+    // account state (step 6), which ends the burst.
+    assert_eq!(
+        frames.get(frames.len().saturating_sub(2)..),
+        Some(
+            &[
+                &b":server.example NOTE * RECOVERY_EPOCH AAAAAAAAAAAAAAAAAAAAAA :Current server recovery identity\r\n"[..],
+                logged_in.as_bytes(),
+            ][..]
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn harness_renders_no_account_state_for_a_guest() -> Result<(), Box<dyn Error>> {
+    let profile = CapabilityProfile::new(vec![CapabilitySpec::new(
+        "agenc.ag/recovery",
+        Some("v1.AAAAAAAAAAAAAAAAAAAAAA"),
+    )?])?;
+    let transcript = parse_client_transcript(
+        "EVID-S02-010-TRANSCRIPT|client|hex|434150204c53203330320d0a\n\
+         EVID-S02-010-TRANSCRIPT|client|hex|43415020524551203a6167656e632e61672f7265636f766572790d0a\n\
+         EVID-S02-010-TRANSCRIPT|client|hex|4e49434b20416c6963650d0a\n\
+         EVID-S02-010-TRANSCRIPT|client|hex|555345522069676e6f7265642030202a203a5265616c204e616d650d0a\n\
+         EVID-S02-010-TRANSCRIPT|client|hex|43415020454e440d0a",
+    )?;
+    let mut harness = ClientTranscriptHarness::with_registration_scenario(
+        profile,
+        AccessTokenPolicy::IgnoreCompatibilityPass,
+        None,
+        false,
+    )?;
+
+    harness.drive(&transcript)?;
+
+    assert!(!harness.welcome_steps().contains(&WelcomeStep::AccountState));
+    let last = harness
+        .pending_server_frame_count()
+        .checked_sub(1)
+        .and_then(|index| harness.pending_server_frame_bytes(index));
+    assert_eq!(
+        last,
+        Some(&b":server.example NOTE * RECOVERY_EPOCH AAAAAAAAAAAAAAAAAAAAAA :Current server recovery identity\r\n"[..])
+    );
+    assert!(
+        (0..harness.pending_server_frame_count())
+            .filter_map(|index| harness.pending_server_frame_bytes(index))
+            .all(|frame| !frame.windows(5).any(|window| window == b" 900 "))
+    );
     Ok(())
 }
 

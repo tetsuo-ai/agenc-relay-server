@@ -115,6 +115,100 @@ pub(crate) fn render_account_logout(
     builder.finish()
 }
 
+/// Renders one post-registration login (architecture 11.4). The connection
+/// that logged in receives the carrier's frames, which end with `903`, and
+/// then the later `900`. A login that gave a guest session its account also
+/// names that account with `ACCOUNT <label-or-*>` to every local recipient of
+/// the switch that negotiated `account-notify`, the session itself included,
+/// as a logout names `ACCOUNT *`. A reauthentication to the same account
+/// changes no public state: its plan carries no switch, and only the `900`
+/// repeats. A coordinator's internal carrier for a session an edge homes is
+/// not that session's connection here, so it gets no `900`: the edge renders
+/// its own.
+pub(crate) fn render_account_login(
+    context: &StateCoreContext,
+    generation: crate::connection::ConnectionGeneration,
+    bound: BoundSession,
+    account_id: AccountId,
+    plan: &MutationPlan,
+    mut frames: Vec<WireMessage>,
+    target: &str,
+) -> Result<FanoutRequest, RuntimeError> {
+    if plan.expected_revision() != context.domain().revision() {
+        return Err(RuntimeError::InvalidValue);
+    }
+    let session = context
+        .domain()
+        .session(bound.user_id)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let logged_in = logged_in_as(context.domain(), session, account_id)?;
+    let sessions = context.sessions();
+    if sessions.generation_for_user(bound.user_id) == Some(generation) {
+        frames.push(logged_in.numeric(context.server_prefix(), target)?);
+    }
+    let sink = sessions
+        .sink_for_generation(generation)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let mut targets = Vec::new();
+    targets
+        .try_reserve_exact(plan.recipients().len().saturating_add(1))
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    targets.push(FanoutTarget { generation, sink });
+    let mut fanout = Vec::new();
+    fanout
+        .try_reserve_exact(frames.len().saturating_add(1))
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for frame in frames {
+        fanout.push(FanoutFrame::new(frame, vec![0])?);
+    }
+    if plan
+        .events()
+        .contains(&DomainEvent::SessionAuthorityChanged(bound.user_id))
+    {
+        let notified = account_notify_targets(context, plan, &mut targets)?;
+        if !notified.is_empty() {
+            let account = WireMessage::new(&logged_in.mask, "ACCOUNT", &[&logged_in.label], None)
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            fanout.push(FanoutFrame::new(account, notified)?);
+        }
+    }
+    FanoutRequest::new(targets, fanout)
+}
+
+/// The fanout indices of every local recipient of `plan` that negotiated
+/// `account-notify`. `targets` starts with the requesting connection alone;
+/// a recipient behind any other connection is appended to it.
+fn account_notify_targets(
+    context: &StateCoreContext,
+    plan: &MutationPlan,
+    targets: &mut Vec<FanoutTarget>,
+) -> Result<Vec<usize>, RuntimeError> {
+    let requester = targets
+        .first()
+        .map(|target| target.generation)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let sessions = context.sessions();
+    let mut notified = Vec::new();
+    notified
+        .try_reserve_exact(plan.recipients().len())
+        .map_err(|_| RuntimeError::MemoryExhausted)?;
+    for user_id in plan.recipients().iter() {
+        let enabled = sessions
+            .capabilities_for_user(user_id)
+            .is_some_and(|capabilities| capabilities.enabled("account-notify"));
+        let Some((generation, sink)) = sessions.sink_for_user(user_id).filter(|_| enabled) else {
+            continue;
+        };
+        if generation == requester {
+            notified.push(0);
+        } else {
+            notified.push(targets.len());
+            targets.push(FanoutTarget { generation, sink });
+        }
+    }
+    Ok(notified)
+}
+
 /// Renders the terminal credential receipt to its requester and the exact
 /// public session departures to their pre-mutation audiences.
 pub(crate) fn render_account_credential_replacement(
@@ -1405,6 +1499,46 @@ fn session_prefix(session: &agenc_relay_domain::SessionState) -> Result<String, 
     ))
 }
 
+/// What a `900` names for one authenticated session in this node's domain.
+/// A session that is missing, holds no account, or names an account the
+/// domain does not hold has no logged-in state.
+pub(crate) fn logged_in(
+    domain: &DomainState,
+    user_id: UserId,
+) -> Result<crate::client_render::LoggedIn, RuntimeError> {
+    let session = domain.session(user_id).ok_or(RuntimeError::InvalidValue)?;
+    let account_id = session.account_id().ok_or(RuntimeError::InvalidValue)?;
+    logged_in_as(domain, session, account_id)
+}
+
+/// What a `900` names for `session` logged in to `account_id`: the session's
+/// public prefix and the account's public label, or `*` without one.
+fn logged_in_as(
+    domain: &DomainState,
+    session: &agenc_relay_domain::SessionState,
+    account_id: AccountId,
+) -> Result<crate::client_render::LoggedIn, RuntimeError> {
+    let account = domain
+        .account(account_id)
+        .ok_or(RuntimeError::InvalidValue)?;
+    Ok(crate::client_render::LoggedIn {
+        mask: session_prefix(session)?,
+        label: account
+            .label()
+            .map_or("*", agenc_relay_domain::AccountLabelValue::as_str)
+            .to_owned(),
+    })
+}
+
+/// The prefix this node renders on every line `session` originates, which a
+/// `900` repeats, for tests that compare a line with the renderer itself.
+#[cfg(test)]
+pub(crate) fn rendered_prefix(
+    session: &agenc_relay_domain::SessionState,
+) -> Result<String, RuntimeError> {
+    session_prefix(session)
+}
+
 pub(crate) fn server_time(timestamp: UtcSecond) -> Result<String, RuntimeError> {
     let seconds = timestamp.get();
     let days = seconds / 86_400;
@@ -2220,3 +2354,7 @@ mod tests {
 #[cfg(test)]
 #[path = "tests/mutation_render_reach.rs"]
 mod render_reach;
+
+#[cfg(test)]
+#[path = "tests/account_login_render.rs"]
+mod account_login_render;

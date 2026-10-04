@@ -857,5 +857,6 @@ pub(crate) fn delivered_message_of(
 
 #[cfg(test)]
 mod tests {
+    mod recompute;
     mod round_trip;
 }
