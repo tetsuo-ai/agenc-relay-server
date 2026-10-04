@@ -328,3 +328,78 @@ fn credentials_are_checked_for_network_genesis_shape_lineage_and_file_size() -> 
     );
     Ok(())
 }
+
+/// Companion 9.2.1: a successor never reuses its predecessor's public key.
+/// That key signs the successor's continuity, so only this predicate refuses
+/// it, on every path that chains a successor from a predecessor.
+#[test]
+fn a_successor_reusing_its_predecessors_key_is_refused_on_every_chained_path() -> TestResult {
+    let first_secret = key(60);
+    let first = sequencer_credential(&first_secret, 0, (0, 1_000_000), None)?;
+    let verified_first = verify_sequencer_credential(&NETWORK, &first, None)?;
+    let same = sequencer_credential(
+        &first_secret,
+        1,
+        (500_000, 2_000_000),
+        Some((&first_secret, &first)),
+    )?;
+    assert_eq!(
+        verify_sequencer_credential(&NETWORK, &same, Some(&verified_first)),
+        Err(E2eeError::InvalidValue),
+        "the anchored successor"
+    );
+    assert_eq!(
+        SequencerKeySet::verify(&NETWORK, &[first.clone(), same.clone()], 1, None).map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "an overlap set"
+    );
+    assert_eq!(
+        SequencerKeySet::verify(
+            &NETWORK,
+            std::slice::from_ref(&same),
+            2,
+            Some(&verified_first)
+        )
+        .map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "a set opening at the successor with its predecessor at hand"
+    );
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[first.clone(), same.clone()], 1).map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "a credentials file opening at generation zero"
+    );
+    let second_secret = key(61);
+    let second = sequencer_credential(
+        &second_secret,
+        1,
+        (500_000, 2_000_000),
+        Some((&first_secret, &first)),
+    )?;
+    let third_same = sequencer_credential(
+        &second_secret,
+        2,
+        (600_000, 3_000_000),
+        Some((&second_secret, &second)),
+    )?;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[second.clone(), third_same], 3).map(|_| ()),
+        Err(E2eeError::InvalidValue),
+        "a credentials file opening above generation zero"
+    );
+    // The same chains with a fresh successor key verify.
+    let third = sequencer_credential(
+        &key(62),
+        2,
+        (600_000, 3_000_000),
+        Some((&second_secret, &second)),
+    )?;
+    assert_eq!(
+        SequencerKeySet::verify_opened(&NETWORK, &[second.clone(), third], 3)?
+            .credentials
+            .len(),
+        2
+    );
+    assert!(verify_sequencer_credential(&NETWORK, &second, Some(&verified_first)).is_ok());
+    Ok(())
+}

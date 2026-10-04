@@ -469,8 +469,14 @@ fn signer_installation_refuses_keys_outside_their_role() -> TestResult {
             .is_err()
     );
     // Two roles sharing one public key, each matching its own credential.
+    // The shared key-set verifier refuses such a set (companion 9.2.1); a
+    // set assembled without it is still refused at installation.
     let reused = sequencer_credential(&key(OLD), 1, (100, 3_000_000), Some((&key(OLD), &old)))?;
-    let reused_set = SequencerKeySet::verify(&NETWORK, &[old.clone(), reused], 1, None)?;
+    assert_eq!(
+        SequencerKeySet::verify(&NETWORK, &[old.clone(), reused.clone()], 1, None),
+        Err(agenc_relay_e2ee::E2eeError::InvalidValue)
+    );
+    let reused_set = unverified_set(&[old.clone(), reused], 1)?;
     assert!(
         harness
             .coordinator

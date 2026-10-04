@@ -22,7 +22,15 @@ fn select(harness: &mut Harness, successor: bool, reuse_key: bool) -> TestResult
     let old = sequencer_credential(&key(90), 0, (0, 2_000_000), None)?;
     let next_seed = if reuse_key { 90 } else { 91 };
     let next = sequencer_credential(&key(next_seed), 1, (100, 3_000_000), Some((&key(90), &old)))?;
-    let set = SequencerKeySet::verify(&NETWORK, &[old.clone(), next.clone()], 1, None)?;
+    // The shared key-set verifier refuses a successor reusing its
+    // predecessor's key (companion 9.2.1). The reuse cases assemble that set
+    // without it, so a terminal is still shown to follow the receipt's
+    // credential identity rather than a matching key.
+    let set = if reuse_key {
+        unverified_set(&[old.clone(), next.clone()], 1)?
+    } else {
+        SequencerKeySet::verify(&NETWORK, &[old.clone(), next.clone()], 1, None)?
+    };
     let (seed, credential) = if successor {
         (next_seed, next)
     } else {

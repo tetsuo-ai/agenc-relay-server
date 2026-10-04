@@ -267,6 +267,19 @@ the asking device, and the disposition that leaves an empty claim result
 re-evaluated after a coordinator restart (SC-001 and SC-002, SDK program,
 outside master #35), are recorded in
 [the claim status record](stage-10-claim-status-target.md).
+The shared public verifiers corrected where they admitted correctly signed
+objects the companion refuses, a sequencer successor that reuses its
+predecessor's key, capability and leaf statements signed for another
+network, roster certificates whose enrollment issuance is not shown and a
+roster listing one certificate both active and revoked, together with the
+first-contact roster admission that takes that issuance as explicit
+evidence and the first-contact capability admission (X-10, SDK program,
+outside master #35), are recorded in
+[the shared verifier predicates record](stage-10-shared-verifier-predicates.md).
+The thirteen endpoint scalars of companion Section 16 that had no constant,
+and the table test that compares every Section 16 row with the `limits`
+module (X-11, SDK program, outside master #35), are recorded in
+[the companion client scalars record](stage-10-companion-client-scalars.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
