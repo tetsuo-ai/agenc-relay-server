@@ -290,6 +290,11 @@ which it resolved from the unpatched release before, and the explicit root
 path edge that was measured but not applied because it fails the Section
 28.8 formatting gate (X-09, SDK program, outside master #35), are recorded in
 [the OPAQUE fuzz source record](stage-10-opaque-fuzz-source.md).
+The client wire crate's object-kind list completed with the four kinds it
+lacked and held equal, with its copied tag, fragment and object limits, to
+the crates that own them (X-12), and the Appendix A.1 argument bounds made
+public for client encoders (X-07, SDK program, outside master #35), are
+recorded in [the shared client wire record](stage-10-shared-client-wire.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

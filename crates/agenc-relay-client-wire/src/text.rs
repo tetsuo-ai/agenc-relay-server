@@ -651,6 +651,10 @@ pub const E2EE_OBJECT_KINDS: &[&str] = &[
     "FEDERATION-REQUEST",
     "FEDERATION-RESULT",
     "FEDERATION-EVENT",
+    "POLICY",
+    "RECOVERY-SUBMISSION",
+    "WITNESS-RESOLUTION",
+    "LEAF-MEMBERSHIP-PROOF",
 ];
 
 /// A validated closed E2EE object-kind token.

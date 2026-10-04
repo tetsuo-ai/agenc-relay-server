@@ -11,7 +11,8 @@ use agenc_relay_types::{
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use crate::registration_command::{MAX_NICKNAME_BYTES, validate_nickname};
+use crate::MAX_NICKNAME_BYTES;
+use crate::registration_command::validate_nickname;
 use crate::{
     CapabilityState, MAX_CLIENT_ONLY_TAGS, MAX_CLIENT_ONLY_TOTAL_BYTES,
     MAX_CLIENT_ONLY_VALUE_BYTES, MAX_CLIENT_TAG_DATA_BYTES, MAX_COMBINED_TAG_SECTION_BYTES,
