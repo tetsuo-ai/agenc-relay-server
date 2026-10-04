@@ -98,6 +98,8 @@ const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "stage_eight_e2ee/claim_restart.rs"]
+mod claim_restart;
 #[path = "stage_eight_e2ee/cli_provisioning.rs"]
 mod cli_provisioning;
 #[path = "stage_eight_e2ee/close_authority.rs"]
@@ -114,6 +116,8 @@ mod login_after_registration;
 mod loopback_ports;
 #[path = "stage_eight_e2ee/recovery_submission.rs"]
 mod recovery_submission;
+#[path = "stage_eight_e2ee/requester_copies.rs"]
+mod requester_copies;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
 mod stage_ten_capacity;
 #[path = "stage_eight_e2ee/stage_ten_drills.rs"]
@@ -2167,6 +2171,85 @@ fn labeled_reply(client: &mut ArcClient, label: &str) -> TestResult<Vec<String>>
         .map_err(|error| failure(format!("waiting for label {label}: {error}")))
 }
 
+/// The requester's labeled completion, which `labeled_reply` returns last.
+/// The unlabeled broadcast or notice that can arrive before it is not the
+/// command's result (companion 11.7), so a reply token is checked here.
+fn completion_line(reply: &[String]) -> TestResult<&String> {
+    reply
+        .last()
+        .filter(|line| tag_value(line, "label").is_some())
+        .ok_or_else(|| failure(format!("no labeled completion in {reply:?}")))
+}
+
+/// The verb and identifiers a result line names, without its tags and
+/// prefix.
+fn result_words(line: &str) -> Option<Vec<String>> {
+    words(line).get(1..).map(<[String]>::to_vec)
+}
+
+/// The requester's labeled `verb` completion, required to be the only line
+/// of its reply naming that result: companion 11.7 and 12.5 answer the
+/// requesting connection with exactly one labeled scalar and send the
+/// untagged broadcast of the same result only to the other eligible sinks.
+/// A line naming another result is earlier traffic the connection had not
+/// read yet.
+fn only_completion<'a>(reply: &'a [String], verb: &str) -> TestResult<&'a String> {
+    let completion = completion_line(reply)?;
+    let token = format!(" EGROUP {verb} ");
+    if !completion.contains(&token) {
+        return Err(failure(format!(
+            "the labeled completion is not {verb}: {reply:?}"
+        )));
+    }
+    let result = result_words(completion);
+    let naming = reply
+        .iter()
+        .filter(|line| line.contains(&token) && result_words(line) == result)
+        .count();
+    if naming != 1 {
+        return Err(failure(format!(
+            "the requester received {naming} {verb} lines naming its result, not one labeled completion: {reply:?}"
+        )));
+    }
+    Ok(completion)
+}
+
+/// Requires the reply to an ACK submission to carry no `verb` notice of the
+/// submitted ACK `object`: the submitter receives only its labeled `ACKED`
+/// or `REINIT-ACKED`, and the untagged notice goes to the other sessions
+/// (companion 11.7 and 12.5).
+fn assert_no_own_notice(reply: &[String], verb: &str, object: &[u8]) -> TestResult {
+    let own = base64url_encode(e2ee::ObjectId::compute(object).as_bytes());
+    let token = format!(" EGROUP {verb} ");
+    if reply
+        .iter()
+        .any(|line| line.contains(&token) && line.contains(&own))
+    {
+        return Err(failure(format!(
+            "the submitter received the notice of its own ACK: {reply:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Requires the last of `lines`, which another sink read, to be the
+/// untagged broadcast of the terminal `completion` names: the same verb and
+/// identifiers, without a label.
+fn assert_same_terminal(lines: &[String], completion: &[String]) -> TestResult {
+    let broadcast = lines
+        .last()
+        .ok_or_else(|| failure("no terminal broadcast was read"))?;
+    if tag_value(broadcast, "label").is_some() {
+        return Err(failure(format!("the broadcast is labeled: {broadcast}")));
+    }
+    assert_eq!(
+        result_words(broadcast),
+        completion.first().and_then(|line| result_words(line)),
+        "the broadcast and the labeled completion name the same terminal"
+    );
+    Ok(())
+}
+
 /// Reassembles the object a reply carried in its fragment tags: the server
 /// tag on batch lines, the preserved client-only tag on live echoes.
 fn batch_object(lines: &[String]) -> TestResult<Vec<u8>> {
@@ -2348,25 +2431,39 @@ fn authenticated_client(
         creation.negotiate_sasl()?;
         create_live_account(&mut creation, fixture, login, request_seed)?
     };
+    let auth_seed = request_seed
+        .checked_add(2)
+        .ok_or_else(|| failure("authentication request seed overflow"))?;
+    let client = authenticated_session(fixture, nickname, login, auth_seed, account_id)?;
+    Ok((client, account_id))
+}
+
+/// Authenticates a new connection on `fixture` as the existing
+/// `account_id` under the account requests of `request_seed`, and registers
+/// it as `nickname`.
+fn authenticated_session(
+    fixture: &NodeFixture,
+    nickname: &str,
+    login: &str,
+    request_seed: u8,
+    account_id: AccountId,
+) -> TestResult<ArcClient> {
     let mut client = ArcClient::connect(fixture)?;
     client.send("CAP LS 302")?;
     client.read_until(|line| line.contains(" CAP * LS ") && !line.contains(" CAP * LS * :"))?;
     let acknowledged = client.send_until(&format!("CAP REQ :{E2EE_CAPS}"), " CAP * ACK ")?;
     assert_contains(&acknowledged, "agenc.ag/e2ee-mls")?;
-    let auth_seed = request_seed
-        .checked_add(2)
-        .ok_or_else(|| failure("authentication request seed overflow"))?;
     authenticate_live_account(
         &mut client,
         fixture,
         login,
         ACCOUNT_PASSWORD,
-        auth_seed,
+        request_seed,
         account_id,
     )?;
     let registered = client.complete_registration(nickname)?;
     assert_contains(&registered, &format!(" 001 {nickname} "))?;
-    Ok((client, account_id))
+    Ok(client)
 }
 
 /// Publishes the identity and roster and attaches the device.
@@ -2936,11 +3033,12 @@ fn activate_bootstrap_with(
         &request,
     )?;
     let reply = labeled_reply(client, &label)?;
+    let completion = std::slice::from_ref(only_completion(&reply, "FINALIZED")?);
     assert_contains(
-        &reply,
+        completion,
         &format!(" EGROUP FINALIZED {conversation_token} 1 "),
     )?;
-    assert_eq!(hash_at(&reply, "FINALIZED", 5)?, finalization_id);
+    assert_eq!(hash_at(completion, "FINALIZED", 5)?, finalization_id);
     // An identical retry returns the committed result under the new label.
     let retry_label = binder.label();
     send_object(
@@ -3063,8 +3161,9 @@ fn close_conversation_at(
         &object,
     )?;
     let reply = labeled_reply(client, &label)?;
-    assert_contains(&reply, &format!(" EGROUP CLOSED {conversation} "))?;
-    assert_eq!(hash_at(&reply, "CLOSED", 4)?, close_id);
+    let completion = std::slice::from_ref(only_completion(&reply, "CLOSED")?);
+    assert_contains(completion, &format!(" EGROUP CLOSED {conversation} "))?;
+    assert_eq!(hash_at(completion, "CLOSED", 4)?, close_id);
     Ok(close_id)
 }
 
@@ -3503,7 +3602,8 @@ mod real_clients {
     };
     use agenc_relay_testkit::e2ee::objects::conversation::ArcJoinTransitionProofBundle;
     use agenc_relay_testkit::e2ee::objects::sequencing::{
-        ArcDeliveredWelcome, ArcNormalJoinAuthorizationProof,
+        ArcAbortCoreTbs, ArcAbortRequest, ArcCommitAbortReason, ArcDeliveredWelcome,
+        ArcNormalJoinAuthorizationProof,
     };
     use mls_rs::client_builder::MlsConfig;
     use mls_rs::crypto::{SignaturePublicKey as RsPublicKey, SignatureSecretKey as RsSecretKey};
@@ -3791,7 +3891,9 @@ mod real_clients {
             &format!("EGROUP SUBMIT ACK {conversation_token}"),
             &object,
         )?;
-        assert_contains(&labeled_reply(client, &label)?, " EGROUP ACKED ")?;
+        let reply = labeled_reply(client, &label)?;
+        only_completion(&reply, "ACKED")?;
+        assert_no_own_notice(&reply, "ACK", &object)?;
         Ok(ack)
     }
 
@@ -3907,16 +4009,85 @@ mod real_clients {
             &request,
         )?;
         let reply = labeled_reply(client, &label)?;
+        let completion = std::slice::from_ref(only_completion(&reply, "FINALIZED")?);
         assert_contains(
-            &reply,
+            completion,
             &format!(" EGROUP FINALIZED {conversation_token} {resulting_epoch} "),
         )?;
-        assert_eq!(hash_at(&reply, "FINALIZED", 5)?, finalization_id);
+        assert_eq!(hash_at(completion, "FINALIZED", 5)?, finalization_id);
         Ok(Certified {
             finalization_id,
-            record_id: hash_at(&reply, "FINALIZED", 6)?,
+            record_id: hash_at(completion, "FINALIZED", 6)?,
             receipt,
         })
+    }
+
+    /// Aborts `sequenced` with one request that carries the votes of the
+    /// binder and `co_voters` (companion 12.4), and returns the binder's
+    /// labeled `ABORTED` completion, the only line of its reply that names
+    /// the abort.
+    pub(super) fn abort_candidate(
+        client: &mut ArcClient,
+        binder: &mut Principal,
+        co_voters: &[&Principal],
+        bound: &BoundConversation,
+        sequenced: Sequenced,
+        prior_epoch: u64,
+    ) -> TestResult<String> {
+        let core = ArcAbortCoreTbs {
+            profile_version: 1,
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            prior_state_id: sequenced.receipt.tbs.prior_state_id,
+            candidate_id: sequenced.candidate_id,
+            prior_epoch,
+            reason: ArcCommitAbortReason::SenderWithdrawn,
+            evidence_digest: [0; 32],
+        };
+        let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+        let slot = VoteSlot {
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            prior_epoch,
+            prior_state_id: core.prior_state_id,
+            candidate_sequence: sequenced.receipt.tbs.candidate_sequence,
+            predecessor_record_id: sequenced.receipt.tbs.predecessor_record_id,
+        };
+        let terminal = Terminal::abort(abort_id, u16::from(core.reason.value()))?;
+        let tbs = vote_tbs(&slot, sequenced.candidate_id, terminal);
+        let mut votes = vec![builders::finality_vote(&binder.keys, binder.device, &tbs)?];
+        for voter in co_voters {
+            votes.push(builders::finality_vote(&voter.keys, voter.device, &tbs)?);
+        }
+        votes.sort_by_key(|vote| (vote.signer_root_fingerprint, vote.signer_device_id));
+        let request = wire_object(
+            ArcWireObjectKind::AbortRequest,
+            &ArcAbortRequest {
+                core,
+                receipt: sequenced.receipt,
+                votes: TlsVec::new(votes)?,
+            },
+        )?;
+        let conversation_token = base64url_encode(&bound.conversation);
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT ABORT {conversation_token}"),
+            &request,
+        )?;
+        let reply = labeled_reply(client, &label)?;
+        let completion = std::slice::from_ref(only_completion(&reply, "ABORTED")?);
+        assert_contains(
+            completion,
+            &format!(" EGROUP ABORTED {conversation_token} "),
+        )?;
+        assert_eq!(hash_at(completion, "ABORTED", 4)?, sequenced.candidate_id);
+        assert_eq!(hash_at(completion, "ABORTED", 5)?, abort_id);
+        completion
+            .first()
+            .cloned()
+            .ok_or_else(|| failure("no labeled ABORTED completion"))
     }
 
     /// Sequences `commit` as the candidate of `bound`, acknowledges it, and
@@ -4223,7 +4394,10 @@ mod real_clients {
     }
 
     /// Claims one package of `target` under the claim nonce `nonce`, so a
-    /// second claim for the same device is a distinct request.
+    /// second claim for the same device is a distinct request. The claimant
+    /// then asks `CLAIM STATUS` for the same operation, as after a lost
+    /// reply, and receives the stored result of the claim: the target's
+    /// device, reference and object, not its own device (companion 11.6).
     pub(super) fn claim_package_with(
         client: &mut ArcClient,
         claimant: &mut Principal,
@@ -4239,7 +4413,30 @@ mod real_clients {
         ))?;
         let reply = labeled_reply(client, &label)?;
         assert_contains(&reply, " EKEY CLAIMED ")?;
-        mls_body(&batch_object(&reply)?, ArcWireObjectKind::KeyPackageMls)
+        let claimed = claimed_words(&reply)?;
+        assert_eq!(claimed.get(3), Some(&target.device_token()), "{claimed:?}");
+        let object = batch_object(&reply)?;
+        let label = claimant.label();
+        client.send(&format!(
+            "@label={label} EKEY CLAIM STATUS {}",
+            base64url_encode(&nonce)
+        ))?;
+        let status = labeled_reply(client, &label)?;
+        assert_eq!(claimed_words(&status)?, claimed, "{status:?}");
+        assert_eq!(batch_object(&status)?, object);
+        mls_body(&object, ArcWireObjectKind::KeyPackageMls)
+    }
+
+    /// The words of the `EKEY CLAIMED` metadata line of a claim reply.
+    pub(super) fn claimed_words(reply: &[String]) -> TestResult<Vec<String>> {
+        reply
+            .iter()
+            .map(|line| words(line))
+            .find(|words| {
+                words.get(1).is_some_and(|word| word == "EKEY")
+                    && words.get(2).is_some_and(|word| word == "CLAIMED")
+            })
+            .ok_or_else(|| failure(format!("no EKEY CLAIMED line in {reply:?}")))
     }
 
     /// Delivers `welcome` to `target` under the finalization that added it,

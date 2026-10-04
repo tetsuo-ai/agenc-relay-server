@@ -17,10 +17,10 @@ use super::*;
 use e2ee::finality::{ReinitVoteSlot, reinit_vote_tbs};
 use e2ee::objects::conversation::{ArcKeyPackagePlan, ArcKeyPackagePlanEntry};
 use e2ee::objects::reinit::{
-    ArcReInitAck, ArcReInitAckKind, ArcReInitAckTbs, ArcReInitActivationCoreTbs,
-    ArcReInitActivationRequest, ArcReInitAttempt, ArcReInitAttemptAuthorization,
-    ArcReInitAttemptAuthorizationTbs, ArcReInitAttemptReceipt, ArcReInitAttemptTbs,
-    ArcReInitDispositionVoteTbs, ArcReInitTargetTbs,
+    ArcReInitAbortCoreTbs, ArcReInitAbortRequest, ArcReInitAck, ArcReInitAckKind, ArcReInitAckTbs,
+    ArcReInitActivationCoreTbs, ArcReInitActivationRequest, ArcReInitAttempt,
+    ArcReInitAttemptAuthorization, ArcReInitAttemptAuthorizationTbs, ArcReInitAttemptReceipt,
+    ArcReInitAttemptTbs, ArcReInitDispositionVoteTbs, ArcReInitTargetTbs,
 };
 use e2ee::objects::sequencing::{ArcFinalityVote, ArcSequencerRecord};
 use mls_rs::CipherSuite as RsSuite;
@@ -34,6 +34,9 @@ const SUCCESSOR_GROUP: [u8; 32] = [0x7C; 32];
 const SUCCESSOR_TEXT: &str = "minutes of the re-initialised group";
 /// The exporter label the activation authenticator uses (companion 13.8).
 const EXPORTER_LABEL: &[u8] = b"ARC-MLS/1 reinit activation";
+/// The reason an attempt abort names; any nonzero code is an abort
+/// (companion 13.8).
+const ABORT_REASON: u16 = 1;
 
 /// The immutable target the old ReInit Commit commits to.
 struct Target {
@@ -248,15 +251,23 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
             (vec![creator_ack, joiner_ack], &[0, 1]),
         ),
     )?;
-    assert_contains(&activated, " EGROUP REINIT-ACTIVATED ")?;
+    let completion = std::slice::from_ref(only_completion(&activated, "REINIT-ACTIVATED")?);
     assert_eq!(
-        hash_at(&activated, "REINIT-ACTIVATED", 3)?,
+        hash_at(completion, "REINIT-ACTIVATED", 3)?,
         clients.bound.conversation
     );
     assert_eq!(
-        hash_at(&activated, "REINIT-ACTIVATED", 4)?,
+        hash_at(completion, "REINIT-ACTIVATED", 4)?,
         target.conversation
     );
+    // bob, on the other edge, reads the activation as the untagged broadcast.
+    let lines = step(
+        "bob reads the activation broadcast",
+        clients
+            .bob
+            .read_until(|line| line.contains(" EGROUP REINIT-ACTIVATED ")),
+    )?;
+    assert_same_terminal(&lines, completion)?;
 
     // What each endpoint can derive: the continuing joiner reads the
     // successor's minutes, and the removed leaf's state derives nothing.
@@ -282,6 +293,63 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
         "the openmls leaf removed before the ReInit derives nothing from the successor"
     );
     require_recorded(&REINIT_RULES)
+}
+
+/// Companion 11.7, 12.5 and 13.8 through the production daemons: the two
+/// council votes of one attempt abort arrive in separate requests. alice's
+/// vote alone is below the quorum and is answered `PENDING`; bob's completes
+/// the abort and is answered `REINIT-ABORTED`; and alice, answered
+/// `PENDING` earlier, then reads the untagged `REINIT-ABORTED` broadcast
+/// naming the same abort. The coordinator correlates the abort event only
+/// on the copy for bob's edge, the home of the request that completed it,
+/// so alice's edge renders its copy as the broadcast.
+#[test]
+fn a_reinit_attempt_aborts_when_its_second_vote_arrives() -> TestResult {
+    run_network(|network, _coordinator, _edge_a, _edge_b| reinit_abort_with_real_clients(network))
+}
+
+fn reinit_abort_with_real_clients(network: &Network) -> TestResult {
+    let mut clients = bind_channel(network)?;
+    let staged = stage_two_leaf_attempt(&mut clients)?;
+    let core = abort_core(&staged);
+    let abort_id = semantic_id_of(SemanticHashDomain::ReinitAbortId, &core)?;
+    let conversation = clients.bound.conversation;
+
+    let (first, request_object) = step(
+        "alice's abort vote",
+        submit_abort(&mut clients, &staged, &core, Voter::Alice),
+    )?;
+    let pending = std::slice::from_ref(completion_line(&first)?);
+    assert_contains(pending, " EGROUP PENDING ")?;
+    assert_eq!(hash_at(pending, "PENDING", 3)?, conversation);
+    assert_eq!(
+        pending
+            .first()
+            .and_then(|line| words(line).get(4).cloned())
+            .as_deref(),
+        Some("REINIT-ABORT"),
+        "{pending:?}"
+    );
+    assert_eq!(hash_at(pending, "PENDING", 5)?, request_object);
+
+    let (second, _) = step(
+        "bob's abort vote",
+        submit_abort(&mut clients, &staged, &core, Voter::Bob),
+    )?;
+    let completion = std::slice::from_ref(only_completion(&second, "REINIT-ABORTED")?);
+    assert_eq!(hash_at(completion, "REINIT-ABORTED", 3)?, conversation);
+    assert_eq!(hash_at(completion, "REINIT-ABORTED", 4)?, staged.attempt_id);
+    assert_eq!(hash_at(completion, "REINIT-ABORTED", 5)?, abort_id);
+
+    // The earlier PENDING requester reads the terminal as the untagged
+    // broadcast, naming the abort bob's labeled completion names.
+    let lines = step(
+        "alice reads the abort broadcast",
+        clients
+            .alice
+            .read_until(|line| line.contains(" EGROUP REINIT-ABORTED ")),
+    )?;
+    assert_same_terminal(&lines, completion)
 }
 
 /// Builds and returns one real mls-rs Commit of the old group under the
@@ -686,16 +754,16 @@ fn stage_attempt(clients: &mut Clients, attempt: &ArcReInitAttempt) -> TestResul
         &object,
     )?;
     let reply = labeled_reply(&mut clients.alice, &label)?;
-    assert_contains(&reply, " EGROUP REINIT-STAGED ")?;
+    let completion = std::slice::from_ref(only_completion(&reply, "REINIT-STAGED")?);
     assert_eq!(
-        hash_at(&reply, "REINIT-STAGED", 3)?,
+        hash_at(completion, "REINIT-STAGED", 3)?,
         clients.bound.conversation
     );
     assert_eq!(
-        hash_at(&reply, "REINIT-STAGED", 5)?,
+        hash_at(completion, "REINIT-STAGED", 5)?,
         *e2ee::ObjectId::compute(&object).as_bytes()
     );
-    hash_at(&reply, "REINIT-STAGED", 4)
+    hash_at(completion, "REINIT-STAGED", 4)
 }
 
 /// Reads the attempt receipt the coordinator sequenced for the conversation.
@@ -816,7 +884,12 @@ fn submit_ack(
         ),
         &object,
     )?;
-    assert_contains(&labeled_reply(client, label)?, " EGROUP ACKED ")
+    let reply = labeled_reply(client, label)?;
+    assert_contains(
+        std::slice::from_ref(completion_line(&reply)?),
+        " EGROUP REINIT-ACKED ",
+    )?;
+    assert_no_own_notice(&reply, "REINIT-ACK", &object)
 }
 
 /// Submits one activation request carrying `acks` and the votes of the
@@ -905,4 +978,182 @@ fn reinit_vote(
             tbs,
         )?,
     })
+}
+
+/// One staged attempt of the two-leaf successor: alice creates it and bob's
+/// continuing leaf joins it through its Welcome.
+struct Staged {
+    attempt: ArcReInitAttempt,
+    attempt_id: [u8; 32],
+    receipt: ArcReInitAttemptReceipt,
+}
+
+/// Activates the old group, adds bob's continuing leaf, closes the group
+/// with a real ReInit Commit, resumes both endpoints and stages the
+/// successor's attempt under the old-policy controller's authorization.
+fn stage_two_leaf_attempt(clients: &mut Clients) -> TestResult<Staged> {
+    let alice_interval = clients.alice_interval();
+    let bob_interval = clients.bob_interval();
+    let alice_leaf = real_leaf(&clients.alice_keys, alice_interval, ALICE_LEAF, 0)?;
+    let alice_client =
+        real_clients::mls_rs_client_with_leaf(&clients.alice_keys, alice_interval, ALICE_LEAF)?;
+    let mut group = alice_client
+        .group_builder()?
+        .with_group_id(clients.bound.group_id.to_vec())
+        .build()?;
+    let mut head = (0_u64, clients.genesis);
+    let mut time = clients.now;
+    let policies = clients.policies;
+
+    let activation = commit(&mut group, clients, head, time, |builder| Ok(builder))?;
+    let activated = certify(
+        clients,
+        &activation,
+        head,
+        policies,
+        &alice_leaf,
+        close_authority::CertificationTransition::Bootstrap,
+    )?;
+    group.apply_pending_commit()?;
+    head = (1, activated.finalization_id);
+    time = time.saturating_add(1);
+
+    let (bob_leaf, mut bob_group) = join_member(
+        clients,
+        &mut group,
+        &mut head,
+        &mut time,
+        (&alice_leaf, BOB_REJOIN_LEAF, bob_interval),
+    )?;
+    {
+        let epoch = head.0;
+        let Clients {
+            bob,
+            bob_keys,
+            bound,
+            ..
+        } = &mut *clients;
+        publish_membership(bob, bob_keys, bound, epoch, &bob_leaf, None)?;
+    }
+
+    let target = target_of(clients, head.1)?;
+    let reinit = commit(&mut group, clients, head, time, |builder| {
+        Ok(builder.reinit(
+            Some(SUCCESSOR_GROUP.to_vec()),
+            RsVersion::MLS_10,
+            RsSuite::CURVE25519_AES128,
+            Default::default(),
+        )?)
+    })?;
+    let old_state = certify(
+        clients,
+        &reinit,
+        head,
+        (policies.1, policies.1),
+        &alice_leaf,
+        close_authority::CertificationTransition::Reinit(target.digest),
+    )?
+    .finalization_id;
+    group.apply_pending_commit()?;
+    bob_group.process_incoming_message(mls_rs::MlsMessage::from_bytes(&reinit)?)?;
+    let target = target_of(clients, old_state)?;
+
+    let bob_resumed = bob_group.get_reinit_client(None, None)?;
+    let bob_package = bob_resumed.generate_key_package(Some(MlsTime::from(bob_interval.0)))?;
+    let joiner_reference = package_reference(&bob_package.to_bytes()?)?;
+    let alice_resumed = group.get_reinit_client(None, None)?;
+    let (successor, _welcomes) = alice_resumed.commit(
+        vec![bob_package],
+        Default::default(),
+        Some(MlsTime::from(alice_interval.0)),
+    )?;
+    let results = results_of(&successor, old_state)?;
+    let initial_commit = successor.group_info_message(true)?.to_bytes()?;
+    let continuing = Continuing {
+        creator: &alice_leaf,
+        joiner: &bob_leaf,
+        joiner_reference,
+    };
+    let attempt = build_attempt(
+        clients,
+        &target,
+        &continuing,
+        (old_state, &initial_commit, results),
+    )?;
+    let attempt_id = step("stage the attempt", stage_attempt(clients, &attempt))?;
+    let receipt = step("fetch the attempt receipt", attempt_receipt(clients))?;
+    assert_eq!(receipt.tbs.reinit_attempt_id, attempt_id);
+    Ok(Staged {
+        attempt,
+        attempt_id,
+        receipt,
+    })
+}
+
+/// The abort core of the staged attempt under [`ABORT_REASON`].
+fn abort_core(staged: &Staged) -> ArcReInitAbortCoreTbs {
+    ArcReInitAbortCoreTbs {
+        profile_version: 1,
+        network_id: *NETWORK_ID.as_bytes(),
+        old_conversation_id: staged.attempt.tbs.old_conversation_id,
+        old_reinit_state_id: staged.attempt.tbs.old_reinit_state_id,
+        attempt_sequence: staged.attempt.tbs.attempt_sequence,
+        slot_predecessor_record_id: staged.receipt.tbs.predecessor_record_id,
+        reinit_attempt_id: staged.receipt.tbs.reinit_attempt_id,
+        reason_code: ABORT_REASON,
+        evidence_digest: [0; 32],
+    }
+}
+
+/// The council device whose vote one abort request carries, submitted from
+/// that device's own client.
+#[derive(Clone, Copy)]
+enum Voter {
+    Alice,
+    Bob,
+}
+
+/// Submits the abort of the staged attempt carrying only `voter`'s vote and
+/// returns the reply lines and the request's object identifier.
+fn submit_abort(
+    clients: &mut Clients,
+    staged: &Staged,
+    core: &ArcReInitAbortCoreTbs,
+    voter: Voter,
+) -> TestResult<(Vec<String>, [u8; 32])> {
+    let terminal = Terminal::abort(
+        semantic_id_of(SemanticHashDomain::ReinitAbortId, core)?,
+        core.reason_code,
+    )?;
+    let slot = ReinitVoteSlot {
+        network_id: core.network_id,
+        old_conversation_id: core.old_conversation_id,
+        old_reinit_state_id: core.old_reinit_state_id,
+        attempt_sequence: core.attempt_sequence,
+        predecessor_record_id: core.slot_predecessor_record_id,
+    };
+    let tbs = reinit_vote_tbs(&slot, core.reinit_attempt_id, terminal);
+    let (client, principal) = match voter {
+        Voter::Alice => (&mut clients.alice, &mut clients.alice_keys),
+        Voter::Bob => (&mut clients.bob, &mut clients.bob_keys),
+    };
+    let request = ArcReInitAbortRequest {
+        core: core.clone(),
+        receipt: staged.receipt.clone(),
+        attempt: staged.attempt.clone(),
+        votes: TlsVec::new(vec![reinit_vote(principal, &tbs)?])?,
+    };
+    let object = wire_object(ArcWireObjectKind::ReinitAbortRequest, &request)?;
+    let label = principal.label();
+    send_object(
+        client,
+        &label,
+        &format!(
+            "EGROUP SUBMIT REINIT ABORT {}",
+            base64url_encode(&core.old_conversation_id)
+        ),
+        &object,
+    )?;
+    let reply = labeled_reply(client, &label)?;
+    Ok((reply, *e2ee::ObjectId::compute(&object).as_bytes()))
 }
