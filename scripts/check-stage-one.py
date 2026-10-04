@@ -13,16 +13,16 @@ from typing import NoReturn
 
 RAW_HASHES = {
     "docs/arc-architecture-and-implementation-spec.md": (
-        "46f2924279daa9d68347112748ab08b4850a74508fa05841c3fd45f5dbf66e81"
+        "7317477b0058ec2bc3cba3f14921154e849358e5016ae36bbe18a08fb2fa6528"
     ),
     "docs/arc-mls-e2ee-extension.md": (
-        "57d6d98df53ce8f738da463304fb47726c9133ef0bec5b268a8cadbc117405bc"
+        "4fa947bf4edfe146de8f6a72932b93625828b0fd6eea46976e699ab06719658c"
     ),
     "docs/federation-v1-profile.registry": (
         "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411"
     ),
     "docs/protocol-sources-and-decisions.md": (
-        "23a20cb38c7918d8488403fc780fc1eba14c647d187548f921cee4cdad4635ac"
+        "430af31197f917c143c7a4f61aabe5c602854a9322674263c0ad59858207fc62"
     ),
 }
 PROFILE_HASHES = {
@@ -30,7 +30,7 @@ PROFILE_HASHES = {
         "7b00e0d0844270626411d398f15f7520224ea906117738e3da9741a611dc67b3"
     ),
     "e2ee-mls-v1": (
-        "c1b5313f8a7f196cda30eea797fb1ab65b004a55d71cf9a81071927046e5d395"
+        "0b3985c1e19f77e561734139d65131fb1c1fc5cb7a63a1119ca03b5a61583525"
     ),
 }
 PROFILE_LABELS = {

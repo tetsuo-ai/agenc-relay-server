@@ -291,3 +291,83 @@ place of a realname. The retained cloak can authorize a historical nickname
 only while it identifies a currently visible live session. A record whose
 session has disconnected is hidden; the daemon retains no historical audience
 or account identifier and grants no authority based on a public label.
+
+## 9. Stage 10 ReInit target and onboarding corrections
+
+The 2026-10-04 revision changes the E2EE companion and the architecture
+specification together. No source pin, dependency, or decision of Sections 2
+to 8 changes.
+
+In the companion, Section 13.8 removes the old-group state ID from
+`ArcReInitTargetTBS`. The field named the finalization ID of the very Commit
+whose authorization commits the target digest, so no target could be built
+and no conforming ReInit could complete. Every `ArcReInitAttempt` now carries
+the exact target. The sequencer refuses an attempt with
+`E2EE_FINALITY_REQUIRED` while the old conversation's accepted state is not
+the finalization of a ReInit Commit; otherwise, before it signs an attempt
+receipt, it checks the attempt and its target against the digest that
+finalization authorized and refuses a mismatch with
+`E2EE_BINDING_AUTH_INVALID`. At
+activation the coordinator installs the successor from the carried target in
+the transaction that stores the activation certificate, so a ReInit successor
+needs no `EGROUP RESERVE` or `EGROUP BIND`. The revision also states how an
+endpoint reconstructs the target, how a member that joins after activation
+checks its ReInit entries against the carried target, the successor initial
+Commit's authenticated data, the rosters that verify a successor policy, that
+a ReInit never carries a root discontinuity, and that `CLAIM STATUS` names the
+stored claim's target device. Profile version 1 keeps its number and the profile
+hash moves from `c1b5313f8a7f196cda30eea797fb1ab65b004a55d71cf9a81071927046e5d395`
+(token `wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U`) to the value that
+`specification-manifest.txt` and architecture Section 30.3 record. Companion
+Sections 2.3 and 22 record why the revision keeps the version although it
+changes two object layouts: under the previous hash no target could be
+constructed, so no conforming ReInit exists to keep interoperable, and
+exact-match negotiation refuses every peer that presents that hash.
+
+In the architecture, Section 9.3 and Appendix C.8 state that an edge
+advertises, and its onboarding descriptor pins, its coordinator's recovery
+epoch. Section 9.5 states that the welcome recovery-epoch `NOTE` does not
+depend on `standard-replies`, and Appendix E.2 shows the account-state `900`
+after that `NOTE`, in the order Section 10.2 already fixed. Section 19.1 and
+Appendix C.6 raise the `preauth_command` default burst from 10 to 24, inside
+the unchanged hard maximum of 50, so that an account client's creation
+followed by registration, or its pre-registration login, completes within the
+30-second registration limit at round trips of up to 3 seconds, as `tor-exit`
+and `onion` connections can have. Section 24.1 adds the
+`agenc-relay-client-support` and `agenc-relay-transport` crates, and
+Section 28.8 runs `cargo fmt --check`.
+
+Every node that has the encrypted profile enabled moves to this revision in
+one coordinated upgrade. CAP and ECAP accept only an exact
+`(version, profile-hash)` pair, so a client of the previous revision is not
+offered the encrypted profile, and a federation link whose ends present
+different profile hashes fails ECAP and closes (companion Section 12.5). An
+edge whose coordinator link is closed behaves as architecture Section 20.10
+states until both ends run this revision.
+
+The `print-onboarding` descriptor of every node with the encrypted profile
+enabled carries `e2ee-profile-sha256`, which an importer requires to equal its
+own build constant, so after the upgrade the operator issues each such
+descriptor again, and every account invitation that embeds one; a descriptor
+without the four E2EE lines is unaffected. A client imports the new
+descriptor through the explicit confirmation that architecture Sections 6.3
+and 9.3 require for a changed pin. The recovery epochs, keys, and other pins
+are unchanged.
+
+The persistent format is unchanged: the database stays at storage generation
+5 with the same records, keys, and tables. Stored objects keep their exact
+wire bytes under their content IDs, so a ReInit attempt stored before this
+revision, and a ReInit activation or abort record that embeds one, remains an
+object of the previous hash, which companion Section 2.3 forbids
+reinterpreting under this one; the implementation that adopts the new attempt
+layout states how a node that holds one restores.
+
+Against the four version axes of architecture Section 26.2, only the
+encrypted client and federation axis moves, to the new profile hash at
+version 1. The base federation profile and its registry are unchanged, and so
+is the database format. The client base profile stays `agenc.ag/privacy=v1`:
+the edge epoch rule names which node's epoch an edge advertises, which a
+client only compares with its pin; the `NOTE` and `900` text clarifies the
+Section 10.2 order and corrects an example of it; and a default inside an
+unchanged hard maximum is not a mandatory limit. The crate graph and the
+formatting command change no wire byte, persistent byte, or negotiated value.
