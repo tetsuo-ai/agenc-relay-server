@@ -11,8 +11,8 @@ use agenc_relay_config::{
     DRAIN_SECONDS, E2EE_GLOBAL_DISK_BYTES, ENDPOINT_PORT, FEDERATION_PEER_BURST_BYTES,
     FEDERATION_PEER_BYTES_PER_SECOND, FLUSH_SECONDS, INTEGRITY_CHECKPOINT_MANIFESTS, LIMIT_ROWS,
     LOG_RETENTION_HOURS, MAILBOX_BYTES_PER_ACCOUNT, MAX_CONTACTS, MAX_DEVICES_PER_ACCOUNT,
-    MAX_GROUP_LEAVES, MEMORY_BUDGET_BYTES, QUIESCE_SECONDS, RATE_ROWS,
-    SECRET_LOOKUP_FLOOR_MILLISECONDS, SESSION_SANCTION_HOURS, STOP_SECONDS,
+    MAX_GROUP_LEAVES, MEMORY_BUDGET_BYTES, QUIESCE_SECONDS, RATE_ROWS, RateKey, RateSpec,
+    RateTable, SECRET_LOOKUP_FLOOR_MILLISECONDS, SESSION_SANCTION_HOURS, STOP_SECONDS,
     STORED_BYTES_PER_CONVERSATION, TOKIO_WORKER_THREADS, ValidationStage, WHOWAS_RECORDS,
 };
 use support::{PUBLIC, mutate, parse};
@@ -76,6 +76,64 @@ fn check_bound(text: &str, field: &str, bound: Bound) {
 fn every_resource_limit_row_is_range_checked() {
     for row in &LIMIT_ROWS {
         check_bound(PUBLIC, row.name, row.bound);
+    }
+}
+
+/// Section 19.1 and Appendix C.6: the `preauth_command` default is one token
+/// per second with a burst of 24, inside the unchanged hard row of ten per
+/// second with a burst of 50. The golden public document states the default,
+/// a document without the table takes it, and the burst is accepted up to the
+/// hard 50 and refused at 51 at the default rate.
+#[test]
+fn the_preauth_command_row_defaults_to_burst_24_within_the_hard_row() {
+    let row = RATE_ROWS
+        .iter()
+        .find(|row| row.key == RateKey::PreauthCommand);
+    assert_eq!(
+        row.map(|row| (row.name, row.default, row.hard)),
+        Some((
+            "preauth_command",
+            RateSpec::new(1, 1, 24),
+            RateSpec::new(10, 1, 50)
+        ))
+    );
+    assert_eq!(
+        RateTable::defaults().get(RateKey::PreauthCommand),
+        RateSpec::new(1, 1, 24)
+    );
+    let golden =
+        "[limits.rate.preauth_command]\nrefill_tokens = 1\nrefill_seconds = 1\nburst = 24\n";
+    assert_eq!(
+        parse(PUBLIC)
+            .ok()
+            .map(|config| config.limits.rates.get(RateKey::PreauthCommand)),
+        Some(RateSpec::new(1, 1, 24))
+    );
+    assert_eq!(
+        parse(&mutate(PUBLIC, golden, ""))
+            .ok()
+            .map(|config| config.limits.rates.get(RateKey::PreauthCommand)),
+        Some(RateSpec::new(1, 1, 24))
+    );
+    for (burst, accepted) in [(1, true), (24, true), (50, true), (51, false)] {
+        let block = format!(
+            "[limits.rate.preauth_command]\nrefill_tokens = 1\nrefill_seconds = 1\nburst = {burst}\n"
+        );
+        let text = mutate(PUBLIC, golden, &block);
+        if accepted {
+            assert_eq!(
+                parse(&text)
+                    .ok()
+                    .map(|config| config.limits.rates.get(RateKey::PreauthCommand)),
+                Some(RateSpec::new(1, 1, burst)),
+                "burst {burst}"
+            );
+        } else {
+            assert!(
+                scalar_rejects(&text, "preauth_command"),
+                "burst {burst} accepted"
+            );
+        }
     }
 }
 

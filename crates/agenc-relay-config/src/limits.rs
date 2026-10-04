@@ -386,7 +386,7 @@ pub const RATE_ROWS: [RateRow; RATE_COUNT] = [
     rate(
         RateKey::PreauthCommand,
         "preauth_command",
-        (1, 1, 10),
+        (1, 1, 24),
         (10, 1, 50),
     ),
     rate(

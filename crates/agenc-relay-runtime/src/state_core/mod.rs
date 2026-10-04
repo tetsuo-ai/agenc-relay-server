@@ -4548,11 +4548,12 @@ mod lifecycle_tests {
             crate::test_support::StateCoreFixture::with_registration_router(vec![7; 1024])?;
         let core = fixture.state_mut()?;
         let queue = open_queued_connection(core)?;
-        core.context.buckets_mut().reload(RateLimits::defaults());
+        let limits = RateLimits::defaults();
+        core.context.buckets_mut().reload(limits);
         let demand = BucketDemand::new(
             BucketKind::PreAuthCommand,
             BucketKey::Connection(ConnectionGeneration::new(1)),
-            10,
+            limits.rate(BucketKind::PreAuthCommand).burst(),
         )?;
         let now = core.context.now();
         core.context

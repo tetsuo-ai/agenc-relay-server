@@ -4233,10 +4233,15 @@ mod tests {
         );
         let demand = preauth_demand(generation)?;
         let now = MonotonicTick::from_ticks(0);
-        for _ in 0..10 {
+        // The Appendix C.6 default burst: 24 lines, then a refusal until
+        // the next one-second refill.
+        for _ in 0..24 {
             assert!(buckets.charge_all_or_nothing(now, &[demand]).is_ok());
         }
         assert!(buckets.charge_all_or_nothing(now, &[demand]).is_err());
+        let refilled = MonotonicTick::from_ticks(1_000);
+        assert!(buckets.charge_all_or_nothing(refilled, &[demand]).is_ok());
+        assert!(buckets.charge_all_or_nothing(refilled, &[demand]).is_err());
         Ok(())
     }
 

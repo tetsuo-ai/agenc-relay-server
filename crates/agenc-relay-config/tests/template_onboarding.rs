@@ -8,8 +8,8 @@ mod support;
 use agenc_relay_config::{
     BASE_PROFILE_SHA256_TOKEN, ConfigError, DisplayLabel, DnsName, E2EE_PROFILE_SHA256_TOKEN,
     InitProfile, InitValues, MAX_ONBOARDING_DESCRIPTOR_BYTES, NodeRole, OnboardingFacts,
-    OperatorTemplate, SequencerKeySetFacts, ValidationStage, parse_onboarding_descriptor,
-    render_onboarding, render_template,
+    OperatorTemplate, RATE_ROWS, RateKey, RateSpec, SequencerKeySetFacts, ValidationStage,
+    parse_onboarding_descriptor, render_onboarding, render_template,
 };
 use agenc_relay_types::{NetworkId, OperatorId, RecoveryEpoch, ServerId};
 use support::{DUAL, ONION, PUBLIC, parse};
@@ -66,6 +66,48 @@ fn generated_admin_admission_and_operator_identity_use_the_same_uid() -> TestRes
         assert_eq!(
             operator.signing_public_key,
             values.operator.signing_public_key
+        );
+    }
+    Ok(())
+}
+
+/// The document `arcd init` writes names no `[limits.rate]` table, so a node
+/// it initializes runs every Appendix C.6 rate default, among them the
+/// `preauth_command` burst of 24.
+#[test]
+fn every_profile_runs_the_appendix_c6_rate_defaults() -> TestResult {
+    for profile in [InitProfile::Public, InitProfile::Onion, InitProfile::Dual] {
+        let text = render_template(&values(profile)?)?;
+        let enabled = text
+            .replace(
+                "enabled = false\npurpose = \"client_tls\"",
+                "enabled = true\npurpose = \"client_tls\"",
+            )
+            .replace(
+                "enabled = false\npurpose = \"client_onion\"",
+                "enabled = true\npurpose = \"client_onion\"",
+            );
+        let enabled = if profile == InitProfile::Onion {
+            enabled.replace(
+                "coordinator_server_id = \"AgICAgICAgICAgICAgICAg\"\n# Fill",
+                "coordinator_server_id = \"AgICAgICAgICAgICAgICAg\"\nonion_address = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion\"\nonion_tls_spki_sha256 = \"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\"\n# Fill",
+            )
+        } else {
+            enabled
+        };
+        let config = parse(&enabled).map_err(|report| format!("{profile:?}: {report}"))?;
+        for row in &RATE_ROWS {
+            assert_eq!(
+                config.limits.rates.get(row.key),
+                row.default,
+                "{profile:?} {}",
+                row.name
+            );
+        }
+        assert_eq!(
+            config.limits.rates.get(RateKey::PreauthCommand),
+            RateSpec::new(1, 1, 24),
+            "{profile:?}"
         );
     }
     Ok(())
