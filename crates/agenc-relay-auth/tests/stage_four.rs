@@ -2,6 +2,9 @@
 
 //! End-to-end Stage-04 account-protocol and malicious-edge tests.
 
+use agenc_relay_auth::profile::{
+    AgencOpaqueSuite, FallibleOpaqueRng, FixedArgon2id, opaque_context, opaque_identifiers,
+};
 use agenc_relay_auth::{
     ACCOUNT_CREATION_INVITE_BYTES, ACCOUNT_CREATION_TIMEOUT_TICKS, ACCOUNT_SERVICE_ENVELOPE_BYTES,
     ACCOUNT_SERVICE_RESPONSE_BYTES, AUTHENTICATION_GRANT_RECORD_BYTES, AccountAuthenticationState,
@@ -31,27 +34,20 @@ use agenc_relay_types::{
     NormalizedLogin, OpaqueCredentialId, OriginId, RecoveryEpoch, RequestId, Revision, ServerId,
     ServerIncarnation, TransactionId, UtcSecond,
 };
-use argon2::{Algorithm, Argon2, Params, Version};
-use opaque_ke::errors::InternalError;
-use opaque_ke::generic_array::{ArrayLength, GenericArray};
-use opaque_ke::ksf::Ksf;
-use opaque_ke::rand::{CryptoRng, Error as RandError, RngCore};
 use opaque_ke::{
-    CipherSuite, ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
-    Ristretto255, TripleDh,
+    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+    ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
 
 const TEST_NETWORK: NetworkId = NetworkId::from_bytes([21_u8; 32]);
 const TEST_RECOVERY_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([25_u8; 16]);
-const TEST_ARGON2_SALT: [u8; 16] = [0_u8; 16];
 
 #[test]
 fn reported_opaque_server_identity_matches_registration_response()
 -> Result<(), Box<dyn core::error::Error>> {
     let profile = OpaqueProfile::generate(TEST_NETWORK)?;
-    let mut rng = TestRng::new();
-    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, b"test password")?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, b"test password")?;
     let request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -72,82 +68,6 @@ fn reported_opaque_server_identity_matches_registration_response()
     assert!(rng.succeeded());
     Ok(())
 }
-
-struct TestOpaqueSuite;
-
-impl CipherSuite for TestOpaqueSuite {
-    type OprfCs = Ristretto255;
-    type KeyExchange = TripleDh<Ristretto255, opaque_sha2::Sha512>;
-    type Ksf = TestArgon2id;
-}
-
-#[derive(Default)]
-struct TestArgon2id;
-
-impl Ksf for TestArgon2id {
-    fn hash<L: ArrayLength<u8>>(
-        &self,
-        input: GenericArray<u8, L>,
-    ) -> Result<GenericArray<u8, L>, InternalError> {
-        if input.len() != 64 {
-            return Err(InternalError::KsfError);
-        }
-        let parameters =
-            Params::new(65_536, 3, 4, Some(64)).map_err(|_| InternalError::KsfError)?;
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, parameters);
-        let mut output = GenericArray::default();
-        argon2
-            .hash_password_into(&input, &TEST_ARGON2_SALT, &mut output)
-            .map_err(|_| InternalError::KsfError)?;
-        Ok(output)
-    }
-}
-
-struct TestRng {
-    failed: bool,
-}
-
-impl TestRng {
-    const fn new() -> Self {
-        Self { failed: false }
-    }
-
-    const fn succeeded(&self) -> bool {
-        !self.failed
-    }
-
-    fn fill_or_latch(&mut self, destination: &mut [u8]) {
-        if self.failed || OsEntropy::fill(destination).is_err() {
-            destination.fill(0);
-            self.failed = true;
-        }
-    }
-}
-
-impl RngCore for TestRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0_u8; 4];
-        self.fill_or_latch(&mut bytes);
-        u32::from_be_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0_u8; 8];
-        self.fill_or_latch(&mut bytes);
-        u64::from_be_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, destination: &mut [u8]) {
-        self.fill_or_latch(destination);
-    }
-
-    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandError> {
-        self.fill_or_latch(destination);
-        Ok(())
-    }
-}
-
-impl CryptoRng for TestRng {}
 
 struct ProtocolFixture {
     registration_request: OpaqueRegistrationRequest,
@@ -199,29 +119,13 @@ fn operation_context_for_network(
     ))
 }
 
-fn opaque_context(network_id: NetworkId) -> Vec<u8> {
-    let mut context = b"agenc-chat account authentication v1".to_vec();
-    context.extend_from_slice(network_id.as_bytes());
-    context
-}
-
-fn identifiers<'a>(
-    network_id: &'a NetworkId,
-    credential_id: &'a OpaqueCredentialId,
-) -> Identifiers<'a> {
-    Identifiers {
-        client: Some(credential_id.expose_for_account_service()),
-        server: Some(network_id.as_bytes()),
-    }
-}
-
 fn protocol_fixture(
     profile: &OpaqueProfile,
     credential_id: &OpaqueCredentialId,
     password: &[u8],
 ) -> Result<ProtocolFixture, Box<dyn core::error::Error>> {
-    let mut rng = TestRng::new();
-    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, password)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -229,12 +133,12 @@ fn protocol_fixture(
     let registration_finish = registration.state.finish(
         &mut rng,
         password,
-        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+        RegistrationResponse::<AgencOpaqueSuite>::deserialize(
             registration_response.expose_for_account_response(),
         )?,
         ClientRegistrationFinishParameters::new(
-            identifiers(&TEST_NETWORK, credential_id),
-            Some(&TestArgon2id),
+            opaque_identifiers(&TEST_NETWORK, credential_id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let record = finish_registration(
@@ -244,19 +148,19 @@ fn protocol_fixture(
             .as_slice()
             .try_into()?,
     )?;
-    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let login = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (ke2, state) =
         profile.authentication_start(TEST_NETWORK, credential_id, Some(&record), &ke1)?;
-    let context = opaque_context(TEST_NETWORK);
+    let context = opaque_context(&TEST_NETWORK);
     let login_finish = login.state.finish(
         &mut rng,
         password,
-        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        CredentialResponse::<AgencOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
         ClientLoginFinishParameters::new(
             Some(&context),
-            identifiers(&TEST_NETWORK, credential_id),
-            Some(&TestArgon2id),
+            opaque_identifiers(&TEST_NETWORK, credential_id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
@@ -693,8 +597,8 @@ fn authenticate_account(
     let context = operation_context(100)?;
     let login_name = NormalizedLogin::prepare("alice")?;
     let login_digest = derive_login_index(login_key, TEST_NETWORK, &login_name)?;
-    let mut rng = TestRng::new();
-    let client = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let client = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(client.message.serialize().as_slice().try_into()?)?;
     let record = AccountCredentialRecord::new(
         stored.account_id,
@@ -728,15 +632,15 @@ fn authenticate_account(
     else {
         return Err("authentication returned the wrong challenge".into());
     };
-    let context_bytes = opaque_context(TEST_NETWORK);
+    let context_bytes = opaque_context(&TEST_NETWORK);
     let finish = client.state.finish(
         &mut rng,
         password,
-        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        CredentialResponse::<AgencOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
         ClientLoginFinishParameters::new(
             Some(&context_bytes),
-            identifiers(&TEST_NETWORK, credential_id),
-            Some(&TestArgon2id),
+            opaque_identifiers(&TEST_NETWORK, credential_id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(finish.message.serialize().as_slice().try_into()?)?;
@@ -1262,8 +1166,8 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
     let profile = OpaqueProfile::generate(TEST_NETWORK)?;
     let login_key = LoginIndexKey::from_bytes([51_u8; 32]);
     let fake_key = OpaqueFakeCredentialKey::from_bytes([52_u8; 32]);
-    let mut rng = TestRng::new();
-    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, b"first password")?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, b"first password")?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -1299,12 +1203,12 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
     let registration_finish = registration.state.finish(
         &mut rng,
         b"first password",
-        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+        RegistrationResponse::<AgencOpaqueSuite>::deserialize(
             response.expose_for_account_response(),
         )?,
         ClientRegistrationFinishParameters::new(
-            identifiers(&TEST_NETWORK, credential_id),
-            Some(&TestArgon2id),
+            opaque_identifiers(&TEST_NETWORK, credential_id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let record = finish_registration(
@@ -1678,8 +1582,8 @@ fn unknown_login_runs_fake_record_and_dummy_finish_work() -> Result<(), Box<dyn 
     let login_key = LoginIndexKey::from_bytes([61_u8; 32]);
     let fake_key = OpaqueFakeCredentialKey::from_bytes([62_u8; 32]);
     let fixture = protocol_fixture(&profile, &credential(63), b"known password")?;
-    let mut rng = TestRng::new();
-    let client = ClientLogin::<TestOpaqueSuite>::start(&mut rng, b"unknown password")?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let client = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, b"unknown password")?;
     let ke1 = OpaqueKe1::from_bytes(client.message.serialize().as_slice().try_into()?)?;
     assert!(rng.succeeded(), "test entropy failed for the unknown login");
     let (request, challenge_token) = authenticated_authentication_start_with_token(

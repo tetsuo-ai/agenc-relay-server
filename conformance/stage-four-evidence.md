@@ -103,9 +103,12 @@ not run on Tokio workers.
 cryptographic version, feature set, crates.io checksum, fixed primitive
 profile, worker limit, and fuzz bound. It retains the published OPAQUE checksum
 and records the complete local patched-tree digest. `scripts/check-stage-four.py`
-compares that record with the two crate manifests, root source override,
-patched tree, and `Cargo.lock`, rejects Git sources, and permits only the
-reviewed OPAQUE/direct-stack duplicate generations.
+compares that record with the two crate manifests, the root source override,
+the fuzz workspace's own override (a root `[patch]` does not reach that
+separately resolved workspace), the patched tree, and both lockfiles, which
+must each resolve exactly one OPAQUE package from that tree. It rejects Git
+sources and permits only the reviewed OPAQUE/direct-stack duplicate
+generations.
 
 `EVID-S04-014-VERIFICATION` is the auth, crypto, and domain public-boundary
 test matrix plus the `account_service_envelope` and `crypto_wrappers` fuzz
