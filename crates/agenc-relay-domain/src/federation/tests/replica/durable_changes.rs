@@ -100,8 +100,13 @@ fn revision_changes_report_every_surviving_row_once() -> TestResult {
                 channel_id: channel,
                 resulting_revision: revision(4),
                 actor: ActorView(None),
+                // A recompute changes the role; the member keeps the
+                // revision it joined at.
                 memberships: vec![MembershipView {
-                    membership: membership(7, 1, 4),
+                    membership: MembershipRecord {
+                        role: Role::Operator,
+                        ..membership(7, 1, 3)
+                    },
                     source: source(&alice),
                 }],
             },

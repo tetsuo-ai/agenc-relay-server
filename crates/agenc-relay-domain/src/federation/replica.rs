@@ -569,6 +569,17 @@ impl EdgeReplica {
                             .memberships
                             .get_mut(&(*channel_id, view.membership.user_id))
                         {
+                            // A recompute changes roles only (architecture
+                            // 13.2): a member keeps the revision it joined
+                            // at, which its history authorization compares,
+                            // and the second it joined.
+                            let recomputed = MembershipRecord {
+                                role: view.membership.role,
+                                ..*existing
+                            };
+                            if view.membership != recomputed {
+                                return Err(ReplicaError::InvalidRecord);
+                            }
                             *existing = view.membership;
                             outcome.upserted.push(ProjectionKey::membership(
                                 *channel_id,

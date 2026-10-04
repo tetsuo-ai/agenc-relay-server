@@ -13,11 +13,13 @@ exists for it. SC-007 has three parts, worked in this order:
 | The same for a session an edge homes, with `ACCOUNT` to that edge's `account-notify` peers | Section 11.4 | Implemented |
 
 The login of a session an edge homes also needed two corrections on the path
-it takes through the coordinator. Each has its own commit and regression:
+it takes through the coordinator, and the first gained a check on the edge.
+Each has its own commit and regression:
 
 | Correction | Specification | State at this revision |
 | --- | --- | --- |
 | A recomputed channel membership keeps the revision it joined at on the federation wire | Section 20.6 | Implemented |
+| An edge accepts a recompute of a membership it holds only when the recompute changes the role alone | Section 13.2 | Implemented |
 | An edge declares the account of a registered connection's login in its next origin generation | Section 20.7 | Implemented |
 
 No specification text, wire registry, profile hash, persistent format or
@@ -285,6 +287,23 @@ What clients read for these changes:
   through the account's grant. The coordinator's rendering of a login names
   the account, and its rendering of a logout names `ACCOUNT *`, as at 70c832c.
 
+### A recompute changes only the role on an edge
+
+Without the equality, an edge's decoder bounds a recomputed membership's
+revision only by the event's resulting revision, and the replica replaced a
+membership it holds wholesale. A coordinator fault that moved a member's join
+revision, which the member's history authorization compares (Section 20.6.1),
+or its join second would have been stored without notice. The replica now
+accepts a recompute of a membership it holds only when the event changes that
+membership's role and nothing else. Any other recompute is refused as an
+invalid record, and the edge fails its link, as for every refused projection.
+Every recompute the coordinator emits passes, because the domain never
+changes a membership's revision or join second after the join, and each of
+the three changes above changes roles only. A recomputed membership the edge
+does not hold is still ignored. The ordinary prefix-mode event of a guest
+target, which the codec never bound to its resulting revision, still
+replaces a held membership as it did at 70c832c.
+
 ## An edge's origin after a post-registration login
 
 An edge declares every client connection to the coordinator as an origin
@@ -397,6 +416,17 @@ the same channel, then the guest's login) read `904` with the equality and
 afterwards, for the effects above; with the equality restored both fail at
 the projector's encoding (`InvalidValue`), and restored both pass.
 
+The role-only recompute on an edge:
+
+| Test | What it pins |
+| --- | --- |
+| `federation::replica::tests::a_recomputation_that_moves_a_join_revision_or_time_is_refused` | An edge holding a member that joined at revision 2 refuses a recompute that moves the join revision to 1 or to the recompute's own revision 3, or moves the join second, and keeps the stored membership; the recompute that changes the role alone is applied and upserts the membership. |
+| `federation::replica::tests::topic_and_recomputation_events_replace_only_known_memberships` and `federation::replica::tests::durable_changes::revision_changes_report_every_surviving_row_once` | Existing tests that recomputed a membership at the event's resulting revision, the equality the codec used to require. They now keep the join revision and change the role. |
+
+With the check left out, the new test fails and the two updated tests pass;
+restored, all pass. The Stage 08 login daemon tests, whose logins recompute
+memberships an edge holds, pass with the check.
+
 The edge origin after a login:
 
 | Test | What it pins |
@@ -500,6 +530,9 @@ Sources:
 - `crates/agenc-relay-domain/src/federation/projection.rs`
   (`project_member_authority`, `project_recompute`)
 - `crates/agenc-relay-runtime/src/federation/codec/tests/recompute.rs`
+- `crates/agenc-relay-domain/src/federation/replica.rs` (the
+  `channel_memberships_recomputed` arm of `EdgeReplica::apply`) and
+  `src/federation/tests/replica.rs`
 - `docs/arc-architecture-and-implementation-spec.md` Section 20.7
 - `crates/agenc-relay-runtime/src/federation/edge/request.rs`
   (`completed_request`, `declare_logged_in_account`)
@@ -574,6 +607,20 @@ cargo nextest run -p agenc-relay-runtime --all-features --locked
 cargo nextest run -p agenc-relay-runtime --all-features --locked --lib \
   -E 'test(federation::codec::tests::recompute)'
 # 4 passed; with the recompute equality restored: 4 failed
+
+# the role-only recompute on an edge, on the tree of its commit
+cargo nextest run -p agenc-relay-domain --all-features --locked
+# 258 tests run: 258 passed, 0 skipped
+cargo nextest run -p agenc-relay-domain --all-features --locked \
+  -E 'test(recomput) | test(revision_changes_report_every_surviving_row_once)'
+# 4 passed; with the check left out: 1 failed, 3 passed
+cargo nextest run -p agenc-relay-server --all-features --locked --test stage_eight_e2ee \
+  -E 'test(login_after_registration) | test(credential_replacement) | test(welcome_recovery)'
+# 5 passed
+RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-domain --all-features --branch --locked \
+  --json --output-path <report>
+# the re-reviewed region replica-event-durable-rows (`apply`): branches 50 of 50;
+# the two moved replica.rs regions: branches 8 of 8 and 6 of 6
 
 # the edge origin after a login, on the tree of its commit
 cargo nextest run -p agenc-relay-runtime -p agenc-relay-server --all-features --locked

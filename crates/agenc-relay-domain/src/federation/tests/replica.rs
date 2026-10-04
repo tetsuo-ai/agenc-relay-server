@@ -521,7 +521,8 @@ fn topic_and_recomputation_events_replace_only_known_memberships() -> TestResult
     };
     let outcome = replica.apply(&topic, 3)?;
     assert!(outcome.local_recipients.contains(&alice.user_id));
-    let mut promoted = membership(2, 1, 4);
+    // A recompute changes the role; the member keeps the revision it joined at.
+    let mut promoted = membership(2, 1, 2);
     promoted.role = Role::Owner;
     let recomputed = ProjectedEvent::ChannelMembershipsRecomputed {
         channel_id: channel,
@@ -563,6 +564,76 @@ fn topic_and_recomputation_events_replace_only_known_memberships() -> TestResult
         }],
     };
     assert_eq!(replica.apply(&foreign, 5), Err(ReplicaError::InvalidRecord));
+    Ok(())
+}
+
+/// A recompute changes roles only (architecture 13.2): a membership this
+/// edge holds keeps the revision it joined at, which its history
+/// authorization compares, and the second it joined. A recompute that moves
+/// either is refused instead of overwriting the stored membership.
+#[test]
+fn a_recomputation_that_moves_a_join_revision_or_time_is_refused() -> TestResult {
+    let mut replica = EdgeReplica::new(LOCAL);
+    let alice = session(1, LOCAL, None)?;
+    let channel = ChannelInstanceId::from_bytes([2; 16]);
+    replica.apply(&ProjectedEvent::SessionVisible(view(&alice, true)), 1)?;
+    replica.apply(&ProjectedEvent::ChannelVisible(detail(2, 1)?), 1)?;
+    let joined = ProjectedEvent::MemberJoined {
+        view: MembershipView {
+            membership: membership(2, 1, 2),
+            source: source(&alice),
+        },
+        home_session_revision: Some(revision(2)),
+        display_name: DisplayNameValue::prepare("User")?,
+    };
+    replica.apply(&joined, 2)?;
+    let recompute = |membership| ProjectedEvent::ChannelMembershipsRecomputed {
+        channel_id: channel,
+        resulting_revision: revision(3),
+        actor: crate::federation::record::ActorView(None),
+        memberships: vec![MembershipView {
+            membership,
+            source: source(&alice),
+        }],
+    };
+    let promoted = MembershipRecord {
+        role: Role::Operator,
+        ..membership(2, 1, 2)
+    };
+    for moved in [
+        // An earlier join revision, which would open older history.
+        MembershipRecord {
+            membership_revision: revision(1),
+            ..promoted
+        },
+        // The recompute's own revision, as if the member joined just now.
+        MembershipRecord {
+            membership_revision: revision(3),
+            ..promoted
+        },
+        // Another join second.
+        MembershipRecord {
+            joined_at: UtcSecond::from_unix_seconds(2),
+            ..promoted
+        },
+    ] {
+        let mut probe = replica.clone();
+        assert_eq!(
+            probe.apply(&recompute(moved), 3),
+            Err(ReplicaError::InvalidRecord)
+        );
+        assert_eq!(
+            probe.membership(channel, alice.user_id),
+            Some(&membership(2, 1, 2))
+        );
+    }
+    let outcome = replica.apply(&recompute(promoted), 3)?;
+    assert!(
+        outcome
+            .upserted
+            .contains(&ProjectionKey::membership(channel, alice.user_id))
+    );
+    assert_eq!(replica.membership(channel, alice.user_id), Some(&promoted));
     Ok(())
 }
 
