@@ -337,6 +337,6 @@ pub const WIRE_OBJECT_ENVELOPE_BYTES: usize = 6;
 /// The largest `ArcWireObject.body` the envelope can carry.
 pub const MAX_WIRE_OBJECT_BODY_BYTES: usize = 4_194_298;
 /// The Section 11.1 vendor capability value, exact.
-pub const CAPABILITY_VALUE: &str = "v1,profile=wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U,seg=2940,obj=262144,parts=90,welcome=4194304";
+pub const CAPABILITY_VALUE: &str = "v1,profile=CzmFweGfd-Vhc0E51lEx-xwfxct6Y6ERnKA7WmFYNSU,seg=2940,obj=262144,parts=90,welcome=4194304";
 /// The vendor capability name.
 pub const CAPABILITY_NAME: &str = "agenc.ag/e2ee-mls";

@@ -18,7 +18,7 @@ CORPUS_PATH = "conformance/e2ee-mls-corpus.toml"
 WIRE_BUDGET_PATH = "conformance/e2ee-wire-budget.toml"
 INTEROP_PATH = "conformance/e2ee-interop-matrix.toml"
 EXPECTED_TASKS = [f"S08-{number:03d}" for number in range(1, 45) if number != 39]
-PROFILE_TOKEN = "wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U"
+PROFILE_TOKEN = "CzmFweGfd-Vhc0E51lEx-xwfxct6Y6ERnKA7WmFYNSU"
 EXPECTED_TARGET = {
     "name": "encrypted-v1",
     "profile_version": 1,

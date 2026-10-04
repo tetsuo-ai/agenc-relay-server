@@ -3,7 +3,7 @@
 # status, revision, or repository head fails the sources job until the
 # ledger is reviewed and this file records a new decision.
 schema_version = 1
-ledger_sha256 = "23a20cb38c7918d8488403fc780fc1eba14c647d187548f921cee4cdad4635ac"
+ledger_sha256 = "430af31197f917c143c7a4f61aabe5c602854a9322674263c0ad59858207fc62"
 decided_on = "2026-09-15"
 
 [[rfc]]

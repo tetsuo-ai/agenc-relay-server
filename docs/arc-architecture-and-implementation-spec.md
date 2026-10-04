@@ -679,11 +679,20 @@ agenc.ag/recovery=v1.<22-char-recovery-epoch>
 ```
 
 The value of `agenc.ag/recovery` is literal `v1.`, followed by canonical
-unpadded base64url for the live header's 16-byte recovery epoch. A native
-client compares it with its onboarding pin during `CAP LS`, before sending
-`PASS`, `ACCTCREATE`, `ACCTCRED`, or `AUTHENTICATE`. A mismatch blocks account/E2EE use and
-requires explicit descriptor confirmation; it is never accepted as an
-ordinary capability-value update. Conventional clients may ignore this vendor
+unpadded base64url for a 16-byte recovery epoch. A coordinator or standalone
+node advertises its live header's epoch. An edge advertises its coordinator's
+epoch, the `recovery_epoch` its enabled coordinator peer record pins
+(Appendix C.4), because the account-service envelopes its clients seal are
+opened on the coordinator under that epoch (Sections 11.2 and 22.2). The
+welcome burst's `NOTE * RECOVERY_EPOCH` (Section 10.2) and the node's
+`print-onboarding` descriptor (Appendix C.8) carry the same advertised epoch.
+A native client compares it with its onboarding pin during `CAP LS`, before
+sending `PASS`, `ACCTCREATE`, `ACCTCRED`, or `AUTHENTICATE`. A mismatch blocks
+account/E2EE use and requires explicit descriptor confirmation; it is never
+accepted as an ordinary capability-value update. When a coordinator's epoch
+changes and an edge's peer record is pinned to the new value, the edge
+advertises and describes the new epoch, and a descriptor naming the earlier
+one is such a mismatch. Conventional clients may ignore this vendor
 capability and retain the base chat profile.
 
 It advertises `agenc.ag/e2ee-mls` only under the dependency and profile rules
@@ -756,6 +765,12 @@ bracketed context is optional; every other listed context is required:
 | `NOTE ACCT` | `UPDATED` | none |
 | `NOTE CHANCTL` | `UPDATED` | channel |
 | `NOTE *` | `RECOVERY_EPOCH` | 22-character epoch |
+
+The welcome burst's `NOTE * RECOVERY_EPOCH` does not depend on
+`standard-replies`: it is sent whenever `agenc.ag/recovery` is negotiated,
+whether or not `standard-replies` is, because Section 10.2 step 5 conditions
+it on that capability alone and Appendix A.3 lists the capability as
+standalone.
 
 `CHALLENGE`, `CHECKPOINT`, `CONFIRM`, `EVENT`, and `VALUE` remain admin-only;
 `SLOW_CONSUMER` remains queue-owner-only. The remaining registered codes are
@@ -2807,7 +2822,7 @@ semantic validation fails, preventing error-oracle floods.
 | new direct TCP | 1/second | 8 | IPv4 /24 or IPv6 /56 |
 | new onion connection | 8/second | 32 | onion listener globally |
 | TLS handshake | 4/second | 16 | direct prefix or onion listener |
-| pre-auth command | 1/second | 10 | connection |
+| pre-auth command | 1/second | 24 | connection |
 | registered command | 4/second | 20 | session |
 | guest message | 0.5/second | 4 | session |
 | account message | 2/second | 10 | Account ID |
@@ -6700,7 +6715,9 @@ forbidden. This graph is checked in CI from `cargo metadata`.
 | `agenc-relay-domain` | validated commands, authorization, state, plans, events, projections, rate policy | `types` |
 | `agenc-relay-e2ee` | companion-profile public-object validation and base/E2EE transaction plans | `types`, `crypto`, `domain`, `federation-wire` |
 | `agenc-relay-storage` | record codecs, redb owner, backups, recovery validation | `types`, `crypto`, `domain`, `e2ee` |
-| `agenc-relay-config` | strict TOML schema, path/permission validation, typed configuration | `types` |
+| `agenc-relay-client-support` | onboarding descriptor and endpoint grammar, SOCKS5 codec, and isolation credentials, shared with clients | `types`, `federation-wire` |
+| `agenc-relay-config` | strict TOML schema, path/permission validation, typed configuration | `types`, `client-support` |
+| `agenc-relay-transport` | client TLS 1.3 policy, SPKI pin, client TLS stream, SOCKS dialer, and Tor client, shared with clients | `types`, `client-support` |
 | `agenc-relay-admin` | admin command parser, challenge verification, permission mapping | `types`, `crypto`, `domain` |
 | `agenc-relay-runtime` | Tokio supervisors, listeners, `StateCore`, federation/link state, queue plumbing | every production library above |
 | `agenc-relay-testkit` | deterministic clocks/RNGs, reference model, fault stores, transcript drivers | any production crate; dev-only |
@@ -6712,7 +6729,11 @@ graphs, and no dependency cycle is accepted. Wire crates contain no sockets,
 policy, database calls, or Tokio tasks. `domain` contains no concrete clock,
 random generator, executor, database, TLS, or filesystem API. `storage` does
 not render client lines. `runtime` coordinates components but does not
-reimplement codecs, cryptography, or authorization.
+reimplement codecs, cryptography, or authorization. `client-support` contains
+no socket, TLS, or Tokio API, and `transport` holds the client side of TLS and
+SOCKS and the TLS policy, provider, trust store, and SPKI digest both sides
+share: server TLS configuration, ticket keys, handshake limits, and the
+federation link's TLS configuration and peer verification stay in `runtime`.
 
 The server-side `e2ee` crate does not contain an MLS client engine. It knows
 only the public objects and validation surfaces expressly assigned to the
@@ -7538,7 +7559,7 @@ descriptor counts must return to the expected envelope after each cycle.
 The release pipeline runs, with the pinned release toolchain:
 
 ```text
-cargo fmt --all --check
+cargo fmt --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
@@ -7547,6 +7568,11 @@ cargo deny check
 cargo audit --deny warnings
 cargo llvm-cov --workspace --all-features --branch
 ```
+
+The formatting check covers every workspace member and no path dependency
+outside the workspace, so a reviewed local source patch (Section 24.5) keeps
+the exact bytes its recorded patched-tree digest names and is never
+reformatted.
 
 Branch coverage is at least 90% overall and 100% for parser error
 discriminants, authorization decisions, protocol enum arms, persistence
@@ -7742,14 +7768,14 @@ These SHA-256 values identify the exact files read for this draft:
 | `rfcs/rfc9420-mls-protocol.txt` | `251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b` |
 | `rfcs/rfc9525-tls-service-identity.txt` | `ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5` |
 | `rfcs/rfc9750-mls-architecture.txt` | `6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd` |
-| `docs/arc-mls-e2ee-extension.md` | `57d6d98df53ce8f738da463304fb47726c9133ef0bec5b268a8cadbc117405bc` |
+| `docs/arc-mls-e2ee-extension.md` | `4fa947bf4edfe146de8f6a72932b93625828b0fd6eea46976e699ab06719658c` |
 
 Changing a file without updating its hash, source decision, and affected
 vectors is a conformance-ledger failure.
 The companion's domain-separated version-1 profile hash is
-`c1b5313f8a7f196cda30eea797fb1ab65b004a55d71cf9a81071927046e5d395`
+`0b3985c1e19f77e561734139d65131fb1c1fc5cb7a63a1119ca03b5a61583525`
 (unpadded base64url
-`wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U`).
+`CzmFweGfd-Vhc0E51lEx-xwfxct6Y6ERnKA7WmFYNSU`).
 
 ## Appendix A. Client wire registries
 
@@ -7910,7 +7936,7 @@ unsafe field is a fatal peer violation, not text to relay.
 | `agenc.ag/account-controls=v1` | authenticated account control implementation available |
 | `agenc.ag/account-credentials=v1` | pinned account service and Section-11.5 credential-change implementation available |
 | `agenc.ag/channel-controls=v1` | channel control implementation available |
-| `agenc.ag/recovery` | standalone; advertised value is the exact live Section-9.3 epoch token |
+| `agenc.ag/recovery` | standalone; advertised value is the exact Section-9.3 advertised epoch token |
 | `agenc.ag/e2ee-mls` | every dependency in companion Section 11.1 |
 
 The server rejects one `CAP REQ` atomically if it includes a capability without
@@ -9458,7 +9484,7 @@ not exceed the hard rate below; burst may not exceed the hard burst.
 | `new_direct` | 1/1, 8 | 16/1, 64 | IPv4 `/24` or IPv6 `/56` |
 | `new_onion` | 8/1, 32 | 64/1, 256 | onion listener |
 | `tls_handshake` | 4/1, 16 | 32/1, 128 | direct prefix or onion listener |
-| `preauth_command` | 1/1, 10 | 10/1, 50 | connection |
+| `preauth_command` | 1/1, 24 | 10/1, 50 | connection |
 | `registered_command` | 4/1, 20 | 40/1, 200 | session |
 | `guest_message` | 1/2, 4 | 5/1, 20 | session |
 | `account_message` | 2/1, 10 | 20/1, 100 | Account ID |
@@ -9472,6 +9498,18 @@ not exceed the hard rate below; burst may not exceed the hard burst.
 addition to the row maximum. Rates are reloadable. Lowering a rate clamps
 existing bucket credit to the new burst; raising it creates no immediate
 credit. No value, zero, negative number, or omitted table means unlimited.
+
+The `preauth_command` default lets an account client finish before the
+30-second registration limit of Section 8.3 on every transport profile. Its
+burst covers the longest run of lines a client sends before registration with
+no reply between them, an `ACCTCREATE` request's 16 `DATA` lines and its
+`END` (Section 11.3): network delay can deliver such a run to the server at
+once, so a smaller burst could refuse its last line however the client paced
+it. The credit beyond that run, refilled at one token per second, is sized so
+that a client pacing its lines to this bucket completes account creation
+followed by registration, or a pre-registration login (Section 11.4) followed
+by registration, within that limit at round trips of up to 3 seconds, as
+`tor-exit` and `onion` connections can have.
 
 Account-service HPKE opening and invitation signature verification occur only
 after the connection's pre-auth bucket admits the command and use the bounded
@@ -9639,39 +9677,44 @@ server-name=<configured DNS-style server name>
 dns-endpoint=<lowercase DNS name>:<port>
 onion-endpoint=<56-char-v3-name>.onion:<port>
 onion-tls-spki-sha256=<43-char-hash>
-recovery-epoch=<22-char-random-recovery-epoch>
+recovery-epoch=<22-char-advertised-recovery-epoch>
 base-profile-sha256=ewDg0IRCcGJkEdOY8V91ICJOqQYRdzjj2pdBphHcZ7M
 account-service-hpke-key-id=<43-char-hash>
 account-service-hpke-public-key=<43-char-X25519-public-key>
 e2ee-profile=ARC-MLS/1
-e2ee-profile-sha256=wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U
+e2ee-profile-sha256=CzmFweGfd-Vhc0E51lEx-xwfxct6Y6ERnKA7WmFYNSU
 sequencer-key-set-generation=<uint64-decimal>
 sequencer-key-set-hash=<43-char-hash>
 ```
 
 Lines occur exactly in that order; optional DNS and the paired onion lines are
-omitted as units. At least one endpoint remains. On a coordinator and on an
-edge alike, `print-onboarding` loads, parses, and verifies the configured
-sequencer credentials file exactly as startup does, read-only: network ID,
-continuity signatures, key-generation order, at most two credentials, and,
-when a database exists, monotonicity against the durably accepted set; the
-emitted `sequencer-key-set-generation` and `sequencer-key-set-hash` are that
-verified set's values, never a placeholder. With `e2ee.enabled = false` the
-four lines `e2ee-profile`, `e2ee-profile-sha256`,
-`sequencer-key-set-generation`, and `sequencer-key-set-hash` are omitted as
-one unit; an importer treats their absence as no E2EE offered and MUST NOT
-enable E2EE, and a present block must still equal the build constant. Values contain printable ASCII
-and no whitespace. `e2ee-profile-sha256` is the exact companion Section-2.3
-profile hash and must equal the importing client's supported build constant;
-an absent or unequal value rejects the descriptor. A QR code contains the
-exact descriptor bytes. Import verifies the account-service key ID from the
-public key, then shows the network, chosen `direct`, `tor-exit`, or `onion`
-profile, endpoint, TLS/onion pin when applicable, recovery epoch, base and
-E2EE profile fingerprints, account-service key fingerprint, and sequencer
-key-set fingerprint for one confirmation; it never auto-selects clearnet after
-onion/Tor failure.
-The descriptor is an onboarding pin conveyed by the user's trusted invitation
-channel, not a substitute for WebPKI or E2EE identity verification.
+omitted as units. At least one endpoint remains. `recovery-epoch` is the epoch
+the node advertises in `agenc.ag/recovery` (Section 9.3): a coordinator's or
+standalone node's own database epoch, and on an edge its coordinator's epoch
+as its enabled coordinator peer record pins it. `serve` refuses an edge
+without an enabled coordinator peer record, and `print-onboarding` prints no
+descriptor for it. On a coordinator and on an edge alike, `print-onboarding`
+loads, parses, and verifies the configured sequencer credentials file exactly
+as startup does, read-only: network ID, continuity signatures, key-generation
+order, at most two credentials, and, when a database exists, monotonicity
+against the durably accepted set; the emitted `sequencer-key-set-generation`
+and `sequencer-key-set-hash` are that verified set's values, never a
+placeholder. With `e2ee.enabled = false` the four lines `e2ee-profile`,
+`e2ee-profile-sha256`, `sequencer-key-set-generation`, and
+`sequencer-key-set-hash` are omitted as one unit; an importer treats their
+absence as no E2EE offered and MUST NOT enable E2EE, and a present block must
+still equal the build constant. Values contain printable ASCII and no
+whitespace. `e2ee-profile-sha256` is the exact companion Section-2.3 profile
+hash and must equal the importing client's supported build constant; an absent
+or unequal value rejects the descriptor. A QR code contains the exact
+descriptor bytes. Import verifies the account-service key ID from the public
+key, then shows the network, chosen `direct`, `tor-exit`, or `onion` profile,
+endpoint, TLS/onion pin when applicable, recovery epoch, base and E2EE profile
+fingerprints, account-service key fingerprint, and sequencer key-set
+fingerprint for one confirmation; it never auto-selects clearnet after
+onion/Tor failure. The descriptor is an onboarding pin conveyed by the user's
+trusted invitation channel, not a substitute for WebPKI or E2EE identity
+verification.
 
 For invite registration, the offline command
 `arcd account-invite create --descriptor <file> --signing-key-file
@@ -9773,8 +9816,8 @@ acceptance; a federated durable outbox commits first.
 
 ### E.2 OPAQUE login then session registration
 
-The client negotiates `sasl`, selects `AGENC-OPAQUE`, and applies IRCv3 400-byte
-chunking to the binary wrappers:
+The client negotiates `sasl` and `agenc.ag/recovery`, selects `AGENC-OPAQUE`,
+and applies IRCv3 400-byte chunking to the binary wrappers:
 
 ```text
 C: AUTHENTICATE AGENC-OPAQUE
@@ -9788,8 +9831,17 @@ C: NICK kestrel
 C: USER ignored 0 * :Kestrel
 C: CAP END
 S: 001 kestrel :Welcome to <network>
+...
+S: 422 kestrel :MOTD File is missing
+S: NOTE * RECOVERY_EPOCH <recovery-epoch> :Current server recovery identity
 S: 900 kestrel kestrel!u-<cloak>@h-<cloak>.invalid <public-account-label-or-*> :You are now logged in
 ```
+
+The burst follows Section 10.2: the elided lines are the rest of steps 1 to 3,
+`422` ends step 4 on a node without a MOTD (a configured MOTD ends it with
+`376`), the `NOTE` is step 5 because the client negotiated
+`agenc.ag/recovery`, and the account state `900` is step 6. Without
+`agenc.ag/recovery`, `900` follows `422` or `376` directly.
 
 Unknown-account and wrong-password transcripts substitute the client's
 uniform dummy KE3, carry the same fixed exporter response with a rejected

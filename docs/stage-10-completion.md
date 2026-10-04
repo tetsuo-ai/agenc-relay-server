@@ -290,6 +290,14 @@ which it resolved from the unpatched release before, and the explicit root
 path edge that was measured but not applied because it fails the Section
 28.8 formatting gate (X-09, SDK program, outside master #35), are recorded in
 [the OPAQUE fuzz source record](stage-10-opaque-fuzz-source.md).
+The program's normative revision, which removes the finalization ID from the
+ReInit target, carries the target in every ReInit attempt with the
+sequencer's checks and the coordinator's atomic successor installation, and
+states the edge recovery-epoch, welcome `900`, pre-authentication default,
+crate-graph and formatting rules, moving the E2EE profile hash under profile
+version 1 (PC-001 with decisions D-13 to D-16 and D-30, SDK program item P-01,
+outside master #35), is recorded in
+[the ReInit target revision record](stage-10-reinit-target-revision.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

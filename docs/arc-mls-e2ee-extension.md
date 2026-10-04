@@ -287,6 +287,18 @@ rule of Section 22. Evidence recorded under the previous hash remains valid
 historical evidence for that revision; it is never re-admitted or
 reinterpreted under this one.
 
+The ReInit-target revision of Section 13.8 also keeps profile version 1 and
+changes this hash, although, unlike the revision above, it changes two object
+layouts (Section 22). It removes the old-group state ID from
+`ArcReInitTargetTBS`: that field named the finalization ID of the very Commit
+whose authorization commits the target digest, so no target could be
+constructed and no conforming ReInit could complete under the previous hash.
+It also carries the target in every `ArcReInitAttempt`, so that the sequencer
+checks an attempt against the digest the old ReInit Commit authorized, the
+coordinator installs the successor from those bytes at activation, and a later
+joiner verifies the same bytes. A ReInit object stored under the previous hash
+is never parsed or reinterpreted under this one.
+
 ## 3. Goals
 
 ARC-MLS is designed to provide:
@@ -1503,7 +1515,11 @@ uses its `target_context_digest`, a same-group route migration uses the
 resulting `binding_id`, and an active-to-closing transition uses the resulting
 `close_intent_id`. Combining those transition classes or adding an unrelated
 action bit to any of them is invalid; each carries only its required inline
-Proposal, context replacement, and populated UpdatePath.
+Proposal, context replacement, and populated UpdatePath. None of these
+digests covers an accepted-state or sequencer-record ID: a ReInit target is
+fixed by the old conversation and its Proposal alone (Section 13.8), and this
+authorization's own `prior_state_id`, `candidate_id`, and `commit_object_id`
+bind the digest to one candidate position.
 `canonical_validation_time` **MUST** equal
 `ArcCommitAad.validation_time`. An approval credential must be active in the
 old context-committed roster, represented by an old leaf, and carry policy
@@ -1727,8 +1743,9 @@ The transport always carries `ArcConversationBindingPackage`; verifiers
 recompute its plan ID before considering the approvals.
 For a channel binding, `channel_instance_id` is exactly 16 bytes and
 `conversation_nonce` is empty; for a direct binding, the instance is empty and
-the nonce is exactly 32 bytes. These values equal the reservation and
-recompute the concrete `route_binding` under Section 9.1. An ordinary new
+the nonce is exactly 32 bytes. These values equal the reservation, or for a
+ReInit successor the replaced binding's, and recompute the concrete
+`route_binding` under Section 9.1. An ordinary new
 group has `initial_bootstrap_pending=1`; a ReInit successor has zero. Any other
 value or a mismatch with the initial committed context is invalid.
 Principals are canonical by Account ID; approvals are canonical by
@@ -1967,7 +1984,10 @@ entry's exact policy ID.
 
 A reset to generation zero is legal only at a `reinit_target_transition` in
 the binding chain. Its policy entry has `policy_reinit_target_transition` and
-must match the policy inside the exact reconstructed `ArcReInitTargetTBS`. The
+is the policy inside the exact `ArcReInitTargetTBS`: a continuing member
+staging the successor at epoch 1 checks it against the target it
+reconstructs, and a later joiner checks it against the target that the
+referenced ReInit activation certificate's attempt carries (Section 13.8). The
 preceding entry is the old terminal policy used to verify the old ReInit
 Commit. The wrapper supplies a `reinit_target_authorization` reference to that
 Commit's finalization certificate and, once the successor is live, a
@@ -2760,10 +2780,13 @@ is the highest accepted generation for that device and named roster.
 
 `operation-id` is 16 random client bytes. The coordinator transactionally maps
 `(claiming_account_id, operation_id)` to the exact claim parameters and result
-before consuming a package. `CLAIM STATUS` returns that stored result. An
-identical retry is idempotent; reuse with different parameters is rejected.
-The mapping survives reconnect and is retained through at least the later of
-the claimed package lifetime and `KEY_PACKAGE_CLAIM_TIMEOUT`.
+before consuming a package. `CLAIM STATUS` returns that stored result: its
+`EKEY CLAIMED` line names the target device, KeyPackageRef, and object that
+the claim's own `CLAIM PACKAGE` answer named, never the device attached to the
+connection that asks. An identical retry is idempotent; reuse with different
+parameters is rejected. The mapping survives reconnect and is retained through
+at least the later of the claimed package lifetime and
+`KEY_PACKAGE_CLAIM_TIMEOUT`.
 
 The server **MUST**:
 
@@ -5125,9 +5148,15 @@ check is one no server can perform and none claims:
 | proof identifies one old leaf | `ArcLeafMembershipProofTBS` `epoch`, `leaf_index`, `old_credential_hash`, `leaf_signature_scheme`, `leaf_signature_key` | coordinator against the ACK TBS and the possession signature | server-visible attestation |
 | proof binds an active device | `ArcLeafMembershipProofTBS` `account_id`, `device_id`, `root_generation`, `root_fingerprint`, `roster_generation`, `roster_id`, `credential_generation` and `ArcLeafMembershipProof` `device_signature` | coordinator against the retained roster and root chain | server-visible attestation |
 | proof states a disposition | `ArcLeafMembershipProofTBS` `disposition`, `removal_finalization_id` and `ArcLeafMembershipProof` `possession_signature` | coordinator against retained finalized records | server-visible attestation |
+| attempt names the old ReInit finalization | `ArcReInitAttemptTBS` `old_reinit_state_id` | coordinator against the retained finalized record that is the old conversation's accepted state | server-visible attestation |
+| attempt carries the authorized target | `ArcReInitAttempt` `target` hashes to `ArcReInitAttemptTBS` `target_context_digest`, which equals the finalized authorization's `transition_target_digest`, and the attempt's group, version, suite, conversation, binding, and plan fields equal the target's | coordinator against the retained old ReInit finalization | server-visible attestation |
+| carried target describes the successor of the bound route | the context extension in `ArcReInitTargetTBS` `encoded_target_extensions` | coordinator against the retained current binding | server-visible attestation |
+| attempt's KeyPackage plan forms the target's semantic plan | `ArcReInitAttempt` `key_package_plan` and `ArcReInitTargetTBS` `initial_member_plan_id` | coordinator | server-visible attestation |
 | leaf is actually in the tree at that epoch | the MLS ratchet tree | endpoint | endpoint-only MLS check |
 | ACK set covers every UpdatePath copath | the old tree and staged Commit | endpoint | endpoint-only MLS check |
 | exact continuing set of a ReInit | the old tree, the successor tree, and the Welcome set | endpoint | endpoint-only MLS check |
+| ReInit target equals the reconstruction from its Proposal | the old ReInit Proposal or the successor's epoch-1 GroupContext, and the rosters its roster heads name | endpoint | endpoint-only MLS check |
+| later joiner's ReInit binding and policy entries match the activated target | the join bundle's ReInit entries and the target that the referenced ReInit activation certificate's attempt carries | endpoint | endpoint-only MLS check |
 
 The expected recovery epoch, source rollback guard hash, restored binding,
 state, and head IDs, and the sequencer key set are taken only from the
@@ -5417,10 +5446,12 @@ successor. The preparation order is security-critical:
    `ArcReInitTargetTBS`: target version, suite, group ID, complete extension
    bytes, generation-zero policy, roster heads, new binding, finality council,
    and semantic initial member plan. The old candidate authorization commits
-   its target digest. It does not commit one-use KeyPackages. Offline leaves
-   and enough old finality principals to leave fewer than `q` continuing
-   staged voters are removed or handed off in earlier finalized epochs, not
-   omitted afterward.
+   its target digest. The target covers no accepted-state or record ID of the
+   old group, so it exists before the old Commit, receipt, authorization, and
+   finalization and depends on none of their IDs. It does not commit one-use
+   KeyPackages. Offline leaves and enough old finality principals to leave
+   fewer than `q` continuing staged voters are removed or handed off in
+   earlier finalized epochs, not omitted afterward.
    A ReInit successor sets `bootstrap_pending=0`; its separate activation
    certificate is already the all-member barrier, so it does not repeat the
    generation-zero bootstrap protocol.
@@ -5436,9 +5467,11 @@ successor. The preparation order is security-critical:
    the reserved KeyPackages, and injects the `reinit` resumption PSK. The new
    GroupContext exactly matches the ReInit parameters and reaches epoch 1.
    The creator is not a Welcome recipient.
-4. The sequencer accepts one active attempt receipt. Every other continuing
-   leaf receives a full-tree Welcome in `ArcStagedReInit`; the creator stages
-   its locally constructed state. No staged endpoint sends new-group traffic.
+4. The sequencer checks the attempt and the target it carries against the
+   finalized old ReInit Commit and accepts one active attempt receipt. Every
+   other continuing leaf receives a full-tree Welcome in `ArcStagedReInit`;
+   the creator stages its locally constructed state. No staged endpoint sends
+   new-group traffic.
 5. The creator issues a `creator_state` ACK; every other continuing leaf
    validates and consumes its one-use Welcome and issues a `welcome_join` ACK.
    Version 1 requires exactly one ACK for every continuing old leaf. The
@@ -5449,7 +5482,10 @@ successor. The preparation order is security-critical:
    the activation.
 6. Old-policy finality principals verify the exact attempt and complete ACK
    set, then issue sign-once ReInit disposition votes. A quorum activation
-   certificate atomically remaps the route and activates new epoch 1.
+   certificate atomically remaps the route and activates new epoch 1: the
+   coordinator installs the successor from the target the attempt carries in
+   the transaction that stores the certificate, so no `EGROUP RESERVE` or
+   `EGROUP BIND` precedes successor traffic.
 7. On success, endpoints delete the resumption PSK, staged Welcomes, attempt
    state, and obsolete old-group secrets. An activation timeout leaves the old
    group closed and permits only a quorum abort of that successor attempt,
@@ -5466,7 +5502,6 @@ struct {
     uint16 profile_version;
     opaque network_id[32];
     opaque old_conversation_id[32];
-    opaque old_reinit_state_id[32];
     opaque new_conversation_id[32];
     opaque target_group_id<1..255>;
     ProtocolVersion target_version;
@@ -5528,6 +5563,7 @@ struct {
 
 struct {
     ArcReInitAttemptTBS tbs;
+    ArcReInitTargetTBS target;
     ArcKeyPackagePlan key_package_plan;
     opaque initial_commit_bytes<1..3145728>;
     ArcReInitAttemptAuthorization authorization;
@@ -5678,15 +5714,194 @@ struct {
 ```
 
 `target_context_digest` is
-`SHA256("ARC-MLS/1 reinit target" || encoded_ArcReInitTargetTBS)`. Its fields
-must equal the finalized old ReInit Proposal, the old candidate
-`transition_target_digest`, and the target binding/context core. The
-`initial_commit_digest` is
+`SHA256("ARC-MLS/1 reinit target" || encoded_ArcReInitTargetTBS)`. The target
+covers no accepted-state or record ID of the old group; every field is fixed
+by the old conversation and the ReInit Proposal. `target_group_id`,
+`target_version`, `target_suite`, and `encoded_target_extensions` are the
+Proposal's group ID, version, cipher suite, and exact encoded extension list,
+and `new_conversation_id` is the Section 2.2 conversation ID of that group ID.
+The list carries exactly one `ARC_MLS_CONTEXT_EXTENSION` and exactly one
+`required_capabilities` extension. `target_binding_id` is the Section 2.2
+`binding_id` of that context's `current_binding`, `initial_member_plan_id` is
+that binding's plan ID, and `target_context_core_id` is that binding's
+`context_core_id`, which equals the Section 2.2 ID of the `ArcContextCoreTBS`
+recomputed from the target version, suite, and group ID, the
+`required_capabilities` extension data, the context's initial validation
+time, and the binding's network, conversation, kind, route lock, route,
+initial and operational policy, plan, and sequencer IDs, with
+`initial_bootstrap_pending` zero.
+
+That context describes the successor as it is once activated: it names the
+target's profile version, network, and new conversation ID; its lifecycle is
+active with a zero `close_intent_id`; its `bootstrap_pending` is zero; and it
+names no pending join, because the activation certificate, not a
+join-confirmation self-Commit, completes every continuing leaf's join. Its
+`policy` is the successor's generation-zero policy: it names the target's
+network and new conversation ID and the context's kind, selects the
+Proposal's suite, has an all-zero `previous_policy_id`, and its Section 2.2 ID
+is both the binding's `initial_policy_id` and its
+`required_operational_policy_id` (Section 9.5). Its `sequencer` credential has
+the Section 2.2 ID the binding names. Its `current_binding` is a Section 9.4
+replacement of the old conversation's current binding: its generation is one
+greater than that binding's, its `previous_binding_id` is that binding's ID,
+and it has no approvals. The binding names the target's profile version,
+network, group ID, and new conversation ID, the Proposal's version and suite,
+the context's kind and concrete route, and the old binding's semantic route
+lock and concrete route, which the activation remaps to the successor
+(step 6). The successor's policy, with its controllers and finality council,
+is verified under the rosters that the context's `roster_heads` name, not
+under the old conversation's rosters, and each of those heads for an account
+that the old context's `roster_heads` also name carries either the old head's
+root or a continuous successor of it (Section 8.2), so a ReInit never carries
+a root discontinuity. Like every context extension, the context also meets the
+policy, binding, roster-head, and private-topic rules of Sections 9.3 to 9.5.
+
+Because no target field depends on the accepted state, the target's bytes and
+digest do not change when the accepted state advances between freezing the
+target and sequencing its candidate, for example through a finalized
+self-update or another member's Commit after a candidate abort. A later
+candidate carrying the same Proposal needs only its own candidate-specific
+authorization, whose `prior_state_id`, `candidate_id`, and `commit_object_id`
+bind the unchanged digest to the new position. Controllers freeze a new target
+only when its content has to change, for example because an embedded roster
+head, policy, or sequencer credential is no longer valid. One target
+therefore stays byte-identical from preparation through old finality, every
+attempt and attempt abort, activation, and later join ancestry.
+
+Every `ArcReInitAttempt` carries in `target` the exact target whose digest is
+its `target_context_digest`: the creator copies, byte for byte, the target
+that the old candidate authorization committed. The attempt TBS, the attempt
+authorization, and that old authorization commit the target through its
+digest, the receipt commits the attempt object that holds it through
+`attempt_object_id`, and the activation and abort requests embed that
+attempt, so the sequencer, the controllers, every continuing leaf, and a later
+joiner check the same bytes, including those that never see the Proposal. The
+carried target counts toward `MAX_REINIT_OBJECT` in the attempt and in each
+request that embeds it (Section 16).
+
+An endpoint reconstructs the target from the ReInit Proposal it verifies: an
+old-group member from the staged old Commit before it approves,
+acknowledges, or votes, and a continuing member from the successor
+GroupContext at epoch 1 before it acknowledges an attempt. That epoch-1
+GroupContext carries exactly the Proposal's extension list (step 3). A later
+GroupContext does not: it names the joining member's own pending join and may
+name later roster heads and policies, so a member that joins the successor
+after activation verifies its join bundle's ReInit entries against the
+carried target as stated below instead. An endpoint verifying a ReInit
+**MUST** reject it when:
+
+- the Proposal's extension list does not carry exactly one context extension
+  and one `required_capabilities` extension, or the context core recomputed
+  from them differs from their binding's `context_core_id`;
+- the context in that list, or its `current_binding`, does not describe the
+  successor as stated above: it names another profile version, network,
+  conversation, group ID, kind, route, version, or suite, is not active with
+  a zero `close_intent_id`, has a nonzero `bootstrap_pending` or a pending
+  join, carries a policy or sequencer credential other than the one its
+  binding names, or the binding is not a replacement of the old
+  conversation's current binding with the next generation, that binding's ID
+  as `previous_binding_id`, and no approvals;
+- the context's policy does not verify under the rosters its `roster_heads`
+  name, or one of those heads, for an account that the old context's
+  `roster_heads` also name, carries a root that is neither the old head's
+  root nor a continuous successor of it;
+- a presented target, or its binding, context core, plan, or extension bytes,
+  differs from that reconstruction, including a target replaced after the old
+  ReInit Commit finalized and the target an attempt carries;
+- the old candidate authorization has action bits other than the ReInit bit
+  alone, commits a `transition_target_digest` other than the reconstructed
+  digest, or names a `prior_state_id` other than the accepted state that the
+  candidate receipt and finalization core name;
+- the finalization core does not commit the recomputed ID of that
+  authorization;
+- an attempt, attempt authorization, receipt, `ArcStagedReInit`, ACK, vote,
+  activation, or abort names an `old_reinit_state_id` other than the
+  recomputed finalization ID of the old ReInit Commit; or
+- an attempt's `target_context_digest` differs from the authorized digest or
+  from the digest of the target it carries, or its group ID, version, suite,
+  new conversation ID, target binding ID, or initial member plan ID differs
+  from that target.
+
+The sequencer holds the old ReInit finalization and the target each attempt
+carries, but not the Proposal. The sequencer **MUST** refuse an attempt for a
+conversation whose accepted state is not the finalization of a ReInit Commit
+with `E2EE_FINALITY_REQUIRED`, retaining nothing.
+
+For an attempt on a conversation whose accepted state is the finalization of
+a ReInit Commit, before it signs an attempt receipt, the sequencer **MUST**
+refuse the attempt with `E2EE_BINDING_AUTH_INVALID`, retaining nothing, when:
+
+- its `old_reinit_state_id` is not the ID of the finalization that is the old
+  conversation's accepted state;
+- the target it carries does not hash to its `target_context_digest`, or that
+  digest differs from the `transition_target_digest` of the authorization
+  that finalization commits;
+- its group ID, version, suite, new conversation ID, target binding ID, or
+  initial member plan ID differs from the target it carries;
+- the device tuples and capability IDs of its `ArcKeyPackagePlan`, in that
+  plan's canonical order, do not form the `ArcInitialMemberPlan` whose
+  Section 2.2 ID is the target's `initial_member_plan_id`; or
+- the extension list of the target it carries fails the first two endpoint
+  rules above, with that target in place of the Proposal, or that target's
+  `new_conversation_id`, `target_context_core_id`, `target_binding_id`, or
+  `initial_member_plan_id` is not the value this section derives from that
+  list.
+
+A member that joins the successor after activation holds neither the
+Proposal nor the epoch-1 GroupContext. Its Welcome wrapper references the old
+ReInit Commit's finalization certificate as `reinit_target_authorization` and
+the activation certificate as `reinit_activation` (Section 9.5), and the
+attempt inside that activation certificate carries the target. The
+activation certificate is the old-policy quorum's statement that every
+continuing leaf acknowledged that attempt after reconstructing the target, so
+the joiner checks the ReInit entries against the carried target and relies on
+that quorum for the checks that need the old group's state, such as the old
+context's roster heads. Such a joiner **MUST** reject the ReInit binding-chain
+or policy-chain entry when:
+
+- the finalization certificate fails the old-authorization and finalization
+  rules above, with the digest of the target the activation's attempt carries
+  in place of the reconstructed digest, or the activation certificate does not
+  verify under the old policy;
+- the activation's attempt names an `old_reinit_state_id` other than that
+  finalization's recomputed ID or a `target_context_digest` other than its
+  authorized digest, or the target the attempt carries does not hash to that
+  digest;
+- the extension list of the carried target fails the first two endpoint rules
+  above, with that target in place of the Proposal and the binding-chain
+  entry that precedes the ReInit entry as the old conversation's current
+  binding, the carried target's `new_conversation_id`,
+  `target_context_core_id`, `target_binding_id`, or `initial_member_plan_id`
+  is not the value this section derives from that list, or the attempt's
+  group ID, version, suite, new conversation ID, target binding ID, or initial
+  member plan ID differs from the carried target;
+- the binding-chain entry's binding differs from the binding in the carried
+  target's context, or its package carries a root binding lock; or
+- the policy-chain entry's policy differs from the policy in the carried
+  target's context.
+
+The `initial_commit_digest` is
 `SHA256("ARC-MLS/1 reinit initial commit" || initial_commit_bytes)`; the bytes
 are the complete canonical MLS message containing the successor initial
-Commit, not an IRC wire wrapper. Its parsed group, Add set, KeyPackageRefs,
-leaf keys, resumption PSK usage, GroupContext, tree, and GroupInfo must match
-the target and key-package plans and every result digest.
+Commit, not an IRC wire wrapper. Like every Commit after group creation
+(Section 7.4), it is a `PrivateMessage` whose public header names the target
+group ID, epoch zero, and the `commit` content type, so only its creator,
+which alone holds the successor's epoch-zero secrets, can parse its content.
+Its group, Add set, KeyPackageRefs, leaf keys, resumption PSK usage,
+GroupContext, tree, and GroupInfo must match the target and key-package plans
+and every result digest: the creator checks them on the Commit it constructs,
+and every Welcome recipient checks the same facts from its Welcome, the
+GroupSecrets it decrypts, the full ratchet tree, and the GroupInfo before it
+acknowledges. Every other verifier checks the public header, the
+authenticated data, and the digests.
+The successor initial Commit's `authenticated_data` **MUST** be the Section 10
+`ArcCommitAad` that names the target's profile version and network, the new
+conversation ID, the target context's `route_binding`, a `validation_time` no
+earlier than the old ReInit Commit's, and `old_reinit_state_id` as
+`prior_state_id`. The successor has no accepted state before activation, and
+its `reinit_activation_id` depends on this Commit through the attempt's
+`initial_commit_digest`, so naming that activation ID, or any other successor
+state, would make the digests circular.
 
 The attempt authorization TBS repeats every attempt field a controller must
 review. Its fields must equal the attempt TBS exactly, and its Section 2.2 ID
@@ -5704,10 +5919,12 @@ The sequencer receipt is signed with label
 predecessor equal to `old_reinit_state_id`, and route sequence exactly one
 after the finalized old ReInit record. After a valid attempt abort, the next
 attempt increments its sequence, names that `reinit_abort_id` as predecessor,
-and uses the next route sequence. `old_reinit_state_id` must be the semantic
-finalization ID of the old ReInit Commit. A staged recipient fetches and
-verifies both object IDs in `ArcStagedReInit` and every required transition
-proof reference before consuming its Welcome.
+and uses the next route sequence. In the attempt, attempt authorization,
+receipt, `ArcStagedReInit`, ACK, vote, activation, and abort,
+`old_reinit_state_id` is the semantic finalization ID of the old ReInit
+Commit; the target, which precedes that finalization, does not carry it. A
+staged recipient fetches and verifies both object IDs in `ArcStagedReInit`
+and every required transition proof reference before consuming its Welcome.
 The wrapper's new conversation ID equals the fetched attempt, and its target
 account digest and Device ID equal exactly one non-creator key-package-plan
 entry and the resulting leaf credential. A creator never receives this
@@ -5752,6 +5969,28 @@ Activation makes
 `reinit_activation_id` the successor's initial accepted state and external
 record-head anchor. The activation and abort quorums cannot both exist within
 the fault bound.
+
+The coordinator **MUST** install the successor from the target the activated
+attempt carries in the same durable transaction that stores the activation
+certificate, and before it sends any reply or event for that activation: the
+remap of the old route to the new conversation ID; the successor conversation,
+whose binding is the `current_binding` of the target's context, whose current
+`BINDING` object (Section 11.7) is the `ArcConversationBindingPackage` of that
+binding with the `ArcInitialMemberPlan` the attempt's `ArcKeyPackagePlan`
+forms and no root binding lock, whose current and retained published policy
+(Section 9.3) is that context's `policy`, and whose pinned credential is that
+context's `sequencer`; `reinit_activation_id` as its accepted state and
+record-head anchor; and the delivery mappings that send the route's encrypted
+traffic and mailbox objects to the successor. The successor's context digest
+is the Section 2.2 `context_digest` of the `ArcMlsContext` in the target, the
+value an `EGROUP BIND` would carry, never the attempt's
+`target_context_digest`, which hashes a different structure under a different
+label. A ReInit successor is therefore never bound with `EGROUP RESERVE` and
+`EGROUP BIND`: once its activation is durable it accepts ordinary candidates,
+from its own route sequence zero (Section 12.2), and application objects, also
+after a coordinator restart, which restores the installed successor from
+durable state. A crash leaves either the old route closed with its attempt
+pending or the complete installed successor, never part of it.
 
 An attempt abort never rolls back or reopens the old MLS group. It only
 permits a different successor creator as contemplated by RFC 9750 while the
@@ -6058,13 +6297,14 @@ cryptography and fail closed when their authenticated bucket is exhausted.
 `MAX_GROUP_LEAVES` is a structural ceiling, not a promise that every
 maximum-sized credential set fits. Before accepting an Add, clients must prove
 that the resulting membership can still form a full ReInit successor whose
-initial Commit is at most `MAX_REINIT_INITIAL_COMMIT_BYTES`, whose attempt and
-terminal records fit `MAX_REINIT_OBJECT`, and whose per-recipient full-tree
-Welcome fits `MAX_WELCOME_MAILBOX_OBJECT`. The calculation uses exact current
-credential and policy proofs plus fresh size-bounded KeyPackages from every
-continuing device. If recovery headroom is unavailable, the Add is invalid;
-members reduce membership or proof sizes without discarding ancestry before
-the group becomes cryptographically unmigratable.
+initial Commit is at most `MAX_REINIT_INITIAL_COMMIT_BYTES`, whose attempt,
+with the target it carries, and terminal records fit `MAX_REINIT_OBJECT`, and
+whose per-recipient full-tree Welcome fits `MAX_WELCOME_MAILBOX_OBJECT`. The
+calculation uses exact current credential and policy proofs plus fresh
+size-bounded KeyPackages from every continuing device. If recovery headroom
+is unavailable, the Add is invalid; members reduce membership or proof sizes
+without discarding ancestry before the group becomes cryptographically
+unmigratable.
 
 Every `MAX_*_OBJECT` above applies to the complete encoded `ArcWireObject`,
 including its six-byte envelope. Fragment `total` and capability/reservation
@@ -6280,7 +6520,10 @@ Before production use, an implementation requires:
    rosters, capability chains, leaf authorizations, policies, root binding
    locks, bindings, committed roster heads, contexts,
    application envelopes, object fragments, sequencer credentials, candidate
-   receipts, ACKs, finalizations, aborts, and ReInit activation.
+   receipts, ACKs, finalizations, aborts, ReInit targets reconstructed from
+   their Proposals and the targets attempts carry, the ReInit binding-chain
+   and policy-chain entries a later joiner verifies against the activated
+   target, and ReInit activation.
 3. Cross-implementation tests in which at least two independent MLS
    libraries each, through the daemon's client surface and not only a framing
    comparison, publish KeyPackages, bind a conversation, publish its policies,
@@ -6327,8 +6570,13 @@ Before production use, an implementation requires:
     offline queues, and authenticated fragment floods.
 12. A review that server logs and telemetry contain no forbidden material.
 13. ReInit race tests covering target-suite KeyPackage preflight, creator-local
-    ACK, all Welcome ACKs, attempt abort/retry, PSK deletion, and the invariant
-    that the old group never reopens.
+    ACK, all Welcome ACKs, attempt abort/retry, PSK deletion, one target that
+    stays byte-identical across an accepted-state advance, a candidate abort,
+    and an attempt retry, the sequencer's refusal of an attempt whose
+    finalization ID, digest, or carried target differs, a successor that takes
+    traffic after activation and after a coordinator restart with no
+    `EGROUP BIND`, a crash on either side of the activation transaction, and
+    the invariant that the old group never reopens.
 14. Federation tests for ECAP's exact profile-document hash, 360/358-byte
     maximum lines, five-second boundary, simultaneous OFFERs, each legal flag
     transition, duplicate and ACK-before-OFFER rejection, every mismatched
@@ -6349,8 +6597,10 @@ Before production use, an implementation requires:
     and is rejected unless it is the exact deterministic coverage vector.
     Tests also reject an authorization embedded in its own Commit, a GroupInfo
     or Welcome that embeds any future receipt/finalization/activation ID, an
-    in-MLS binding or policy-chain entry containing post-Commit proof IDs, or
-    any other content-address cycle. Wrapper construction tests prove that
+    in-MLS binding or policy-chain entry containing post-Commit proof IDs, a
+    ReInit target that names the finalization committing it, a successor
+    initial Commit that names the activation committing it, or any other
+    content-address cycle. Wrapper construction tests prove that
     immutable MLS Welcome bytes exist first and are only then paired with the
     exact typed external proof references.
 17. Finality-council transition tests proving only retained, fully staged old
@@ -6405,7 +6655,14 @@ capabilities cause fail-closed rejection. The revision that added the
 public-evidence carriers of Section 12.5.1 and Sections 13.7.2 through 13.7.5
 is such a hash change under an unchanged numeric version: peers presenting
 the previous profile hash are refused by exact-match negotiation, and no
-implementation parses that revision's objects under this one.
+implementation parses that revision's objects under this one. The
+ReInit-target revision of Section 13.8 is also a hash change under an
+unchanged numeric version, although it changes the layout of two structures,
+the target whose digest signed authorizations commit and the attempt that now
+carries it, which the first rule of this section would otherwise give a new
+version: under the previous hash no target could be constructed, so no
+conforming ReInit exists to keep interoperable, and exact-match negotiation
+already refuses every peer that presents that hash.
 
 Before interoperability outside this implementation family:
 
