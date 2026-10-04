@@ -1805,23 +1805,24 @@ impl RegistrationRouter {
     }
 
     /// Sends the `900` of every awaited login whose account the session
-    /// projection now names, and forgets those whose connection is gone. A
-    /// `900` the edge cannot render closes its connection.
+    /// projection now names. A `900` the edge cannot render closes its
+    /// connection, and so does an awaited login the router cannot answer when
+    /// it settles, without an edge role or without the connection's state or
+    /// binding: the `900` is never dropped silently. A closed connection has
+    /// already forgotten its login, and closing one whose transport is
+    /// already closing changes nothing.
     fn settle_awaited_logins(&mut self, context: &mut StateCoreContext) {
         if self.awaited_logins.is_empty() {
             return;
         }
-        let Some(edge) = self.edge.as_ref() else {
-            self.awaited_logins.clear();
-            return;
-        };
         let mut settled = Vec::new();
         for (generation, account_id) in &self.awaited_logins {
-            let Some((state, bound)) = self
-                .connections
-                .get(generation)
-                .and_then(|state| state.bound.map(|bound| (state, bound)))
-            else {
+            let answerable = self.edge.as_ref().zip(
+                self.connections
+                    .get(generation)
+                    .and_then(|state| state.bound.map(|bound| (state, bound))),
+            );
+            let Some((edge, (state, bound))) = answerable else {
                 settled.push((*generation, None));
                 continue;
             };
@@ -1837,8 +1838,7 @@ impl RegistrationRouter {
             self.awaited_logins.remove(&generation);
             let sent = match frame {
                 Some(Ok(frame)) => context.send_to(generation, vec![frame]).is_ok(),
-                Some(Err(_)) => false,
-                None => true,
+                Some(Err(_)) | None => false,
             };
             if !sent {
                 close_transport(context, generation);
@@ -3276,6 +3276,8 @@ impl CommandRouter for RegistrationRouter {
                 context.complete_command_observation(observation, ResultClass::Closed);
             }
         }
+        // Forgotten even when a closing path already dropped the state.
+        self.awaited_logins.remove(&generation);
         let Some(mut state) = self.connections.remove(&generation) else {
             return;
         };
@@ -3296,7 +3298,6 @@ impl CommandRouter for RegistrationRouter {
             .unwrap_or("connection closed")
             .to_owned();
         self.edge_carriers.remove(&generation);
-        self.awaited_logins.remove(&generation);
         if let Some(edge) = self.edge.as_mut() {
             if let Some(e2ee) = self.e2ee.as_mut() {
                 e2ee.delete_origin(context, edge, generation);

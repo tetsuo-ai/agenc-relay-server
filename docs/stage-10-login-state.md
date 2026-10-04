@@ -206,7 +206,13 @@ lines for its own clients:
   same-account reauthentication finds the account projected and reads the
   `900` right after its `903`. A login before registration is named by the
   welcome instead, an awaited login is forgotten with its connection, and a
-  `900` the edge cannot render closes the connection, as a welcome does.
+  `900` the edge cannot render closes the connection, as a welcome does. An
+  awaited login the router cannot answer when it settles, because it has no
+  edge role or no state or binding for the connection, also closes the
+  connection: the `900` is never dropped silently. No caller settles while
+  it holds a connection's state outside the router, so this applies only to
+  a connection that is already closing, but a later caller cannot lose a
+  `900` that way.
 - A coordinator's own clients read the `ACCOUNT` line of a session an edge
   homes from the coordinator's rendering above.
 
@@ -451,6 +457,9 @@ The login across a federated network:
 | `registration::edge_login_tests::an_edge_reauthentication_sends_900_right_after_903` | A replica that already names the account: `903` then `900`. |
 | `registration::edge_login_tests::a_login_before_registration_awaits_no_900` | A login before registration ends with `903` and awaits nothing. |
 | `registration::edge_login_tests::an_awaited_login_is_forgotten_with_its_connection` | A closed connection forgets its awaited login; a later projection sends nothing. |
+| `registration::edge_login_tests::an_awaited_login_the_router_cannot_answer_closes_its_connection` | An awaited login whose connection state is held outside the router while the account's projection is applied, and one whose state is unbound, each close the connection; the client read `903` and no `900`. |
+| `registration::edge_login_tests::an_awaited_login_without_an_edge_role_closes_its_connection` | A router without an edge role that holds an awaited login closes that connection rather than forget the login. |
+| `registration::edge_login_tests::a_connection_closed_after_its_state_was_dropped_forgets_its_login` | A connection whose state a closing path already dropped still forgets its awaited login when its close is reported. |
 | `login_after_registration::an_edge_login_after_registration_sends_900_and_names_the_account` | Production edges and coordinator: a guest on edge A, in a channel with members on edge A, on the coordinator and on edge B, logs in: `903`, then the `900` byte-exact with the label; `ACCOUNT Kestrel` to the guest, to edge A's and the coordinator's `account-notify` members, nothing to a member without it; the guest's next message reaches edge B; a reauthentication repeats the `900` alone. |
 | `login_after_registration::a_coordinator_login_after_registration_sends_900_and_names_the_account` | A guest on the coordinator, in a channel with a member on edge B: `903` and the `900` from `core.test`, `ACCOUNT Kestrel` to a coordinator `account-notify` member, nothing more to the guest, and its next message reaches edge B. |
 | `credential_replacement::edge_credential_replacement_survives_coordinator_restart` | Its existing reauthentication of a registered edge session now reads the `900` after the `903`. |
@@ -465,7 +474,11 @@ Restored, all pass. At this commit, restoring the recompute equality makes
 both daemon login tests fail (the edge answers its guest `904`, the
 coordinator closes its guest's connection without an answer), and leaving out
 the origin declaration makes the edge login test fail at its reauthentication
-with `904`.
+with `904`. The three router tests that close or forget an awaited login were
+added afterwards: with the settling step reporting an unanswerable login as
+sent, as it first did, the two closing tests fail, and with the close
+forgetting the login only when it still finds the connection's state, the
+third fails; restored, all seven router tests pass.
 
 The Stage 08 edge test keeps every registered connection open until its
 scenario ends.
@@ -639,4 +652,9 @@ cargo nextest run -p agenc-relay-server --all-features --locked --test stage_eig
   -E 'test(login_after_registration) | test(credential_replacement)'
 # 3 passed (four repeated runs); with the recompute equality: 2 failed;
 # without the origin declaration: 1 failed
+
+# the awaited 900 that fails closed, on the tree of its commit
+cargo nextest run -p agenc-relay-runtime --all-features --locked --lib -E 'test(edge_login_tests)'
+# 7 passed; settling an unanswerable login as sent: 2 failed;
+# forgetting it only with the connection's state: 1 failed
 ```

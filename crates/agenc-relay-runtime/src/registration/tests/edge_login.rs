@@ -225,3 +225,80 @@ async fn an_awaited_login_is_forgotten_with_its_connection() -> TestResult {
     assert!(ends_with_903(&sink.lines()), "lines: {:?}", sink.lines());
     Ok(())
 }
+
+/// An awaited login the router cannot answer when it settles is never
+/// forgotten silently. Here a caller holds the connection's state while the
+/// projection naming the account is applied, and then the state is present
+/// but unbound: each time the router closes the connection instead of
+/// leaving its client without the `900`.
+#[tokio::test]
+async fn an_awaited_login_the_router_cannot_answer_closes_its_connection() -> TestResult {
+    for detached in [true, false] {
+        let mut harness = Harness::new(Role::Edge)?;
+        let sink = registered_guest(&mut harness, None)?;
+        login_answered(&mut harness)?;
+        let generation = ConnectionGeneration::new(1);
+        assert!(harness.router.awaited_logins.contains_key(&generation));
+        let held = if detached {
+            harness.router.connections.remove(&generation)
+        } else {
+            let state = harness
+                .router
+                .connections
+                .get_mut(&generation)
+                .ok_or("no connection state")?;
+            state.bound = None;
+            None
+        };
+        let projection = record(&harness, 2, Some(account()))?;
+        project(&mut harness, projection)?;
+        let context = harness.fixture.context_mut()?;
+        harness.router.apply_edge_completions(context, Vec::new());
+        assert!(harness.router.awaited_logins.is_empty());
+        assert!(ends_with_903(&sink.lines()), "lines: {:?}", sink.lines());
+        assert!(harness.sink_gone(1)?, "the connection must be closed");
+        if let Some(state) = held {
+            harness.router.connections.insert(generation, state);
+        }
+    }
+    Ok(())
+}
+
+/// A router without an edge role never awaits a login; one that somehow
+/// holds an awaited login closes that connection rather than forget it.
+#[tokio::test]
+async fn an_awaited_login_without_an_edge_role_closes_its_connection() -> TestResult {
+    let mut harness = Harness::new(Role::Plain)?;
+    let _sink = harness.open(1, true)?;
+    harness
+        .router
+        .awaited_logins
+        .insert(ConnectionGeneration::new(1), account());
+    let context = harness.fixture.context_mut()?;
+    harness.router.apply_edge_completions(context, Vec::new());
+    assert!(harness.router.awaited_logins.is_empty());
+    assert!(harness.sink_gone(1)?, "the connection must be closed");
+    Ok(())
+}
+
+/// A closing path can drop a connection's state, and close its transport,
+/// before the transport reports the close. The awaited login is forgotten
+/// with the connection all the same.
+#[tokio::test]
+async fn a_connection_closed_after_its_state_was_dropped_forgets_its_login() -> TestResult {
+    let mut harness = Harness::new(Role::Edge)?;
+    let _sink = registered_guest(&mut harness, None)?;
+    login_answered(&mut harness)?;
+    let generation = ConnectionGeneration::new(1);
+    harness
+        .router
+        .connections
+        .remove(&generation)
+        .ok_or("no connection state")?;
+    let context = harness.fixture.context_mut()?;
+    harness
+        .router
+        .connection_closed(context, generation, CloseReason::ProtocolError);
+    assert!(harness.router.awaited_logins.is_empty());
+    Ok(())
+}
