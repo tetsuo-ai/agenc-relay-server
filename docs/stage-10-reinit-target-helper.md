@@ -50,9 +50,12 @@ decoding, and the server's source rules.
   old conversation's current binding (the next generation, that binding's ID,
   its semantic route lock, concrete route, channel instance or nonce); the
   binding agreement, private-topic and roster-head-order rules of every
-  context; the generation-zero policy the binding names as its initial and
-  required operational policy, for its network, conversation, kind and suite;
-  and the sequencer credential the binding names.
+  context; the shape every binding has against the semantic route it carries,
+  that route's conversation kind among it (`route::check_binding_shape`, the
+  check every binding package meets); the generation-zero policy the binding
+  names as its initial and required operational policy, for its network,
+  conversation, kind and suite; and the sequencer credential the binding
+  names.
 - `AuthorizedReinit::from_proof` recomputes the hash links of the old ReInit
   finalization proof (the ReInit bit alone as a controlled transition with a
   nonzero target digest; one position and candidate in the authorization,
@@ -68,7 +71,12 @@ decoding, and the server's source rules.
   `ArcKeyPackagePlan`, in the plan's order, form the semantic plan the target
   names; and the carried target meets `check_carried_target`. Whether the
   old conversation's accepted state is the ReInit finalization is the
-  sequencer's own state and stays the caller's.
+  sequencer's own state and stays the caller's: the sequencer refuses an
+  attempt on any other accepted state with `E2EE_FINALITY_REQUIRED`,
+  retaining nothing, before it builds anything from that finalization's
+  proof, and refuses one with `E2EE_BINDING_AUTH_INVALID` on any error of
+  `check_attempt` (companion 13.8; the documentation of `from_proof` and
+  `check_attempt` says so).
 - `AuthorizedReinit::check_attempt_target` is an endpoint's check of an
   attempt against its own reconstruction: the carried target must be the
   reconstruction byte for byte, with the same links and plan check.
@@ -92,7 +100,8 @@ decoding, and the server's source rules.
   validation time no earlier than the old ReInit Commit's, and the old
   finalization ID as prior state.
 
-`check_binding_agreement` in `context.rs` became `pub(crate)` for this module.
+`check_binding_agreement` in `context.rs` and `check_binding_shape` in
+`route.rs` became `pub(crate)` for this module.
 
 ## The historical chain
 
@@ -130,7 +139,11 @@ finalization ID, name the activation in the initial Commit, name another
 target's digest while carrying that target, and name the authorized digest
 while carrying another target. `--check` fails on any drift, including a
 stale or missing file. Their MLS inputs are synthetic; their signatures are
-real.
+real. P-03 adds 23 files for the successor rosters, and the review follow-up
+two more: a successor whose context, binding, policy and core name the direct
+kind while its binding keeps the old channel's semantic route, as an
+extension list and as the target a sender carrying that list builds (81
+files in all).
 
 ## Tests
 
@@ -152,7 +165,10 @@ real.
   and refuses each structural edit twice, through an endpoint's
   reconstruction and through the sequencer's check of the target a sender
   carrying the edited list would build; an invalid policy approval is refused
-  only by the endpoint, which verifies the policy under rosters.
+  only by the endpoint, which verifies the policy under rosters. A successor
+  whose context, binding and policy all name another kind than the semantic
+  route its binding keeps is refused on both paths, and so are the
+  generator's two files of such a successor.
 - `tests/reinit/join.rs` covers a later joiner: the activation's attempt and
   its carried target, the target against the preceding binding-chain entry
   (derived fields under a re-committed authorization), the activation core,
@@ -186,9 +202,12 @@ untagged broadcasts.
 ## Requirements
 
 No binding changes. The fourteen `S10-005` clauses of the revision describe
-what an endpoint or a later joiner checks; the helper implements thirteen of
-them, and P-03 the remaining one (the successor policy under the rosters its
-roster heads name, with root continuity). Under the server's process a
+what an endpoint or a later joiner checks; the shared code implements
+thirteen of them (the helper, with `HistoricalChain` for the receipts, ACKs,
+votes and terminals of `E2EE-REQ-B7019C9600DEEE9F73B2` and the old-policy
+verification of the activation in `E2EE-REQ-78EA2878D8AF97B72939`, as the
+table says), and P-03 the remaining one (the successor policy under the
+rosters its roster heads name, with root continuity). Under the server's process a
 clause's status follows its closure task, so they stay `unimplemented` until
 `S10-005` closes, as the ENC-06 clauses stayed bound to `S10-008` when ENC-07
 implemented them:
@@ -196,7 +215,7 @@ implemented them:
 | Requirement | Clause | Implemented by |
 | --- | --- | --- |
 | `E2EE-REQ-CD50092C1042C824D3AE` | extension list and context core | `extension_parts`, `successor_target` |
-| `E2EE-REQ-5CE2946BC4C5748CBAD9` | context and binding describe the successor | `binding_of`, `check_lineage`, `check_context`, `check_policy_named` |
+| `E2EE-REQ-5CE2946BC4C5748CBAD9` | context and binding describe the successor | `binding_of`, `check_lineage`, `check_context` (with `route::check_binding_shape`), `check_policy_named` |
 | `E2EE-REQ-978953B8799A08B41F25` | presented, replaced or carried target equals the reconstruction | `check_target`, `check_attempt_target`, `bind_reinit_target` |
 | `E2EE-REQ-9C570091CD7134A351DB` | old candidate authorization | `from_proof`, `check_target` |
 | `E2EE-REQ-6D390E4D9F1DEA0EEF68` | finalization core commits the authorization | `from_proof` |
@@ -262,6 +281,31 @@ holding such attempts restores is part of P-04 (plan item G-08).
   under.
 - The Stage 08 fixture proves one target through the daemon and the shared
   history, not a real ARC successor context or initial Commit.
+
+## Review
+
+An independent review of this topic led to follow-up commits on the same
+branch:
+
+- The successor binding has the shape every binding has against the semantic
+  route it carries, that route's conversation kind among it: `check_context`
+  applies `route::check_binding_shape`, which every binding package meets, to
+  the successor binding and the route it keeps (companion 9.4 and 13.8), so
+  `reconstruct_reinit_target`, `check_carried_target`, `check_attempt` and
+  `check_join_entries` hold the successor to it. Tests refuse a successor
+  whose context, binding and policy all name another kind on both paths, the
+  generator writes two files of such a successor (an extension list and the
+  target built from it) with the refusal it expects, and one more mutation
+  removes the check. Validation of the follow-up: `generate-e2ee-vectors.py
+  --check` (9, 20 and 81 files, the 79 earlier ReInit files unchanged);
+  `cargo nextest run -p agenc-relay-e2ee --all-features --locked` (330
+  passed); the new tests fail with the check removed; the mutation campaign
+  of the helper and the chain, now 146 mutations, kills the new one; an e2ee
+  branch report scores every `pc001-*` region at 100 percent.
+- The documentation of `from_proof` and `check_attempt` gives P-04 the reply
+  codes: `E2EE_FINALITY_REQUIRED` first, for an accepted state that is not
+  the ReInit finalization, then `E2EE_BINDING_AUTH_INVALID` for any error of
+  `check_attempt`.
 
 ## Validation
 

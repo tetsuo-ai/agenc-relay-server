@@ -74,7 +74,8 @@ use crate::objects::sequencing::ArcFinalizationProof;
 use crate::objects::{GROUP_ID_BYTES, group_id_bytes};
 use crate::policy::verify_policy;
 use crate::route::{
-    PrincipalRosters, SemanticRoute, VerifiedBinding, check_principals, verify_initial_member_plan,
+    PrincipalRosters, SemanticRoute, VerifiedBinding, check_binding_shape, check_principals,
+    verify_initial_member_plan,
 };
 use crate::sequencer::{verify_opened_credential, verify_sequencer_credential};
 use crate::tls::{DecodeBudget, Opaque, TlsDecode, TlsVec, ensure_canonical};
@@ -542,8 +543,10 @@ impl Successor<'_> {
     /// old binding, keeping its semantic route and concrete route, for this
     /// group, conversation, version and suite (companion 9.4). That the
     /// binding names the context's network, conversation, kind and route is
-    /// the binding agreement every context meets, checked with the other
-    /// context rules in [`Self::check_context`].
+    /// the binding agreement every context meets, and that it has the shape
+    /// of a binding of the semantic route it keeps, the route's conversation
+    /// kind among it, is the shape every binding meets; both are checked with
+    /// the other context rules in [`Self::check_context`].
     fn binding_of<'c>(
         &self,
         context: &'c ArcMlsContext,
@@ -620,17 +623,20 @@ impl Successor<'_> {
 
     /// The context meets the rules every context extension meets (the
     /// binding's recomputed route lock, the private topic, canonical roster
-    /// heads; companion 9.4 and 9.5), and its policy and sequencer credential
-    /// are the ones the binding names: the generation-zero policy of this
-    /// conversation, kind and suite, and a structurally valid credential
-    /// (companion 9.2, 9.3 and 13.8). Returns the binding's verified
-    /// semantic route.
+    /// heads; companion 9.4 and 9.5), its binding has the shape every binding
+    /// has against the semantic route it carries, that route's conversation
+    /// kind among it (companion 9.4; [`check_binding_shape`]), and its policy
+    /// and sequencer credential are the ones the binding names: the
+    /// generation-zero policy of this conversation, kind and suite, and a
+    /// structurally valid credential (companion 9.2, 9.3 and 13.8). Returns
+    /// the binding's verified semantic route.
     fn check_context(
         &self,
         context: &ArcMlsContext,
         binding: &ArcConversationBindingTbs,
     ) -> Result<SemanticRoute, E2eeError> {
         let route = check_binding_agreement(self.network_id, context)?;
+        check_binding_shape(self.network_id, binding, &route)?;
         check_private_topic(context.kind, context.private_topic.as_slice())?;
         ensure_canonical(context.roster_heads.as_slice(), |head| {
             (
@@ -841,6 +847,14 @@ impl AuthorizedReinit {
     /// candidate and Commit object; and the core commits the recomputed
     /// authorization ID. Signatures, approvals, votes and the record position
     /// are not checked here.
+    ///
+    /// A sequencer first establishes from its own state that the old
+    /// conversation's accepted state is the finalization of a ReInit Commit,
+    /// before it builds anything from that finalization's proof; an attempt
+    /// on any other accepted state, a finalization whose proof this function
+    /// refuses included, is refused with `E2EE_FINALITY_REQUIRED`, retaining
+    /// nothing (companion 13.8). Only then does it check the attempt with
+    /// [`Self::check_attempt`].
     pub fn from_proof(proof: &ArcFinalizationProof) -> Result<Self, E2eeError> {
         let authorization = &proof.authorization.tbs;
         let core = &proof.core;
@@ -979,6 +993,11 @@ impl AuthorizedReinit {
     /// binding of any other conversation rebuilds a target that names that
     /// conversation, which is not the carried one). Returns the checked
     /// carried target.
+    ///
+    /// Every error is the sequencer's `E2EE_BINDING_AUTH_INVALID`, retaining
+    /// nothing, whatever its kind: the refusal with `E2EE_FINALITY_REQUIRED`
+    /// for an accepted state that is not this finalization comes first and is
+    /// the caller's (companion 13.8; see [`Self::from_proof`]).
     pub fn check_attempt(
         &self,
         attempt: &ArcReInitAttempt,

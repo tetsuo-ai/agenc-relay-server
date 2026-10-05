@@ -283,7 +283,12 @@ pub fn verify_binding_package(
     })
 }
 
-fn check_binding_shape(
+/// The shape every binding meets against the semantic route it carries
+/// (companion 9.4): this profile, network and MLS version with an enabled
+/// suite, the route's conversation kind and semantic route lock, a previous
+/// binding exactly when the generation is not zero, and a context core and a
+/// sequencer credential.
+pub(crate) fn check_binding_shape(
     network_id: &[u8; 32],
     tbs: &ArcConversationBindingTbs,
     route: &SemanticRoute,

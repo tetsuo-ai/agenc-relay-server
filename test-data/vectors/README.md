@@ -54,6 +54,13 @@ its heads, policy and plan name the new one, and a successor naming a
 continuously rotated root of `c` (`root-c-1.bin`, `roster-c-1.bin`), the
 channel-authority root the old semantic route lock names.
 
+Two more rejection files hold a successor binding to the shape every binding
+has against the semantic route it carries: a successor whose context, binding,
+policy and context core name the direct kind while its binding keeps the old
+channel's semantic route, lock, channel instance and route binding, as the
+Proposal's extension list (`reject-extensions-kind-changed.bin`) and as the
+target a sender carrying that list builds (`reject-target-kind-changed.bin`).
+
 The recovery set covers the ENC-01 public-evidence contract: every `.bin`
 file is one complete encoded `ArcWireObject` of kind `recovery_submission`
 (35), `witness_resolution` (36), `leaf_membership_proof` (37), or an existing

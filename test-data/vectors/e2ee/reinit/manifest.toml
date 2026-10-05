@@ -514,6 +514,25 @@ new_conversation_id = "188869522f4f9823aefa9232904cd45d554f2e87ff2fcb3bcc4f681a2
 expected = "E2eeError::InvalidValue"
 
 [[vectors]]
+file = "reject-extensions-kind-changed.bin"
+encoded_length = 1716
+sha256 = "9fb3010bb93373ae7b46706b8b794a568e510581beb468667618cf70aa806600"
+group_id = "6666666666666666666666666666666666666666666666666666666666666666"
+cipher_suite = "1"
+new_conversation_id = "d698b4a8483f671caea494b29fb4195cfc60e97b123fa5709d0ded2b491d6aa5"
+expected = "E2eeError::InvalidValue"
+
+[[vectors]]
+file = "reject-target-kind-changed.bin"
+encoded_length = 1950
+sha256 = "ea7dc4de25982a205611da616b08fb309ea931e452e72b08f453fee7866dcee3"
+target_context_digest = "2c868853d6bbebc5113860f5e6934595141a716079c4a7cf4b30ebc06223ac9e"
+target_binding_id = "0041c21c1e250ebae3538044d4790a75ef6a33df8af2f5d1ec7d89b837043dee"
+target_context_core_id = "7375f1051f6bd9b01c45088db5d17f25be40e2585e134a2422af613d7c583653"
+initial_member_plan_id = "5736da87fb27ac1ddc088fe842bfec6115826a8ee891a257e8de0f587fb52f75"
+expected = "E2eeError::InvalidValue"
+
+[[vectors]]
 file = "reject-extensions-duplicate-context.bin"
 encoded_length = 3416
 sha256 = "68c76bebf3708da09b64b97174e91da1acb066b20d94380838a52ff6c2988839"

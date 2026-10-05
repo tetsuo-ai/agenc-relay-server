@@ -341,6 +341,51 @@ fn the_successor_binding_must_replace_the_old_binding() -> TestResult {
 }
 
 #[test]
+fn the_successor_binding_must_have_the_kind_of_the_route_it_keeps() -> TestResult {
+    // The context, the binding and the policy all name the direct kind, so
+    // the binding agrees with its context and names its policy, while the
+    // binding keeps the old channel's semantic route, lock, channel instance
+    // and route binding: only the shape every binding has against the route
+    // it carries separates it from the control (companion 9.4 and 13.8).
+    let edits: [Edit; 1] = [("the direct kind throughout", |context| {
+        context.kind = ArcConversationKind::Direct;
+        context.current_binding.tbs.kind = ArcConversationKind::Direct;
+        edit_policy(context, |policy| policy.kind = ArcConversationKind::Direct)
+    })];
+    assert_refused(&edits, &E2eeError::InvalidValue)?;
+
+    // The generator's independent vectors of the same successor: the
+    // extension list an endpoint reconstructs from, and the target a sender
+    // carrying that list builds, which the sequencer and a later joiner
+    // check without the Proposal.
+    let list = "reject-extensions-kind-changed.bin";
+    let proposal = Proposal {
+        group_id: hex(&entry(list, "group_id")?)?,
+        suite: entry(list, "cipher_suite")?.parse()?,
+        extensions: read(list)?,
+    };
+    let endpoint = reconstruct(&proposal.fields())?
+        .err()
+        .ok_or("the endpoint rebuilt a target")?;
+    assert_eq!(format!("E2eeError::{endpoint:?}"), entry(list, "expected")?);
+    let file = "reject-target-kind-changed.bin";
+    let target = ArcReInitTargetTbs::decode_exact(&read(file)?, &mut budget())?;
+    assert_eq!(
+        semantic_id_of(SemanticHashDomain::ReinitTarget, &target)?,
+        id(file, "target_context_digest")?
+    );
+    assert_eq!(
+        target.encoded_target_extensions.as_slice(),
+        proposal.extensions.as_slice()
+    );
+    let carried = check_carried_target(&network()?, &old_authority()?.0, &target, &mut budget())
+        .err()
+        .ok_or("the sequencer accepted the carried target")?;
+    assert_eq!(format!("E2eeError::{carried:?}"), entry(file, "expected")?);
+    Ok(())
+}
+
+#[test]
 fn the_successor_context_meets_every_context_extension_rule() -> TestResult {
     assert_eq!(
         rebuilt(|context| {

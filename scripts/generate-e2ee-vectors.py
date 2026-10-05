@@ -31,7 +31,16 @@ and a candidate abort, and activates it with a second attempt after the first
 aborted. Rejection files carry a malformed or mismatched extension list, a
 later joiner's GroupContext extensions (its own pending join), the
 pre-revision target layout, a successor initial Commit naming its activation,
-and an attempt carrying another target's digest. Signatures are real; MLS
+and an attempt carrying another target's digest. A continuous rotation of one
+member's root reaches a successor whose roster heads, binding principals,
+policy and plan name the new root, through activation and a later joiner's
+entries, and the same rotation is also written with a suite change from
+0x0001 to 0x0003. Its rejection files carry a forged continuity signature, a
+sibling root the rotation does not descend from, a fresh root that does not
+continue the old one, a successor binding that keeps the old root, a rotated
+channel-authority root, and a successor whose context, binding and policy
+name another conversation kind than the semantic route it keeps, as an
+extension list and as the target built from it. Signatures are real; MLS
 inputs are synthetic.
 
 Usage: python3 scripts/generate-e2ee-vectors.py [--check]
@@ -756,6 +765,7 @@ CREATOR_STATE, WELCOME_JOIN = 1, 2  # ArcReInitAckKind
 ROOT_LOCKED_GENESIS, REINIT_TARGET_TRANSITION = 1, 3  # ArcBindingProofKind
 POLICY_REINIT_TARGET_TRANSITION = 3  # ArcPolicyProofKind
 CHANNEL, MODERATED, ACTIVE = 1, 2, 1
+DIRECT = 2  # ArcConversationKind
 ARC_MLS_CONTEXT_EXTENSION = 0xF1C1
 REQUIRED_CAPABILITIES_EXTENSION = 0x0003
 PROFILE_LABEL = b"agenc-chat ARC-MLS specification profile v1\0"
@@ -916,10 +926,11 @@ def canonical(items: list[bytes]) -> bytes:
 
 
 def r_policy(conversation: bytes, generation: int, previous: bytes, controllers: list[RPrincipal],
-             council: list[RPrincipal], suite: int, approvers: list[RPrincipal]) -> tuple[bytes, bytes]:
+             council: list[RPrincipal], suite: int, approvers: list[RPrincipal],
+             kind: int = CHANNEL) -> tuple[bytes, bytes]:
     allowed = [1, 3] if suite == 1 else [suite, 1]
     tbs = (
-        u16(1) + NETWORK + conversation + u64(generation) + previous + u8(CHANNEL) + u8(MODERATED)
+        u16(1) + NETWORK + conversation + u64(generation) + previous + u8(kind) + u8(MODERATED)
         + u16(1) + u16(suite) + opaque(b"".join(u16(item) for item in allowed), 32)
         + opaque(canonical([p.fp for p in controllers]), 2048) + u16(1)
         + opaque(canonical([p.fp + p.device_id + p.cert_id for p in council]), 5120)
@@ -942,9 +953,10 @@ def r_plan(members: list[RPrincipal]) -> bytes:
 
 
 def r_core(suite: int, group: bytes, conversation: bytes, lock: bytes, route: bytes, time: int,
-           initial_policy: bytes, operational_policy: bytes, pending: int, plan_id: bytes, sequencer_id: bytes) -> bytes:
+           initial_policy: bytes, operational_policy: bytes, pending: int, plan_id: bytes, sequencer_id: bytes,
+           kind: int = CHANNEL) -> bytes:
     return (
-        u16(1) + u16(1) + u16(suite) + opaque(group, 255) + NETWORK + conversation + u8(CHANNEL)
+        u16(1) + u16(1) + u16(suite) + opaque(group, 255) + NETWORK + conversation + u8(kind)
         + lock + route + u64(time) + initial_policy + operational_policy + u8(pending) + plan_id
         + sequencer_id + opaque(R_REQUIRED_CAPABILITIES, 65_535)
     )
@@ -952,9 +964,9 @@ def r_core(suite: int, group: bytes, conversation: bytes, lock: bytes, route: by
 
 def r_binding_tbs(generation: int, previous: bytes, route_tbs: bytes, lock: bytes, group: bytes, conversation: bytes,
                   route: bytes, suite: int, initial_policy: bytes, operational_policy: bytes, plan_id: bytes,
-                  core_id: bytes, sequencer_id: bytes, principals: list[RPrincipal]) -> bytes:
+                  core_id: bytes, sequencer_id: bytes, principals: list[RPrincipal], kind: int = CHANNEL) -> bytes:
     return (
-        u16(1) + NETWORK + u8(CHANNEL) + u64(generation) + previous + route_tbs + lock
+        u16(1) + NETWORK + u8(kind) + u64(generation) + previous + route_tbs + lock
         + opaque(R_INSTANCE, 16) + opaque(b"", 32) + opaque(group, 255) + conversation + route
         + u16(1) + u16(suite) + initial_policy + operational_policy + plan_id + core_id + sequencer_id
         + opaque(canonical([p.principal_entry() for p in principals]), 65_535)
@@ -1148,22 +1160,27 @@ class RAttempt:
 class RTarget:
     """The successor of one suite: its context, extension list and target. `members` are the principals
     its roster heads, policy and plan name (the old ones unless given, such as after a root rotation);
-    `binding_members` are its binding's principals (the members unless given)."""
+    `binding_members` are its binding's principals (the members unless given); `kind` is the
+    conversation kind its context, binding, policy and core name (the old channel's unless given),
+    while it keeps the old channel's semantic route."""
 
     def __init__(self, world: "RWorld", suite: int, *, members: tuple[RPrincipal, ...] | None = None,
-                 binding_members: tuple[RPrincipal, ...] | None = None, group: bytes | None = None) -> None:
+                 binding_members: tuple[RPrincipal, ...] | None = None, group: bytes | None = None,
+                 kind: int = CHANNEL) -> None:
         self.world = world
         self.suite = suite
+        self.kind = kind
         self.group = bytes([0x40 + suite] * 32) if group is None else group
         self.new_conversation = semantic_id("conversation", NETWORK + opaque(self.group, 255))
         self.members = tuple(world.principals) if members is None else members
         self.binding_members = self.members if binding_members is None else binding_members
         members = list(self.members)
-        policy_tbs, self.policy = r_policy(self.new_conversation, 0, bytes(32), members, members, suite, [members[0]])
+        policy_tbs, self.policy = r_policy(self.new_conversation, 0, bytes(32), members, members, suite, [members[0]],
+                                           kind)
         self.policy_id = semantic_id("policy id", policy_tbs)
         self.plan_id = semantic_id("initial member plan id", r_plan(members))
         core = r_core(suite, self.group, self.new_conversation, world.lock, world.route, R_SUCCESSOR_TIME,
-                      self.policy_id, self.policy_id, 0, self.plan_id, world.sequencer_id)
+                      self.policy_id, self.policy_id, 0, self.plan_id, world.sequencer_id, kind)
         self.core_id = semantic_id("context core id", core)
         self.context = self.context_with(self.core_id)
         self.binding_id = semantic_id("binding id", self.binding_tbs(self.core_id))
@@ -1178,14 +1195,14 @@ class RTarget:
         w = self.world
         return r_binding_tbs(1, w.binding_id, w.route_tbs, w.lock, self.group, self.new_conversation, w.route,
                              self.suite, self.policy_id, self.policy_id, self.plan_id, core_id, w.sequencer_id,
-                             list(self.binding_members))
+                             list(self.binding_members), self.kind)
 
     def context_with(self, core_id: bytes, pending_joins: bytes = b"") -> bytes:
         w = self.world
         binding = self.binding_tbs(core_id) + opaque(b"", 65_535)
         heads = canonical([p.roster_head() for p in self.members])
         return (
-            u16(1) + NETWORK + self.new_conversation + u8(CHANNEL) + w.route + u64(R_SUCCESSOR_TIME)
+            u16(1) + NETWORK + self.new_conversation + u8(self.kind) + w.route + u64(R_SUCCESSOR_TIME)
             + self.policy + w.credential + binding + u8(ACTIVE) + bytes(32) + opaque(b"", 4096) + u8(0)
             + opaque(heads, 65_535) + opaque(pending_joins, 65_535)
         )
@@ -1506,6 +1523,19 @@ def build_reinit() -> tuple[list[tuple[str, bytes, dict[str, object]]], dict[str
         entries.append((f"reject-rotation-{name}-extensions.bin", rejected.extensions,
                         {"group_id": rejected.group, "cipher_suite": "1", "new_conversation_id": rejected.new_conversation,
                          "expected": "E2eeError::InvalidValue"}))
+
+    # A successor binding has the shape of a binding of the semantic route it keeps (companion 9.4 and
+    # 13.8): one whose context, binding, policy and core all name the direct kind while it keeps the old
+    # channel's semantic route, lock, channel instance and route binding is refused, both as the
+    # Proposal's extension list and as the target a sender carrying that list would build.
+    kind_changed = RTarget(w, 1, group=bytes([0x66] * 32), kind=DIRECT)
+    entries.append(("reject-extensions-kind-changed.bin", kind_changed.extensions,
+                    {"group_id": kind_changed.group, "cipher_suite": "1",
+                     "new_conversation_id": kind_changed.new_conversation, "expected": "E2eeError::InvalidValue"}))
+    entries.append(("reject-target-kind-changed.bin", kind_changed.tbs,
+                    {"target_context_digest": kind_changed.digest, "target_binding_id": kind_changed.binding_id,
+                     "target_context_core_id": kind_changed.core_id, "initial_member_plan_id": kind_changed.plan_id,
+                     "expected": "E2eeError::InvalidValue"}))
 
     # Rejections.
     suite_one = targets[1]

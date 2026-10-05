@@ -152,8 +152,9 @@ that the old context's `roster_heads` also name, carries a root that is
 neither the old head's root nor a continuous successor of it") is now
 implemented by `reconstruct_reinit_target` (`check_rosters_named`,
 `check_root_continuity`, the principals and policy checks). With the thirteen
-clauses of P-02, the shared helper implements all fourteen `S10-005` clauses
-of the revision; they stay bound to `S10-005`, `unimplemented` until that task
+clauses of P-02, the shared code (the helper, with `HistoricalChain` where the
+P-02 record's table says so) implements all fourteen `S10-005` clauses of the
+revision; they stay bound to `S10-005`, `unimplemented` until that task
 closes, as the server's process derives status from the task. The seven
 `S10-004` clauses remain P-04's.
 
