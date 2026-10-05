@@ -62,7 +62,7 @@ use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
 use crate::sync::Arc;
 
-pub(crate) use request::is_local_user_mode_query;
+pub(crate) use request::served_while_unavailable;
 pub use request::{EdgeCompletion, RemoteCarrierOutcome};
 pub use startup::{EdgeRestoreCause, EdgeRestoreRefusal, EdgeRestoreStep};
 

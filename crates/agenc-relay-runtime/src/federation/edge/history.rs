@@ -136,6 +136,17 @@ pub(super) fn begin(
     }
 }
 
+/// Whether a record of the connection's `CHATHISTORY` is staged and not yet
+/// committed: its first send before the request is registered, or the next
+/// page's send between two pages. At every other step until its last page
+/// the query's request is pending.
+pub(super) fn record_staged(edge: &EdgeFederation, generation: ConnectionGeneration) -> bool {
+    matches!(
+        &edge.commit,
+        Some(PendingCommit::History(prepared)) if prepared.generation == generation
+    )
+}
+
 fn stage_send(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,

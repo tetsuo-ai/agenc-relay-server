@@ -421,10 +421,35 @@ fn render_information(
     nickname: &str,
     query: InformationQuery,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
+    information_frames(context, nickname, query, LusersForm::Counted)
+}
+
+/// The form of a node's `LUSERS` reply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LusersForm {
+    /// The counts of the node's own domain, as a single node and a
+    /// coordinator answer.
+    Counted,
+    /// The fixed form an edge answers with: no count, the same on every edge
+    /// in every state (Section 14's static output).
+    Static,
+}
+
+/// Renders one information query from the node's own configuration and
+/// clock, with `LUSERS` in the given form.
+pub(crate) fn information_frames(
+    context: &StateCoreContext,
+    nickname: &str,
+    query: InformationQuery,
+    lusers: LusersForm,
+) -> Result<Vec<WireMessage>, RuntimeError> {
     let prefix = context.server_prefix();
     match query {
         InformationQuery::Motd => render_motd(context, nickname),
-        InformationQuery::Lusers => render_lusers(context.domain(), prefix, nickname),
+        InformationQuery::Lusers => match lusers {
+            LusersForm::Counted => render_lusers(context.domain(), prefix, nickname),
+            LusersForm::Static => render_static_lusers(prefix, nickname),
+        },
         InformationQuery::Version => info_lines(
             prefix,
             nickname,
@@ -564,6 +589,21 @@ fn render_lusers(
         &local,
     )?;
     Ok(frames)
+}
+
+/// The fixed `LUSERS` reply of an edge: the two numerics every `LUSERS`
+/// reply carries, `251` and `255`, with fixed text and no count, so the reply
+/// is the same on every edge whatever it serves.
+const STATIC_LUSERS: [(u16, &str); 2] = [
+    (251, "User counts are not published by this server"),
+    (255, "Local counts are not published by this server"),
+];
+
+fn render_static_lusers(prefix: &str, nickname: &str) -> Result<Vec<WireMessage>, RuntimeError> {
+    STATIC_LUSERS
+        .iter()
+        .map(|(code, text)| numeric(prefix, *code, nickname, &[], text))
+        .collect()
 }
 
 fn info_lines(

@@ -149,10 +149,11 @@ ceiling guards, which this change does not touch.
 
 - On the edge the daemon test exercises `#` channels and `AWAY`. On an
   edge, a JOIN of a `&` channel is refused (`481`, or `SERVER_BUSY` with
-  `standard-replies`) instead of joining an edge-owned channel, and `TIME`,
-  `VERSION`, `MOTD` and `LUSERS` each end the requester's connection
-  without a reply. Both are outside AUD-16; the code on both paths is
-  unchanged from `70c832c`, and both are reported to the program for
-  separate work.
+  `standard-replies`) instead of joining an edge-owned channel; that is
+  outside AUD-16, the code on that path is unchanged from `70c832c`, and it
+  is on the owner's list (decision D-29). The edge's information queries,
+  which this record found ending the requester's connection, are answered
+  since BLJ-R1's fix, recorded in
+  [the edge local queries record](stage-10-edge-local-queries.md).
 - The daemon tests run on the development host, not the release
   qualification hosts.

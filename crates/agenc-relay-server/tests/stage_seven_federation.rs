@@ -1207,3 +1207,279 @@ fn require_before(lines: &[String], first: usize, then: usize, rule: &str) -> Te
         Err(failure(format!("{rule}: {lines:?}")))
     }
 }
+
+/// The information queries an edge answers itself (BLJ-R1, decision D-28):
+/// `MOTD`, `LUSERS`, `VERSION`, `TIME`, `ADMIN` and `INFO`, plain and
+/// labeled, each followed by `PING`, are answered and the connection stays
+/// open; `LINKS` reaches the coordinator's directory. After the coordinator
+/// is killed the edge still answers the six (Section 20.10), while `LINKS`
+/// fails closed.
+#[test]
+fn an_edge_answers_its_information_queries_and_keeps_the_connection() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| exercise_edge_information(&network, &mut coordinator));
+    let stopped_a = edge_a.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text()
+        )));
+    }
+    let status = stopped_a.map_err(|error| failure(format!("edge a: {error}")))?;
+    if !status.success() {
+        return Err(failure(format!("edge a exited with {status}")));
+    }
+    // The scenario killed the coordinator, so it has nothing left to stop.
+    if stopped_core.is_ok() {
+        return Err(failure("the coordinator outlived its kill"));
+    }
+    Ok(())
+}
+
+/// Each query with the numeric that ends its reply; the fixture configures
+/// no MOTD.
+const EDGE_INFORMATION: [(&str, &str); 6] = [
+    ("MOTD", " 422 "),
+    ("LUSERS", " 255 "),
+    ("VERSION", " 374 "),
+    ("TIME", " 391 "),
+    ("ADMIN", " 374 "),
+    ("INFO", " 374 "),
+];
+
+fn exercise_edge_information(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
+    let mut iris = register_when_available(&network.edge_a, "iris")?;
+    edge_information_round(&mut iris, "active")?;
+    iris.send("CAP REQ :message-tags batch labeled-response")?;
+    iris.read_until(|line| line.contains(" ACK "))?;
+    labeled_edge_information_round(&mut iris, "active")?;
+    // LINKS is the coordinator's directory query; its reply follows the
+    // coordinator's single-node rendering.
+    iris.send("LINKS")?;
+    iris.read_until(|line| line.contains(" 374 iris :End of INFO"))?;
+    iris.send("PING :links")?;
+    iris.read_until(|line| line.ends_with(" :links"))?;
+
+    coordinator.kill()?;
+    let refused = wait_for_partition(&mut iris)?;
+    assert_contains(&refused, "FAIL PRIVMSG NETWORK_UNAVAILABLE")?;
+    edge_information_round(&mut iris, "partitioned")?;
+    labeled_edge_information_round(&mut iris, "partitioned")?;
+    iris.send("LINKS")?;
+    iris.read_until(|line| line.contains("FAIL LINKS NETWORK_UNAVAILABLE"))?;
+    iris.send("PING :still-open")?;
+    iris.read_until(|line| line.ends_with(" :still-open"))?;
+    Ok(())
+}
+
+/// Sends the six queries and a PING and reads until every reply and the
+/// PONG arrived. The PING is answered at once, while the queries wait behind
+/// whatever the connection still has in flight (right after registration,
+/// the origin update that carries its session), so the PONG may come first;
+/// the replies themselves arrive in order.
+fn edge_information_round(client: &mut ArcClient, phase: &str) -> TestResult {
+    for (query, _) in EDGE_INFORMATION {
+        client.send(query)?;
+    }
+    let marker = format!(" :information-{phase}");
+    client.send(&format!("PING{marker}"))?;
+    let mut answered = 0;
+    let mut ponged = false;
+    let replies = client.read_until(|line| {
+        ponged |= line.ends_with(&marker);
+        if let Some((_, ending)) = EDGE_INFORMATION.get(answered)
+            && line.starts_with(":edge-a.test")
+            && line.contains(ending)
+        {
+            answered += 1;
+        }
+        ponged && answered == EDGE_INFORMATION.len()
+    })?;
+    if replies.iter().any(|line| line.contains(" FAIL ")) {
+        return Err(failure(format!("{phase}: refused: {replies:?}")));
+    }
+    Ok(())
+}
+
+/// The same with a label on each query: each reply is one labeled line or
+/// one labeled batch, and each ends before the next begins.
+fn labeled_edge_information_round(client: &mut ArcClient, phase: &str) -> TestResult {
+    for (query, _) in EDGE_INFORMATION {
+        client.send(&format!("@label={} {query}", query.to_ascii_lowercase()))?;
+    }
+    let marker = format!(" :labeled-{phase}");
+    client.send(&format!("PING{marker}"))?;
+    let mut answered = 0;
+    let mut ponged = false;
+    let replies = client.read_until(|line| {
+        ponged |= line.ends_with(&marker);
+        if let Some((query, ending)) = EDGE_INFORMATION.get(answered) {
+            let label = query.to_ascii_lowercase();
+            let single = line.starts_with(&format!("@label={label} ")) && line.contains(ending);
+            let batch_end = line.ends_with(&format!(" BATCH -{label}"));
+            if single || batch_end {
+                answered += 1;
+            }
+        }
+        ponged && answered == EDGE_INFORMATION.len()
+    })?;
+    if replies.iter().any(|line| line.contains(" FAIL ")) {
+        return Err(failure(format!("{phase}: refused: {replies:?}")));
+    }
+    Ok(())
+}
+
+/// An edge answers `LUSERS` in one fixed form that holds no count (decision
+/// D-35, which replaces the counted form of D-28): two edges serving
+/// different clients and channels send the same reply apart from the server
+/// prefix and the nickname, and neither a JOIN and a PART on an edge nor the
+/// loss of the coordinator changes it. The coordinator keeps its counted
+/// reply over the whole network.
+#[test]
+fn edges_answer_lusers_in_one_fixed_form() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| wait_for_link(&network.edge_b, 0))
+        .and_then(|()| exercise_static_lusers(&network, &mut coordinator));
+    let stopped_a = edge_a.stop();
+    let stopped_b = edge_b.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}\n--- edge b log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text(),
+            network.edge_b.log_text()
+        )));
+    }
+    for (label, status) in [("edge a", stopped_a), ("edge b", stopped_b)] {
+        let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+        if !status.success() {
+            return Err(failure(format!("{label} exited with {status}")));
+        }
+    }
+    // The scenario killed the coordinator, so it has nothing left to stop.
+    if stopped_core.is_ok() {
+        return Err(failure("the coordinator outlived its kill"));
+    }
+    Ok(())
+}
+
+/// The fixed `LUSERS` reply, with the server prefix and the nickname written
+/// as `lusers` writes them.
+const STATIC_LUSERS: [&str; 2] = [
+    ":<server> 251 <nick> :User counts are not published by this server",
+    ":<server> 255 <nick> :Local counts are not published by this server",
+];
+
+fn exercise_static_lusers(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
+    // Edge A serves one client and no channel, edge B two clients and a
+    // channel.
+    let mut lena = register_when_available(&network.edge_a, "lena")?;
+    let mut omar = register_when_available(&network.edge_b, "omar")?;
+    let _pia = register_when_available(&network.edge_b, "pia")?;
+    omar.send("JOIN #b-side")?;
+    omar.read_until(|line| line.contains(" 366 omar #b-side "))?;
+    let on_a = lusers(&mut lena, "edge-a.test", "lena")?;
+    let on_b = lusers(&mut omar, "edge-b.test", "omar")?;
+    if on_a != on_b {
+        return Err(failure(format!("the edges differ: {on_a:?} {on_b:?}")));
+    }
+    require_static(&on_a, "edge a")?;
+    // The coordinator counts the whole network: the three edge clients, its
+    // own client and the channel on edge B.
+    let mut cora = register_when_available(&network.coordinator, "cora")?;
+    require_counted(&mut cora, 4, 1, "the coordinator")?;
+    // A JOIN and a PART on edge A leave its reply as it was, while the
+    // coordinator counts the new channel.
+    lena.send("JOIN #a-side")?;
+    lena.read_until(|line| line.contains(" 366 lena #a-side "))?;
+    require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "after a JOIN")?;
+    require_counted(&mut cora, 4, 2, "the coordinator after a JOIN")?;
+    lena.send("PART #a-side")?;
+    lena.read_until(|line| line.contains(" PART #a-side"))?;
+    require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "after a PART")?;
+    // So does the loss of the coordinator.
+    coordinator.kill()?;
+    let refused = wait_for_partition(&mut lena)?;
+    assert_contains(&refused, "FAIL PRIVMSG NETWORK_UNAVAILABLE")?;
+    require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "partitioned")
+}
+
+/// Sends `LUSERS` and returns its reply lines with the server prefix and the
+/// nickname replaced, so that replies compare across edges.
+fn lusers(client: &mut ArcClient, server: &str, nickname: &str) -> TestResult<Vec<String>> {
+    client.send("LUSERS")?;
+    let end = format!(":{server} 255 {nickname} ");
+    let lines = client.read_until(|line| line.starts_with(&end))?;
+    let mut reply = Vec::new();
+    for line in &lines {
+        for code in ["251", "252", "253", "254", "255", "265", "266"] {
+            if let Some(rest) = line.strip_prefix(&format!(":{server} {code} {nickname} ")) {
+                reply.push(format!(":<server> {code} <nick> {rest}"));
+            }
+        }
+    }
+    Ok(reply)
+}
+
+/// Sends `LUSERS` and a `PING` to the coordinator's client `cora` and
+/// requires the reply read through its `266` to be the counted form for
+/// `users` sessions and `channels` channels network-wide.
+fn require_counted(
+    cora: &mut ArcClient,
+    users: usize,
+    channels: usize,
+    moment: &str,
+) -> TestResult {
+    cora.send("LUSERS")?;
+    cora.send("PING :counted")?;
+    let lines = cora.read_until(|line| line.ends_with(" :counted"))?;
+    let reply: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| {
+            ["251", "252", "253", "254", "255", "265", "266"]
+                .iter()
+                .any(|code| line.starts_with(&format!(":core.test {code} cora ")))
+        })
+        .collect();
+    let expected = [
+        format!(":core.test 251 cora :There are {users} users on one server"),
+        ":core.test 252 cora 0 :operator(s) online".to_owned(),
+        ":core.test 253 cora 0 :unknown connection(s)".to_owned(),
+        format!(":core.test 254 cora {channels} :channels formed"),
+        format!(":core.test 255 cora :There are {users} users on one server"),
+        format!(":core.test 265 cora {users} {users} :Current local users {users}, max {users}"),
+        format!(":core.test 266 cora {users} {users} :Current local users {users}, max {users}"),
+    ];
+    if reply
+        .iter()
+        .copied()
+        .eq(expected.iter().map(String::as_str))
+    {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "{moment}: LUSERS is not the counted form for {users} users and {channels} channels: {reply:?}"
+        )))
+    }
+}
+
+fn require_static(reply: &[String], moment: &str) -> TestResult {
+    if reply.iter().map(String::as_str).eq(STATIC_LUSERS) {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "{moment}: LUSERS is not the fixed form: {reply:?}"
+        )))
+    }
+}
