@@ -7,12 +7,14 @@
 //! The target covers no accepted-state or record ID of the old group. Every
 //! field is fixed by the old conversation and the Proposal, so
 //! [`reconstruct_reinit_target`] derives the complete target from the
-//! Proposal's group ID, version, cipher suite and exact extension list, and
+//! Proposal's group ID, version, cipher suite and exact extension list,
 //! checks the successor context in that list against the old conversation's
-//! current binding and verifies its policy. An old-group endpoint calls it
-//! with the Proposal of the staged old Commit before it approves,
-//! acknowledges or votes, and a continuing member with the successor's
-//! epoch-1 GroupContext before it acknowledges an attempt.
+//! current binding, and verifies the successor under the rosters its own
+//! roster heads name, whose roots continue the old context's
+//! ([`SuccessorRosters`]). An old-group endpoint calls it with the Proposal
+//! of the staged old Commit before it approves, acknowledges or votes, and a
+//! continuing member with the successor's epoch-1 GroupContext before it
+//! acknowledges an attempt.
 //!
 //! Every `ArcReInitAttempt` carries the exact target in `target`, so a
 //! verifier that never sees the Proposal checks the same bytes:
@@ -32,8 +34,9 @@
 //! public frame and authenticated data, which a caller that holds the attempt
 //! must check itself: [`crate::history::HistoricalChain`] does not.
 //!
-//! Only public bytes enter this module. It checks structure, hash links, and
-//! the successor policy's approvals under the given rosters. Controller
+//! Only public bytes enter this module. It checks structure, hash links, the
+//! successor rosters and root continuity, and the successor policy's
+//! approvals under those rosters. Controller
 //! approvals of the old Commit, finality votes, sequencer signatures, ACK
 //! sets, quorums and record positions are verified by
 //! [`crate::history::HistoricalChain`] or by the caller under the old policy,
@@ -43,13 +46,14 @@
 //! MLS state, and that the successor's roster heads and initial member plan
 //! are the ones the controllers approved.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_crypto::SemanticHashDomain;
 
 use crate::context::{check_binding_agreement, check_private_topic, context_core_id};
 use crate::error::E2eeError;
-use crate::ids::{SemanticId, conversation_id, semantic_id_of};
+use crate::identity::{AccountIdBytes, verify_root_chain, verify_root_standalone};
+use crate::ids::{SemanticId, account_id_digest, conversation_id, semantic_id_of};
 use crate::limits::{
     ARC_MLS_CONTEXT_EXTENSION, MAX_ARC_MLS_CONTEXT_EXTENSION, MLS_VERSION_MLS10, PROFILE_VERSION,
     suite_is_enabled,
@@ -60,15 +64,18 @@ use crate::objects::conversation::{
     ArcBindingChainEntry, ArcBindingProofKind, ArcCommitAuthorizationRule, ArcContextCoreTbs,
     ArcConversationBindingTbs, ArcConversationLifecycleKind, ArcInitialMemberPlan,
     ArcInitialMemberPlanEntry, ArcKeyPackagePlan, ArcMlsContext, ArcPolicyChainEntry,
-    ArcPolicyProofKind, ArcPolicyTbs, action_bits,
+    ArcPolicyProofKind, ArcPolicyTbs, ArcRosterHead, action_bits,
 };
+use crate::objects::identity::ArcRootIdentity;
 use crate::objects::reinit::{
     ArcReInitActivationCertificate, ArcReInitAttempt, ArcReInitAttemptTbs, ArcReInitTargetTbs,
 };
 use crate::objects::sequencing::ArcFinalizationProof;
 use crate::objects::{GROUP_ID_BYTES, group_id_bytes};
 use crate::policy::verify_policy;
-use crate::route::{PrincipalRosters, VerifiedBinding, verify_initial_member_plan};
+use crate::route::{
+    PrincipalRosters, SemanticRoute, VerifiedBinding, check_principals, verify_initial_member_plan,
+};
 use crate::sequencer::{verify_opened_credential, verify_sequencer_credential};
 use crate::tls::{DecodeBudget, Opaque, TlsDecode, TlsVec, ensure_canonical};
 use crate::welcome::VerifiedStagedReInit;
@@ -119,6 +126,7 @@ pub struct CarriedTarget {
     tbs: ArcReInitTargetTbs,
     digest: SemanticId,
     context: ArcMlsContext,
+    route: SemanticRoute,
 }
 
 impl CarriedTarget {
@@ -149,8 +157,9 @@ impl CarriedTarget {
 }
 
 /// A target reconstructed from its Proposal by an endpoint: a
-/// [`CarriedTarget`] whose successor policy also verified under the rosters
-/// the endpoint supplied. The only constructor is
+/// [`CarriedTarget`] whose successor rosters are the ones its roster heads
+/// name and continue the old context's roots, and whose binding principals
+/// and policy verify under them. The only constructor is
 /// [`reconstruct_reinit_target`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReinitTarget {
@@ -185,8 +194,32 @@ impl ReinitTarget {
     }
 }
 
-/// Reconstructs the ReInit target of the conversation `old_binding` binds
-/// from its Proposal (companion 13.8).
+/// The old conversation as an endpoint holds it when it rebuilds a ReInit
+/// target: its current binding and the roster heads its current context
+/// commits.
+#[derive(Clone, Copy, Debug)]
+pub struct OldConversation<'a> {
+    /// The old conversation's current binding.
+    pub binding: &'a VerifiedBinding,
+    /// The `roster_heads` of the old conversation's current context.
+    pub roster_heads: &'a [ArcRosterHead],
+}
+
+/// The rosters a successor context's roster heads name, and the root chains
+/// that continue the old context's heads to them (companion 8.2 and 13.8).
+#[derive(Clone, Copy, Debug)]
+pub struct SuccessorRosters<'a> {
+    /// The verified root and roster of every account the successor context's
+    /// `roster_heads` name, keyed by Account ID, and of no other account.
+    pub rosters: &'a PrincipalRosters,
+    /// For each account whose successor head names another root than its
+    /// head in the old context: the consecutive root identities from the old
+    /// head's root to the successor's root, oldest first, both included.
+    pub root_chains: &'a BTreeMap<AccountIdBytes, Vec<ArcRootIdentity>>,
+}
+
+/// Reconstructs the ReInit target of the old conversation from its Proposal
+/// (companion 13.8).
 ///
 /// The structural rules of [`check_carried_target`] apply to the Proposal:
 /// the extension list carries exactly one `ARC_MLS_CONTEXT_EXTENSION` and one
@@ -194,25 +227,120 @@ impl ReinitTarget {
 /// 13.4); the context describes the successor as companion 13.8 states it
 /// once activated; and the `ArcContextCoreTBS` recomputed from the Proposal,
 /// the `required_capabilities` data, the context and its binding has the
-/// binding's `context_core_id`. The successor policy must also verify under
-/// `rosters`. The target's binding ID, plan ID and context core ID are then
-/// read from that binding.
+/// binding's `context_core_id`. The successor is then verified under its own
+/// rosters: `successor.rosters` must be exactly the rosters the successor
+/// context's `roster_heads` name; each of those heads for an account the old
+/// context's `old.roster_heads` also name must carry the old head's root or,
+/// through the supplied root chain, a continuous successor of it, so a
+/// ReInit never carries a root discontinuity; and the successor binding's
+/// principals and the successor policy must verify under those rosters. The
+/// target's binding ID, plan ID and context core ID are read from the
+/// binding.
 pub fn reconstruct_reinit_target(
     network_id: &[u8; 32],
-    old_binding: &VerifiedBinding,
-    rosters: &PrincipalRosters,
+    old: &OldConversation<'_>,
+    successor: &SuccessorRosters<'_>,
     proposal: &ReinitProposal<'_>,
     budget: &mut DecodeBudget,
 ) -> Result<ReinitTarget, E2eeError> {
-    let target = successor_target(network_id, &Predecessor::of(old_binding), proposal, budget)?;
+    let target = successor_target(network_id, &Predecessor::of(old.binding), proposal, budget)?;
+    let context = &target.context;
+    check_rosters_named(
+        network_id,
+        context.roster_heads.as_slice(),
+        successor.rosters,
+    )?;
+    check_root_continuity(network_id, old.roster_heads, successor)?;
+    check_principals(
+        &context.current_binding.tbs,
+        &target.route,
+        successor.rosters,
+    )?;
     verify_policy(
         network_id,
         &target.tbs.new_conversation_id,
-        &target.context.policy,
-        rosters,
+        &context.policy,
+        successor.rosters,
         None,
     )?;
     Ok(ReinitTarget { target })
+}
+
+/// The supplied rosters are exactly the ones the successor context's roster
+/// heads name: a head for every supplied account, naming that account's
+/// root generation and fingerprint and its roster generation and ID, and as
+/// many heads as rosters, so no head lacks a roster and none names an account
+/// twice (companion 9.5 and 13.8).
+fn check_rosters_named(
+    network_id: &[u8; 32],
+    heads: &[ArcRosterHead],
+    rosters: &PrincipalRosters,
+) -> Result<(), E2eeError> {
+    if heads.len() != rosters.len() {
+        return Err(E2eeError::InvalidValue);
+    }
+    for (account_id, (root, roster)) in rosters {
+        let digest = account_id_digest(network_id, account_id)?;
+        let Some(head) = heads.iter().find(|head| head.account_id_digest == digest) else {
+            return Err(E2eeError::InvalidValue);
+        };
+        let carried = (
+            head.root_generation,
+            head.root_fingerprint,
+            head.roster_generation,
+            head.roster_id,
+        );
+        let supplied = (
+            root.generation,
+            root.fingerprint,
+            roster.generation,
+            roster.roster_id,
+        );
+        if carried != supplied {
+            return Err(E2eeError::InvalidValue);
+        }
+    }
+    Ok(())
+}
+
+/// Every successor root of an account the old context's roster heads also
+/// name is the old head's root or a continuous successor of it (companion
+/// 8.2 and 13.8): the same fingerprint, or a supplied root chain that starts
+/// at the old head's root, verifies every continuity signature, and ends at
+/// the successor's root. Root fingerprints cover the account and the
+/// generation.
+fn check_root_continuity(
+    network_id: &[u8; 32],
+    old_heads: &[ArcRosterHead],
+    successor: &SuccessorRosters<'_>,
+) -> Result<(), E2eeError> {
+    for (account_id, (root, _)) in successor.rosters {
+        let digest = account_id_digest(network_id, account_id)?;
+        let mut named = old_heads
+            .iter()
+            .filter(|head| head.account_id_digest == digest);
+        let Some(old) = named.next() else {
+            continue;
+        };
+        if named.next().is_some() {
+            return Err(E2eeError::InvalidValue);
+        }
+        if old.root_fingerprint == root.fingerprint {
+            continue;
+        }
+        let chain = successor
+            .root_chains
+            .get(account_id)
+            .ok_or(E2eeError::InvalidValue)?;
+        let (first, rest) = chain.split_first().ok_or(E2eeError::InvalidValue)?;
+        let start = verify_root_standalone(network_id, first)?;
+        let verified = verify_root_chain(network_id, rest, Some(&start))?;
+        let end = verified.last().ok_or(E2eeError::InvalidValue)?;
+        if (start.fingerprint, end.fingerprint) != (old.root_fingerprint, root.fingerprint) {
+            return Err(E2eeError::InvalidValue);
+        }
+    }
+    Ok(())
 }
 
 /// Checks a target that a verifier holds without the Proposal, such as the
@@ -277,7 +405,7 @@ fn successor_target(
         old,
     };
     let binding = successor.binding_of(&context)?;
-    successor.check_context(&context, binding)?;
+    let route = successor.check_context(&context, binding)?;
     let core = successor.core(&context, binding, required_capabilities)?;
     if context_core_id(&core)? != binding.context_core_id {
         return Err(E2eeError::InvalidValue);
@@ -300,6 +428,7 @@ fn successor_target(
         tbs,
         digest,
         context,
+        route,
     })
 }
 
@@ -494,13 +623,14 @@ impl Successor<'_> {
     /// heads; companion 9.4 and 9.5), and its policy and sequencer credential
     /// are the ones the binding names: the generation-zero policy of this
     /// conversation, kind and suite, and a structurally valid credential
-    /// (companion 9.2, 9.3 and 13.8).
+    /// (companion 9.2, 9.3 and 13.8). Returns the binding's verified
+    /// semantic route.
     fn check_context(
         &self,
         context: &ArcMlsContext,
         binding: &ArcConversationBindingTbs,
-    ) -> Result<(), E2eeError> {
-        check_binding_agreement(self.network_id, context)?;
+    ) -> Result<SemanticRoute, E2eeError> {
+        let route = check_binding_agreement(self.network_id, context)?;
         check_private_topic(context.kind, context.private_topic.as_slice())?;
         ensure_canonical(context.roster_heads.as_slice(), |head| {
             (
@@ -516,7 +646,7 @@ impl Successor<'_> {
             verify_opened_credential(self.network_id, &context.sequencer)?
         };
         if sequencer.credential_id == binding.sequencer_credential_id {
-            Ok(())
+            Ok(route)
         } else {
             Err(E2eeError::InvalidValue)
         }

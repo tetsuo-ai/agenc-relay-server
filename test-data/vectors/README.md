@@ -37,6 +37,23 @@ initial Commit, name another target's digest (and carry that target) in an
 otherwise valid attempt and receipt, and name the authorized digest while
 carrying another target.
 
+The ReInit set also covers the successor rosters. Account `d` rotates its root
+continuously (`root-d-1.bin`, whose continuity signature is by `d`'s old root,
+and `roster-d-1.bin` under it), and the `rotation` successor names that root
+in its roster heads, binding principals, policy and plan; its log runs from the
+ReInit candidate through activation under the old council, with the attempt,
+the initial Commit and a later joiner's entries. `rotation-0003` is the same
+rotation with a suite change from `0x0001` to `0x0003`, reconstructed only.
+The rejection files for the rosters are a generation-one root of `d` with the
+same fingerprint and a continuity signature by another key, another valid
+generation-one root of `d` (`root-d-1-sibling.bin`) from which the rotation
+does not descend, a successor naming
+a generation-zero root of `d` that does not continue the old one (with its own
+root and roster files), a successor whose binding keeps `d`'s old root while
+its heads, policy and plan name the new one, and a successor naming a
+continuously rotated root of `c` (`root-c-1.bin`, `roster-c-1.bin`), the
+channel-authority root the old semantic route lock names.
+
 The recovery set covers the ENC-01 public-evidence contract: every `.bin`
 file is one complete encoded `ArcWireObject` of kind `recovery_submission`
 (35), `witness_resolution` (36), `leaf_membership_proof` (37), or an existing

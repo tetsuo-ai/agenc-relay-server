@@ -340,7 +340,11 @@ fn concrete_route(
     Ok((group_id, expected, instance, nonce))
 }
 
-fn check_principals(
+/// The binding's principals are canonical and bounded, each names the root
+/// fingerprint, roster generation and roster ID of its supplied roster, a
+/// direct binding names exactly its route's two accounts, and a channel's
+/// authority root is among the supplied roots.
+pub(crate) fn check_principals(
     tbs: &ArcConversationBindingTbs,
     route: &SemanticRoute,
     principals: &PrincipalRosters,

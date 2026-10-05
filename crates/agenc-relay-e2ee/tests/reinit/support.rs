@@ -3,19 +3,26 @@
 //! (written by `scripts/generate-e2ee-vectors.py`, never by this crate) and
 //! opening the conversation they describe at its pinned genesis.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 
 use agenc_relay_e2ee::history::{ChainLimits, ChainStep, HistoricalChain, RecordReferences};
+use agenc_relay_e2ee::identity::AccountIdBytes;
+use agenc_relay_e2ee::ids::account_id_digest;
 use agenc_relay_e2ee::initial_authority::{
     ExpectedInitialAuthority, InitialAuthorityEvidence, InitialPrincipalEvidence,
     authenticate_initial_authority,
 };
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
+use agenc_relay_e2ee::objects::conversation::ArcRosterHead;
+use agenc_relay_e2ee::objects::identity::ArcRootIdentity;
 use agenc_relay_e2ee::objects::reinit::ArcReInitAttempt;
 use agenc_relay_e2ee::objects::sequencing::{ArcFinalizationProof, ArcSequencerRecord};
-use agenc_relay_e2ee::reinit_target::{ReinitProposal, ReinitTarget, reconstruct_reinit_target};
+use agenc_relay_e2ee::reinit_target::{
+    OldConversation, ReinitProposal, ReinitTarget, SuccessorRosters, reconstruct_reinit_target,
+};
 use agenc_relay_e2ee::route::{PrincipalRosters, VerifiedBinding};
 use agenc_relay_e2ee::{DecodeBudget, E2eeError, TlsDecode};
 
@@ -223,19 +230,63 @@ pub(crate) fn old_authority() -> TestResult<(VerifiedBinding, PrincipalRosters)>
     Ok((chain.binding().clone(), chain.principals().clone()))
 }
 
+/// The canonical roster heads of `rosters`, as a context names them.
+pub(crate) fn heads_of(rosters: &PrincipalRosters) -> TestResult<Vec<ArcRosterHead>> {
+    let network = network()?;
+    let mut heads = rosters
+        .iter()
+        .map(|(account, (root, roster))| {
+            Ok(ArcRosterHead {
+                account_id_digest: account_id_digest(&network, account)?,
+                root_generation: root.generation,
+                root_fingerprint: root.fingerprint,
+                roster_generation: roster.generation,
+                roster_id: roster.roster_id,
+            })
+        })
+        .collect::<Result<Vec<_>, E2eeError>>()?;
+    heads.sort_by_key(|head| {
+        (
+            head.account_id_digest,
+            head.root_generation,
+            head.root_fingerprint,
+        )
+    });
+    Ok(heads)
+}
+
 /// Reconstructs a target from `fields` for the old conversation, under its
-/// current binding and rosters.
-pub(crate) fn reconstruct(
+/// current binding and roster heads, with the successor rosters `rosters`
+/// and the root chains `chains`.
+pub(crate) fn reconstruct_under(
     fields: &ReinitProposal<'_>,
+    rosters: &PrincipalRosters,
+    chains: &BTreeMap<AccountIdBytes, Vec<ArcRootIdentity>>,
 ) -> TestResult<Result<ReinitTarget, E2eeError>> {
-    let (binding, rosters) = old_authority()?;
+    let (binding, old_rosters) = old_authority()?;
+    let old_heads = heads_of(&old_rosters)?;
     Ok(reconstruct_reinit_target(
         &network()?,
-        &binding,
-        &rosters,
+        &OldConversation {
+            binding: &binding,
+            roster_heads: &old_heads,
+        },
+        &SuccessorRosters {
+            rosters,
+            root_chains: chains,
+        },
         fields,
         &mut budget(),
     ))
+}
+
+/// Reconstructs a target from `fields` for the old conversation, whose
+/// successor names the old conversation's own rosters.
+pub(crate) fn reconstruct(
+    fields: &ReinitProposal<'_>,
+) -> TestResult<Result<ReinitTarget, E2eeError>> {
+    let (_, rosters) = old_authority()?;
+    reconstruct_under(fields, &rosters, &BTreeMap::new())
 }
 
 /// One complete sequencer record file, decoded.

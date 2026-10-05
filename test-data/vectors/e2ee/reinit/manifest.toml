@@ -339,6 +339,181 @@ semantic_id = "1c568cf060d7899da67dcd7f96cc8203d0eee57eab689515e6728bc64e383816"
 route_sequence = "11"
 
 [[vectors]]
+file = "root-d-1.bin"
+encoded_length = 282
+sha256 = "278b4f7d5111f510e3547702613dc2a68f0ef7522e47ebbb162eee47d259fafc"
+root_fingerprint = "a4949104548aadd5b1892d57a64ed68c87792bc419da3f90eaca7893f85d897c"
+root_generation = "1"
+previous_root_fingerprint = "330afc5da3d88ed4f78067c2ddca4537491dfed8d296d6304155e65ee51e0f59"
+
+[[vectors]]
+file = "roster-d-1.bin"
+encoded_length = 887
+sha256 = "b0610c2f129bdee8f601733db1bced767608374c8fedb03f9fe43ed8aff24ca1"
+roster_id = "f58532d240f0c488b4a57fa1603918a8e6617d87c27854a7500ff378d04ca946"
+
+[[vectors]]
+file = "rotation-extensions.bin"
+encoded_length = 1716
+sha256 = "5b8605e23b71db3275a74ac08e8a0ab54cd98c85046390b344a536e99e77b722"
+group_id = "6161616161616161616161616161616161616161616161616161616161616161"
+cipher_suite = "1"
+new_conversation_id = "1bd0f335fdccdb32526daa012c9e279df3c04b09cb85825720ac6f52ae472723"
+
+[[vectors]]
+file = "rotation-target.bin"
+encoded_length = 1950
+sha256 = "913b6e2af108f81f09ef9346f2abf692b814b0bb1df107f170b1d92c9bce3337"
+target_context_digest = "e5394664098f0e94baeaff3319acefa41cc94835cdeb2f7e4c0e30750dc488cc"
+target_binding_id = "6f3c04f61d55ac9b279a002312f6660781e614bd5b9e56da31dd00e57b7bea08"
+target_context_core_id = "677ee78078f392aac0d3059e68f874f80daefc3c2bdac82b846277a90d9615af"
+initial_member_plan_id = "739cea371009eb9a15c3da924e89bf75d0208c8030d16935f605be89a6785ccc"
+route_binding = "77178394055ee19f00692cf4dfbe56f28f17ad0cafa94da5cd239348f3b249e7"
+
+[[vectors]]
+file = "rotation-0003-extensions.bin"
+encoded_length = 1716
+sha256 = "db177d9555ac383f197d1be852801b26ecfb201acc232860b67115b43dcca25a"
+group_id = "6363636363636363636363636363636363636363636363636363636363636363"
+cipher_suite = "3"
+new_conversation_id = "1896abb667e702af10fb1743855525888dd729f813c9253742ba1c7689d34984"
+
+[[vectors]]
+file = "rotation-0003-target.bin"
+encoded_length = 1950
+sha256 = "bd23574fb6d94f1a9c7620fb3ba254dd6840ddfea8d21b3cc1a7657829e9c1f7"
+target_context_digest = "1e5d3d79693cb44734b57e0fac2b946a0434b05875d6ee082537d8c0399868ab"
+target_binding_id = "36f12a8aee93e29a2dd95c8e13aa3b09de6f3258b875dfdf15617972bfd68688"
+target_context_core_id = "cc9f41aa94588f9aeaca72220ba110ffd0529b1b11fa7f74f21d727d8fcd32a2"
+initial_member_plan_id = "739cea371009eb9a15c3da924e89bf75d0208c8030d16935f605be89a6785ccc"
+route_binding = "77178394055ee19f00692cf4dfbe56f28f17ad0cafa94da5cd239348f3b249e7"
+
+[[vectors]]
+file = "rotation-join-binding-entry.bin"
+encoded_length = 916
+sha256 = "0ac8110d0ccfa3b6f0019606fa1f43d14a2e9582a869e402c649899333554440"
+binding_id = "6f3c04f61d55ac9b279a002312f6660781e614bd5b9e56da31dd00e57b7bea08"
+
+[[vectors]]
+file = "rotation-join-policy-entry.bin"
+encoded_length = 503
+sha256 = "4be22628ec0aa80af35906f25889cd5228461b71c8e5288c63e67295b3ca3d04"
+policy_id = "30e16da56b76b83a50a58882c908979e727423bb8af8214b4210058667714cee"
+
+[[vectors]]
+file = "rotation-record-02-reinit-candidate.bin"
+encoded_length = 301
+sha256 = "bc8e768c4553ce8a0fe7cbb3376d8a2dedc3b919f7001b48185ef49e7b768804"
+semantic_id = "ba50f7005c709851cb07a5382cd15a53ce5a73844d2f4bdc8a2e8b0b327450bd"
+route_sequence = "2"
+prior_state_id = "4c49b6a77c130a061f7544cbd8eac122b41d19d0735e5f57a3806c2b7b24a5a6"
+
+[[vectors]]
+file = "rotation-record-03-reinit-finalization.bin"
+encoded_length = 2030
+sha256 = "206586d39d77f80063e0d91973140071a9b3a1e58d820061329ce461290733b1"
+semantic_id = "d2655327133ad223f6ff48aa59d9d5c57089235c16950eb8ccb44813428c242e"
+route_sequence = "3"
+commit_authorization_id = "932dbcd6d2990f07498c177a7edeff2f5426832c2187fe862d2b5dcc6e9a012d"
+transition_target_digest = "e5394664098f0e94baeaff3319acefa41cc94835cdeb2f7e4c0e30750dc488cc"
+
+[[vectors]]
+file = "rotation-initial-commit-0.bin"
+encoded_length = 285
+sha256 = "2ade5af7fde5dc71288b3c26a9c14f5b02831b7315f3badddd1d266641cc72e6"
+prior_state_id = "d2655327133ad223f6ff48aa59d9d5c57089235c16950eb8ccb44813428c242e"
+
+[[vectors]]
+file = "rotation-attempt-0.bin"
+encoded_length = 3757
+sha256 = "a39e4083ebc7045c5b0915b29cdb735d724b2886b68c48c819ea8b9957b078ba"
+reinit_attempt_id = "7059a649e1b6e22e15ead703334ec9c4d2dc187f0d931bea20dde2fe3ffbddc2"
+initial_commit_digest = "5bb6a7f2f39365f6c17223805d8aae857fb16877d3017db852b6a8468bf35a2a"
+
+[[vectors]]
+file = "rotation-record-04-attempt-0-receipt.bin"
+encoded_length = 317
+sha256 = "0606f3a61872c1770923463fbd111b218413867a0eccc3dc42155adad645ad53"
+semantic_id = "7059a649e1b6e22e15ead703334ec9c4d2dc187f0d931bea20dde2fe3ffbddc2"
+route_sequence = "4"
+attempt_object = "rotation-attempt-0.bin"
+
+[[vectors]]
+file = "rotation-record-05-activation.bin"
+encoded_length = 5747
+sha256 = "e50b3656184d68125a4812ceb443f9d2f84fc688135859d15c708034a5fbfa1e"
+semantic_id = "2b9ca7cc1f1dfe8a96476f697a7a19f7efabb76376e8f34611b85b5d51ce503e"
+route_sequence = "5"
+
+[[vectors]]
+file = "reject-root-d-1-forged-continuity.bin"
+encoded_length = 282
+sha256 = "21bcc463daaf4d5b43d42e2b9cbfa2bdb2d66842b3e5217213d7cb60f031d72c"
+root_fingerprint = "a4949104548aadd5b1892d57a64ed68c87792bc419da3f90eaca7893f85d897c"
+expected = "E2eeError::SignatureInvalid"
+
+[[vectors]]
+file = "root-d-1-sibling.bin"
+encoded_length = 282
+sha256 = "c7a3d3f7aaaa4cb83cca47e5c6563060b3d201e9762087406ae2d7b5d7f528cf"
+root_fingerprint = "d06e3e667301df495ff147def6740d94d84c74e8e350053b9365a05f08430eb1"
+root_generation = "1"
+previous_root_fingerprint = "330afc5da3d88ed4f78067c2ddca4537491dfed8d296d6304155e65ee51e0f59"
+
+[[vectors]]
+file = "root-d-fresh.bin"
+encoded_length = 218
+sha256 = "84ec830270cc265f2f4bcf09c0e56b8ae47f3a4e9af271d74dd58f396d2abda8"
+root_fingerprint = "5be410cca784d36db3c9809a874ec89cf04c059dbecfd5204897e4590a8012d2"
+
+[[vectors]]
+file = "roster-d-fresh.bin"
+encoded_length = 887
+sha256 = "4bf730e614b331bf73f3df57909ca55f550645c1c6f7760f51c57682a73d04e5"
+roster_id = "6e66996cce437c78f5449b83be8912ef9ef842d7ffb8882be431a5a3584ecfda"
+
+[[vectors]]
+file = "root-c-1.bin"
+encoded_length = 282
+sha256 = "d7699b74fd307db5f1431f9619b200029b703b29ccd3b64cd4fa826cb0f624be"
+root_fingerprint = "2bbbb00ba33168fe3db50184b5159468a9eed3909241a7e42de6f1a7bb1f7f82"
+root_generation = "1"
+previous_root_fingerprint = "03f28eaf713351f296aee7a379c970fa5243272f8dde5aae5a75775972b33950"
+
+[[vectors]]
+file = "roster-c-1.bin"
+encoded_length = 887
+sha256 = "cba5ab6a8907ea98973f78be4f1acd3cb8db6bc76caee837d455486e91446da1"
+roster_id = "5eab80b3bb16d9eaa5398ecc47ac95dcc4c7b4d110b5f34a25ab0dfea9aeb7bb"
+
+[[vectors]]
+file = "reject-rotation-fresh-root-extensions.bin"
+encoded_length = 1716
+sha256 = "bd44834caf863358c0dc74848a155acc6b9a1ba62424aae585a7401275b6d50c"
+group_id = "6565656565656565656565656565656565656565656565656565656565656565"
+cipher_suite = "1"
+new_conversation_id = "268894c8b8ccb3a7f2e5a153c3f91038b644d7fe9bf493d405fb770684a0eedb"
+expected = "E2eeError::InvalidValue"
+
+[[vectors]]
+file = "reject-rotation-stale-principal-extensions.bin"
+encoded_length = 1716
+sha256 = "5a730b64cb3a7127047a2f6cc324bffa154fdf5b865c0534465227cc284ddf09"
+group_id = "6464646464646464646464646464646464646464646464646464646464646464"
+cipher_suite = "1"
+new_conversation_id = "8cb6745b91709c3ce67f1ba3853a61996d19eb047a1d9ef25856a1e1bf0e0128"
+expected = "E2eeError::InvalidValue"
+
+[[vectors]]
+file = "reject-rotation-channel-authority-extensions.bin"
+encoded_length = 1716
+sha256 = "438b6e88cb7345a75f0c985a17d82ceae5eb599a97616a7c13bdc0d8f5f64989"
+group_id = "6262626262626262626262626262626262626262626262626262626262626262"
+cipher_suite = "1"
+new_conversation_id = "188869522f4f9823aefa9232904cd45d554f2e87ff2fcb3bcc4f681a27201102"
+expected = "E2eeError::InvalidValue"
+
+[[vectors]]
 file = "reject-extensions-duplicate-context.bin"
 encoded_length = 3416
 sha256 = "68c76bebf3708da09b64b97174e91da1acb066b20d94380838a52ff6c2988839"

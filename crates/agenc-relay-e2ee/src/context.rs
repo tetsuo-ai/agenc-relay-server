@@ -20,7 +20,7 @@ use crate::objects::conversation::{
     ArcPendingJoin, ArcRosterHead,
 };
 use crate::policy::{VerifiedPolicy, verify_policy};
-use crate::route::{PrincipalRosters, VerifiedBinding, verify_semantic_route};
+use crate::route::{PrincipalRosters, SemanticRoute, VerifiedBinding, verify_semantic_route};
 use crate::sequencer::{VerifiedSequencerCredential, verify_sequencer_credential};
 use crate::tls::{TlsEncode, ensure_canonical};
 
@@ -112,10 +112,11 @@ pub fn verify_context(
 
 /// The current binding names the context's kind, conversation, network and
 /// concrete route, and its semantic route recomputes to the lock it names.
+/// Returns that verified semantic route.
 pub(crate) fn check_binding_agreement(
     network_id: &[u8; 32],
     context: &ArcMlsContext,
-) -> Result<(), E2eeError> {
+) -> Result<SemanticRoute, E2eeError> {
     let binding = &context.current_binding.tbs;
     let route = verify_semantic_route(network_id, &binding.semantic_route)?;
     let agrees = binding.kind == context.kind
@@ -124,7 +125,7 @@ pub(crate) fn check_binding_agreement(
         && binding.semantic_route_lock_id == route.lock_id
         && binding.network_id == *network_id;
     if agrees {
-        Ok(())
+        Ok(route)
     } else {
         Err(E2eeError::InvalidValue)
     }

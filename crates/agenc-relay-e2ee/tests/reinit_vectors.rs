@@ -21,6 +21,9 @@ mod successor;
 #[path = "reinit/join.rs"]
 mod join;
 
+#[path = "reinit/rosters.rs"]
+mod rosters;
+
 use agenc_relay_crypto::SemanticHashDomain;
 use agenc_relay_e2ee::E2eeError;
 use agenc_relay_e2ee::history::{ChainStep, Lifecycle};

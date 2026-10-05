@@ -305,6 +305,11 @@ initial Commit, with the historical chain's carried-target checks, the
 independent ReInit vectors and the one-target Stage 08 fixture (P-02, SDK
 program, outside master #35), is recorded in
 [the ReInit target helper record](stage-10-reinit-target-helper.md).
+The ReInit successor verified under the rosters its own roster heads name,
+with root continuity from the old heads and its binding's principals, the
+root-rotation and suite-change vectors, and the channel-authority root that a
+ReInit cannot rotate (P-03, SDK program, outside master #35), are recorded in
+[the ReInit successor rosters record](stage-10-reinit-successor-rosters.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

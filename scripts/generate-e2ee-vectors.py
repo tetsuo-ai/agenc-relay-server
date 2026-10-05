@@ -39,6 +39,7 @@ Usage: python3 scripts/generate-e2ee-vectors.py [--check]
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import struct
 import sys
@@ -764,6 +765,11 @@ R_ROOT_SEEDS = (110, 111)
 R_DEVICE_SEEDS = (112, 114)
 R_OLD_LEAF_SEEDS = (120, 121)
 R_SEQUENCER_SEED = 115
+R_ROTATED_ROOT_SEEDS = (132, 133)
+R_FORGED_CONTINUITY_SEED = 134
+R_ROTATED_ROOT_INTERVAL = (100, 2_000_000)
+R_FRESH_ROOT_SEED = 135
+R_SIBLING_ROOT_SEED = 136
 R_OLD_GROUP = bytes([0x31] * 32)
 R_INSTANCE = bytes([0x3C] * 16)
 R_CHANNEL = b"#pc001"
@@ -790,11 +796,12 @@ def r_root(account: bytes, private: Ed25519PrivateKey) -> tuple[bytes, bytes]:
     return tbs, tbs + sign(private, "root identity", tbs) + opaque(b"", 64)
 
 
-def r_certificate(account: bytes, root_private: Ed25519PrivateKey, root_fp: bytes, seed: int) -> tuple[bytes, bytes]:
+def r_certificate(account: bytes, root_private: Ed25519PrivateKey, root_fp: bytes, seed: int,
+                  root_generation: int = 0) -> tuple[bytes, bytes]:
     device = key(seed)
     challenge = bytes([seed + 100] * 32)
     enrollment_tbs = (
-        u16(1) + NETWORK + opaque(account, 255) + u64(0) + root_fp + u64(0) + challenge
+        u16(1) + NETWORK + opaque(account, 255) + u64(root_generation) + root_fp + u64(0) + challenge
         + bytes([seed] * 16) + public(device) + u64(90) + u64(100)
     )
     enrollment = (
@@ -803,16 +810,17 @@ def r_certificate(account: bytes, root_private: Ed25519PrivateKey, root_fp: byte
         + sign(root_private, "device enrollment approval", enrollment_tbs)
     )
     tbs = (
-        u16(1) + NETWORK + opaque(account, 255) + u64(0) + root_fp + bytes([seed] * 16)
+        u16(1) + NETWORK + opaque(account, 255) + u64(root_generation) + root_fp + bytes([seed] * 16)
         + public(device) + u64(0) + challenge + semantic_id("enrollment id", enrollment_tbs)
         + u64(1) + u32(3) + u64(0) + u64(1_000_000)
     )
     return tbs, tbs + enrollment + sign(root_private, "device certificate", tbs)
 
 
-def r_roster(account: bytes, root_private: Ed25519PrivateKey, root_fp: bytes, seed: int, cert: bytes) -> tuple[bytes, bytes]:
+def r_roster(account: bytes, root_private: Ed25519PrivateKey, root_fp: bytes, seed: int, cert: bytes,
+             root_generation: int = 0) -> tuple[bytes, bytes]:
     tbs = (
-        u16(1) + NETWORK + opaque(account, 255) + u64(0) + root_fp + u64(0)
+        u16(1) + NETWORK + opaque(account, 255) + u64(root_generation) + root_fp + u64(0)
         + u64(R_ROSTER_INTERVAL[0]) + u64(R_ROSTER_INTERVAL[1]) + bytes(32)
         + vector([bytes([seed] * 16) + cert], 65_535) + vector([], 65_535)
     )
@@ -847,6 +855,7 @@ class RPrincipal:
         self.old_leaf = key(R_OLD_LEAF_SEEDS[index])
         self.old_leaf_index = index
         self.old_credential_hash = semantic_id("old credential hash", opaque_v(self.root + cert))
+        self.root_generation = 0
 
     def approval(self, label: str, tbs: bytes) -> bytes:
         """`ArcPolicyApproval`, `ArcBindingApproval`, `ArcCommitApproval` and `ArcFinalityVote` share this layout."""
@@ -857,7 +866,49 @@ class RPrincipal:
 
     def roster_head(self) -> bytes:
         digest = semantic_id("account id", NETWORK + opaque(self.account, 255))
-        return digest + u64(0) + self.fp + u64(0) + self.roster_id
+        return digest + u64(self.root_generation) + self.fp + u64(0) + self.roster_id
+
+
+def r_rotated(old: RPrincipal, root_seed: int, continuity: Ed25519PrivateKey | None = None) -> RPrincipal:
+    """`old`'s account after a continuous root rotation (companion 8.2): a generation-one root whose
+    continuity signature is by `continuity` (the old root key unless given), a new certificate for the
+    same device and a new generation-zero roster under the new root, and a new capability ID. The old
+    leaf and credential stay `old`'s: they are what the old group's ACKs name."""
+    new = copy.copy(old)
+    new.root_key = key(root_seed)
+    new.root_generation = 1
+    new.root_tbs = (
+        u16(1) + NETWORK + opaque(old.account, 255) + u64(1) + public(new.root_key)
+        + u64(R_ROTATED_ROOT_INTERVAL[0]) + u64(R_ROTATED_ROOT_INTERVAL[1]) + old.fp
+    )
+    signer = old.root_key if continuity is None else continuity
+    new.root = (
+        new.root_tbs + sign(new.root_key, "root identity", new.root_tbs)
+        + opaque(sign(signer, "root continuity", new.root_tbs), 64)
+    )
+    new.fp = semantic_id("root fingerprint", new.root_tbs)
+    cert_tbs, cert = r_certificate(old.account, new.root_key, new.fp, old.seed, root_generation=1)
+    new.cert_id = semantic_id("device certificate id", cert_tbs)
+    new.roster_tbs, new.roster = r_roster(old.account, new.root_key, new.fp, old.seed, cert, root_generation=1)
+    new.roster_id = semantic_id("roster id", new.roster_tbs)
+    new.capability_id = r_capability_id(old.account, old.seed, new.fp, new.roster_id)
+    return new
+
+
+def r_fresh(old: RPrincipal, root_seed: int) -> RPrincipal:
+    """`old`'s account under a new generation-zero root that does not continue the old one, an identity
+    discontinuity (companion 8.2), with a new certificate and roster under it."""
+    new = copy.copy(old)
+    new.root_key = key(root_seed)
+    new.root_generation = 0
+    new.root_tbs, new.root = r_root(old.account, new.root_key)
+    new.fp = semantic_id("root fingerprint", new.root_tbs)
+    cert_tbs, cert = r_certificate(old.account, new.root_key, new.fp, old.seed)
+    new.cert_id = semantic_id("device certificate id", cert_tbs)
+    new.roster_tbs, new.roster = r_roster(old.account, new.root_key, new.fp, old.seed, cert)
+    new.roster_id = semantic_id("roster id", new.roster_tbs)
+    new.capability_id = r_capability_id(old.account, old.seed, new.fp, new.roster_id)
+    return new
 
 
 def canonical(items: list[bytes]) -> bytes:
@@ -1044,8 +1095,8 @@ class RAttempt:
         self.joiner_ref = hashlib.sha256(b"synthetic KeyPackageRef" + bytes([marker])).digest()
         leaves = {creator.seed: key(marker), joiner.seed: key(marker + 1)}
         entries = []
-        for p in (creator, joiner):
-            is_creator = p is creator
+        for p in target.members:
+            is_creator = p.seed == creator.seed
             leaf_digest = semantic_id("leaf signature key", u16(ED25519_SCHEME) + opaque(public(leaves[p.seed]), 255))
             entries.append(
                 opaque(p.account, 255) + p.fp + p.device_id + p.capability_id
@@ -1095,14 +1146,19 @@ class RAttempt:
 
 
 class RTarget:
-    """The successor of one suite: its context, extension list and target."""
+    """The successor of one suite: its context, extension list and target. `members` are the principals
+    its roster heads, policy and plan name (the old ones unless given, such as after a root rotation);
+    `binding_members` are its binding's principals (the members unless given)."""
 
-    def __init__(self, world: "RWorld", suite: int) -> None:
+    def __init__(self, world: "RWorld", suite: int, *, members: tuple[RPrincipal, ...] | None = None,
+                 binding_members: tuple[RPrincipal, ...] | None = None, group: bytes | None = None) -> None:
         self.world = world
         self.suite = suite
-        self.group = bytes([0x40 + suite] * 32)
+        self.group = bytes([0x40 + suite] * 32) if group is None else group
         self.new_conversation = semantic_id("conversation", NETWORK + opaque(self.group, 255))
-        members = list(world.principals)
+        self.members = tuple(world.principals) if members is None else members
+        self.binding_members = self.members if binding_members is None else binding_members
+        members = list(self.members)
         policy_tbs, self.policy = r_policy(self.new_conversation, 0, bytes(32), members, members, suite, [members[0]])
         self.policy_id = semantic_id("policy id", policy_tbs)
         self.plan_id = semantic_id("initial member plan id", r_plan(members))
@@ -1122,12 +1178,12 @@ class RTarget:
         w = self.world
         return r_binding_tbs(1, w.binding_id, w.route_tbs, w.lock, self.group, self.new_conversation, w.route,
                              self.suite, self.policy_id, self.policy_id, self.plan_id, core_id, w.sequencer_id,
-                             list(w.principals))
+                             list(self.binding_members))
 
     def context_with(self, core_id: bytes, pending_joins: bytes = b"") -> bytes:
         w = self.world
         binding = self.binding_tbs(core_id) + opaque(b"", 65_535)
-        heads = canonical([p.roster_head() for p in w.principals])
+        heads = canonical([p.roster_head() for p in self.members])
         return (
             u16(1) + NETWORK + self.new_conversation + u8(CHANNEL) + w.route + u64(R_SUCCESSOR_TIME)
             + self.policy + w.credential + binding + u8(ACTIVE) + bytes(32) + opaque(b"", 4096) + u8(0)
@@ -1137,7 +1193,7 @@ class RTarget:
     def binding_entry(self) -> bytes:
         """The join bundle's ReInit `ArcBindingChainEntry`: the unapproved replacement package."""
         package = (
-            self.binding_tbs(self.core_id) + opaque(b"", 65_535) + r_plan(list(self.world.principals))
+            self.binding_tbs(self.core_id) + opaque(b"", 65_535) + r_plan(list(self.members))
             + opaque(b"", 65_535)
         )
         return package + u8(REINIT_TARGET_TRANSITION)
@@ -1390,6 +1446,66 @@ def build_reinit() -> tuple[list[tuple[str, bytes, dict[str, object]]], dict[str
     entries.append(("advanced-initial-commit-1.bin", second.initial_commit, {"prior_state_id": advanced_finalization}))
     entries.extend(r_attempt_records(advanced, second, "advanced"))
     entries.append(r_activation(advanced, second, "advanced"))
+
+    # Root rotation (P-03): d's account continuously rotates its root, and the successor's roster heads,
+    # binding principals, policy and plan name d's new root while the old council activates it. The
+    # same rotation with a suite change from 0x0001 to 0x0003 is reconstructed only.
+    rotated_d = r_rotated(other, R_ROTATED_ROOT_SEEDS[1])
+    entries.append(("root-d-1.bin", wire_object(KIND_ROOT_IDENTITY, rotated_d.root),
+                    {"root_fingerprint": rotated_d.fp, "root_generation": "1", "previous_root_fingerprint": other.fp}))
+    entries.append(("roster-d-1.bin", wire_object(KIND_DEVICE_ROSTER, rotated_d.roster), {"roster_id": rotated_d.roster_id}))
+    rotations = {
+        1: RTarget(w, 1, members=(creator, rotated_d), group=bytes([0x61] * 32)),
+        3: RTarget(w, 3, members=(creator, rotated_d), group=bytes([0x63] * 32)),
+    }
+    for suite, rotation in rotations.items():
+        prefix = "rotation" if suite == 1 else "rotation-0003"
+        entries.append((f"{prefix}-extensions.bin", rotation.extensions,
+                        {"group_id": rotation.group, "cipher_suite": str(suite),
+                         "new_conversation_id": rotation.new_conversation}))
+        entries.append((f"{prefix}-target.bin", rotation.tbs,
+                        {"target_context_digest": rotation.digest, "target_binding_id": rotation.binding_id,
+                         "target_context_core_id": rotation.core_id, "initial_member_plan_id": rotation.plan_id,
+                         "route_binding": w.route}))
+    rotation = rotations[1]
+    entries.append(("rotation-join-binding-entry.bin", rotation.binding_entry(), {"binding_id": rotation.binding_id}))
+    entries.append(("rotation-join-policy-entry.bin", rotation.policy_entry(), {"policy_id": rotation.policy_id}))
+    branch = log.copy()
+    records, finalization_id = r_reinit(branch, rotation, "rotation", 0xE1)
+    entries.extend(records)
+    attempt = RAttempt(w, rotation, finalization_id, 0, 0xE4)
+    entries.append(("rotation-initial-commit-0.bin", attempt.initial_commit, {"prior_state_id": finalization_id}))
+    entries.extend(r_attempt_records(branch, attempt, "rotation"))
+    entries.append(r_activation(branch, attempt, "rotation"))
+
+    # Rejections of successor rosters (P-03). d's generation-one root with a continuity signature by
+    # another key (the same TBS, so the same fingerprint the rotation names); another valid
+    # generation-one root of d, a sibling of the rotation's, from which the rotation does not descend;
+    # a generation-zero root that does not continue d's; a successor whose heads, policy and plan name
+    # d's new root while its binding keeps d's old one; and a rotation of c's root, which the old
+    # semantic route lock names as the channel-authority root.
+    forged_d = r_rotated(other, R_ROTATED_ROOT_SEEDS[1], continuity=key(R_FORGED_CONTINUITY_SEED))
+    assert forged_d.fp == rotated_d.fp and forged_d.root != rotated_d.root
+    entries.append(("reject-root-d-1-forged-continuity.bin", wire_object(KIND_ROOT_IDENTITY, forged_d.root),
+                    {"root_fingerprint": forged_d.fp, "expected": "E2eeError::SignatureInvalid"}))
+    sibling_d = r_rotated(other, R_SIBLING_ROOT_SEED)
+    assert sibling_d.fp != rotated_d.fp
+    entries.append(("root-d-1-sibling.bin", wire_object(KIND_ROOT_IDENTITY, sibling_d.root),
+                    {"root_fingerprint": sibling_d.fp, "root_generation": "1", "previous_root_fingerprint": other.fp}))
+    fresh_d = r_fresh(other, R_FRESH_ROOT_SEED)
+    entries.append(("root-d-fresh.bin", wire_object(KIND_ROOT_IDENTITY, fresh_d.root), {"root_fingerprint": fresh_d.fp}))
+    entries.append(("roster-d-fresh.bin", wire_object(KIND_DEVICE_ROSTER, fresh_d.roster), {"roster_id": fresh_d.roster_id}))
+    fresh = RTarget(w, 1, members=(creator, fresh_d), group=bytes([0x65] * 32))
+    stale = RTarget(w, 1, members=(creator, rotated_d), binding_members=(creator, other), group=bytes([0x64] * 32))
+    rotated_c = r_rotated(creator, R_ROTATED_ROOT_SEEDS[0])
+    entries.append(("root-c-1.bin", wire_object(KIND_ROOT_IDENTITY, rotated_c.root),
+                    {"root_fingerprint": rotated_c.fp, "root_generation": "1", "previous_root_fingerprint": creator.fp}))
+    entries.append(("roster-c-1.bin", wire_object(KIND_DEVICE_ROSTER, rotated_c.roster), {"roster_id": rotated_c.roster_id}))
+    authority = RTarget(w, 1, members=(rotated_c, other), group=bytes([0x62] * 32))
+    for name, rejected in (("fresh-root", fresh), ("stale-principal", stale), ("channel-authority", authority)):
+        entries.append((f"reject-rotation-{name}-extensions.bin", rejected.extensions,
+                        {"group_id": rejected.group, "cipher_suite": "1", "new_conversation_id": rejected.new_conversation,
+                         "expected": "E2eeError::InvalidValue"}))
 
     # Rejections.
     suite_one = targets[1]
