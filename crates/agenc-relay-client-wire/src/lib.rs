@@ -4,6 +4,13 @@
 //!
 //! Stage 02 implements transport-independent wire behavior. Runtime socket
 //! ownership and network listeners remain outside this crate.
+//!
+//! The server-to-client direction a client reads is decoded by
+//! [`ServerStreamFramer`], [`parse_server_tags`] and [`parse_server_message`];
+//! the daemon itself never runs them. A decoding error of
+//! [`parse_server_tags`] or [`parse_server_message`] concerns that line only:
+//! the framer's stream stays in sync, and only a [`ServerStreamFramer`]
+//! failure ends the stream.
 
 mod auth_transport;
 mod capability;
@@ -13,6 +20,9 @@ mod message;
 mod registration;
 mod registration_command;
 mod render;
+mod server_framing;
+mod server_message;
+mod server_tags;
 mod tags;
 mod text;
 mod websocket;
@@ -39,6 +49,15 @@ pub use render::{
     SafeReplyDescription, VISIBLE_CLOAK_HOST_BYTES, VISIBLE_CLOAK_USER_BYTES, VisibleCloak,
     WireMessage, isupport_messages, labeled_response, numeric_reply, slow_consumer_warning,
     standard_reply, user_mask,
+};
+pub use server_framing::{ServerFramedLine, ServerFramingError, ServerStreamFramer, WireDirection};
+pub use server_message::{
+    ADMIN_ONLY_REPLY_CODES, FORBIDDEN_NUMERICS, ServerCommand, ServerMessage, ServerMessageError,
+    ServerParams, ServerPrefix, ServerUserPrefix, parse_server_message,
+};
+pub use server_tags::{
+    ServerTag, ServerTagError, ServerTagIter, ServerTags, parse_server_tags,
+    unescape_server_tag_value, validate_batch_reference, validate_safe_label,
 };
 pub use tags::{
     MessageTag, MessageTagRef, MessageTagSource, ParsedTagIter, ParsedTags, TagError,

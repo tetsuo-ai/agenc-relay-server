@@ -1,0 +1,65 @@
+# evidence-id|surface|encoding|payload
+# Server-to-client lines for the client wire crate's server-direction decoder
+# (ServerStreamFramer, parse_server_tags, parse_server_message), written by
+# hand from Architecture Sections 7.4, 9.1, 9.2, 9.4, 9.5 and 10.3 and
+# Appendix A.2, not produced by the renderer under test. The surface is
+# accept/<name>, or reject/<stage>/<error>/<name> with the stage framing,
+# tags or message and the error's variant. An ascii payload is one line and
+# the reader appends its CRLF; a hex payload is the whole stream.
+EVID-S02-008-RENDER|accept/welcome-001|ascii|:server.example 001 alice :Welcome to the ARC network alice
+EVID-S02-008-RENDER|accept/myinfo-004|ascii|:server.example 004 alice server.example 1.0.0-rc.3 iw beIiklmnpst
+EVID-S02-008-RENDER|accept/isupport-005|ascii|:server.example 005 alice AWAYLEN=256 CASEMAPPING=ascii CHANNELLEN=64 CHANTYPES=#& CHANMODES=beI,,kl,imnpst EXCEPTS=e INVEX=I KICKLEN=256 MAXLIST=b:100,e:100,I:100 MODES=6 :are supported by this server
+EVID-S02-008-RENDER|accept/isupport-005-fifteen-parameters|ascii|:server.example 005 alice MONITOR=100 NICKLEN=32 PREFIX=(qaohv)~&@%+ SAFELIST STATUSMSG=@+ TARGMAX=PRIVMSG:4,NOTICE:4,TAGMSG:1,JOIN:20,PART:20 TOPICLEN=1024 UTF8ONLY EXTBAN=$,auncq LISTBUCKETS=1,2,5,10,25,50,100 NETWORK=ARC AGENCNET=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA AWAYLEN=256 :are supported by this server
+EVID-S02-008-RENDER|accept/server-ping|ascii|:server.example PING :AAAAAAAAAAAAAAAAAAAAAA
+EVID-S02-008-RENDER|accept/unprefixed-ping|ascii|PING :AAAAAAAAAAAAAAAAAAAAAA
+EVID-S02-008-RENDER|accept/user-privmsg|ascii|:alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid PRIVMSG #garden :hello: there
+EVID-S02-008-RENDER|accept/extended-join|ascii|:alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid JOIN #garden heron :Alice
+EVID-S02-008-RENDER|accept/account-900|ascii|:server.example 900 alice alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid heron :You are now logged in
+EVID-S02-008-RENDER|accept/names-353|ascii|:server.example 353 alice = #garden :@alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid bob!u-mnopqrst45@h-abcdefghijklmnop.invalid
+EVID-S02-008-RENDER|accept/empty-trailing-302|ascii|:server.example 302 alice :
+EVID-S02-008-RENDER|accept/error-close|ascii|:server.example ERROR :Closing connection
+EVID-S02-003-TAGS|accept/server-tags|ascii|@account=heron;msgid=AAAAAAAAAAAAAAAAAAAAAA;time=2026-10-04T00:00:00.000Z :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid PRIVMSG #garden :hello
+EVID-S02-003-TAGS|accept/escaped-client-tag|ascii|@+example.com/note=a\sb\:c\\d :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid PRIVMSG #garden :x
+EVID-S02-003-TAGS|accept/tagmsg-typing|ascii|@+typing=active :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid TAGMSG #garden
+EVID-S02-003-TAGS|accept/empty-values|ascii|@account=;+flag :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid NOTICE #garden :x
+EVID-S02-003-TAGS|reject/tags/InvalidKey/underscore-key|ascii|@+a_b=1 :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid PRIVMSG #garden :x
+EVID-S02-003-TAGS|reject/tags/InvalidKey/vendor-label-hyphen|ascii|@+-vendor.example/x=1 :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid PRIVMSG #garden :x
+EVID-S02-003-TAGS|reject/tags/InvalidEscape/unknown-escape|ascii|@+a=b\x :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid PRIVMSG #garden :x
+EVID-S02-003-TAGS|reject/tags/InvalidEscape/dangling-backslash|ascii|@+a=b\ :alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid PRIVMSG #garden :x
+EVID-S02-003-TAGS|reject/tags/DuplicateKey/duplicate-key|ascii|@msgid=a;msgid=b :server.example PING :x
+EVID-S02-003-TAGS|reject/tags/EmptySection/empty-section|ascii|@ :server.example PING :x
+EVID-S02-003-TAGS|reject/tags/EmptyTag/empty-tag|ascii|@a;;b :server.example PING :x
+EVID-S02-003-TAGS|reject/message/MisplacedClientOnlyTag/numeric-with-client-tag|ascii|@+typing=active :server.example 001 alice :Welcome
+EVID-S02-003-TAGS|reject/message/UnterminatedTags/no-space|ascii|@msgid=a
+EVID-S02-009-REPLIES|accept/labeled-ack|ascii|@label=req-1 :server.example ACK
+EVID-S02-009-REPLIES|accept/labeled-batch-open|ascii|@label=req-1 :server.example BATCH +req-1 labeled-response
+EVID-S02-009-REPLIES|accept/batch-child|ascii|@batch=req-1 :server.example 352 alice #garden u-abcdefgh23 h-ijklmnopqrstuv67.invalid server.example alice H :0 Alice
+EVID-S02-009-REPLIES|accept/batch-close|ascii|:server.example BATCH -req-1
+EVID-S02-009-REPLIES|accept/fail-e2ee-required|ascii|:server.example FAIL PRIVMSG E2EE_REQUIRED #garden :Encryption is required for this channel
+EVID-S02-009-REPLIES|accept/note-recovery-epoch|ascii|:server.example NOTE * RECOVERY_EPOCH AAAAAAAAAAAAAAAAAAAAAA :Current server recovery identity
+EVID-S02-009-REPLIES|accept/warn-slow-consumer|ascii|:server.example WARN * SLOW_CONSUMER :Output queue nearing capacity
+EVID-S02-009-REPLIES|reject/tags/InvalidLabel/escaped-space-label|ascii|@label=a\sb :server.example ACK
+EVID-S02-009-REPLIES|reject/tags/InvalidBatchReference/underscore-batch|ascii|@batch=a_b :server.example PING :x
+EVID-S02-009-REPLIES|reject/message/MalformedStandardReply/no-description|ascii|:server.example FAIL PRIVMSG INVALID_ARGUMENT
+EVID-S02-009-REPLIES|reject/message/InvalidReplyCode/lowercase-code|ascii|:server.example FAIL PRIVMSG invalid_argument :x
+EVID-S02-009-REPLIES|reject/message/UnregisteredReplyCode/unknown-code|ascii|:server.example FAIL PRIVMSG MADE_UP :x
+EVID-S02-009-REPLIES|reject/message/InapplicableReplyCode/administrative-code|ascii|:server.example NOTE * CHALLENGE :x
+EVID-S02-009-REPLIES|reject/message/InapplicableReplyCode/misplaced-queue-warning|ascii|:server.example NOTE * SLOW_CONSUMER :x
+EVID-S02-004-PARSER|reject/message/InvalidPrefix/real-host|ascii|:alice!alice@host.example PRIVMSG #garden :x
+EVID-S02-004-PARSER|reject/message/InvalidPrefix/bare-cloak|ascii|:alice!abcdefgh23@ijklmnopqrstuv67 PRIVMSG #garden :x
+EVID-S02-004-PARSER|reject/message/InvalidPrefix/uppercase-server|ascii|:Server.Example PING :x
+EVID-S02-004-PARSER|reject/message/MissingCommand/double-space|ascii|:server.example  PING :x
+EVID-S02-004-PARSER|reject/message/InvalidCommand/lowercase-command|ascii|:server.example ping :x
+EVID-S02-004-PARSER|reject/message/UnregisteredCommand/administrative-command|ascii|:server.example STATS u
+EVID-S02-004-PARSER|reject/message/UnregisteredCommand/companion-command|ascii|:server.example EGROUP EMPTY OBJECTS
+EVID-S02-004-PARSER|reject/message/UnregisteredNumeric/unknown-numeric|ascii|:server.example 999 alice :x
+EVID-S02-004-PARSER|reject/message/ForbiddenNumeric/idle-317|ascii|:server.example 317 alice bob 30 :seconds idle
+EVID-S02-004-PARSER|reject/message/ForbiddenNumeric/host-338|ascii|:server.example 338 alice bob 192.0.2.1 :actually using host
+EVID-S02-004-PARSER|reject/message/EmptyParameter/trailing-space|hex|3a7365727665722e6578616d706c65204a4f494e202367617264656e200d0a
+EVID-S02-004-PARSER|reject/message/TooManyParameters/sixteen-parameters|ascii|:server.example NOTICE m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 m13 m14 m15 :t
+EVID-S02-001-FRAMING|reject/framing/EmptyLine/empty-line|hex|0d0a
+EVID-S02-001-FRAMING|reject/framing/BareLineFeed/bare-lf|hex|50494e470a
+EVID-S02-001-FRAMING|reject/framing/BareCarriageReturn/bare-cr|hex|50490d4e470d0a
+EVID-S02-001-FRAMING|reject/framing/EmbeddedNul/embedded-nul|hex|5049004e470d0a
+EVID-S02-001-FRAMING|reject/framing/InvalidUtf8/invalid-utf8|hex|50494e47203aff0d0a
+EVID-S02-001-FRAMING|reject/framing/UnexpectedEof/truncated|hex|50494e47203a78

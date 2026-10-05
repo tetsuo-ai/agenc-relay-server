@@ -30,6 +30,21 @@ pub enum PendingKind {
 }
 
 impl PendingKind {
+    /// Every kind, in companion 11.7 order.
+    pub const ALL: [Self; 5] = [
+        Self::Finalization,
+        Self::Abort,
+        Self::ReinitAttempt,
+        Self::ReinitActivate,
+        Self::ReinitAbort,
+    ];
+
+    /// The kind a wire literal names.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.token() == token)
+    }
+
     /// The wire literal.
     #[must_use]
     pub const fn token(self) -> &'static str {
@@ -57,6 +72,20 @@ pub enum EmptyGroupKind {
 }
 
 impl EmptyGroupKind {
+    /// Every kind, in companion 11.7 order.
+    pub const ALL: [Self; 4] = [
+        Self::Authorizations,
+        Self::Acks,
+        Self::Receipts,
+        Self::Objects,
+    ];
+
+    /// The kind a wire literal names.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.token() == token)
+    }
+
     /// The wire literal.
     #[must_use]
     pub const fn token(self) -> &'static str {
@@ -95,6 +124,26 @@ pub enum StoreKind {
 }
 
 impl StoreKind {
+    /// Every kind, in companion 11.7 order.
+    pub const ALL: [Self; 10] = [
+        Self::Identity,
+        Self::RootChain,
+        Self::Roster,
+        Self::Capabilities,
+        Self::Package,
+        Self::Application,
+        Self::Binding,
+        Self::BindingLock,
+        Self::Welcome,
+        Self::StagedReinit,
+    ];
+
+    /// The kind a wire literal names.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.token() == token)
+    }
+
     /// The wire literal.
     #[must_use]
     pub const fn token(self) -> &'static str {

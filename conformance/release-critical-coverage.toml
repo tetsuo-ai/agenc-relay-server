@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1010
-reviewed_source_sha256 = "688138e41e74fdb8ef71c5934d8af872c34891c1db35ce0da8423d8de9e712e9"
+reviewed_source_files = 1014
+reviewed_source_sha256 = "1e541e1e7b90d131ee01381074f256faa34a849d40ae4269f07f12489db5fdc2"
 deferred = []
 
 [[region]]
@@ -199,7 +199,7 @@ id = "client-text-carrier-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-relay-client-wire/src/text.rs"
 item = "fmt"
-source_sha256 = "a707d3c8a0479dcfda5bbf63d43c37d54cde2c9805b3d2e2352818b38532c1fd"
+source_sha256 = "d0093f786331f97a92e0d6cf48475355abbc5fe2f5e61596482470649fdd9552"
 start_line = 46
 end_line = 64
 span_sha256 = "e06d87f41e58616a37ec202f3c62ac48e2ab351174e783594eaf79036b21a48f"
@@ -223,9 +223,9 @@ id = "client-registration-grammar-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-relay-client-wire/src/registration_command.rs"
 item = "fmt"
-source_sha256 = "7268a317d449d71dd4a94faf448f0487697e3ccf97bc8aa383bd6db93ccd5623"
-start_line = 337
-end_line = 349
+source_sha256 = "43ba98bddfe514fabaa6e2dc5d93d1776350076e4abc79956349a4cad175b369"
+start_line = 320
+end_line = 332
 span_sha256 = "88a7184daf1460646c3ea8b7c629f3722796efc56cad177f1cce3dd30f8cdcbc"
 metric = "regions"
 reason = "Every closed RegistrationGrammarError discriminant must be observed by an error reporting test."
@@ -247,12 +247,72 @@ id = "client-render-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-relay-client-wire/src/render.rs"
 item = "fmt"
-source_sha256 = "59777fb30a372c9fa2e0a0d60535753cac5678b937a66560c4cbbeb4f5d56134"
-start_line = 80
-end_line = 97
+source_sha256 = "34c780a4630e08807457be67d32ff10a2112dcf14029a40e898acd27ba04ad67"
+start_line = 82
+end_line = 99
 span_sha256 = "d667a899117af2364e070a17bcc4104773613d2501802fbc1e8e461d597af41c"
 metric = "regions"
 reason = "Every closed RenderError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-framing-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_framing.rs"
+item = "fmt"
+source_sha256 = "4bd458927693d98d917b120434e0596a3c9b191fc755f0a317f10b45ceb50314"
+start_line = 94
+end_line = 108
+span_sha256 = "da65ce1e57e218d644b84b677086dc8979f9d849b0f34c43b06f58361eeaa4d0"
+metric = "regions"
+reason = "Every closed ServerFramingError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-tag-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_tags.rs"
+item = "fmt"
+source_sha256 = "5be7a52d6cedf9f7e457313636dafbe8a4770a9b5baee7b900a93308c1330c4c"
+start_line = 71
+end_line = 90
+span_sha256 = "ee1ea8f85c53d0cb85aeb861ba35a072949e6b4e8a13a34b076235065d213eda"
+metric = "regions"
+reason = "Every closed ServerTagError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-message-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_message.rs"
+item = "fmt"
+source_sha256 = "5705369a9e6c01e76a52d52bca551b32e6c4103596bf7424527a71a6813ae660"
+start_line = 77
+end_line = 98
+span_sha256 = "b40767dcdc665c4795bb3adbf26187483ebab17a8e64ba7a60b083bc342bd0a4"
+metric = "regions"
+reason = "Every closed ServerMessageError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-tag-section-errors"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_tags.rs"
+item = "parse_server_tags"
+source_sha256 = "5be7a52d6cedf9f7e457313636dafbe8a4770a9b5baee7b900a93308c1330c4c"
+start_line = 318
+end_line = 347
+span_sha256 = "ced5f7ea5249cc77185bfcd14b7a2ef03585136db022d4934d025d46159a32c9"
+metric = "branches"
+reason = "Every accepted and rejected path of a server line's tag section must be exercised at the decoder boundary."
+
+[[region]]
+id = "server-message-parser-errors"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_message.rs"
+item = "parse_server_message"
+source_sha256 = "5705369a9e6c01e76a52d52bca551b32e6c4103596bf7424527a71a6813ae660"
+start_line = 381
+end_line = 404
+span_sha256 = "112b52f54658494db60fbd0450c48c084e15a70669f9061b7ab70db6e8c98368"
+metric = "branches"
+reason = "Every accepted and rejected syntax path must be exercised at the server-to-client decoder boundary."
 
 [[region]]
 id = "wss-upgrade-error-arms"
@@ -337,6 +397,42 @@ end_line = 293
 span_sha256 = "665f10040f209f212d7d1121e4cac2eb970ff165cda5f1c86752880aaa0da621"
 metric = "regions"
 reason = "Every closed AssemblyError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "e2ee-received-line-productions"
+category = "protocol-enum-arms"
+file = "crates/agenc-relay-e2ee/src/wire/received.rs"
+item = "parse_received_line"
+source_sha256 = "6a2b48c1c8599b23c8177df7936402688176392f073019991ce9444ffbe07a3d"
+start_line = 160
+end_line = 179
+span_sha256 = "59899bfff1042d66fa791835bf5faa85044145099d5b567edc1ec79caf5f561c"
+metric = "branches"
+reason = "Every companion 11.7 production and the 11.9 FAIL line a client receives is selected by its exact tag set before its tokens are read."
+
+[[region]]
+id = "e2ee-response-batch-bounds"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-e2ee/src/wire/received.rs"
+item = "admit_object"
+source_sha256 = "6a2b48c1c8599b23c8177df7936402688176392f073019991ce9444ffbe07a3d"
+start_line = 729
+end_line = 757
+span_sha256 = "1271f848a1347b0808c844e8d7263392ee246bac2814276ad8e824e2b9166772"
+metric = "branches"
+reason = "A response object is charged to its class limit and to the batch's object, fragment and decoded-byte bounds before a client reserves memory for it."
+
+[[region]]
+id = "e2ee-response-batch-order"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-e2ee/src/wire/received.rs"
+item = "child"
+source_sha256 = "6a2b48c1c8599b23c8177df7936402688176392f073019991ce9444ffbe07a3d"
+start_line = 663
+end_line = 680
+span_sha256 = "4e5ecb592315b672e5d0a8d2e03666000ccce530b1d1dd6b8b380135430b7dcb"
+metric = "branches"
+reason = "A batch admits one operation-result child before its objects and pairs each mailbox child with the object that follows it."
 
 [[region]]
 id = "e2ee-key-set-error-arms"

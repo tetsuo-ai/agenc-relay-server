@@ -135,6 +135,19 @@ fn closed_e2ee_tokens_match_the_documented_registry() -> Result<(), TextCarrierE
     for token in E2EE_OBJECT_KINDS {
         assert_eq!(E2eeObjectKind::parse(token)?.as_str(), *token);
     }
+    // Companion 11.7 lists 37 kinds; the last four map to ordinals 34 to 37.
+    assert_eq!(E2EE_OBJECT_KINDS.len(), 37);
+    assert_eq!(
+        E2EE_OBJECT_KINDS.get(33..),
+        Some(
+            &[
+                "POLICY",
+                "RECOVERY-SUBMISSION",
+                "WITNESS-RESOLUTION",
+                "LEAF-MEMBERSHIP-PROOF"
+            ][..]
+        )
+    );
     assert!(E2eeObjectKind::parse("FUTURE-KIND").is_err());
     assert_eq!(SafeLabel::parse("a_B-9")?.as_str(), "a_B-9");
     assert!(SafeLabel::parse("escaped\\label").is_err());

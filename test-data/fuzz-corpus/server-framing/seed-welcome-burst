@@ -1,0 +1,6 @@
+:server.example 001 alice :Welcome to the ARC network alice
+:server.example 004 alice server.example 1.0.0-rc.3 iw beIiklmnpst
+:server.example 005 alice AWAYLEN=256 CHANTYPES=#& PREFIX=(qaohv)~&@%+ :are supported by this server
+:server.example NOTE * RECOVERY_EPOCH AAAAAAAAAAAAAAAAAAAAAA :Current server recovery identity
+:server.example 900 alice alice!u-abcdefgh23@h-ijklmnopqrstuv67.invalid heron :You are now logged in
+PING :AAAAAAAAAAAAAAAAAAAAAA

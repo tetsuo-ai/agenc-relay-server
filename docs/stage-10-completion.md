@@ -305,6 +305,15 @@ account creation or a login before registration within the registration
 limit, and the operator guide's section on the budget (AUD-07, SDK program
 item B-05, outside master #35), are recorded in
 [the pre-authentication default record](stage-10-preauth-default.md).
+The client wire crate's object-kind list completed with the four kinds it
+lacked and held equal, with its copied tag, fragment and object limits, to
+the crates that own them (X-12), the Appendix A.1 argument bounds made
+public for client encoders (X-07), the server-to-client base decoder, its
+framer, raw tag parser, registries and validators, with its fuzz target and
+hand-written vectors (X-05), and the reader of the E2EE replies with the
+charge of an object batch to its class and batch bounds (X-06, SDK program,
+outside master #35), are recorded in
+[the shared client wire record](stage-10-shared-client-wire.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

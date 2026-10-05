@@ -12,34 +12,17 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use zeroize::Zeroizing;
 
 use crate::{
-    ACCOUNT_REQUEST_BYTES, AUTH_CHUNK_CHARACTERS, AccessTokenPolicy, ParsedMessage,
-    parse_u64_decimal,
+    ACCOUNT_REQUEST_BYTES, AUTH_CHUNK_CHARACTERS, AccessTokenPolicy, CONFIGURED_PASS_CHARACTERS,
+    MAX_CHANNEL_BYTES, MAX_CHANNEL_KEY_BYTES, MAX_CHANNEL_TARGETS, MAX_COMPATIBILITY_PASS_BYTES,
+    MAX_HISTORY_LIMIT, MAX_ISON_NICKNAMES, MAX_KICK_TARGETS, MAX_MESSAGE_BODY_BYTES,
+    MAX_MESSAGE_TARGETS, MAX_MODE_CHANGES, MAX_MONITOR_NICKNAMES, MAX_NICKNAME_BYTES,
+    MAX_PART_KICK_AWAY_BYTES, MAX_PING_PONG_BYTES, MAX_QUIT_REASON_BYTES, MAX_REALNAME_BYTES,
+    MAX_SASL_MECHANISM_BYTES, MAX_SERVER_NAME_BYTES, MAX_TOPIC_BYTES, MAX_USERHOST_NICKNAMES,
+    MAX_WHOWAS_COUNT, MIN_CHANNEL_KEY_BYTES, ParsedMessage, parse_u64_decimal,
 };
 
-const MAX_COMPATIBILITY_PASS_BYTES: usize = 256;
 const CONFIGURED_PASS_BYTES: usize = 32;
-const CONFIGURED_PASS_CHARACTERS: usize = 43;
-const MAX_QUIT_REASON_BYTES: usize = 256;
-const MAX_PING_PONG_BYTES: usize = 64;
-const MAX_REALNAME_BYTES: usize = 64;
-const MAX_SASL_MECHANISM_BYTES: usize = 20;
 const MAX_AUTH_CHUNK_BYTES: usize = AUTH_CHUNK_CHARACTERS / 4 * 3;
-const MAX_CHANNEL_BYTES: usize = 64;
-pub(crate) const MAX_NICKNAME_BYTES: usize = 32;
-const MAX_SERVER_NAME_BYTES: usize = 253;
-const MAX_CHANNEL_TARGETS: usize = 20;
-const MAX_MESSAGE_TARGETS: usize = 4;
-const MAX_KICK_TARGETS: usize = 4;
-const MAX_MODE_CHANGES: usize = 6;
-const MIN_CHANNEL_KEY_BYTES: usize = 8;
-const MAX_CHANNEL_KEY_BYTES: usize = 256;
-const MAX_PART_KICK_AWAY_BYTES: usize = 256;
-const MAX_TOPIC_BYTES: usize = 1_024;
-const MAX_MESSAGE_BODY_BYTES: usize = 512;
-const MAX_WHOWAS_COUNT: u64 = 10;
-const MAX_ISON_NICKNAMES: usize = 20;
-const MAX_USERHOST_NICKNAMES: usize = 5;
-const MAX_HISTORY_LIMIT: u64 = 100;
 
 /// Appendix-A commands admitted only after registration-state gating.
 pub const POST_REGISTRATION_COMMANDS: &[&str] = &[
@@ -716,7 +699,7 @@ fn validate_monitor(
         ([operation, nicknames], None) if matches!(operation.as_str(), "+" | "-") => {
             validate_csv(
                 nicknames,
-                MAX_CHANNEL_TARGETS,
+                MAX_MONITOR_NICKNAMES,
                 validate_nickname,
                 ascii_equal,
             )?;
@@ -1089,7 +1072,7 @@ fn validate_mode_string(value: &str) -> Result<(), RegistrationGrammarError> {
     Ok(())
 }
 
-fn validate_server_name(value: &str) -> Result<(), RegistrationGrammarError> {
+pub(crate) fn validate_server_name(value: &str) -> Result<(), RegistrationGrammarError> {
     if value.len() > MAX_SERVER_NAME_BYTES {
         return Err(RegistrationGrammarError::InputTooLong);
     }

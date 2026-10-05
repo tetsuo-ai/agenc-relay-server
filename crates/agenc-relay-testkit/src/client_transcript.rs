@@ -8,8 +8,9 @@ use agenc_relay_client_wire::{
     AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec,
     MAX_TRADITIONAL_LINE_BYTES, OutputBudget, RegisteredCommandKind, RegistrationAction,
     RegistrationAuthCarrier, RegistrationError, RegistrationEvent, RegistrationPhase,
-    RegistrationState, RenderedMessage, SecretBytes, StreamFramer, WelcomeStep, WireMessage,
-    isupport_messages, numeric_reply, parse_message, split_capability_lines, user_mask,
+    RegistrationState, RenderedMessage, SecretBytes, ServerStreamFramer, StreamFramer, WelcomeStep,
+    WireMessage, isupport_messages, numeric_reply, parse_message, parse_server_message,
+    split_capability_lines, user_mask,
 };
 use agenc_relay_types::NetworkId;
 use subtle::ConstantTimeEq as _;
@@ -118,6 +119,9 @@ pub enum ClientTranscriptError {
     ServerBytesMismatch,
     /// The transcript ended before all rendered responses were asserted.
     MissingServerBytes,
+    /// Asserted server bytes were not one line the server-to-client decoder
+    /// accepts.
+    ServerDecoding,
 }
 
 impl fmt::Display for ClientTranscriptError {
@@ -135,6 +139,7 @@ impl fmt::Display for ClientTranscriptError {
             Self::UnexpectedServerBytes => "client transcript has unexpected server bytes",
             Self::ServerBytesMismatch => "client transcript server bytes do not match",
             Self::MissingServerBytes => "client transcript omitted expected server bytes",
+            Self::ServerDecoding => "client transcript server bytes do not decode",
         };
         formatter.write_str(message)
     }
@@ -457,11 +462,10 @@ impl ClientTranscriptHarness {
             .expected_server
             .pop_front()
             .ok_or(ClientTranscriptError::UnexpectedServerBytes)?;
-        if expected.as_bytes() == bytes {
-            Ok(())
-        } else {
-            Err(ClientTranscriptError::ServerBytesMismatch)
+        if expected.as_bytes() != bytes {
+            return Err(ClientTranscriptError::ServerBytesMismatch);
         }
+        decode_server_frame(bytes)
     }
 
     fn apply_actions(
@@ -830,6 +834,38 @@ impl ClientTranscriptHarness {
             .map_err(|_| ClientTranscriptError::Rendering)?;
         self.expected_server.push_back(rendered);
         Ok(())
+    }
+}
+
+/// Requires one server frame, CRLF included, to be exactly one line that a
+/// client's server-to-client decoder accepts: [`ServerStreamFramer`] and
+/// [`parse_server_message`]. The harness applies it to every server frame a
+/// fixture asserts.
+///
+/// # Errors
+///
+/// Returns [`ClientTranscriptError::ServerDecoding`] when the bytes do not
+/// frame as one line or the line does not decode, and
+/// [`ClientTranscriptError::AllocationFailed`] when the framer cannot
+/// reserve its buffer.
+pub fn decode_server_frame(bytes: &[u8]) -> Result<(), ClientTranscriptError> {
+    let mut framer =
+        ServerStreamFramer::new().map_err(|_| ClientTranscriptError::AllocationFailed)?;
+    let mut decoded = 0_usize;
+    let lines = framer
+        .feed(bytes, |line| {
+            if parse_server_message(line).is_ok() {
+                decoded = decoded.saturating_add(1);
+            }
+        })
+        .map_err(|_| ClientTranscriptError::ServerDecoding)?;
+    framer
+        .finish()
+        .map_err(|_| ClientTranscriptError::ServerDecoding)?;
+    if lines == 1 && decoded == 1 {
+        Ok(())
+    } else {
+        Err(ClientTranscriptError::ServerDecoding)
     }
 }
 
