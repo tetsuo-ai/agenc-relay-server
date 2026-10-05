@@ -4,8 +4,8 @@ This record covers the SDK program's server items X-12, X-07, X-05 and X-06
 (2026-10-04, outside master #35), which make the client wire crate's limits,
 registries and grammar usable by a client: the copies of limits and of the
 object-kind registry that other crates own, the Appendix A.1 argument
-bounds, and, in later sections, the server-to-client base decoder and the
-inverse of the E2EE response renderers. No specification, profile hash, wire
+bounds, the server-to-client base decoder, and the inverse of the E2EE
+response renderers. No specification, profile hash, wire
 format, registry, configured limit, storage generation or daemon behaviour
 changes. No Stage 10 task is closed by this record.
 
@@ -208,6 +208,85 @@ three modules and `decode_server_frame` reach 642 of 645 regions and 146 of
 `client-render-error-arms` and `client-registration-grammar-error-arms`
 moved with their spans unchanged.
 
+## X-06: the E2EE replies, read back
+
+### Finding
+
+`agenc_relay_e2ee::wire::response` renders the companion Section 11.7
+results, broadcasts, object batches and live frames and the Section 11.9
+`FAIL` line, but nothing read them: a client had to restate every result
+verb, kind literal and tag rule, and the batch bounds of Section 11.7
+(`MAX_BATCH_OBJECTS`, `MAX_BATCH_FRAGMENTS`, `MAX_BATCH_DECODED_BYTES`)
+were summed only in the daemon's runtime, from federation results.
+
+### Change
+
+- `crates/agenc-relay-e2ee/src/wire/received.rs`, beside the renderers:
+  `parse_received_line` reads one received line, without its CRLF, into its
+  production (`ReceivedLine`): a labeled result, one of the six untagged
+  state broadcasts, a batch opener, child, `EOBJECT` fragment or close, a
+  live frame, an `ACK` or `REINIT-ACK` notification, or a `FAIL`. The tag
+  set selects the production, and each production keeps its exact tag set,
+  in any order (the daemon sends companion lines through
+  `WireMessage::extension_line`, whose renderer sorts tags), the 512-byte
+  non-tag budget, the renderer's source check and its tokens:
+  `SuccessLine::parse_body`, `BatchOpener::parse_body`,
+  `BatchChild::parse_body` and `LiveLine::parse_body` are the inverses of the
+  renderers' bodies. Labels are safe labels, batch references batch IDs,
+  fragment and receipt tags their exact grammars, an `EOBJECT` names its
+  fragment's object, a live frame's label rides only fragment zero and its
+  receipt exactly a candidate's fragment zero, and a `FAIL` code is one of
+  the 22 `E2eeReplyCode` tokens (its description is not parsed).
+- The literals stay in one registry: `PendingKind`, `EmptyGroupKind` and
+  `StoreKind` gain `ALL` and `from_token`, which read their own `token()`;
+  `EKEY STORED` admits only the storable kinds, as the renderer does.
+- `ResponseBatch` follows one object batch from its opener to its close. The
+  opener's kind fixes the class every object is held to, the response
+  carrier's complete-object size and fragment ceiling. Response fragments
+  may arrive in any order (Section 11.8), so the first fragment seen of each
+  object charges the object, its declared fragments and its declared size
+  to the batch's bounds before a client reserves memory to reassemble it,
+  and every later fragment must repeat that count and size. The batch keeps
+  its lines in production order: at most one operation-result child, before
+  the first object, and in a mailbox fetch one `MAILBOX` child immediately
+  before each object's first fragment, naming it; the close needs at least
+  one object (an empty page is the `EMPTY` result). Reassembly and the
+  per-connection quotas stay with `E2eeAssembler`.
+- The `server_framing` fuzz target also reads every framed line, and its
+  input as one line, with `parse_received_line`; a companion seed is added.
+
+### Evidence
+
+| Test | What it pins |
+| --- | --- |
+| `received_lines::every_result_form_reads_back_labeled_and_from_its_body` | `parse(render(x))` for all 48 result forms: every verb, the four `REINIT-*` results, each `PENDING`, `EMPTY` and storable `STORED` kind, both bounds of a key-package reference. |
+| `...::only_the_six_state_broadcasts_read_back_untagged` | The six broadcasts read back untagged; every other form is refused without its label. |
+| `...::batch_lines_read_back_from_every_renderer` | Openers for `EGROUP` and `EKEY`, with and without a cursor, and the runtime's `-` label; the close; all eight children; each `EOBJECT` fragment of a two-fragment object. |
+| `...::live_frames_read_back_with_their_tag_rules`, `...::ack_notices_read_back_with_their_distinct_literals`, `...::fail_lines_read_back_for_every_code` | Seven live tag combinations and seven refused ones; both ACK literals; every reply code labeled and not, with and without context, and five refused `FAIL` shapes. |
+| `...::tags_may_come_in_the_order_the_base_renderer_sorts_them`, `...::malformed_lines_are_refused`, `...::tag_sets_and_frames_outside_a_production_are_refused`, `...::every_token_of_every_production_is_checked`, `...::the_production_readers_check_what_their_lines_cannot_carry` | Sorted tags; duplicate, missing, extra and escaped tags, a bad source, arity, verbs, kinds and non-canonical tokens; and every body token of every production replaced in turn, each replacement refused. |
+| `...::the_non_tag_budget_holds_512_bytes_with_the_crlf` | A 512-byte non-tag line reads back and 513 is refused, matching the renderer. |
+| `...::a_mailbox_batch_charges_each_object_once_in_any_fragment_order`, `...::a_batch_keeps_its_object_fragment_and_byte_bounds`, `...::a_batch_keeps_its_opener_and_production_order`, `...::a_fragment_declaring_more_than_its_class_allows_is_not_charged` | 32 objects and not 33; 1,427 fragments and not 1,428; 4,194,304 declared bytes and not one more; an application object at and over its kind's maximum; foreign batch, kind and scope; changed declarations; child order and mailbox pairing; the close. |
+| `companion_lines` (testkit, 2 tests) | The daemon's path: each line rendered through `WireMessage::extension_line`, encoded and framed by `ServerStreamFramer`, reads back to what was rendered and drives a mailbox batch with reversed fragment order; the base decoder refuses `EGROUP`, `EKEY` and `EOBJECT`, accepts `BATCH`, a relayed `TAGMSG` and the two companion codes the base registry also holds. |
+
+Each reader rule was weakened in turn in the working tree, and at least one
+test failed every time: any result accepted untagged, the live tag rule,
+the `EOBJECT` object match, each of the three batch bounds and the class
+limit one larger, the mailbox pairing, a labeled line's exact tag set, the
+non-tag budget one larger, and any `FAIL` code accepted. The fuzz smoke with
+the reader ran 10,000 inputs without a failure.
+
+### Coverage
+
+The source inventories are refreshed (1,014 files). Three release regions
+are new and complete for their metric: `e2ee-received-line-productions`
+(`parse_received_line`, branches 10/10), `e2ee-response-batch-bounds`
+(`admit_object`, branches 10/10) and `e2ee-response-batch-order` (`child`,
+branches 10/10). Over the e2ee and testkit suites
+(`RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-e2ee -p
+agenc-relay-testkit --all-features --branch --locked`), the module's
+functions reach every branch, and every region but four exits for integer
+conversions and sums that cannot overflow at these bounds.
+
 ## Compatibility
 
 Additive public items only, and four tokens a client may now accept. The
@@ -227,3 +306,7 @@ batch check calls the shared predicate with the same grammar.
   (decision D-20).
 - No gate script runs the `server_framing` fuzz target; the Stage 09 gate
   builds it with the other targets, and its smoke run is recorded here.
+- `ResponseBatch` checks a batch's declarations and order; whether an
+  object's bytes hash to its ID, and the connection and account quotas, are
+  `E2eeAssembler`'s. Which result answers which request is the reader's
+  correlation.

@@ -5,6 +5,8 @@ use agenc_relay_client_wire::{
     ServerCommand, ServerFramedLine, ServerFramingError, ServerMessageError, ServerStreamFramer,
     parse_server_message, parse_server_tags, unescape_server_tag_value,
 };
+use agenc_relay_e2ee::E2eeError;
+use agenc_relay_e2ee::wire::received::{ReceivedLine, parse_received_line};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -22,6 +24,7 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(line) = ServerFramedLine::new(text) {
             let _ = parse_server_message(line);
         }
+        let _ = parse_received_line(text);
         if let Ok(tags) = parse_server_tags(text) {
             assert!(tags.len() >= 1);
             assert_eq!(tags.iter().count(), tags.len());
@@ -50,6 +53,20 @@ struct ObservedLine {
     bytes: usize,
     checksum: u64,
     decoded: Result<DecodedShape, ServerMessageError>,
+    companion: Result<CompanionShape, E2eeError>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CompanionShape {
+    Labeled,
+    Broadcast,
+    BatchOpen,
+    BatchChild,
+    Object,
+    BatchClose,
+    Live,
+    AckNotice,
+    Fail,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -97,6 +114,8 @@ fn run(payload: &[u8], schedule: &[usize]) -> Run {
                     label_bytes: message.tags().label().map(str::len),
                     batch_bytes: message.tags().batch().map(str::len),
                 }),
+                companion: parse_received_line(text)
+                    .map(|received| companion_shape(&received.line)),
             });
         });
         if let Err(error) = result {
@@ -113,6 +132,20 @@ fn run(payload: &[u8], schedule: &[usize]) -> Run {
         lines,
         framing: Ok(()),
         finish: Some(framer.finish()),
+    }
+}
+
+fn companion_shape(line: &ReceivedLine) -> CompanionShape {
+    match line {
+        ReceivedLine::Labeled { .. } => CompanionShape::Labeled,
+        ReceivedLine::Broadcast(_) => CompanionShape::Broadcast,
+        ReceivedLine::BatchOpen(_) => CompanionShape::BatchOpen,
+        ReceivedLine::BatchChild { .. } => CompanionShape::BatchChild,
+        ReceivedLine::Object(_) => CompanionShape::Object,
+        ReceivedLine::BatchClose { .. } => CompanionShape::BatchClose,
+        ReceivedLine::Live(_) => CompanionShape::Live,
+        ReceivedLine::AckNotice(_) => CompanionShape::AckNotice,
+        ReceivedLine::Fail(_) => CompanionShape::Fail,
     }
 }
 
