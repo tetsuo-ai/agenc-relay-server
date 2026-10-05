@@ -1338,7 +1338,8 @@ fn labeled_edge_information_round(client: &mut ArcClient, phase: &str) -> TestRe
 /// D-35, which replaces the counted form of D-28): two edges serving
 /// different clients and channels send the same reply apart from the server
 /// prefix and the nickname, and neither a JOIN and a PART on an edge nor the
-/// loss of the coordinator changes it.
+/// loss of the coordinator changes it. The coordinator keeps its counted
+/// reply over the whole network.
 #[test]
 fn edges_answer_lusers_in_one_fixed_form() -> TestResult {
     let network = build_network()?;
@@ -1393,10 +1394,16 @@ fn exercise_static_lusers(network: &Network, coordinator: &mut DaemonProcess) ->
         return Err(failure(format!("the edges differ: {on_a:?} {on_b:?}")));
     }
     require_static(&on_a, "edge a")?;
-    // A JOIN and a PART on edge A leave its reply as it was.
+    // The coordinator counts the whole network: the three edge clients, its
+    // own client and the channel on edge B.
+    let mut cora = register_when_available(&network.coordinator, "cora")?;
+    require_counted(&mut cora, 4, 1, "the coordinator")?;
+    // A JOIN and a PART on edge A leave its reply as it was, while the
+    // coordinator counts the new channel.
     lena.send("JOIN #a-side")?;
     lena.read_until(|line| line.contains(" 366 lena #a-side "))?;
     require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "after a JOIN")?;
+    require_counted(&mut cora, 4, 2, "the coordinator after a JOIN")?;
     lena.send("PART #a-side")?;
     lena.read_until(|line| line.contains(" PART #a-side"))?;
     require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "after a PART")?;
@@ -1422,6 +1429,49 @@ fn lusers(client: &mut ArcClient, server: &str, nickname: &str) -> TestResult<Ve
         }
     }
     Ok(reply)
+}
+
+/// Sends `LUSERS` and a `PING` to the coordinator's client `cora` and
+/// requires the reply read through its `266` to be the counted form for
+/// `users` sessions and `channels` channels network-wide.
+fn require_counted(
+    cora: &mut ArcClient,
+    users: usize,
+    channels: usize,
+    moment: &str,
+) -> TestResult {
+    cora.send("LUSERS")?;
+    cora.send("PING :counted")?;
+    let lines = cora.read_until(|line| line.ends_with(" :counted"))?;
+    let reply: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| {
+            ["251", "252", "253", "254", "255", "265", "266"]
+                .iter()
+                .any(|code| line.starts_with(&format!(":core.test {code} cora ")))
+        })
+        .collect();
+    let expected = [
+        format!(":core.test 251 cora :There are {users} users on one server"),
+        ":core.test 252 cora 0 :operator(s) online".to_owned(),
+        ":core.test 253 cora 0 :unknown connection(s)".to_owned(),
+        format!(":core.test 254 cora {channels} :channels formed"),
+        format!(":core.test 255 cora :There are {users} users on one server"),
+        format!(":core.test 265 cora {users} {users} :Current local users {users}, max {users}"),
+        format!(":core.test 266 cora {users} {users} :Current local users {users}, max {users}"),
+    ];
+    if reply
+        .iter()
+        .copied()
+        .eq(expected.iter().map(String::as_str))
+    {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "{moment}: LUSERS is not the counted form for {users} users and {channels} channels: {reply:?}"
+        )))
+    }
 }
 
 fn require_static(reply: &[String], moment: &str) -> TestResult {

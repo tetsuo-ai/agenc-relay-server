@@ -78,7 +78,7 @@ There, in `crates/agenc-relay-runtime/src/federation/edge/request.rs`:
 | `...::a_local_query_needs_a_registered_connection` | With the session projected but no registered connection to answer under, `TIME` is refused with `RegistrationRequired`. |
 | `...::a_local_query_is_charged_as_a_registered_command` | With the requester's registered-command bucket exhausted, each query is refused with `ServerBusy`. |
 | `stage_seven_federation::an_edge_answers_its_information_queries_and_keeps_the_connection` | The production binary, a coordinator and one edge: a guest on the edge sends the six and a `PING`, plain and then labeled, and reads every reply from the edge and the `PONG`; `LINKS` is answered through the coordinator; after the coordinator is killed and the edge reports the partition, the six are answered again, plain and labeled, `LINKS` fails closed and the connection stays open. |
-| `stage_seven_federation::edges_answer_lusers_in_one_fixed_form` | The production binary, a coordinator and two edges: edge A serves one client and no channel, edge B two clients and a channel. Both answer `LUSERS` with the same fixed reply apart from the server prefix and the nickname, and edge A's reply stays the same after a `JOIN`, after a `PART` and after the coordinator is killed. |
+| `stage_seven_federation::edges_answer_lusers_in_one_fixed_form` | The production binary, a coordinator and two edges: edge A serves one client and no channel, edge B two clients and a channel. Both answer `LUSERS` with the same fixed reply apart from the server prefix and the nickname, and edge A's reply stays the same after a `JOIN`, after a `PART` and after the coordinator is killed. A client of the coordinator reads the coordinator's own reply through its `266`: the counted form over the whole network, four users and one channel, then two channels after edge A's `JOIN`. |
 
 ## The fix, reverted
 
@@ -108,7 +108,9 @@ With the counted `LUSERS` form restored (`query_render.rs`,
 every test kept, the active and the partitioned edge tests fail, because the
 reply no longer ends with the fixed form's `255`, and
 `edges_answer_lusers_in_one_fixed_form` fails because the two edges' replies
-differ. With the `CHATHISTORY` rule removed (`federation/edge/request.rs` and
+differ; with the coordinator's own reply switched to the fixed form, the same
+daemon test fails on the coordinator's reply. With the `CHATHISTORY` rule
+removed (`federation/edge/request.rs` and
 `federation/edge/history.rs` at `8ebe355`) and the tests kept, both history
 ordering tests fail: the `TIME` is answered at once.
 
@@ -199,6 +201,9 @@ own after the commits above:
   so a local answer, like any later command of the connection, waits until
   the query's last page; described under Fix, with its tests and revert in
   the same sections.
+- A test-only commit after the re-review (RR-01) has the two-edge daemon test
+  also pin the coordinator's own counted `LUSERS` (The regressions, The fix,
+  reverted).
 
 Validation of the fixed `LUSERS` form, from the repository root before its
 commit:
@@ -222,4 +227,15 @@ commit:
 | `cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,161 passed (3 slow), 21 skipped |
 | `python3 scripts/check-source.py check` | ok |
 | coverage policy refresh: both inventories, re-anchoring, both audits and self-tests | ok |
+| the SDK program's fast gate (59 commands) on the staged tree | every command passes |
+
+Validation of the test-only commit that pins the coordinator's counted
+`LUSERS`, from the repository root before its commit:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo nextest run -p agenc-relay-server --all-features --locked --test stage_seven_federation` | 8 passed |
+| `cargo nextest run -p agenc-relay-runtime --all-features --locked` | 2,790 passed, 2 skipped |
+| the coordinator's reply switched to the fixed form, the daemon test run | fails on the coordinator's reply |
 | the SDK program's fast gate (59 commands) on the staged tree | every command passes |
