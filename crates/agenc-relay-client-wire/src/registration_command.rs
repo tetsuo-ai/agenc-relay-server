@@ -1072,7 +1072,7 @@ fn validate_mode_string(value: &str) -> Result<(), RegistrationGrammarError> {
     Ok(())
 }
 
-fn validate_server_name(value: &str) -> Result<(), RegistrationGrammarError> {
+pub(crate) fn validate_server_name(value: &str) -> Result<(), RegistrationGrammarError> {
     if value.len() > MAX_SERVER_NAME_BYTES {
         return Err(RegistrationGrammarError::InputTooLong);
     }

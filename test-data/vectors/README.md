@@ -34,6 +34,18 @@ whose close element names the head record rather than a real finalization
 certificate; they do not substitute for real MLS endpoint evidence, and their
 Rust consumers are owned by ENC-02 through ENC-05 under master #35.
 
+## Server-to-client wire vectors
+
+`server-wire-v1.vectors` holds lines a server sends, written by hand from
+Architecture Sections 7.4, 9.1, 9.2, 9.4, 9.5 and 10.3 and Appendix A.2,
+in the four-field `evidence-id|surface|encoding|payload` form that
+`scripts/check-stage-two.py` binds to the Stage 02 evidence IDs. A surface
+`accept/<name>` must decode and rebuild byte for byte from its parts;
+`reject/<stage>/<error>/<name>` must fail at the framing, tags or message
+stage with that error. An ascii payload is one line without its CRLF; a hex
+payload is a whole stream. `crates/agenc-relay-client-wire/tests/server_vectors.rs`
+reads them.
+
 ## Stage 04 files
 
 `stage-four-crypto-v1.vectors` contains the project SHA-256, HMAC, HKDF,

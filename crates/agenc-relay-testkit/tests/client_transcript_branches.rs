@@ -10,7 +10,7 @@ use agenc_relay_client_wire::{
 };
 use agenc_relay_testkit::{
     ClientTranscriptError, ClientTranscriptHandoff, ClientTranscriptHarness,
-    MAX_TRANSCRIPT_STEP_BYTES, MAX_TRANSCRIPT_STEPS, parse_client_transcript,
+    MAX_TRANSCRIPT_STEP_BYTES, MAX_TRANSCRIPT_STEPS, decode_server_frame, parse_client_transcript,
 };
 use agenc_relay_types::CAPABILITIES;
 
@@ -359,4 +359,35 @@ fn complete_capability_profile() -> Result<CapabilityProfile, Box<dyn Error>> {
         capabilities.push(CapabilitySpec::new(name, value)?);
     }
     Ok(CapabilityProfile::new(capabilities)?)
+}
+
+/// X-05: every server frame a fixture asserts must also be one line the
+/// client's server-to-client decoder accepts. The registration transcript's
+/// frames all pass through this check when it is driven.
+#[test]
+fn every_asserted_server_frame_decodes_as_one_server_line() -> Result<(), Box<dyn Error>> {
+    assert_eq!(decode_server_frame(b":server.example PING :x\r\n"), Ok(()));
+    for frame in [
+        &b":Server.Example PING :x\r\n"[..],
+        &b":server.example PING :x\r\n:server.example PING :y\r\n"[..],
+        &b":server.example PING :x"[..],
+        &b"PING\n"[..],
+        &b"\r\n"[..],
+        &b""[..],
+    ] {
+        assert_eq!(
+            decode_server_frame(frame),
+            Err(ClientTranscriptError::ServerDecoding),
+            "{frame:?}"
+        );
+    }
+    assert_eq!(
+        ClientTranscriptError::ServerDecoding.to_string(),
+        "client transcript server bytes do not decode"
+    );
+    let transcript = parse_client_transcript(REGISTRATION_TRANSCRIPT)?;
+    let mut harness = ClientTranscriptHarness::new()?;
+    harness.drive(&transcript)?;
+    harness.finish()?;
+    Ok(())
 }

@@ -13,6 +13,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::MAX_NICKNAME_BYTES;
 use crate::registration_command::validate_nickname;
+use crate::server_tags::is_batch_reference;
 use crate::{
     CapabilityState, MAX_CLIENT_ONLY_TAGS, MAX_CLIENT_ONLY_TOTAL_BYTES,
     MAX_CLIENT_ONLY_VALUE_BYTES, MAX_CLIENT_TAG_DATA_BYTES, MAX_COMBINED_TAG_SECTION_BYTES,
@@ -829,9 +830,9 @@ fn decimal_text(value: u64) -> Result<String, RenderError> {
 
 const CLOAK_USER_COMPONENT_BYTES: usize = 10;
 const CLOAK_HOST_COMPONENT_BYTES: usize = 16;
-const CLOAK_USER_FRAME: &str = "u-";
-const CLOAK_HOST_FRAME: &str = "h-";
-const CLOAK_HOST_SUFFIX: &str = ".invalid";
+pub(crate) const CLOAK_USER_FRAME: &str = "u-";
+pub(crate) const CLOAK_HOST_FRAME: &str = "h-";
+pub(crate) const CLOAK_HOST_SUFFIX: &str = ".invalid";
 
 /// Bytes of a public cloak's visible user field: `u-` and the ten base32
 /// characters of its user component (Architecture 7.4).
@@ -1568,15 +1569,11 @@ fn validate_correlation(value: &str) -> Result<(), RenderError> {
 }
 
 fn validate_batch_reference(value: &str) -> Result<(), RenderError> {
-    if value.is_empty()
-        || value.len() > MAX_CORRELATION_TAG_BYTES
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(RenderError::InvalidCorrelation);
+    if is_batch_reference(value) {
+        Ok(())
+    } else {
+        Err(RenderError::InvalidCorrelation)
     }
-    Ok(())
 }
 
 fn command_bytes(

@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1010
-reviewed_source_sha256 = "720ee88e0dadd17dd564878f3224cfe56afca1dbd0e36ed1b882c3274fe82dbd"
+reviewed_source_files = 1013
+reviewed_source_sha256 = "ad03f93c0e8fb04777abcbb1013808208710bf4f3b7479e28bdf220a2a7677da"
 deferred = []
 
 [[region]]
@@ -223,7 +223,7 @@ id = "client-registration-grammar-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-relay-client-wire/src/registration_command.rs"
 item = "fmt"
-source_sha256 = "6bf5a1f8c4e6521a5b2099eabac18a69a4e333fcc16d6408e57e196c731d262c"
+source_sha256 = "43ba98bddfe514fabaa6e2dc5d93d1776350076e4abc79956349a4cad175b369"
 start_line = 320
 end_line = 332
 span_sha256 = "88a7184daf1460646c3ea8b7c629f3722796efc56cad177f1cce3dd30f8cdcbc"
@@ -247,12 +247,72 @@ id = "client-render-error-arms"
 category = "parser-error-discriminants"
 file = "crates/agenc-relay-client-wire/src/render.rs"
 item = "fmt"
-source_sha256 = "401380933031930b4112516f58a48e7704c0403bb2c420bbffa52453c261a83b"
-start_line = 81
-end_line = 98
+source_sha256 = "34c780a4630e08807457be67d32ff10a2112dcf14029a40e898acd27ba04ad67"
+start_line = 82
+end_line = 99
 span_sha256 = "d667a899117af2364e070a17bcc4104773613d2501802fbc1e8e461d597af41c"
 metric = "regions"
 reason = "Every closed RenderError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-framing-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_framing.rs"
+item = "fmt"
+source_sha256 = "4bd458927693d98d917b120434e0596a3c9b191fc755f0a317f10b45ceb50314"
+start_line = 94
+end_line = 108
+span_sha256 = "da65ce1e57e218d644b84b677086dc8979f9d849b0f34c43b06f58361eeaa4d0"
+metric = "regions"
+reason = "Every closed ServerFramingError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-tag-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_tags.rs"
+item = "fmt"
+source_sha256 = "0bb7909db65b79e93b5651f013e544d70f7b9f860e57f951f6b29e0a86017cab"
+start_line = 70
+end_line = 89
+span_sha256 = "ee1ea8f85c53d0cb85aeb861ba35a072949e6b4e8a13a34b076235065d213eda"
+metric = "regions"
+reason = "Every closed ServerTagError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-message-error-arms"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_message.rs"
+item = "fmt"
+source_sha256 = "67c22f14701cedec1cfb9e96cb275a0900e0ef7821aceee47212bce02979d8eb"
+start_line = 75
+end_line = 96
+span_sha256 = "b40767dcdc665c4795bb3adbf26187483ebab17a8e64ba7a60b083bc342bd0a4"
+metric = "regions"
+reason = "Every closed ServerMessageError discriminant must be observed by an error reporting test."
+
+[[region]]
+id = "server-tag-section-errors"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_tags.rs"
+item = "parse_server_tags"
+source_sha256 = "0bb7909db65b79e93b5651f013e544d70f7b9f860e57f951f6b29e0a86017cab"
+start_line = 317
+end_line = 346
+span_sha256 = "ced5f7ea5249cc77185bfcd14b7a2ef03585136db022d4934d025d46159a32c9"
+metric = "branches"
+reason = "Every accepted and rejected path of a server line's tag section must be exercised at the decoder boundary."
+
+[[region]]
+id = "server-message-parser-errors"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-client-wire/src/server_message.rs"
+item = "parse_server_message"
+source_sha256 = "67c22f14701cedec1cfb9e96cb275a0900e0ef7821aceee47212bce02979d8eb"
+start_line = 379
+end_line = 402
+span_sha256 = "112b52f54658494db60fbd0450c48c084e15a70669f9061b7ab70db6e8c98368"
+metric = "branches"
+reason = "Every accepted and rejected syntax path must be exercised at the server-to-client decoder boundary."
 
 [[region]]
 id = "wss-upgrade-error-arms"
