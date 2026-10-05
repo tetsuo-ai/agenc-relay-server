@@ -1297,11 +1297,7 @@ fn resumed_chain(
 /// Replays the daemon's ReInit records through the shared historical chain
 /// (companion 13.8): the finalization commits the one target's digest, a
 /// replaced target never binds, the bound target matches the attempt, and
-/// the activation ends the old lineage. Before PC-001 this fixture built a
-/// second target naming the finalization ID and staged an attempt carrying
-/// that second digest, which the old authorization never committed; the
-/// shared history refuses such an attempt (the e2ee ReInit vector test
-/// `an_attempt_carrying_another_targets_digest_is_refused`).
+/// the activation ends the old lineage.
 fn verify_through_history(
     network: &Network,
     clients: &mut Clients,

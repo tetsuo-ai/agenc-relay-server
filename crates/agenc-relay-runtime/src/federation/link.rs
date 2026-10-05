@@ -525,12 +525,15 @@ const fn close_reason(failure: ReadFailure) -> LinkCloseReason {
 /// Companion Section 12.5: an `ECAP` line that does not carry this node's
 /// exact profile tuple, such as a peer of another profile revision's OFFER,
 /// sends at most `ERROR :ARC-MLS profile mismatch` before the link closes,
-/// as a negotiation that fails on a parsed tuple does. A write that fails
-/// changes nothing: the link closes either way.
+/// as a negotiation that fails on a parsed tuple does. The write waits at
+/// most the keepalive timeout, so a peer that stops reading cannot hold the
+/// close open; a write that fails or times out changes nothing, and the link
+/// closes either way.
 async fn send_profile_mismatch<W: AsyncWrite + Unpin>(writer: &mut W, context: &LinkContext) {
-    if let Ok(line) = FederationLineText::from_rendered(violation_line(&context.local_name)) {
-        let _ = write_line(writer, &line).await;
-    }
+    let Ok(line) = FederationLineText::from_rendered(violation_line(&context.local_name)) else {
+        return;
+    };
+    let _ = tokio::time::timeout(context.timing.keepalive_timeout, write_line(writer, &line)).await;
 }
 
 /// The mutable state of one running link between select steps.

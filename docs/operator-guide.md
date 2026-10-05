@@ -162,9 +162,16 @@ mixed-version operation of the encrypted profile.
   serves only what architecture Section 20.10 allows and refuses new
   registrations and global commands with `FAIL <command> NETWORK_UNAVAILABLE`.
   Edges that run the coordinator's hash are unaffected.
-- An upgraded node does not offer the encrypted profile to a client of the
-  previous hash; that client keeps plaintext chat wherever a channel allows
-  it.
+- An upgraded node advertises the new profile value to every client. A
+  client of the previous hash finds that value unequal to its own and does
+  not enable the encrypted profile: its encrypted conversations stay blocked
+  until the client is upgraded and never fall back to plaintext (companion
+  Section 11.1). Plaintext channels keep working.
+- This release does not migrate ReInit state stored under the previous
+  profile. A conversation whose latest sequencer record is a ReInit
+  activation or abort of the previous profile is not restored, and a ReInit
+  attempt left open under the previous profile can neither complete nor be
+  aborted after the upgrade. How such state migrates is not yet defined.
 - After the upgrade, run `print-onboarding` on every node that has the
   encrypted profile enabled, distribute the new descriptor, and create new
   account invitations from it. A client refuses a descriptor whose

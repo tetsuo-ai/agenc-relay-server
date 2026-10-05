@@ -255,10 +255,21 @@ reviewed spans.
 
 The `reinit_attempt` object and the two ReInit terminal requests that embed it
 carry the target, as the revision's companion text requires. No other object,
-token, reply or registry changes, and the storage generation is unchanged. A
-coordinator that holds a ReInit attempt object of the previous profile and
-reads it again (an ACK for that attempt) no longer decodes it; how a database
-holding such attempts restores is part of P-04 (plan item G-08).
+token, reply or registry changes, and the storage generation is unchanged.
+ReInit state that a coordinator stored under the previous profile does not
+read as before:
+
+- a route whose durable head is a ReInit activation or abort record of the
+  previous profile, which embeds an attempt of the previous layout, no longer
+  decodes, and startup does not restore that route;
+- an attempt of the previous profile left open restores, but it can neither
+  complete nor be aborted: its object no longer decodes for an ACK, and an
+  activation or abort request cannot re-encode it to the attempt object ID
+  its receipt names.
+
+This change leaves startup as it is. How such state migrates is part of P-04
+(plan item G-08), whose restore test covers a database with each of those
+heads; the operator guide's upgrade note states the effect.
 
 ## Limitations
 
@@ -306,6 +317,11 @@ branch:
   codes: `E2EE_FINALITY_REQUIRED` first, for an accepted state that is not
   the ReInit finalization, then `E2EE_BINDING_AUTH_INVALID` for any error of
   `check_attempt`.
+- The wire and persistence section states what ReInit state stored under the
+  previous profile does after this change, and the operator guide's upgrade
+  note carries it; the Stage 08 fixture's comment states the rules its replay
+  checks, and the Stage 08 line of the validation list names both ReInit
+  scenarios among the tests that passed.
 
 ## Validation
 
@@ -323,7 +339,8 @@ On the tree of this commit, before it was committed, with Rust 1.98.0:
   is a load-dependent test that ReInit does not reach, and it passed alone
   three times.
 - `cargo nextest run -p agenc-relay-server --test stage_eight_e2ee --all-features --locked`:
-  46 passed, 17 Stage 10 drills skipped, among them both ReInit scenarios.
+  46 passed, both ReInit scenarios among them; the 17 Stage 10 drills were
+  skipped.
 - Mutation testing: 130 single-check mutations of `reinit_target.rs` and the
   chain's ReInit checks, one per condition and per compared field, each
   rebuilt and run against the `reinit_vectors` and `history` test binaries:

@@ -56,9 +56,11 @@ as `ReadFailure::Profile`; every other companion line that does not parse is
 still `Framing`. The link loop answers a profile failure with
 `ERROR :ARC-MLS profile mismatch`, rendered by
 `agenc_relay_e2ee::federation::ecap::violation_line` as the negotiation's
-violations are, and then closes with reason `Framing`, as before. A write
-that fails changes nothing. During the hello, a profile failure becomes
-`HelloFailure::Framing`, like every other line failure.
+violations are, and then closes with reason `Framing`, as before. The
+write waits at most the link's keepalive timeout (`LinkTiming::keepalive_timeout`,
+10 seconds), so a peer that stops reading cannot hold the close open; a write
+that fails or times out changes nothing. During the hello, a profile failure
+becomes `HelloFailure::Framing`, like every other line failure.
 
 `crates/agenc-relay-runtime/src/federation/link/tests/profile_mismatch.rs`:
 
@@ -69,6 +71,9 @@ that fails changes nothing. During the hello, a profile failure becomes
   link run as `core.example` answers the release candidate 3 OFFER with
   exactly `:core.example ERROR :ARC-MLS profile mismatch\r\n` and closes with
   `Framing`.
+- `a_peer_that_stops_reading_cannot_hold_the_close_open`: over a one-byte
+  transport whose peer never reads, the link closes with `Framing` once the
+  write's bound passes.
 - `a_malformed_base_line_still_closes_without_a_profile_line`: a base line
   that does not parse still closes the link without any line.
 
@@ -107,12 +112,26 @@ says:
 - what a link between different hashes does: it closes, an upgraded end
   sends the profile-mismatch line first, and an edge whose coordinator link
   is closed behaves as architecture Section 20.10 states;
-- that clients of the previous hash are not offered the encrypted profile;
+- that an upgraded node advertises the new value, and that a client of the
+  previous hash finds it unequal and keeps its encrypted conversations
+  blocked, never falling back to plaintext (companion 11.1);
+- that this release does not migrate ReInit state stored under the previous
+  profile: a conversation whose latest sequencer record is a ReInit
+  activation or abort of that profile is not restored, and a ReInit attempt
+  left open under it can neither complete nor be aborted (P-02's record
+  explains why; how such state migrates is part of P-04, plan item G-08);
 - to print and distribute new descriptors and invitations;
 - what does not change.
 
-The note does not say how a database that holds a ReInit attempt of the
-previous profile restores, which is part of P-04 (plan item G-08).
+## Review
+
+An independent review of this topic led to a follow-up commit: the mismatch
+write is bounded by the keepalive timeout, with the test above, which fails
+without the bound; and the upgrade note now says what a client of the
+previous hash sees and what happens to ReInit state stored under the previous
+profile. Validation of the follow-up:
+`cargo nextest run -p agenc-relay-runtime -p agenc-relay-config -p agenc-relay-e2ee --all-features --locked`
+and the Stage 08 suite passed, and the fast gate passed.
 
 ## Requirements
 

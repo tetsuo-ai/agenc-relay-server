@@ -1,7 +1,8 @@
 //! Companion Section 12.5 on a running link: an `ECAP` line that is not
 //! this node's exact profile tuple, such as the OFFER of a peer of the
 //! previous profile revision, is answered with
-//! `ERROR :ARC-MLS profile mismatch` before the link closes.
+//! `ERROR :ARC-MLS profile mismatch` before the link closes, and a peer that
+//! does not read the answer cannot hold the close open.
 #![forbid(unsafe_code)]
 #![cfg(test)]
 
@@ -28,13 +29,10 @@ fn offer_line(profile: &str) -> TestResult<String> {
     ))
 }
 
-/// Runs one link as `core.example` against `peer.example`, sends `line` from
-/// the peer, and returns what the peer reads back and why the link closed.
-async fn answer_to(line: &str) -> TestResult<(String, LinkCloseReason)> {
-    let (local, mut remote) = tokio::io::duplex(1 << 16);
-    let (reader, writer) = FrameReader::new(local, "peer.example")?.split();
-    let (_handle, queue) = link_queue(1 << 20);
-    let (inbound, _receiver) = mpsc::channel(4);
+/// The context of one link run as `core.example` against `peer.example`,
+/// with the receiver its inbound events go to.
+fn context(timing: LinkTiming) -> (LinkContext, mpsc::Receiver<FederationInbound>) {
+    let (inbound, receiver) = mpsc::channel(4);
     let context = LinkContext {
         link: LinkId::new(81),
         peer: ServerId::from_bytes([81; 16]),
@@ -42,9 +40,19 @@ async fn answer_to(line: &str) -> TestResult<(String, LinkCloseReason)> {
         inbound,
         budget: ingress_budget(),
         token: CancellationToken::root(),
-        timing: LinkTiming::SPEC,
+        timing,
         observer: None,
     };
+    (context, receiver)
+}
+
+/// Runs one link as `core.example` against `peer.example`, sends `line` from
+/// the peer, and returns what the peer reads back and why the link closed.
+async fn answer_to(line: &str) -> TestResult<(String, LinkCloseReason)> {
+    let (local, mut remote) = tokio::io::duplex(1 << 16);
+    let (reader, writer) = FrameReader::new(local, "peer.example")?.split();
+    let (_handle, queue) = link_queue(1 << 20);
+    let (context, _receiver) = context(LinkTiming::SPEC);
     let task = tokio::spawn(async move {
         let mut entropy = OsEntropy;
         run_link(reader, writer, queue, context, &mut entropy).await
@@ -90,6 +98,31 @@ async fn a_previous_profile_offer_is_answered_with_the_mismatch_line_and_closes(
     let (answer, reason) = answer_to(&offer_line(RC3_PROFILE_TOKEN)?).await?;
     assert_eq!(answer, ":core.example ERROR :ARC-MLS profile mismatch\r\n");
     assert_eq!(reason, LinkCloseReason::Framing);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_peer_that_stops_reading_cannot_hold_the_close_open() -> TestResult {
+    // One byte of buffer each way and a peer that never reads: the answer
+    // cannot be written, so only the write's bound lets the link close.
+    let (local, mut remote) = tokio::io::duplex(1);
+    let (reader, writer) = FrameReader::new(local, "peer.example")?.split();
+    let (_handle, queue) = link_queue(1 << 20);
+    let timing = LinkTiming {
+        keepalive_timeout: std::time::Duration::from_millis(200),
+        ..LinkTiming::SPEC
+    };
+    let (context, _receiver) = context(timing);
+    let task = tokio::spawn(async move {
+        let mut entropy = OsEntropy;
+        run_link(reader, writer, queue, context, &mut entropy).await
+    });
+    remote
+        .write_all(offer_line(RC3_PROFILE_TOKEN)?.as_bytes())
+        .await?;
+    let reason = tokio::time::timeout(std::time::Duration::from_secs(5), task).await??;
+    assert_eq!(reason, LinkCloseReason::Framing);
+    drop(remote);
     Ok(())
 }
 
