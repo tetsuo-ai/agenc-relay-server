@@ -4,6 +4,7 @@
 //! line read back as a client receives them, `parse(render(x))` for every
 //! form, and an object batch charged to its class and batch bounds.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 
 use agenc_relay_e2ee::E2eeError;
@@ -88,6 +89,74 @@ fn every_success() -> Vec<SuccessLine> {
             .map(|kind| SuccessLine::Stored(kind, [9; 32])),
     );
     lines
+}
+
+/// The variant name of a result form. The match has no wildcard arm, so a
+/// new `SuccessLine` variant does not compile until it is named here, and
+/// `every_success_holds_every_declared_result_form` then fails until
+/// `every_success` holds a line of it.
+fn form_name(success: &SuccessLine) -> &'static str {
+    match success {
+        SuccessLine::Bound(..) => "Bound",
+        SuccessLine::Closed(..) => "Closed",
+        SuccessLine::StoredAuthorization(..) => "StoredAuthorization",
+        SuccessLine::StoredPolicy(..) => "StoredPolicy",
+        SuccessLine::StoredMembership(..) => "StoredMembership",
+        SuccessLine::RecoveryAccepted(..) => "RecoveryAccepted",
+        SuccessLine::RecoveryExtended(..) => "RecoveryExtended",
+        SuccessLine::RecoveryClosed(..) => "RecoveryClosed",
+        SuccessLine::RecoveryConflict(..) => "RecoveryConflict",
+        SuccessLine::Acked(..) => "Acked",
+        SuccessLine::Pending(..) => "Pending",
+        SuccessLine::Finalized(..) => "Finalized",
+        SuccessLine::Aborted(..) => "Aborted",
+        SuccessLine::ReinitStaged(..) => "ReinitStaged",
+        SuccessLine::ReinitAcked(..) => "ReinitAcked",
+        SuccessLine::ReinitActivated(..) => "ReinitActivated",
+        SuccessLine::ReinitAborted(..) => "ReinitAborted",
+        SuccessLine::EmptyGroup(..) => "EmptyGroup",
+        SuccessLine::Account(..) => "Account",
+        SuccessLine::Attached(..) => "Attached",
+        SuccessLine::Stored(..) => "Stored",
+        SuccessLine::Revoked(..) => "Revoked",
+        SuccessLine::MailboxAcked(..) => "MailboxAcked",
+        SuccessLine::EmptyKey(..) => "EmptyKey",
+    }
+}
+
+/// The variants `SuccessLine` declares, read from its definition.
+fn declared_forms() -> Result<BTreeSet<&'static str>, Box<dyn Error>> {
+    const SOURCE: &str = include_str!("../src/wire/response.rs");
+    let start = SOURCE
+        .find("pub enum SuccessLine {")
+        .ok_or("no SuccessLine")?;
+    let body = SOURCE.get(start..).ok_or("no SuccessLine body")?;
+    let end = body.find("\n}\n").ok_or("no end of SuccessLine")?;
+    let mut forms = BTreeSet::new();
+    for line in body
+        .get(..end)
+        .ok_or("no SuccessLine body")?
+        .lines()
+        .skip(1)
+    {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("///") {
+            continue;
+        }
+        let name = line
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .next()
+            .ok_or("no variant name")?;
+        forms.insert(name);
+    }
+    Ok(forms)
+}
+
+#[test]
+fn every_success_holds_every_declared_result_form() -> TestResult {
+    let named: BTreeSet<&str> = every_success().iter().map(form_name).collect();
+    assert_eq!(named, declared_forms()?);
+    Ok(())
 }
 
 #[test]
@@ -307,6 +376,75 @@ fn live_frames_read_back_with_their_tag_rules() -> TestResult {
             "{why}"
         );
     }
+    // No tag twice. The live production asks only whether a tag is present,
+    // so the tag split's own rule is what refuses a repeated one.
+    for (tags, why) in [
+        (
+            format!(
+                "account=heron;account=heron;+agenc.ag/e2ee={}",
+                fragment(&zero)
+            ),
+            "a repeated account",
+        ),
+        (
+            format!("label=req-3;label=req-4;+agenc.ag/e2ee={}", fragment(&zero)),
+            "a repeated label",
+        ),
+        (
+            format!("+agenc.ag/e2ee={0};+agenc.ag/e2ee={0}", fragment(&zero)),
+            "a repeated fragment tag",
+        ),
+    ] {
+        assert_eq!(
+            refused(&format!("@{tags} :{USER} TAGMSG #garden"))?,
+            E2eeError::InvalidValue,
+            "{why}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_tag_split_holds_four_fields_and_refuses_a_fifth() -> TestResult {
+    let receipt = ReceiptTag {
+        candidate_id: [3; 32],
+        receipt: vec![4; 40],
+    };
+    let tags = LiveTags {
+        label: Some("req-3"),
+        account: Some("heron"),
+        receipt: Some(&receipt),
+    };
+    let candidate = LiveLine::Candidate([1; 32], [2; 32], [3; 32]);
+    let rendered = render_live(USER, &tags, &fragment_of(0)?, &candidate)?;
+    // Four fields, the most a production carries: a live candidate frame.
+    let four = line(&rendered)?;
+    let tagged = four.strip_prefix('@').ok_or("no tags")?;
+    let (section, _) = tagged.split_once(' ').ok_or("no tag section")?;
+    assert_eq!(section.split(';').count(), 4);
+    assert!(matches!(
+        parse_received_line(four)?.line,
+        ReceivedLine::Live(_)
+    ));
+    // A fifth field is refused for the count, before the production would
+    // refuse the tag it does not carry.
+    assert_eq!(
+        refused(&format!("@msgid=x;{tagged}"))?,
+        E2eeError::LimitExceeded
+    );
+    // So is any longer section, whatever its fields.
+    let long = vec!["a=1"; 2_048].join(";");
+    let bound = format!("EGROUP BOUND {} {}", h(1), h(2));
+    assert_eq!(
+        refused(&format!("@{long} :{SERVER} {bound}"))?,
+        E2eeError::LimitExceeded
+    );
+    // Four fields outside every production's tag set are refused by the
+    // productions.
+    assert_eq!(
+        refused(&format!("@a=1;b=2;c=3;d=4 :{SERVER} {bound}"))?,
+        E2eeError::InvalidValue
+    );
     Ok(())
 }
 

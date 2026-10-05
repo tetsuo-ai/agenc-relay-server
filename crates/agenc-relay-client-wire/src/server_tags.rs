@@ -5,7 +5,8 @@
 //! whole section and keeps it verbatim: every [`ServerTag`] borrows its key
 //! and its raw, still escaped value, so a consumer can apply a rule to the
 //! raw bytes (the companion's fragment tags forbid any backslash) before it
-//! asks for the strict unescape.
+//! asks for the strict unescape. A [`ServerTagError`] concerns that line
+//! only, as every decoding error of a server line does.
 
 use std::borrow::Cow;
 use std::collections::HashSet;

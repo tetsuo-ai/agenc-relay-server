@@ -55,7 +55,7 @@ EVID-S02-004-PARSER|reject/message/UnregisteredCommand/companion-command|ascii|:
 EVID-S02-004-PARSER|reject/message/UnregisteredNumeric/unknown-numeric|ascii|:server.example 999 alice :x
 EVID-S02-004-PARSER|reject/message/ForbiddenNumeric/idle-317|ascii|:server.example 317 alice bob 30 :seconds idle
 EVID-S02-004-PARSER|reject/message/ForbiddenNumeric/host-338|ascii|:server.example 338 alice bob 192.0.2.1 :actually using host
-EVID-S02-004-PARSER|reject/message/EmptyParameter/trailing-space|ascii|:server.example JOIN #garden 
+EVID-S02-004-PARSER|reject/message/EmptyParameter/trailing-space|hex|3a7365727665722e6578616d706c65204a4f494e202367617264656e200d0a
 EVID-S02-004-PARSER|reject/message/TooManyParameters/sixteen-parameters|ascii|:server.example NOTICE m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 m13 m14 m15 :t
 EVID-S02-001-FRAMING|reject/framing/EmptyLine/empty-line|hex|0d0a
 EVID-S02-001-FRAMING|reject/framing/BareLineFeed/bare-lf|hex|50494e470a

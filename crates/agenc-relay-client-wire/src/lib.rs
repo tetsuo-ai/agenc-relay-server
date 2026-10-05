@@ -7,7 +7,10 @@
 //!
 //! The server-to-client direction a client reads is decoded by
 //! [`ServerStreamFramer`], [`parse_server_tags`] and [`parse_server_message`];
-//! the daemon itself never runs them.
+//! the daemon itself never runs them. A decoding error of
+//! [`parse_server_tags`] or [`parse_server_message`] concerns that line only:
+//! the framer's stream stays in sync, and only a [`ServerStreamFramer`]
+//! failure ends the stream.
 
 mod auth_transport;
 mod capability;

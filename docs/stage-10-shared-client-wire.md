@@ -153,6 +153,10 @@ never runs the new modules.
   The companion commands `EGROUP`, `EKEY`, `EDIRECT` and `EOBJECT` and the
   companion reply codes are outside the base registries, so this decoder
   refuses them; X-06 reads those lines in `agenc_relay_e2ee::wire`.
+- A decoding error of `parse_server_tags` or `parse_server_message` concerns
+  that line only: the framer's stream stays in sync, and only a
+  `ServerStreamFramer` failure ends a stream. The crate and module docs say
+  so.
 - The SDK's preparatory codec was the reference for the rules and tests;
   its opt-in for the audit pin's bare cloak spelling stays in the SDK.
 - `crates/agenc-relay-testkit/src/client_transcript.rs`: every server frame a
@@ -165,7 +169,10 @@ never runs the new modules.
   each, decodes the input as one delimited line and as a bare tag section,
   and requires every value of an accepted section to unescape.
   `scripts/check-stage-two.py` lists the target and the three modules, and
-  validates the new vector file's evidence IDs.
+  validates the new vector file's evidence IDs. The seeds keep their CRLF
+  delimiters under the repository's `binary` attribute (`.gitattributes`),
+  as the `wss_upgrade` inputs do, and the vector whose line ends in a space
+  is written in hex.
 
 ### Evidence
 
@@ -236,7 +243,11 @@ were summed only in the daemon's runtime, from federation results.
   fragment and receipt tags their exact grammars, an `EOBJECT` names its
   fragment's object, a live frame's label rides only fragment zero and its
   receipt exactly a candidate's fragment zero, and a `FAIL` code is one of
-  the 22 `E2eeReplyCode` tokens (its description is not parsed).
+  the 22 `E2eeReplyCode` tokens (its description is not parsed). No
+  production carries more than four tags, so a tag section of more fields
+  is refused (`LimitExceeded`) before any field is collected, which also
+  bounds the duplicate check; the input is one framed server line without
+  its CRLF.
 - The literals stay in one registry: `PendingKind`, `EmptyGroupKind` and
   `StoreKind` gain `ALL` and `from_token`, which read their own `token()`;
   `EKEY STORED` admits only the storable kinds, as the renderer does.
@@ -262,7 +273,9 @@ were summed only in the daemon's runtime, from federation results.
 | `received_lines::every_result_form_reads_back_labeled_and_from_its_body` | `parse(render(x))` for all 48 result forms: every verb, the four `REINIT-*` results, each `PENDING`, `EMPTY` and storable `STORED` kind, both bounds of a key-package reference. |
 | `...::only_the_six_state_broadcasts_read_back_untagged` | The six broadcasts read back untagged; every other form is refused without its label. |
 | `...::batch_lines_read_back_from_every_renderer` | Openers for `EGROUP` and `EKEY`, with and without a cursor, and the runtime's `-` label; the close; all eight children; each `EOBJECT` fragment of a two-fragment object. |
-| `...::live_frames_read_back_with_their_tag_rules`, `...::ack_notices_read_back_with_their_distinct_literals`, `...::fail_lines_read_back_for_every_code` | Seven live tag combinations and seven refused ones; both ACK literals; every reply code labeled and not, with and without context, and five refused `FAIL` shapes. |
+| `...::live_frames_read_back_with_their_tag_rules`, `...::ack_notices_read_back_with_their_distinct_literals`, `...::fail_lines_read_back_for_every_code` | Seven live tag combinations and seven refused ones, and a repeated `account`, label and fragment tag each refused by the tag split's own rule; both ACK literals; every reply code labeled and not, with and without context, and five refused `FAIL` shapes. |
+| `...::the_tag_split_holds_four_fields_and_refuses_a_fifth` | A live candidate frame with four tags reads back; the same line with a fifth tag, and a section of 2,048 fields, are refused with `LimitExceeded`; four fields outside every production's tag set are refused with `InvalidValue`. |
+| `...::every_success_holds_every_declared_result_form` | `every_success` holds a line of every `SuccessLine` variant the source declares, named through a match with no wildcard arm, so a new result form fails to compile or fails the test. |
 | `...::tags_may_come_in_the_order_the_base_renderer_sorts_them`, `...::malformed_lines_are_refused`, `...::tag_sets_and_frames_outside_a_production_are_refused`, `...::every_token_of_every_production_is_checked`, `...::the_production_readers_check_what_their_lines_cannot_carry` | Sorted tags; duplicate, missing, extra and escaped tags, a bad source, arity, verbs, kinds and non-canonical tokens; and every body token of every production replaced in turn, each replacement refused. |
 | `...::the_non_tag_budget_holds_512_bytes_with_the_crlf` | A 512-byte non-tag line reads back and 513 is refused, matching the renderer. |
 | `...::a_mailbox_batch_charges_each_object_once_in_any_fragment_order`, `...::a_batch_keeps_its_object_fragment_and_byte_bounds`, `...::a_batch_keeps_its_opener_and_production_order`, `...::a_fragment_declaring_more_than_its_class_allows_is_not_charged` | 32 objects and not 33; 1,427 fragments and not 1,428; 4,194,304 declared bytes and not one more; an application object at and over its kind's maximum; foreign batch, kind and scope; changed declarations; child order and mailbox pairing; the close. |
@@ -272,8 +285,10 @@ Each reader rule was weakened in turn in the working tree, and at least one
 test failed every time: any result accepted untagged, the live tag rule,
 the `EOBJECT` object match, each of the three batch bounds and the class
 limit one larger, the mailbox pairing, a labeled line's exact tag set, the
-non-tag budget one larger, and any `FAIL` code accepted. The fuzz smoke with
-the reader ran 10,000 inputs without a failure.
+non-tag budget one larger, and any `FAIL` code accepted. In the review fix
+round, the tag split's duplicate rule and its four-field bound were removed
+in turn, and each fails its new test. The fuzz smoke with the reader ran
+10,000 inputs without a failure.
 
 ### Coverage
 
@@ -314,9 +329,10 @@ batch check calls the shared predicate with the same grammar.
 ## Validation
 
 From the repository root. Each commit's lane runs were repeated in a target
-directory of this worktree alone, with identical results (the lane's shared
-target directory had let another worktree's build of an unchanged crate
-stand in for this one's).
+directory of this worktree alone, and the table gives those runs: the lane's
+shared target directory had let another worktree's build of an unchanged
+crate stand in for this one's, and at `b18e837` the shared-directory run of
+the suite had failed for that reason.
 
 | Command | `70503bb` (X-12, X-07) | `b5d26d6` (X-05) | `b18e837` (X-06) |
 | --- | --- | --- | --- |
@@ -331,10 +347,42 @@ stand in for this one's).
 `taskset -c 0-31 bash scripts/check-stage-nine.sh` at `b18e837` exits 1:
 104 of 105 commands pass; the one failure is the storage disk profile
 (`cargo nextest run -p agenc-relay-storage --all-features --locked --profile
-disk`), whose qualification workload reads unstable free space on this
-host's XFS volume (`QualificationFailure { error: StaleState }`), the known
-failure of the base, unrelated to this change. Its workspace coverage report
-scores each of the eight new release regions complete for its metric.
+disk`), whose qualification workload does not complete its free-space
+boundary cases on this host's XFS volume (`QualificationFailure { error:
+StaleState }`), the known failure of the base, unrelated to this change.
+Its workspace coverage report scores each of the eight new release regions
+complete for its metric.
 
 This section was added in a later commit that changes this record only; the
 full gate was run again at that commit.
+
+## Review fix round
+
+The program's review of this topic led to changes in one later commit:
+
+- XW-01: the E2EE reader refuses a tag section of more than four fields
+  before collecting any, which bounds its duplicate check (X-06, Change).
+- XW-02: the decoder's docs state that a decoding error concerns its line
+  only (X-05, Change).
+- XW-03: `every_success` is held to every declared `SuccessLine` variant
+  (X-06, Evidence).
+- XW-05: a repeated tag on a live frame is tested (X-06, Evidence).
+- XW-06: the `server_framing` seeds carry the `binary` attribute and the
+  trailing-space vector is written in hex, so `git diff --check` over the
+  topic is clean (X-05, Change).
+- XW-04, the `server_framing` smoke outside every gate script, is kept as
+  the Limitations say.
+
+Validation, from the repository root before that commit:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo nextest run -p agenc-relay-client-wire -p agenc-relay-e2ee -p agenc-relay-testkit -p agenc-relay-runtime --all-features --locked` | 3,442 passed, 2 skipped |
+| the fuzz manifest's `fmt --check`, `check --bins --locked` and `cargo deny check`; the `server_framing` smoke | clean; the smoke passed (10,000 runs, seed 20260824) |
+| `python3 scripts/check-stage-two.py check` and `self-test` | pass |
+| `python3 scripts/check-source.py check` | ok |
+| coverage policy refresh: both inventories, re-anchoring, both audits and self-tests | ok |
+| `git diff --check 6986ace..` over the working tree | clean |
+| the SDK program's fast gate (59 commands) on the staged tree | every command passes |

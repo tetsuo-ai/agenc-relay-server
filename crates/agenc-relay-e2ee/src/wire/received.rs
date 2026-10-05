@@ -6,11 +6,13 @@
 //! A line is read without its CRLF. Its tags may come in any order, because
 //! the daemon's base renderer sorts them by key, so the order on the wire is
 //! not the order the productions are written in; each production still has
-//! its exact tag set, no other tag, and no tag twice. Every production keeps
-//! the 512-byte non-tag budget, the source check of
-//! [`check_server_prefix`], and its registry tokens: result verbs, the
-//! [`PendingKind`], [`EmptyGroupKind`] and [`StoreKind`] literals,
-//! [`ArcWireObjectKind`] tokens and [`E2eeReplyCode`] codes.
+//! its exact tag set, no other tag, and no tag twice. No production carries
+//! more than four tags, so a tag section of more fields is refused before
+//! any of them is collected. Every production keeps the 512-byte non-tag
+//! budget, the source check of [`check_server_prefix`], and its registry
+//! tokens: result verbs, the [`PendingKind`], [`EmptyGroupKind`] and
+//! [`StoreKind`] literals, [`ArcWireObjectKind`] tokens and
+//! [`E2eeReplyCode`] codes.
 
 use crate::error::E2eeError;
 use crate::limits::{MAX_BATCH_DECODED_BYTES, MAX_BATCH_FRAGMENTS, MAX_BATCH_OBJECTS};
@@ -37,6 +39,9 @@ const ACCOUNT_TAG: &str = "account";
 const OBJECT_BATCH_TYPE: &str = "agenc.ag/e2ee-objects";
 /// The CRLF the non-tag budget counts.
 const CRLF_BYTES: usize = 2;
+/// The most tags a production carries: a live frame's label, `account`,
+/// receipt and fragment tags (companion 11.7).
+const MAX_PRODUCTION_TAGS: usize = 4;
 
 /// One received companion line, read into its production.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -145,8 +150,8 @@ pub struct FailLine {
     pub description: String,
 }
 
-/// Reads one received companion line, without its CRLF, into its
-/// production.
+/// Reads one received companion line into its production: one framed server
+/// line without its CRLF, as a client's framer delivers it.
 ///
 /// The tag set selects the production: a client-only fragment tag makes a
 /// live frame, `batch` with the server fragment tag an `EOBJECT` fragment,
@@ -216,8 +221,13 @@ impl<'a> LineParts<'a> {
 }
 
 /// Splits a tag section into keys and raw values; every companion tag has a
-/// value and none repeats.
+/// value and none repeats. A section of more than [`MAX_PRODUCTION_TAGS`]
+/// fields is refused before any is collected, which also bounds the
+/// duplicate check.
 fn split_tags(raw: &str) -> Result<Vec<(&str, &str)>, E2eeError> {
+    if raw.split(';').nth(MAX_PRODUCTION_TAGS).is_some() {
+        return Err(E2eeError::LimitExceeded);
+    }
     let mut tags: Vec<(&str, &str)> = Vec::new();
     for field in raw.split(';') {
         let (key, value) = field.split_once('=').ok_or(E2eeError::InvalidValue)?;

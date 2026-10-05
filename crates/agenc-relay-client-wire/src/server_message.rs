@@ -3,7 +3,9 @@
 //! [`parse_server_message`] reads one line a server sent: optional tags, an
 //! optional source prefix, a command or numeric from the closed base
 //! registries, and at most 15 parameters. The decoded [`ServerMessage`]
-//! borrows the line and owns no heap memory.
+//! borrows the line and owns no heap memory. A decoding error concerns that
+//! line only; the stream it came from stays in sync, and only a
+//! [`ServerStreamFramer`](crate::ServerStreamFramer) failure ends a stream.
 
 use std::error::Error;
 use std::fmt;
