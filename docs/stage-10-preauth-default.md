@@ -52,11 +52,12 @@ round trips of up to 3 seconds.
   must cover an account request's 17-line run, and what lowering or raising
   it does.
 
-The abuse budget changes within the hard row: a connection can send at most
-24 unauthenticated lines at once instead of 10, and at most 54 lines instead
-of 40 before its 30-second registration limit closes it. Every line keeps its
-existing size and parse bounds, and account-service work still starts only
-after the bucket admits the line that needs it.
+The abuse budget changes within the hard row: at most 24 unauthenticated
+lines of a connection are admitted at once instead of 10, and at most 54
+instead of 40 before its 30-second registration limit closes it; a line
+beyond the available credit is answered with `263` and is not processed.
+Every line keeps its existing size and parse bounds, and account-service work
+still starts only after the bucket admits the line that needs it.
 
 `agenc.ag/privacy` stays `v1`: Section 26.2 changes that profile when
 client-visible base semantics or mandatory limits change, and a default
@@ -170,7 +171,14 @@ At `5191617`, from the repository root:
 | `cargo nextest run -p agenc-relay-config -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,004 passed (1 slow), 21 skipped |
 | the two `preauth_budget` daemon tests, three further runs | passed each time; account creation registers after 24.6 to 24.8 s and the login after 20.3 s |
 | the SDK program's fast gate (agenc-relay-sdk `evidence/2026-09-29-server-rehearsal-pc001/tools/fast-gates.sh`, 59 commands), on the staged tree and at the commit | every command passes |
-| `taskset -c 0-31 bash scripts/check-stage-nine.sh` | exit 1: 104 of 105 commands pass; the one failure is the storage disk profile (`cargo nextest run -p agenc-relay-storage --all-features --locked --profile disk`), whose qualification workload reads unstable free space on this host's XFS volume (`QualificationFailure { error: StaleState }`), the known failure of the base, unrelated to this change |
+| `taskset -c 0-31 bash scripts/check-stage-nine.sh` | exit 1: 104 of 105 commands pass; the one failure is the storage disk profile (`cargo nextest run -p agenc-relay-storage --all-features --locked --profile disk`), whose qualification workload does not complete its free-space boundary cases on this host's XFS volume (`QualificationFailure { error: StaleState }`), the known failure of the base, unrelated to this change |
 
 This section was added in a later commit that changes this record only; the
 full gate was run again at that commit.
+
+In the program's review fix round, a later record-only commit corrected the
+abuse-budget sentence above and in the TODO note (lines are admitted, not
+sent) and the description of the storage disk profile's failure. Its
+validation: the check-release-claims.py document lint on the record and
+TODO.md and `git diff --check` pass, and the SDK program's fast gate passes
+on the staged tree.
