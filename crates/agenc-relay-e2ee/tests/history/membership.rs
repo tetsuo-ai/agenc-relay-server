@@ -56,7 +56,7 @@ fn supplied_membership_facts_bind_reinit_acks_to_their_plan_entries() -> TestRes
     let genesis = Genesis::new()?;
     let (mut chain, mut log) = activated(&genesis)?;
     let council = operational_council(&genesis);
-    let target = [72; 32];
+    let target = log.target_digest()?;
     let (candidate_record, candidate) = log.candidate([2; 32])?;
     adopt(&mut chain, &candidate_record)?;
     let tbs = log.authorization_tbs(

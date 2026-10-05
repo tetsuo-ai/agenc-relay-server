@@ -7,7 +7,7 @@ Ed25519 through the `cryptography` package. The Rust crate must decode
 every vector, recompute every identifier, and verify every signature. Keys
 are derived from fixed seeds so the output is reproducible.
 
-Two sets are written. The identity set under `test-data/vectors/e2ee/identity`
+Three sets are written. The identity set under `test-data/vectors/e2ee/identity`
 covers Section 8 objects. The recovery set under
 `test-data/vectors/e2ee/recovery` covers the Section 12.5.1 witness
 resolution, the Section 13.7.3 leaf-membership proof and the Section 13.7.4
@@ -18,11 +18,37 @@ contract's encoding, identifier and signature rules, but it is not a real
 MLS endpoint transcript, and its Rust consumers belong to ENC-02 through
 ENC-05.
 
+The ReInit set under `test-data/vectors/e2ee/reinit` covers the Section 13.8
+target: for successor suites 0x0001 and 0x0003, the Proposal's extension list,
+the target reconstructed from it, and one conversation's complete sequencer
+records from its pinned genesis through the bootstrap activation, a ReInit
+candidate whose authorization commits the target digest, its finalization, an
+attempt naming that finalization and digest, and the activation, with the
+ReInit binding-chain and policy-chain entries a later joiner of that successor
+checks against the activation, and the old genesis entry they follow. A second
+suite-0x0001 chain authorizes the same target after a finalized self-update
+and a candidate abort, and activates it with a second attempt after the first
+aborted. Rejection files carry a malformed or mismatched extension list, a
+later joiner's GroupContext extensions (its own pending join), the
+pre-revision target layout, a successor initial Commit naming its activation,
+and an attempt carrying another target's digest. A continuous rotation of one
+member's root reaches a successor whose roster heads, binding principals,
+policy and plan name the new root, through activation and a later joiner's
+entries, and the same rotation is also written with a suite change from
+0x0001 to 0x0003. Its rejection files carry a forged continuity signature, a
+sibling root the rotation does not descend from, a fresh root that does not
+continue the old one, a successor binding that keeps the old root, a rotated
+channel-authority root, and a successor whose context, binding and policy
+name another conversation kind than the semantic route it keeps, as an
+extension list and as the target built from it. Signatures are real; MLS
+inputs are synthetic.
+
 Usage: python3 scripts/generate-e2ee-vectors.py [--check]
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import struct
 import sys
@@ -711,6 +737,870 @@ def render_manifest(files: dict[str, bytes], ids: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --- ReInit target set (companion 13.8 with 9.3 to 9.5 and 12.2 to 12.4) ------
+#
+# One conversation from its pinned genesis through the bootstrap activation to
+# a ReInit: the target reconstructed from the Proposal's extension list, the
+# candidate whose authorization commits the target digest, the finalization
+# that authorizes it, an attempt naming that finalization and digest, and the
+# activation. Every structure is encoded from the companion's presentation
+# language, not from the Rust codec, and every signature is a real Ed25519
+# signature from a fixed seed. MLS inputs (Commit objects, GroupContext, tree
+# and GroupInfo encodings, exporter values, and the initial Commit's
+# ciphertext) are synthetic: the chain is valid under the public rules, but it
+# is not a real MLS endpoint transcript.
+
+REINIT_OUTPUT = ROOT / "test-data/vectors/e2ee/reinit"
+KIND_ROOT_IDENTITY = 10
+KIND_DEVICE_ROSTER = 12
+KIND_CONVERSATION_BINDING = 15
+KIND_REINIT_ATTEMPT = 18
+KIND_POLICY = 34
+FINALIZATION_RECORD, ABORT_RECORD = 2, 3  # ArcSequencerRecordKind
+REINIT_ATTEMPT_RECORD, REINIT_ACTIVATION_RECORD, REINIT_ABORT_RECORD = 4, 5, 6
+FINALIZE, ABORT = 1, 2  # ArcDisposition and ArcReInitDisposition
+ROUTINE_SELF_UPDATE, CONTROLLED_TRANSITION, BOOTSTRAP_ACTIVATION = 1, 3, 6
+POLICY_BIT, BOOTSTRAP_BIT, REINIT_BIT = 0x08, 0x200, 0x80
+CREATOR_STATE, WELCOME_JOIN = 1, 2  # ArcReInitAckKind
+ROOT_LOCKED_GENESIS, REINIT_TARGET_TRANSITION = 1, 3  # ArcBindingProofKind
+POLICY_REINIT_TARGET_TRANSITION = 3  # ArcPolicyProofKind
+CHANNEL, MODERATED, ACTIVE = 1, 2, 1
+DIRECT = 2  # ArcConversationKind
+ARC_MLS_CONTEXT_EXTENSION = 0xF1C1
+REQUIRED_CAPABILITIES_EXTENSION = 0x0003
+PROFILE_LABEL = b"agenc-chat ARC-MLS specification profile v1\0"
+
+R_ACCOUNTS = (b"c" * 24, b"d" * 24)
+R_ROOT_SEEDS = (110, 111)
+R_DEVICE_SEEDS = (112, 114)
+R_OLD_LEAF_SEEDS = (120, 121)
+R_SEQUENCER_SEED = 115
+R_ROTATED_ROOT_SEEDS = (132, 133)
+R_FORGED_CONTINUITY_SEED = 134
+R_ROTATED_ROOT_INTERVAL = (100, 2_000_000)
+R_FRESH_ROOT_SEED = 135
+R_SIBLING_ROOT_SEED = 136
+R_OLD_GROUP = bytes([0x31] * 32)
+R_INSTANCE = bytes([0x3C] * 16)
+R_CHANNEL = b"#pc001"
+R_GENESIS_TIME = 120
+R_SUCCESSOR_TIME = 140
+R_REINIT_TIME = 150
+R_INITIAL_COMMIT_TIME = 155
+R_ROSTER_INTERVAL = (100, 100 + 6 * 24 * 3600)
+R_REQUIRED_CAPABILITIES = (
+    opaque_v(u16(ARC_MLS_CONTEXT_EXTENSION) + u16(0xF1C3)) + opaque_v(u16(0xF1C2)) + opaque_v(u16(1))
+)
+
+
+def opaque4(data: bytes) -> bytes:
+    """A vector with the four-byte prefix of an unbounded proof-set digest."""
+    return opaque(data, 0xFFFF_FFFF)
+
+
+def r_root(account: bytes, private: Ed25519PrivateKey) -> tuple[bytes, bytes]:
+    tbs = (
+        u16(1) + NETWORK + opaque(account, 255) + u64(0) + public(private)
+        + u64(ROOT_INTERVAL[0]) + u64(ROOT_INTERVAL[1]) + bytes(32)
+    )
+    return tbs, tbs + sign(private, "root identity", tbs) + opaque(b"", 64)
+
+
+def r_certificate(account: bytes, root_private: Ed25519PrivateKey, root_fp: bytes, seed: int,
+                  root_generation: int = 0) -> tuple[bytes, bytes]:
+    device = key(seed)
+    challenge = bytes([seed + 100] * 32)
+    enrollment_tbs = (
+        u16(1) + NETWORK + opaque(account, 255) + u64(root_generation) + root_fp + u64(0) + challenge
+        + bytes([seed] * 16) + public(device) + u64(90) + u64(100)
+    )
+    enrollment = (
+        enrollment_tbs
+        + sign(device, "device enrollment possession", enrollment_tbs)
+        + sign(root_private, "device enrollment approval", enrollment_tbs)
+    )
+    tbs = (
+        u16(1) + NETWORK + opaque(account, 255) + u64(root_generation) + root_fp + bytes([seed] * 16)
+        + public(device) + u64(0) + challenge + semantic_id("enrollment id", enrollment_tbs)
+        + u64(1) + u32(3) + u64(0) + u64(1_000_000)
+    )
+    return tbs, tbs + enrollment + sign(root_private, "device certificate", tbs)
+
+
+def r_roster(account: bytes, root_private: Ed25519PrivateKey, root_fp: bytes, seed: int, cert: bytes,
+             root_generation: int = 0) -> tuple[bytes, bytes]:
+    tbs = (
+        u16(1) + NETWORK + opaque(account, 255) + u64(root_generation) + root_fp + u64(0)
+        + u64(R_ROSTER_INTERVAL[0]) + u64(R_ROSTER_INTERVAL[1]) + bytes(32)
+        + vector([bytes([seed] * 16) + cert], 65_535) + vector([], 65_535)
+    )
+    return tbs, tbs + sign(root_private, "device roster", tbs)
+
+
+def r_capability_id(account: bytes, seed: int, root_fp: bytes, roster_id: bytes) -> bytes:
+    tbs = (
+        u16(1) + NETWORK + opaque(account, 255) + root_fp + u64(0) + roster_id + bytes([seed] * 16)
+        + u64(0) + bytes(32) + u64(100) + u64(200) + vector([u16(1)], 32) + vector([u16(1), u16(3)], 64)
+        + vector([u16(0xF1C1), u16(0xF1C3)], 128) + vector([u16(0xF1C2)], 128) + vector([u16(1)], 32)
+    )
+    return semantic_id("capability id", tbs)
+
+
+class RPrincipal:
+    """One binding principal: a root, one device with binding and policy authority, and its old leaf."""
+
+    def __init__(self, index: int) -> None:
+        self.account = R_ACCOUNTS[index]
+        self.root_key = key(R_ROOT_SEEDS[index])
+        self.root_tbs, self.root = r_root(self.account, self.root_key)
+        self.fp = semantic_id("root fingerprint", self.root_tbs)
+        self.seed = R_DEVICE_SEEDS[index]
+        self.device = key(self.seed)
+        self.device_id = bytes([self.seed] * 16)
+        cert_tbs, cert = r_certificate(self.account, self.root_key, self.fp, self.seed)
+        self.cert_id = semantic_id("device certificate id", cert_tbs)
+        self.roster_tbs, self.roster = r_roster(self.account, self.root_key, self.fp, self.seed, cert)
+        self.roster_id = semantic_id("roster id", self.roster_tbs)
+        self.capability_id = r_capability_id(self.account, self.seed, self.fp, self.roster_id)
+        self.old_leaf = key(R_OLD_LEAF_SEEDS[index])
+        self.old_leaf_index = index
+        self.old_credential_hash = semantic_id("old credential hash", opaque_v(self.root + cert))
+        self.root_generation = 0
+
+    def approval(self, label: str, tbs: bytes) -> bytes:
+        """`ArcPolicyApproval`, `ArcBindingApproval`, `ArcCommitApproval` and `ArcFinalityVote` share this layout."""
+        return self.fp + self.device_id + self.cert_id + sign(self.device, label, tbs)
+
+    def principal_entry(self) -> bytes:
+        return opaque(self.account, 255) + self.fp + u64(0) + self.roster_id
+
+    def roster_head(self) -> bytes:
+        digest = semantic_id("account id", NETWORK + opaque(self.account, 255))
+        return digest + u64(self.root_generation) + self.fp + u64(0) + self.roster_id
+
+
+def r_rotated(old: RPrincipal, root_seed: int, continuity: Ed25519PrivateKey | None = None) -> RPrincipal:
+    """`old`'s account after a continuous root rotation (companion 8.2): a generation-one root whose
+    continuity signature is by `continuity` (the old root key unless given), a new certificate for the
+    same device and a new generation-zero roster under the new root, and a new capability ID. The old
+    leaf and credential stay `old`'s: they are what the old group's ACKs name."""
+    new = copy.copy(old)
+    new.root_key = key(root_seed)
+    new.root_generation = 1
+    new.root_tbs = (
+        u16(1) + NETWORK + opaque(old.account, 255) + u64(1) + public(new.root_key)
+        + u64(R_ROTATED_ROOT_INTERVAL[0]) + u64(R_ROTATED_ROOT_INTERVAL[1]) + old.fp
+    )
+    signer = old.root_key if continuity is None else continuity
+    new.root = (
+        new.root_tbs + sign(new.root_key, "root identity", new.root_tbs)
+        + opaque(sign(signer, "root continuity", new.root_tbs), 64)
+    )
+    new.fp = semantic_id("root fingerprint", new.root_tbs)
+    cert_tbs, cert = r_certificate(old.account, new.root_key, new.fp, old.seed, root_generation=1)
+    new.cert_id = semantic_id("device certificate id", cert_tbs)
+    new.roster_tbs, new.roster = r_roster(old.account, new.root_key, new.fp, old.seed, cert, root_generation=1)
+    new.roster_id = semantic_id("roster id", new.roster_tbs)
+    new.capability_id = r_capability_id(old.account, old.seed, new.fp, new.roster_id)
+    return new
+
+
+def r_fresh(old: RPrincipal, root_seed: int) -> RPrincipal:
+    """`old`'s account under a new generation-zero root that does not continue the old one, an identity
+    discontinuity (companion 8.2), with a new certificate and roster under it."""
+    new = copy.copy(old)
+    new.root_key = key(root_seed)
+    new.root_generation = 0
+    new.root_tbs, new.root = r_root(old.account, new.root_key)
+    new.fp = semantic_id("root fingerprint", new.root_tbs)
+    cert_tbs, cert = r_certificate(old.account, new.root_key, new.fp, old.seed)
+    new.cert_id = semantic_id("device certificate id", cert_tbs)
+    new.roster_tbs, new.roster = r_roster(old.account, new.root_key, new.fp, old.seed, cert)
+    new.roster_id = semantic_id("roster id", new.roster_tbs)
+    new.capability_id = r_capability_id(old.account, old.seed, new.fp, new.roster_id)
+    return new
+
+
+def canonical(items: list[bytes]) -> bytes:
+    return b"".join(sorted(items))
+
+
+def r_policy(conversation: bytes, generation: int, previous: bytes, controllers: list[RPrincipal],
+             council: list[RPrincipal], suite: int, approvers: list[RPrincipal],
+             kind: int = CHANNEL) -> tuple[bytes, bytes]:
+    allowed = [1, 3] if suite == 1 else [suite, 1]
+    tbs = (
+        u16(1) + NETWORK + conversation + u64(generation) + previous + u8(kind) + u8(MODERATED)
+        + u16(1) + u16(suite) + opaque(b"".join(u16(item) for item in allowed), 32)
+        + opaque(canonical([p.fp for p in controllers]), 2048) + u16(1)
+        + opaque(canonical([p.fp + p.device_id + p.cert_id for p in council]), 5120)
+        + u16(0) + u8(0) + u16(8) + u32(16)
+    )
+    approvals = canonical([p.approval("policy approval", tbs) for p in approvers])
+    return tbs, tbs + opaque(approvals, 16_384)
+
+
+def r_semantic_route(authority: RPrincipal) -> bytes:
+    return (
+        u16(1) + NETWORK + u8(CHANNEL) + opaque(b"", 24) + opaque(b"", 24) + opaque(R_CHANNEL, 255)
+        + authority.fp + u64(0) + bytes(32)
+    )
+
+
+def r_plan(members: list[RPrincipal]) -> bytes:
+    entries = [opaque(p.account, 255) + p.fp + p.device_id + p.capability_id for p in members]
+    return opaque(canonical(entries), 1_048_576)
+
+
+def r_core(suite: int, group: bytes, conversation: bytes, lock: bytes, route: bytes, time: int,
+           initial_policy: bytes, operational_policy: bytes, pending: int, plan_id: bytes, sequencer_id: bytes,
+           kind: int = CHANNEL) -> bytes:
+    return (
+        u16(1) + u16(1) + u16(suite) + opaque(group, 255) + NETWORK + conversation + u8(kind)
+        + lock + route + u64(time) + initial_policy + operational_policy + u8(pending) + plan_id
+        + sequencer_id + opaque(R_REQUIRED_CAPABILITIES, 65_535)
+    )
+
+
+def r_binding_tbs(generation: int, previous: bytes, route_tbs: bytes, lock: bytes, group: bytes, conversation: bytes,
+                  route: bytes, suite: int, initial_policy: bytes, operational_policy: bytes, plan_id: bytes,
+                  core_id: bytes, sequencer_id: bytes, principals: list[RPrincipal], kind: int = CHANNEL) -> bytes:
+    return (
+        u16(1) + NETWORK + u8(kind) + u64(generation) + previous + route_tbs + lock
+        + opaque(R_INSTANCE, 16) + opaque(b"", 32) + opaque(group, 255) + conversation + route
+        + u16(1) + u16(suite) + initial_policy + operational_policy + plan_id + core_id + sequencer_id
+        + opaque(canonical([p.principal_entry() for p in principals]), 65_535)
+    )
+
+
+def r_mls_extensions(context: bytes, *, contexts: int = 1, required: bool = True) -> bytes:
+    """The encoded `Extension extensions<V>` list of a ReInit Proposal."""
+    body = u16(REQUIRED_CAPABILITIES_EXTENSION) + opaque_v(R_REQUIRED_CAPABILITIES) if required else b""
+    body += (u16(ARC_MLS_CONTEXT_EXTENSION) + opaque_v(context)) * contexts
+    return opaque_v(body)
+
+
+def r_result_digests(suite: int, marker: int) -> tuple[bytes, bytes, bytes]:
+    """Registered result digests over synthetic MLS encodings."""
+    return (
+        semantic_id("group context digest", u16(suite) + opaque(bytes([marker] * 48), 1_048_576)),
+        semantic_id("ratchet tree digest", u16(suite) + opaque(bytes([marker + 1] * 96), 4_194_304)),
+        semantic_id("group info digest", u16(suite) + opaque(bytes([marker + 2] * 80), 4_194_304)),
+    )
+
+
+class RLog:
+    """The sequencer's view of the old conversation's log, and the chain state it signs over."""
+
+    def __init__(self, world: "RWorld") -> None:
+        self.world = world
+        self.route_sequence = 0
+        self.head = world.genesis_id
+        self.epoch = 0
+        self.accepted = world.genesis_id
+        self.candidate_sequence = 0
+        self.policy_id = world.bootstrap_policy_id
+
+    def copy(self) -> "RLog":
+        other = RLog(self.world)
+        other.__dict__.update(self.__dict__)
+        return other
+
+    def sequencer_sign(self, label: str, tbs: bytes) -> bytes:
+        return sign(key(R_SEQUENCER_SEED), label, tbs)
+
+    def record(self, kind: int, body: bytes, semantic: bytes) -> bytes:
+        self.route_sequence += 1
+        self.head = semantic
+        return wire_object(KIND_SEQUENCER_RECORD, u8(kind) + body)
+
+    def candidate(self, commit_object: bytes) -> tuple[bytes, bytes, bytes]:
+        tbs = (
+            u16(1) + NETWORK + self.world.conversation + u64(self.route_sequence) + u64(self.epoch)
+            + u64(self.epoch + 1) + u32(self.candidate_sequence) + commit_object + self.accepted + self.head
+            + u64(1_700_000_000 + self.route_sequence) + self.world.sequencer_id
+        )
+        receipt = tbs + self.sequencer_sign("candidate receipt", tbs)
+        candidate_id = semantic_id("candidate id", tbs)
+        self.slot = (self.epoch, self.accepted, self.candidate_sequence, self.head)
+        return self.record(CANDIDATE_RECORD, receipt, candidate_id), receipt, candidate_id
+
+    def vote_tbs(self, candidate_id: bytes, disposition: int, terminal: bytes, reason: int) -> bytes:
+        epoch, accepted, candidate_sequence, predecessor = self.slot
+        return (
+            u16(1) + NETWORK + self.world.conversation + u64(epoch) + accepted + u32(candidate_sequence)
+            + predecessor + candidate_id + u8(disposition) + terminal + u16(reason)
+        )
+
+    def finalization(self, receipt: bytes, candidate_id: bytes, commit_object: bytes, rule: int, bits: int,
+                     resulting_policy: bytes, target: bytes, approvers: list[RPrincipal],
+                     voters: list[RPrincipal]) -> tuple[bytes, bytes, bytes]:
+        w = self.world
+        context_digest, tree_digest, _ = r_result_digests(1, 0x50 + self.route_sequence)
+        authorization_tbs = (
+            u16(1) + NETWORK + w.conversation + u64(self.epoch) + self.accepted + candidate_id + commit_object
+            + u64(R_REINIT_TIME if bits == REINIT_BIT else 130 + self.route_sequence) + self.policy_id
+            + u8(rule) + u32(bits) + resulting_policy + context_digest + tree_digest + target
+        )
+        approvals = canonical([p.approval("commit authorization", authorization_tbs) for p in approvers])
+        authorization = authorization_tbs + opaque(approvals, 16_384)
+        authenticator = bytes([0x70 + self.route_sequence] * 32)
+        sender = w.principals[0]
+        ack_tbs = (
+            u16(1) + NETWORK + w.conversation + u64(self.epoch) + candidate_id + commit_object
+            + u32(sender.old_leaf_index) + sender.old_credential_hash + u64(self.epoch + 1)
+            + context_digest + tree_digest + authenticator
+        )
+        ack = ack_tbs + opaque(sign(sender.old_leaf, "commit processed", ack_tbs), 255)
+        core = (
+            u16(1) + NETWORK + w.conversation + u64(self.epoch) + self.accepted + candidate_id + commit_object
+            + u64(self.epoch + 1) + self.policy_id + semantic_id("commit authorization id", authorization_tbs)
+            + semantic_id("commit acknowledgement set", opaque4(ack_tbs)) + context_digest + tree_digest
+            + authenticator
+        )
+        finalization_id = semantic_id("finalization id", core)
+        vote = self.vote_tbs(candidate_id, FINALIZE, finalization_id, 0)
+        votes = canonical([p.approval("disposition vote", vote) for p in voters])
+        request = core + receipt + authorization + opaque(ack, 262_144) + opaque(votes, 16_384)
+        tbs = (
+            u16(1) + NETWORK + w.conversation + u64(self.route_sequence) + self.head + finalization_id
+            + w.sequencer_id + request
+        )
+        certificate = tbs + self.sequencer_sign("commit finalization", tbs)
+        record = self.record(FINALIZATION_RECORD, certificate, finalization_id)
+        self.epoch += 1
+        self.accepted = finalization_id
+        self.candidate_sequence = 0
+        self.policy_id = resulting_policy
+        return record, finalization_id, authorization_tbs
+
+    def abort(self, receipt: bytes, candidate_id: bytes, voters: list[RPrincipal]) -> tuple[bytes, bytes]:
+        w = self.world
+        reason = 1  # sender_withdrawn
+        core = (
+            u16(1) + NETWORK + w.conversation + self.accepted + candidate_id + u64(self.epoch) + u8(reason)
+            + bytes([0x65] * 32)
+        )
+        abort_id = semantic_id("abort id", core)
+        vote = self.vote_tbs(candidate_id, ABORT, abort_id, reason)
+        votes = canonical([p.approval("disposition vote", vote) for p in voters])
+        request = core + receipt + opaque(votes, 16_384)
+        tbs = u16(1) + NETWORK + w.conversation + u64(self.route_sequence) + self.head + abort_id + w.sequencer_id + request
+        certificate = tbs + self.sequencer_sign("candidate abort", tbs)
+        record = self.record(ABORT_RECORD, certificate, abort_id)
+        self.candidate_sequence += 1
+        return record, abort_id
+
+
+class RAttempt:
+    """One ReInit attempt of a target: its KeyPackage plan, initial Commit, and object, which carries the
+    target (`ArcReInitAttempt.target`) right after its TBS."""
+
+    def __init__(self, world: "RWorld", target: "RTarget", finalization_id: bytes, sequence: int, marker: int,
+                 *, digest: bytes | None = None, carried: bytes | None = None) -> None:
+        creator, joiner = world.principals
+        self.sequence = sequence
+        self.finalization_id = finalization_id
+        self.target = target
+        self.digest = target.digest if digest is None else digest
+        self.carried = target.tbs if carried is None else carried
+        self.joiner_ref = hashlib.sha256(b"synthetic KeyPackageRef" + bytes([marker])).digest()
+        leaves = {creator.seed: key(marker), joiner.seed: key(marker + 1)}
+        entries = []
+        for p in target.members:
+            is_creator = p.seed == creator.seed
+            leaf_digest = semantic_id("leaf signature key", u16(ED25519_SCHEME) + opaque(public(leaves[p.seed]), 255))
+            entries.append(
+                opaque(p.account, 255) + p.fp + p.device_id + p.capability_id
+                + opaque(b"" if is_creator else self.joiner_ref, 255) + u16(ED25519_SCHEME) + leaf_digest
+                + u8(1 if is_creator else 0)
+            )
+        self.plan = opaque(canonical(entries), 1_048_576)
+        self.initial_commit = world.initial_commit(target, finalization_id, marker)
+        self.results = r_result_digests(target.suite, marker) + (bytes([marker + 3] * 32),)
+        context_digest, tree_digest, info_digest, exporter = self.results
+        common = (
+            creator.old_credential_hash, target.new_conversation, self.digest, target.binding_id,
+            target.plan_id, semantic_id("key package plan id", self.plan),
+            semantic_id("reinit initial commit", self.initial_commit),
+        )
+        authorization_tbs = (
+            u16(1) + NETWORK + world.conversation + finalization_id + u32(sequence) + u32(creator.old_leaf_index)
+            + common[0] + common[1] + common[2] + common[3] + common[4] + common[5] + common[6]
+            + info_digest + context_digest + tree_digest + exporter
+        )
+        approvals = canonical([creator.approval("reinit attempt authorization", authorization_tbs)])
+        self.tbs = (
+            u16(1) + NETWORK + world.conversation + target.new_conversation + finalization_id + u32(sequence)
+            + u32(creator.old_leaf_index) + common[0] + opaque(target.group, 255) + u16(1) + u16(target.suite)
+            + common[2] + common[3] + common[4] + common[5] + common[6]
+            + semantic_id("reinit attempt authorization id", authorization_tbs)
+            + info_digest + context_digest + tree_digest + exporter
+        )
+        body = (
+            self.tbs + self.carried + self.plan + opaque(self.initial_commit, 3_145_728)
+            + authorization_tbs + opaque(approvals, 16_384)
+            + opaque(sign(creator.old_leaf, "reinit attempt", self.tbs), 255)
+        )
+        self.object = wire_object(KIND_REINIT_ATTEMPT, body)
+        self.body = body
+        self.attempt_id = semantic_id("reinit attempt id", self.tbs)
+
+    def ack_tbs(self, principal: RPrincipal, kind: int) -> bytes:
+        context_digest, tree_digest, info_digest, exporter = self.results
+        reference = b"" if kind == CREATOR_STATE else self.joiner_ref
+        return (
+            u16(1) + NETWORK + self.target.world.conversation + self.target.new_conversation
+            + self.finalization_id + self.attempt_id + u8(kind) + info_digest + context_digest + tree_digest
+            + exporter + u32(principal.old_leaf_index) + principal.old_credential_hash
+            + u32(principal.old_leaf_index) + opaque(reference, 255)
+        )
+
+
+class RTarget:
+    """The successor of one suite: its context, extension list and target. `members` are the principals
+    its roster heads, policy and plan name (the old ones unless given, such as after a root rotation);
+    `binding_members` are its binding's principals (the members unless given); `kind` is the
+    conversation kind its context, binding, policy and core name (the old channel's unless given),
+    while it keeps the old channel's semantic route."""
+
+    def __init__(self, world: "RWorld", suite: int, *, members: tuple[RPrincipal, ...] | None = None,
+                 binding_members: tuple[RPrincipal, ...] | None = None, group: bytes | None = None,
+                 kind: int = CHANNEL) -> None:
+        self.world = world
+        self.suite = suite
+        self.kind = kind
+        self.group = bytes([0x40 + suite] * 32) if group is None else group
+        self.new_conversation = semantic_id("conversation", NETWORK + opaque(self.group, 255))
+        self.members = tuple(world.principals) if members is None else members
+        self.binding_members = self.members if binding_members is None else binding_members
+        members = list(self.members)
+        policy_tbs, self.policy = r_policy(self.new_conversation, 0, bytes(32), members, members, suite, [members[0]],
+                                           kind)
+        self.policy_id = semantic_id("policy id", policy_tbs)
+        self.plan_id = semantic_id("initial member plan id", r_plan(members))
+        core = r_core(suite, self.group, self.new_conversation, world.lock, world.route, R_SUCCESSOR_TIME,
+                      self.policy_id, self.policy_id, 0, self.plan_id, world.sequencer_id, kind)
+        self.core_id = semantic_id("context core id", core)
+        self.context = self.context_with(self.core_id)
+        self.binding_id = semantic_id("binding id", self.binding_tbs(self.core_id))
+        self.extensions = r_mls_extensions(self.context)
+        self.tbs = (
+            u16(1) + NETWORK + world.conversation + self.new_conversation + opaque(self.group, 255) + u16(1)
+            + u16(suite) + self.core_id + self.binding_id + self.plan_id + opaque(self.extensions, 1_048_576)
+        )
+        self.digest = semantic_id("reinit target", self.tbs)
+
+    def binding_tbs(self, core_id: bytes) -> bytes:
+        w = self.world
+        return r_binding_tbs(1, w.binding_id, w.route_tbs, w.lock, self.group, self.new_conversation, w.route,
+                             self.suite, self.policy_id, self.policy_id, self.plan_id, core_id, w.sequencer_id,
+                             list(self.binding_members), self.kind)
+
+    def context_with(self, core_id: bytes, pending_joins: bytes = b"") -> bytes:
+        w = self.world
+        binding = self.binding_tbs(core_id) + opaque(b"", 65_535)
+        heads = canonical([p.roster_head() for p in self.members])
+        return (
+            u16(1) + NETWORK + self.new_conversation + u8(self.kind) + w.route + u64(R_SUCCESSOR_TIME)
+            + self.policy + w.credential + binding + u8(ACTIVE) + bytes(32) + opaque(b"", 4096) + u8(0)
+            + opaque(heads, 65_535) + opaque(pending_joins, 65_535)
+        )
+
+    def binding_entry(self) -> bytes:
+        """The join bundle's ReInit `ArcBindingChainEntry`: the unapproved replacement package."""
+        package = (
+            self.binding_tbs(self.core_id) + opaque(b"", 65_535) + r_plan(list(self.members))
+            + opaque(b"", 65_535)
+        )
+        return package + u8(REINIT_TARGET_TRANSITION)
+
+    def policy_entry(self) -> bytes:
+        """The join bundle's ReInit `ArcPolicyChainEntry`: the successor's generation-zero policy."""
+        return self.policy + u8(POLICY_REINIT_TARGET_TRANSITION)
+
+    def later_joiner_extensions(self) -> bytes:
+        """A later joiner's GroupContext extensions: the same context with that joiner's own pending join."""
+        pending = u32(2) + opaque(hashlib.sha256(b"synthetic later joiner KeyPackageRef").digest(), 255)
+        return r_mls_extensions(self.context_with(self.core_id, pending))
+
+    def pinned_layout(self, finalization_id: bytes) -> bytes:
+        """The pre-revision layout, which carried the finalization ID and could not be constructed."""
+        w = self.world
+        return (
+            u16(1) + NETWORK + w.conversation + finalization_id + self.new_conversation + opaque(self.group, 255)
+            + u16(1) + u16(self.suite) + self.core_id + self.binding_id + self.plan_id
+            + opaque(self.extensions, 1_048_576)
+        )
+
+
+class RWorld:
+    """The old conversation's genesis: principals, policies, binding, core and sequencer credential."""
+
+    def __init__(self) -> None:
+        self.principals = (RPrincipal(0), RPrincipal(1))
+        creator, other = self.principals
+        self.conversation = semantic_id("conversation", NETWORK + opaque(R_OLD_GROUP, 255))
+        credential_tbs = (
+            u16(1) + NETWORK + u64(0) + public(key(R_SEQUENCER_SEED)) + u64(0) + u64(4_000_000) + bytes(32)
+        )
+        self.credential = credential_tbs + opaque(b"", 64)
+        self.sequencer_id = semantic_id("sequencer key", credential_tbs)
+        bootstrap_tbs, self.bootstrap_policy = r_policy(self.conversation, 0, bytes(32), [creator], [creator], 1, [creator])
+        self.bootstrap_policy_id = semantic_id("policy id", bootstrap_tbs)
+        operational_tbs, self.operational_policy = r_policy(
+            self.conversation, 1, self.bootstrap_policy_id, list(self.principals), list(self.principals), 1, [creator]
+        )
+        self.operational_policy_id = semantic_id("policy id", operational_tbs)
+        self.route_tbs = r_semantic_route(creator)
+        self.lock = semantic_id("semantic route lock", self.route_tbs)
+        self.route = semantic_id("channel route", NETWORK + R_INSTANCE)
+        plan = r_plan(list(self.principals))
+        plan_id = semantic_id("initial member plan id", plan)
+        self.core = r_core(1, R_OLD_GROUP, self.conversation, self.lock, self.route, R_GENESIS_TIME,
+                           self.bootstrap_policy_id, self.operational_policy_id, 1, plan_id, self.sequencer_id)
+        self.core_id = semantic_id("context core id", self.core)
+        binding_tbs = r_binding_tbs(0, bytes(32), self.route_tbs, self.lock, R_OLD_GROUP, self.conversation,
+                                    self.route, 1, self.bootstrap_policy_id, self.operational_policy_id, plan_id,
+                                    self.core_id, self.sequencer_id, list(self.principals))
+        self.binding_id = semantic_id("binding id", binding_tbs)
+        approvals = canonical([p.approval("conversation binding", binding_tbs) for p in self.principals])
+        locks = []
+        for p in self.principals:
+            lock_tbs = (
+                u16(1) + NETWORK + opaque(p.account, 255) + p.fp + u64(0) + bytes(32) + self.lock
+                + self.binding_id + u64(0) + p.roster_id
+            )
+            locks.append(lock_tbs + sign(p.root_key, "root binding lock", lock_tbs))
+        self.binding_package = (
+            binding_tbs + opaque(approvals, 65_535) + plan + opaque(canonical(locks), 65_535)
+        )
+        self.genesis_id = semantic_id(
+            "group genesis id", NETWORK + self.conversation + opaque(R_OLD_GROUP, 255) + self.binding_id + self.core_id
+        )
+
+    def initial_commit(self, target: RTarget, prior_state: bytes, marker: int) -> bytes:
+        """The successor initial Commit's public `PrivateMessage` frame; its ciphertext is synthetic."""
+        aad = u16(1) + NETWORK + target.new_conversation + self.route + u64(R_INITIAL_COMMIT_TIME) + prior_state
+        return (
+            u16(1) + u16(2) + opaque_v(target.group) + u64(0) + u8(3) + opaque_v(aad)
+            + opaque_v(bytes([marker] * 32)) + opaque_v(bytes([marker + 1] * 64))
+        )
+
+    def bootstrap(self, log: RLog) -> list[tuple[str, bytes, dict[str, object]]]:
+        creator, other = self.principals
+        record, receipt, candidate_id = log.candidate(bytes([0xB0] * 32))
+        out = [("record-00-bootstrap-candidate.bin", record, {"semantic_id": candidate_id, "route_sequence": "0"})]
+        record, finalization_id, _ = log.finalization(
+            receipt, candidate_id, bytes([0xB0] * 32), BOOTSTRAP_ACTIVATION, POLICY_BIT | BOOTSTRAP_BIT,
+            self.operational_policy_id, bytes(32), [creator], [creator, other],
+        )
+        out.append(("record-01-bootstrap-finalization.bin", record,
+                    {"semantic_id": finalization_id, "route_sequence": "1", "policy_object": "policy-operational.bin"}))
+        return out
+
+
+def r_attempt_records(log: RLog, attempt: RAttempt, prefix: str) -> list[tuple[str, bytes, dict[str, object]]]:
+    """The attempt object and the sequencer's receipt for it."""
+    w = log.world
+    tbs = (
+        u16(1) + NETWORK + w.conversation + attempt.finalization_id + u64(log.route_sequence) + u32(attempt.sequence)
+        + log.head + attempt.attempt_id + object_id(attempt.object) + u64(1_700_000_100 + log.route_sequence)
+        + w.sequencer_id
+    )
+    attempt.receipt = tbs + log.sequencer_sign("reinit attempt receipt", tbs)
+    attempt.receipt_predecessor = log.head
+    sequence = log.route_sequence
+    record = log.record(REINIT_ATTEMPT_RECORD, attempt.receipt, attempt.attempt_id)
+    object_name = f"{prefix}-attempt-{attempt.sequence}.bin"
+    return [
+        (object_name, attempt.object, {"reinit_attempt_id": attempt.attempt_id,
+                                        "initial_commit_digest": semantic_id("reinit initial commit", attempt.initial_commit)}),
+        (f"{prefix}-record-{sequence:02d}-attempt-{attempt.sequence}-receipt.bin", record,
+         {"semantic_id": attempt.attempt_id, "route_sequence": str(sequence), "attempt_object": object_name}),
+    ]
+
+
+def r_reinit_vote(log: RLog, attempt: RAttempt, disposition: int, terminal: bytes, reason: int) -> bytes:
+    return (
+        u16(1) + NETWORK + log.world.conversation + attempt.finalization_id + u32(attempt.sequence)
+        + attempt.receipt_predecessor + attempt.attempt_id + u8(disposition) + terminal + u16(reason)
+    )
+
+
+def r_activation(log: RLog, attempt: RAttempt, prefix: str) -> tuple[str, bytes, dict[str, object]]:
+    w = log.world
+    creator, joiner = w.principals
+    acks_tbs = [attempt.ack_tbs(creator, CREATOR_STATE), attempt.ack_tbs(joiner, WELCOME_JOIN)]
+    acks = b"".join(
+        tbs + opaque(sign(p.old_leaf, "reinit processed", tbs), 255) for tbs, p in zip(acks_tbs, (creator, joiner))
+    )
+    context_digest, tree_digest, info_digest, exporter = attempt.results
+    core = (
+        u16(1) + NETWORK + w.conversation + attempt.target.new_conversation + attempt.finalization_id
+        + u32(attempt.sequence) + attempt.attempt_id + info_digest + context_digest + tree_digest + exporter
+        + semantic_id("reinit acknowledgement set", opaque4(b"".join(acks_tbs)))
+    )
+    activation_id = semantic_id("reinit activation id", core)
+    vote = r_reinit_vote(log, attempt, FINALIZE, activation_id, 0)
+    votes = canonical([p.approval("reinit disposition", vote) for p in w.principals])
+    request = core + attempt.receipt + attempt.body + opaque(acks, 1_048_576) + opaque(votes, 16_384)
+    sequence = log.route_sequence
+    tbs = u16(1) + NETWORK + w.conversation + u64(sequence) + log.head + activation_id + w.sequencer_id + request
+    record = log.record(REINIT_ACTIVATION_RECORD, tbs + log.sequencer_sign("reinit activation", tbs), activation_id)
+    return (f"{prefix}-record-{sequence:02d}-activation.bin", record,
+            {"semantic_id": activation_id, "route_sequence": str(sequence)})
+
+
+def r_attempt_abort(log: RLog, attempt: RAttempt, prefix: str) -> tuple[str, bytes, dict[str, object]]:
+    w = log.world
+    reason = 5
+    core = (
+        u16(1) + NETWORK + w.conversation + attempt.finalization_id + u32(attempt.sequence)
+        + attempt.receipt_predecessor + attempt.attempt_id + u16(reason) + bytes([0x94] * 32)
+    )
+    abort_id = semantic_id("reinit abort id", core)
+    vote = r_reinit_vote(log, attempt, ABORT, abort_id, reason)
+    votes = canonical([p.approval("reinit disposition", vote) for p in w.principals])
+    request = core + attempt.receipt + attempt.body + opaque(votes, 16_384)
+    sequence = log.route_sequence
+    tbs = u16(1) + NETWORK + w.conversation + u64(sequence) + log.head + abort_id + w.sequencer_id + request
+    record = log.record(REINIT_ABORT_RECORD, tbs + log.sequencer_sign("reinit attempt abort", tbs), abort_id)
+    return (f"{prefix}-record-{sequence:02d}-attempt-abort.bin", record,
+            {"semantic_id": abort_id, "route_sequence": str(sequence)})
+
+
+def r_reinit(log: RLog, target: RTarget, prefix: str, marker: int) -> tuple[list[tuple[str, bytes, dict[str, object]]], bytes]:
+    """A ReInit candidate at the log's current accepted state and the finalization that authorizes `target`."""
+    creator, other = log.world.principals
+    commit_object = bytes([marker] * 32)
+    sequence = log.route_sequence
+    record, receipt, candidate_id = log.candidate(commit_object)
+    out = [(f"{prefix}-record-{sequence:02d}-reinit-candidate.bin", record,
+            {"semantic_id": candidate_id, "route_sequence": str(sequence), "prior_state_id": log.accepted})]
+    sequence = log.route_sequence
+    record, finalization_id, authorization_tbs = log.finalization(
+        receipt, candidate_id, commit_object, CONTROLLED_TRANSITION, REINIT_BIT, log.policy_id, target.digest,
+        [creator], [creator, other],
+    )
+    out.append((f"{prefix}-record-{sequence:02d}-reinit-finalization.bin", record,
+                {"semantic_id": finalization_id, "route_sequence": str(sequence),
+                 "commit_authorization_id": semantic_id("commit authorization id", authorization_tbs),
+                 "transition_target_digest": target.digest}))
+    return out, finalization_id
+
+
+def build_reinit() -> tuple[list[tuple[str, bytes, dict[str, object]]], dict[str, str]]:
+    """Return ordered `(name, bytes, ids)` entries and the manifest's global values."""
+    w = RWorld()
+    creator, other = w.principals
+    entries: list[tuple[str, bytes, dict[str, object]]] = [
+        ("genesis-binding.bin", wire_object(KIND_CONVERSATION_BINDING, w.binding_package), {"binding_id": w.binding_id}),
+        ("genesis-context-core.bin", w.core, {"context_core_id": w.core_id}),
+        ("policy-bootstrap.bin", wire_object(KIND_POLICY, w.bootstrap_policy), {"policy_id": w.bootstrap_policy_id}),
+        ("policy-operational.bin", wire_object(KIND_POLICY, w.operational_policy), {"policy_id": w.operational_policy_id}),
+        ("sequencer-credential.bin", w.credential, {"sequencer_credential_id": w.sequencer_id}),
+    ]
+    for p, name in ((creator, "c"), (other, "d")):
+        entries.append((f"root-{name}.bin", wire_object(KIND_ROOT_IDENTITY, p.root), {"root_fingerprint": p.fp}))
+        entries.append((f"roster-{name}.bin", wire_object(KIND_DEVICE_ROSTER, p.roster), {"roster_id": p.roster_id}))
+    entries.append(("join-genesis-binding-entry.bin", w.binding_package + u8(ROOT_LOCKED_GENESIS),
+                    {"binding_id": w.binding_id}))
+    log = RLog(w)
+    entries.extend(w.bootstrap(log))
+    targets = {suite: RTarget(w, suite) for suite in (1, 3)}
+    for suite, target in targets.items():
+        prefix = f"suite-{suite:04x}"
+        entries.append((f"{prefix}-extensions.bin", target.extensions,
+                        {"group_id": target.group, "cipher_suite": str(suite), "new_conversation_id": target.new_conversation}))
+        entries.append((f"{prefix}-target.bin", target.tbs,
+                        {"target_context_digest": target.digest, "target_binding_id": target.binding_id,
+                         "target_context_core_id": target.core_id, "initial_member_plan_id": target.plan_id,
+                         "route_binding": w.route}))
+        entries.append((f"{prefix}-join-binding-entry.bin", target.binding_entry(),
+                        {"binding_id": target.binding_id}))
+        entries.append((f"{prefix}-join-policy-entry.bin", target.policy_entry(), {"policy_id": target.policy_id}))
+        branch = log.copy()
+        records, finalization_id = r_reinit(branch, target, prefix, 0xC0 + suite)
+        entries.extend(records)
+        attempt = RAttempt(w, target, finalization_id, 0, 0x90 + suite)
+        entries.append((f"{prefix}-initial-commit-0.bin", attempt.initial_commit, {"prior_state_id": finalization_id}))
+        entries.extend(r_attempt_records(branch, attempt, prefix))
+        entries.append(r_activation(branch, attempt, prefix))
+        if suite == 1:
+            direct = (branch, attempt, finalization_id)
+    # The same suite-1 target, authorized after the accepted state advanced
+    # through a routine self-update and a candidate abort, then activated by a
+    # second attempt after the first attempt aborted.
+    target = targets[1]
+    advanced = log.copy()
+    commit_object = bytes([0xA2] * 32)
+    sequence = advanced.route_sequence
+    record, receipt, candidate_id = advanced.candidate(commit_object)
+    entries.append((f"advanced-record-{sequence:02d}-routine-candidate.bin", record,
+                    {"semantic_id": candidate_id, "route_sequence": str(sequence)}))
+    sequence = advanced.route_sequence
+    record, routine_id, _ = advanced.finalization(
+        receipt, candidate_id, commit_object, ROUTINE_SELF_UPDATE, 0, advanced.policy_id, bytes(32), [], [creator, other]
+    )
+    entries.append((f"advanced-record-{sequence:02d}-routine-finalization.bin", record,
+                    {"semantic_id": routine_id, "route_sequence": str(sequence)}))
+    sequence = advanced.route_sequence
+    record, receipt, candidate_id = advanced.candidate(bytes([0xA4] * 32))
+    entries.append((f"advanced-record-{sequence:02d}-reinit-candidate-aborted.bin", record,
+                    {"semantic_id": candidate_id, "route_sequence": str(sequence)}))
+    sequence = advanced.route_sequence
+    record, abort_id = advanced.abort(receipt, candidate_id, [creator, other])
+    entries.append((f"advanced-record-{sequence:02d}-candidate-abort.bin", record,
+                    {"semantic_id": abort_id, "route_sequence": str(sequence)}))
+    records, advanced_finalization = r_reinit(advanced, target, "advanced", 0xA6)
+    entries.extend(records)
+    first = RAttempt(w, target, advanced_finalization, 0, 0xD0)
+    entries.append(("advanced-initial-commit-0.bin", first.initial_commit, {"prior_state_id": advanced_finalization}))
+    entries.extend(r_attempt_records(advanced, first, "advanced"))
+    entries.append(r_attempt_abort(advanced, first, "advanced"))
+    second = RAttempt(w, target, advanced_finalization, 1, 0xD4)
+    entries.append(("advanced-initial-commit-1.bin", second.initial_commit, {"prior_state_id": advanced_finalization}))
+    entries.extend(r_attempt_records(advanced, second, "advanced"))
+    entries.append(r_activation(advanced, second, "advanced"))
+
+    # Root rotation (P-03): d's account continuously rotates its root, and the successor's roster heads,
+    # binding principals, policy and plan name d's new root while the old council activates it. The
+    # same rotation with a suite change from 0x0001 to 0x0003 is reconstructed only.
+    rotated_d = r_rotated(other, R_ROTATED_ROOT_SEEDS[1])
+    entries.append(("root-d-1.bin", wire_object(KIND_ROOT_IDENTITY, rotated_d.root),
+                    {"root_fingerprint": rotated_d.fp, "root_generation": "1", "previous_root_fingerprint": other.fp}))
+    entries.append(("roster-d-1.bin", wire_object(KIND_DEVICE_ROSTER, rotated_d.roster), {"roster_id": rotated_d.roster_id}))
+    rotations = {
+        1: RTarget(w, 1, members=(creator, rotated_d), group=bytes([0x61] * 32)),
+        3: RTarget(w, 3, members=(creator, rotated_d), group=bytes([0x63] * 32)),
+    }
+    for suite, rotation in rotations.items():
+        prefix = "rotation" if suite == 1 else "rotation-0003"
+        entries.append((f"{prefix}-extensions.bin", rotation.extensions,
+                        {"group_id": rotation.group, "cipher_suite": str(suite),
+                         "new_conversation_id": rotation.new_conversation}))
+        entries.append((f"{prefix}-target.bin", rotation.tbs,
+                        {"target_context_digest": rotation.digest, "target_binding_id": rotation.binding_id,
+                         "target_context_core_id": rotation.core_id, "initial_member_plan_id": rotation.plan_id,
+                         "route_binding": w.route}))
+    rotation = rotations[1]
+    entries.append(("rotation-join-binding-entry.bin", rotation.binding_entry(), {"binding_id": rotation.binding_id}))
+    entries.append(("rotation-join-policy-entry.bin", rotation.policy_entry(), {"policy_id": rotation.policy_id}))
+    branch = log.copy()
+    records, finalization_id = r_reinit(branch, rotation, "rotation", 0xE1)
+    entries.extend(records)
+    attempt = RAttempt(w, rotation, finalization_id, 0, 0xE4)
+    entries.append(("rotation-initial-commit-0.bin", attempt.initial_commit, {"prior_state_id": finalization_id}))
+    entries.extend(r_attempt_records(branch, attempt, "rotation"))
+    entries.append(r_activation(branch, attempt, "rotation"))
+
+    # Rejections of successor rosters (P-03). d's generation-one root with a continuity signature by
+    # another key (the same TBS, so the same fingerprint the rotation names); another valid
+    # generation-one root of d, a sibling of the rotation's, from which the rotation does not descend;
+    # a generation-zero root that does not continue d's; a successor whose heads, policy and plan name
+    # d's new root while its binding keeps d's old one; and a rotation of c's root, which the old
+    # semantic route lock names as the channel-authority root.
+    forged_d = r_rotated(other, R_ROTATED_ROOT_SEEDS[1], continuity=key(R_FORGED_CONTINUITY_SEED))
+    assert forged_d.fp == rotated_d.fp and forged_d.root != rotated_d.root
+    entries.append(("reject-root-d-1-forged-continuity.bin", wire_object(KIND_ROOT_IDENTITY, forged_d.root),
+                    {"root_fingerprint": forged_d.fp, "expected": "E2eeError::SignatureInvalid"}))
+    sibling_d = r_rotated(other, R_SIBLING_ROOT_SEED)
+    assert sibling_d.fp != rotated_d.fp
+    entries.append(("root-d-1-sibling.bin", wire_object(KIND_ROOT_IDENTITY, sibling_d.root),
+                    {"root_fingerprint": sibling_d.fp, "root_generation": "1", "previous_root_fingerprint": other.fp}))
+    fresh_d = r_fresh(other, R_FRESH_ROOT_SEED)
+    entries.append(("root-d-fresh.bin", wire_object(KIND_ROOT_IDENTITY, fresh_d.root), {"root_fingerprint": fresh_d.fp}))
+    entries.append(("roster-d-fresh.bin", wire_object(KIND_DEVICE_ROSTER, fresh_d.roster), {"roster_id": fresh_d.roster_id}))
+    fresh = RTarget(w, 1, members=(creator, fresh_d), group=bytes([0x65] * 32))
+    stale = RTarget(w, 1, members=(creator, rotated_d), binding_members=(creator, other), group=bytes([0x64] * 32))
+    rotated_c = r_rotated(creator, R_ROTATED_ROOT_SEEDS[0])
+    entries.append(("root-c-1.bin", wire_object(KIND_ROOT_IDENTITY, rotated_c.root),
+                    {"root_fingerprint": rotated_c.fp, "root_generation": "1", "previous_root_fingerprint": creator.fp}))
+    entries.append(("roster-c-1.bin", wire_object(KIND_DEVICE_ROSTER, rotated_c.roster), {"roster_id": rotated_c.roster_id}))
+    authority = RTarget(w, 1, members=(rotated_c, other), group=bytes([0x62] * 32))
+    for name, rejected in (("fresh-root", fresh), ("stale-principal", stale), ("channel-authority", authority)):
+        entries.append((f"reject-rotation-{name}-extensions.bin", rejected.extensions,
+                        {"group_id": rejected.group, "cipher_suite": "1", "new_conversation_id": rejected.new_conversation,
+                         "expected": "E2eeError::InvalidValue"}))
+
+    # A successor binding has the shape of a binding of the semantic route it keeps (companion 9.4 and
+    # 13.8): one whose context, binding, policy and core all name the direct kind while it keeps the old
+    # channel's semantic route, lock, channel instance and route binding is refused, both as the
+    # Proposal's extension list and as the target a sender carrying that list would build.
+    kind_changed = RTarget(w, 1, group=bytes([0x66] * 32), kind=DIRECT)
+    entries.append(("reject-extensions-kind-changed.bin", kind_changed.extensions,
+                    {"group_id": kind_changed.group, "cipher_suite": "1",
+                     "new_conversation_id": kind_changed.new_conversation, "expected": "E2eeError::InvalidValue"}))
+    entries.append(("reject-target-kind-changed.bin", kind_changed.tbs,
+                    {"target_context_digest": kind_changed.digest, "target_binding_id": kind_changed.binding_id,
+                     "target_context_core_id": kind_changed.core_id, "initial_member_plan_id": kind_changed.plan_id,
+                     "expected": "E2eeError::InvalidValue"}))
+
+    # Rejections.
+    suite_one = targets[1]
+    entries.append(("reject-extensions-duplicate-context.bin", r_mls_extensions(suite_one.context, contexts=2),
+                    {"expected": "E2eeError::NonCanonical"}))
+    entries.append(("reject-extensions-missing-required-capabilities.bin",
+                    r_mls_extensions(suite_one.context, required=False), {"expected": "E2eeError::InvalidValue"}))
+    entries.append(("reject-extensions-later-joiner-context.bin", suite_one.later_joiner_extensions(),
+                    {"expected": "E2eeError::InvalidValue"}))
+    entries.append(("reject-extensions-context-core-mismatch.bin",
+                    r_mls_extensions(suite_one.context_with(bytes([0xEE] * 32))), {"expected": "E2eeError::InvalidValue"}))
+    branch, attempt, finalization_id = direct
+    entries.append(("reject-target-pinned-layout.bin", suite_one.pinned_layout(finalization_id),
+                    {"finalization_id": finalization_id}))
+    activation_id = entries[[name for name, _, _ in entries].index("suite-0001-record-05-activation.bin")][2]["semantic_id"]
+    entries.append(("reject-initial-commit-names-activation.bin",
+                    w.initial_commit(suite_one, activation_id, 0x91), {"prior_state_id": activation_id}))
+    # An attempt naming another target's digest (and carrying that target),
+    # and an attempt naming the authorized digest while carrying another
+    # target, each sequenced right after the suite-1 finalization.
+    wrong = RAttempt(w, suite_one, finalization_id, 0, 0x98, digest=targets[3].digest, carried=targets[3].tbs)
+    replay = log.copy()
+    records, _ = r_reinit(replay, suite_one, "unused", 0xC1)
+    records = r_attempt_records(replay, wrong, "reject-other-digest")
+    entries.extend(records)
+    swapped = RAttempt(w, suite_one, finalization_id, 0, 0x9A, carried=targets[3].tbs)
+    replay = log.copy()
+    records, _ = r_reinit(replay, suite_one, "unused", 0xC1)
+    records = r_attempt_records(replay, swapped, "reject-carried-target")
+    entries.extend(records)
+    values = {
+        "network_id": NETWORK.hex(),
+        "old_conversation_id": w.conversation.hex(),
+        "old_group_id": R_OLD_GROUP.hex(),
+        "genesis_binding_id": w.binding_id.hex(),
+        "genesis_id": w.genesis_id.hex(),
+        "sequencer_credential_id": w.sequencer_id.hex(),
+        "bootstrap_policy_id": w.bootstrap_policy_id.hex(),
+        "operational_policy_id": w.operational_policy_id.hex(),
+        "route_binding": w.route.hex(),
+    }
+    return entries, values
+
+
+def render_reinit_manifest(entries: list[tuple[str, bytes, dict[str, object]]], values: dict[str, str]) -> str:
+    lines = [
+        "# Generated by scripts/generate-e2ee-vectors.py; do not edit by hand.",
+        "schema_version = 1",
+        'generator = "python cryptography Ed25519, independent TLS encoder"',
+        'evidence_class = "synthetic public-envelope chain with real signatures; MLS inputs are synthetic"',
+    ]
+    lines.extend(f'{name} = "{value}"' for name, value in values.items())
+    lines.append("")
+    for name, data, ids in entries:
+        lines.append("[[vectors]]")
+        lines.append(f'file = "{name}"')
+        lines.append(f"encoded_length = {len(data)}")
+        lines.append(f'sha256 = "{hashlib.sha256(data).hexdigest()}"')
+        for key_name, value in ids.items():
+            rendered = value.hex() if isinstance(value, bytes) else value
+            lines.append(f'{key_name} = "{rendered}"')
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def main() -> None:
     files, ids, state = build_identity()
     manifest = render_manifest(files, ids)
@@ -719,6 +1609,11 @@ def main() -> None:
     if len(recovery_files) != len(recovery):
         raise SystemExit("recovery vector names collide")
     recovery_manifest = render_recovery_manifest(recovery)
+    reinit, reinit_values = build_reinit()
+    reinit_files = {name: data for name, data, _ in reinit}
+    if len(reinit_files) != len(reinit):
+        raise SystemExit("reinit vector names collide")
+    reinit_manifest = render_reinit_manifest(reinit, reinit_values)
     if "--check" in sys.argv[1:]:
         for name, data in files.items():
             if (OUTPUT / name).read_bytes() != data:
@@ -734,7 +1629,21 @@ def main() -> None:
         if (RECOVERY_OUTPUT / "manifest.toml").read_text(encoding="utf-8") != recovery_manifest:
             print("stale recovery manifest", file=sys.stderr)
             sys.exit(1)
-        print(f"e2ee identity vectors: ok ({len(files)} files); recovery vectors: ok ({len(recovery_files)} files)")
+        on_disk = {path.name for path in REINIT_OUTPUT.glob("*.bin")}
+        if on_disk != set(reinit_files):
+            print("reinit vector set differs from the generated files", file=sys.stderr)
+            sys.exit(1)
+        for name, data in reinit_files.items():
+            if (REINIT_OUTPUT / name).read_bytes() != data:
+                print(f"stale reinit vector: {name}", file=sys.stderr)
+                sys.exit(1)
+        if (REINIT_OUTPUT / "manifest.toml").read_text(encoding="utf-8") != reinit_manifest:
+            print("stale reinit manifest", file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"e2ee identity vectors: ok ({len(files)} files); recovery vectors: ok ({len(recovery_files)} files); "
+            f"reinit vectors: ok ({len(reinit_files)} files)"
+        )
         return
     OUTPUT.mkdir(parents=True, exist_ok=True)
     for name, data in files.items():
@@ -744,7 +1653,17 @@ def main() -> None:
     for name, data in recovery_files.items():
         (RECOVERY_OUTPUT / name).write_bytes(data)
     (RECOVERY_OUTPUT / "manifest.toml").write_text(recovery_manifest, encoding="utf-8")
-    print(f"e2ee identity vectors: wrote {len(files)} files; recovery vectors: wrote {len(recovery_files)} files")
+    REINIT_OUTPUT.mkdir(parents=True, exist_ok=True)
+    for stale in REINIT_OUTPUT.glob("*.bin"):
+        if stale.name not in reinit_files:
+            stale.unlink()
+    for name, data in reinit_files.items():
+        (REINIT_OUTPUT / name).write_bytes(data)
+    (REINIT_OUTPUT / "manifest.toml").write_text(reinit_manifest, encoding="utf-8")
+    print(
+        f"e2ee identity vectors: wrote {len(files)} files; recovery vectors: wrote {len(recovery_files)} files; "
+        f"reinit vectors: wrote {len(reinit_files)} files"
+    )
 
 
 if __name__ == "__main__":

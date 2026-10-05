@@ -857,7 +857,7 @@ fn a_reinit_runs_attempt_abort_attempt_and_activation_to_its_terminal() -> TestR
     let genesis = Genesis::new()?;
     let (mut chain, mut log) = activated(&genesis)?;
     let council = operational_council(&genesis);
-    let target = [72; 32];
+    let target = log.target_digest()?;
     let (candidate_record, candidate) = log.candidate([2; 32])?;
     adopt(&mut chain, &candidate_record)?;
     let tbs = log.authorization_tbs(
@@ -930,7 +930,7 @@ fn a_reinit_runs_attempt_abort_attempt_and_activation_to_its_terminal() -> TestR
     let activation = log.reinit_activation(&receipt, &attempt, &council)?;
     let step = adopt(&mut chain, &activation)?;
     assert!(
-        matches!(step, ChainStep::ReinitActivated { new_conversation_id, quorum_votes: 2, .. } if new_conversation_id == [70; 32])
+        matches!(step, ChainStep::ReinitActivated { new_conversation_id, quorum_votes: 2, .. } if new_conversation_id == log.target.new_conversation_id)
     );
     assert!(chain.is_terminal());
     assert!(

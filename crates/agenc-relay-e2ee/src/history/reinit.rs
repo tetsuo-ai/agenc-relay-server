@@ -13,10 +13,11 @@ use crate::ids::{SemanticId, proof_set_digest, semantic_id_of};
 use crate::object::{ArcWireObjectKind, ObjectId};
 use crate::objects::reinit::{
     ArcReInitAbortCertificate, ArcReInitAckKind, ArcReInitActivationCertificate, ArcReInitAttempt,
-    ArcReInitAttemptReceipt, ArcReInitAttemptReceiptTbs,
+    ArcReInitAttemptReceipt, ArcReInitAttemptReceiptTbs, ArcReInitTargetTbs,
 };
 use crate::objects::sequencing::ArcFinalityVote;
 use crate::reinit_authorization::verify_reinit_attempt_authorization;
+use crate::reinit_target::{TargetFacts, target_digest};
 use crate::tls::{DecodeBudget, TlsEncode, ensure_canonical};
 use agenc_relay_crypto::SemanticHashDomain;
 
@@ -69,6 +70,7 @@ impl HistoricalChain {
         if named != expected || core.new_conversation_id == self.conversation_id {
             return Err(E2eeError::InvalidValue);
         }
+        self.check_carried_target(&attempt)?;
         verify_reinit_attempt_authorization(&attempt, &self.policy, &self.principals)?;
         let open = OpenAttempt {
             attempt_id,
@@ -328,5 +330,63 @@ fn ack_role_planned(
                 .any(|entry| entry.creator == 0 && entry.key_package_ref == ack.key_package_ref);
             !ack.key_package_ref.is_empty() && ack.old_leaf_index != creator.0 && planned
         }
+    }
+}
+
+impl HistoricalChain {
+    /// The target an attempt carries (companion 13.8) is the authorized one
+    /// and repeats the attempt's group, version, suite, successor
+    /// conversation, binding and plan. With a bound target the carried bytes
+    /// must equal it; otherwise they must hash to the committed digest the
+    /// attempt names, which the caller already compared with the chain's.
+    fn check_carried_target(&self, attempt: &ArcReInitAttempt) -> Result<(), E2eeError> {
+        let carried = &attempt.target;
+        match &self.reinit_target {
+            Some(bound) if carried != bound => return Err(E2eeError::InvalidValue),
+            Some(_) => {}
+            None => {
+                let digest = target_digest(&self.network_id, &self.conversation_id, carried)?;
+                if digest != attempt.tbs.target_context_digest {
+                    return Err(E2eeError::InvalidValue);
+                }
+            }
+        }
+        TargetFacts::of(&self.network_id, carried)?.check_attempt(&attempt.tbs)
+    }
+
+    /// Binds the ReInit target a verifier holds, reconstructed from its
+    /// Proposal (companion 13.8), to the finalized old ReInit Commit. The
+    /// target must name this network and old conversation, name the successor
+    /// conversation of its own group, and hash to the digest the finalized
+    /// authorization committed, so a target replaced after finalization is
+    /// refused. Every later attempt must then carry exactly this target. A
+    /// chain with no bound target, such as a server's, requires each attempt's
+    /// carried target to hash to the committed digest instead; either way the
+    /// attempt must repeat the target's group, version, suite, successor
+    /// conversation, binding and plan.
+    ///
+    /// Binding is refused while an attempt is open: that attempt was adopted
+    /// before the binding, so the binding would vouch for nothing about it. A
+    /// verifier binds after the finalization and before the first attempt
+    /// receipt, or after an attempt abort; one that resumed a chain at an open
+    /// attempt ([`HistoricalChain::resume`] starts with no bound target)
+    /// checks that attempt with
+    /// [`AuthorizedReinit::check_attempt_target`](crate::reinit_target::AuthorizedReinit::check_attempt_target).
+    /// The carried target's extension list and the successor initial Commit
+    /// are not checked here; the caller checks them with
+    /// [`AuthorizedReinit::check_attempt`](crate::reinit_target::AuthorizedReinit::check_attempt)
+    /// or [`AuthorizedReinit::check_attempt_target`](crate::reinit_target::AuthorizedReinit::check_attempt_target),
+    /// and with
+    /// [`AuthorizedReinit::check_initial_commit`](crate::reinit_target::AuthorizedReinit::check_initial_commit).
+    /// On error the chain is unchanged.
+    pub fn bind_reinit_target(&mut self, target: &ArcReInitTargetTbs) -> Result<(), E2eeError> {
+        let state = self.reinit_state()?;
+        TargetFacts::of(&self.network_id, target)?;
+        let digest = target_digest(&self.network_id, &self.conversation_id, target)?;
+        if digest != state.target_context_digest || state.attempt.is_some() {
+            return Err(E2eeError::InvalidValue);
+        }
+        self.reinit_target = Some(target.clone());
+        Ok(())
     }
 }

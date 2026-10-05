@@ -321,6 +321,23 @@ hand-written vectors (X-05), and the reader of the E2EE replies with the
 charge of an object batch to its class and batch bounds (X-06, SDK program,
 outside master #35), are recorded in
 [the shared client wire record](stage-10-shared-client-wire.md).
+The shared ReInit target helper that rebuilds a target from its Proposal,
+checks the target every attempt carries for the sequencer, an endpoint and a
+later joiner, and binds them to the old ReInit finalization and the successor
+initial Commit, with the historical chain's carried-target checks, the
+independent ReInit vectors and the one-target Stage 08 fixture (P-02, SDK
+program, outside master #35), is recorded in
+[the ReInit target helper record](stage-10-reinit-target-helper.md).
+The ReInit successor verified under the rosters its own roster heads name,
+with root continuity from the old heads and its binding's principals, the
+root-rotation and suite-change vectors, and the channel-authority root that a
+ReInit cannot rotate (P-03, SDK program, outside master #35), are recorded in
+[the ReInit successor rosters record](stage-10-reinit-successor-rosters.md).
+The refusal of the previous encrypted profile, the profile-mismatch answer
+to an `ECAP` line of another profile, the mixed-version link through the
+daemons and the operator guide's upgrade note (P-05, SDK program, outside
+master #35) are recorded in
+[the previous-profile refusal record](stage-10-previous-profile-refusal.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

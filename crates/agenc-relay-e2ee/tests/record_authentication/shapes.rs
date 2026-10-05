@@ -119,6 +119,22 @@ pub(super) fn finalization() -> Result<ArcCommitFinalizationCertificate, E2eeErr
     })
 }
 
+fn reinit_target() -> Result<ArcReInitTargetTbs, E2eeError> {
+    Ok(ArcReInitTargetTbs {
+        profile_version: 1,
+        network_id: [1; 32],
+        old_conversation_id: [20; 32],
+        new_conversation_id: [70; 32],
+        target_group_id: Opaque::new(vec![71; 32])?,
+        target_version: 1,
+        target_suite: 3,
+        target_context_core_id: [86; 32],
+        target_binding_id: [73; 32],
+        initial_member_plan_id: [29; 32],
+        encoded_target_extensions: Opaque::new(vec![87; 40])?,
+    })
+}
+
 pub(super) fn reinit_attempt() -> Result<ArcReInitAttempt, E2eeError> {
     Ok(ArcReInitAttempt {
         tbs: ArcReInitAttemptTbs {
@@ -144,6 +160,7 @@ pub(super) fn reinit_attempt() -> Result<ArcReInitAttempt, E2eeError> {
             new_ratchet_tree_digest: [79; 32],
             new_exporter_authenticator: [80; 32],
         },
+        target: reinit_target()?,
         key_package_plan: ArcKeyPackagePlan {
             entries: TlsVec::new(vec![ArcKeyPackagePlanEntry {
                 account_id: account()?,
