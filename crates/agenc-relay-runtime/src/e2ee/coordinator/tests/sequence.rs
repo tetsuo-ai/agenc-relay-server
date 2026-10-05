@@ -52,6 +52,8 @@ mod review_reload;
 
 mod sequencer_eligibility;
 
+pub(in crate::e2ee::coordinator::tests) mod reinit_successor;
+
 #[test]
 fn finalization_rejects_substituted_receipts_and_acknowledgements() -> TestResult {
     let mut harness = Harness::new()?;
@@ -740,6 +742,7 @@ mod reinit {
     mod admission;
     mod attempt_authority;
     mod core_mismatch;
+    mod enforcement;
     mod leaf_membership;
     pub(in crate::e2ee::coordinator::tests::sequence) mod successor;
 
@@ -747,13 +750,12 @@ mod reinit {
     use agenc_relay_domain::e2ee::projection::{EventKind, PendingKind};
     use agenc_relay_domain::e2ee::sequencer_log::Phase;
     use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
-    use agenc_relay_e2ee::objects::conversation::{ArcKeyPackagePlan, ArcKeyPackagePlanEntry};
     use agenc_relay_e2ee::objects::federation::ArcFederationOpcode as Op;
     use agenc_relay_e2ee::objects::reinit::{
         ArcReInitAbortCoreTbs, ArcReInitAbortRequest, ArcReInitAck, ArcReInitAckKind,
         ArcReInitAckTbs, ArcReInitActivationCoreTbs, ArcReInitActivationRequest, ArcReInitAttempt,
         ArcReInitAttemptAuthorization, ArcReInitAttemptAuthorizationTbs, ArcReInitAttemptReceipt,
-        ArcReInitAttemptTbs, ArcReInitTargetTbs,
+        ArcReInitAttemptTbs,
     };
     use agenc_relay_e2ee::objects::sequencing::ArcSequencerRecord;
     use agenc_relay_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsVec};
@@ -768,14 +770,14 @@ mod reinit {
         semantic_id_of,
     };
 
-    const NEW_CONVERSATION: [u8; 32] = [77; 32];
+    pub(super) use super::reinit_successor::new_conversation;
     /// The old leaf key of `SECOND_DEVICE` when it joins a successor.
     const JOINER_LEAF_SEED: u8 = 31;
 
     #[test]
     fn reinit_abort_rejects_substituted_attempts_and_receipts() -> TestResult {
         let mut harness = Harness::new()?;
-        let conversation = harness.bind_channel()?;
+        let conversation = harness.bind_channel_for_reinit()?;
         let old_state = *harness
             .coordinator
             .state
@@ -821,13 +823,24 @@ mod reinit {
         Ok(())
     }
 
+    /// An attempt for the successor the harness's last finalized ReInit
+    /// Commit authorized, or, before any, for the successor of the attached
+    /// device alone: it carries that successor's target and KeyPackage plan
+    /// and is authorized by the old-policy controller.
     pub(super) fn attempt(
         harness: &Harness,
         conversation: [u8; 32],
         old_state: [u8; 32],
         attempt_sequence: u32,
     ) -> TestResult<(ArcReInitAttempt, Vec<u8>)> {
-        let fingerprint = root_fingerprint(&harness.principal.root)?;
+        let successor = match &harness.reinit {
+            Some(successor) => successor.clone(),
+            None => super::reinit_successor::successor(
+                harness,
+                conversation,
+                super::reinit_successor::creator_plan(harness)?,
+            )?,
+        };
         let authorization_tbs = ArcReInitAttemptAuthorizationTbs {
             profile_version: 1,
             network_id: NETWORK,
@@ -836,10 +849,10 @@ mod reinit {
             attempt_sequence,
             creator_old_leaf_index: 0,
             creator_old_credential_hash: [1; 32],
-            new_conversation_id: NEW_CONVERSATION,
-            target_context_digest: [2; 32],
-            target_binding_id: [3; 32],
-            initial_member_plan_id: [4; 32],
+            new_conversation_id: successor.conversation,
+            target_context_digest: successor.digest,
+            target_binding_id: successor.binding_id,
+            initial_member_plan_id: successor.plan_id,
             key_package_plan_id: [5; 32],
             initial_commit_digest: [6; 32],
             new_group_info_digest: [7; 32],
@@ -858,17 +871,17 @@ mod reinit {
                 profile_version: 1,
                 network_id: NETWORK,
                 old_conversation_id: conversation,
-                new_conversation_id: NEW_CONVERSATION,
+                new_conversation_id: successor.conversation,
                 old_reinit_state_id: old_state,
                 attempt_sequence,
                 creator_old_leaf_index: 0,
                 creator_old_credential_hash: [1; 32],
-                target_group_id: Opaque::new(vec![11; 32])?,
-                target_version: 1,
-                target_suite: 1,
-                target_context_digest: [2; 32],
-                target_binding_id: [3; 32],
-                initial_member_plan_id: [4; 32],
+                target_group_id: successor.target.target_group_id.clone(),
+                target_version: successor.target.target_version,
+                target_suite: successor.target.target_suite,
+                target_context_digest: successor.digest,
+                target_binding_id: successor.binding_id,
+                initial_member_plan_id: successor.plan_id,
                 key_package_plan_id: [5; 32],
                 initial_commit_digest: [6; 32],
                 attempt_authorization_id: [12; 32],
@@ -877,31 +890,8 @@ mod reinit {
                 new_ratchet_tree_digest: [9; 32],
                 new_exporter_authenticator: [10; 32],
             },
-            target: ArcReInitTargetTbs {
-                profile_version: 1,
-                network_id: NETWORK,
-                old_conversation_id: conversation,
-                new_conversation_id: NEW_CONVERSATION,
-                target_group_id: Opaque::new(vec![11; 32])?,
-                target_version: 1,
-                target_suite: 1,
-                target_context_core_id: [17; 32],
-                target_binding_id: [3; 32],
-                initial_member_plan_id: [4; 32],
-                encoded_target_extensions: Opaque::new(vec![0])?,
-            },
-            key_package_plan: ArcKeyPackagePlan {
-                entries: TlsVec::new(vec![ArcKeyPackagePlanEntry {
-                    account_id: Opaque::from_slice(&harness.account)?,
-                    root_fingerprint: fingerprint,
-                    device_id: DEVICE_ID,
-                    capability_id: [13; 32],
-                    key_package_ref: Opaque::new(vec![14; 32])?,
-                    leaf_signature_scheme: 0x0807,
-                    leaf_signature_key_digest: [18; 32],
-                    creator: 1,
-                }])?,
-            },
+            target: successor.target.clone(),
+            key_package_plan: successor.plan.clone(),
             initial_commit_bytes: Opaque::new(vec![15; 40])?,
             authorization: ArcReInitAttemptAuthorization {
                 tbs: authorization_tbs,
@@ -953,7 +943,7 @@ mod reinit {
                 profile_version: 1,
                 network_id: NETWORK,
                 old_conversation_id: conversation,
-                new_conversation_id: NEW_CONVERSATION,
+                new_conversation_id: new_conversation()?,
                 old_reinit_state_id: old_state,
                 reinit_attempt_id: attempt_id,
                 ack_kind: ArcReInitAckKind::CreatorState,
@@ -990,8 +980,25 @@ mod reinit {
     fn a_reinit_attempt_is_staged_acknowledged_aborted_and_finally_activated() -> TestResult {
         let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
         let conversation = harness.bind_channel()?;
+        // Before the ReInit Commit finalizes, the old group takes no attempt
+        // and retains nothing.
+        let genesis = *harness
+            .coordinator
+            .state
+            .logs
+            .get(&conversation)
+            .ok_or("log")?
+            .accepted_state_id();
+        let (_, early) = attempt(&harness, conversation, genesis, 0)?;
+        let writes = harness.writes.len();
+        assert_eq!(
+            code(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&early))?),
+            Some(E2eeReplyCode::FinalityRequired)
+        );
+        assert_eq!(harness.writes.len(), writes);
         // A ReInit follows the finalized ReInit Commit whose finalization is
-        // the accepted state; after the bootstrap that is the genesis anchor.
+        // the accepted state, which closed the old group.
+        harness.finalize_reinit(conversation)?;
         let old_state = *harness
             .coordinator
             .state
@@ -1130,7 +1137,7 @@ mod reinit {
             profile_version: 1,
             network_id: NETWORK,
             old_conversation_id: conversation,
-            new_conversation_id: NEW_CONVERSATION,
+            new_conversation_id: new_conversation()?,
             old_reinit_state_id: old_state,
             attempt_sequence: 1,
             reinit_attempt_id: attempt_id,
@@ -1199,9 +1206,10 @@ mod reinit {
             &outcome.result,
             vec![activate_vote, second_activate_vote],
         )?;
+        let new_id = new_conversation()?;
         assert!(matches!(
             outcome.result,
-            ResultBody::ReinitActivated(old, new, ..) if old == conversation && new == NEW_CONVERSATION
+            ResultBody::ReinitActivated(old, new, ..) if old == conversation && new == new_id
         ));
         assert!(
             outcome
@@ -1218,20 +1226,8 @@ mod reinit {
                 .map(|log| log.phase()),
             Some(Phase::Migrated { .. })
         ));
-        assert!(
-            harness
-                .coordinator
-                .state
-                .logs
-                .contains_key(&NEW_CONVERSATION)
-        );
-        assert!(
-            harness
-                .coordinator
-                .state
-                .lifecycles
-                .contains_key(&NEW_CONVERSATION)
-        );
+        assert!(harness.coordinator.state.logs.contains_key(&new_id));
+        assert!(harness.coordinator.state.lifecycles.contains_key(&new_id));
         harness = harness.reloaded()?;
         let old_log = harness
             .coordinator
@@ -1250,17 +1246,11 @@ mod reinit {
             .coordinator
             .state
             .logs
-            .get(&NEW_CONVERSATION)
+            .get(&new_id)
             .ok_or("successor log")?;
         assert_eq!(successor.accepted_epoch(), 1);
         assert_eq!(successor.accepted_state_id(), &activation_id);
-        assert!(
-            harness
-                .coordinator
-                .state
-                .lifecycles
-                .contains_key(&NEW_CONVERSATION)
-        );
+        assert!(harness.coordinator.state.lifecycles.contains_key(&new_id));
         let _ = ack_object;
         Ok(())
     }

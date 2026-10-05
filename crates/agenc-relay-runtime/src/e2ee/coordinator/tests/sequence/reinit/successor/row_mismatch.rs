@@ -83,7 +83,7 @@ fn a_reload_refuses_a_route_row_that_no_longer_matches_its_activation_record() -
         let mut fixture = Fixture::prepare()?;
         fixture.activate()?;
         let package = fixture.package.clone();
-        ok(fixture.bind(&package, CONTEXT)?)?;
+        ok(fixture.bind(&package, fixture.context)?)?;
         let key = RouteRow::key(&fixture.old)?;
         rewrite(&mut fixture.harness, &key, |body| {
             let mut row = RouteRow::decode(&body)?;
@@ -100,7 +100,7 @@ fn a_reload_refuses_an_activation_record_row_under_another_predecessor() -> Test
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
     let package = fixture.package.clone();
-    ok(fixture.bind(&package, CONTEXT)?)?;
+    ok(fixture.bind(&package, fixture.context)?)?;
     let sequence = last_record_sequence(&fixture)?;
     let key = SequencerRow::record_key(&fixture.old, sequence)?;
     rewrite(&mut fixture.harness, &key, |body| {

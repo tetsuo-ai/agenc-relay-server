@@ -27,12 +27,21 @@ pub(in crate::e2ee::coordinator) fn binding(
         .get(conversation)
         .ok_or(E2eeError::InvalidValue)?
         .binding_object_id;
-    let bytes = state.objects.get(&id).ok_or(E2eeError::InvalidValue)?;
+    binding_object(state, &id).ok_or(E2eeError::InvalidValue)
+}
+
+/// The retained binding package object `id`, decoded.
+pub(in crate::e2ee::coordinator) fn binding_object(
+    state: &CompanionState,
+    id: &[u8; 32],
+) -> Option<ArcConversationBindingPackage> {
+    let bytes = state.objects.get(id)?;
     decode(
         bytes,
         ArcWireObjectKind::ConversationBinding,
         MAX_BINDING_OBJECT,
     )
+    .ok()
 }
 
 fn decode<T: TlsDecode>(

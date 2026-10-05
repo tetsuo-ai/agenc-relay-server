@@ -17,14 +17,14 @@ fn a_successor_bind_for_another_conversation_than_the_activated_one_is_refused()
     package.binding.tbs.conversation_id = other;
     let mut params = fixture.reservation.to_vec();
     params.extend_from_slice(&other);
-    params.extend_from_slice(&CONTEXT);
+    params.extend_from_slice(&fixture.context);
     let bytes = wire(ArcWireObjectKind::ConversationBinding, &package)?;
     assert_eq!(
         code(fixture.harness.run(Op::BindGroup, &params, Some(&bytes))?),
         Some(E2eeReplyCode::BindingAuthInvalid)
     );
     let original = fixture.package.clone();
-    ok(fixture.bind(&original, CONTEXT)?)?;
+    ok(fixture.bind(&original, fixture.context)?)?;
     Ok(())
 }
 
@@ -43,7 +43,7 @@ fn a_successor_bind_whose_group_differs_from_the_attempt_target_is_refused() -> 
     fixture.activate()?;
     let package = fixture.package.clone();
     assert_eq!(
-        code(fixture.bind(&package, CONTEXT)?),
+        code(fixture.bind(&package, fixture.context)?),
         Some(E2eeReplyCode::BindingAuthInvalid)
     );
     Ok(())
@@ -55,7 +55,7 @@ fn a_reload_refuses_reinit_records_stored_under_each_others_positions() -> TestR
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
     let package = fixture.package.clone();
-    ok(fixture.bind(&package, CONTEXT)?)?;
+    ok(fixture.bind(&package, fixture.context)?)?;
     let sequences: Vec<u64> = fixture
         .harness
         .coordinator

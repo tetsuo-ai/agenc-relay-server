@@ -363,6 +363,14 @@ pub struct ConversationState {
     /// retained request, no vote of its signer, or a signer on neither
     /// council. Zero on every consistent store; never silently dropped.
     pub unreplayed_votes: u32,
+    /// The finalized ReInit Commit that is the accepted state while the old
+    /// group is in its ReInit phase, reduced to the hash links its
+    /// finalization proof binds, among them the authorized
+    /// `transition_target_digest` every attempt is checked against
+    /// (companion 13.8). `None` outside the phase, and when the finalization
+    /// that entered it carries no proof `AuthorizedReinit::from_proof`
+    /// admits, so no attempt can follow it.
+    pub reinit: Option<agenc_relay_e2ee::reinit_target::AuthorizedReinit>,
 }
 
 /// One published policy the sequencer retains for its quorum check.

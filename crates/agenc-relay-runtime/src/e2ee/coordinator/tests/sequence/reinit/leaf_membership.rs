@@ -12,8 +12,10 @@ use super::super::leaf_membership::{
     SECOND_LEAF_SEED, credential_of, refused, snapshot, two_member_channel,
 };
 use super::*;
+use crate::e2ee::coordinator::tests::sequence::reinit_successor::{LEAF_ZERO, creator_entry};
 use crate::e2ee::coordinator::tests::support::{MembershipSpec, key, membership_proof, sign};
 use crate::e2ee::coordinator::tests::{LEAF_SEED, TestResult as Result};
+use agenc_relay_e2ee::objects::conversation::ArcKeyPackagePlan;
 
 mod maximum;
 
@@ -64,34 +66,37 @@ fn accepted_state(harness: &Harness, conversation: [u8; 32]) -> Result<[u8; 32]>
         .accepted_state_id())
 }
 
-/// Stages an attempt whose KeyPackage plan carries `members`, the first
-/// being the creator, and returns its receipt and attempt.
-pub(super) fn stage(
-    harness: &mut Harness,
-    conversation: [u8; 32],
-    members: &[Member],
-) -> Result<(ArcReInitAttemptReceipt, ArcReInitAttempt)> {
-    let old_state = accepted_state(harness, conversation)?;
-    let (mut attempt, _) = attempt(harness, conversation, old_state, 0)?;
-    let creator = attempt
-        .key_package_plan
-        .entries
-        .as_slice()
-        .first()
-        .ok_or("creator entry")?
-        .clone();
+/// The KeyPackage plan that carries `members`, the first being the creator,
+/// each with its own capability and reserved KeyPackageRef.
+fn plan_of(harness: &Harness, members: &[Member]) -> Result<ArcKeyPackagePlan> {
+    let creator = creator_entry(harness)?;
     let mut entries = vec![creator.clone()];
     for member in members.iter().skip(1) {
         let mut entry = creator.clone();
         entry.creator = 0;
         entry.device_id = [member.device; 16];
+        entry.capability_id = [member.device; 32];
         entry.key_package_ref = Opaque::new(vec![member.reference.ok_or("joiner reference")?; 32])?;
         entries.push(entry);
     }
     entries.sort_by_key(|entry| entry.device_id);
-    attempt.key_package_plan.entries = TlsVec::new(entries)?;
-    super::attempt_authority::authorize_attempt(harness, &mut attempt)?;
-    let bytes = wire(ArcWireObjectKind::ReinitAttempt, &attempt)?;
+    Ok(ArcKeyPackagePlan {
+        entries: TlsVec::new(entries)?,
+    })
+}
+
+/// Finalizes the ReInit Commit whose target plans `members`, the first
+/// being the creator, stages an attempt for it, and returns its receipt and
+/// attempt.
+pub(super) fn stage(
+    harness: &mut Harness,
+    conversation: [u8; 32],
+    members: &[Member],
+) -> Result<(ArcReInitAttemptReceipt, ArcReInitAttempt)> {
+    let plan = plan_of(harness, members)?;
+    harness.finalize_reinit_with(conversation, plan, &[LEAF_ZERO])?;
+    let old_state = accepted_state(harness, conversation)?;
+    let (attempt, bytes) = attempt(harness, conversation, old_state, 0)?;
     ok(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
     Ok((staged_receipt(harness, conversation)?, attempt))
 }
@@ -222,6 +227,7 @@ fn nonmember_case(opcode: Op) -> Result<(Harness, [u8; 32], Vec<u8>)> {
     let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
     let conversation = harness.bind_channel()?;
     if opcode == Op::SubmitReinitAttempt {
+        harness.finalize_reinit(conversation)?;
         let old_state = accepted_state(&harness, conversation)?;
         let (_, bytes) = attempt(&harness, conversation, old_state, 0)?;
         return Ok((harness, conversation, bytes));

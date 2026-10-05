@@ -311,6 +311,7 @@ fn a_reinit_attempt_is_signed_only_under_the_old_conversation_pin() -> TestResul
     let mut harness = Harness::new()?;
     let (old, _) = install_overlap(&mut harness.coordinator)?;
     let conversation = bound_pinned(&mut harness, old)?;
+    harness.finalize_reinit(conversation)?;
     let accepted = *harness
         .coordinator
         .state
@@ -356,7 +357,7 @@ fn a_reinit_attempt_is_signed_only_under_the_old_conversation_pin() -> TestResul
 }
 
 #[test]
-fn a_blocked_route_refuses_candidates_attempts_and_policies_but_keeps_delivery() -> TestResult {
+fn a_blocked_route_refuses_candidates_and_policies_but_keeps_delivery() -> TestResult {
     let (mut harness, conversation, old, _) = bootstrapped_old_pinned()?;
     // The overlap deadline passed at a restart (`restart` covers the
     // reconciliation): the route is blocked on the old credential.
@@ -380,18 +381,6 @@ fn a_blocked_route_refuses_candidates_attempts_and_policies_but_keeps_delivery()
         code(harness.run(Op::SubmitPolicy, &conversation, Some(&policy))?),
         Some(E2eeReplyCode::Syncing)
     );
-    let accepted = *harness
-        .coordinator
-        .state
-        .logs
-        .get(&conversation)
-        .ok_or("log")?
-        .accepted_state_id();
-    let (_, attempt) = reinit::attempt(&harness, conversation, accepted, 0)?;
-    assert_eq!(
-        code(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&attempt))?),
-        Some(E2eeReplyCode::Syncing)
-    );
     assert_eq!(harness.coordinator.state.logs, logs);
     assert_eq!(harness.writes.len(), writes);
     // Opaque application delivery continues on the last accepted epoch.
@@ -411,6 +400,36 @@ fn a_blocked_route_refuses_candidates_attempts_and_policies_but_keeps_delivery()
     send.extend_from_slice(&INSTANCE);
     let outcome = ok(harness.run(Op::ApplicationChannel, &send, Some(&message))?)?;
     assert_eq!(outcome.result, ResultBody::AcceptedEvent);
+    Ok(())
+}
+
+#[test]
+fn a_blocked_route_in_its_reinit_phase_refuses_attempts() -> TestResult {
+    let (mut harness, conversation, old, _) = bootstrapped_old_pinned()?;
+    harness.finalize_reinit(conversation)?;
+    harness
+        .coordinator
+        .state
+        .conversations
+        .get_mut(&conversation)
+        .ok_or("conversation")?
+        .blocked_credential_id = Some(old);
+    let accepted = *harness
+        .coordinator
+        .state
+        .logs
+        .get(&conversation)
+        .ok_or("log")?
+        .accepted_state_id();
+    let (_, attempt) = reinit::attempt(&harness, conversation, accepted, 0)?;
+    let logs = harness.coordinator.state.logs.clone();
+    let writes = harness.writes.len();
+    assert_eq!(
+        code(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&attempt))?),
+        Some(E2eeReplyCode::Syncing)
+    );
+    assert_eq!(harness.coordinator.state.logs, logs);
+    assert_eq!(harness.writes.len(), writes);
     Ok(())
 }
 

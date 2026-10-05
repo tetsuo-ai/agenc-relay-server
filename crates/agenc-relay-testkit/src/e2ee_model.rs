@@ -1,7 +1,7 @@
 //! Bounded explicit-state exploration of the encrypted route model: the
 //! route table, one sequencer log and lifecycle per conversation, and the
 //! plaintext gate, driven by every action a client or a faulty sender can
-//! attempt (companion 12.1 to 12.4, 13.7, 17). The explorer walks every
+//! attempt (companion 12.1 to 12.4, 13.7, 13.8, 17). The explorer walks every
 //! action sequence to the recorded depth, deduplicates states by their
 //! observable shape, and checks the invariants after every transition.
 //!
@@ -49,6 +49,10 @@ pub enum Action {
     ConflictingCandidate(u8),
     /// Finalize the active candidate.
     Finalize(u8),
+    /// Finalize the active candidate as a ReInit Commit, whose authorization
+    /// carries the ReInit bit: the old group closes in the same step
+    /// (companion 13.8 step 2).
+    ReinitFinalize(u8),
     /// Finalize a candidate that is not the active one (reordered).
     ReorderedFinalize(u8),
     /// Abort the active candidate.
@@ -74,6 +78,8 @@ struct Conversation {
     activated: bool,
     /// Close identifier once closed.
     closed: Option<[u8; 32]>,
+    /// Whether a ReInit Commit finalized, closing the old group.
+    reinit: bool,
 }
 
 /// The explorable world.
@@ -104,6 +110,9 @@ pub enum Violation {
     UngatedApplication(Vec<Action>),
     /// A closed lineage reopened under the same lock.
     Reopened(Vec<Action>),
+    /// An ordinary candidate, application object, or close was accepted
+    /// after a ReInit Commit finalized and closed the old group.
+    ReinitClosedGroup(Vec<Action>),
     /// The model itself could not build a fixture value.
     Model(&'static str),
 }
@@ -175,6 +184,7 @@ impl World {
                     records: Vec::new(),
                     activated: false,
                     closed: None,
+                    reinit: false,
                 })
                 .collect(),
             applications: vec![0; count],
@@ -306,7 +316,10 @@ fn step(world: &mut World, action: Action, accounts: u8) -> Result<bool, Violati
             }
             Ok(allowed)
         }
-        Action::Candidate(conversation) => submit_candidate(world, conversation, 0, 0),
+        Action::Candidate(conversation) => {
+            let accepted = submit_candidate(world, conversation, 0, 0)?;
+            closed_group(world, conversation, accepted, trace)
+        }
         Action::DuplicateCandidate(conversation) => {
             let Some(last) = world
                 .conversations
@@ -346,9 +359,14 @@ fn step(world: &mut World, action: Action, accounts: u8) -> Result<bool, Violati
             }
             Ok(accepted)
         }
-        Action::Finalize(conversation) => terminal(world, conversation, true, false),
-        Action::ReorderedFinalize(conversation) => terminal(world, conversation, true, true),
-        Action::Abort(conversation) => terminal(world, conversation, false, false),
+        Action::Finalize(conversation) => terminal(world, conversation, Terminal::Finalize, false),
+        Action::ReinitFinalize(conversation) => {
+            terminal(world, conversation, Terminal::Reinit, false)
+        }
+        Action::ReorderedFinalize(conversation) => {
+            terminal(world, conversation, Terminal::Finalize, true)
+        }
+        Action::Abort(conversation) => terminal(world, conversation, Terminal::Abort, false),
         Action::Application(conversation) => {
             let Some(state) = world.conversations.get(usize::from(conversation)) else {
                 return Ok(false);
@@ -367,10 +385,31 @@ fn step(world: &mut World, action: Action, accounts: u8) -> Result<bool, Violati
             if allowed && let Some(count) = world.applications.get_mut(usize::from(conversation)) {
                 *count = count.saturating_add(1);
             }
-            Ok(allowed)
+            closed_group(world, conversation, allowed, trace)
         }
-        Action::Close(conversation) => close(world, conversation),
+        Action::Close(conversation) => {
+            let closed = close(world, conversation)?;
+            closed_group(world, conversation, closed, trace)
+        }
     }
+}
+
+/// An accepted ordinary record or application object after a ReInit
+/// finalization is a violation: that finalization closed the old group.
+fn closed_group(
+    world: &World,
+    conversation: u8,
+    accepted: bool,
+    trace: impl FnOnce() -> Vec<Action>,
+) -> Result<bool, Violation> {
+    let reinit = world
+        .conversations
+        .get(usize::from(conversation))
+        .is_some_and(|state| state.reinit);
+    if accepted && reinit {
+        return Err(Violation::ReinitClosedGroup(trace()));
+    }
+    Ok(accepted)
 }
 
 fn bind(
@@ -409,6 +448,7 @@ fn bind(
         state.lifecycle = Some(Lifecycle::bootstrap());
         state.activated = false;
         state.closed = None;
+        state.reinit = false;
     }
     Ok(bound)
 }
@@ -451,10 +491,21 @@ fn submit_candidate(
     Ok(true)
 }
 
+/// The terminal a [`terminal`] action certifies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Terminal {
+    /// An ordinary finalization.
+    Finalize,
+    /// The finalization of a ReInit Commit.
+    Reinit,
+    /// A candidate abort.
+    Abort,
+}
+
 fn terminal(
     world: &mut World,
     conversation: u8,
-    finalize: bool,
+    kind: Terminal,
     reordered: bool,
 ) -> Result<bool, Violation> {
     let Some(state) = world.conversations.get_mut(usize::from(conversation)) else {
@@ -473,15 +524,17 @@ fn terminal(
     };
     let sequence =
         u32::try_from(slot.position.route_sequence.saturating_add(1)).unwrap_or(u32::MAX);
-    let terminal_id = id(if finalize { 7 } else { 8 }, conversation, sequence, 0);
-    let result = if finalize {
-        log.finalize(
-            &candidate_id,
-            terminal_id,
-            slot.position.prior_epoch.saturating_add(1),
-        )
-    } else {
-        log.abort(&candidate_id, terminal_id)
+    let tag = match kind {
+        Terminal::Finalize => 7,
+        Terminal::Abort => 8,
+        Terminal::Reinit => 10,
+    };
+    let terminal_id = id(tag, conversation, sequence, 0);
+    let resulting_epoch = slot.position.prior_epoch.saturating_add(1);
+    let result = match kind {
+        Terminal::Finalize => log.finalize(&candidate_id, terminal_id, resulting_epoch),
+        Terminal::Reinit => log.finalize_reinit(&candidate_id, terminal_id, resulting_epoch),
+        Terminal::Abort => log.abort(&candidate_id, terminal_id),
     };
     let Ok(position) = result else {
         return Ok(false);
@@ -490,7 +543,12 @@ fn terminal(
         return Err(Violation::Discontinuity(world.trace.clone()));
     }
     state.records.push(terminal_id);
-    if finalize
+    // A ReInit authorization is a controlled transition, never the
+    // bootstrap activation, and it closes the old group.
+    if kind == Terminal::Reinit {
+        state.reinit = true;
+    }
+    if kind == Terminal::Finalize
         && let Some(lifecycle) = state.lifecycle.as_mut()
         && !state.activated
     {
@@ -564,6 +622,7 @@ fn actions(bounds: E2eeModelBounds) -> Vec<Action> {
             Action::StaleCandidate(conversation),
             Action::ConflictingCandidate(conversation),
             Action::Finalize(conversation),
+            Action::ReinitFinalize(conversation),
             Action::ReorderedFinalize(conversation),
             Action::Abort(conversation),
             Action::Application(conversation),

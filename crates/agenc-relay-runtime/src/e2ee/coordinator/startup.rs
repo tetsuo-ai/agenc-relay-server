@@ -65,6 +65,7 @@ use agenc_relay_e2ee::limits::{
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::objects::conversation::{
     ArcCommitAuthorizationRule, ArcConversationBindingPackage, ArcConversationKind, ArcPolicy,
+    action_bits,
 };
 use agenc_relay_e2ee::objects::federation::ArcFederationRouteState;
 use agenc_relay_e2ee::objects::identity::{
@@ -75,6 +76,7 @@ use agenc_relay_e2ee::objects::sequencing::{
     ArcAbortRequest, ArcFinalityVote, ArcFinalizationRequest, ArcSequencerRecord,
 };
 use agenc_relay_e2ee::policy::verify_policy;
+use agenc_relay_e2ee::reinit_target::AuthorizedReinit;
 use agenc_relay_e2ee::route::PrincipalRosters;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_relay_storage::e2ee_records::origin::OriginSequenceRow;
@@ -1438,9 +1440,10 @@ struct RestoredLogPhase {
     next_attempt_sequence: u32,
 }
 
-/// A ReInit receipt or terminal at the durable head determines whether an
-/// attempt is still open, another attempt may follow, or the group migrated.
-// agenc-review: focus owner=runtime reviewed=2026-09-04 reason=the head receipt and terminal alternatives restore the phase together with exact durable row identity checks
+/// The finalization of a ReInit Commit, or a ReInit receipt or terminal, at
+/// the durable head determines whether the old group is closed with an
+/// attempt still to come, open, or followed by another, or migrated.
+// agenc-review: focus owner=runtime reviewed=2026-10-05 reason=the head finalization, receipt and terminal alternatives restore the phase together with exact durable row identity checks
 fn restore_log_phase(
     state: &CompanionState,
     conversation_id: [u8; 32],
@@ -1457,7 +1460,10 @@ fn restore_log_phase(
     let Some(record) = records.get(&row.route_sequence).filter(|record| {
         matches!(
             record.record_kind,
-            REINIT_ATTEMPT_RECORD | REINIT_ACTIVATION_RECORD | REINIT_ABORT_RECORD
+            FINALIZATION_RECORD
+                | REINIT_ATTEMPT_RECORD
+                | REINIT_ACTIVATION_RECORD
+                | REINIT_ABORT_RECORD
         )
     }) else {
         return Some(restored);
@@ -1469,6 +1475,13 @@ fn restore_log_phase(
         MAX_SEQUENCER_RECORD_OBJECT,
     )?;
     match decoded {
+        ArcSequencerRecord::Finalization(certificate) => {
+            if let Some(phase) =
+                finalization_head_phase(conversation_id, row, record, &certificate.tbs)?
+            {
+                restored.phase = phase;
+            }
+        }
         ArcSequencerRecord::ReinitAttempt(receipt) => {
             let tbs = receipt.tbs;
             if record.record_kind != REINIT_ATTEMPT_RECORD
@@ -1526,6 +1539,57 @@ fn restore_log_phase(
         _ => return None,
     }
     Some(restored)
+}
+
+/// The phase a finalization at the durable head restores: the finalization
+/// of a ReInit Commit, whose authorization carries the ReInit bit, closed
+/// the old group and entered the ReInit phase at that finalization
+/// (companion 13.8 step 2), and must be exactly the record its route row
+/// names; any other finalization leaves the phase the row gives (`Some(None)`).
+fn finalization_head_phase(
+    conversation_id: [u8; 32],
+    row: &RouteRow,
+    record: &RecordRow,
+    tbs: &agenc_relay_e2ee::objects::sequencing::ArcCommitFinalizationTbs,
+) -> Option<Option<Phase>> {
+    if tbs.request.proof.authorization.tbs.action_bits & action_bits::REINIT == 0 {
+        return Some(None);
+    }
+    let exact = record.record_kind == FINALIZATION_RECORD
+        && tbs.conversation_id == conversation_id
+        && tbs.predecessor_record_id == record.predecessor_record_id
+        && tbs.finalization_id == row.accepted_state_id
+        && tbs.finalization_id == row.sequencer_head_id
+        && tbs.route_sequence == row.route_sequence;
+    exact.then_some(Some(Phase::Reinit {
+        old_reinit_state_id: tbs.finalization_id,
+    }))
+}
+
+/// The authorized ReInit of the finalization that entered a restored ReInit
+/// phase, from its retained record (companion 13.8): `None` when no
+/// retained finalization record names that state or its proof binds no
+/// authorized target, so no attempt follows it. An authority whose proof
+/// names another finalization than the accepted state admits no attempt
+/// either (`ops::reinit_authority::authorized`).
+fn restored_authority(
+    state: &CompanionState,
+    records: &BTreeMap<u64, &RecordRow>,
+    finalization_id: &[u8; 32],
+) -> Option<AuthorizedReinit> {
+    let record = records.values().find(|record| {
+        record.record_kind == FINALIZATION_RECORD && record.record_id == *finalization_id
+    })?;
+    let decoded: ArcSequencerRecord = decode_object(
+        state,
+        &record.record_object_id,
+        ArcWireObjectKind::SequencerRecord,
+        MAX_SEQUENCER_RECORD_OBJECT,
+    )?;
+    let ArcSequencerRecord::Finalization(certificate) = decoded else {
+        return None;
+    };
+    AuthorizedReinit::from_proof(&certificate.tbs.request.proof).ok()
 }
 
 /// Restores the log head, epoch position, and ReInit phase from retained rows.
@@ -2120,6 +2184,12 @@ fn restore_route(
         .candidates
         .get(&(conversation_id, route.finalized_epoch));
     let log = restore_log(state, conversation_id, row, &route, &records, candidate)?;
+    let reinit = match log.phase() {
+        Phase::Reinit {
+            old_reinit_state_id,
+        } => restored_authority(state, &records, &old_reinit_state_id),
+        _ => None,
+    };
     let activated = records
         .values()
         .any(|record| activates_bootstrap(state, record));
@@ -2162,6 +2232,7 @@ fn restore_route(
         blocked_credential_id: row.blocked_credential_id,
         predecessor_close_id: row.predecessor_close_id,
         last_validation_time,
+        reinit,
         ..ConversationState::default()
     };
     let historical = principal_rosters(state, network_id, &conversation, index);

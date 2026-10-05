@@ -51,7 +51,7 @@ async fn sealed_reconstruction_preserves_a_bound_successors_later_head() -> Test
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
     let package = fixture.package.clone();
-    ok(fixture.bind(&package, CONTEXT)?)?;
+    ok(fixture.bind(&package, fixture.context)?)?;
     let aad = agenc_relay_e2ee::objects::aad::ArcCommitAad {
         profile_version: 1,
         network_id: NETWORK,
@@ -97,7 +97,7 @@ async fn sealed_reconstruction_preserves_a_bound_successors_later_head() -> Test
             .conversations
             .get(&fixture.new)
             .map(|state| state.context_digest),
-        Some(CONTEXT)
+        Some(fixture.context)
     );
     assert_eq!(
         restored

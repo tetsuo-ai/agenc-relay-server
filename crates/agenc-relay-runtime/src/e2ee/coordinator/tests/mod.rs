@@ -131,6 +131,9 @@ struct Harness {
     devices: Vec<u8>,
     /// Whether the base profile counts the origin as a member of every channel.
     channel_member: bool,
+    /// The successor the last finalized ReInit Commit authorized; attempts
+    /// carry its target.
+    reinit: Option<sequence::reinit_successor::Successor>,
 }
 
 impl Harness {
@@ -218,6 +221,7 @@ impl Harness {
             writes: Vec::new(),
             devices: devices.to_vec(),
             channel_member: true,
+            reinit: None,
         })
     }
 
@@ -259,6 +263,7 @@ impl Harness {
             .coordinator
             .finish_restore_with_backing(fresh.backing.clone())?;
         fresh.sequence = self.sequence;
+        fresh.reinit.clone_from(&self.reinit);
         // Companion origins are not durable: the edge re-declares the
         // attached device after a reload, which the harness copies over.
         let device = self.device();

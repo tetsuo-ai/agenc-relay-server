@@ -6,11 +6,9 @@ use agenc_relay_e2ee::objects::reinit::{ArcReInitActivationCoreTbs, ArcReInitAct
 
 use super::*;
 
-const SUCCESSOR: [u8; 32] = [77; 32];
-
 fn attempt_fixture() -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
     let mut fixture = Harness::new()?;
-    let conversation = fixture.bind_channel()?;
+    let conversation = fixture.bind_channel_for_reinit()?;
     let old_state = *fixture
         .coordinator
         .state
@@ -33,7 +31,7 @@ fn activation_fixture() -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
         profile_version: 1,
         network_id: NETWORK,
         old_conversation_id: conversation,
-        new_conversation_id: SUCCESSOR,
+        new_conversation_id: super::super::reinit::new_conversation()?,
         old_reinit_state_id: old_state,
         attempt_sequence: 0,
         reinit_attempt_id: attempt_id,
@@ -94,11 +92,10 @@ fn assert_successor_refusal(
         RecoveryGate::Conflict,
         RecoveryGate::Closed,
     ] {
-        fixture
-            .coordinator
-            .state
-            .lifecycles
-            .insert(SUCCESSOR, Lifecycle::restore(gate, false, false));
+        fixture.coordinator.state.lifecycles.insert(
+            super::super::reinit::new_conversation()?,
+            Lifecycle::restore(gate, false, false),
+        );
         let before = retained_state(&fixture)?;
         assert_route_refused(evaluate_request(
             &mut fixture,

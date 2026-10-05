@@ -10,12 +10,13 @@
 //! The ReInit target is built once, before the old ReInit Commit: it covers
 //! no state of the old group, so the digest the old authorization commits is
 //! the digest every attempt names, and every attempt carries that target
-//! byte for byte. The daemon's own records are then replayed through the
-//! shared historical chain, resumed at the accepted state before the ReInit
-//! candidate, with that target bound to the finalization. The target's
-//! extension list is a one-byte placeholder: the chain checks the carried
-//! target's digest and the fields the attempt repeats, never the list, whose
-//! rules the independent vectors cover.
+//! byte for byte. Its extension list carries the successor context companion
+//! 13.8 describes, so the daemon's sequencer accepts the attempt only after
+//! the target hashes to the authorized digest, the attempt repeats it, the
+//! KeyPackage plan forms its member plan, and the context describes the
+//! successor of the bound route. The daemon's own records are then replayed
+//! through the shared historical chain, resumed at the accepted state before
+//! the ReInit candidate, with that target bound to the finalization.
 //!
 //! openmls 0.9 exposes no ReInit proposal or resumption successor, so both
 //! endpoints of this scenario are mls-rs; the cross-library evidence is in
@@ -23,10 +24,11 @@
 //! mls-rs 0.56 `ReinitClient::commit` returns neither the successor initial
 //! Commit nor a way to set its authenticated data, so the attempt still
 //! carries the successor GroupInfo message as its initial Commit bytes, and
-//! the reinit extension list stays empty because these endpoints advertise
-//! no ARC extension capability; the target's reconstruction from real
-//! extensions and the initial Commit's authenticated data are covered by the
-//! independent vectors in `test-data/vectors/e2ee/reinit`. Those GroupInfo
+//! the mls-rs ReInit Proposal's own extension list stays empty because these
+//! endpoints advertise no ARC extension capability, so they never rebuild
+//! the target from the Proposal; that reconstruction from real extensions and
+//! the initial Commit's authenticated data are covered by the independent
+//! vectors in `test-data/vectors/e2ee/reinit`. Those GroupInfo
 //! bytes do not satisfy the companion's successor initial-Commit rule
 //! (`AuthorizedReinit::check_initial_commit` refuses anything but a
 //! `PrivateMessage` Commit), and `HistoricalChain` does not apply that rule,
@@ -570,56 +572,136 @@ fn remove_leaf(
     Ok(certified.finalization_id)
 }
 
+/// An empty RFC 9420 `RequiredCapabilities`: three empty vectors.
+const REQUIRED_CAPABILITIES: [u8; 3] = [0, 0, 0];
+/// The successor context's initial validation time.
+const SUCCESSOR_VALIDATION_TIME: u64 = 60;
+
 /// The immutable ReInit target of the successor group, with the binding and
-/// initial member plan it commits to. It names no state of the old group.
+/// initial member plan it commits to. It names no state of the old group:
+/// its extension list carries the successor context companion 13.8
+/// describes (the replacement of the bound `#room` binding on the same
+/// route, the successor's generation-zero policy of both principals, the
+/// coordinator's sequencer credential and both principals' roster heads)
+/// and an empty `required_capabilities` extension.
 fn target_of(clients: &Clients) -> TestResult<Target> {
+    let network = *NETWORK_ID.as_bytes();
     let principals = [&clients.alice_keys.keys, &clients.bob_keys.keys];
-    let fingerprint = builders::root_fingerprint(&clients.alice_keys.keys.root)?;
-    let conversation = e2ee::ids::conversation_id(NETWORK_ID.as_bytes(), &SUCCESSOR_GROUP)?;
-    let policies = policies_for(&principals, conversation, ArcConversationKind::Channel)?;
-    let package = builders::binding_package(&builders::BindingSpec {
-        principals: &principals,
-        route: builders::channel_route(b"#room", fingerprint)?,
-        channel_instance_id: clients.bound.instance,
-        conversation_nonce: None,
-        group_id: SUCCESSOR_GROUP,
-        generation: 1,
-        previous_binding_id: clients.bound.binding_id,
-        lock_sequence: 0,
-        previous_lock_ids: Vec::new(),
-        initial_policy_id: builders::policy_id_of(&policies[0])?,
-        required_operational_policy_id: builders::policy_id_of(&policies[1])?,
-        sequencer_credential_id: active_sequencer_credential_id()?,
-        plan_devices: vec![
-            (
-                &clients.alice_keys.account,
-                fingerprint,
-                clients.alice_keys.device,
-            ),
-            (
-                &clients.bob_keys.account,
-                builders::root_fingerprint(&clients.bob_keys.keys.root)?,
-                clients.bob_keys.device,
-            ),
-        ],
-    })?;
-    let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &package.binding.tbs)?;
-    let plan_id = semantic_id_of(
-        SemanticHashDomain::InitialMemberPlanId,
-        &package.initial_member_plan,
+    let conversation = e2ee::ids::conversation_id(&network, &SUCCESSOR_GROUP)?;
+    let policy = builders::policy(&builders::PolicySpec::bootstrap(
+        &principals,
+        conversation,
+        ArcConversationKind::Channel,
+    )?)?;
+    let policy_id = builders::policy_id_of(&policy)?;
+    let sequencer = builders::sequencer_credential_in(
+        network,
+        &Ed25519SecretKey::from_bytes([35; 32]),
+        0,
+        (0, 4_000_000_000),
+        None,
     )?;
+    let plan = successor_plan(clients)?;
+    let plan_id = semantic_id_of(SemanticHashDomain::InitialMemberPlanId, &plan)?;
+    let old = &clients.bound.package.binding.tbs;
+    let mut binding = old.clone();
+    binding.binding_generation = old.binding_generation.saturating_add(1);
+    binding.previous_binding_id = clients.bound.binding_id;
+    binding.group_id = Opaque::from_slice(&SUCCESSOR_GROUP)?;
+    binding.conversation_id = conversation;
+    binding.cipher_suite = 1;
+    binding.initial_policy_id = policy_id;
+    binding.required_operational_policy_id = policy_id;
+    binding.initial_member_plan_id = plan_id;
+    binding.sequencer_credential_id =
+        semantic_id_of(SemanticHashDomain::SequencerKey, &sequencer.tbs)?;
+    let core = e2ee::objects::conversation::ArcContextCoreTbs {
+        profile_version: 1,
+        mls_version: 1,
+        cipher_suite: 1,
+        group_id: Opaque::from_slice(&SUCCESSOR_GROUP)?,
+        network_id: network,
+        conversation_id: conversation,
+        kind: binding.kind,
+        semantic_route_lock_id: binding.semantic_route_lock_id,
+        route_binding: binding.route_binding,
+        initial_validation_time: SUCCESSOR_VALIDATION_TIME,
+        initial_policy_id: policy_id,
+        required_operational_policy_id: policy_id,
+        initial_bootstrap_pending: 0,
+        initial_member_plan_id: plan_id,
+        sequencer_credential_id: binding.sequencer_credential_id,
+        encoded_required_capabilities: Opaque::from_slice(&REQUIRED_CAPABILITIES)?,
+    };
+    let core_id = e2ee::context::context_core_id(&core)?;
+    binding.context_core_id = core_id;
+    let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &binding)?;
+    let mut roster_heads = [&clients.alice_keys, &clients.bob_keys]
+        .into_iter()
+        .map(|principal| {
+            Ok(e2ee::objects::conversation::ArcRosterHead {
+                account_id_digest: e2ee::ids::account_id_digest(&network, &principal.account)?,
+                root_generation: principal.keys.root.tbs.root_generation,
+                root_fingerprint: builders::root_fingerprint(&principal.keys.root)?,
+                roster_generation: principal.keys.roster.tbs.roster_generation,
+                roster_id: builders::roster_id(&principal.keys.roster)?,
+            })
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    roster_heads.sort_by_key(|head| {
+        (
+            head.account_id_digest,
+            head.root_generation,
+            head.root_fingerprint,
+        )
+    });
+    let context = e2ee::objects::conversation::ArcMlsContext {
+        profile_version: 1,
+        network_id: network,
+        conversation_id: conversation,
+        kind: binding.kind,
+        route_binding: binding.route_binding,
+        initial_validation_time: SUCCESSOR_VALIDATION_TIME,
+        policy,
+        sequencer,
+        current_binding: e2ee::objects::conversation::ArcConversationBinding {
+            tbs: binding,
+            approvals: TlsVec::new(Vec::new())?,
+        },
+        lifecycle: e2ee::objects::conversation::ArcConversationLifecycle {
+            kind: e2ee::objects::conversation::ArcConversationLifecycleKind::ActiveConversation,
+            close_intent_id: [0; 32],
+        },
+        private_topic: Opaque::new(Vec::new())?,
+        bootstrap_pending: 0,
+        roster_heads: TlsVec::new(roster_heads)?,
+        pending_joins: TlsVec::new(Vec::new())?,
+    };
+    let mut body = Vec::new();
+    for (extension_type, data) in [
+        (
+            e2ee::reinit_target::REQUIRED_CAPABILITIES_EXTENSION,
+            REQUIRED_CAPABILITIES.to_vec(),
+        ),
+        (e2ee::limits::ARC_MLS_CONTEXT_EXTENSION, context.encode()?),
+    ] {
+        body.extend_from_slice(&extension_type.to_be_bytes());
+        builders::opaque_v(&mut body, &data)?;
+    }
+    let mut extensions = Vec::new();
+    builders::opaque_v(&mut extensions, &body)?;
     let tbs = ArcReInitTargetTbs {
         profile_version: 1,
-        network_id: *NETWORK_ID.as_bytes(),
+        network_id: network,
         old_conversation_id: clients.bound.conversation,
         new_conversation_id: conversation,
         target_group_id: Opaque::new(SUCCESSOR_GROUP.to_vec())?,
         target_version: 1,
         target_suite: 1,
-        target_context_core_id: CONTEXT_CORE_ID,
+        target_context_core_id: core_id,
         target_binding_id: binding_id,
         initial_member_plan_id: plan_id,
-        encoded_target_extensions: Opaque::new(vec![0])?,
+        encoded_target_extensions: Opaque::new(extensions)?,
     };
     let digest = semantic_id_of(SemanticHashDomain::ReinitTarget, &tbs)?;
     Ok(Target {
@@ -628,6 +710,35 @@ fn target_of(clients: &Clients) -> TestResult<Target> {
         conversation,
         binding_id,
         plan_id,
+    })
+}
+
+/// The semantic initial member plan of both continuing leaves, in the
+/// canonical order the attempt's KeyPackage plan repeats: alice's and bob's
+/// devices with their capabilities.
+fn successor_plan(
+    clients: &Clients,
+) -> TestResult<e2ee::objects::conversation::ArcInitialMemberPlan> {
+    let mut entries = [&clients.alice_keys, &clients.bob_keys]
+        .into_iter()
+        .map(|principal| {
+            Ok(e2ee::objects::conversation::ArcInitialMemberPlanEntry {
+                account_id: Opaque::from_slice(&principal.account)?,
+                root_fingerprint: builders::root_fingerprint(&principal.keys.root)?,
+                device_id: [principal.device; 16],
+                capability_id: [principal.device.wrapping_add(200); 32],
+            })
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    entries.sort_by_key(|entry| {
+        (
+            entry.account_id.clone(),
+            entry.root_fingerprint,
+            entry.device_id,
+        )
+    });
+    Ok(e2ee::objects::conversation::ArcInitialMemberPlan {
+        entries: TlsVec::new(entries)?,
     })
 }
 
@@ -778,8 +889,16 @@ fn key_package_plan(
         )?,
         creator: 0,
     };
+    // Canonical by the semantic plan's device tuple (companion 9.4), so the
+    // tuples form the target's initial member plan in this order.
     let mut entries = vec![creator, joiner];
-    entries.sort_by_key(|entry| entry.device_id);
+    entries.sort_by_key(|entry| {
+        (
+            entry.account_id.clone(),
+            entry.root_fingerprint,
+            entry.device_id,
+        )
+    });
     Ok(ArcKeyPackagePlan {
         entries: TlsVec::new(entries)?,
     })

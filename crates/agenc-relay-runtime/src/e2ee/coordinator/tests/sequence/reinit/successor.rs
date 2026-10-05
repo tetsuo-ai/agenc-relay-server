@@ -14,8 +14,7 @@ use agenc_relay_e2ee::tls::TlsEncode;
 
 use super::super::super::INSTANCE;
 
-const SUCCESSOR_GROUP: [u8; 32] = [11; 32];
-const CONTEXT: [u8; 32] = [2; 32];
+use super::super::reinit_successor::SUCCESSOR_GROUP;
 
 struct Fixture {
     harness: Harness,
@@ -25,6 +24,8 @@ struct Fixture {
     package: ArcConversationBindingPackage,
     activation: Vec<u8>,
     activation_id: [u8; 32],
+    /// The context digest a successor BIND names: the authorized target's.
+    context: [u8; 32],
 }
 
 fn reserve(harness: &mut Harness) -> TestResult<[u8; 16]> {
@@ -49,14 +50,16 @@ impl Fixture {
         Self::prepare_bound_with(harness, old, |_, _| Ok(()))
     }
 
-    /// [`Self::prepare_bound`] with `edit` applied to the successor package before the
-    /// attempt is built, so the activated attempt targets the edited binding exactly.
+    /// [`Self::prepare_bound`] with `edit` applied to the successor package the
+    /// BIND carries; the activated attempt targets the authorized successor.
     fn prepare_bound_with(
         mut harness: Harness,
         old: [u8; 32],
         edit: fn(&mut ArcConversationBindingPackage, [u8; 32]) -> TestResult,
     ) -> TestResult<Self> {
         let reservation = reserve(&mut harness)?;
+        harness.finalize_reinit(old)?;
+        let successor = harness.reinit.clone().ok_or("the authorized successor")?;
         let old_state = *harness
             .coordinator
             .state
@@ -64,40 +67,10 @@ impl Fixture {
             .get(&old)
             .ok_or("old log")?
             .accepted_state_id();
-        let mut package = crate::e2ee::coordinator::ops::route_successor::binding(
-            &harness.coordinator.state,
-            &old,
-        )?;
-        let previous = semantic_id_of(SemanticHashDomain::BindingId, &package.binding.tbs)?;
-        let new = agenc_relay_e2ee::ids::conversation_id(&NETWORK, &SUCCESSOR_GROUP)?;
-        package.binding.tbs.binding_generation = 1;
-        package.binding.tbs.previous_binding_id = previous;
-        package.binding.tbs.group_id = Opaque::from_slice(&SUCCESSOR_GROUP)?;
-        package.binding.tbs.conversation_id = new;
-        package.binding.approvals = TlsVec::new(Vec::new())?;
-        package.root_binding_locks = TlsVec::new(Vec::new())?;
+        let mut package = successor.package()?;
         edit(&mut package, old)?;
-        let new = package.binding.tbs.conversation_id;
-        let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &package.binding.tbs)?;
-        let (mut attempt, _) = attempt(&harness, old, old_state, 0)?;
-        attempt.tbs.new_conversation_id = new;
-        attempt.tbs.target_binding_id = binding_id;
-        attempt.tbs.initial_member_plan_id = package.binding.tbs.initial_member_plan_id;
-        attempt.authorization.tbs.new_conversation_id = new;
-        attempt.authorization.tbs.target_binding_id = binding_id;
-        attempt.authorization.tbs.initial_member_plan_id =
-            package.binding.tbs.initial_member_plan_id;
-        attempt.authorization.approvals = TlsVec::new(vec![commit_approval(
-            &harness.principal,
-            DEVICE,
-            &attempt.authorization.tbs,
-            SignatureDomain::ReinitAttemptAuthorization,
-        )?])?;
-        attempt.tbs.attempt_authorization_id = semantic_id_of(
-            SemanticHashDomain::ReinitAttemptAuthorizationId,
-            &attempt.authorization.tbs,
-        )?;
-        let bytes = wire(ArcWireObjectKind::ReinitAttempt, &attempt)?;
+        let new = successor.conversation;
+        let (attempt, bytes) = attempt(&harness, old, old_state, 0)?;
         ok(harness.run(Op::SubmitReinitAttempt, &old, Some(&bytes))?)?;
         let receipt = staged_receipt(&harness, old)?;
         let (mut ack, _) = ack(old, old_state, receipt.tbs.reinit_attempt_id)?;
@@ -147,6 +120,7 @@ impl Fixture {
             package,
             activation,
             activation_id,
+            context: successor.digest,
         })
     }
 
@@ -177,11 +151,11 @@ fn successor_bind_requires_activation_and_preserves_epoch_one_after_restart() ->
     let mut fixture = Fixture::prepare()?;
     let package = fixture.package.clone();
     assert_eq!(
-        code(fixture.bind(&package, CONTEXT)?),
+        code(fixture.bind(&package, fixture.context)?),
         Some(E2eeReplyCode::BindingAuthInvalid)
     );
     fixture.activate()?;
-    let bound = ok(fixture.bind(&package, CONTEXT)?)?;
+    let bound = ok(fixture.bind(&package, fixture.context)?)?;
     assert!(
         bound
             .events
@@ -265,7 +239,7 @@ fn successor_bind_requires_activation_and_preserves_epoch_one_after_restart() ->
             .conversations
             .get(&fixture.new)
             .map(|value| value.context_digest),
-        Some(CONTEXT)
+        Some(fixture.context)
     );
     assert!(
         !state
@@ -274,6 +248,52 @@ fn successor_bind_requires_activation_and_preserves_epoch_one_after_restart() ->
             .ok_or("successor lifecycle after candidate reload")?
             .bootstrap_pending()
     );
+    Ok(())
+}
+
+#[test]
+fn an_activation_ends_the_reinit_phase_and_its_authorized_target() -> TestResult {
+    let mut fixture = Fixture::prepare()?;
+    let authorized = fixture
+        .harness
+        .coordinator
+        .state
+        .conversations
+        .get(&fixture.old)
+        .ok_or("old state")?
+        .reinit;
+    assert!(authorized.is_some());
+    fixture.activate()?;
+    let old_state = *fixture
+        .harness
+        .coordinator
+        .state
+        .logs
+        .get(&fixture.old)
+        .ok_or("old log")?
+        .accepted_state_id();
+    let (_, bytes) = attempt(&fixture.harness, fixture.old, old_state, 1)?;
+    for reload in [false, true] {
+        if reload {
+            fixture.harness = fixture.harness.reloaded()?;
+        }
+        // The migrated group keeps no authority, live and after a restart.
+        let state = &mut fixture.harness.coordinator.state;
+        let old = state.conversations.get_mut(&fixture.old).ok_or("old")?;
+        assert_eq!(old.reinit, None, "reload {reload}");
+        // An attempt on it is refused as finality required, even with the
+        // authorized target of its ReInit put back.
+        old.reinit = authorized;
+        assert_eq!(
+            code(
+                fixture
+                    .harness
+                    .run(Op::SubmitReinitAttempt, &fixture.old, Some(&bytes))?
+            ),
+            Some(E2eeReplyCode::FinalityRequired),
+            "reload {reload}"
+        );
+    }
     Ok(())
 }
 
@@ -302,11 +322,11 @@ fn successor_bind_rejects_changed_target_and_keeps_the_reservation() -> TestResu
             }
         }
         assert_eq!(
-            code(fixture.bind(&package, CONTEXT)?),
+            code(fixture.bind(&package, fixture.context)?),
             Some(E2eeReplyCode::BindingAuthInvalid)
         );
     }
-    ok(fixture.bind(&original, CONTEXT)?)?;
+    ok(fixture.bind(&original, fixture.context)?)?;
     Ok(())
 }
 
@@ -332,11 +352,11 @@ fn successor_bind_rejects_a_different_reservation_owner() -> TestResult {
     fixture.harness.coordinator.state.routes = routes;
     let package = fixture.package.clone();
     assert_eq!(
-        code(fixture.bind(&package, CONTEXT)?),
+        code(fixture.bind(&package, fixture.context)?),
         Some(E2eeReplyCode::BindingAuthInvalid)
     );
     fixture.harness.coordinator.state.routes = original;
-    ok(fixture.bind(&package, CONTEXT)?)?;
+    ok(fixture.bind(&package, fixture.context)?)?;
     Ok(())
 }
 
@@ -347,7 +367,7 @@ fn successor_reservation_can_be_renewed_after_activation_and_restart() -> TestRe
     fixture.harness = fixture.harness.reloaded()?;
     fixture.reservation = reserve(&mut fixture.harness)?;
     let package = fixture.package.clone();
-    ok(fixture.bind(&package, CONTEXT)?)?;
+    ok(fixture.bind(&package, fixture.context)?)?;
     Ok(())
 }
 
@@ -357,7 +377,7 @@ fn successor_reload_rejects_missing_activation_evidence() -> TestResult {
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
     let package = fixture.package.clone();
-    ok(fixture.bind(&package, CONTEXT)?)?;
+    ok(fixture.bind(&package, fixture.context)?)?;
     let object = fixture
         .harness
         .coordinator
@@ -424,7 +444,7 @@ fn successor_bind_rejects_a_targeted_package_that_does_not_continue_the_lineage(
         reached += 1;
         let package = fixture.package.clone();
         assert_eq!(
-            code(fixture.bind(&package, CONTEXT)?),
+            code(fixture.bind(&package, fixture.context)?),
             Some(E2eeReplyCode::BindingAuthInvalid),
             "{name}"
         );

@@ -13,7 +13,7 @@ fn a_declared_successor_gate_refuses_the_loss_of_its_predecessor() -> TestResult
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
     let package = fixture.package.clone();
-    ok(fixture.bind(&package, CONTEXT)?)?;
+    ok(fixture.bind(&package, fixture.context)?)?;
     let key = RouteRow::key(&fixture.new)?;
     let mut row = None;
     for write in &fixture.harness.writes {

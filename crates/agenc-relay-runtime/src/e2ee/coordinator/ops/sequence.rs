@@ -22,7 +22,7 @@ use agenc_relay_e2ee::limits::{
     MAX_LIVE_OBJECT, MAX_REINIT_ACK_OBJECT, MAX_REINIT_OBJECT,
 };
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
-use agenc_relay_e2ee::objects::conversation::ArcCommitApprovalEnvelope;
+use agenc_relay_e2ee::objects::conversation::{ArcCommitApprovalEnvelope, action_bits};
 use agenc_relay_e2ee::objects::reinit::{
     ArcReInitAbortCertificate, ArcReInitAbortRequest, ArcReInitAbortTbs, ArcReInitAck,
     ArcReInitActivationCertificate, ArcReInitActivationRequest, ArcReInitActivationTbs,
@@ -31,9 +31,10 @@ use agenc_relay_e2ee::objects::reinit::{
 use agenc_relay_e2ee::objects::sequencing::{
     ArcAbortRequest, ArcCandidateReceipt, ArcCandidateReceiptTbs, ArcCommitAbortCertificate,
     ArcCommitAbortTbs, ArcCommitAck, ArcCommitFinalizationCertificate, ArcCommitFinalizationTbs,
-    ArcFinalityVote, ArcFinalizationRequest, ArcSequencerRecord,
+    ArcFinalityVote, ArcFinalizationProof, ArcFinalizationRequest, ArcSequencerRecord,
 };
 use agenc_relay_e2ee::policy::VerifiedPolicy;
+use agenc_relay_e2ee::reinit_target::AuthorizedReinit;
 use agenc_relay_e2ee::route::PrincipalRosters;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode, TlsEncode, TlsVec};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
@@ -232,7 +233,6 @@ fn sequencer_transition(
     conversation_id: &[u8; 32],
     authorization: &agenc_relay_e2ee::objects::conversation::ArcCommitAuthorizationTbs,
 ) -> Result<Option<[u8; 32]>, Fail> {
-    use agenc_relay_e2ee::objects::conversation::action_bits;
     if authorization.action_bits & action_bits::SEQUENCER == 0 {
         return Ok(None);
     }
@@ -783,6 +783,17 @@ fn leaf_device(leaf: u32) -> [u8; 16] {
     device
 }
 
+/// Whether finalizing `proof` enters the ReInit phase, and with what: a
+/// Commit whose authorization carries the ReInit bit closes the old group at
+/// its finalization (companion 13.8 step 2), which records the authorized
+/// target its proof binds, every later attempt's reference, or none when
+/// `AuthorizedReinit::from_proof` refuses that proof, so no attempt can
+/// follow it.
+fn reinit_entry(proof: &ArcFinalizationProof) -> Option<Option<AuthorizedReinit>> {
+    (proof.authorization.tbs.action_bits & action_bits::REINIT != 0)
+        .then(|| AuthorizedReinit::from_proof(proof).ok())
+}
+
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the finality votes, signs the finalization, advances the log, and stages the rows and events as one atomic set
 /// `submit_finalization` and `submit_abort` share one shape: a request with
 /// votes becomes the signed terminal certificate at the next position.
@@ -834,6 +845,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let finalization_id = CompanionCoordinator::id_of(SemanticHashDomain::FinalizationId, core)?;
     let request_object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
+    let reinit = reinit_entry(&request.proof);
     let authorization = &request.proof.authorization.tbs;
     if authorization.old_policy_id != core.old_policy_id {
         return Err(Fail::with(
@@ -952,9 +964,12 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let record = record_bytes(&ArcSequencerRecord::Finalization(certificate))?;
     let record_id = *agenc_relay_e2ee::ObjectId::compute(&record).as_bytes();
     let mut next_log = log.clone();
-    next_log
-        .finalize(&core.candidate_id, finalization_id, resulting_epoch)
-        .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
+    if reinit.is_some() {
+        next_log.finalize_reinit(&core.candidate_id, finalization_id, resulting_epoch)
+    } else {
+        next_log.finalize(&core.candidate_id, finalization_id, resulting_epoch)
+    }
+    .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &conversation_id))?;
     // The finalized transition, if any, moves the pin before the route row
     // is refreshed so the row and the state agree in one batch.
     let mut pinned = conversation(exec, &conversation_id)?.clone();
@@ -1022,6 +1037,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.pending_requests.remove(&candidate_id);
             state.current_policy_id = resulting_policy_id;
             state.route_object_id = route_object_id;
+            state.reinit = reinit.flatten();
             if let Some(pin) = next_pin {
                 state.sequencer_credential_id = pin;
                 state.blocked_credential_id = None;
@@ -1209,8 +1225,13 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     Ok(outcome)
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the staged ReInit, records the attempt, signs the receipt, and stages the rows and events as one atomic set
-/// `submit_reinit_attempt`.
+/// `submit_reinit_attempt`: after the requester checks, an attempt on a
+/// conversation whose accepted state is not the finalization of a ReInit
+/// Commit is `E2EE_FINALITY_REQUIRED`, and an attempt that does not match
+/// that finalization's authorized target is `E2EE_BINDING_AUTH_INVALID`,
+/// both retaining nothing (companion 13.8; decision D-11a). Only then do the
+/// attempt slot and the old-policy authorization decide.
+// agenc-review: focus owner=runtime reviewed=2026-10-05 reason=one handler refuses an attempt outside the ReInit phase first, then checks the attempt and its carried target against the finalized ReInit Commit, records the attempt, signs the receipt, and stages the rows and events as one atomic set
 pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
     exec.attached_device()?;
@@ -1218,6 +1239,8 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let (object, bytes) = exec.payload()?;
     let log = log(exec, &old_conversation_id)?;
     super::ack_context::old_group_device(exec, &old_conversation_id)?;
+    let old_state = conversation(exec, &old_conversation_id)?;
+    let authorized = super::reinit_authority::authorized(&old_conversation_id, log, old_state)?;
     let attempt: ArcReInitAttempt = decode(object.body(), MAX_REINIT_OBJECT)?;
     let tbs = &attempt.tbs;
     if tbs.old_conversation_id != old_conversation_id
@@ -1228,15 +1251,10 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             &old_conversation_id,
         ));
     }
+    let _work = super::reinit_authority::reserve_work(exec, &old_conversation_id, old_state)?;
+    super::reinit_authority::check_attempt(exec, &authorized, &attempt, old_state)?;
+    super::recovery::vacant_successor(&exec.coordinator.state, &tbs.new_conversation_id)?;
     let mut next_log = log.clone();
-    if !matches!(
-        log.phase(),
-        agenc_relay_domain::e2ee::sequencer_log::Phase::Reinit { .. }
-    ) {
-        next_log
-            .enter_reinit(tbs.old_reinit_state_id)
-            .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
-    }
     let slot = next_log
         .attempt_position()
         .map_err(|_| Fail::with(E2eeReplyCode::CandidateActive, &old_conversation_id))?;
@@ -1248,7 +1266,6 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let attempt_object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
     // The attempt receipt is signed under the old conversation's pin at the
     // attempt's trusted time; a blocked old group attempts nothing.
-    let old_state = conversation(exec, &old_conversation_id)?;
     old_state
         .blocked_credential_id
         .map_or(Ok(()), |_| Err(Fail::from(E2eeReplyCode::Syncing)))?;
@@ -1697,6 +1714,10 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             state.vote_ledgers.remove(&attempt_id);
             state.pending_requests.remove(&attempt_id);
             state.route_object_id = route_object_id;
+            // An activation ends the ReInit phase; an attempt abort keeps it.
+            if new_conversation.is_some() {
+                state.reinit = None;
+            }
         }
     }));
     Ok(outcome)

@@ -6,11 +6,22 @@ use super::*;
 
 const CONVERSATION: Id = [1; 32];
 const GENESIS: Id = [2; 32];
+/// The finalization of the ReInit Commit of [`reinit_log`].
+const REINIT: Id = [20; 32];
 
 fn candidate(log: &mut SequencerLog, id: u8) -> Result<CandidatePosition, LogError> {
     let position = log.candidate_position(log.accepted_epoch())?;
     log.record_candidate([id; 32], [id + 100; 32], position)?;
     Ok(position)
+}
+
+/// A log whose ReInit Commit, candidate 10 of epoch zero, finalized as
+/// [`REINIT`] at route sequence one.
+fn reinit_log() -> Result<SequencerLog, LogError> {
+    let mut log = SequencerLog::genesis(CONVERSATION, GENESIS);
+    candidate(&mut log, 10)?;
+    log.finalize_reinit(&[10; 32], REINIT, 1)?;
+    Ok(log)
 }
 
 #[test]
@@ -109,13 +120,42 @@ fn an_epoch_permits_a_bounded_number_of_attempts() -> Result<(), LogError> {
 fn reinit_attempts_activate_or_abort_and_migrate_the_log() -> Result<(), LogError> {
     let mut log = SequencerLog::genesis(CONVERSATION, GENESIS);
     assert_eq!(log.attempt_position(), Err(LogError::NotReinit));
+    // Without an active candidate there is nothing to finalize into the
+    // phase, and a refused finalization changes nothing.
+    assert_eq!(
+        log.finalize_reinit(&[10; 32], [20; 32], 1),
+        Err(LogError::NoSuchCandidate)
+    );
     candidate(&mut log, 10)?;
-    assert_eq!(log.enter_reinit([20; 32]), Err(LogError::Closed));
-    log.finalize(&[10; 32], [20; 32], 1)?;
-    assert_eq!(log.enter_reinit([21; 32]), Err(LogError::EpochStale));
-    log.enter_reinit([20; 32])?;
+    let before = log.clone();
+    assert_eq!(
+        log.finalize_reinit(&[11; 32], [20; 32], 1),
+        Err(LogError::NoSuchCandidate)
+    );
+    assert_eq!(
+        log.finalize_reinit(&[10; 32], [20; 32], 2),
+        Err(LogError::EpochStale)
+    );
+    assert_eq!(log, before);
+    // The ReInit finalization closes the old group in the same step.
+    let finalized = log.finalize_reinit(&[10; 32], [20; 32], 1)?;
+    assert_eq!(finalized.route_sequence, 1);
+    assert_eq!(finalized.predecessor_record_id, [10; 32]);
+    assert_eq!(
+        log.phase(),
+        Phase::Reinit {
+            old_reinit_state_id: [20; 32],
+        }
+    );
+    assert_eq!(log.accepted_state_id(), &[20; 32]);
+    assert_eq!(log.accepted_epoch(), 1);
     assert!(!log.accepts_application());
     assert_eq!(log.candidate_position(1), Err(LogError::Closed));
+    assert_eq!(log.close([90; 32]), Err(LogError::Closed));
+    assert_eq!(
+        log.finalize_reinit(&[10; 32], [21; 32], 2),
+        Err(LogError::Closed)
+    );
     let slot = log.attempt_position()?;
     assert_eq!(slot.route_sequence, 2);
     assert_eq!(slot.attempt_sequence, 0);
@@ -181,16 +221,15 @@ fn close_is_the_last_record_and_restore_reproduces_the_head() -> Result<(), LogE
 
 #[test]
 fn reinit_restore_preserves_active_and_exhausted_attempt_slots() -> Result<(), LogError> {
-    let mut original = SequencerLog::genesis(CONVERSATION, GENESIS);
-    original.enter_reinit(GENESIS)?;
-    let slot = original.record_attempt([10; 32])?;
+    let mut original = reinit_log()?;
+    let slot = original.record_attempt([40; 32])?;
     let mut restored =
-        SequencerLog::restore(CONVERSATION, original.head(), GENESIS, 0, original.phase());
+        SequencerLog::restore(CONVERSATION, original.head(), REINIT, 1, original.phase());
     restored.restore_reinit(Some(slot), 0)?;
     assert_eq!(restored, original);
     restored.abort_attempt(&slot.attempt_id, [11; 32])?;
     let mut after_abort =
-        SequencerLog::restore(CONVERSATION, restored.head(), GENESIS, 0, restored.phase());
+        SequencerLog::restore(CONVERSATION, restored.head(), REINIT, 1, restored.phase());
     after_abort.restore_reinit(None, 1)?;
     assert_eq!(after_abort, restored);
     assert_eq!(
@@ -213,12 +252,12 @@ fn reinit_restore_preserves_active_and_exhausted_attempt_slots() -> Result<(), L
 
 #[test]
 fn reinit_restore_rejects_a_slot_that_does_not_match_its_head() -> Result<(), LogError> {
-    let mut original = SequencerLog::genesis(CONVERSATION, GENESIS);
-    assert_eq!(original.restore_reinit(None, 0), Err(LogError::NotReinit));
-    original.enter_reinit(GENESIS)?;
-    let slot = original.record_attempt([10; 32])?;
+    let mut open = SequencerLog::genesis(CONVERSATION, GENESIS);
+    assert_eq!(open.restore_reinit(None, 0), Err(LogError::NotReinit));
+    let mut original = reinit_log()?;
+    let slot = original.record_attempt([40; 32])?;
     let mut restored =
-        SequencerLog::restore(CONVERSATION, original.head(), GENESIS, 0, original.phase());
+        SequencerLog::restore(CONVERSATION, original.head(), REINIT, 1, original.phase());
     let before = restored.clone();
     for invalid in [
         AttemptSlot {
@@ -246,25 +285,27 @@ fn reinit_restore_rejects_a_slot_that_does_not_match_its_head() -> Result<(), Lo
 #[test]
 fn reinit_entry_and_restore_refuse_repeats_stale_states_unrecorded_heads_and_exhaustion()
 -> Result<(), LogError> {
-    let mut log = SequencerLog::genesis(CONVERSATION, GENESIS);
-    log.enter_reinit(GENESIS)?;
-    assert_eq!(log.enter_reinit(GENESIS), Err(LogError::Closed));
-    let slot = log.record_attempt([10; 32])?;
+    let mut log = reinit_log()?;
+    assert_eq!(
+        log.finalize_reinit(&[10; 32], REINIT, 1),
+        Err(LogError::Closed)
+    );
+    let slot = log.record_attempt([40; 32])?;
     // The durable accepted state must be the state the phase names.
-    let mut stale = SequencerLog::restore(CONVERSATION, log.head(), [9; 32], 0, log.phase());
+    let mut stale = SequencerLog::restore(CONVERSATION, log.head(), [9; 32], 1, log.phase());
     assert_eq!(stale.restore_reinit(None, 0), Err(LogError::EpochStale));
     // A slot needs a recorded head.
     let unrecorded = Head {
         recorded: false,
         ..log.head()
     };
-    let mut pending = SequencerLog::restore(CONVERSATION, unrecorded, GENESIS, 0, log.phase());
+    let mut pending = SequencerLog::restore(CONVERSATION, unrecorded, REINIT, 1, log.phase());
     assert_eq!(
         pending.restore_reinit(Some(slot), 0),
         Err(LogError::EpochStale)
     );
     // A slot at the attempt ceiling is already exhausted.
-    let mut exhausted = SequencerLog::restore(CONVERSATION, log.head(), GENESIS, 0, log.phase());
+    let mut exhausted = SequencerLog::restore(CONVERSATION, log.head(), REINIT, 1, log.phase());
     let last = AttemptSlot {
         attempt_sequence: MAX_CANDIDATE_ATTEMPTS_PER_EPOCH,
         ..slot
