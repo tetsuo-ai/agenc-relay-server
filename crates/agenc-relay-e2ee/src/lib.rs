@@ -39,6 +39,10 @@
 //! - [`context`]: the required MLS context extension and the context core.
 //! - [`envelope`]: application and Commit outer objects and the padding
 //!   arithmetic.
+//! - [`reinit_target`]: the ReInit target reconstructed from its Proposal,
+//!   the checks of the target every attempt carries, and their binding to the
+//!   old ReInit finalization, every attempt, a later joiner's ReInit entries,
+//!   and the successor initial Commit.
 //! - [`welcome`]: Welcome and staged ReInit wrappers and proof bundles.
 //! - [`wire`]: tokens, fragment tags, the carrier matrix, reassembly,
 //!   command and response productions, and reply codes.
@@ -89,6 +93,7 @@ pub mod profile;
 pub mod record_authentication;
 pub mod recovery;
 pub mod reinit_authorization;
+pub mod reinit_target;
 pub mod route;
 pub mod sequencer;
 pub mod signature;

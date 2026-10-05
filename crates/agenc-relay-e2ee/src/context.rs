@@ -110,7 +110,9 @@ pub fn verify_context(
     })
 }
 
-fn check_binding_agreement(
+/// The current binding names the context's kind, conversation, network and
+/// concrete route, and its semantic route recomputes to the lock it names.
+pub(crate) fn check_binding_agreement(
     network_id: &[u8; 32],
     context: &ArcMlsContext,
 ) -> Result<(), E2eeError> {

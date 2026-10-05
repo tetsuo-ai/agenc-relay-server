@@ -30,6 +30,7 @@ use crate::ids::{SemanticId, semantic_id_of};
 use crate::initial_authority::InitialAuthority;
 use crate::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
 use crate::objects::conversation::{ArcCloseAuthorization, action_bits};
+use crate::objects::reinit::ArcReInitTargetTbs;
 use crate::objects::sequencing::{
     ArcCandidateReceipt, ArcCommitAbortCertificate, ArcGroupGenesisTbs, ArcSequencerRecord,
 };
@@ -307,6 +308,7 @@ pub struct HistoricalChain {
     candidate: Option<OpenCandidate>,
     next_candidate_sequence: u32,
     lifecycle: Lifecycle,
+    reinit_target: Option<ArcReInitTargetTbs>,
     records_left: u32,
 }
 
@@ -359,6 +361,7 @@ impl HistoricalChain {
             candidate: None,
             next_candidate_sequence: 0,
             lifecycle: Lifecycle::Active,
+            reinit_target: None,
             records_left: limits.max_records,
         })
     }
@@ -400,6 +403,7 @@ impl HistoricalChain {
             candidate: resumed.candidate,
             next_candidate_sequence: resumed.next_candidate_sequence,
             lifecycle: resumed.lifecycle,
+            reinit_target: None,
             records_left: limits.max_records,
         })
     }

@@ -250,8 +250,9 @@ pub(super) struct Log {
     pub(super) accepted_state_id: [u8; 32],
     pub(super) candidate_sequence: u32,
     pub(super) policy_id: [u8; 32],
-    /// The successor conversation every ReInit attempt names.
-    pub(super) new_conversation: [u8; 32],
+    /// The target every ReInit attempt carries and whose successor fields it
+    /// names.
+    pub(super) target: ArcReInitTargetTbs,
 }
 
 /// One built record: its complete wire object and semantic identifier.
@@ -290,7 +291,7 @@ impl Log {
             accepted_state_id: genesis.genesis_id()?,
             candidate_sequence: 0,
             policy_id: policy_id_of(&genesis.bootstrap_policy)?,
-            new_conversation: [70; 32],
+            target: harness_target(genesis.conversation, &[71; 32])?,
         })
     }
 
@@ -306,7 +307,7 @@ impl Log {
             accepted_state_id: self.accepted_state_id,
             candidate_sequence: self.candidate_sequence,
             policy_id: self.policy_id,
-            new_conversation: self.new_conversation,
+            target: self.target.clone(),
         }
     }
 
@@ -611,21 +612,41 @@ impl Log {
         target_context_digest: [u8; 32],
         council: &Council<'_>,
     ) -> Result<(Vec<u8>, Built, ArcReInitAttemptReceipt, ArcReInitAttempt), E2eeError> {
+        let carried = self.target.clone();
+        self.reinit_attempt_carrying(
+            old_reinit_state_id,
+            attempt_sequence,
+            target_context_digest,
+            &carried,
+            council,
+        )
+    }
+
+    /// [`Self::reinit_attempt`] whose object carries `carried` instead of the
+    /// log's target, while naming the log's target fields.
+    pub(super) fn reinit_attempt_carrying(
+        &mut self,
+        old_reinit_state_id: [u8; 32],
+        attempt_sequence: u32,
+        target_context_digest: [u8; 32],
+        carried: &ArcReInitTargetTbs,
+        council: &Council<'_>,
+    ) -> Result<(Vec<u8>, Built, ArcReInitAttemptReceipt, ArcReInitAttempt), E2eeError> {
         let tbs = ArcReInitAttemptTbs {
             profile_version: 1,
             network_id: NETWORK,
             old_conversation_id: self.conversation,
-            new_conversation_id: self.new_conversation,
+            new_conversation_id: self.target.new_conversation_id,
             old_reinit_state_id,
             attempt_sequence,
             creator_old_leaf_index: 0,
             creator_old_credential_hash: [55; 32],
-            target_group_id: Opaque::new(vec![71; 32])?,
-            target_version: 1,
-            target_suite: 1,
+            target_group_id: self.target.target_group_id.clone(),
+            target_version: self.target.target_version,
+            target_suite: self.target.target_suite,
             target_context_digest,
-            target_binding_id: [73; 32],
-            initial_member_plan_id: [29; 32],
+            target_binding_id: self.target.target_binding_id,
+            initial_member_plan_id: self.target.initial_member_plan_id,
             key_package_plan_id: [0; 32],
             initial_commit_digest: [0; 32],
             attempt_authorization_id: [0; 32],
@@ -692,6 +713,7 @@ impl Log {
         )?;
         let attempt = ArcReInitAttempt {
             tbs,
+            target: carried.clone(),
             key_package_plan: plan,
             initial_commit_bytes: initial_commit,
             authorization: ArcReInitAttemptAuthorization {
@@ -1116,4 +1138,34 @@ pub(super) fn memberships(
         set.insert(object_id, verified);
     }
     Ok(set)
+}
+
+/// A ReInit target of the harness conversation `old_conversation` naming
+/// `group`'s successor conversation. Its extension list is a placeholder:
+/// the historical chain checks the carried target's digest and the fields
+/// an attempt repeats, never the list itself.
+pub(super) fn harness_target(
+    old_conversation: [u8; 32],
+    group: &[u8],
+) -> Result<ArcReInitTargetTbs, E2eeError> {
+    Ok(ArcReInitTargetTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        old_conversation_id: old_conversation,
+        new_conversation_id: conversation_id(&NETWORK, group)?,
+        target_group_id: Opaque::from_slice(group)?,
+        target_version: 1,
+        target_suite: 1,
+        target_context_core_id: [74; 32],
+        target_binding_id: [73; 32],
+        initial_member_plan_id: [29; 32],
+        encoded_target_extensions: Opaque::new(vec![0])?,
+    })
+}
+
+impl Log {
+    /// The digest of the target the log's attempts carry.
+    pub(super) fn target_digest(&self) -> Result<[u8; 32], E2eeError> {
+        semantic_id_of(SemanticHashDomain::ReinitTarget, &self.target)
+    }
 }

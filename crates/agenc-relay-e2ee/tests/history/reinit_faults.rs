@@ -5,11 +5,17 @@
 //! the council's quorum.
 
 use super::*;
+use agenc_relay_e2ee::ids::conversation_id;
 use agenc_relay_e2ee::objects::reinit::{
     ArcReInitAbortCoreTbs, ArcReInitActivationCoreTbs, ArcReInitAttempt, ArcReInitAttemptReceipt,
+    ArcReInitTargetTbs,
 };
 
-const TARGET: [u8; 32] = [72; 32];
+/// The digest of the target every harness attempt carries.
+fn target() -> Result<[u8; 32], E2eeError> {
+    let target = harness_target(conversation_id(&NETWORK, &GROUP)?, &[71; 32])?;
+    semantic_id_of(SemanticHashDomain::ReinitTarget, &target)
+}
 
 /// The pending chain with attempt zero open, and the receipt and attempt that opened it.
 type OpenAttempt = (
@@ -29,6 +35,13 @@ type ActivationEdit = (&'static str, fn(&mut ArcReInitActivationCoreTbs));
 
 /// An activated chain moved into its ReInit lifecycle, with the reinit state id.
 fn reinit_pending() -> Result<(Genesis, HistoricalChain, Log, [u8; 32]), E2eeError> {
+    reinit_pending_with(target()?)
+}
+
+/// [`reinit_pending`] whose finalized authorization commits `target`.
+fn reinit_pending_with(
+    target: [u8; 32],
+) -> Result<(Genesis, HistoricalChain, Log, [u8; 32]), E2eeError> {
     let genesis = Genesis::new()?;
     let (mut chain, mut log) = activated(&genesis)?;
     let council = operational_council(&genesis);
@@ -39,7 +52,7 @@ fn reinit_pending() -> Result<(Genesis, HistoricalChain, Log, [u8; 32]), E2eeErr
         ArcCommitAuthorizationRule::ControlledTransition,
         action_bits::REINIT,
         log.policy_id,
-        TARGET,
+        target,
     );
     let (request, id) =
         log.finalization_request(&candidate, council.authorization(tbs)?, &council)?;
@@ -68,16 +81,16 @@ fn attempt_refused(chain: &HistoricalChain, attempt_bytes: &[u8], record: &Built
 fn an_attempt_must_take_the_next_slot_and_name_a_real_successor() -> TestResult {
     let (genesis, chain, log, old_reinit_state_id) = reinit_pending()?;
     let council = operational_council(&genesis);
-    let (bytes, record, _, _) = log
-        .clone_for_fork()
-        .reinit_attempt([9; 32], 0, TARGET, &council)?;
+    let (bytes, record, _, _) =
+        log.clone_for_fork()
+            .reinit_attempt([9; 32], 0, target()?, &council)?;
     assert!(
         attempt_refused(&chain, &bytes, &record),
         "another reinit state"
     );
     let (bytes, record, _, _) =
         log.clone_for_fork()
-            .reinit_attempt(old_reinit_state_id, 1, TARGET, &council)?;
+            .reinit_attempt(old_reinit_state_id, 1, target()?, &council)?;
     assert!(
         attempt_refused(&chain, &bytes, &record),
         "a skipped attempt sequence"
@@ -85,22 +98,22 @@ fn an_attempt_must_take_the_next_slot_and_name_a_real_successor() -> TestResult 
     let mut other_predecessor = log.clone_for_fork();
     other_predecessor.head = [9; 32];
     let (bytes, record, _, _) =
-        other_predecessor.reinit_attempt(old_reinit_state_id, 0, TARGET, &council)?;
+        other_predecessor.reinit_attempt(old_reinit_state_id, 0, target()?, &council)?;
     assert!(
         attempt_refused(&chain, &bytes, &record),
         "the first attempt must follow the reinit state itself"
     );
     let mut same_conversation = log.clone_for_fork();
-    same_conversation.new_conversation = log.conversation;
+    same_conversation.target = harness_target(log.conversation, &GROUP)?;
     let (bytes, record, _, _) =
-        same_conversation.reinit_attempt(old_reinit_state_id, 0, TARGET, &council)?;
+        same_conversation.reinit_attempt(old_reinit_state_id, 0, target()?, &council)?;
     assert!(
         attempt_refused(&chain, &bytes, &record),
         "the successor cannot be the old conversation"
     );
     let mut log = log;
     let mut chain = chain;
-    let (bytes, record, _, _) = log.reinit_attempt(old_reinit_state_id, 0, TARGET, &council)?;
+    let (bytes, record, _, _) = log.reinit_attempt(old_reinit_state_id, 0, target()?, &council)?;
     chain.advance(
         &record.bytes,
         &RecordReferences {
@@ -111,7 +124,7 @@ fn an_attempt_must_take_the_next_slot_and_name_a_real_successor() -> TestResult 
     )?;
     let (bytes, record, _, _) =
         log.clone_for_fork()
-            .reinit_attempt(old_reinit_state_id, 1, TARGET, &council)?;
+            .reinit_attempt(old_reinit_state_id, 1, target()?, &council)?;
     assert!(
         attempt_refused(&chain, &bytes, &record),
         "no second attempt while one is open"
@@ -123,7 +136,7 @@ fn open_attempt() -> Result<OpenAttempt, E2eeError> {
     let (genesis, mut chain, mut log, old_reinit_state_id) = reinit_pending()?;
     let council = operational_council(&genesis);
     let (bytes, record, receipt, attempt) =
-        log.reinit_attempt(old_reinit_state_id, 0, TARGET, &council)?;
+        log.reinit_attempt(old_reinit_state_id, 0, target()?, &council)?;
     chain.advance(
         &record.bytes,
         &RecordReferences {
@@ -141,7 +154,7 @@ fn an_activation_for_an_attempt_that_is_not_open_is_refused() -> TestResult {
     let council = operational_council(&genesis);
     let mut fork = log.clone_for_fork();
     let (_, _, other_receipt, other_attempt) =
-        fork.reinit_attempt(old_reinit_state_id, 1, TARGET, &council)?;
+        fork.reinit_attempt(old_reinit_state_id, 1, target()?, &council)?;
     let activation =
         log.clone_for_fork()
             .reinit_activation(&other_receipt, &other_attempt, &council)?;
@@ -227,5 +240,112 @@ fn an_activation_core_must_repeat_the_open_attempt_and_its_acknowledgements() ->
         adopt(&mut probe, &activation)?,
         ChainStep::ReinitActivated { .. }
     ));
+    Ok(())
+}
+
+#[test]
+fn an_attempt_must_carry_the_authorized_target_and_repeat_its_fields() -> TestResult {
+    let (genesis, chain, log, old_reinit_state_id) = reinit_pending()?;
+    let council = operational_council(&genesis);
+    let authorized = target()?;
+    let other = ArcReInitTargetTbs {
+        target_binding_id: [9; 32],
+        ..log.target.clone()
+    };
+    // The attempt names the authorized digest but carries another target.
+    let (bytes, record, _, _) = log.clone_for_fork().reinit_attempt_carrying(
+        old_reinit_state_id,
+        0,
+        authorized,
+        &other,
+        &council,
+    )?;
+    assert!(attempt_refused(&chain, &bytes, &record), "another target");
+    // An attempt whose carried target is the authorized one but whose own
+    // fields name another binding, under an authorization of that target.
+    let digest = semantic_id_of(SemanticHashDomain::ReinitTarget, &other)?;
+    let (genesis, chain, log, old_reinit_state_id) = reinit_pending_with(digest)?;
+    let council = operational_council(&genesis);
+    let (bytes, record, _, _) = log.clone_for_fork().reinit_attempt_carrying(
+        old_reinit_state_id,
+        0,
+        digest,
+        &other,
+        &council,
+    )?;
+    assert!(attempt_refused(&chain, &bytes, &record), "other fields");
+    Ok(())
+}
+
+#[test]
+fn a_bound_target_must_name_its_own_successor_conversation() -> TestResult {
+    let (genesis, chain, log, old_reinit_state_id) = reinit_pending()?;
+    let council = operational_council(&genesis);
+    // A chain that bound the authorized target adopts the attempt carrying
+    // it, and refuses one carrying any other bytes, even bytes the
+    // authorization does not name.
+    let mut bound = chain.clone();
+    bound.bind_reinit_target(&log.target)?;
+    let (bytes, record, _, _) =
+        log.clone_for_fork()
+            .reinit_attempt(old_reinit_state_id, 0, target()?, &council)?;
+    assert!(matches!(
+        bound.clone().advance(
+            &record.bytes,
+            &RecordReferences {
+                attempt_object: Some(&bytes),
+                ..RecordReferences::default()
+            },
+            &mut budget(),
+        )?,
+        ChainStep::ReinitAttempted(_)
+    ));
+    let other = ArcReInitTargetTbs {
+        target_context_core_id: [9; 32],
+        ..log.target.clone()
+    };
+    let (bytes, record, _, _) = log.clone_for_fork().reinit_attempt_carrying(
+        old_reinit_state_id,
+        0,
+        target()?,
+        &other,
+        &council,
+    )?;
+    assert!(attempt_refused(&bound, &bytes, &record));
+
+    // A target whose successor conversation is not its group's, is the old
+    // conversation, or whose group ID is not 32 bytes never binds, although
+    // the finalized authorization committed exactly its digest.
+    let conversation = conversation_id(&NETWORK, &GROUP)?;
+    let target = log.target.clone();
+    let cases = [
+        (
+            "not its group's conversation",
+            ArcReInitTargetTbs {
+                new_conversation_id: [70; 32],
+                ..target.clone()
+            },
+        ),
+        (
+            "the old conversation",
+            harness_target(conversation, &GROUP)?,
+        ),
+        (
+            "a short group ID",
+            ArcReInitTargetTbs {
+                target_group_id: agenc_relay_e2ee::Opaque::new(vec![71; 31])?,
+                ..target.clone()
+            },
+        ),
+    ];
+    for (name, bad) in cases {
+        let digest = semantic_id_of(SemanticHashDomain::ReinitTarget, &bad)?;
+        let (_, mut chain, _, _) = reinit_pending_with(digest)?;
+        assert_eq!(
+            chain.bind_reinit_target(&bad),
+            Err(E2eeError::InvalidValue),
+            "{name}"
+        );
+    }
     Ok(())
 }

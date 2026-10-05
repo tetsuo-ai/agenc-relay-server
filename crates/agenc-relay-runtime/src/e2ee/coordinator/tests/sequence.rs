@@ -753,7 +753,7 @@ mod reinit {
         ArcReInitAbortCoreTbs, ArcReInitAbortRequest, ArcReInitAck, ArcReInitAckKind,
         ArcReInitAckTbs, ArcReInitActivationCoreTbs, ArcReInitActivationRequest, ArcReInitAttempt,
         ArcReInitAttemptAuthorization, ArcReInitAttemptAuthorizationTbs, ArcReInitAttemptReceipt,
-        ArcReInitAttemptTbs,
+        ArcReInitAttemptTbs, ArcReInitTargetTbs,
     };
     use agenc_relay_e2ee::objects::sequencing::ArcSequencerRecord;
     use agenc_relay_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsVec};
@@ -876,6 +876,19 @@ mod reinit {
                 new_group_context_digest: [8; 32],
                 new_ratchet_tree_digest: [9; 32],
                 new_exporter_authenticator: [10; 32],
+            },
+            target: ArcReInitTargetTbs {
+                profile_version: 1,
+                network_id: NETWORK,
+                old_conversation_id: conversation,
+                new_conversation_id: NEW_CONVERSATION,
+                target_group_id: Opaque::new(vec![11; 32])?,
+                target_version: 1,
+                target_suite: 1,
+                target_context_core_id: [17; 32],
+                target_binding_id: [3; 32],
+                initial_member_plan_id: [4; 32],
+                encoded_target_extensions: Opaque::new(vec![0])?,
             },
             key_package_plan: ArcKeyPackagePlan {
                 entries: TlsVec::new(vec![ArcKeyPackagePlanEntry {

@@ -298,6 +298,13 @@ crate-graph and formatting rules, moving the E2EE profile hash under profile
 version 1 (PC-001 with decisions D-13 to D-16 and D-30, SDK program item P-01,
 outside master #35), is recorded in
 [the ReInit target revision record](stage-10-reinit-target-revision.md).
+The shared ReInit target helper that rebuilds a target from its Proposal,
+checks the target every attempt carries for the sequencer, an endpoint and a
+later joiner, and binds them to the old ReInit finalization and the successor
+initial Commit, with the historical chain's carried-target checks, the
+independent ReInit vectors and the one-target Stage 08 fixture (P-02, SDK
+program, outside master #35), is recorded in
+[the ReInit target helper record](stage-10-reinit-target-helper.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

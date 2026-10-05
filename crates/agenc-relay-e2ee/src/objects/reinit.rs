@@ -17,7 +17,10 @@ tls_enum! {
 }
 
 tls_struct! {
-    /// `ArcReInitTargetTBS` (13.8).
+    /// `ArcReInitTargetTBS` (13.8). It covers no accepted-state or record ID
+    /// of the old group: every field is fixed by the old conversation and the
+    /// ReInit Proposal, so the target exists before the old ReInit Commit
+    /// whose authorization commits its digest ([`crate::reinit_target`]).
     pub struct ArcReInitTargetTbs {
         /// Profile version.
         pub profile_version: u16,
@@ -25,8 +28,6 @@ tls_struct! {
         pub network_id: [u8; 32],
         /// Old conversation identifier.
         pub old_conversation_id: [u8; 32],
-        /// Old ReInit finalization identifier.
-        pub old_reinit_state_id: [u8; 32],
         /// New conversation identifier.
         pub new_conversation_id: [u8; 32],
         /// Target group identifier.
@@ -149,6 +150,10 @@ tls_struct! {
     pub struct ArcReInitAttempt {
         /// Signed fields.
         pub tbs: ArcReInitAttemptTbs,
+        /// The exact target whose digest is `tbs.target_context_digest`,
+        /// copied byte for byte from the one the old candidate authorization
+        /// committed.
+        pub target: ArcReInitTargetTbs,
         /// KeyPackage plan.
         pub key_package_plan: ArcKeyPackagePlan,
         /// Complete initial commit message bytes.

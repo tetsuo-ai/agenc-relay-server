@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1010
-reviewed_source_sha256 = "4d95f382b52ad2be3881f59a314143e21985d976c3e5fb0ee6045e56120930db"
+reviewed_source_files = 1011
+reviewed_source_sha256 = "b7ef4acb12bbc8d671cbeb3c83f5aa56760aaffad811ec40719991a789961d60"
 deferred = []
 
 [[region]]
@@ -55,9 +55,9 @@ id = "history-chain-record-adoption"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history.rs"
 item = "advance"
-source_sha256 = "fcf86ee2ce9a4db897379237ec9f14bbc3cd78ba69225f7f143ce6e1e96fdfed"
-start_line = 485
-end_line = 559
+source_sha256 = "3eb4736745671c3f25325420cbbf6e39f244557dd1ba1b493278813f4471c128"
+start_line = 489
+end_line = 563
 span_sha256 = "2b180c4cd1da35ddeba5ce12e9c38bbaf9d05720585a8d81827082a2ce77878f"
 metric = "regions"
 reason = "Every historical sequencer record is authenticated at exactly the next position under the credential the validated history committed, its referenced objects are admitted only for the record kind that names them, and the head advances only after the record's own checks succeed."
@@ -91,9 +91,9 @@ id = "history-reinit-activation"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history/reinit.rs"
 item = "adopt_reinit_activation"
-source_sha256 = "8ee1ced86fc0d55cd0cba2f8dc30e0d5bd43f0faf4d14ebb640e7d7b0d791694"
-start_line = 87
-end_line = 129
+source_sha256 = "40012f39bdb868c4474e4f40576cae24c5c2b72dae0c82114e07b3b5a05b1a57"
+start_line = 89
+end_line = 131
 span_sha256 = "eb6f125273d11e8b2f9cbaee7c597e6dcf6fde2248e435354f80697a89f90f9d"
 metric = "regions"
 reason = "A ReInit activation is adopted only for the exact retained attempt and receipt, with a canonical complete ACK set that repeats the attempt, and an old-policy quorum over the attempt's sign-once slot."
@@ -103,9 +103,9 @@ id = "history-reinit-ack-agreement"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history/reinit.rs"
 item = "staged_result"
-source_sha256 = "8ee1ced86fc0d55cd0cba2f8dc30e0d5bd43f0faf4d14ebb640e7d7b0d791694"
-start_line = 231
-end_line = 332
+source_sha256 = "40012f39bdb868c4474e4f40576cae24c5c2b72dae0c82114e07b3b5a05b1a57"
+start_line = 233
+end_line = 334
 span_sha256 = "b91ff905fa7907abb69aea7e54af8cf00c2b5c548d011eaf6d3664f0f01e51f6"
 metric = "regions"
 reason = "Every ReInit ACK in an activation repeats the attempt's identity and staged result, the set is canonical and hashes to the certified digest, and each ACK names the creator's old leaf or a reserved non-creator plan entry."
@@ -13399,10 +13399,10 @@ id = "e2ee-history-resume"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history.rs"
 item = "resume"
-source_sha256 = "fcf86ee2ce9a4db897379237ec9f14bbc3cd78ba69225f7f143ce6e1e96fdfed"
-start_line = 370
-end_line = 405
-span_sha256 = "183de130fa25a7f8c469cef12866daa38ed396b9a59f938bb9b23a3e820f9b96"
+source_sha256 = "3eb4736745671c3f25325420cbbf6e39f244557dd1ba1b493278813f4471c128"
+start_line = 373
+end_line = 409
+span_sha256 = "ae9c89293831884437c539c8b24b78f58cdd3f82bbb3623b83c50b7f9ec9f08e"
 metric = "branches"
 reason = "A chain resumed from a restored head keeps exactly the validated binding, principals, policy, credential and head so every later record is verified as a successor of that state."
 
@@ -13765,3 +13765,291 @@ end_line = 98
 span_sha256 = "0838fdb175aa75b5eca3d7481a8b779815ad847f9ad11281e2222986707d212a"
 metric = "branches"
 reason = "A device-signed statement resolves only to the account's current heads or to a retained roster object re-verified under a root of that account's own re-verified chain; a roster that was never retained, that another account's root signed, or that does not re-verify resolves nothing, so live admission decides as startup reconstruction does."
+
+[[region]]
+id = "pc001-reinit-target-reconstruction"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "reconstruct_reinit_target"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 200
+end_line = 216
+span_sha256 = "c17df902a2c7707ca772ea954ab2e2fb2388e0b768c95a665b5ba9f8dbe074f4"
+metric = "regions"
+reason = "An endpoint rebuilds a ReInit target only from a Proposal that meets the structural rules against the old conversation's current binding and whose successor policy verifies under the supplied rosters (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-carried"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "carried_after"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 233
+end_line = 244
+span_sha256 = "60a37d29bccec466bb3e0a45e9ca80fea4e9dfc5d64a58567e852c579a3be577"
+metric = "branches"
+reason = "A carried target is accepted only when its own group, version, suite and extension list rebuild exactly its bytes, so every derived ID it names is the one its list yields (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-structure"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "successor_target"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 249
+end_line = 304
+span_sha256 = "df3b5af55225a929decf950e702f763edcf225e119a913cba804364d562271cc"
+metric = "branches"
+reason = "A target is built only from this profile's version and an enabled suite, a 32-byte successor group other than the old conversation's, and a bounded context whose binding, context rules and recomputed context core describe the successor (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-extension-list"
+category = "parser-error-discriminants"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "extension_parts"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 309
+end_line = 355
+span_sha256 = "9ffb7deeffb682e8e8cc8ac86f60759b5e9b4eebb6e1316267af477b244c5c85"
+metric = "branches"
+reason = "The extension list is one exact MLS vector with no trailing or missing bytes and no repeated type, carrying both the ARC context and required_capabilities extensions, so a target covers one unambiguous list (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-successor-context"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "binding_of"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 418
+end_line = 460
+span_sha256 = "b9359649b9ee8612f7e5f73894c93f769882067e1e6428d12b9f523cd9d9cff8"
+metric = "branches"
+reason = "The context and its binding describe the successor itself: this profile and network, not bootstrapping, active with no close intent or pending join, and an unapproved binding of this group, conversation, version and suite that replaces the old binding (companion 9.4, 9.5 and 13.8)."
+
+[[region]]
+id = "pc001-reinit-target-successor-lineage"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_lineage"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 467
+end_line = 490
+span_sha256 = "f8a9835cbf3c45be35866265547754101b4f4e01a7a19af4ff47fb92ffdc2534"
+metric = "branches"
+reason = "The successor binding replaces the old conversation's current binding: the next generation, that binding's ID, and the old semantic route lock, concrete route, channel instance and nonce, which the activation remaps (companion 9.4 and 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-successor-rules"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_context"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 498
+end_line = 523
+span_sha256 = "fa63055fe92b3bccec52b89e00382b83b451fd945506270de38368dc2bec3937"
+metric = "branches"
+reason = "The successor context meets every context-extension rule, and its policy and sequencer credential are the ones its binding names (companion 9.2 to 9.5 and 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-successor-policy"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_policy_named"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 558
+end_line = 590
+span_sha256 = "39fe954fde4f92740e2397a75cadd662b73f671f969aeda350c77467e39e768e"
+metric = "branches"
+reason = "The successor policy is the generation-zero policy of the binding's network, conversation, kind and suite whose ID the binding names as its initial and required operational policy (companion 9.5 and 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-named-digest"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "target_digest"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 594
+end_line = 608
+span_sha256 = "43ba7456310a08238ec5de2cbbe2cde2e737cdf9f381f374f0f528da71540e75"
+metric = "branches"
+reason = "A target digest is computed only for a target naming this profile, network and old conversation, so a committed digest of a misnamed target never authorizes it (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-successor-facts"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "of"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 645
+end_line = 663
+span_sha256 = "9d31ff1cfd497b23a35413e64053546c80491662e25442cac2b9c5756ca76936"
+metric = "branches"
+reason = "A target's successor conversation is the one its group names on this network and never the old conversation (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-target-attempt-fields"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_attempt"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 667
+end_line = 689
+span_sha256 = "402e617a920f3a9832109016d3cfdc168d16340590e9d0f9d863b7c48ffe8073"
+metric = "branches"
+reason = "An attempt must repeat the target's successor conversation, group, version, suite, binding and plan exactly (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-authorized-finalization"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "from_proof"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 714
+end_line = 771
+span_sha256 = "8f6d5ba75fea0bcfcea3dd6d8f57f021cbf09223ae1cd5a9d44c54806dd26cc7"
+metric = "branches"
+reason = "Only a ReInit finalization whose authorization carries the ReInit bit alone, a controlled transition and a nonzero target digest, whose authorization, core and receipt name one position and candidate, and whose core commits that authorization, yields the finalization ID and digest later objects must name (PC-001)."
+
+[[region]]
+id = "pc001-reinit-authorized-target"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_target"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 794
+end_line = 800
+span_sha256 = "25df2424864b2f40c86b979f48f5b77d60de3768b59cc06b50eb00974655111d"
+metric = "branches"
+reason = "A presented, reconstructed or carried target must hash to the digest the old authorization committed, so a target replaced after finalization is refused (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-authorized-names"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_finalization_named"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 804
+end_line = 822
+span_sha256 = "0bad8d8bd527e7e9ad2eb0e5d23ac0472214cb91c92c3e70e937cd802cded6a3"
+metric = "branches"
+reason = "Every attempt must name this profile, network and old conversation and the recomputed finalization ID (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-authorized-carried"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_carried_links"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 829
+end_line = 837
+span_sha256 = "6c6ddcffc0a32df39d860ebc0a814f4738a6ad1781030c391e360828a3e41b52"
+metric = "branches"
+reason = "An attempt's carried target hashes to the authorized digest, the attempt names that digest, and its successor fields are the carried target's (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-sequencer-attempt"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_attempt"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 852
+end_line = 863
+span_sha256 = "75618f0e8f19cb41ce6e385b37cb2e0d19ba464b7a90ad8a83ebc8b974d7d518"
+metric = "branches"
+reason = "The sequencer's attempt checks: the old binding is the old conversation's, the carried target is the authorized one, the KeyPackage plan forms the target's semantic plan, and the carried target meets the structural rules (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-endpoint-attempt"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_attempt_target"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 871
+end_line = 885
+span_sha256 = "a3b040405f7b24c8ff22a897fe1ffbca4ba96a7ec56f3e105ba8c05bab211206"
+metric = "branches"
+reason = "An endpoint accepts an attempt only when it carries exactly its own reconstruction, names the authorized digest and the target's fields, and its KeyPackage plan forms the target's semantic plan (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-authorized-staged"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_staged"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 890
+end_line = 897
+span_sha256 = "c2d8846144681c7a24f01f27a4b1c5d9813f907210173667b39422f7a44cc7a8"
+metric = "branches"
+reason = "A staged ReInit wrapper must name this old conversation and the recomputed finalization ID (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-join-entries"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_join_entries"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 917
+end_line = 943
+span_sha256 = "f2af989872f0fc2523782060224a41f37911d84854027a7b0c28ee7a204b8b90"
+metric = "branches"
+reason = "A later joiner checks its ReInit entries against the target the activation's attempt carries, rebuilt against the preceding binding-chain entry of the old conversation, and accepts a policy entry only as the carried target's policy (companion 9.5 and 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-join-activation"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_activation_core"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 948
+end_line = 978
+span_sha256 = "fd87787bc3616708c375a8999288dc84b387e4a2b72236f63174767eb953b446"
+metric = "branches"
+reason = "The activation core names this network, old conversation and finalization, the attempt it carries and its successor, and the certificate's activation ID is the core's (companion 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-join-binding-entry"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_binding_entry"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 1037
+end_line = 1057
+span_sha256 = "9dddcce91a755ac2dd761fb3ab69965b61cd0aaf2eeebe1188ff4ae42ed93040"
+metric = "branches"
+reason = "A later joiner accepts a ReInit binding-chain entry only as the binding of the carried target's context, with that binding's semantic plan and no root binding lock (companion 9.4, 9.5 and 13.8, PC-001)."
+
+[[region]]
+id = "pc001-reinit-initial-commit"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/reinit_target.rs"
+item = "check_initial_commit"
+source_sha256 = "d4d687648fb71b38db3585dbc585c2a7feb96c49a682adbab14a7b980b2f57b8"
+start_line = 987
+end_line = 1030
+span_sha256 = "c67189bbfc64a5fc6b3c241f5116508f5e11696306a82bdf18e4fb4f82fd146d"
+metric = "branches"
+reason = "The successor initial Commit is a PrivateMessage of the target group at epoch zero with commit content whose ArcCommitAad names the target's profile and network, the successor conversation and route, a time no earlier than the old ReInit Commit's, and the old finalization (PC-001 U1)."
+
+[[region]]
+id = "pc001-history-reinit-carried-target"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history/reinit.rs"
+item = "check_carried_target"
+source_sha256 = "40012f39bdb868c4474e4f40576cae24c5c2b72dae0c82114e07b3b5a05b1a57"
+start_line = 342
+end_line = 355
+span_sha256 = "a8846def06a273eb7602c70437132c3f40cfffd95c6153754917862912838710"
+metric = "branches"
+reason = "A historical chain adopts an attempt only when its carried target is the bound target or, unbound, hashes to the committed digest, and the attempt repeats that target's successor fields (companion 13.7.2 and 13.8, PC-001)."
+
+[[region]]
+id = "pc001-history-reinit-target-binding"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history/reinit.rs"
+item = "bind_reinit_target"
+source_sha256 = "40012f39bdb868c4474e4f40576cae24c5c2b72dae0c82114e07b3b5a05b1a57"
+start_line = 382
+end_line = 391
+span_sha256 = "624a902b34e9894468b2bb5340edb9d7e45e89a1be3dd1183f3a9c9dff11e7ba"
+metric = "branches"
+reason = "A target binds only to a chain in its ReInit phase, only when it names its own successor conversation and hashes to the finalized digest, and never while an attempt is open (companion 13.8, PC-001)."
