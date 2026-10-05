@@ -1211,11 +1211,20 @@ mod reinit {
             outcome.result,
             ResultBody::ReinitActivated(old, new, ..) if old == conversation && new == new_id
         ));
+        // The activation's events, and the route events of the successor it
+        // installs in the same batch.
+        assert!(outcome.events.iter().all(|event| {
+            event.planned.kind == EventKind::ReinitActivated
+                || (event.planned.kind == EventKind::RouteStateHidden
+                    && event.planned.conversation_id == Some(conversation))
+                || (event.planned.kind == EventKind::RouteStateChanged
+                    && event.planned.conversation_id == Some(new_id))
+        }));
         assert!(
             outcome
                 .events
                 .iter()
-                .all(|event| event.planned.kind == EventKind::ReinitActivated)
+                .any(|event| event.planned.kind == EventKind::ReinitActivated)
         );
         assert!(matches!(
             harness

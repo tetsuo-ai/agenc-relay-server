@@ -1,4 +1,4 @@
-//! Reservation and atomic route replacement after a verified ReInit activation.
+//! Atomic route replacement by a verified ReInit activation, and its restore.
 
 #![forbid(unsafe_code)]
 
@@ -13,87 +13,37 @@ impl RouteTable {
             .is_some_and(|entry| self.owns_indexes(entry))
     }
 
-    /// Reserves an occupied concrete route without authorizing its replacement.
-    /// The caller verifies the owner's current binding-principal authority.
-    pub fn reserve_successor(
+    /// Installs the successor of a quorum-activated ReInit in place of its
+    /// predecessor's route (companion 13.8): the successor takes the
+    /// predecessor's concrete route, semantic lock and incarnation at the
+    /// next binding generation, continuing the predecessor's binding, and
+    /// the predecessor keeps its entry without the route's indexes. The
+    /// caller has verified the activation and the target its attempt
+    /// carries, whose binding keeps the predecessor's channel instance or
+    /// direct nonce.
+    // agenc-review: focus owner=domain reviewed=2026-10-05 reason=one atomic route replacement checks the exact lineage, concrete route and index ownership before the successor takes the predecessor's indexes
+    pub fn install_successor(
         &mut self,
-        reservation_id: ReservationId,
         predecessor: ConversationId,
-        owner: AccountId,
-        nonce: Option<[u8; 32]>,
-        expires_at: u64,
-    ) -> Result<(), RouteConflict> {
-        let entry = *self
-            .routes
-            .get(&predecessor)
-            .ok_or(RouteConflict::RouteInvalid)?;
-        if !entry.accepts_traffic()
-            || !self.owns_indexes(&entry)
-            || self.target_reserved(&entry.target)
-        {
-            return Err(RouteConflict::GroupConflict);
-        }
-        match (entry.target, nonce) {
-            (RouteTarget::Channel(_), None) => {}
-            (RouteTarget::Direct(pair), Some(_)) if owner == pair.smaller() => {}
-            _ => return Err(RouteConflict::ReservationInvalid),
-        }
-        self.insert_reservation(RouteReservation {
-            reservation_id,
-            target: entry.target,
-            conversation_nonce: nonce,
-            owner,
-            expires_at,
-        })?;
-        self.successor_reservations
-            .insert(reservation_id, predecessor);
-        Ok(())
-    }
-
-    /// The predecessor named by a reservation that cannot create a genesis route.
-    #[must_use]
-    pub fn reservation_predecessor(&self, id: &ReservationId) -> Option<ConversationId> {
-        self.successor_reservations.get(id).copied()
-    }
-
-    /// Consumes a live reservation after the caller verifies the retained
-    /// activation authorizing this exact successor binding.
-    // agenc-review: focus owner=domain reviewed=2026-09-04 reason=one atomic reservation consume checks exact lineage, concrete route, owner, expiry, and index ownership before replacing the route
-    pub fn bind_successor(
-        &mut self,
-        reservation_id: ReservationId,
-        actor: AccountId,
         summary: BindingSummary,
-        now: u64,
     ) -> Result<RouteEntry, RouteConflict> {
-        let predecessor = self
-            .reservation_predecessor(&reservation_id)
-            .ok_or(RouteConflict::ReservationInvalid)?;
         let old = *self
             .routes
             .get(&predecessor)
             .ok_or(RouteConflict::RouteInvalid)?;
-        let reservation = self
-            .reservations
-            .get(&reservation_id)
-            .filter(|value| value.owner == actor && value.expires_at > now)
-            .ok_or(RouteConflict::ReservationInvalid)?;
-        let concrete_matches = match reservation.target {
+        let concrete_matches = match old.target {
             RouteTarget::Channel(instance) => {
                 summary.channel_instance_id == Some(instance)
                     && summary.conversation_nonce.is_none()
             }
             RouteTarget::Direct(_) => {
-                summary.channel_instance_id.is_none()
-                    && summary.conversation_nonce == reservation.conversation_nonce
+                summary.channel_instance_id.is_none() && summary.conversation_nonce.is_some()
             }
         };
         if !old.accepts_traffic()
             || !self.owns_indexes(&old)
-            || reservation.target != old.target
             || !concrete_matches
             || self.routes.contains_key(&summary.conversation_id)
-            || summary.conversation_id == predecessor
             || summary.lock != old.lock
             || summary.incarnation != old.incarnation
             || old.binding_generation.checked_add(1) != Some(summary.binding_generation)
@@ -111,8 +61,6 @@ impl RouteTable {
             lifecycle: RouteLifecycle::Active,
             recovery: RecoveryState::Normal,
         };
-        self.reservations.remove(&reservation_id);
-        self.successor_reservations.remove(&reservation_id);
         self.insert_route(entry);
         Ok(entry)
     }

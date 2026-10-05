@@ -168,22 +168,54 @@ pub(in crate::e2ee::coordinator::tests) fn successor_on(
     plan: ArcKeyPackagePlan,
     group: [u8; 32],
 ) -> TestResult<Successor> {
-    let old_package =
-        crate::e2ee::coordinator::ops::route_successor::binding(&harness.coordinator.state, &old)?;
-    let old_binding = &old_package.binding.tbs;
-    let conversation = conversation_id(&NETWORK, &group)?;
-    let principals = std::slice::from_ref(&harness.principal);
-    let policy = policy(&PolicySpec::bootstrap(
-        principals,
-        conversation,
-        old_binding.kind,
-    ))?;
-    let policy_id = policy_id_of(&policy)?;
     let sequencer = harness
         .coordinator
         .current_credential()
         .cloned()
         .ok_or("the harness sequencer credential")?;
+    successor_pinned(harness, old, plan, group, sequencer)
+}
+
+/// [`successor_on`] pinning the sequencer credential `sequencer`.
+pub(in crate::e2ee::coordinator::tests) fn successor_pinned(
+    harness: &Harness,
+    old: [u8; 32],
+    plan: ArcKeyPackagePlan,
+    group: [u8; 32],
+    sequencer: agenc_relay_e2ee::objects::conversation::ArcSequencerCredential,
+) -> TestResult<Successor> {
+    successor_edited(harness, old, plan, group, sequencer, |_| Ok(()))
+}
+
+/// [`successor_pinned`] with `edit` applied to the successor's
+/// generation-zero policy before the context and the binding name it.
+pub(in crate::e2ee::coordinator::tests) fn successor_edited(
+    harness: &Harness,
+    old: [u8; 32],
+    plan: ArcKeyPackagePlan,
+    group: [u8; 32],
+    sequencer: agenc_relay_e2ee::objects::conversation::ArcSequencerCredential,
+    edit: fn(&mut agenc_relay_e2ee::objects::conversation::ArcPolicy) -> TestResult,
+) -> TestResult<Successor> {
+    let state = &harness.coordinator.state;
+    let old_object = state
+        .conversations
+        .get(&old)
+        .ok_or("the old conversation")?
+        .binding_object_id;
+    let old_package =
+        crate::e2ee::coordinator::ops::route_successor::binding_object(state, &old_object)
+            .ok_or("the old binding")?;
+    let old_binding = &old_package.binding.tbs;
+    let conversation = conversation_id(&NETWORK, &group)?;
+    let principals = std::slice::from_ref(&harness.principal);
+    let mut policy = policy(&PolicySpec::bootstrap(
+        principals,
+        conversation,
+        old_binding.kind,
+    ))?;
+    edit(&mut policy)?;
+    let policy_id = policy_id_of(&policy)?;
     let plan_id = verify_initial_member_plan(&formed_plan(&plan)?)?;
     let mut binding = old_binding.clone();
     binding.binding_generation = old_binding.binding_generation.saturating_add(1);

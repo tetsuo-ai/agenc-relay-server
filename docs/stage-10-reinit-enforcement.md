@@ -1,4 +1,4 @@
-# The coordinator's ReInit enforcement (AUD-14, SC-014, P-04)
+# The coordinator's ReInit enforcement and successor installation (AUD-14, SC-014, P-04)
 
 This record covers plan item P-04 of the SDK server program (2026-10-05,
 outside master #35) with the Stage 08 evidence maintenance (G-07) and the
@@ -7,9 +7,11 @@ applies the companion Section 13.8 rules that the program's normative
 revision ([the ReInit target revision record](stage-10-reinit-target-revision.md),
 P-01) assigned to the sequencer and the coordinator, with the shared helper
 of [the ReInit target helper record](stage-10-reinit-target-helper.md)
-(P-02). The work lands in small commits; each section below names the
-commit that made it. No specification, profile hash, registry entry, named
-limit, reply code, wire object or storage generation changed.
+(P-02). The work lands in small commits: the first enters the ReInit phase
+at the ReInit finalization and checks attempts against it, the second
+installs the successor in the activation's own transaction. No
+specification, profile hash, registry entry, named limit, reply code, wire
+object or storage generation changed.
 
 ## The ReInit phase begins at the ReInit finalization
 
@@ -97,11 +99,83 @@ how the work is bounded (Q-RD-4, Q-RD-5, Q-RD-9). The old-policy
 authorization no longer compares the attempt's `old_reinit_state_id` with
 the accepted state itself: step 4 does.
 
-## The Stage 08 fixture builds a successor the sequencer accepts
+## The activation installs the successor (second commit)
+
+Companion 13.8: "The coordinator MUST install the successor from the target
+the activated attempt carries in the same durable transaction that stores the
+activation certificate, and before it sends any reply or event for that
+activation", so that "no `EGROUP RESERVE` or `EGROUP BIND` precedes successor
+traffic" (step 6).
+
+`submit_reinit_terminal` prepares the installation once the activation's
+quorum is reached and before it signs or stages anything
+(`reinit_install::prepare`), and every refusal retains nothing:
+
+- the old group must still hold the authority its ReInit finalization
+  recorded (`E2EE_FINALITY_REQUIRED` otherwise), and, under the same bounded
+  work reservation the attempt used, the activated attempt and its carried
+  target are checked again with `AuthorizedReinit::check_attempt` against
+  the old binding re-verified under the rosters it names;
+- the successor's binding package is the target context's `current_binding`
+  with the `ArcInitialMemberPlan` the attempt's KeyPackage plan forms and no
+  root binding lock (`reinit_install::package`); it and the context's policy
+  verify under the rosters the successor binding names, and its pin, the
+  context's `sequencer`, must be a credential this coordinator issues
+  receipts under (Q-RD-12); any of these refused is
+  `E2EE_BINDING_AUTH_INVALID`;
+- the route table replaces the predecessor's route by the successor
+  (`RouteTable::install_successor`) only as the exact next binding of its
+  lineage on the same concrete route, lock and incarnation, from a
+  predecessor that owns the route and accepts traffic; the predecessor keeps
+  its entry without the route's indexes.
+
+The activation's batch then carries, beside the activation certificate and
+the old route's refreshed row, the successor's binding object, its policy
+object and policy row, its route state object and its route row, whose
+accepted state and record-head anchor are `reinit_activation_id` at route
+sequence zero. When the batch commits, the successor's log is anchored at the
+activation (`SequencerLog::from_activation`), its lifecycle has no bootstrap,
+its retained facts hold the binding, the published policy and the pin, the
+old route's delivery entitlements move to it, and the same route events a
+binding sent go out: the old route hidden from every edge entitled to it and
+the successor's route state to every edge holding the channel
+(Q-RD-13). The successor's context digest is the Section 2.2 `context_digest`
+of the `ArcMlsContext` the target carries (`ContextHash`), never the
+attempt's `target_context_digest` (`ReinitTarget`). The replies and events of
+the activation leave only with its committed batch, as every coordinator
+operation's do.
+
+The successor `RESERVE` and `BIND` path is removed: `EGROUP RESERVE` of an
+existing route is `E2EE_GROUP_CONFLICT` as a bound or tombstoned target
+already was, a direct reservation always takes a fresh nonce, and
+`EGROUP BIND` binds generation zero only (Q-RD-14). `RouteTable` loses
+`reserve_successor`, `bind_successor` and its successor reservations;
+`route_successor` keeps the binding lookup, the requester's principal check
+and the activation lookup. `BIND` and the installation share the binding
+summary and the starting facts of a bound conversation
+(`route::binding_summary`, `route::bound_state`).
+
+## A restart restores the installed successor (second commit)
+
+The successor restores from its own rows like every route; the substitution
+of its context digest at startup is removed. Once every route has loaded,
+`restore_successors` checks each migrated predecessor's successor
+(`restore_successor`): its binding package must be the one the activated
+target installs, and its log must be anchored at the activation (accepted
+state, record head and epoch one) or continue from it; its route is then
+selected over the predecessor's whatever the read order, its lifecycle keeps
+no bootstrap, and its context digest is recomputed from the target's
+context. A migrated predecessor without its installed successor, two
+predecessors naming one successor, or a successor that does not match its
+activation refuse startup (Q-RD-15). The recovery lineage stays consistent:
+a predecessor whose head is a ReInit record resumes nothing, and a successor
+restored pending resumes at its activation anchor.
+
+## The Stage 08 scenarios
 
 `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/reinit.rs`
 built its target with a one-byte placeholder extension list, which the
-sequencer's step 4 now refuses. Its target now carries the successor context
+sequencer's step 4 refuses since the first commit. Its target now carries the successor context
 companion 13.8 describes (the replacement of the bound `#room` binding on the
 same route, the successor's generation-zero policy of both principals, a
 sequencer credential and both principals' roster heads) with an empty
@@ -110,6 +184,15 @@ canonical order of the semantic plan's device tuples. Both ReInit scenarios
 (activation and attempt abort) pass through the daemon with that target. The
 mls-rs endpoints still advertise no ARC extension, so their own ReInit
 Proposal carries no extension list and they never rebuild the target from it.
+
+Since the second commit the activation scenario continues through the
+daemons with no further reservation or binding: alice's application message
+on the remapped `#room` route, encrypted by her successor group, reaches
+bob's edge and bob's successor group reads it, while the leaf removed before
+the ReInit derives nothing; alice's first successor Commit is sequenced at
+the successor's route sequence zero after the activation; and after the
+whole network restarts, as the rotation scenario restarts it (Q-RD-16), the
+successor takes another application message that bob reads.
 
 ## Stage 08 model and transcripts (G-07)
 
@@ -142,9 +225,17 @@ The Stage 08 evidence that changed, for the TODO note and the push report:
 | the model's new action and check, and its counts | `model-exhaustive` (gates 7, 22), `model-adversarial` (gate 7) | S08-008, S08-024, S08-030 |
 | `a_reinit_attempt_is_staged_acknowledged_aborted_and_finally_activated` and every coordinator test that stages an attempt, now after a finalized ReInit Commit | `coordinator-reinit`, gate 14 | S08-012, S08-030 |
 | the Stage 08 ReInit scenarios with a target the sequencer checks | (daemon scenarios of ENC-10) | S08-012, S08-030 |
+| second commit: the activation's route events in `a_reinit_attempt_is_staged_acknowledged_aborted_and_finally_activated` | `coordinator-reinit`, gate 14 | S08-012, S08-030 |
+| second commit: the Stage 08 activation scenario's successor traffic with no binding, also after a restart | (daemon scenario of ENC-10) | S08-012, S08-030 |
+| second commit: `RouteTable::install_successor` replacing the successor reservation (`route_table_successor.rs`, no transcript row) | none | S08-012 |
 
 The gate numbers are the transcript catalog's; its gate 14 is the companion's
-ReInit race item. No box changes.
+ReInit race item, whose text since P-01 names the successor that takes
+traffic after activation and after a coordinator restart with no
+`EGROUP BIND`, and a crash on either side of the activation transaction. The
+second commit changes no model count: the model's route actions reserve,
+bind, close and reopen, and none of them is a ReInit successor. No box
+changes.
 
 ## Tests
 
@@ -182,11 +273,47 @@ ReInit race item. No box changes.
   that authorizes its target first (`Harness::bind_channel_for_reinit`,
   `finalize_reinit`, `finalize_reinit_to`).
 
+Second commit:
+
+- `crates/agenc-relay-domain/src/e2ee/tests/route_table_successor.rs`: an
+  installed successor takes the channel or direct route, plaintext stays
+  refused and the predecessor keeps its entry without the indexes; a second
+  install from the predecessor, a predecessor closing, pending, without the
+  route's indexes or missing, a successor that already has a route, and each
+  lineage field (instance, nonce, lock, incarnation, generation, previous
+  binding, conversation) are refused with the table unchanged.
+- `tests/sequence/reinit/successor.rs`: the activation's batch carries the
+  successor's route row, binding and policy objects and policy row, and its
+  route events; the successor holds the target's binding, policy, pin and
+  context digest (`ContextHash`, not the target's digest), live and after a
+  restart that reproduces it; it takes an application object and a Commit
+  candidate with no binding, and the candidate survives a restart. An
+  activation evaluated but not committed leaves, after a restart, the old
+  route closed with its attempt pending and no part of the successor, and the
+  same activation then installs it. The route is neither reserved nor bound
+  again. An activation without its authority, with a foreign authority, under
+  an exhausted work budget, with a successor policy that does not verify,
+  with a pin this coordinator does not issue under, or when the old binding
+  cannot be checked again retains nothing, and the bindings are checked
+  under the rosters they name after the roster moved on. A restored
+  successor keeps no bootstrap whatever the read order.
+- `successor/row_mismatch.rs`, `successor/target_mismatch.rs`,
+  `successor/declared_recovery.rs` and `successor/reconstruction.rs` keep
+  their restore checks on installed successors; new cases refuse a successor
+  row naming another binding or leaving its activation anchor (accepted
+  state, head, no epoch, a later epoch), the sealed reconstruction refuses an
+  independent route at the activation target and preserves an installed
+  successor's later head, and a pending successor's recovery lineage resumes
+  at its anchor while its predecessor's resumes nothing.
+- `tests/startup_routes.rs`: an activation without its installed successor
+  refuses startup and anchors nothing.
+
 ## Requirements
 
 No binding changes (Q-PR-1 of the P-02 lane): a clause's status follows its
 closure task, so the seven `S10-004` clauses stay `unimplemented` until
-`S10-004` closes. This commit implements six of them in the coordinator:
+`S10-004` closes. The first commit implements six of them in the
+coordinator, the second the seventh:
 
 | Requirement | Clause | Implemented by |
 | --- | --- | --- |
@@ -197,8 +324,10 @@ closure task, so the seven `S10-004` clauses stay `unimplemented` until
 | `E2EE-REQ-B4977D179E4C66AAD737` | the KeyPackage plan forms the member plan | the same |
 | `E2EE-REQ-4A3F05D133A72461A8DC` | the carried list's structure and derived IDs | the same, against the binding re-verified under its named rosters |
 
-`E2EE-REQ-65D600D44A7F4FDA9EE6`, the atomic successor installation, is still
-open in this commit.
+| `E2EE-REQ-65D600D44A7F4FDA9EE6` | the atomic successor installation (second commit) | `reinit_install::prepare` and `package`, `RouteTable::install_successor`, the activation's batch and effect, `restore_successor` |
+
+No clause of the revision is left without an implementation in the
+coordinator or the shared code.
 
 ## Coverage
 
@@ -213,13 +342,25 @@ spans changed text and were re-reviewed and respanned:
 and `cap100-reinit-authority-006-submit-reinit-attempt`; the others whose
 lines moved were re-anchored. The policy holds 1,192 reviewed spans.
 
+The second commit adds five regions (`p04-reinit-install-{prepare,package}`,
+`p04-sequence-{install-successor,successor-route-events}` and the domain's
+`p04-route-table-install-successor`), re-reviews and respans
+`cap73-recovery-bind`, `cap76-startup-rebuild`,
+`cap76-startup-restore-successors` and three `p04-reinit-authority-*`
+regions, and moves `cap76-startup-restore-successor-binding` to the renamed
+`restore_successor`. The policy holds 1,197 reviewed spans and both
+inventories 1,020 files.
+
 ## Persistence
 
 No row, field, table or object layout changed, and the storage generation
-stays 5: the phase and its authority are derived from the retained
-finalization record. A stored route whose head is the finalization of a
-ReInit Commit now restores closed in the ReInit phase instead of open. How
-routes written before this change restore, including attempts admitted
+stays 5. The first commit derives the phase and its authority from the
+retained finalization record; a stored route whose head is the finalization
+of a ReInit Commit now restores closed in the ReInit phase instead of open.
+The second commit writes the successor's existing kinds of rows (route row,
+binding, policy and route state objects, policy row) in the activation's
+transaction instead of at a later `BIND`, and restores them like any route.
+How routes written before this change restore, including attempts admitted
 before this enforcement and ReInit state of the previous profile, is decided
 with its restore test in the G-08 section.
 
@@ -254,10 +395,33 @@ makes them differ, and after one the old-policy authorization, which this
 change does not alter, refuses the attempt whichever root the binding check
 took (see the limitations).
 
+The second commit's campaign, run the same way (the domain's route table
+tests for the route table mutations), reverts three rules and 26 single
+conditions:
+
+| Reverted rule | Failing tests |
+| --- | --- |
+| the activation installs nothing | 14: the installation, crash, restart, recovery-gate, reconstruction and row tests and the staged-then-activated transcript |
+| a restart does not check the installed successor against its activation | 3: the successor rows that leave the activation anchor, name another binding of the lineage, or lose the epoch after a later head |
+| the successor's context digest is the target's digest | 2: the installation test and the sealed reconstruction |
+
+Of the 26 single-condition mutations (the attempt's links not checked again,
+the successor bindings under the current heads, a pin that need not issue,
+the policy verified for the old conversation, the old route not hidden, the
+successor's route not sent, the old entitlement kept, the successor channel
+not entitled, a bootstrap left on the successor, a successor log anchored
+elsewhere, the restore's binding comparison, its four anchor conditions, its
+lifecycle, its route selection and its missing-successor fault, and the
+route table's eight install conditions), 25 are killed, so the campaign
+kills 28 of its 29 entries. The survivor skips the route selection after the
+restore's checks: `restore_entry` already gives the route to the higher
+binding generation of one lock and incarnation whatever the read order, and
+the lineage the selection checks follows from the binding comparison before
+it, so no reachable store distinguishes it; the selection is kept as it was
+before this change.
+
 ## Limitations
 
-- The successor is still installed by `EGROUP RESERVE` and `EGROUP BIND`
-  after the activation in this commit.
 - The Stage 08 scenarios' successor context is built by the test from the
   bound route; the mls-rs endpoints do not rebuild it from their Proposal.
 - An attempt's old-policy authorization is verified under the principals'
@@ -266,6 +430,13 @@ took (see the limitations).
   policy's controllers name the previous root and no attempt of that
   conversation is authorized. The binding check of this change resolves the
   root and roster the binding names and is not what refuses it.
+- A successor of a direct conversation is installed by the same code, but no
+  coordinator test binds a direct conversation through the harness, so its
+  entitlement branch is covered by no test; the route table's direct install
+  is.
+- The daemon-level restart in the Stage 08 scenario restarts the whole
+  network; a coordinator-only restart with live sessions is not used there
+  (Q-RD-16).
 
 ## Validation
 
@@ -294,7 +465,39 @@ On the tree of this commit, before it was committed, with Rust 1.98.0:
   failures no test reaches (payload, decode, lookup and write failures and
   checked arithmetic on constants).
 - `python3 scripts/check-coverage.py audit` and `self-test` on both
-  policies: passed (21 and 1,191 reviewed spans).
+  policies: passed (21 and 1,192 reviewed spans).
+- The program's fast static gate (59 commands): all passed.
+
+On the tree of the second commit, before it was committed:
+
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  and `python3 scripts/check-source.py check`: clean.
+- `cargo nextest run -p agenc-relay-runtime --lib --all-features --locked`:
+  2,709 passed, 1 skipped (804 of them E2EE tests).
+- `cargo nextest run -p agenc-relay-domain -p agenc-relay-testkit --all-features --locked`:
+  389 passed (the four successor reservation tests replaced by two install
+  tests).
+- `cargo nextest run -p agenc-relay-server --test stage_eight_e2ee --all-features --locked`:
+  47 passed, 17 skipped; the activation scenario with its successor traffic
+  and network restart among them.
+- `bash scripts/run-stage-eight-model.sh` and
+  `bash scripts/run-stage-eight-transcripts.sh`: passed, the model's counts
+  unchanged.
+- The mutation campaign above: 28 of 29 killed.
+- `RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime -p agenc-relay-domain --all-features --branch --locked --json`:
+  `p04-sequence-successor-route-events` (30 of 30 regions) and
+  `p04-route-table-install-successor` (20 of 20 branches) complete;
+  `p04-reinit-install-prepare` 203 of 230, `p04-reinit-install-package` 19 of
+  21 and `p04-sequence-install-successor` 27 of 31 regions, short by internal
+  failures no test reaches (encoding and lookup failures, a bounded plan
+  that cannot overflow) and by the direct-conversation branch (see the
+  limitations); the respanned `cap76-startup-rebuild` (89 of 89) and
+  `cap76-startup-restore-successors` (51 of 51) complete, and
+  `cap76-startup-restore-successor-binding` 80 of 91 and `cap73-recovery-bind`
+  21 of 26, short by internal failures; the first commit's new regions,
+  three of them respanned, stay complete.
+- `python3 scripts/check-coverage.py audit` and `self-test` on both
+  policies: passed (21 and 1,197 reviewed spans).
 - The program's fast static gate (59 commands): all passed.
 
 The workspace test run and the full `bash scripts/check-stage-nine.sh` run at

@@ -12,8 +12,6 @@ use agenc_relay_storage::{E2eeRecoveryGate, E2eeRecoveryKind, PersistentRecordVa
 fn a_declared_successor_gate_refuses_the_loss_of_its_predecessor() -> TestResult {
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
-    let package = fixture.package.clone();
-    ok(fixture.bind(&package, fixture.context)?)?;
     let key = RouteRow::key(&fixture.new)?;
     let mut row = None;
     for write in &fixture.harness.writes {
@@ -57,6 +55,16 @@ fn a_declared_successor_gate_refuses_the_loss_of_its_predecessor() -> TestResult
         normal.coordinator.state.recovery_gates.get(&fixture.new),
         Some(gate)
     );
+    // The pending successor's recovery lineage resumes at its activation
+    // anchor, while the migrated predecessor, whose head is the ReInit
+    // activation, resumes nothing (companion 13.7.4 and 13.8).
+    let lineage =
+        crate::e2ee::coordinator::recovery_lineage::resume(&normal.coordinator, &fixture.new);
+    assert!(lineage.is_ok());
+    assert!(matches!(
+        crate::e2ee::coordinator::recovery_lineage::resume(&normal.coordinator, &fixture.old),
+        Err(E2eeReplyCode::RouteInvalid)
+    ));
     assert!(
         normal
             .coordinator

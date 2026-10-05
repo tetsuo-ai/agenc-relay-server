@@ -77,6 +77,10 @@ struct Target {
     conversation: [u8; 32],
     binding_id: [u8; 32],
     plan_id: [u8; 32],
+    /// The successor the activation installs on the bound route: the
+    /// context's binding with the plan the KeyPackage plan forms, and the
+    /// context's policy.
+    successor: BoundConversation,
 }
 
 /// The public results of the successor state every acknowledgement repeats.
@@ -99,12 +103,17 @@ struct Continuing<'a> {
 fn a_reinit_activates_only_with_every_continuing_leaf_acknowledged() -> TestResult {
     // The ReInit lifecycle stops no daemon: every step runs on the network
     // the wrapper started and stops with it.
-    run_network(|network, _coordinator, _edge_a, _edge_b| reinit_with_real_clients(network))
+    run_network(|network, coordinator, edge_a, edge_b| {
+        reinit_with_real_clients(network, (coordinator, edge_a, edge_b))
+    })
 }
 
 // agenc-review: allow owner=tests reviewed=2026-09-17 reason=one ReInit lifecycle names the old group both endpoints the target the attempt every acknowledgement and the successor together, and splitting it would hide the order the companion fixes
 #[allow(clippy::too_many_lines)]
-fn reinit_with_real_clients(network: &Network) -> TestResult {
+fn reinit_with_real_clients(
+    network: &Network,
+    daemons: (&mut DaemonProcess, &mut DaemonProcess, &mut DaemonProcess),
+) -> TestResult {
     let mut clients = bind_channel(network)?;
     let alice_interval = clients.alice_interval();
     let bob_interval = clients.bob_interval();
@@ -302,28 +311,100 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
     )?;
     assert_same_terminal(&lines, completion)?;
 
-    // What each endpoint can derive: the continuing joiner reads the
-    // successor's minutes, and the removed leaf's state derives nothing.
-    let aad = real_clients::application_aad(&clients.bound, old_state)?;
+    // The activation installed the successor on the bound route, so it
+    // takes traffic through the daemons with no further reservation or
+    // binding (companion 13.8): alice's application message on the route
+    // reaches bob's edge, the continuing joiner reads it while the removed
+    // leaf's state derives nothing, and alice's first successor Commit is
+    // sequenced at the successor's own route sequence zero.
+    let activation_id = hash_at(completion, "REINIT-ACTIVATED", 5)?;
+    let installed = &target.successor;
+    // alice's successor group sends every application message, so each
+    // takes the next generation of her sender ratchet.
+    let mut alice_successor = successor.clone();
+    let aad = real_clients::application_aad(installed, activation_id)?;
     let content = real_clients::padded_content(
-        &clients.bound,
+        installed,
         &clients.alice_keys,
         0,
-        old_state,
+        activation_id,
         SUCCESSOR_TEXT,
     )?;
-    let encrypted = successor
-        .clone()
+    let encrypted = alice_successor
         .encrypt_application_message(&content, aad)?
         .to_bytes()?;
+    let delivered = step("the successor's application message", {
+        let Clients {
+            alice,
+            alice_keys,
+            bob,
+            ..
+        } = &mut clients;
+        real_clients::relay_application(alice, alice_keys, bob, installed, &encrypted)
+    })?;
     assert_eq!(
-        mls_rs_text(&mut bob_successor, &encrypted)?.as_deref(),
+        mls_rs_text(&mut bob_successor, &delivered)?.as_deref(),
         Some(SUCCESSOR_TEXT),
         "the continuing leaf reads the successor group's minutes"
     );
     assert!(
-        removed_member.decrypt(&mut lost_group, &encrypted).is_err(),
+        removed_member.decrypt(&mut lost_group, &delivered).is_err(),
         "the openmls leaf removed before the ReInit derives nothing from the successor"
+    );
+    let successor_commit = successor
+        .clone()
+        .commit_builder()
+        .authenticated_data(real_clients::commit_aad(
+            installed,
+            activation_id,
+            time.saturating_add(1),
+        )?)
+        .build()?
+        .commit_message
+        .to_bytes()?;
+    let sequenced = step("the successor's first Commit", {
+        let Clients {
+            alice, alice_keys, ..
+        } = &mut clients;
+        real_clients::sequence_candidate(
+            alice,
+            alice_keys,
+            installed,
+            &successor_commit,
+            activation_id,
+        )
+    })?;
+    assert_eq!(sequenced.receipt.tbs.route_sequence, 0);
+    assert_eq!(sequenced.receipt.tbs.conversation_id, target.conversation);
+    // After the network restarts, the coordinator restores the successor
+    // from its own rows, and it still takes traffic with no binding.
+    step(
+        "network restart",
+        restart_network(network, daemons, &mut clients),
+    )?;
+    let content = real_clients::padded_content(
+        installed,
+        &clients.alice_keys,
+        1,
+        activation_id,
+        SUCCESSOR_TEXT,
+    )?;
+    let aad = real_clients::application_aad(installed, activation_id)?;
+    let encrypted = alice_successor
+        .encrypt_application_message(&content, aad)?
+        .to_bytes()?;
+    let delivered = step("the successor's application message after the restart", {
+        let Clients {
+            alice,
+            alice_keys,
+            bob,
+            ..
+        } = &mut clients;
+        real_clients::relay_application(alice, alice_keys, bob, installed, &encrypted)
+    })?;
+    assert_eq!(
+        mls_rs_text(&mut bob_successor, &delivered)?.as_deref(),
+        Some(SUCCESSOR_TEXT)
     );
     step(
         "shared history verification",
@@ -337,6 +418,68 @@ fn reinit_with_real_clients(network: &Network) -> TestResult {
         ),
     )?;
     require_recorded(&REINIT_RULES)
+}
+
+/// Stops every daemon and starts them again with both clients logged in,
+/// attached and back in the channel, as the rotation scenario restarts its
+/// network: client sessions do not survive an edge restart, so each returns
+/// as a new connection of the same account with the same device identity.
+fn restart_network(
+    network: &Network,
+    daemons: (&mut DaemonProcess, &mut DaemonProcess, &mut DaemonProcess),
+    clients: &mut Clients,
+) -> TestResult {
+    let (coordinator, edge_a, edge_b) = daemons;
+    clients.alice.send("QUIT :restart")?;
+    clients.bob.send("QUIT :restart")?;
+    // The edges retire both sessions before they are stopped.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    for (label, daemon) in [
+        ("edge a", &mut *edge_a),
+        ("edge b", &mut *edge_b),
+        ("coordinator", &mut *coordinator),
+    ] {
+        let status = daemon.stop()?;
+        assert!(
+            status.success(),
+            "{label} stopped for the restart: {status}"
+        );
+    }
+    *coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    *edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    *edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
+    for fixture in [&network.edge_a, &network.edge_b] {
+        wait_for_link(fixture, 0)?;
+        super::super::stage_ten_drills::wait_for_account_authority(fixture)?;
+    }
+    let (alice, _) = super::super::stage_ten_drills::account_login_named(
+        &network.edge_a,
+        clients.alice_account,
+        "alice",
+        "alice-account",
+    )?;
+    let (bob, _) = super::super::stage_ten_drills::account_login_named(
+        &network.edge_b,
+        clients.bob_account,
+        "bob",
+        "bob-account",
+    )?;
+    clients.alice = alice;
+    clients.bob = bob;
+    super::super::recovery_submission::attach_when_active(
+        &mut clients.alice,
+        &mut clients.alice_keys,
+    )?;
+    super::super::recovery_submission::attach_when_active(&mut clients.bob, &mut clients.bob_keys)?;
+    clients.alice.send("JOIN #room")?;
+    clients
+        .alice
+        .read_until(|line| line.contains(" 366 alice #room "))?;
+    clients.bob.send("JOIN #room")?;
+    clients
+        .bob
+        .read_until(|line| line.contains(" 366 bob #room "))?;
+    Ok(())
 }
 
 /// Companion 11.7, 12.5 and 13.8 through the production daemons: the two
@@ -662,10 +805,10 @@ fn target_of(clients: &Clients) -> TestResult<Target> {
         kind: binding.kind,
         route_binding: binding.route_binding,
         initial_validation_time: SUCCESSOR_VALIDATION_TIME,
-        policy,
+        policy: policy.clone(),
         sequencer,
         current_binding: e2ee::objects::conversation::ArcConversationBinding {
-            tbs: binding,
+            tbs: binding.clone(),
             approvals: TlsVec::new(Vec::new())?,
         },
         lifecycle: e2ee::objects::conversation::ArcConversationLifecycle {
@@ -704,12 +847,31 @@ fn target_of(clients: &Clients) -> TestResult<Target> {
         encoded_target_extensions: Opaque::new(extensions)?,
     };
     let digest = semantic_id_of(SemanticHashDomain::ReinitTarget, &tbs)?;
+    let package = ArcConversationBindingPackage {
+        binding: e2ee::objects::conversation::ArcConversationBinding {
+            tbs: binding,
+            approvals: TlsVec::new(Vec::new())?,
+        },
+        initial_member_plan: plan,
+        root_binding_locks: TlsVec::new(Vec::new())?,
+    };
+    let successor = BoundConversation {
+        conversation,
+        binding_id,
+        route_binding: clients.bound.route_binding,
+        group_id: SUCCESSOR_GROUP,
+        instance: clients.bound.instance,
+        binding: wire_object(ArcWireObjectKind::ConversationBinding, &package)?,
+        package,
+        policies: [policy.clone(), policy],
+    };
     Ok(Target {
         tbs,
         digest,
         conversation,
         binding_id,
         plan_id,
+        successor,
     })
 }
 

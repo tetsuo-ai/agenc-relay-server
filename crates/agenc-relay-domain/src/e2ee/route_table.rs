@@ -206,7 +206,6 @@ pub struct RouteTable {
     by_pair: BTreeMap<DirectPair, ConversationId>,
     locks: BTreeMap<SemanticLockId, ConversationId>,
     reservations: BTreeMap<ReservationId, RouteReservation>,
-    successor_reservations: BTreeMap<ReservationId, ConversationId>,
 }
 
 impl RouteTable {
@@ -333,8 +332,6 @@ impl RouteTable {
         let before = self.reservations.len();
         self.reservations
             .retain(|_, reservation| reservation.expires_at > now);
-        self.successor_reservations
-            .retain(|id, _| self.reservations.contains_key(id));
         before.saturating_sub(self.reservations.len())
     }
 
@@ -349,9 +346,6 @@ impl RouteTable {
         summary: BindingSummary,
         now: u64,
     ) -> Result<RouteEntry, RouteConflict> {
-        if self.successor_reservations.contains_key(&reservation_id) {
-            return Err(RouteConflict::BadState);
-        }
         let reservation = self
             .reservations
             .get(&reservation_id)

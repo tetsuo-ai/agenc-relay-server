@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use agenc_relay_domain::e2ee::lifecycle::RecoveryGate;
-use agenc_relay_domain::e2ee::{ConversationId, DirectPair, RecoveryState, ReservationId};
+use agenc_relay_domain::e2ee::{ConversationId, DirectPair, RecoveryState};
 use agenc_relay_e2ee::limits::MAX_REINIT_OBJECT;
 use agenc_relay_e2ee::objects::federation::ArcFederationOpcode as Op;
 use agenc_relay_e2ee::objects::reinit::ArcReInitActivationRequest;
@@ -166,20 +166,11 @@ fn reserve_direct(exec: &Exec<'_>) -> Result<(), Fail> {
 
 fn bind(exec: &Exec<'_>) -> Result<(), Fail> {
     exec.attached_device()?;
-    let (reservation, conversation) = exec.params().read(|reader| {
-        let reservation = reader.fixed::<16>()?;
+    let conversation = exec.params().read(|reader| {
+        reader.fixed::<16>()?;
         let conversation = reader.fixed::<32>()?;
         reader.fixed::<32>()?;
-        Ok((reservation, conversation))
+        Ok(conversation)
     })?;
-    mutation(exec, &conversation)?;
-    let predecessor = exec
-        .coordinator
-        .state
-        .routes
-        .reservation_predecessor(&ReservationId(reservation));
-    match predecessor {
-        Some(predecessor) => mutation(exec, &predecessor.0),
-        None => Ok(()),
-    }
+    mutation(exec, &conversation)
 }

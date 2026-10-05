@@ -341,8 +341,10 @@ master #35) are recorded in
 The ReInit phase the coordinator enters when a ReInit Commit finalizes, with
 the sequencer's attempt checks against that finalization's authorized target
 in the order decision D-11a fixes, the phase and its authority restored after
-a restart, and the Stage 08 model's ReInit finalization (P-04 with G-07, SDK
-program, outside master #35), are recorded in
+a restart, the successor the activation installs in its own transaction with
+no reservation or binding and that a restart restores from its own rows, and
+the Stage 08 model's ReInit finalization (P-04 with G-07, SDK program,
+outside master #35), are recorded in
 [the ReInit enforcement record](stage-10-reinit-enforcement.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).

@@ -185,29 +185,18 @@ fn migrated_log(old: [u8; 32], new: [u8; 32]) -> SequencerLog {
 }
 
 #[test]
-fn an_activation_without_a_successor_route_anchors_the_successor_log() -> TestResult {
+fn an_activation_without_its_installed_successor_fails_startup() {
+    // The activation installs its successor in the transaction that stores
+    // it, so a store that holds the activation without the successor is not
+    // one this coordinator wrote, and nothing is anchored in its place.
     let mut state = CompanionState::default();
     state.logs.insert(OLD, migrated_log(OLD, NEW));
-    restore_successors(&mut state, &ObjectIndex::default())?;
-    let anchored = state.logs.get(&NEW).ok_or("successor log")?;
-    assert_eq!(anchored.accepted_epoch(), 1);
-    assert_eq!(anchored.head().record_id, [0x33; 32]);
-    assert!(!anchored.head().recorded);
-    assert!(state.lifecycles.contains_key(&NEW));
-    Ok(())
-}
-
-#[test]
-fn two_activations_naming_distinct_successors_anchor_both() -> TestResult {
-    let mut state = CompanionState::default();
-    state.logs.insert(OLD, migrated_log(OLD, NEW));
-    state
-        .logs
-        .insert([0x11; 32], migrated_log([0x11; 32], [0x21; 32]));
-    restore_successors(&mut state, &ObjectIndex::default())?;
-    assert!(state.logs.contains_key(&NEW));
-    assert!(state.logs.contains_key(&[0x21; 32]));
-    Ok(())
+    assert_eq!(
+        restore_successors(&mut state, &NETWORK, &ObjectIndex::default()),
+        Err(super::super::CompanionFault::Storage)
+    );
+    assert!(!state.logs.contains_key(&NEW));
+    assert!(!state.lifecycles.contains_key(&NEW));
 }
 
 #[test]
@@ -216,7 +205,7 @@ fn two_activations_naming_one_successor_fail_startup() {
     state.logs.insert(OLD, migrated_log(OLD, NEW));
     state.logs.insert([0x11; 32], migrated_log([0x11; 32], NEW));
     assert_eq!(
-        restore_successors(&mut state, &ObjectIndex::default()),
+        restore_successors(&mut state, &NETWORK, &ObjectIndex::default()),
         Err(super::super::CompanionFault::Storage)
     );
 }
@@ -229,7 +218,7 @@ fn a_successor_log_without_a_conversation_fails_startup() {
         .logs
         .insert(NEW, SequencerLog::from_activation(NEW, [0x33; 32]));
     assert_eq!(
-        restore_successors(&mut state, &ObjectIndex::default()),
+        restore_successors(&mut state, &NETWORK, &ObjectIndex::default()),
         Err(super::super::CompanionFault::Storage)
     );
 }
@@ -240,7 +229,7 @@ fn a_successor_lifecycle_without_a_conversation_fails_startup() {
     state.logs.insert(OLD, migrated_log(OLD, NEW));
     state.lifecycles.insert(NEW, Lifecycle::successor());
     assert_eq!(
-        restore_successors(&mut state, &ObjectIndex::default()),
+        restore_successors(&mut state, &NETWORK, &ObjectIndex::default()),
         Err(super::super::CompanionFault::Storage)
     );
 }
@@ -260,7 +249,7 @@ fn a_successor_route_without_a_conversation_fails_startup() {
         recovery: RecoveryState::Normal,
     });
     assert_eq!(
-        restore_successors(&mut state, &ObjectIndex::default()),
+        restore_successors(&mut state, &NETWORK, &ObjectIndex::default()),
         Err(super::super::CompanionFault::Storage)
     );
 }
@@ -273,7 +262,7 @@ fn a_successor_conversation_without_a_retained_activation_fails_startup() {
         .conversations
         .insert(NEW, ConversationState::default());
     assert_eq!(
-        restore_successors(&mut state, &ObjectIndex::default()),
+        restore_successors(&mut state, &NETWORK, &ObjectIndex::default()),
         Err(super::super::CompanionFault::Storage)
     );
 }

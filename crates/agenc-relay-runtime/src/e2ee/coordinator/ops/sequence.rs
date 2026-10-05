@@ -1437,8 +1437,10 @@ pub fn submit_reinit_ack(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     Ok(outcome)
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler verifies the terminal votes, signs activation or abort, migrates or resets the log, and stages the rows and events as one atomic set
-/// `submit_reinit_activate` (`activate`) and `submit_reinit_abort`.
+/// `submit_reinit_activate` (`activate`) and `submit_reinit_abort`. An
+/// activation installs its successor in the same batch
+/// (`reinit_install::prepare`), before any reply or event leaves.
+// agenc-review: focus owner=runtime reviewed=2026-10-05 reason=one handler verifies the terminal votes, signs activation or abort, migrates or resets the log, installs an activated successor, and stages the rows and events as one atomic set
 pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Outcome, Fail> {
     let old_conversation_id = exec.params().read(|reader| reader.fixed::<32>())?;
     exec.attached_device()?;
@@ -1448,7 +1450,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
     let accepted_epoch = log.accepted_epoch();
     super::ack_context::old_group_device(exec, &old_conversation_id)?;
     let request_object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
-    let (attempt_id, quorum, terminal, terminal_id, new_conversation, record) = if activate {
+    let (attempt_id, quorum, terminal, terminal_id, activated, record) = if activate {
         let mut request: ArcReInitActivationRequest = decode(object.body(), MAX_REINIT_OBJECT)?;
         super::terminal_proof::reinit_attempt(
             exec,
@@ -1480,7 +1482,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         let terminal_id =
             CompanionCoordinator::id_of(SemanticHashDomain::ReinitActivationId, core)?;
         let attempt_id = core.reinit_attempt_id;
-        let new_conversation = core.new_conversation_id;
+        let activated = request.attempt.clone();
         let terminal = Terminal::finalize(terminal_id);
         let quorum = reinit_quorum(
             exec,
@@ -1517,7 +1519,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             quorum,
             terminal,
             terminal_id,
-            Some(new_conversation),
+            Some(activated),
             ArcSequencerRecord::ReinitActivation(certificate),
         )
     } else {
@@ -1613,6 +1615,20 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             quorum,
         );
     }
+    let old_state = conversation(exec, &old_conversation_id)?;
+    // An activation installs its successor from the target the activated
+    // attempt carries, in this batch (companion 13.8).
+    let mut install = match activated.as_ref() {
+        Some(attempt) => Some(super::reinit_install::prepare(
+            exec,
+            &old_conversation_id,
+            old_state,
+            attempt,
+            terminal_id,
+        )?),
+        None => None,
+    };
+    let new_conversation = install.as_ref().map(|install| install.conversation_id);
     let attempt_rows = vote_rows(
         &old_conversation_id,
         &attempt_id,
@@ -1653,12 +1669,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             )
         }
     };
-    let refresh = super::route::refresh_head(
-        exec,
-        old_conversation_id,
-        conversation(exec, &old_conversation_id)?,
-        &next_log,
-    )?;
+    let refresh = super::route::refresh_head(exec, old_conversation_id, old_state, &next_log)?;
     let mut outcome = Outcome::scalar(result);
     outcome.writes.extend(refresh.writes);
     outcome.writes.extend(attempt_rows);
@@ -1697,15 +1708,15 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
             None,
         ));
     }
+    if let Some(install) = &mut install {
+        outcome.writes.append(&mut install.writes);
+        successor_route_events(exec, &mut outcome, old_conversation_id, install);
+    }
     let route_object_id = refresh.route_object_id;
+    let home = exec.home;
     outcome.effects.push(Box::new(move |companion| {
-        if let Some(new_conversation_id) = new_conversation {
-            let successor = SequencerLog::from_activation(new_conversation_id, terminal_id);
-            companion.logs.insert(new_conversation_id, successor);
-            companion.lifecycles.insert(
-                new_conversation_id,
-                agenc_relay_domain::e2ee::lifecycle::Lifecycle::successor(),
-            );
+        if let Some(install) = install {
+            install_successor(companion, old_conversation_id, install, home);
         }
         companion.logs.insert(old_conversation_id, next_log);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
@@ -1721,6 +1732,73 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         }
     }));
     Ok(outcome)
+}
+
+/// The route events of an installed successor: the old route is hidden
+/// from every edge entitled to it, and the successor's route state is sent
+/// to every edge that holds its route, as a binding sends them.
+fn successor_route_events(
+    exec: &Exec<'_>,
+    outcome: &mut Outcome,
+    old: [u8; 32],
+    install: &super::reinit_install::Install,
+) {
+    for target in exec
+        .peers
+        .iter()
+        .copied()
+        .filter(|peer| exec.coordinator.state.entitlements.entitled(*peer, &old))
+    {
+        outcome.events.push(exec.event(
+            EventKind::RouteStateHidden,
+            Some(old),
+            target,
+            0,
+            Vec::new(),
+            None,
+        ));
+    }
+    for target in &install.hosts {
+        outcome.events.push(exec.event(
+            EventKind::RouteStateChanged,
+            Some(install.conversation_id),
+            *target,
+            0,
+            Vec::new(),
+            Some(install.route_object.clone()),
+        ));
+    }
+}
+
+/// Applies an installed successor when its activation's batch commits: the
+/// remapped route, the successor's log, lifecycle and retained facts, and
+/// the delivery entitlements that send the route's traffic to it.
+fn install_successor(
+    companion: &mut super::super::CompanionState,
+    old: [u8; 32],
+    install: super::reinit_install::Install,
+    home: agenc_relay_types::ServerId,
+) {
+    let new = install.conversation_id;
+    companion.routes = install.routes;
+    companion.entitlements.retire_conversation(old);
+    companion.logs.insert(new, install.log);
+    companion.lifecycles.insert(
+        new,
+        agenc_relay_domain::e2ee::lifecycle::Lifecycle::successor(),
+    );
+    companion.conversations.insert(new, install.state);
+    if install.direct {
+        let _ = companion.entitlements.require_direct(
+            home,
+            new,
+            agenc_relay_domain::e2ee::projection::EntitlementReason::Operation,
+        );
+    } else {
+        for host in install.hosts {
+            companion.entitlements.set_channel(host, new, true);
+        }
+    }
 }
 
 fn page(

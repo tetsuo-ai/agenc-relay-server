@@ -5,7 +5,7 @@
 //! authorization must satisfy the current old policy, all before any
 //! sequencer signature.
 #![forbid(unsafe_code)]
-use super::super::ConversationState;
+use super::super::{CompanionState, ConversationState};
 use super::{Exec, Fail};
 use crate::budget::MemoryPermit;
 use agenc_relay_domain::e2ee::sequencer_log::{Phase, SequencerLog};
@@ -69,7 +69,9 @@ pub(super) fn check_attempt(
             &attempt.tbs.old_conversation_id,
         )
     };
-    let old_binding = current_binding(exec, state).ok_or_else(invalid)?;
+    let companion = &exec.coordinator.state;
+    let old_binding =
+        current_binding(companion, &exec.coordinator.network_id, state).ok_or_else(invalid)?;
     let mut budget = DecodeBudget::new(MAX_REINIT_OBJECT, 1 << 18);
     authorized
         .check_attempt(attempt, &old_binding, &mut budget)
@@ -80,25 +82,24 @@ pub(super) fn check_attempt(
 /// rosters its principals name (companion 13.7.2: the carried target is
 /// checked against the retained current binding), or `None` when it does
 /// not re-verify.
-pub(super) fn current_binding(
-    exec: &Exec<'_>,
+pub(in crate::e2ee::coordinator) fn current_binding(
+    companion: &CompanionState,
+    network_id: &[u8; 32],
     state: &ConversationState,
 ) -> Option<VerifiedBinding> {
-    let companion = &exec.coordinator.state;
     let package = super::route_successor::binding_object(companion, &state.binding_object_id)?;
-    let rosters = named_rosters(exec, &package)?;
-    verify_binding_package(&exec.coordinator.network_id, &package, &rosters).ok()
+    let rosters = named_rosters(companion, network_id, &package)?;
+    verify_binding_package(network_id, &package, &rosters).ok()
 }
 
 /// The root and roster each binding principal names: the root of that
 /// fingerprint in the principal's re-verified root chain, and the retained
 /// roster snapshot of that root the binding names.
-fn named_rosters(
-    exec: &Exec<'_>,
+pub(in crate::e2ee::coordinator) fn named_rosters(
+    state: &CompanionState,
+    network_id: &[u8; 32],
     package: &ArcConversationBindingPackage,
 ) -> Option<PrincipalRosters> {
-    let state = &exec.coordinator.state;
-    let network_id = &exec.coordinator.network_id;
     let mut rosters = PrincipalRosters::new();
     for principal in package.binding.tbs.principals.as_slice() {
         let account = <[u8; 24]>::try_from(principal.account_id.as_slice()).ok()?;

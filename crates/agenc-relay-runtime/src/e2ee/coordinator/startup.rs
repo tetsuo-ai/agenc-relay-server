@@ -628,7 +628,7 @@ pub(super) fn rebuild(
     for (conversation_id, row) in restore.routes {
         restore_route(state, &network_id, &index, &rows, conversation_id, &row);
     }
-    restore_successors(state, &index)?;
+    restore_successors(state, &network_id, &index)?;
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.finish(state);
     state.object_expiry = restore.object_expiry.unwrap_or_default();
@@ -712,10 +712,15 @@ fn open_receipt_credential(
     }
 }
 
-/// Activation creates a successor anchor before that conversation has its
-/// own route. Restore these anchors after every existing route has loaded.
+/// An activation installs its successor in the transaction that stores the
+/// activation certificate (companion 13.8), so the successor of every
+/// migrated predecessor restores from its own route row, binding and policy
+/// rows like any route. Once every route has loaded, each is checked against
+/// the target its predecessor's activated attempt carries, and a migrated
+/// predecessor without its installed successor is a storage fault.
 fn restore_successors(
     state: &mut CompanionState,
+    network_id: &[u8; 32],
     index: &ObjectIndex,
 ) -> Result<(), super::CompanionFault> {
     let mut verified = std::collections::BTreeSet::new();
@@ -740,28 +745,9 @@ fn restore_successors(
     // Keep the original predecessor ordering after the allocation-free check.
     successors.sort_unstable_by_key(|(old, _, _)| *old);
     for (old, conversation_id, activation_id) in successors {
-        if state.conversations.contains_key(&conversation_id) {
-            restore_successor_binding(state, old, conversation_id)
-                .ok_or(super::CompanionFault::Storage)?;
-            verified.insert(conversation_id);
-        } else {
-            if state.logs.contains_key(&conversation_id)
-                || state.lifecycles.contains_key(&conversation_id)
-                || state
-                    .routes
-                    .route(&ConversationId(conversation_id))
-                    .is_some()
-            {
-                return Err(super::CompanionFault::Storage);
-            }
-            state.logs.insert(
-                conversation_id,
-                SequencerLog::from_activation(conversation_id, activation_id),
-            );
-            state
-                .lifecycles
-                .insert(conversation_id, Lifecycle::successor());
-        }
+        restore_successor(state, network_id, old, conversation_id, activation_id)
+            .ok_or(super::CompanionFault::Storage)?;
+        verified.insert(conversation_id);
     }
     discard_unanchored_successors(state, index, &verified);
     Ok(())
@@ -811,27 +797,39 @@ fn discard_route(state: &mut CompanionState, conversation: [u8; 32]) {
     state.lifecycles.remove(&conversation);
 }
 
-/// Rechecks activation-bound metadata and selects the successor's route indexes
-/// after all route rows have loaded, independent of conversation-ID ordering.
-fn restore_successor_binding(
+/// Checks the restored successor `new` of `old` against the target the
+/// activated attempt carries: its binding package is the one the activation
+/// installs and its log is anchored at the activation or continues from it.
+/// Then selects its route over the predecessor's, whatever the read order,
+/// restores its lifecycle without a bootstrap, and gives it the context
+/// digest of the target's context (companion 2.2), not the target's digest.
+fn restore_successor(
     state: &mut CompanionState,
+    network_id: &[u8; 32],
     old: [u8; 32],
     new: [u8; 32],
+    activation_id: [u8; 32],
 ) -> Option<()> {
-    use super::ops::route_successor;
+    use super::ops::{reinit_authority, reinit_install, route_successor};
     let certificate = route_successor::activation(state, &old).ok()?;
-    let context_digest = certificate.tbs.request.attempt.tbs.target_context_digest;
-    let package = route_successor::binding(state, &new).ok()?;
-    let activation_id = route_successor::verify(
-        state,
-        &certificate.tbs.network_id,
-        &old,
-        &package,
-        &context_digest,
+    let attempt = &certificate.tbs.request.attempt;
+    let old_binding =
+        reinit_authority::current_binding(state, network_id, state.conversations.get(&old)?)?;
+    let mut budget = DecodeBudget::new(MAX_REINIT_OBJECT, 1 << 18);
+    let carried = agenc_relay_e2ee::reinit_target::check_carried_target(
+        network_id,
+        &old_binding,
+        &attempt.target,
+        &mut budget,
     )
     .ok()?;
+    let package = reinit_install::package(carried.context(), &attempt.key_package_plan).ok()?;
+    let bytes =
+        reinit_install::wire_object(ArcWireObjectKind::ConversationBinding, &package).ok()?;
+    let installed = state.conversations.get(&new)?.binding_object_id;
     let log = state.logs.get(&new)?;
-    if log.accepted_epoch() < 1
+    if installed != *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes()
+        || log.accepted_epoch() < 1
         || (!log.head().recorded
             && (log.accepted_state_id() != &activation_id
                 || log.head().record_id != activation_id
@@ -839,6 +837,9 @@ fn restore_successor_binding(
     {
         return None;
     }
+    let context_digest =
+        agenc_relay_e2ee::ids::semantic_id_of(SemanticHashDomain::ContextHash, carried.context())
+            .ok()?;
     state
         .routes
         .select_restored_successor(ConversationId(old), ConversationId(new))

@@ -3,15 +3,17 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::e2ee::coordinator::tests::account_id_digest;
 use crate::e2ee::coordinator::tests::support::{
     BindingSpec, PolicySpec, binding_package, channel_route, policy, policy_id_of, sign,
 };
-use crate::e2ee::coordinator::tests::{account_id_digest, wire_raw};
 use crate::e2ee::coordinator::{CompanionCoordinator, CompanionFault};
 use crate::state_core::durable::AccountServiceDurableWrite as Write;
 use crate::state_core::fanout::FanoutRequest;
 use crate::test_support::StateCoreFixture;
-use agenc_relay_e2ee::objects::conversation::{ArcConversationKind, ArcPolicy};
+use agenc_relay_e2ee::objects::conversation::{
+    ArcConversationBindingPackage, ArcConversationKind, ArcPolicy,
+};
 use agenc_relay_storage::{PersistentRecordValue, ReadPlan, StoredKey, TableId};
 
 const INDEPENDENT_INSTANCE: [u8; 16] = [98; 16];
@@ -33,9 +35,15 @@ async fn sealed_reconstruction_rejects_an_independent_route_at_an_activation_tar
         .cloned()
         .ok_or("independent log")?;
     assert_eq!(expected.accepted_epoch(), 0);
-    // Keep the migrated predecessor's final rows and add only distinct keys
-    // from the independently valid history. No row body or signature is forged.
+    // Keep the migrated predecessor's final rows but its installed
+    // successor's route row, and add only the distinct keys of the
+    // independently valid history, among them its route row at the
+    // activation target. No row body or signature is forged.
+    let successor_row = agenc_relay_storage::e2ee_records::RouteRow::key(&migrated.new)?;
     rows = copy_rows(&migrated.harness.writes)?;
+    rows.retain(|row| {
+        !matches!(row, Write::Put { table: TableId::E2eeState, key, .. } if *key == successor_row)
+    });
     append_missing(&mut rows, &independent.writes)?;
     let (restored, result) = Box::pin(reconstruct(&rows)).await?;
     assert!(
@@ -47,29 +55,10 @@ async fn sealed_reconstruction_rejects_an_independent_route_at_an_activation_tar
 }
 
 #[tokio::test]
-async fn sealed_reconstruction_preserves_a_bound_successors_later_head() -> TestResult {
+async fn sealed_reconstruction_preserves_an_installed_successors_later_head() -> TestResult {
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
-    let package = fixture.package.clone();
-    ok(fixture.bind(&package, fixture.context)?)?;
-    let aad = agenc_relay_e2ee::objects::aad::ArcCommitAad {
-        profile_version: 1,
-        network_id: NETWORK,
-        conversation_id: fixture.new,
-        route_binding: package.binding.tbs.route_binding,
-        validation_time: 20,
-        prior_state_id: fixture.activation_id,
-    }
-    .encode()?;
-    let candidate = wire_raw(
-        ArcWireObjectKind::CommitMls,
-        crate::e2ee::coordinator::tests::support::private_message_at_epoch(
-            &SUCCESSOR_GROUP,
-            1,
-            3,
-            &aad,
-        )?,
-    )?;
+    let candidate = fixture.successor_commit(70)?;
     ok(fixture
         .harness
         .run(Op::SubmitCandidate, &fixture.new, Some(&candidate))?)?;
@@ -97,7 +86,7 @@ async fn sealed_reconstruction_preserves_a_bound_successors_later_head() -> Test
             .conversations
             .get(&fixture.new)
             .map(|state| state.context_digest),
-        Some(fixture.context)
+        Some(fixture.context_digest()?)
     );
     assert_eq!(
         restored
@@ -208,12 +197,8 @@ async fn sealed_reconstruction_rejects_duplicate_predecessor_ownership() -> Test
     let mut rows = copy_rows(&first.harness.writes)?;
     append_missing(&mut rows, &second.harness.writes)?;
     for _ in 0..2 {
-        let (restored, result) = Box::pin(reconstruct(&rows)).await?;
+        let (_, result) = Box::pin(reconstruct(&rows)).await?;
         assert!(result.is_err(), "two predecessors cannot own one successor");
-        assert!(
-            !restored.state.logs.contains_key(&first.new),
-            "duplicate ownership must refuse before choosing an activation anchor"
-        );
         rows.reverse();
     }
     Ok(())
