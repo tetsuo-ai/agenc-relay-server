@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use agenc_relay_client_wire::{FramingError, StreamFramer};
+use agenc_relay_e2ee::federation::ecap::violation_line;
 use agenc_relay_e2ee::federation::frames::{
     CompanionFrame, is_companion_command, parse_companion_frame,
 };
@@ -78,6 +79,10 @@ pub enum ReadFailure {
     Framing,
     /// A line was well formed but not a valid frame.
     Frame(FrameError),
+    /// An `ECAP` line that is not an exact link-profile frame of this
+    /// node's build, such as one naming another profile hash (companion
+    /// Section 12.5).
+    Profile,
 }
 
 /// One parsed line: a base federation frame or a companion frame.
@@ -211,9 +216,16 @@ pub fn parse_line(line: &str, expected_prefix: &str) -> Result<ParsedLine, ReadF
         if parts.tag_value.is_some() && !parts.companion_tag {
             return Err(ReadFailure::Framing);
         }
+        let is_profile_line = parts.command == "ECAP";
         return parse_companion_frame(parts.command, &parts.parameters, parts.tag_value)
             .map(ParsedLine::Companion)
-            .map_err(|_| ReadFailure::Framing);
+            .map_err(|_| {
+                if is_profile_line {
+                    ReadFailure::Profile
+                } else {
+                    ReadFailure::Framing
+                }
+            });
     }
     if parts.companion_tag {
         return Err(ReadFailure::Framing);
@@ -486,6 +498,10 @@ where
         let outcome = match step {
             Step::Outbound(None) => Err(LinkCloseReason::QueueClosed),
             Step::Outbound(Some(item)) => link.on_outbound(item, &queue).await,
+            Step::Inbound(Err(ReadFailure::Profile)) => {
+                send_profile_mismatch(&mut link.writer, &link.context).await;
+                Err(close_reason(ReadFailure::Profile))
+            }
             Step::Inbound(Err(failure)) => Err(close_reason(failure)),
             Step::Inbound(Ok(frame)) => link.on_inbound(*frame, now).await,
             Step::Deadline => link.on_deadline(entropy, now).await,
@@ -500,7 +516,20 @@ const fn close_reason(failure: ReadFailure) -> LinkCloseReason {
     match failure {
         ReadFailure::PeerClosed => LinkCloseReason::PeerClosed,
         ReadFailure::Io => LinkCloseReason::Transport,
-        ReadFailure::Framing | ReadFailure::Frame(_) => LinkCloseReason::Framing,
+        ReadFailure::Framing | ReadFailure::Frame(_) | ReadFailure::Profile => {
+            LinkCloseReason::Framing
+        }
+    }
+}
+
+/// Companion Section 12.5: an `ECAP` line that does not carry this node's
+/// exact profile tuple, such as a peer of another profile revision's OFFER,
+/// sends at most `ERROR :ARC-MLS profile mismatch` before the link closes,
+/// as a negotiation that fails on a parsed tuple does. A write that fails
+/// changes nothing: the link closes either way.
+async fn send_profile_mismatch<W: AsyncWrite + Unpin>(writer: &mut W, context: &LinkContext) {
+    if let Ok(line) = FederationLineText::from_rendered(violation_line(&context.local_name)) {
+        let _ = write_line(writer, &line).await;
     }
 }
 
@@ -903,3 +932,7 @@ mod companion_line_tests {
 #[cfg(test)]
 #[path = "link/tests/awaited_write.rs"]
 mod awaited_write_tests;
+
+#[cfg(test)]
+#[path = "link/tests/profile_mismatch.rs"]
+mod profile_mismatch_tests;

@@ -310,6 +310,11 @@ with root continuity from the old heads and its binding's principals, the
 root-rotation and suite-change vectors, and the channel-authority root that a
 ReInit cannot rotate (P-03, SDK program, outside master #35), are recorded in
 [the ReInit successor rosters record](stage-10-reinit-successor-rosters.md).
+The refusal of the previous encrypted profile, the profile-mismatch answer
+to an `ECAP` line of another profile, the mixed-version link through the
+daemons and the operator guide's upgrade note (P-05, SDK program, outside
+master #35) are recorded in
+[the previous-profile refusal record](stage-10-previous-profile-refusal.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

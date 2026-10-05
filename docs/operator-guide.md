@@ -143,6 +143,39 @@ sequencer_credentials_file = "/etc/arcd/sequencer-credentials.bin"
 
 On each edge, set `enabled = true` and the same `sequencer_credentials_file`, without a sequencer key. Restart every node, because the credentials file is restart-only. Then `print-onboarding` on each node prints the four E2EE lines, with the generation and hash the command printed. The command creates only a new network's first document; later rotation and retirement documents are provisioned as described in [Rotate the sequencer credential](#rotate-the-sequencer-credential).
 
+## Upgrade to a new encrypted profile
+
+A release whose encrypted profile hash differs from the running one is a
+coordinated upgrade. This release's hash differs from release candidate 3's,
+because the ReInit target revision changed two companion object layouts. CAP
+and ECAP accept only the exact profile version and hash, so there is no
+mixed-version operation of the encrypted profile.
+
+- Stop the coordinator and every edge that has the encrypted profile enabled,
+  install the new release on all of them, and start the coordinator before
+  its edges.
+- A federation link whose ends run different hashes fails its ECAP
+  negotiation and closes, and the edge's redials fail the same way until both
+  ends match. An upgraded end that reads the other end's OFFER answers it with
+  `ERROR :ARC-MLS profile mismatch` before it closes, and each end logs
+  `federation_link_closed`. While its coordinator link is closed, an edge
+  serves only what architecture Section 20.10 allows and refuses new
+  registrations and global commands with `FAIL <command> NETWORK_UNAVAILABLE`.
+  Edges that run the coordinator's hash are unaffected.
+- An upgraded node does not offer the encrypted profile to a client of the
+  previous hash; that client keeps plaintext chat wherever a channel allows
+  it.
+- After the upgrade, run `print-onboarding` on every node that has the
+  encrypted profile enabled, distribute the new descriptor, and create new
+  account invitations from it. A client refuses a descriptor whose
+  `e2ee-profile-sha256` differs from its build, so descriptors and
+  invitations printed before the upgrade no longer import. Clients take the
+  new descriptor through the explicit confirmation of a changed pin that
+  architecture Sections 6.3 and 9.3 require. A node with the encrypted
+  profile disabled prints the same descriptor as before.
+- Recovery epochs, keys, the base federation profile and the storage format
+  (schema generation 5) do not change.
+
 ## Print onboarding data and account invitations
 
 After enabling at least one reviewed client endpoint, print the canonical connection descriptor:

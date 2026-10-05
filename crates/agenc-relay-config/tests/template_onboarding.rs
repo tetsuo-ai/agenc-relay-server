@@ -307,6 +307,41 @@ fn descriptor_parser_rejects_noncanonical_scalars_and_reordered_fields() -> Test
 }
 
 #[test]
+fn a_descriptor_of_the_previous_profile_is_refused() -> TestResult {
+    // Release candidate 3's profile token, then the tokens of drafts of the
+    // ReInit target revision that were never adopted: the program's
+    // superseded first round and the two revisions of its earlier rehearsal.
+    let previous = [
+        "wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U",
+        "wdFNKl0-6lCHsd81UTpS74BG2BGg0yZUURoRCzwEkO8",
+        "7IkMThzSxSXro80LOF4RPUlMHJzf1GcDPZDiHxk9U-0",
+        "fApHHjGXpxyWRFMLG00LDDpXjORF6u13LPffgT2ALY0",
+    ];
+    let current = render_onboarding(&parse(PUBLIC)?, &facts())?;
+    parse_onboarding_descriptor(&current)?;
+    for token in previous {
+        let descriptor = current.replacen(E2EE_PROFILE_SHA256_TOKEN, token, 1);
+        assert_ne!(descriptor, current);
+        assert_eq!(
+            parse_onboarding_descriptor(&descriptor),
+            Err(ConfigError::InvalidValue),
+            "{token}"
+        );
+    }
+    // A node with the encrypted profile disabled prints no E2EE line, so its
+    // descriptor is the same under either revision.
+    let mut disabled = facts();
+    disabled.sequencer_key_set = None;
+    let core_only = render_onboarding(&parse(PUBLIC)?, &disabled)?;
+    assert!(!core_only.contains("e2ee-profile"));
+    assert_eq!(
+        parse_onboarding_descriptor(&core_only)?.sequencer_key_set,
+        None
+    );
+    Ok(())
+}
+
+#[test]
 fn edge_template_omits_every_coordinator_only_secret_path() -> TestResult {
     let mut edge = values(InitProfile::Public)?;
     edge.role = NodeRole::Edge;

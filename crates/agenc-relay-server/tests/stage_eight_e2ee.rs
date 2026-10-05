@@ -111,6 +111,8 @@ mod encrypted_clients;
 mod login_after_registration;
 #[path = "support/loopback_ports.rs"]
 mod loopback_ports;
+#[path = "stage_eight_e2ee/mixed_profile.rs"]
+mod mixed_profile;
 #[path = "stage_eight_e2ee/recovery_submission.rs"]
 mod recovery_submission;
 #[path = "stage_eight_e2ee/requester_copies.rs"]

@@ -73,7 +73,7 @@ impl From<ReadFailure> for HelloFailure {
     fn from(failure: ReadFailure) -> Self {
         match failure {
             ReadFailure::Io | ReadFailure::PeerClosed => Self::Transport,
-            ReadFailure::Framing | ReadFailure::Frame(_) => Self::Framing,
+            ReadFailure::Framing | ReadFailure::Frame(_) | ReadFailure::Profile => Self::Framing,
         }
     }
 }
