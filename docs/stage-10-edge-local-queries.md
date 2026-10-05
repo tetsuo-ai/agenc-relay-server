@@ -45,10 +45,10 @@ There, in `crates/agenc-relay-runtime/src/federation/edge/request.rs`:
   request's label and batch (`client_render::logical_frames`).
 - `LINKS` is the coordinator's directory query (`directory.links`), which the
   edge forwards as it forwards `WHO` or `NAMES`.
-- A query the edge answers itself still waits behind the connection's
-  earlier work: while a request of the connection is in flight, or its
-  origin update or a JOIN's NAMES continuation is pending, the query joins the
-  connection's deferred commands, as any command does. When it is released,
+- While the edge is active, a query it answers itself still waits behind the
+  connection's earlier work: while a request of the connection is in flight,
+  or its origin update or a JOIN's NAMES continuation is pending, the query
+  joins the connection's deferred commands, as any command does. When it is released,
   its reply is handed to the router as one more completion
   (`EdgeCompletion::LocalReply`), after the completion that released it, so
   the router renders the earlier request's reply first. The edge's other local
@@ -141,5 +141,29 @@ their spans unchanged. Over the runtime library tests at this branch
 - An edge still refuses `JOIN` of a local `&` channel (BLJ-R2); that is a
   missing edge feature, placed on the owner's list by decision D-29.
 - `LINKS` needs the coordinator, so it is unavailable on a partitioned edge.
+- While the coordinator link is down or recovering, the edge defers no
+  command (`must_defer_command` holds commands back only in the active
+  phase), so a query answered then is not held behind a request of the
+  connection that is still pending from before the link was lost; that
+  request is resent once the link is back. The user-mode read behaved the
+  same way before this change.
 - The daemon test runs on the development host, not the release
   qualification hosts.
+
+## Validation
+
+At `415f7c6`, from the repository root:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,158 passed (1 slow), 21 skipped |
+| `RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime --lib --all-features --branch --locked` | 2,683 passed, 1 skipped |
+| `python3 scripts/check-source.py check` | ok |
+| the SDK program's fast gate (agenc-relay-sdk `evidence/2026-09-29-server-rehearsal-pc001/tools/fast-gates.sh`, 59 commands), on the staged tree and at the commit | every command passes |
+| `taskset -c 0-31 bash scripts/check-stage-nine.sh` | exit 1: 104 of 105 commands pass; the one failure is the storage disk profile (`cargo nextest run -p agenc-relay-storage --all-features --locked --profile disk`), whose qualification workload reads unstable free space on this host's XFS volume (`QualificationFailure { error: StaleState }`), the known failure of the base, unrelated to this change |
+
+This section, and the two sentences on the partition, were added in a later
+commit that changes this record only; the full gate was run again at that
+commit.
