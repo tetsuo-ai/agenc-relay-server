@@ -1245,7 +1245,7 @@ fn an_edge_answers_its_information_queries_and_keeps_the_connection() -> TestRes
 /// no MOTD.
 const EDGE_INFORMATION: [(&str, &str); 6] = [
     ("MOTD", " 422 "),
-    ("LUSERS", " 266 "),
+    ("LUSERS", " 255 "),
     ("VERSION", " 374 "),
     ("TIME", " 391 "),
     ("ADMIN", " 374 "),
@@ -1332,4 +1332,104 @@ fn labeled_edge_information_round(client: &mut ArcClient, phase: &str) -> TestRe
         return Err(failure(format!("{phase}: refused: {replies:?}")));
     }
     Ok(())
+}
+
+/// An edge answers `LUSERS` in one fixed form that holds no count (decision
+/// D-35, which replaces the counted form of D-28): two edges serving
+/// different clients and channels send the same reply apart from the server
+/// prefix and the nickname, and neither a JOIN and a PART on an edge nor the
+/// loss of the coordinator changes it.
+#[test]
+fn edges_answer_lusers_in_one_fixed_form() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| wait_for_link(&network.edge_b, 0))
+        .and_then(|()| exercise_static_lusers(&network, &mut coordinator));
+    let stopped_a = edge_a.stop();
+    let stopped_b = edge_b.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}\n--- edge b log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text(),
+            network.edge_b.log_text()
+        )));
+    }
+    for (label, status) in [("edge a", stopped_a), ("edge b", stopped_b)] {
+        let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+        if !status.success() {
+            return Err(failure(format!("{label} exited with {status}")));
+        }
+    }
+    // The scenario killed the coordinator, so it has nothing left to stop.
+    if stopped_core.is_ok() {
+        return Err(failure("the coordinator outlived its kill"));
+    }
+    Ok(())
+}
+
+/// The fixed `LUSERS` reply, with the server prefix and the nickname written
+/// as `lusers` writes them.
+const STATIC_LUSERS: [&str; 2] = [
+    ":<server> 251 <nick> :User counts are not published by this server",
+    ":<server> 255 <nick> :Local counts are not published by this server",
+];
+
+fn exercise_static_lusers(network: &Network, coordinator: &mut DaemonProcess) -> TestResult {
+    // Edge A serves one client and no channel, edge B two clients and a
+    // channel.
+    let mut lena = register_when_available(&network.edge_a, "lena")?;
+    let mut omar = register_when_available(&network.edge_b, "omar")?;
+    let _pia = register_when_available(&network.edge_b, "pia")?;
+    omar.send("JOIN #b-side")?;
+    omar.read_until(|line| line.contains(" 366 omar #b-side "))?;
+    let on_a = lusers(&mut lena, "edge-a.test", "lena")?;
+    let on_b = lusers(&mut omar, "edge-b.test", "omar")?;
+    if on_a != on_b {
+        return Err(failure(format!("the edges differ: {on_a:?} {on_b:?}")));
+    }
+    require_static(&on_a, "edge a")?;
+    // A JOIN and a PART on edge A leave its reply as it was.
+    lena.send("JOIN #a-side")?;
+    lena.read_until(|line| line.contains(" 366 lena #a-side "))?;
+    require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "after a JOIN")?;
+    lena.send("PART #a-side")?;
+    lena.read_until(|line| line.contains(" PART #a-side"))?;
+    require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "after a PART")?;
+    // So does the loss of the coordinator.
+    coordinator.kill()?;
+    let refused = wait_for_partition(&mut lena)?;
+    assert_contains(&refused, "FAIL PRIVMSG NETWORK_UNAVAILABLE")?;
+    require_static(&lusers(&mut lena, "edge-a.test", "lena")?, "partitioned")
+}
+
+/// Sends `LUSERS` and returns its reply lines with the server prefix and the
+/// nickname replaced, so that replies compare across edges.
+fn lusers(client: &mut ArcClient, server: &str, nickname: &str) -> TestResult<Vec<String>> {
+    client.send("LUSERS")?;
+    let end = format!(":{server} 255 {nickname} ");
+    let lines = client.read_until(|line| line.starts_with(&end))?;
+    let mut reply = Vec::new();
+    for line in &lines {
+        for code in ["251", "252", "253", "254", "255", "265", "266"] {
+            if let Some(rest) = line.strip_prefix(&format!(":{server} {code} {nickname} ")) {
+                reply.push(format!(":<server> {code} <nick> {rest}"));
+            }
+        }
+    }
+    Ok(reply)
+}
+
+fn require_static(reply: &[String], moment: &str) -> TestResult {
+    if reply.iter().map(String::as_str).eq(STATIC_LUSERS) {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "{moment}: LUSERS is not the fixed form: {reply:?}"
+        )))
+    }
 }

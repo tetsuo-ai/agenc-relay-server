@@ -421,36 +421,35 @@ fn render_information(
     nickname: &str,
     query: InformationQuery,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
-    let counts = UserCounts {
-        users: context.domain().session_count(),
-        channels: context.domain().channel_count(),
-    };
-    information_frames(context, nickname, query, counts)
+    information_frames(context, nickname, query, LusersForm::Counted)
 }
 
-/// The sessions and channels a node's `LUSERS` reply counts: a node's own
-/// domain, or the projection an edge holds (Section 20.10).
+/// The form of a node's `LUSERS` reply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct UserCounts {
-    /// Sessions the node sees.
-    pub(crate) users: usize,
-    /// Channels the node sees.
-    pub(crate) channels: usize,
+pub(crate) enum LusersForm {
+    /// The counts of the node's own domain, as a single node and a
+    /// coordinator answer.
+    Counted,
+    /// The fixed form an edge answers with: no count, the same on every edge
+    /// in every state (Section 14's static output).
+    Static,
 }
 
 /// Renders one information query from the node's own configuration and
-/// clock and the given counts. `LUSERS` names one server whatever the
-/// topology, so an edge reveals no more than a single node.
+/// clock, with `LUSERS` in the given form.
 pub(crate) fn information_frames(
     context: &StateCoreContext,
     nickname: &str,
     query: InformationQuery,
-    counts: UserCounts,
+    lusers: LusersForm,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
     let prefix = context.server_prefix();
     match query {
         InformationQuery::Motd => render_motd(context, nickname),
-        InformationQuery::Lusers => render_lusers(counts, prefix, nickname),
+        InformationQuery::Lusers => match lusers {
+            LusersForm::Counted => render_lusers(context.domain(), prefix, nickname),
+            LusersForm::Static => render_static_lusers(prefix, nickname),
+        },
         InformationQuery::Version => info_lines(
             prefix,
             nickname,
@@ -538,12 +537,12 @@ fn public_info_lines(
 }
 
 fn render_lusers(
-    counts: UserCounts,
+    domain: &DomainState,
     prefix: &str,
     nickname: &str,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
-    let users = counts.users.to_string();
-    let channels = counts.channels.to_string();
+    let users = domain.session_count().to_string();
+    let channels = domain.channel_count().to_string();
     let summary = format!("There are {users} users on one server");
     let local = format!("Current local users {users}, max {users}");
     let mut frames = Vec::new();
@@ -590,6 +589,21 @@ fn render_lusers(
         &local,
     )?;
     Ok(frames)
+}
+
+/// The fixed `LUSERS` reply of an edge: the two numerics every `LUSERS`
+/// reply carries, `251` and `255`, with fixed text and no count, so the reply
+/// is the same on every edge whatever it serves.
+const STATIC_LUSERS: [(u16, &str); 2] = [
+    (251, "User counts are not published by this server"),
+    (255, "Local counts are not published by this server"),
+];
+
+fn render_static_lusers(prefix: &str, nickname: &str) -> Result<Vec<WireMessage>, RuntimeError> {
+    STATIC_LUSERS
+        .iter()
+        .map(|(code, text)| numeric(prefix, *code, nickname, &[], text))
+        .collect()
 }
 
 fn info_lines(

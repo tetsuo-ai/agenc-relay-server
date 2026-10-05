@@ -991,10 +991,10 @@ fn local_user_modes(
 }
 
 /// Answers one of the edge's own information queries with the single-node
-/// renderers: the edge's configured MOTD and public information, its build,
-/// its clock, and `LUSERS` counted over the sessions and channels its
-/// projection holds. The command is charged as on a single node, and the
-/// reply carries its label and batch as any other reply does.
+/// renderers: the edge's configured MOTD and public information, its build
+/// and its clock; `LUSERS` takes its fixed form, which holds no count. The
+/// command is charged as on a single node, and the reply carries its label
+/// and batch as any other reply does.
 fn local_information(
     edge: &EdgeFederation,
     context: &mut StateCoreContext,
@@ -1013,15 +1013,11 @@ fn local_information(
         .replica
         .session(user_id)
         .ok_or(DomainError::RegistrationRequired)?;
-    let counts = crate::query_render::UserCounts {
-        users: edge.replica.session_count(),
-        channels: edge.replica.channel_count(),
-    };
     let frames = crate::query_render::information_frames(
         context,
         session.nickname.presentation(),
         query,
-        counts,
+        crate::query_render::LusersForm::Static,
     )
     .map_err(|_| DomainError::InvariantViolation)?;
     let capabilities = context

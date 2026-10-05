@@ -17,12 +17,21 @@ const LOCAL_SERVER: &str = "server.example";
 /// configuration holds no MOTD or public information.
 const QUERIES: [(&str, &str); 6] = [
     ("MOTD", " 422 "),
-    ("LUSERS", " 266 "),
+    ("LUSERS", " 255 "),
     ("VERSION", " 374 "),
     ("TIME", " 391 "),
     ("ADMIN", " 374 "),
     ("INFO", " 374 "),
 ];
+
+/// The fixed `LUSERS` reply an edge sends to `nickname`: no count, the same
+/// on every edge in every state (decision D-35).
+fn static_lusers(nickname: &str) -> [String; 2] {
+    [
+        format!(":{LOCAL_SERVER} 251 {nickname} :User counts are not published by this server"),
+        format!(":{LOCAL_SERVER} 255 {nickname} :Local counts are not published by this server"),
+    ]
+}
 
 /// Registers `nickname` on a fresh connection through the scripted
 /// coordinator and acknowledges the origin update that carries the session.
@@ -177,21 +186,11 @@ async fn an_active_edge_answers_its_information_queries_itself() -> TestResult {
         hub.synchronize().await?;
         let mut client = registered_client(&mut hub, inbox, "lena").await?;
         let replies = plain_replies(&mut client, "lena").await?;
-        // LUSERS counts the edge's own projection: lena's session and no
-        // channel, on "one server" whatever the topology.
+        // LUSERS has its fixed form, though the projection holds lena's
+        // session.
         assert_eq!(
             replies.get(1).map(Vec::as_slice),
-            Some(
-                &[
-                    format!(":{LOCAL_SERVER} 251 lena :There are 1 users on one server"),
-                    format!(":{LOCAL_SERVER} 252 lena 0 :operator(s) online"),
-                    format!(":{LOCAL_SERVER} 253 lena 0 :unknown connection(s)"),
-                    format!(":{LOCAL_SERVER} 254 lena 0 :channels formed"),
-                    format!(":{LOCAL_SERVER} 255 lena :There are 1 users on one server"),
-                    format!(":{LOCAL_SERVER} 265 lena 1 1 :Current local users 1, max 1"),
-                    format!(":{LOCAL_SERVER} 266 lena 1 1 :Current local users 1, max 1"),
-                ][..]
-            )
+            Some(&static_lusers("lena")[..])
         );
         assert_eq!(
             replies.get(2).map(Vec::as_slice),
@@ -227,7 +226,11 @@ async fn a_partitioned_edge_still_answers_its_information_queries() -> TestResul
         .await?;
         client.line("PRIVMSG #edge :anyone").await?;
         client.wait_for("FAIL PRIVMSG NETWORK_UNAVAILABLE").await?;
-        plain_replies(&mut client, "mira").await?;
+        let replies = plain_replies(&mut client, "mira").await?;
+        assert_eq!(
+            replies.get(1).map(Vec::as_slice),
+            Some(&static_lusers("mira")[..])
+        );
         labeled_replies(&mut client, "mira").await?;
         // LINKS is the coordinator's directory query, so it fails closed.
         let before = client.sink.lines().len();
