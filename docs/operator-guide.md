@@ -178,6 +178,30 @@ connection. The [maintenance export profile](admin-audit-maintenance-v1.md)
 defines the exact batch, record labels, historical verification, and limits.
 The operator needs the `audit` permission.
 
+## Size the pre-authentication command budget
+
+Every line a connection sends before its registration completes is charged to
+that connection's `[limits.rate.preauth_command]` bucket. The generated
+configuration names no rate table, so the Appendix C.6 default applies: one
+token per second with a burst of 24. The hard row is ten tokens per second with
+a burst of 50; a configuration with a faster rate or a larger burst fails
+validation. A line beyond the available credit is answered with
+`263 * <command> :Please wait a while and try again.` and is not processed; the
+connection stays open, and the 30-second registration limit still applies.
+
+The default is sized for account clients. An `ACCTCREATE` request sends 16
+`DATA` lines and its `END` with no reply between them, and network delay can
+deliver them at once, so a burst below 17 can refuse the end of an account
+request however the client paces it. The credit beyond that run lets a client
+that paces its lines to the bucket finish account creation, or a login before
+registration, followed by registration within the 30-second limit at round
+trips of up to 3 seconds, as `tor-exit` and `onion` connections can have.
+Lowering the rate or the burst below the default can therefore make account
+creation and pre-registration login fail on slow routes; raising them up to
+the hard row admits more unauthenticated lines per connection before
+registration. Rates are reloadable: lowering one clamps each connection's
+current credit to the new burst, and raising one adds no immediate credit.
+
 ## Qualify storage growth on a host
 
 `arcd storage qualify` measures the production storage engine on the

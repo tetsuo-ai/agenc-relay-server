@@ -298,6 +298,13 @@ crate-graph and formatting rules, moving the E2EE profile hash under profile
 version 1 (PC-001 with decisions D-13 to D-16 and D-30, SDK program item P-01,
 outside master #35), is recorded in
 [the ReInit target revision record](stage-10-reinit-target-revision.md).
+The `preauth_command` default burst of 24 that the configuration, the
+runtime's admission table and the golden configuration now use, as Section
+19.1 and Appendix C.6 specify, so that a client paced to the bucket finishes
+account creation or a login before registration within the registration
+limit, and the operator guide's section on the budget (AUD-07, SDK program
+item B-05, outside master #35), are recorded in
+[the pre-authentication default record](stage-10-preauth-default.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

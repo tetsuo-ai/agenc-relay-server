@@ -14,6 +14,8 @@ mod idle_capacity;
 mod local_join;
 #[path = "stage_six_daemon/pipelined_commands.rs"]
 mod pipelined_commands;
+#[path = "stage_six_daemon/preauth_budget.rs"]
+mod preauth_budget;
 #[path = "stage_six_daemon/runtime_regressions.rs"]
 mod runtime_regressions;
 #[path = "stage_six_daemon/service_user.rs"]
