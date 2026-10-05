@@ -310,3 +310,31 @@ batch check calls the shared predicate with the same grammar.
   object's bytes hash to its ID, and the connection and account quotas, are
   `E2eeAssembler`'s. Which result answers which request is the reader's
   correlation.
+
+## Validation
+
+From the repository root. Each commit's lane runs were repeated in a target
+directory of this worktree alone, with identical results (the lane's shared
+target directory had let another worktree's build of an unchanged crate
+stand in for this one's).
+
+| Command | `70503bb` (X-12, X-07) | `b5d26d6` (X-05) | `b18e837` (X-06) |
+| --- | --- | --- | --- |
+| `cargo fmt --all --check` | clean | clean | clean |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean | clean | clean |
+| `cargo nextest run -p agenc-relay-client-wire -p agenc-relay-testkit -p agenc-relay-runtime --all-features --locked` | 3,109 passed, 2 skipped | 3,141 passed, 2 skipped | (with `-p agenc-relay-e2ee`) 3,440 passed, 2 skipped |
+| `cargo +nightly-2026-08-24 fmt --manifest-path fuzz/Cargo.toml -- --check`, `check --bins --locked`, `cargo deny --manifest-path fuzz/Cargo.toml check` | n/a | clean | clean |
+| the `server_framing` smoke (10,000 runs, seed 20260824, 32,768-byte inputs, 2 s, 512 MiB) | n/a | passed | passed, with the E2EE reader |
+| `python3 scripts/check-stage-two.py check` and `self-test`; `python3 scripts/test-release-qualification.py` | pass | pass (67 vectors) | pass |
+| the SDK program's fast gate (agenc-relay-sdk `evidence/2026-09-29-server-rehearsal-pc001/tools/fast-gates.sh`, 59 commands), on the staged tree and at the commit | every command passes | every command passes | every command passes |
+
+`taskset -c 0-31 bash scripts/check-stage-nine.sh` at `b18e837` exits 1:
+104 of 105 commands pass; the one failure is the storage disk profile
+(`cargo nextest run -p agenc-relay-storage --all-features --locked --profile
+disk`), whose qualification workload reads unstable free space on this
+host's XFS volume (`QualificationFailure { error: StaleState }`), the known
+failure of the base, unrelated to this change. Its workspace coverage report
+scores each of the eight new release regions complete for its metric.
+
+This section was added in a later commit that changes this record only; the
+full gate was run again at that commit.
