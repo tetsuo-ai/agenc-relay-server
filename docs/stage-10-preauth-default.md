@@ -158,3 +158,19 @@ their spans and take the new file hashes.
   the daemon sees but not jitter or loss.
 - The daemon test runs on the development host, not the release
   qualification hosts.
+
+## Validation
+
+At `5191617`, from the repository root:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo nextest run -p agenc-relay-config -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,004 passed (1 slow), 21 skipped |
+| the two `preauth_budget` daemon tests, three further runs | passed each time; account creation registers after 24.6 to 24.8 s and the login after 20.3 s |
+| the SDK program's fast gate (agenc-relay-sdk `evidence/2026-09-29-server-rehearsal-pc001/tools/fast-gates.sh`, 59 commands), on the staged tree and at the commit | every command passes |
+| `taskset -c 0-31 bash scripts/check-stage-nine.sh` | exit 1: 104 of 105 commands pass; the one failure is the storage disk profile (`cargo nextest run -p agenc-relay-storage --all-features --locked --profile disk`), whose qualification workload reads unstable free space on this host's XFS volume (`QualificationFailure { error: StaleState }`), the known failure of the base, unrelated to this change |
+
+This section was added in a later commit that changes this record only; the
+full gate was run again at that commit.
