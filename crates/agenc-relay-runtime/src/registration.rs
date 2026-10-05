@@ -2491,19 +2491,9 @@ impl RegistrationRouter {
                     #[cfg(feature = "history")]
                     self.history_isupport(target, &mut frames)?;
                 }
-                WelcomeStep::LuserCounters => frames.push(
-                    numeric_reply(
-                        &self.config.server_prefix,
-                        251,
-                        target,
-                        &[],
-                        Some(&format!(
-                            "There are {} users and 0 services on 1 servers",
-                            context.sessions().registered_len()
-                        )),
-                    )
-                    .map_err(|_| RuntimeError::InvalidValue)?,
-                ),
+                WelcomeStep::LuserCounters => {
+                    frames.extend(self.luser_counters(context, target)?);
+                }
                 WelcomeStep::Motd => self.append_motd(context, target, &mut frames)?,
                 WelcomeStep::RecoveryEpoch => frames.push(self.recovery_epoch_note()?),
                 WelcomeStep::AccountState => {
@@ -2513,6 +2503,37 @@ impl RegistrationRouter {
             }
         }
         Ok(frames)
+    }
+
+    /// The welcome's `RPL_LUSER*` counters (architecture 10.2 step 3), the
+    /// figures of the node's own `LUSERS` reply: an edge's fixed form, which
+    /// holds no count; on a coordinator the network's sessions its `LUSERS`
+    /// reply counts; on a node without federation its registered
+    /// connections, which are the network's.
+    fn luser_counters(
+        &self,
+        context: &StateCoreContext,
+        target: &str,
+    ) -> Result<Vec<WireMessage>, RuntimeError> {
+        if self.edge.is_some() {
+            return crate::query_render::render_static_lusers(&self.config.server_prefix, target);
+        }
+        let users = if self.federation.is_some() {
+            context.domain().session_count()
+        } else {
+            context.sessions().registered_len()
+        };
+        let line = numeric_reply(
+            &self.config.server_prefix,
+            251,
+            target,
+            &[],
+            Some(&format!(
+                "There are {users} users and 0 services on 1 servers"
+            )),
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
+        Ok(vec![line])
     }
 
     /// `900 <nick> <nick>!<user>@<host> <label-or-*> :You are now logged in`,

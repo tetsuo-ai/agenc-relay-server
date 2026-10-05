@@ -761,6 +761,15 @@ fn wait_for_link(fixture: &NodeFixture, before: usize) -> TestResult {
 /// Connects and registers on an edge, retrying until its link is ACTIVE.
 /// Attempts are spaced so the per-address admission limit never trips.
 fn register_when_available(fixture: &NodeFixture, nickname: &str) -> TestResult<ArcClient> {
+    welcome_when_available(fixture, nickname).map(|(client, _)| client)
+}
+
+/// Registers like `register_when_available` and also returns the welcome
+/// lines, through the end of the MOTD group.
+fn welcome_when_available(
+    fixture: &NodeFixture,
+    nickname: &str,
+) -> TestResult<(ArcClient, Vec<String>)> {
     let deadline = Instant::now() + NETWORK_WAIT;
     loop {
         let mut client = match ArcClient::connect(fixture) {
@@ -789,7 +798,7 @@ fn register_when_available(fixture: &NodeFixture, nickname: &str) -> TestResult<
                 {
                     return Err(failure(format!("registration lacked 001: {lines:?}")));
                 }
-                return Ok(client);
+                return Ok((client, lines));
             }
             Registration::Unavailable(lines) => {
                 if Instant::now() >= deadline {
@@ -1635,4 +1644,109 @@ fn labeled_exchange(client: &mut ArcClient, label: &str, message: &str) -> TestR
     let settled = format!(" :settled-{label}");
     lines.extend(client.read_until(|line| line.ends_with(&settled))?);
     Ok(lines)
+}
+
+/// Every welcome's `RPL_LUSER*` counters are the figures of its node's own
+/// `LUSERS` reply (Architecture 10.2 step 3): two edges serving different
+/// clients send the same fixed form, with no count, apart from the server
+/// prefix and the nickname, and the coordinator's welcome counts what its
+/// `LUSERS` reply counts, the whole network's sessions, as clients join on
+/// the coordinator and on the edges.
+#[test]
+fn welcome_counters_match_each_nodes_lusers_reply() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| wait_for_link(&network.edge_b, 0))
+        .and_then(|()| exercise_welcome_counters(&network));
+    let stopped_a = edge_a.stop();
+    let stopped_b = edge_b.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}\n--- edge b log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text(),
+            network.edge_b.log_text()
+        )));
+    }
+    for (label, status) in [
+        ("edge a", stopped_a),
+        ("edge b", stopped_b),
+        ("coordinator", stopped_core),
+    ] {
+        let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+        if !status.success() {
+            return Err(failure(format!("{label} exited with {status}")));
+        }
+    }
+    Ok(())
+}
+
+fn exercise_welcome_counters(network: &Network) -> TestResult {
+    // Edge A serves one client, edge B two.
+    let (mut uma, welcome_a) = welcome_when_available(&network.edge_a, "uma")?;
+    let _vic = register_when_available(&network.edge_b, "vic")?;
+    let (mut wes, welcome_b) = welcome_when_available(&network.edge_b, "wes")?;
+    let on_a = welcome_counters(&welcome_a, "edge-a.test", "uma");
+    let on_b = welcome_counters(&welcome_b, "edge-b.test", "wes");
+    if on_a != on_b {
+        return Err(failure(format!(
+            "the edges' welcomes differ: {on_a:?} {on_b:?}"
+        )));
+    }
+    require_static(&on_a, "edge a's welcome")?;
+    // Each edge's welcome is its LUSERS reply.
+    require_static(&lusers(&mut uma, "edge-a.test", "uma")?, "edge a")?;
+    require_static(&lusers(&mut wes, "edge-b.test", "wes")?, "edge b")?;
+    // The coordinator counts the edges' three clients with its own, in its
+    // welcome as in its LUSERS reply, as clients join on both.
+    let _xia = coordinator_counts(network, "xia", 4)?;
+    let (_yan, welcome) = welcome_when_available(&network.edge_a, "yan")?;
+    require_static(
+        &welcome_counters(&welcome, "edge-a.test", "yan"),
+        "a later welcome on edge a",
+    )?;
+    let _zed = coordinator_counts(network, "zed", 6)?;
+    Ok(())
+}
+
+/// The `RPL_LUSER*` lines of a welcome with the server prefix and the
+/// nickname replaced, as `lusers` writes them.
+fn welcome_counters(lines: &[String], server: &str, nickname: &str) -> Vec<String> {
+    let mut counters = Vec::new();
+    for line in lines {
+        for code in ["251", "252", "253", "254", "255", "265", "266"] {
+            if let Some(rest) = line.strip_prefix(&format!(":{server} {code} {nickname} ")) {
+                counters.push(format!(":<server> {code} <nick> {rest}"));
+            }
+        }
+    }
+    counters
+}
+
+/// Registers `nickname` on the coordinator and requires its welcome and its
+/// `LUSERS` reply to count `users` sessions.
+fn coordinator_counts(network: &Network, nickname: &str, users: usize) -> TestResult<ArcClient> {
+    let (mut client, welcome) = welcome_when_available(&network.coordinator, nickname)?;
+    let expected = [format!(
+        ":<server> 251 <nick> :There are {users} users and 0 services on 1 servers"
+    )];
+    let counters = welcome_counters(&welcome, "core.test", nickname);
+    if counters != expected {
+        return Err(failure(format!(
+            "{nickname}'s welcome does not count {users} users: {counters:?}"
+        )));
+    }
+    client.send("LUSERS")?;
+    let reply = client.read_until(|line| line.contains(&format!(" 266 {nickname} ")))?;
+    let summary = format!(":core.test 251 {nickname} :There are {users} users on one server");
+    if !reply.contains(&summary) {
+        return Err(failure(format!(
+            "{nickname}'s LUSERS does not count {users} users: {reply:?}"
+        )));
+    }
+    Ok(client)
 }

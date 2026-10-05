@@ -249,8 +249,9 @@ D-35, outside master #35), are recorded in
 [the edge local queries record](stage-10-edge-local-queries.md).
 The one labeled response an edge gives its client's labeled `PRIVMSG`,
 `NOTICE` or `TAGMSG`, the held echoes under `echo-message` and otherwise a
-labeled `ACK`, as the coordinator gives its own client (SDK program decision
-D-36, outside master #35), is recorded in
+labeled `ACK`, as the coordinator gives its own client, and every welcome's
+`RPL_LUSER*` counters, now the figures of the node's own `LUSERS` reply (SDK
+program decision D-36, outside master #35), are recorded in
 [the edge echo record](stage-10-edge-echo.md).
 The edge initialized by `arcd init` that starts, links and advertises the
 encrypted profile, its database complete without the fake OPAQUE record only a

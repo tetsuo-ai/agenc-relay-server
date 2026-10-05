@@ -305,7 +305,7 @@ async fn an_authenticated_edge_burst_reads_the_logged_in_state_from_the_replica(
     assert_eq!(
         commands(welcome),
         [
-            "001", "002", "003", "004", "005", "005", "005", "251", "422", "NOTE", "900"
+            "001", "002", "003", "004", "005", "005", "005", "251", "255", "422", "NOTE", "900"
         ],
         "lines: {lines:?}"
     );

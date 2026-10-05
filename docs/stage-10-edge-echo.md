@@ -1,13 +1,16 @@
-# One labeled response to a message sent through an edge
+# An edge's labeled message responses and every welcome's counters
 
-This record covers the first item of the SDK program's decision D-36
-(2026-10-05, outside master #35): an edge's response to a labeled
-`PRIVMSG`, `NOTICE` or `TAGMSG`, which the SDK's encrypted harness found and
-the SDK's wire register records as WD-16. It changes no wire format,
-numeric, reply code, registry, configured limit, persistent format or
-specification text.
+This record covers the SDK program's decision D-36 (2026-10-05, outside
+master #35), two follow-ups the SDK's encrypted harness found on an edge:
+an edge's response to a labeled `PRIVMSG`, `NOTICE` or `TAGMSG`, which the
+SDK's wire register records as WD-16, and the welcome burst's `RPL_LUSER*`
+counters, which now give the figures of the node's own `LUSERS` reply.
+Neither changes a wire format, numeric, reply code, registry, configured
+limit, persistent format or specification text.
 
-## What was observed
+## Labeled message responses
+
+### What was observed
 
 Architecture Section 2.1 adopts IRCv3 `labeled-response` and `echo-message`,
 and Section 9.5 gives a request with a negotiated `label` that label on
@@ -25,7 +28,7 @@ recipient that had not negotiated `message-tags`, which the coordinator does
 not, and it did not render a direct message to its sender as the
 coordinator does.
 
-## Cause
+### Cause
 
 An edge renders the copies of a message from the coordinator's
 `MessageDelivered` events: each local recipient's copy goes out when the
@@ -35,7 +38,7 @@ correlated completion event are known. A committed message completed as
 `EdgeCompletion::CommandCompleted`, for which the router renders nothing, so
 the echo went out unlabeled with its event and no `ACK` followed.
 
-## Fix
+### Fix
 
 In `crates/agenc-relay-runtime/src/federation/edge/message_echo.rs`:
 
@@ -79,7 +82,7 @@ Section 2.1 adopts and Section 30.2 pins, requires a server to send a
 included, and no role echoes a direct message yet. The fix for every role
 is on the owner's list (Limitations).
 
-## The regressions
+### The regressions
 
 | Test | What it pins |
 | --- | --- |
@@ -95,7 +98,7 @@ is on the owner's list (Limitations).
 | `...::the_held_copies_become_the_response_and_keep_their_backing_until_sent` | The completion carries the held copies in order, then the result's replies, and their backing until it is dropped; with nothing held it carries no line. |
 | `stage_seven_federation::an_edge_gives_a_labeled_channel_message_one_labeled_response` | The production binary, a coordinator and two edges: a client of edge A sends a labeled channel `PRIVMSG` and `NOTICE` without `echo-message` and gets one labeled `ACK` each, then with `echo-message` and gets one labeled echo each; the other members, on edge A, on edge B and on the coordinator, receive all four without a label. |
 
-## The fix, reverted
+### The fix, reverted
 
 With the production files of the fix restored to `6e84d29`
 (`message_echo.rs` removed, and the new field dropped from the four test
@@ -129,7 +132,7 @@ open). With a direct message echoed to a sender without `labeled-response`,
 the bridged test fails in the last capability set: the requester holds an
 echo it should not.
 
-## Coverage
+### Coverage
 
 Both production source inventories are refreshed (1,020 files: the new module
 and two new test modules sit under `src/`). The release region
@@ -154,7 +157,7 @@ The other release regions in the changed files that the library tests leave
 short score the same at `6e84d29`, and the crate's branch and line totals
 rise from 78.17% and 86.76% to 78.25% and 86.80%.
 
-## Compatibility
+### Compatibility
 
 - Clients of an edge: a labeled `PRIVMSG`, `NOTICE` or `TAGMSG` now gets one
   labeled response, as on the coordinator. With `echo-message` the
@@ -170,7 +173,7 @@ rise from 78.17% and 86.76% to 78.25% and 86.80%.
 - Mixed builds: an edge built before this change keeps the old responses,
   whatever the coordinator runs.
 
-## Limitations
+### Limitations
 
 These differences between an edge and the coordinator were found while
 checking and are not changed here (outside D-36):
@@ -197,3 +200,104 @@ checking and are not changed here (outside D-36):
 - The E2EE carriers' echoes on an edge are not covered by these tests.
 - The daemon test runs on the development host, not the release
   qualification hosts.
+
+## The welcome's counters
+
+Architecture Section 10.2 step 3 gives the welcome burst `RPL_LUSER*`
+counters with privacy-safe aggregate values, and Section 14 gives `LUSERS`
+privacy-safe static or aggregate output. The welcome's counters now give the
+figures of the node's own `LUSERS` reply:
+
+- an edge sends its fixed `LUSERS` form (decision D-35): `251` and `255` with
+  fixed text and no count, byte-identical on every edge in every state apart
+  from the server prefix and the nickname;
+- a coordinator's `251` counts the network's sessions, the figure its
+  `LUSERS` reply gives;
+- a node without federation, whose own connections are the network's, counts
+  its registered connections, as before, which is what its `LUSERS` reply
+  counts.
+
+### Fix
+
+`crates/agenc-relay-runtime/src/registration.rs`: the welcome's
+`WelcomeStep::LuserCounters` step renders `luser_counters`, which takes the
+edge's fixed form from `query_render::render_static_lusers` (now
+`pub(crate)`, the renderer of the edge's `LUSERS` reply), and otherwise one
+`251` that counts the domain's sessions on a coordinator
+(`DomainState::session_count`, which its `LUSERS` reply counts) and the
+registered connections on a node without federation.
+
+### The regressions
+
+| Test | What it pins |
+| --- | --- |
+| `registration::welcome_tests::an_edge_sends_its_fixed_lusers_form` | Two clients registered on an edge each get the fixed form in their welcome, the same lines apart from the nickname. |
+| `registration::welcome_tests::a_coordinator_counts_the_sessions_of_its_domain` | A coordinator's welcome counts every session of its domain, a session homed on another node among them. |
+| `registration::welcome_tests::a_node_without_federation_counts_its_registered_connections` | A node without federation counts its registered connections: one, then two. |
+| `registration::welcome_tests::an_edge_registration_sends_the_epoch_note_after_the_motd_group`, `registration::account_state_tests::an_authenticated_edge_burst_reads_the_logged_in_state_from_the_replica` | Updated: an edge's burst now holds `251` and `255` before the MOTD group. |
+| `federation::edge::tests::welcome_counters::welcome_counters_match_each_nodes_lusers_reply` | A coordinator and an edge in one process: every client of the edge gets the fixed form in its welcome and as its `LUSERS` reply; each client of the coordinator, registered between clients of the edge, gets a welcome `251` that counts the network's sessions, three, four and then six, the count of its `LUSERS` reply. |
+| `federation::edge::tests::welcome_counters::a_node_without_federation_counts_what_its_lusers_reply_counts` | A node without federation in the actor loop: each client's welcome counts what its `LUSERS` reply counts, one and two, and two again for a client that registers after another has left. |
+| `stage_seven_federation::welcome_counters_match_each_nodes_lusers_reply` | The production binary, a coordinator and two edges serving different clients: the welcomes on both edges are the fixed form and the same apart from the server prefix and the nickname, as is each edge's `LUSERS` reply and a later welcome on edge A; each client of the coordinator gets a welcome that counts the network's sessions, four and then six as clients join on an edge and on the coordinator, the count of its `LUSERS` reply. |
+
+### The fix, reverted
+
+With the welcome's counter step and `query_render.rs` restored to `6e84d29`
+and every test kept, the two updated burst tests,
+`an_edge_sends_its_fixed_lusers_form` and the in-process test fail, and so
+does the daemon test: an edge's welcome is not its fixed form. With only the
+edge's fixed form removed, the same tests fail. With only the coordinator's
+count removed, the router test of a coordinator, the in-process test and the
+daemon test fail: the coordinator's welcome does not give its `LUSERS`
+reply's figure. With the count of a node without federation off by one, its
+router test and its actor-loop test fail.
+
+### Coverage
+
+The release region `runtime-edge-static-lusers` is respanned, since
+`render_static_lusers` is now `pub(crate)`, with its reason restated, and
+the new release region `runtime-welcome-luser-counters` binds
+`luser_counters`. The other regions in the changed files moved with their
+spans unchanged. Both production source inventories are refreshed (1,021
+files: the new test module sits under `src/`). Over the runtime library
+tests (2,704 passed), `luser_counters` scores branches 4/4 and
+`render_static_lusers` regions 12/12, and every release region in the two
+changed files is reached in full.
+
+### Compatibility
+
+- Clients of an edge: the welcome's counters are the edge's fixed form, `251`
+  and `255`, as its `LUSERS` reply is.
+- Clients of a coordinator: the welcome's `251` gives the count of the
+  coordinator's `LUSERS` reply.
+- Nodes without federation, federation, storage, registries and the
+  specification: unchanged.
+- Mixed builds: a node built before this change keeps its welcome counters.
+
+## Validation
+
+The labeled message responses (the first commit of the topic), from the
+repository root before the commit:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,179 passed (1 slow), 21 skipped |
+| `RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime --lib --all-features --branch --locked` | 2,699 passed, 1 skipped; the measures under Coverage |
+| coverage policy refresh: both inventories, re-anchoring, both audits and self-tests | ok |
+| the SDK program's fast gate (agenc-relay-sdk `evidence/2026-09-29-server-rehearsal-pc001/tools/fast-gates.sh`, 59 commands), on the staged tree and at the commit | every command passes |
+
+The welcome's counters (the second commit), from the repository root before
+the commit:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,185 passed (1 slow), 21 skipped |
+| `RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime --lib --all-features --branch --locked` | 2,704 passed, 1 skipped; the measures under Coverage |
+| coverage policy refresh: both inventories, re-anchoring, both audits and self-tests | ok |
+| the SDK program's fast gate (59 commands), on the staged tree and at the commit | every command passes |
+
+The full gate, `taskset -c 0-31 bash scripts/check-stage-nine.sh`, runs once
+at the topic tip; the SDK program keeps its log (decision D-05).

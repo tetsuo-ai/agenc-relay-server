@@ -4449,3 +4449,5 @@ mod request_refusals;
 mod local_information;
 
 mod labeled_messages;
+
+mod welcome_counters;
