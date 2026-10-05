@@ -268,8 +268,8 @@ read as before:
   its receipt names.
 
 This change leaves startup as it is. How such state migrates is part of P-04
-(plan item G-08), whose restore test covers a database with each of those
-heads; the operator guide's upgrade note states the effect.
+(plan item G-08), whose restore test is to cover a database with each of
+those heads; the operator guide's upgrade note states the effect.
 
 ## Limitations
 
