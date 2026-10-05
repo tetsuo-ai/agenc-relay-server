@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod declared_recovery;
+mod previous_profile;
 pub(in crate::e2ee::coordinator::tests::sequence) mod reconstruction;
 mod row_mismatch;
 mod target_mismatch;

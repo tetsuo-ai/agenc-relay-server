@@ -241,6 +241,7 @@ const fn phase_tag(phase: Phase) -> u8 {
         Phase::Reinit { .. } => 1,
         Phase::Migrated { .. } => 2,
         Phase::Closed { .. } => 3,
+        Phase::Retired => 4,
     }
 }
 

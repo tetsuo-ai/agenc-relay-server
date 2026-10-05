@@ -9,9 +9,10 @@ P-01) assigned to the sequencer and the coordinator, with the shared helper
 of [the ReInit target helper record](stage-10-reinit-target-helper.md)
 (P-02). The work lands in small commits: the first enters the ReInit phase
 at the ReInit finalization and checks attempts against it, the second
-installs the successor in the activation's own transaction. No
-specification, profile hash, registry entry, named limit, reply code, wire
-object or storage generation changed.
+installs the successor in the activation's own transaction, and the third
+restores the ReInit state a coordinator stored under the previous profile
+(G-08). No specification, profile hash, registry entry, named limit, reply
+code, wire object or storage generation changed.
 
 ## The ReInit phase begins at the ReInit finalization
 
@@ -171,6 +172,88 @@ activation refuse startup (Q-RD-15). The recovery lineage stays consistent:
 a predecessor whose head is a ReInit record resumes nothing, and a successor
 restored pending resumes at its activation anchor.
 
+## ReInit state of the previous profile (G-08, third commit)
+
+Decision: **additive within generation 5**. No table, key, row kind, field
+or object layout changes, and the storage generation stays 5 (decision
+D-06). What changes is how stored state is read: the first commit reads a
+ReInit finalization head as the closed ReInit phase, the second writes the
+successor's rows at activation instead of at `BIND`, and this commit reads
+the ReInit state that a coordinator of release candidate 3 (`70c832c`)
+stored under the previous profile hash, of which companion 2.3 says: "A
+ReInit object stored under the previous hash is never parsed or
+reinterpreted under this one."
+
+What such a coordinator can have stored, and what the parent commit made of
+it when the store was sealed into a storage fixture and reconstructed:
+
+- an attempt admitted with no ReInit Commit before it, at the genesis anchor
+  or after an ordinary finalization, left open: restored in the ReInit phase
+  with the attempt open and no authority;
+- that attempt aborted or activated: the abort or activation record embeds
+  an attempt of the previous layout, which no longer decodes, and the
+  coordinator refused to start (storage fault), with or without a successor
+  bound for the activation;
+- a finalized ReInit Commit, whose phase that coordinator entered only at
+  the first attempt: restored in the ReInit phase at it (first commit);
+- such a finalization followed by ordinary records: restored open, so the
+  group took ordinary candidates and application objects again, and an
+  ordinary candidate left open stayed open.
+
+This commit keeps the coordinator startable and every such group closed:
+
+- `Phase::Retired` (domain) is a phase only a restore enters. The log keeps
+  its head, accepted state and epoch and takes no candidate, terminal,
+  application object, attempt or close: `restore_epoch` keeps no candidate
+  in it, the route is a tombstone for plaintext purposes
+  (`Lifecycle::is_tombstone`), and its recovery lineage resumes nothing
+  (`recovery_lineage::resume`, `E2EE_ROUTE_INVALID`).
+- A route whose head is a ReInit activation or abort of the previous profile
+  is retired (`head_log_phase`, `previous_profile_terminal`). Its record is
+  not parsed: after the restore's decode of the head record fails, the record
+  is recognized from its rows alone. The head's record row must be an
+  activation or abort terminal whose identifier is the route row's head and
+  whose predecessor is the attempt receipt row before it, and its retained
+  object's envelope must be a sequencer record; any disagreement refuses
+  startup, as any other undecodable head does (Q-RD-19).
+- The successor that such an activation's group bound with `EGROUP RESERVE`
+  and `EGROUP BIND` cannot be checked against its activation and is retired
+  with its predecessor (`discard_unanchored_successors`, `retire_route`), in
+  binding-generation order, so a chain of them is retired.
+- A group that its head leaves open, but whose log holds a finalized ReInit
+  Commit followed by any record other than an attempt receipt, is retired
+  (`restore_log_phase`, `ordinary_after_reinit`) once the head's own checks
+  have passed.
+- Unchanged: an attempt left open restores open in the ReInit phase and can
+  neither complete nor be aborted, because its object has the previous
+  layout; no other attempt follows it, refused with
+  `E2EE_FINALITY_REQUIRED` without an authority and with
+  `E2EE_BINDING_AUTH_INVALID` under the authority of a ReInit Commit of the
+  previous profile, whose authorized target no attempt of this profile
+  carries. A group closed by an authorized close stays closed.
+
+A retired route stays bound, so plaintext stays refused on it and a new
+reservation of its channel is `E2EE_GROUP_CONFLICT`. Startup writes nothing:
+the retirement is derived again from the same rows at every restart.
+
+The restore evidence is `test-data/stage-ten/previous-profile-reinit/`: ten
+stores that the `70c832c` coordinator wrote through its own test harness,
+those of the states above, among them an open ordinary candidate with the
+finalization request that would have completed it, and a finalized ReInit
+Commit followed by an attempt (the previous profile's own flow) or by a
+closing intent and its close. Its README reproduces the generator, the three
+test-only edits of the exported tree and the command; separate runs wrote
+byte-identical files (Q-RD-17). The tests are listed below.
+
+Staying in generation 5 has a cost: nothing refuses a database this branch
+has written when release candidate 3 opens it, and release candidate 3 does
+not read this branch's ReInit state as this branch does, so downgrading a
+node is unsafe. The operator guide's upgrade note says so and that going
+back means restoring a backup taken before the upgrade. The source ledger's
+Section 9 still says only that the persistent format is unchanged; the
+ledger is a pinned normative artifact, so its downgrade sentence is left for
+the next normative revision (Q-RD-20).
+
 ## The Stage 08 scenarios
 
 `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/reinit.rs`
@@ -228,14 +311,21 @@ The Stage 08 evidence that changed, for the TODO note and the push report:
 | second commit: the activation's route events in `a_reinit_attempt_is_staged_acknowledged_aborted_and_finally_activated` | `coordinator-reinit`, gate 14 | S08-012, S08-030 |
 | second commit: the Stage 08 activation scenario's successor traffic with no binding, also after a restart | (daemon scenario of ENC-10) | S08-012, S08-030 |
 | second commit: `RouteTable::install_successor` replacing the successor reservation (`route_table_successor.rs`, no transcript row) | none | S08-012 |
+| third commit: the retired phase's domain tests, beside the unchanged pinned tests of `restore_epoch` and `is_tombstone` | none (`domain-close-restore` and `domain-lifecycle-gate`, gate 8, unchanged) | S08-011, S08-012 |
+| third commit: the restore of the previous profile's ReInit state (`previous_profile.rs`) | none | S08-012, S08-013, S08-015 |
 
 The gate numbers are the transcript catalog's; its gate 14 is the companion's
 ReInit race item, whose text since P-01 names the successor that takes
 traffic after activation and after a coordinator restart with no
 `EGROUP BIND`, and a crash on either side of the activation transaction. The
 second commit changes no model count: the model's route actions reserve,
-bind, close and reopen, and none of them is a ReInit successor. No box
-changes.
+bind, close and reopen, and none of them is a ReInit successor. The third
+commit adds `Phase::Retired`, which only a restore enters; the model never
+restores a log, so its counts do not change either, and its state key gives
+the new phase its own tag. The domain functions it touches, `restore_epoch`
+and `Lifecycle::is_tombstone`, changed only for that phase, and the pinned
+tests that run them (`domain-close-restore` and `domain-lifecycle-gate`,
+gate 8) pass unchanged. No box changes.
 
 ## Tests
 
@@ -308,6 +398,38 @@ Second commit:
 - `tests/startup_routes.rs`: an activation without its installed successor
   refuses startup and anchors nothing.
 
+Third commit:
+
+- `crates/agenc-relay-domain/src/e2ee/tests/sequencer_log.rs` and
+  `tests/lifecycle.rs`: a retired log keeps its head, keeps no candidate its
+  head names, and refuses a candidate, a finalization or abort, a ReInit
+  finalization, an attempt, a ReInit restore and a close, unchanged; a
+  retired route is a tombstone that refuses application traffic and
+  candidates.
+- `tests/sequence/reinit/successor/previous_profile.rs`, over the ten
+  `70c832c` stores: every store reconstructs through the sealed storage
+  fixture; a route whose head is the previous profile's ReInit abort or
+  activation is retired, and so is the successor bound for the activation;
+  an attempt admitted before this enforcement, also after a ReInit Commit,
+  stays open in the ReInit phase; a ReInit Commit finalized under the
+  previous profile keeps the group in that phase, and ordinary records after
+  it retire the group; an ordinary candidate left open after it is not
+  restored, and its stored finalization request is
+  `E2EE_FINALITY_REQUIRED`; a group closed after it stays closed. On every
+  such route a candidate and an application object are
+  `E2EE_ROUTE_INVALID`, an attempt is `E2EE_FINALITY_REQUIRED` or, under a
+  previous-profile authority, `E2EE_BINDING_AUTH_INVALID`, a reservation of
+  the channel is `E2EE_GROUP_CONFLICT` and plaintext stays refused, and no
+  retired or ReInit-phase route resumes a recovery lineage. Eight row
+  disagreements around a retired head (the route row's
+  head, the record row's identifier, kind, terminal flag and predecessor,
+  the kind of the record before it, an object of another kind and a missing
+  object) each refuse startup, while the unedited rows restore, and a head
+  record row that names another kind than its record refuses startup.
+- `successor/row_mismatch.rs`: an attempt aborted under this profile
+  restores in the ReInit phase, and a route row that names another accepted
+  state or another head than its abort record refuses startup.
+
 ## Requirements
 
 No binding changes (Q-PR-1 of the P-02 lane): a clause's status follows its
@@ -323,7 +445,6 @@ coordinator, the second the seventh:
 | `E2EE-REQ-39DFA440E75F7F7495F2` | attempt fields against the carried target | the same |
 | `E2EE-REQ-B4977D179E4C66AAD737` | the KeyPackage plan forms the member plan | the same |
 | `E2EE-REQ-4A3F05D133A72461A8DC` | the carried list's structure and derived IDs | the same, against the binding re-verified under its named rosters |
-
 | `E2EE-REQ-65D600D44A7F4FDA9EE6` | the atomic successor installation (second commit) | `reinit_install::prepare` and `package`, `RouteTable::install_successor`, the activation's batch and effect, `restore_successor` |
 
 No clause of the revision is left without an implementation in the
@@ -351,6 +472,12 @@ regions, and moves `cap76-startup-restore-successor-binding` to the renamed
 `restore_successor`. The policy holds 1,197 reviewed spans and both
 inventories 1,020 files.
 
+The third commit adds six regions,
+`p04-startup-{restore-log-phase,head-log-phase,previous-profile-terminal,ordinary-after-reinit,discard-unanchored-successors,retire-route}`,
+and re-reviews and respans `runtime-recovery-lineage-resume`, whose refusal
+now names the retired phase. The policy holds 1,203 reviewed spans and both
+inventories 1,021 files.
+
 ## Persistence
 
 No row, field, table or object layout changed, and the storage generation
@@ -360,9 +487,10 @@ of a ReInit Commit now restores closed in the ReInit phase instead of open.
 The second commit writes the successor's existing kinds of rows (route row,
 binding, policy and route state objects, policy row) in the activation's
 transaction instead of at a later `BIND`, and restores them like any route.
-How routes written before this change restore, including attempts admitted
-before this enforcement and ReInit state of the previous profile, is decided
-with its restore test in the G-08 section.
+The third commit writes nothing: it reads the ReInit state stored under the
+previous profile, including attempts admitted before this enforcement, as
+the G-08 section describes, and the decision is additive within generation
+5.
 
 ## Revert proofs and mutations
 
@@ -420,6 +548,27 @@ the lineage the selection checks follows from the binding comparison before
 it, so no reachable store distinguishes it; the selection is kept as it was
 before this change.
 
+The third commit's campaign, run the same way (the domain and testkit
+suites for the two domain mutations, the runtime's E2EE tests otherwise),
+reverts four rules (the last against both crates' tests) and 18 single
+conditions:
+
+| Reverted rule | Failing tests |
+| --- | --- |
+| a previous-profile ReInit activation or abort at the head refuses startup again | 4: the restore of every store, the terminal retirement, the bound successor and the row disagreements |
+| ordinary records after a finalized ReInit Commit no longer retire the group | 2: the finalized ReInit Commit test (its store with ordinary records after it) and the open candidate test |
+| a successor bound under the previous profile is discarded again | 2: the bound successor test and the restore of every store |
+| a retired log keeps the candidate its head names | 1 domain test, and 1 runtime test: the open candidate's stored finalization request is accepted |
+
+The 18 single-condition mutations (a closed group retired, the retirement
+before the head's own checks, every finalization or every ReInit
+finalization retiring, an attempt receipt counted as an ordinary record, a
+previous-profile terminal left in the row's phase, every undecodable head
+retired, the seven row conditions of a previous-profile terminal, a retired
+predecessor's successor kept in its phase or `retire_route` doing nothing, a
+retired lineage resumed, and a retired route that is no tombstone) are all
+killed, so the campaign kills 23 of its 23 entries.
+
 ## Limitations
 
 - The Stage 08 scenarios' successor context is built by the test from the
@@ -437,6 +586,19 @@ before this change.
 - The daemon-level restart in the Stage 08 scenario restarts the whole
   network; a coordinator-only restart with live sessions is not used there
   (Q-RD-16).
+- A retired channel takes no encrypted traffic again in this release: it
+  cannot be closed, reserved or bound anew. How such a channel gets a new
+  group is for plan item B-14 (recreated routes) to define.
+- Startup writes nothing for a retired route, so its edges keep the route
+  state they last received, an active route; the coordinator refuses every
+  request on it.
+- The restore still decodes each head record under this profile before it
+  recognizes a previous-profile terminal from its rows, and it still reads
+  the receipt of an attempt left open under the previous profile, whose
+  layout the revision did not change, to restore that attempt's slot
+  (Q-RD-19).
+- The restore fixtures come from the `70c832c` coordinator's test harness,
+  not from a running `arcd` of that release, and cover one channel route.
 
 ## Validation
 
@@ -498,6 +660,44 @@ On the tree of the second commit, before it was committed:
   three of them respanned, stay complete.
 - `python3 scripts/check-coverage.py audit` and `self-test` on both
   policies: passed (21 and 1,197 reviewed spans).
+- The program's fast static gate (59 commands): all passed.
+
+On the tree of the third commit, before it was committed:
+
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  and `python3 scripts/check-source.py check`: clean.
+- `cargo nextest run -p agenc-relay-runtime --lib --all-features --locked`:
+  2,719 passed, 1 skipped (814 of them E2EE tests).
+- `cargo nextest run -p agenc-relay-domain -p agenc-relay-testkit --all-features --locked`:
+  391 passed.
+- `cargo nextest run -p agenc-relay-server --test stage_eight_e2ee --all-features --locked`:
+  47 passed, 17 skipped.
+- `bash scripts/run-stage-eight-model.sh` and
+  `bash scripts/run-stage-eight-transcripts.sh`: passed, the model's counts
+  unchanged.
+- `cargo nextest run -p agenc-relay-storage --all-features --locked`: 443
+  passed, 1 skipped (no storage source changed). With `--profile disk`: the
+  one test of that profile,
+  `qualification_workload::production_workload_measures_every_required_case_and_phase`,
+  failed with `StaleState` and its five `reserve-minus-one` rows refused,
+  the known failure of issue #55 on this host's XFS volume.
+- The mutation campaign above: 23 of 23 killed.
+- `RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime -p agenc-relay-domain --all-features --branch --locked --json`:
+  `p04-startup-restore-log-phase` (16 of 16 regions),
+  `p04-startup-previous-profile-terminal` (29 of 29) and
+  `p04-startup-ordinary-after-reinit` (25 of 25) complete, and the respanned
+  `runtime-recovery-lineage-resume` (10 of 10 branches);
+  `p04-startup-head-log-phase` 85 of 86, short by an attempt sequence at its
+  maximum, which the bounded attempt count never reaches;
+  `p04-startup-discard-unanchored-successors` 64 of 65, short by a restored
+  conversation whose binding is not indexed, and `p04-startup-retire-route`
+  11 of 12, short by a retired conversation without a log, which no restore
+  produces. A first run of the same command failed in the unrelated
+  `state_core::tests::a_guest_session_registers_and_commands_flow_through_the_router`,
+  whose scripted session can race its own stop under host load; the second
+  run passed all 3,084 tests.
+- `python3 scripts/check-coverage.py audit` and `self-test` on both
+  policies: passed (21 and 1,203 reviewed spans).
 - The program's fast static gate (59 commands): all passed.
 
 The workspace test run and the full `bash scripts/check-stage-nine.sh` run at

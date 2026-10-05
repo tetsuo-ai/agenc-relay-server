@@ -132,6 +132,12 @@ pub enum Phase {
         /// The close identifier.
         close_id: Id,
     },
+    /// Restored from stored state this profile does not continue: ReInit
+    /// state of the previous profile, or ordinary records that the previous
+    /// profile let follow a finalized ReInit Commit. The group takes no
+    /// candidate, terminal, application object, attempt or close; only a
+    /// restore enters this phase.
+    Retired,
 }
 
 /// The log.
@@ -215,10 +221,11 @@ impl SequencerLog {
 
     /// Restores the epoch position of a reloaded log: the active candidate,
     /// if the head record is one, and the attempts the epoch consumed. With
-    /// no active candidate the next candidate follows the head record.
+    /// no active candidate the next candidate follows the head record. A
+    /// retired log keeps no candidate, so no terminal completes one.
     pub fn restore_epoch(&mut self, candidate: Option<CandidateSlot>, attempts: u32) {
         self.attempts = attempts;
-        match candidate {
+        match candidate.filter(|_| self.phase != Phase::Retired) {
             Some(slot) => {
                 self.next_candidate_sequence = slot.position.candidate_sequence;
                 self.candidate = Some(slot);

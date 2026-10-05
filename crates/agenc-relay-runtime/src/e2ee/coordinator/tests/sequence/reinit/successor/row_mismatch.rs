@@ -93,6 +93,103 @@ fn a_reload_refuses_a_route_row_that_no_longer_matches_its_activation_record() -
     Ok(())
 }
 
+/// Aborts the staged attempt of `fixture` with its single device's vote.
+fn abort(fixture: &mut Fixture) -> TestResult {
+    let old_state = *fixture
+        .harness
+        .coordinator
+        .state
+        .logs
+        .get(&fixture.old)
+        .ok_or("old log")?
+        .accepted_state_id();
+    let receipt = staged_receipt(&fixture.harness, fixture.old)?;
+    let mut budget = DecodeBudget::new(1 << 20, 1 << 16);
+    let attempt_object = fixture
+        .harness
+        .coordinator
+        .state
+        .objects
+        .get(&receipt.tbs.attempt_object_id)
+        .ok_or("attempt object")?
+        .clone();
+    let object = ArcWireObject::decode_kind(
+        &attempt_object,
+        Some(ArcWireObjectKind::ReinitAttempt),
+        &mut budget,
+    )?;
+    let attempt = ArcReInitAttempt::decode_exact(object.body(), &mut budget)?;
+    let core = ArcReInitAbortCoreTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        old_conversation_id: fixture.old,
+        old_reinit_state_id: old_state,
+        attempt_sequence: 0,
+        slot_predecessor_record_id: receipt.tbs.predecessor_record_id,
+        reinit_attempt_id: receipt.tbs.reinit_attempt_id,
+        reason_code: 1,
+        evidence_digest: [0; 32],
+    };
+    let abort_id = semantic_id_of(SemanticHashDomain::ReinitAbortId, &core)?;
+    let vote = reinit_vote(
+        &fixture.harness,
+        DEVICE,
+        &receipt,
+        old_state,
+        receipt.tbs.reinit_attempt_id,
+        Terminal::abort(abort_id, 1)?,
+    )?;
+    let request = ArcReInitAbortRequest {
+        core,
+        receipt,
+        attempt,
+        votes: TlsVec::new(vec![vote])?,
+    };
+    let bytes = wire(ArcWireObjectKind::ReinitAbortRequest, &request)?;
+    let outcome = ok(fixture
+        .harness
+        .run(Op::SubmitReinitAbort, &fixture.old, Some(&bytes))?)?;
+    assert!(matches!(outcome.result, ResultBody::ReinitAborted(..)));
+    Ok(())
+}
+
+#[test]
+fn a_reload_refuses_a_route_row_that_no_longer_matches_its_abort_record() -> TestResult {
+    type RowEdit = fn(&mut RouteRow);
+    let edits: [(&str, RowEdit); 2] = [
+        ("another accepted state", |row| {
+            row.accepted_state_id[0] ^= 1;
+        }),
+        ("another sequencer head", |row| {
+            row.sequencer_head_id[0] ^= 1;
+        }),
+    ];
+    let mut unedited = Fixture::prepare()?;
+    abort(&mut unedited)?;
+    let restored = unedited.harness.reloaded()?;
+    assert!(matches!(
+        restored
+            .coordinator
+            .state
+            .logs
+            .get(&unedited.old)
+            .map(SequencerLog::phase),
+        Some(Phase::Reinit { .. })
+    ));
+    for (name, edit) in edits {
+        let mut fixture = Fixture::prepare()?;
+        abort(&mut fixture)?;
+        let key = RouteRow::key(&fixture.old)?;
+        rewrite(&mut fixture.harness, &key, |body| {
+            let mut row = RouteRow::decode(&body)?;
+            edit(&mut row);
+            Ok(row.encode()?)
+        })?;
+        assert!(fixture.harness.reloaded().is_err(), "{name}");
+    }
+    Ok(())
+}
+
 #[test]
 fn a_reload_refuses_an_activation_record_row_under_another_predecessor() -> TestResult {
     let mut fixture = Fixture::prepare()?;

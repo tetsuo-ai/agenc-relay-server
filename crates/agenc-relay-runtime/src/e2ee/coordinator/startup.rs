@@ -780,11 +780,37 @@ fn discard_unanchored_successors(
         if predecessor == Some(id) {
             continue;
         }
+        // A successor of a retired predecessor, bound under the previous
+        // profile, is retired with it: its activation cannot be checked.
+        let retired = |old: &[u8; 32]| {
+            state
+                .logs
+                .get(old)
+                .is_some_and(|log| log.phase() == Phase::Retired)
+        };
+        if !verified.contains(&id) && predecessor.as_ref().is_some_and(retired) {
+            retire_route(state, id);
+            continue;
+        }
         if !verified.contains(&id)
             || predecessor.is_none_or(|old| !state.conversations.contains_key(&old))
         {
             discard_route(state, id);
         }
+    }
+}
+
+/// Retires the restored route of `conversation`: its log keeps its head and
+/// accepted state in the retired phase.
+fn retire_route(state: &mut CompanionState, conversation: [u8; 32]) {
+    if let Some(log) = state.logs.get_mut(&conversation) {
+        *log = SequencerLog::restore(
+            conversation,
+            log.head(),
+            *log.accepted_state_id(),
+            log.accepted_epoch(),
+            Phase::Retired,
+        );
     }
 }
 
@@ -1441,11 +1467,28 @@ struct RestoredLogPhase {
     next_attempt_sequence: u32,
 }
 
+/// The phase the durable head restores (`head_log_phase`), except that a
+/// group the head leaves open whose log went on with ordinary records after
+/// a finalized ReInit Commit is retired (`ordinary_after_reinit`).
+fn restore_log_phase(
+    state: &CompanionState,
+    conversation_id: [u8; 32],
+    row: &RouteRow,
+    records: &BTreeMap<u64, &RecordRow>,
+) -> Option<RestoredLogPhase> {
+    let mut restored = head_log_phase(state, conversation_id, row, records)?;
+    if restored.phase == Phase::Open && ordinary_after_reinit(state, records) {
+        restored.phase = Phase::Retired;
+    }
+    Some(restored)
+}
+
 /// The finalization of a ReInit Commit, or a ReInit receipt or terminal, at
 /// the durable head determines whether the old group is closed with an
-/// attempt still to come, open, or followed by another, or migrated.
+/// attempt still to come, open, or followed by another, or migrated; a
+/// ReInit terminal of the previous profile retires it.
 // agenc-review: focus owner=runtime reviewed=2026-10-05 reason=the head finalization, receipt and terminal alternatives restore the phase together with exact durable row identity checks
-fn restore_log_phase(
+fn head_log_phase(
     state: &CompanionState,
     conversation_id: [u8; 32],
     row: &RouteRow,
@@ -1469,12 +1512,18 @@ fn restore_log_phase(
     }) else {
         return Some(restored);
     };
-    let decoded: ArcSequencerRecord = decode_object(
+    let Some(decoded) = decode_object::<ArcSequencerRecord>(
         state,
         &record.record_object_id,
         ArcWireObjectKind::SequencerRecord,
         MAX_SEQUENCER_RECORD_OBJECT,
-    )?;
+    ) else {
+        // A ReInit terminal of the previous profile, which this profile does
+        // not read, retires the route; any other undecodable head refuses.
+        previous_profile_terminal(state, row, records, record)?;
+        restored.phase = Phase::Retired;
+        return Some(restored);
+    };
     match decoded {
         ArcSequencerRecord::Finalization(certificate) => {
             if let Some(phase) =
@@ -1565,6 +1614,66 @@ fn finalization_head_phase(
     exact.then_some(Some(Phase::Reinit {
         old_reinit_state_id: tbs.finalization_id,
     }))
+}
+
+/// Whether `record`, the head its route `row` names, is a ReInit activation
+/// or abort record of the previous profile. Such a record embeds an attempt
+/// of the previous layout, which this profile neither parses nor
+/// reinterprets (companion 2.3), so only its rows are compared: the head's
+/// record row is a terminal of one of those kinds whose identifier is the
+/// route row's head and whose predecessor is the attempt receipt before it,
+/// and its retained object is a sequencer record, which the caller found
+/// does not decode under this profile. `None` refuses the route.
+fn previous_profile_terminal(
+    state: &CompanionState,
+    row: &RouteRow,
+    records: &BTreeMap<u64, &RecordRow>,
+    record: &RecordRow,
+) -> Option<()> {
+    let receipt = row
+        .route_sequence
+        .checked_sub(1)
+        .and_then(|sequence| records.get(&sequence))?;
+    let bytes = state.objects.get(&record.record_object_id)?;
+    let envelope = ArcWireObject::peek(bytes).ok().map(|(kind, _)| kind);
+    (matches!(
+        record.record_kind,
+        REINIT_ACTIVATION_RECORD | REINIT_ABORT_RECORD
+    ) && record.terminal
+        && record.record_id == row.sequencer_head_id
+        && record.predecessor_record_id == receipt.record_id
+        && receipt.record_kind == REINIT_ATTEMPT_RECORD
+        && envelope == Some(ArcWireObjectKind::SequencerRecord))
+    .then_some(())
+}
+
+/// Whether the log holds a finalized ReInit Commit followed by a record
+/// other than a ReInit attempt receipt. Under the previous profile the
+/// ReInit phase began only at the first attempt, so ordinary records could
+/// follow such a finalization; this profile closes the group at the
+/// finalization (companion 13.8 step 2) and does not continue a group that
+/// went on after it.
+fn ordinary_after_reinit(state: &CompanionState, records: &BTreeMap<u64, &RecordRow>) -> bool {
+    records.iter().any(|(sequence, record)| {
+        let followed = sequence
+            .checked_add(1)
+            .and_then(|next| records.get(&next))
+            .is_some_and(|next| next.record_kind != REINIT_ATTEMPT_RECORD);
+        followed
+            && record.record_kind == FINALIZATION_RECORD
+            && matches!(
+                decode_object(
+                    state,
+                    &record.record_object_id,
+                    ArcWireObjectKind::SequencerRecord,
+                    MAX_SEQUENCER_RECORD_OBJECT,
+                ),
+                Some(ArcSequencerRecord::Finalization(certificate))
+                    if certificate.tbs.request.proof.authorization.tbs.action_bits
+                        & action_bits::REINIT
+                        != 0
+            )
+    })
 }
 
 /// The authorized ReInit of the finalization that entered a restored ReInit

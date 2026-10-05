@@ -284,8 +284,10 @@ impl Lifecycle {
     /// Whether the route is a tombstone for plaintext purposes.
     #[must_use]
     pub fn is_tombstone(&self, log: &SequencerLog) -> bool {
-        matches!(log.phase(), Phase::Closed { .. } | Phase::Migrated { .. })
-            || matches!(self.gate, RecoveryGate::Closed | RecoveryGate::Conflict)
+        matches!(
+            log.phase(),
+            Phase::Closed { .. } | Phase::Migrated { .. } | Phase::Retired
+        ) || matches!(self.gate, RecoveryGate::Closed | RecoveryGate::Conflict)
     }
 }
 

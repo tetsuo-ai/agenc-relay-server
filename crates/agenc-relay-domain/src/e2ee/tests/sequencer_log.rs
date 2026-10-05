@@ -316,3 +316,37 @@ fn reinit_entry_and_restore_refuse_repeats_stale_states_unrecorded_heads_and_exh
     );
     Ok(())
 }
+
+#[test]
+fn a_retired_log_keeps_its_head_and_takes_nothing() -> Result<(), LogError> {
+    let mut open = SequencerLog::genesis(CONVERSATION, GENESIS);
+    candidate(&mut open, 10)?;
+    let slot = *open.candidate().ok_or(LogError::NoSuchCandidate)?;
+    // Only a restore enters the phase, and the candidate its head names is
+    // not restored with it.
+    let mut retired = SequencerLog::restore(CONVERSATION, open.head(), GENESIS, 0, Phase::Retired);
+    retired.restore_epoch(Some(slot), 1);
+    assert_eq!(retired.phase(), Phase::Retired);
+    assert_eq!(retired.head(), open.head());
+    assert_eq!(retired.candidate(), None);
+    assert!(!retired.accepts_application());
+    let before = retired.clone();
+    assert_eq!(retired.candidate_position(0), Err(LogError::Closed));
+    assert_eq!(
+        retired.finalize(&[10; 32], [20; 32], 1),
+        Err(LogError::NoSuchCandidate)
+    );
+    assert_eq!(
+        retired.abort(&[10; 32], [11; 32]),
+        Err(LogError::NoSuchCandidate)
+    );
+    assert_eq!(
+        retired.finalize_reinit(&[10; 32], REINIT, 1),
+        Err(LogError::Closed)
+    );
+    assert_eq!(retired.record_attempt([40; 32]), Err(LogError::NotReinit));
+    assert_eq!(retired.restore_reinit(None, 0), Err(LogError::NotReinit));
+    assert_eq!(retired.close([90; 32]), Err(LogError::Closed));
+    assert_eq!(retired, before);
+    Ok(())
+}
