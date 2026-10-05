@@ -933,14 +933,22 @@ pub(crate) const fn is_local_information_query(kind: RegisteredCommandKind) -> b
 }
 
 fn must_defer_command(edge: &EdgeFederation, generation: ConnectionGeneration) -> bool {
-    edge.phase == Phase::Active
-        && (edge
-            .pending
-            .values()
-            .any(|pending| pending.generation == generation)
-            || edge.origins.get(&generation).is_some_and(|origin| {
-                origin.join_names_pending || !origin.pending_updates.is_empty()
-            }))
+    edge.phase == Phase::Active && has_work_in_flight(edge, generation)
+}
+
+/// Whether the connection has work a later command must not overtake: a
+/// pending request, a `CHATHISTORY` whose record is being committed (before
+/// its request is registered, and between its pages), an origin update not
+/// yet acknowledged, or a JOIN's NAMES continuation.
+fn has_work_in_flight(edge: &EdgeFederation, generation: ConnectionGeneration) -> bool {
+    edge.pending
+        .values()
+        .any(|pending| pending.generation == generation)
+        || super::history::record_staged(edge, generation)
+        || edge
+            .origins
+            .get(&generation)
+            .is_some_and(|origin| origin.join_names_pending || !origin.pending_updates.is_empty())
 }
 
 fn local_user_modes(
@@ -1736,14 +1744,7 @@ pub(super) fn dispatch_deferred(
     let mut completions = Vec::new();
     completions.extend(dispatch_deferred_carrier(edge, context, generation));
     loop {
-        let in_flight = edge
-            .pending
-            .values()
-            .any(|pending| pending.generation == generation)
-            || edge.origins.get(&generation).is_some_and(|origin| {
-                origin.join_names_pending || !origin.pending_updates.is_empty()
-            });
-        if in_flight {
+        if has_work_in_flight(edge, generation) {
             break;
         }
         let Some(next) = edge

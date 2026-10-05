@@ -366,3 +366,99 @@ async fn a_render_commit_the_core_refuses_fails_the_link_without_output() -> Tes
     assert!(sink.lines().is_empty());
     Ok(())
 }
+
+/// Sends `TIME` on the query's connection through the edge's command path
+/// and returns whether the edge answered it at once.
+fn time_answered_at_once(
+    fixture: &mut StateCoreFixture,
+    edge: &mut EdgeFederation,
+    sink: &FrameSink,
+) -> TestResult<bool> {
+    let message = Box::new(parse_message(FramedLine::new("TIME")?)?.ok_or("message")?);
+    let proof = agenc_relay_client_wire::validate_post_registration_command(&message)?;
+    let before = sink.lines().len();
+    request::send_command(
+        edge,
+        fixture.context_mut()?,
+        GENERATION,
+        agenc_relay_client_wire::RegisteredCommandKind::Public(proof.kind()),
+        message,
+    )
+    .map_err(|(_, error)| format!("TIME: {error:?}"))?;
+    Ok(sink
+        .lines()
+        .iter()
+        .skip(before)
+        .any(|line| line.contains(" 391 ")))
+}
+
+/// Counts the `TIME` replies among the completions the router renders.
+fn released_times(completions: &[EdgeCompletion]) -> usize {
+    completions
+        .iter()
+        .filter(|completion| {
+            matches!(completion, EdgeCompletion::LocalReply { frames, .. }
+                if frames.iter().any(|frame| frame.command() == "391"))
+        })
+        .count()
+}
+
+/// A `TIME` sent while the query's first send is being committed, before
+/// its request is registered, waits until the query's last page and is
+/// released after it.
+#[tokio::test]
+async fn a_local_answer_waits_while_a_history_send_commits() -> TestResult {
+    let ((mut fixture, mut edge, sink, page), _) = begun()?;
+    assert!(!time_answered_at_once(&mut fixture, &mut edge, &sink)?);
+    assert_eq!(released_times(&apply(&mut fixture, &mut edge).await?), 0);
+    let id = *edge.pending.keys().next().ok_or("request")?;
+    let header = successor_header(&edge, id)?;
+    receive(
+        &mut edge,
+        fixture.context_mut()?,
+        header,
+        OBJECT,
+        ResultArm::HistoryPage(page),
+    )
+    .map_err(|error| format!("receive: {error:?}"))?;
+    assert_eq!(released_times(&apply(&mut fixture, &mut edge).await?), 0);
+    let completions = apply(&mut fixture, &mut edge).await?;
+    assert!(edge.history.batches.is_empty());
+    assert_eq!(released_times(&completions), 1);
+    assert!(sink.lines().iter().all(|line| !line.contains(" 391 ")));
+    Ok(())
+}
+
+/// A `TIME` sent between two pages, while the successor's send is being
+/// committed, waits until the last page and is released after it.
+#[tokio::test]
+async fn a_local_answer_waits_between_history_pages() -> TestResult {
+    let (mut fixture, mut edge, sink, page) = fixture()?;
+    let first = rebuilt(&page, |metadata, _| metadata.next_cursor = Some([21; 32]))?;
+    deliver(&mut fixture, &mut edge, first).await?;
+    assert!(edge.pending.is_empty());
+    assert!(!time_answered_at_once(&mut fixture, &mut edge, &sink)?);
+    assert_eq!(released_times(&apply(&mut fixture, &mut edge).await?), 0);
+    let next = *edge.pending.keys().next().ok_or("successor request")?;
+    let header = successor_header(&edge, next)?;
+    let last = rebuilt(&page, |metadata, messages| {
+        metadata.page_sequence = 1;
+        for message in messages {
+            message.channel_sequence = 21;
+        }
+    })?;
+    receive(
+        &mut edge,
+        fixture.context_mut()?,
+        header,
+        OBJECT,
+        ResultArm::HistoryPage(last),
+    )
+    .map_err(|error| format!("receive: {error:?}"))?;
+    assert_eq!(released_times(&apply(&mut fixture, &mut edge).await?), 0);
+    let completions = apply(&mut fixture, &mut edge).await?;
+    assert!(edge.history.batches.is_empty());
+    assert_eq!(released_times(&completions), 1);
+    assert!(sink.lines().iter().all(|line| !line.contains(" 391 ")));
+    Ok(())
+}

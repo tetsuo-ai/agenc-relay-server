@@ -49,10 +49,12 @@ There, in `crates/agenc-relay-runtime/src/federation/edge/request.rs`:
 - `LINKS` is the coordinator's directory query (`directory.links`), which the
   edge forwards as it forwards `WHO` or `NAMES`.
 - While the edge is active, a query it answers itself still waits behind the
-  connection's earlier work: while a request of the connection is in flight,
-  or its origin update or a JOIN's NAMES continuation is pending, the query
-  joins the connection's deferred commands, as any command does. When it is released,
-  its reply is handed to the router as one more completion
+  connection's earlier work (`has_work_in_flight`): while a request of the
+  connection is pending, a record of its `CHATHISTORY` is being committed
+  (before the query's request is registered, and between its pages), or its
+  origin update or a JOIN's NAMES continuation is pending, the query joins
+  the connection's deferred commands, as any command does. When it is
+  released, its reply is handed to the router as one more completion
   (`EdgeCompletion::LocalReply`), after the completion that released it, so
   the router renders the earlier request's reply first. The edge's other local
   read, the requester's own `MODE <nick>`, takes the same path; before, a
@@ -70,6 +72,8 @@ There, in `crates/agenc-relay-runtime/src/federation/edge/request.rs`:
 | `federation::edge::tests::local_information::an_active_edge_answers_its_information_queries_itself` | Through the edge's actor loop with a scripted coordinator: each of the six, plain, ends with its numeric to the requester and no `FAIL`; `LUSERS`, in its fixed form, and `VERSION` are pinned line by line; each of the six, labeled, is one labeled line or one labeled batch; the first request the edge sends afterwards is the directory query of a `LINKS`, so none of the six left the edge. |
 | `...::a_partitioned_edge_still_answers_its_information_queries` | After the coordinator link closes and a `PRIVMSG` gets `NETWORK_UNAVAILABLE`: the six, plain and labeled, are answered, `LUSERS` in the same fixed form; `LINKS` gets `FAIL LINKS NETWORK_UNAVAILABLE`. |
 | `...::a_local_answer_waits_behind_the_connections_pending_request` | Behind an unanswered `WHO`: a `TIME`, a `MOTD`, the user-mode read and a labeled `LUSERS` each wait (a `PING` sent after them is answered first), and each reply follows the `WHO`'s reply once the coordinator answers it. |
+| `federation::edge::history::tests::lifecycle::a_local_answer_waits_while_a_history_send_commits` | A `TIME` sent while a `CHATHISTORY`'s first send is being committed, before its request is registered, is not answered at once; the completion of the query's last page releases it. |
+| `...::a_local_answer_waits_between_history_pages` | A `TIME` sent between two pages of a `CHATHISTORY`, while the next page's send is being committed, is released only by the last page. |
 | `...::a_local_query_needs_the_session_in_the_projection` | Without the requester's session in the projection each query is refused with `RegistrationRequired` and nothing is forwarded. |
 | `...::a_local_query_needs_a_registered_connection` | With the session projected but no registered connection to answer under, `TIME` is refused with `RegistrationRequired`. |
 | `...::a_local_query_is_charged_as_a_registered_command` | With the requester's registered-command bucket exhausted, each query is refused with `ServerBusy`. |
@@ -104,7 +108,9 @@ With the counted `LUSERS` form restored (`query_render.rs`,
 every test kept, the active and the partitioned edge tests fail, because the
 reply no longer ends with the fixed form's `255`, and
 `edges_answer_lusers_in_one_fixed_form` fails because the two edges' replies
-differ.
+differ. With the `CHATHISTORY` rule removed (`federation/edge/request.rs` and
+`federation/edge/history.rs` at `8ebe355`) and the tests kept, both history
+ordering tests fail: the `TIME` is answered at once.
 
 ## Coverage
 
@@ -115,10 +121,7 @@ now returns its reply instead of sending it; its reason is unchanged. Two
 release regions are new: `runtime-edge-local-information-queries` binds
 `is_local_information_query` and `runtime-edge-local-information-answer`
 binds `local_information`. Other regions in the changed files moved with
-their spans unchanged. With the fixed `LUSERS` form, the release region
-`runtime-edge-static-lusers` binds `render_static_lusers`, and
-`runtime-edge-local-information-answer` is respanned with its reason
-restated; the inventories keep 1,011 files. Over the runtime library tests at this branch
+their spans unchanged. Over the runtime library tests at `415f7c6`
 (`RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime --lib
 --all-features --branch --locked`, 2,683 passed), scored with
 `check-coverage.py`'s counting:
@@ -132,6 +135,12 @@ restated; the inventories keep 1,011 files. Over the runtime library tests at th
 | `served_while_unavailable` | regions 6/6, branches 2/2 |
 | `route_command` | regions 78/88, branches 16/16 |
 | `dispatch_one` | regions 17/17 |
+
+In the review fix round, the release region `runtime-edge-static-lusers`
+binds `render_static_lusers`, the fixed `LUSERS` form;
+`runtime-edge-local-information-answer` is respanned with its reason
+restated, and the regions in the changed files moved with their spans
+unchanged. The inventories keep 1,011 files.
 
 ## Compatibility
 
@@ -186,6 +195,10 @@ own after the commits above:
 - `LUSERS` on an edge takes one fixed form (decision D-35, which replaced the
   counted form of D-28), described under Fix, with its tests under The
   regressions and its revert under The fix, reverted.
+- A `CHATHISTORY` whose record is being committed counts as work in flight,
+  so a local answer, like any later command of the connection, waits until
+  the query's last page; described under Fix, with its tests and revert in
+  the same sections.
 
 Validation of the fixed `LUSERS` form, from the repository root before its
 commit:
@@ -195,6 +208,18 @@ commit:
 | `cargo fmt --all --check` | clean |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,159 passed (1 slow), 21 skipped |
+| `python3 scripts/check-source.py check` | ok |
+| coverage policy refresh: both inventories, re-anchoring, both audits and self-tests | ok |
+| the SDK program's fast gate (59 commands) on the staged tree | every command passes |
+
+Validation of the `CHATHISTORY` rule, from the repository root before its
+commit:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-server --all-features --locked` | 3,161 passed (3 slow), 21 skipped |
 | `python3 scripts/check-source.py check` | ok |
 | coverage policy refresh: both inventories, re-anchoring, both audits and self-tests | ok |
 | the SDK program's fast gate (59 commands) on the staged tree | every command passes |
