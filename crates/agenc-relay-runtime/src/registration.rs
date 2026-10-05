@@ -1373,6 +1373,15 @@ impl RegistrationRouter {
                     }
                 }
             }
+            EdgeCompletion::MessageCommitted {
+                generation,
+                frames,
+                echo_permits,
+                message,
+            } => {
+                self.deliver_edge_replies(context, generation, frames, (0, None), message);
+                drop(echo_permits);
+            }
             EdgeCompletion::JoinCommitted {
                 generation,
                 frames,

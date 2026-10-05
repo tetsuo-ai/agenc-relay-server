@@ -15,6 +15,7 @@ mod history;
 mod join_echo;
 mod journal;
 mod journal_retry;
+mod message_echo;
 mod ordinary_batch;
 pub(crate) use render::prefix as source_prefix;
 mod render;

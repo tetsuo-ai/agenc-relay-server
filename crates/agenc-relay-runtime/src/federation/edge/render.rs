@@ -264,6 +264,14 @@ pub(super) fn render_event_strict(
             }
             echo = Some(captured);
         }
+        super::message_echo::capture(
+            edge,
+            context,
+            header,
+            event,
+            (*user_id, generation, capabilities.as_ref()),
+            &mut frames,
+        )?;
         fanout.append(context, generation, frames)?;
     }
     Ok(echo)
@@ -452,7 +460,21 @@ fn frames_for(
             }
         }
         ProjectedEvent::MessageDelivered(record) => {
-            if record.sender.user_id == recipient && !enabled(capabilities, "echo-message") {
+            // A channel message reaches every member, the sender only under
+            // echo-message, and a TAGMSG only a recipient that negotiated
+            // message-tags. A direct message reaches its target only, its
+            // sender too when it is the target and negotiated echo-message:
+            // that matches the coordinator, which does not yet echo a direct
+            // message to its sender as echo-message requires (a recorded
+            // deviation; the fix for every role is on the owner's list).
+            let addressed = match record.target {
+                DeliveryTarget::Channel(_) => true,
+                DeliveryTarget::User(target) => target == recipient,
+            };
+            if !addressed
+                || (record.sender.user_id == recipient && !enabled(capabilities, "echo-message"))
+                || (record.kind == MessageKind::Tagmsg && !enabled(capabilities, "message-tags"))
+            {
                 return Ok(Vec::new());
             }
             let target = match record.target {
