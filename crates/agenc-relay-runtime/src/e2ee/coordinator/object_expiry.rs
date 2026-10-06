@@ -30,6 +30,7 @@ use agenc_relay_e2ee::limits::{
     ACKED_E2EE_EVENT_REPLAY_TARGET_SECONDS, SEQUENCER_RECORD_RETENTION_SECONDS,
     WELCOME_RETENTION_SECONDS,
 };
+use agenc_relay_e2ee::object::ArcWireObjectKind;
 use agenc_relay_storage::e2ee_records::{
     EXPIRY_PROGRESS_ROW_KIND, ObjectExpiryProgressRow, ObjectOwnerRow, RetentionClass,
     UNDATED_SECOND, object_key,
@@ -320,6 +321,9 @@ fn release(state: &mut CompanionState, change: &Change) {
     };
     state.object_memory.remove(&change.id);
     state.object_bytes = state.object_bytes.saturating_sub(bytes.len());
+    if change.kind == ArcWireObjectKind::DeviceRoster.value() {
+        super::roster_snapshots::forget(state, &change.id, &bytes);
+    }
 }
 
 /// The `object-expiry/v1` row this pass stages at the batch revision.

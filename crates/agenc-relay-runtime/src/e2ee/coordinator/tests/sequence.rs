@@ -48,6 +48,7 @@ mod core_bindings;
 mod leaf_membership;
 mod object_expiry;
 mod owners;
+mod retention;
 mod review_reload;
 
 mod sequencer_eligibility;

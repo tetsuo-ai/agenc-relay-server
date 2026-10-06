@@ -6,7 +6,24 @@
 //! packages and claims, attach challenges, mailbox items and tokens, replay
 //! rows, and the outbox and barrier rows of delivered events. The owning set
 //! is derived from those rows, never declared separately, so one derivation
-//! serves live batches and startup reconstruction alike. Each object's
+//! serves live batches and startup reconstruction alike. A route row also
+//! holds the binding package of the binding it names (companion 11.7 and
+//! 15): the batch that binds the route, or installs it at a ReInit
+//! activation, stages that package, every later rewrite of the row keeps it,
+//! since a route's binding never changes in place, and startup derives it
+//! from the package the route was restored from. Only the row's deletion
+//! releases it. A route row also holds the device rosters its conversation's
+//! statements name (companion 9.3, 9.4, 13.7.3 and 15; `roster_holds`): the
+//! roster heads its binding names, the roster each stored leaf-membership
+//! proof names, and, for each root a retained policy names, the earliest
+//! retained roster of that root that verifies the policy, each charged to
+//! the conversation. The batch that stores the statement acquires them and
+//! every later rewrite of the row keeps them, also once a later proof
+//! replaces the proof that named one; startup derives them from the
+//! statements each restored route holds and keeps every roster whose stored
+//! account records that route row as a holder. An account's roster row owns
+//! only its current roster, so a replaced roster that no live conversation
+//! names retires when the account replaces it. Each object's
 //! `owner/v1/` row persists what the rows cannot say: the retention class the
 //! owners imply, the trusted time of acceptance, and the trusted time the last
 //! owner retired. The per-conversation and global disk quotas are charged from
@@ -16,8 +33,14 @@
 
 use super::CompanionState;
 use crate::state_core::durable::AccountServiceDurableWrite as Write;
-use agenc_relay_e2ee::limits::{MAX_STORED_BYTES_PER_CONVERSATION, RECOVERY_HEADROOM_BYTES};
-use agenc_relay_e2ee::object::{ArcWireObject, ObjectId};
+use agenc_relay_crypto::SemanticHashDomain;
+use agenc_relay_e2ee::ids::semantic_id_of;
+use agenc_relay_e2ee::limits::{
+    MAX_BINDING_OBJECT, MAX_STORED_BYTES_PER_CONVERSATION, RECOVERY_HEADROOM_BYTES,
+};
+use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
+use agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage;
+use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode as Code;
 use agenc_relay_storage::e2ee_records::delivery_recovery::DeliveryRecoveryRow;
 use agenc_relay_storage::e2ee_records::delivery_recovery::outbox::OUTBOX_PREFIX;
@@ -223,9 +246,22 @@ fn invalid<E>(_: E) -> Code {
 /// The objects one table-23 row owns. A row kind that names no object owns
 /// nothing; an undecodable row is refused.
 pub(crate) fn owned_by(key: &StoredKey, kind: u16, body: &[u8]) -> Result<Vec<Owned>, Code> {
+    owned_by_in_batch(key, kind, body, &BTreeMap::new())
+}
+
+/// [`owned_by`] for a row written by a batch that stages the binding
+/// packages `staged`, by binding identifier: a route row also acquires the
+/// package of the binding it names when its batch stages it, as the batch
+/// that binds a route or installs a ReInit successor does.
+fn owned_by_in_batch(
+    key: &StoredKey,
+    kind: u16,
+    body: &[u8],
+    staged: &BTreeMap<[u8; 32], [u8; 32]>,
+) -> Result<Vec<Owned>, Code> {
     let bytes = key.as_bytes();
     Ok(match kind {
-        ROUTE_ROW_KIND => route_owned(key, body)?,
+        ROUTE_ROW_KIND => route_owned(key, body, staged)?,
         CLAIM_ROW_KIND => claim_owned(body)?,
         SEQUENCER_ROW_KIND => sequencer_owned(key, body)?,
         DIRECTORY_ROW_KIND => directory_owned(body)?,
@@ -243,15 +279,44 @@ pub(crate) fn owned_by(key: &StoredKey, kind: u16, body: &[u8]) -> Result<Vec<Ow
     })
 }
 
-fn route_owned(key: &StoredKey, body: &[u8]) -> Result<Vec<Owned>, Code> {
+fn route_owned(
+    key: &StoredKey,
+    body: &[u8],
+    staged: &BTreeMap<[u8; 32], [u8; 32]>,
+) -> Result<Vec<Owned>, Code> {
     let row = RouteRow::decode(body).map_err(invalid)?;
     let conversation = RouteRow::parse_key(key).map_err(invalid)?;
     let id = *ObjectId::compute(&row.route_state).as_bytes();
-    Ok(vec![owned(
-        id,
-        RetentionClass::SecurityProof,
-        Some(conversation),
-    )])
+    let package = staged.get(&row.binding_id).copied();
+    Ok(std::iter::once(id)
+        .chain(package)
+        .map(|id| owned(id, RetentionClass::SecurityProof, Some(conversation)))
+        .collect())
+}
+
+/// The binding identifier of a staged `conversation_binding` object, or
+/// `None` for bytes that are not a decodable binding package.
+fn staged_binding_id(bytes: &[u8]) -> Option<[u8; 32]> {
+    let mut budget = DecodeBudget::new(MAX_BINDING_OBJECT, 1 << 16);
+    let object = ArcWireObject::decode_kind(
+        bytes,
+        Some(ArcWireObjectKind::ConversationBinding),
+        &mut budget,
+    )
+    .ok()?;
+    let mut budget = DecodeBudget::new(MAX_BINDING_OBJECT, 1 << 16);
+    let package = ArcConversationBindingPackage::decode_exact(object.body(), &mut budget).ok()?;
+    semantic_id_of(SemanticHashDomain::BindingId, &package.binding.tbs).ok()
+}
+
+/// Whether a rewrite of the row `owner` keeps holding an object of `kind`
+/// that its new body no longer names: a route row keeps its binding package
+/// and the rosters its conversation's statements name, while a superseded
+/// route state is released. Only the row's deletion releases what it keeps.
+fn kept_on_rewrite(owner: &[u8], kind: u8) -> bool {
+    owner.starts_with(prefix::ROUTE)
+        && (kind == ArcWireObjectKind::ConversationBinding.value()
+            || kind == ArcWireObjectKind::DeviceRoster.value())
 }
 
 fn claim_owned(body: &[u8]) -> Result<Vec<Owned>, Code> {
@@ -532,13 +597,14 @@ fn account_of<'a>(
 /// quota admitted it; a refusal leaves the batch unstaged.
 pub(crate) fn stage(
     state: &CompanionState,
+    network_id: &[u8; 32],
     writes: &[Write],
     now: u64,
     security_mutation: bool,
     global_limit: u64,
 ) -> Result<Staged, Code> {
     let invalid = |_| Code::InvalidFragment;
-    let touched = derive(state, writes, now)?;
+    let touched = derive(state, network_id, writes, now)?;
     check_quotas(state, &touched, security_mutation, global_limit)?;
     let mut staged_writes = Vec::with_capacity(touched.len());
     for (id, account) in &touched {
@@ -582,6 +648,7 @@ pub(crate) fn stage(
 /// undated retirement.
 fn derive(
     state: &CompanionState,
+    network_id: &[u8; 32],
     writes: &[Write],
     now: u64,
 ) -> Result<BTreeMap<[u8; 32], Account>, Code> {
@@ -590,6 +657,8 @@ fn derive(
         state,
         staged: BTreeMap::new(),
     };
+    // The binding packages this batch stages, by binding identifier.
+    let mut staged_bindings = BTreeMap::new();
     for write in writes {
         let Some((TableId::E2eeObject, _, encoded)) = write.encoded_record() else {
             continue;
@@ -601,9 +670,14 @@ fn derive(
             .ok_or(Code::InvalidFragment)?;
         let row = ObjectRow::decode(value.body()).map_err(invalid)?;
         let id = *ObjectId::compute(&row.bytes).as_bytes();
-        let kind = row.kind().map_err(invalid)?.value();
+        let kind = row.kind().map_err(invalid)?;
+        if kind == ArcWireObjectKind::ConversationBinding
+            && let Some(binding_id) = staged_binding_id(&row.bytes)
+        {
+            staged_bindings.insert(binding_id, id);
+        }
         let size = u64::try_from(row.bytes.len()).map_err(|_| Code::RateLimited)?;
-        sizes.staged.insert(id, (kind, size));
+        sizes.staged.insert(id, (kind.value(), size));
     }
 
     let mut touched: BTreeMap<[u8; 32], Account> = BTreeMap::new();
@@ -622,11 +696,16 @@ fn derive(
                     return Err(Code::InvalidFragment);
                 }
                 let owner = key.as_bytes().to_vec();
-                let new: Vec<Owned> = owned_by(key, value.record_kind(), value.body())?;
+                let new: Vec<Owned> =
+                    owned_by_in_batch(key, value.record_kind(), value.body(), &staged_bindings)?;
                 let named: BTreeSet<[u8; 32]> = new.iter().map(|o| o.object_id).collect();
                 // Every object the index names is accounted, so the account exists.
                 for previous in state.owners.owned_by(&owner).into_iter().flatten() {
-                    if !named.contains(previous) {
+                    let kept = state
+                        .owners
+                        .account(previous)
+                        .is_some_and(|account| kept_on_rewrite(&owner, account.kind));
+                    if !named.contains(previous) && !kept {
                         account_of(&sizes, &mut touched, *previous, now)?
                             .ok_or(Code::InvalidFragment)?
                             .owners
@@ -661,6 +740,7 @@ fn derive(
             _ => {}
         }
     }
+    dated |= hold_named_rosters(state, network_id, writes, &sizes, &mut touched, now)?;
     // An object put without any owner is accounted as already retired.
     for id in sizes.staged.keys() {
         if !touched.contains_key(id) && state.owners.account(id).is_none() {
@@ -685,6 +765,44 @@ fn derive(
         }
     }
     Ok(touched)
+}
+
+/// Makes the route row of each statement's conversation a holder, charged to
+/// that conversation, of every roster the statements `writes` store name
+/// (`roster_holds`). A roster whose account already lists
+/// `MAX_RECORD_REFERENCES` owners is retained by them and takes no further
+/// holder, so naming it refuses no batch. Returns whether a holder was
+/// added, which needs a trusted time.
+fn hold_named_rosters(
+    state: &CompanionState,
+    network_id: &[u8; 32],
+    writes: &[Write],
+    sizes: &Sizes<'_>,
+    touched: &mut BTreeMap<[u8; 32], Account>,
+    now: u64,
+) -> Result<bool, Code> {
+    let mut dated = false;
+    for (conversation, roster) in super::roster_holds::of_batch(state, network_id, writes) {
+        let holder = RouteRow::key(&conversation)
+            .map_err(invalid)?
+            .as_bytes()
+            .to_vec();
+        let current = touched
+            .get(&roster)
+            .or_else(|| state.owners.account(&roster));
+        if current.is_some_and(|account| {
+            account.owners.contains_key(&holder) || account.owners.len() >= MAX_RECORD_REFERENCES
+        }) {
+            continue;
+        }
+        let held = account_of(sizes, touched, roster, now)?.map(|account| {
+            account.retention = stronger(account.retention, RetentionClass::SecurityProof);
+            account.owners.insert(holder, Some(conversation));
+            account.retired_at = None;
+        });
+        dated |= held.is_some();
+    }
+    Ok(dated)
 }
 
 /// Charges every touched conversation and the global ceiling before the batch
@@ -740,6 +858,10 @@ pub(crate) struct Rebuild {
     objects: BTreeMap<[u8; 32], (u8, u64)>,
     stored: BTreeMap<[u8; 32], (ObjectOwnerRow, BTreeSet<OwnerKey>)>,
     derived: BTreeMap<[u8; 32], DerivedOwners>,
+    /// The conversations whose route rows were read, by row key.
+    routes: BTreeMap<OwnerKey, [u8; 32]>,
+    /// The network whose root chains verify the rosters a policy names.
+    network_id: [u8; 32],
     diagnostics: Diagnostics,
 }
 
@@ -772,6 +894,12 @@ impl Diagnostics {
 }
 
 impl Rebuild {
+    /// The reconstruction of `network_id`'s store.
+    pub(crate) const fn for_network(mut self, network_id: [u8; 32]) -> Self {
+        self.network_id = network_id;
+        self
+    }
+
     /// Records the identity, kind and size of one retained object.
     pub(crate) fn admit_object(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
         let parsed = ObjectRow::decode(value.body()).ok().and_then(|row| {
@@ -820,6 +948,11 @@ impl Rebuild {
             self.diagnostics.undecodable += 1;
             Vec::new()
         });
+        if value.record_kind() == ROUTE_ROW_KIND
+            && let Ok(conversation) = RouteRow::parse_key(key)
+        {
+            self.routes.insert(key.as_bytes().to_vec(), conversation);
+        }
         for item in items {
             let entry = self
                 .derived
@@ -837,6 +970,7 @@ impl Rebuild {
     /// keeps a trusted acceptance time only when the stored row proved the
     /// same object.
     pub(crate) fn finish(mut self, state: &mut CompanionState) -> Diagnostics {
+        self.derive_held(state);
         let mut ledger = Ledger::default();
         self.diagnostics.orphaned += self
             .stored
@@ -857,6 +991,95 @@ impl Rebuild {
         state.owners = ledger;
         sync_conversation_bytes(state);
         self.diagnostics
+    }
+}
+
+impl Rebuild {
+    /// Adds what a row holds beyond what its body names, from the state the
+    /// rows restored: each restored route's row holds the binding package
+    /// the route was restored from, every roster its conversation's
+    /// statements name (`roster_holds`) and every roster whose stored
+    /// account records it as a holder, each charged to the conversation.
+    fn derive_held(&mut self, state: &CompanionState) {
+        let network_id = &self.network_id;
+        let mut resolved = super::roster_holds::Resolved::new();
+        let mut packages = Vec::new();
+        let mut rosters: BTreeMap<[u8; 32], BTreeMap<OwnerKey, Option<[u8; 32]>>> = BTreeMap::new();
+        let restored = self.routes.iter().filter_map(|(owner, conversation)| {
+            Some((owner, conversation, state.conversations.get(conversation)?))
+        });
+        for (owner, conversation, retained) in restored {
+            packages.push((retained.binding_object_id, owner.clone(), *conversation));
+            let named =
+                super::roster_holds::of_conversation(state, network_id, retained, &mut resolved);
+            for roster in named {
+                let holders = rosters.entry(roster).or_default();
+                holders.insert(owner.clone(), Some(*conversation));
+            }
+        }
+        for (roster, recorded) in self.recorded_route_holders(state) {
+            rosters.entry(roster).or_default().extend(recorded);
+        }
+        for (object, owner, conversation) in packages {
+            let entry = self
+                .derived
+                .entry(object)
+                .or_insert((RetentionClass::SecurityProof, BTreeMap::new()));
+            entry.0 = stronger(entry.0, RetentionClass::SecurityProof);
+            entry.1.insert(owner, Some(conversation));
+        }
+        for (roster, holders) in rosters {
+            self.hold_roster(roster, holders);
+        }
+    }
+
+    /// Adds the route rows that hold `roster` to the rows that name it, up
+    /// to `MAX_RECORD_REFERENCES` owners in all, as a live batch adds no
+    /// holder beyond that: the holders its stored account records come
+    /// first, then the others in key order.
+    fn hold_roster(&mut self, roster: [u8; 32], holders: BTreeMap<OwnerKey, Option<[u8; 32]>>) {
+        let recorded = self.stored.get(&roster).map(|(_, references)| references);
+        let (first, rest): (Vec<_>, Vec<_>) = holders.into_iter().partition(|(holder, _)| {
+            recorded.is_some_and(|references| references.contains(holder))
+        });
+        let entry = self
+            .derived
+            .entry(roster)
+            .or_insert((RetentionClass::SecurityProof, BTreeMap::new()));
+        entry.0 = stronger(entry.0, RetentionClass::SecurityProof);
+        let room = MAX_RECORD_REFERENCES.saturating_sub(entry.1.len());
+        entry.1.extend(first.into_iter().chain(rest).take(room));
+    }
+
+    /// The restored route rows each stored roster account records as its
+    /// holders. A route row keeps every roster it acquired until its
+    /// deletion (`kept_on_rewrite`), so it still holds a roster that no
+    /// statement it restores names any more, such as the roster of a leaf
+    /// proof that a later proof replaced. Only an account whose kind and
+    /// size are those of the resident roster object counts.
+    fn recorded_route_holders(
+        &self,
+        state: &CompanionState,
+    ) -> BTreeMap<[u8; 32], BTreeMap<OwnerKey, Option<[u8; 32]>>> {
+        let roster = ArcWireObjectKind::DeviceRoster.value();
+        let mut held = BTreeMap::new();
+        for (id, (row, references)) in &self.stored {
+            if row.kind != roster || self.objects.get(id) != Some(&(row.kind, row.size)) {
+                continue;
+            }
+            let restored = references.iter().filter_map(|reference| {
+                let conversation = self.routes.get(reference)?;
+                state
+                    .conversations
+                    .contains_key(conversation)
+                    .then(|| (reference.clone(), Some(*conversation)))
+            });
+            let holders: BTreeMap<OwnerKey, Option<[u8; 32]>> = restored.collect();
+            if !holders.is_empty() {
+                held.insert(*id, holders);
+            }
+        }
+        held
     }
 }
 

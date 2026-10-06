@@ -1,9 +1,9 @@
 //! A ReInit after object expiry (companion 13.8): the attempt check, the
 //! activation and the restore of an installed successor read the facts of
 //! the old binding that the coordinator retained when it verified the
-//! binding, so the expiry of the roster snapshot that binding names, once
-//! the principal's roster has moved on, refuses none of them, and neither
-//! does a later rotation of the principal's account root.
+//! binding, so none of them needs the roster snapshot that binding names
+//! once the principal's roster has moved on, and a later rotation of the
+//! principal's account root refuses none of them either.
 
 #![forbid(unsafe_code)]
 
@@ -86,27 +86,21 @@ fn an_attempt_and_its_activation_follow_the_expiry_of_the_roster_the_binding_nam
 }
 
 #[test]
-fn an_installed_successor_restarts_after_the_roster_its_predecessor_named_expires() -> TestResult {
+fn an_installed_successor_restarts_without_the_roster_its_predecessor_named() -> TestResult {
     let mut fixture = Fixture::prepare()?;
     fixture.activate()?;
-    let (object, writes) = move_on_and_expire(&mut fixture.harness)?;
-    // The store loses the rows the passes deleted that name that roster:
-    // its object row and its owner row.
+    let (object, _) = move_on_and_expire(&mut fixture.harness)?;
+    // The restart reads a store without that roster: its object row and its
+    // owner row are removed.
     let names = |key: &agenc_relay_storage::StoredKey| {
         key.as_bytes().windows(32).any(|window| window == object)
     };
-    let mut deleted = 0;
-    for write in writes {
-        if let Write::Delete { table, key } = write
-            && names(&key)
-        {
-            fixture.harness.writes.retain(|stored| {
-                !matches!(stored, Write::Put { table: kept, key: name, .. } if *kept == table && *name == key)
-            });
-            deleted += 1;
-        }
-    }
-    assert!(deleted > 0, "the passes collect the replaced roster");
+    let before = fixture.harness.writes.len();
+    fixture
+        .harness
+        .writes
+        .retain(|stored| !matches!(stored, Write::Put { key, .. } if names(key)));
+    assert_eq!(fixture.harness.writes.len() + 2, before);
     let restarted = fixture.harness.reloaded()?;
     let state = &restarted.coordinator.state;
     assert_eq!(
