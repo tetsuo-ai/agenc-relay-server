@@ -4,7 +4,8 @@
 //! whose authorization carries the ReInit bit restores the ReInit phase at that
 //! finalization under the same identity checks; any other finalization head leaves the
 //! group open. A restored ReInit phase takes its authorized target only from the retained
-//! finalization record of its own state.
+//! finalization record of its own state. Whatever its kind, the head a route row names
+//! must be its last retained record.
 #![forbid(unsafe_code)]
 
 use super::*;
@@ -189,6 +190,76 @@ fn restored(record: &ArcSequencerRecord, kind: u16, row: &RouteRow) -> TestResul
     };
     let records = BTreeMap::from([(SEQUENCE, &head)]);
     Ok(restore_log_phase(&state, OLD, row, &records).map(|restored| restored.phase))
+}
+
+/// A candidate record row named `id`; a candidate head restores no phase, so
+/// its object is not read.
+fn candidate_row(id: [u8; 32]) -> RecordRow {
+    RecordRow {
+        record_object_id: [0x30; 32],
+        record_id: id,
+        record_kind: CANDIDATE_RECORD,
+        terminal: false,
+        predecessor_record_id: PREDECESSOR,
+    }
+}
+
+#[test]
+fn a_route_row_whose_head_is_not_its_last_record_is_refused() {
+    let state = CompanionState::default();
+    let earlier = candidate_row([0x31; 32]);
+    let last = candidate_row(ATTEMPT);
+    let records = BTreeMap::from([(SEQUENCE - 1, &earlier), (SEQUENCE, &last)]);
+    let phase = |row: &RouteRow| {
+        restore_log_phase(&state, OLD, row, &records).map(|restored| restored.phase)
+    };
+    assert_eq!(phase(&route_row()), Some(Phase::Open));
+    for (name, row) in [
+        (
+            "a later position",
+            RouteRow {
+                route_sequence: SEQUENCE + 1,
+                ..route_row()
+            },
+        ),
+        (
+            "an earlier record",
+            RouteRow {
+                route_sequence: SEQUENCE - 1,
+                sequencer_head_id: earlier.record_id,
+                ..route_row()
+            },
+        ),
+        (
+            "another identifier",
+            RouteRow {
+                sequencer_head_id: [0x32; 32],
+                ..route_row()
+            },
+        ),
+    ] {
+        assert_eq!(phase(&row), None, "{name}");
+    }
+    // A closed route's head is its close, which follows the last record.
+    let closed = RouteRow {
+        lifecycle: RowLifecycle::Tombstone,
+        sequencer_head_id: [0x33; 32],
+        route_sequence: SEQUENCE + 1,
+        close_id: Some([0x33; 32]),
+        ..route_row()
+    };
+    assert_eq!(
+        phase(&closed),
+        Some(Phase::Closed {
+            close_id: [0x33; 32]
+        })
+    );
+    // A route without a retained record has no recorded head.
+    let empty = BTreeMap::new();
+    assert_eq!(
+        restore_log_phase(&state, OLD, &route_row(), &empty).map(|restored| restored.phase),
+        Some(Phase::Open)
+    );
 }
 
 #[test]

@@ -156,12 +156,15 @@ fn abort(fixture: &mut Fixture) -> TestResult {
 #[test]
 fn a_reload_refuses_a_route_row_that_no_longer_matches_its_abort_record() -> TestResult {
     type RowEdit = fn(&mut RouteRow);
-    let edits: [(&str, RowEdit); 2] = [
+    let edits: [(&str, RowEdit); 3] = [
         ("another accepted state", |row| {
             row.accepted_state_id[0] ^= 1;
         }),
         ("another sequencer head", |row| {
             row.sequencer_head_id[0] ^= 1;
+        }),
+        ("another route sequence", |row| {
+            row.route_sequence = row.route_sequence.saturating_add(1);
         }),
     ];
     let mut unedited = Fixture::prepare()?;
@@ -187,6 +190,43 @@ fn a_reload_refuses_a_route_row_that_no_longer_matches_its_abort_record() -> Tes
         })?;
         assert!(fixture.harness.reloaded().is_err(), "{name}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_reload_refuses_a_route_row_rolled_back_before_its_reinit_finalization() -> TestResult {
+    // A route row whose head is not its last record restores nothing: here
+    // it names the bootstrap activation, the record before the ReInit Commit.
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
+    harness.activate_bootstrap(conversation)?;
+    let earlier = harness
+        .coordinator
+        .state
+        .logs
+        .get(&conversation)
+        .ok_or("log")?
+        .head();
+    harness.finalize_reinit(conversation)?;
+    assert!(matches!(
+        harness
+            .reloaded()?
+            .coordinator
+            .state
+            .logs
+            .get(&conversation)
+            .map(SequencerLog::phase),
+        Some(Phase::Reinit { .. })
+    ));
+    let key = RouteRow::key(&conversation)?;
+    rewrite(&mut harness, &key, |body| {
+        let mut row = RouteRow::decode(&body)?;
+        row.route_sequence = earlier.sequence;
+        row.sequencer_head_id = earlier.record_id;
+        row.accepted_state_id = earlier.record_id;
+        Ok(row.encode()?)
+    })?;
+    assert!(harness.reloaded().is_err());
     Ok(())
 }
 

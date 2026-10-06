@@ -1469,18 +1469,33 @@ struct RestoredLogPhase {
 
 /// The phase the durable head restores (`head_log_phase`), except that a
 /// group the head leaves open whose log went on with ordinary records after
-/// a finalized ReInit Commit is retired (`ordinary_after_reinit`).
+/// a finalized ReInit Commit is retired (`ordinary_after_reinit`). A route
+/// row whose head is not its last retained record restores nothing.
 fn restore_log_phase(
     state: &CompanionState,
     conversation_id: [u8; 32],
     row: &RouteRow,
     records: &BTreeMap<u64, &RecordRow>,
 ) -> Option<RestoredLogPhase> {
+    if !head_is_last_record(row, records) {
+        return None;
+    }
     let mut restored = head_log_phase(state, conversation_id, row, records)?;
     if restored.phase == Phase::Open && ordinary_after_reinit(state, records) {
         restored.phase = Phase::Retired;
     }
     Some(restored)
+}
+
+/// Whether the head that route `row` names is its last retained record, at
+/// that record's route sequence and under its identifier. A closed route's
+/// head is its close, which is not a retained record, and a route without a
+/// retained record has no recorded head.
+fn head_is_last_record(row: &RouteRow, records: &BTreeMap<u64, &RecordRow>) -> bool {
+    row.close_id.is_some()
+        || records.last_key_value().is_none_or(|(sequence, record)| {
+            *sequence == row.route_sequence && record.record_id == row.sequencer_head_id
+        })
 }
 
 /// The finalization of a ReInit Commit, or a ReInit receipt or terminal, at

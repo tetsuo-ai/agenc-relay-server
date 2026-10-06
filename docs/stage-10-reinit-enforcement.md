@@ -9,9 +9,10 @@ P-01) assigned to the sequencer and the coordinator, with the shared helper
 of [the ReInit target helper record](stage-10-reinit-target-helper.md)
 (P-02). The work lands in small commits: the first enters the ReInit phase
 at the ReInit finalization and checks attempts against it, the second
-installs the successor in the activation's own transaction, and the third
+installs the successor in the activation's own transaction, the third
 restores the ReInit state a coordinator stored under the previous profile
-(G-08). No specification, profile hash, registry entry, named limit, reply
+(G-08), and the fourth ties every restored route's head to its last
+retained record. No specification, profile hash, registry entry, named limit, reply
 code, wire object or storage generation changed.
 
 ## The ReInit phase begins at the ReInit finalization
@@ -254,6 +255,22 @@ Section 9 still says only that the persistent format is unchanged; the
 ledger is a pinned normative artifact, so its downgrade sentence is left for
 the next normative revision (Q-RD-20).
 
+## A restored head is the route's last record (fourth commit)
+
+Companion 13.8 step 2 closes the old group for good, so the phase a restart
+restores must be the phase of the route's actual last record.
+`restore_log_phase` now first requires `head_is_last_record`: the head the
+route row names is its last retained record, at that record's route
+sequence and under its identifier. A closed route's head is its close,
+which is not a retained record, and a route without a retained record (a
+genesis anchor, or a successor anchored at its activation) has no recorded
+head. A route row that names an earlier record, a position after the last
+one or another identifier at that position restores nothing, so startup
+refuses the store, as it does for the other identity disagreements. Stores
+this coordinator writes, including those of the previous profile, always
+name their last record: the route row and the record are written in one
+batch.
+
 ## The Stage 08 scenarios
 
 `crates/agenc-relay-server/tests/stage_eight_e2ee/encrypted_clients/reinit.rs`
@@ -430,6 +447,16 @@ Third commit:
   restores in the ReInit phase, and a route row that names another accepted
   state or another head than its abort record refuses startup.
 
+Fourth commit:
+
+- `tests/startup_heads.rs`: a route row whose head is its last record
+  restores, and one that names a later position, an earlier record or
+  another identifier restores nothing; a closed route and a route without
+  records restore.
+- `successor/row_mismatch.rs`: a route row of an aborted attempt that names
+  a later route sequence, and a route row rolled back from the ReInit
+  finalization to the bootstrap activation before it, refuse startup.
+
 ## Requirements
 
 No binding changes (Q-PR-1 of the P-02 lane): a clause's status follows its
@@ -477,6 +504,10 @@ The third commit adds six regions,
 and re-reviews and respans `runtime-recovery-lineage-resume`, whose refusal
 now names the retired phase. The policy holds 1,203 reviewed spans and both
 inventories 1,021 files.
+
+The fourth commit adds `p04-startup-head-is-last-record` and re-reviews and
+respans `p04-startup-restore-log-phase`; the policy holds 1,204 reviewed
+spans.
 
 ## Persistence
 
@@ -568,6 +599,12 @@ retired, the seven row conditions of a previous-profile terminal, a retired
 predecessor's successor kept in its phase or `retire_route` doing nothing, a
 retired lineage resumed, and a retired route that is no tombstone) are all
 killed, so the campaign kills 23 of its 23 entries.
+
+The fourth commit's campaign reverts its rule, which fails 3 tests (the
+unit test of the head position, the aborted attempt's later route sequence
+and the rolled-back route row), and kills its four single-condition
+mutations (the route sequence or the identifier not compared, a closed
+route held to the rule, a route without records refused), 5 of 5 entries.
 
 ## Limitations
 
@@ -698,6 +735,27 @@ On the tree of the third commit, before it was committed:
   run passed all 3,084 tests.
 - `python3 scripts/check-coverage.py audit` and `self-test` on both
   policies: passed (21 and 1,203 reviewed spans).
+- The program's fast static gate (59 commands): all passed.
+
+On the tree of the fourth commit, before it was committed:
+
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  and `python3 scripts/check-source.py check`: clean.
+- `cargo nextest run -p agenc-relay-runtime --lib --all-features --locked`:
+  2,721 passed, 1 skipped (816 of them E2EE tests, the ten restore tests
+  over the `70c832c` stores among them).
+- `cargo nextest run -p agenc-relay-domain -p agenc-relay-testkit --all-features --locked`:
+  391 passed.
+- `cargo nextest run -p agenc-relay-server --test stage_eight_e2ee --all-features --locked`:
+  47 passed, 17 skipped.
+- `bash scripts/run-stage-eight-model.sh` and
+  `bash scripts/run-stage-eight-transcripts.sh`: passed.
+- The mutation campaign above: 5 of 5 killed.
+- `RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime -p agenc-relay-domain --all-features --branch --locked --json`:
+  `p04-startup-head-is-last-record` (11 of 11 regions) and the respanned
+  `p04-startup-restore-log-phase` (20 of 20) complete.
+- `python3 scripts/check-coverage.py audit` and `self-test` on both
+  policies: passed (21 and 1,204 reviewed spans).
 - The program's fast static gate (59 commands): all passed.
 
 The workspace test run and the full `bash scripts/check-stage-nine.sh` run at
