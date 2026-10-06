@@ -12,8 +12,8 @@ at the ReInit finalization and checks attempts against it, the second
 installs the successor in the activation's own transaction, the third
 restores the ReInit state a coordinator stored under the previous profile
 (G-08), and the fourth ties every restored route's head to its last
-retained record. No specification, profile hash, registry entry, named limit, reply
-code, wire object or storage generation changed.
+retained record. No specification, profile hash, registry entry, named
+limit, reply code, wire object or storage generation changed.
 
 ## The ReInit phase begins at the ReInit finalization
 
@@ -267,9 +267,9 @@ genesis anchor, or a successor anchored at its activation) has no recorded
 head. A route row that names an earlier record, a position after the last
 one or another identifier at that position restores nothing, so startup
 refuses the store, as it does for the other identity disagreements. Stores
-this coordinator writes, including those of the previous profile, always
-name their last record: the route row and the record are written in one
-batch.
+this coordinator writes always name their last record, because the route
+row and the record are written in one batch, and so do the ten stores of
+the previous profile's coordinator that the G-08 restore test reads.
 
 ## The Stage 08 scenarios
 
@@ -434,11 +434,12 @@ Third commit:
   restored, and its stored finalization request is
   `E2EE_FINALITY_REQUIRED`; a group closed after it stays closed. On every
   such route a candidate and an application object are
-  `E2EE_ROUTE_INVALID`, an attempt is `E2EE_FINALITY_REQUIRED` or, under a
-  previous-profile authority, `E2EE_BINDING_AUTH_INVALID`, a reservation of
-  the channel is `E2EE_GROUP_CONFLICT` and plaintext stays refused, and no
-  retired or ReInit-phase route resumes a recovery lineage. Eight row
-  disagreements around a retired head (the route row's
+  `E2EE_ROUTE_INVALID`, an attempt is `E2EE_FINALITY_REQUIRED`, or
+  `E2EE_BINDING_AUTH_INVALID` under a previous-profile authority and on the
+  bound successor, whose leaves the attached device does not hold, a
+  reservation of the channel is `E2EE_GROUP_CONFLICT` and plaintext stays
+  refused, and no retired or ReInit-phase route resumes a recovery lineage.
+  Eight row disagreements around a retired head (the route row's
   head, the record row's identifier, kind, terminal flag and predecessor,
   the kind of the record before it, an object of another kind and a missing
   object) each refuse startup, while the unedited rows restore, and a head
