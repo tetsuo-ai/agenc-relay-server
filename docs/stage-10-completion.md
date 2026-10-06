@@ -353,6 +353,10 @@ restore of ReInit state stored under the previous profile, which keeps such
 groups closed, and the Stage 08 model's ReInit finalization (P-04 with G-07
 and G-08, SDK program, outside master #35), are recorded in
 [the ReInit enforcement record](stage-10-reinit-enforcement.md).
+The route row's holding of its encrypted conversation's binding package for
+as long as the route exists, with startup deriving the same holding (D-39,
+SDK program, outside master #35), is recorded in
+[the binding retention record](stage-10-binding-retention.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

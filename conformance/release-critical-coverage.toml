@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1026
-reviewed_source_sha256 = "cc13138f77e14431cf4b913891a2b63cb90a5a4b1126a5c4948e93211d6e43df"
+reviewed_source_files = 1028
+reviewed_source_sha256 = "2fed44cc024759f98bcfb308cb21d57398ee8be91672fc5fe62d09605b3ae4fc"
 deferred = []
 
 [[region]]
@@ -13447,21 +13447,21 @@ id = "e2ee-owner-derivation"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
 item = "strength"
-source_sha256 = "94af7861a1901e91517848e032aa3c3d4721d18919ffbef51bc1ffdf646b3117"
-start_line = 198
-end_line = 372
-span_sha256 = "1e53c8f7eebd070758ce03b4f6adbcee2df51add2870c2d3c0b28e196d88f37c"
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 210
+end_line = 424
+span_sha256 = "7ed17fbdd5df73ae89a95fe85aaad5edb067b04c2d63b2e323dbcfc90e001e60"
 metric = "branches"
-reason = "Every table-23 row kind that names a retained object yields exactly its objects, retention class and conversation charge; an undecodable row is refused and a row family that names no object owns nothing."
+reason = "Every table-23 row kind that names a retained object yields exactly its objects, retention class and conversation charge, and a route row also the binding package of its binding that its batch stages, which its rewrites keep; an undecodable row is refused and a row family that names no object owns nothing."
 
 [[region]]
 id = "e2ee-owner-ledger-index"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
 item = "total_bytes"
-source_sha256 = "94af7861a1901e91517848e032aa3c3d4721d18919ffbef51bc1ffdf646b3117"
-start_line = 113
-end_line = 153
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 125
+end_line = 165
 span_sha256 = "9bafd691b58a0b49d2c581f64dded0b35f80e0339d669da9a8a7c5f5a7debcb7"
 metric = "regions"
 reason = "Installing or replacing an account keeps the owner index, per-conversation charge and global total exact, releasing the previous account's charges before adding the new ones."
@@ -13471,21 +13471,21 @@ id = "e2ee-owner-batch-derivation"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
 item = "Staged"
-source_sha256 = "94af7861a1901e91517848e032aa3c3d4721d18919ffbef51bc1ffdf646b3117"
-start_line = 425
-end_line = 600
-span_sha256 = "b4ca4b5c0bc2f870de5cd01ba4467fd6f8f4832fe5525f778ccd049f57b7495e"
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 477
+end_line = 654
+span_sha256 = "8720a41b7a3556064e75ba2c74f077fb3cf1c7d3d33b5bb7f4b5858912a9d94b"
 metric = "branches"
-reason = "A batch's accounts are derived from its row puts and deletes against the retained ledger: a reconstructed account takes the batch time as its floor, an unretained object charges nothing, a forged owner row and a changing batch without a trusted clock are refused, and the last owner's retirement is dated."
+reason = "A batch's accounts are derived from its row puts and deletes against the retained ledger: a reconstructed account takes the batch time as its floor, an unretained object charges nothing, a forged owner row and a changing batch without a trusted clock are refused, the binding packages it stages are known by binding identifier, and the last owner's retirement is dated."
 
 [[region]]
 id = "e2ee-owner-stage-rows"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
 item = "Sizes"
-source_sha256 = "94af7861a1901e91517848e032aa3c3d4721d18919ffbef51bc1ffdf646b3117"
-start_line = 465
-end_line = 509
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 517
+end_line = 561
 span_sha256 = "d1d84231f3122c76fd7f2eebb3d278ba43286ed7b017ec0a5df6ea6236235137"
 metric = "branches"
 reason = "Owner rows are written only after the quotas admit the batch, with every owning row as a bounded typed reference, so a refusal stages nothing."
@@ -13495,24 +13495,24 @@ id = "e2ee-owner-quotas"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
 item = "derive"
-source_sha256 = "94af7861a1901e91517848e032aa3c3d4721d18919ffbef51bc1ffdf646b3117"
-start_line = 605
-end_line = 645
-span_sha256 = "f5b53a4fc3962f0239acb981bde0d82c183dc27da4782884af543d471c2d6f3c"
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 664
+end_line = 709
+span_sha256 = "ed4b93c80ab692803c0d7bbaeba719ba281e659a83bb05bb89336acc247657a2"
 metric = "branches"
-reason = "An object is charged once per conversation and once globally; the conversation quota, the recovery headroom of a proof-producing batch and the global ceiling refuse before any row is staged, and retirements never need headroom."
+reason = "An object is charged once per conversation and once globally; the conversation quota, the recovery headroom of a proof-producing batch and the global ceiling refuse before any row is staged, and retirements never need headroom; a row's rewrite releases only the objects the row does not keep."
 
 [[region]]
 id = "e2ee-owner-reconstruction"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
 item = "check_quotas"
-source_sha256 = "94af7861a1901e91517848e032aa3c3d4721d18919ffbef51bc1ffdf646b3117"
-start_line = 686
-end_line = 826
-span_sha256 = "bc6071186b8c3853bba579429ede365c012ff49d5e2b007b1dac266bf8ee5a3c"
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 750
+end_line = 897
+span_sha256 = "71b165412df36636bee2c3d090daa78c4d2572818057de7088984e937fd8c98b"
 metric = "branches"
-reason = "Startup trusts a stored account only when it names exactly the rows that name its object with the object's kind, size and retirement; every other account is rebuilt from the rows with diagnostics and without an invented age."
+reason = "Startup trusts a stored account only when it names exactly the rows that name its object with the object's kind, size and retirement; every other account is rebuilt from the rows with diagnostics and without an invented age; each route row read is recorded, so it also holds the package its route restores from."
 
 [[region]]
 id = "e2ee-recovery-submission-verify"
@@ -14521,3 +14521,27 @@ end_line = 2537
 span_sha256 = "b67c5e50549a668088ee1d21e77aeebeeae6bee04c6be84aa93e0cdaf413bee8"
 metric = "branches"
 reason = "The welcome's RPL_LUSER* counters give the figures of the node's own LUSERS reply: an edge's fixed form with no count, a coordinator's count of the network's sessions, and a node without federation's count of its registered connections (Section 10.2 step 3)."
+
+[[region]]
+id = "retention-owner-staged-packages"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
+item = "derive"
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 659
+end_line = 663
+span_sha256 = "bc1c612f22190113f43c339618d4e6e7f030e457ca707f6e47fcbc13c1288129"
+metric = "branches"
+reason = "A batch knows each binding package it stages by the binding identifier its package names, and a staged binding object that does not decode as a package is known by none, so no route row acquires it."
+
+[[region]]
+id = "retention-owner-held-packages"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs"
+item = "derive_held"
+source_sha256 = "9c46b4ff93b4b51d4b6c2a691ea5aeb8685917a079183a6e4a1b4ac97efc714a"
+start_line = 939
+end_line = 957
+span_sha256 = "29b5285ebd616abe2845a79f099adbc4efaaa50480b8d0fa06cca1f0437bcc90"
+metric = "branches"
+reason = "Startup derives that each restored route's row holds, as a security proof charged to the conversation, the binding package the route was restored from, so the restart rebuilds exactly the holding live batches derived and an earlier store's package becomes held."

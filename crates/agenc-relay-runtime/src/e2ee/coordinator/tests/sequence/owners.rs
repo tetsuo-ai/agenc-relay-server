@@ -681,11 +681,35 @@ fn a_reconstructed_account_takes_its_first_trusted_batch_as_the_floor() -> TestR
     Ok(())
 }
 
+/// A binding package of `#other`, which no route holds, so a mailbox
+/// alone owns it once delivered.
+fn unbound_binding(harness: &Harness) -> TestResult<Vec<u8>> {
+    use super::super::support::{BindingSpec, binding_package, channel_route, root_fingerprint};
+    let fingerprint = root_fingerprint(&harness.principal.root)?;
+    let package = binding_package(&BindingSpec {
+        principals: std::slice::from_ref(&harness.principal),
+        route: channel_route(b"#other", fingerprint)?,
+        channel_instance_id: Some([79; 16]),
+        conversation_nonce: None,
+        group_id: [78; 32],
+        generation: 0,
+        previous_binding_id: [0; 32],
+        lock_sequence: 1,
+        plan_devices: vec![(&harness.account, fingerprint, DEVICE_ID[0])],
+        initial_policy_id: harness.initial_policy_id()?,
+        required_operational_policy_id: super::super::support::policy_id_of(
+            &harness.operational_policy,
+        )?,
+        sequencer_credential_id: harness.pinned_credential(),
+    })?;
+    super::super::wire(Kind::ConversationBinding, &package)
+}
+
 /// Every owner class the coordinator writes, in one sealed store.
 fn every_owner_class() -> TestResult<(Harness, [u8; 32])> {
     let (mut harness, conversation) = two_member_channel()?;
     finalize_both(&mut harness, conversation)?;
-    let binding = harness.binding_bytes()?;
+    let binding = unbound_binding(&harness)?;
     let mut parameters = account_param(&harness.account);
     parameters.extend_from_slice(&DEVICE_ID);
     let outcome = ok(harness.run(Op::DeliverBinding, &parameters, Some(&binding))?)?;

@@ -6,7 +6,13 @@
 //! packages and claims, attach challenges, mailbox items and tokens, replay
 //! rows, and the outbox and barrier rows of delivered events. The owning set
 //! is derived from those rows, never declared separately, so one derivation
-//! serves live batches and startup reconstruction alike. Each object's
+//! serves live batches and startup reconstruction alike. A route row also
+//! holds the binding package of the binding it names (companion 11.7 and
+//! 15): the batch that binds the route, or installs it at a ReInit
+//! activation, stages that package, every later rewrite of the row keeps it,
+//! since a route's binding never changes in place, and startup derives it
+//! from the package the route was restored from. Only the row's deletion
+//! releases it. Each object's
 //! `owner/v1/` row persists what the rows cannot say: the retention class the
 //! owners imply, the trusted time of acceptance, and the trusted time the last
 //! owner retired. The per-conversation and global disk quotas are charged from
@@ -16,8 +22,14 @@
 
 use super::CompanionState;
 use crate::state_core::durable::AccountServiceDurableWrite as Write;
-use agenc_relay_e2ee::limits::{MAX_STORED_BYTES_PER_CONVERSATION, RECOVERY_HEADROOM_BYTES};
-use agenc_relay_e2ee::object::{ArcWireObject, ObjectId};
+use agenc_relay_crypto::SemanticHashDomain;
+use agenc_relay_e2ee::ids::semantic_id_of;
+use agenc_relay_e2ee::limits::{
+    MAX_BINDING_OBJECT, MAX_STORED_BYTES_PER_CONVERSATION, RECOVERY_HEADROOM_BYTES,
+};
+use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
+use agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage;
+use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode as Code;
 use agenc_relay_storage::e2ee_records::delivery_recovery::DeliveryRecoveryRow;
 use agenc_relay_storage::e2ee_records::delivery_recovery::outbox::OUTBOX_PREFIX;
@@ -223,9 +235,22 @@ fn invalid<E>(_: E) -> Code {
 /// The objects one table-23 row owns. A row kind that names no object owns
 /// nothing; an undecodable row is refused.
 pub(crate) fn owned_by(key: &StoredKey, kind: u16, body: &[u8]) -> Result<Vec<Owned>, Code> {
+    owned_by_in_batch(key, kind, body, &BTreeMap::new())
+}
+
+/// [`owned_by`] for a row written by a batch that stages the binding
+/// packages `staged`, by binding identifier: a route row also acquires the
+/// package of the binding it names when its batch stages it, as the batch
+/// that binds a route or installs a ReInit successor does.
+fn owned_by_in_batch(
+    key: &StoredKey,
+    kind: u16,
+    body: &[u8],
+    staged: &BTreeMap<[u8; 32], [u8; 32]>,
+) -> Result<Vec<Owned>, Code> {
     let bytes = key.as_bytes();
     Ok(match kind {
-        ROUTE_ROW_KIND => route_owned(key, body)?,
+        ROUTE_ROW_KIND => route_owned(key, body, staged)?,
         CLAIM_ROW_KIND => claim_owned(body)?,
         SEQUENCER_ROW_KIND => sequencer_owned(key, body)?,
         DIRECTORY_ROW_KIND => directory_owned(body)?,
@@ -243,15 +268,42 @@ pub(crate) fn owned_by(key: &StoredKey, kind: u16, body: &[u8]) -> Result<Vec<Ow
     })
 }
 
-fn route_owned(key: &StoredKey, body: &[u8]) -> Result<Vec<Owned>, Code> {
+fn route_owned(
+    key: &StoredKey,
+    body: &[u8],
+    staged: &BTreeMap<[u8; 32], [u8; 32]>,
+) -> Result<Vec<Owned>, Code> {
     let row = RouteRow::decode(body).map_err(invalid)?;
     let conversation = RouteRow::parse_key(key).map_err(invalid)?;
     let id = *ObjectId::compute(&row.route_state).as_bytes();
-    Ok(vec![owned(
-        id,
-        RetentionClass::SecurityProof,
-        Some(conversation),
-    )])
+    let package = staged.get(&row.binding_id).copied();
+    Ok(std::iter::once(id)
+        .chain(package)
+        .map(|id| owned(id, RetentionClass::SecurityProof, Some(conversation)))
+        .collect())
+}
+
+/// The binding identifier of a staged `conversation_binding` object, or
+/// `None` for bytes that are not a decodable binding package.
+fn staged_binding_id(bytes: &[u8]) -> Option<[u8; 32]> {
+    let mut budget = DecodeBudget::new(MAX_BINDING_OBJECT, 1 << 16);
+    let object = ArcWireObject::decode_kind(
+        bytes,
+        Some(ArcWireObjectKind::ConversationBinding),
+        &mut budget,
+    )
+    .ok()?;
+    let mut budget = DecodeBudget::new(MAX_BINDING_OBJECT, 1 << 16);
+    let package = ArcConversationBindingPackage::decode_exact(object.body(), &mut budget).ok()?;
+    semantic_id_of(SemanticHashDomain::BindingId, &package.binding.tbs).ok()
+}
+
+/// Whether a rewrite of the row `owner` keeps holding an object of `kind`
+/// that its new body no longer names: a route row keeps its binding
+/// package, while a superseded route state is released. Only the row's
+/// deletion releases what it keeps.
+fn kept_on_rewrite(owner: &[u8], kind: u8) -> bool {
+    owner.starts_with(prefix::ROUTE) && kind == ArcWireObjectKind::ConversationBinding.value()
 }
 
 fn claim_owned(body: &[u8]) -> Result<Vec<Owned>, Code> {
@@ -590,6 +642,8 @@ fn derive(
         state,
         staged: BTreeMap::new(),
     };
+    // The binding packages this batch stages, by binding identifier.
+    let mut staged_bindings = BTreeMap::new();
     for write in writes {
         let Some((TableId::E2eeObject, _, encoded)) = write.encoded_record() else {
             continue;
@@ -601,9 +655,14 @@ fn derive(
             .ok_or(Code::InvalidFragment)?;
         let row = ObjectRow::decode(value.body()).map_err(invalid)?;
         let id = *ObjectId::compute(&row.bytes).as_bytes();
-        let kind = row.kind().map_err(invalid)?.value();
+        let kind = row.kind().map_err(invalid)?;
+        if kind == ArcWireObjectKind::ConversationBinding
+            && let Some(binding_id) = staged_binding_id(&row.bytes)
+        {
+            staged_bindings.insert(binding_id, id);
+        }
         let size = u64::try_from(row.bytes.len()).map_err(|_| Code::RateLimited)?;
-        sizes.staged.insert(id, (kind, size));
+        sizes.staged.insert(id, (kind.value(), size));
     }
 
     let mut touched: BTreeMap<[u8; 32], Account> = BTreeMap::new();
@@ -622,11 +681,16 @@ fn derive(
                     return Err(Code::InvalidFragment);
                 }
                 let owner = key.as_bytes().to_vec();
-                let new: Vec<Owned> = owned_by(key, value.record_kind(), value.body())?;
+                let new: Vec<Owned> =
+                    owned_by_in_batch(key, value.record_kind(), value.body(), &staged_bindings)?;
                 let named: BTreeSet<[u8; 32]> = new.iter().map(|o| o.object_id).collect();
                 // Every object the index names is accounted, so the account exists.
                 for previous in state.owners.owned_by(&owner).into_iter().flatten() {
-                    if !named.contains(previous) {
+                    let kept = state
+                        .owners
+                        .account(previous)
+                        .is_some_and(|account| kept_on_rewrite(&owner, account.kind));
+                    if !named.contains(previous) && !kept {
                         account_of(&sizes, &mut touched, *previous, now)?
                             .ok_or(Code::InvalidFragment)?
                             .owners
@@ -740,6 +804,8 @@ pub(crate) struct Rebuild {
     objects: BTreeMap<[u8; 32], (u8, u64)>,
     stored: BTreeMap<[u8; 32], (ObjectOwnerRow, BTreeSet<OwnerKey>)>,
     derived: BTreeMap<[u8; 32], DerivedOwners>,
+    /// The conversations whose route rows were read, by row key.
+    routes: BTreeMap<OwnerKey, [u8; 32]>,
     diagnostics: Diagnostics,
 }
 
@@ -820,6 +886,11 @@ impl Rebuild {
             self.diagnostics.undecodable += 1;
             Vec::new()
         });
+        if value.record_kind() == ROUTE_ROW_KIND
+            && let Ok(conversation) = RouteRow::parse_key(key)
+        {
+            self.routes.insert(key.as_bytes().to_vec(), conversation);
+        }
         for item in items {
             let entry = self
                 .derived
@@ -837,6 +908,7 @@ impl Rebuild {
     /// keeps a trusted acceptance time only when the stored row proved the
     /// same object.
     pub(crate) fn finish(mut self, state: &mut CompanionState) -> Diagnostics {
+        self.derive_held(state);
         let mut ledger = Ledger::default();
         self.diagnostics.orphaned += self
             .stored
@@ -857,6 +929,31 @@ impl Rebuild {
         state.owners = ledger;
         sync_conversation_bytes(state);
         self.diagnostics
+    }
+}
+
+impl Rebuild {
+    /// Adds what a row holds beyond what its body names, from the state the
+    /// rows restored: each restored route's row holds the binding package
+    /// the route was restored from.
+    fn derive_held(&mut self, state: &CompanionState) {
+        let packages = self.routes.iter().filter_map(|(owner, conversation)| {
+            let retained = state.conversations.get(conversation)?;
+            Some((
+                retained.binding_object_id,
+                owner.clone(),
+                Some(*conversation),
+            ))
+        });
+        let held: Vec<_> = packages.collect();
+        for (object, owner, conversation) in held {
+            let entry = self
+                .derived
+                .entry(object)
+                .or_insert((RetentionClass::SecurityProof, BTreeMap::new()));
+            entry.0 = stronger(entry.0, RetentionClass::SecurityProof);
+            entry.1.insert(owner, conversation);
+        }
     }
 }
 
