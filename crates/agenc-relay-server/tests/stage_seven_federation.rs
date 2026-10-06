@@ -761,6 +761,15 @@ fn wait_for_link(fixture: &NodeFixture, before: usize) -> TestResult {
 /// Connects and registers on an edge, retrying until its link is ACTIVE.
 /// Attempts are spaced so the per-address admission limit never trips.
 fn register_when_available(fixture: &NodeFixture, nickname: &str) -> TestResult<ArcClient> {
+    welcome_when_available(fixture, nickname).map(|(client, _)| client)
+}
+
+/// Registers like `register_when_available` and also returns the welcome
+/// lines, through the end of the MOTD group.
+fn welcome_when_available(
+    fixture: &NodeFixture,
+    nickname: &str,
+) -> TestResult<(ArcClient, Vec<String>)> {
     let deadline = Instant::now() + NETWORK_WAIT;
     loop {
         let mut client = match ArcClient::connect(fixture) {
@@ -789,7 +798,7 @@ fn register_when_available(fixture: &NodeFixture, nickname: &str) -> TestResult<
                 {
                     return Err(failure(format!("registration lacked 001: {lines:?}")));
                 }
-                return Ok(client);
+                return Ok((client, lines));
             }
             Registration::Unavailable(lines) => {
                 if Instant::now() >= deadline {
@@ -1482,4 +1491,262 @@ fn require_static(reply: &[String], moment: &str) -> TestResult {
             "{moment}: LUSERS is not the fixed form: {reply:?}"
         )))
     }
+}
+
+/// A labeled channel `PRIVMSG` or `NOTICE` from a client of an edge gets
+/// exactly one labeled logical response, as a client of the coordinator
+/// does (Architecture 9.5): a labeled `ACK` without `echo-message`, and its
+/// labeled echo with it. Every other member's copy, on the same edge, on the
+/// other edge and on the coordinator, carries no label.
+#[test]
+fn an_edge_gives_a_labeled_channel_message_one_labeled_response() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| wait_for_link(&network.edge_b, 0))
+        .and_then(|()| exercise_labeled_channel_messages(&network));
+    let stopped_a = edge_a.stop();
+    let stopped_b = edge_b.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}\n--- edge b log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text(),
+            network.edge_b.log_text()
+        )));
+    }
+    for (label, status) in [
+        ("edge a", stopped_a),
+        ("edge b", stopped_b),
+        ("coordinator", stopped_core),
+    ] {
+        let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+        if !status.success() {
+            return Err(failure(format!("{label} exited with {status}")));
+        }
+    }
+    Ok(())
+}
+
+/// The labeled messages the client of edge A sends to `#echo`, each with
+/// whether it negotiated `echo-message` by then.
+const LABELED_CHANNEL_MESSAGES: [(&str, &str, bool); 4] = [
+    ("p1", "PRIVMSG #echo :privmsg without echo", false),
+    ("n1", "NOTICE #echo :notice without echo", false),
+    ("p2", "PRIVMSG #echo :privmsg with echo", true),
+    ("n2", "NOTICE #echo :notice with echo", true),
+];
+
+fn exercise_labeled_channel_messages(network: &Network) -> TestResult {
+    let mut iris = register_when_available(&network.edge_a, "iris")?;
+    let mut jon = register_when_available(&network.edge_a, "jon")?;
+    let mut lia = register_when_available(&network.edge_b, "lia")?;
+    let mut kai = register_when_available(&network.coordinator, "kai")?;
+    for client in [&mut iris, &mut jon] {
+        client.send("CAP REQ :message-tags batch labeled-response")?;
+        client.read_until(|line| line.contains(" ACK "))?;
+    }
+    for (client, nickname) in [
+        (&mut kai, "kai"),
+        (&mut iris, "iris"),
+        (&mut jon, "jon"),
+        (&mut lia, "lia"),
+    ] {
+        client.send("JOIN #echo")?;
+        client.read_until(|line| line.contains(&format!(" 366 {nickname} #echo ")))?;
+    }
+    let mut echoing = false;
+    for (label, message, echo) in LABELED_CHANNEL_MESSAGES {
+        if echo && !echoing {
+            iris.send("CAP REQ :echo-message")?;
+            iris.read_until(|line| line.contains(" ACK "))?;
+            echoing = true;
+        }
+        let lines = labeled_exchange(&mut iris, label, message)?;
+        let text = message.split_once(" :").map_or("", |(_, text)| text);
+        let labeled: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains(&format!("label={label}")))
+            .collect();
+        let response = match labeled.as_slice() {
+            [response] => response.as_str(),
+            _ => {
+                return Err(failure(format!(
+                    "{message}: not one labeled response: {lines:?}"
+                )));
+            }
+        };
+        let single = if echo {
+            let echoed = response
+                .strip_prefix(&format!("@label={label} :iris!"))
+                .is_some_and(|rest| rest.ends_with(&format!(" {message}")));
+            echoed
+                && lines
+                    .iter()
+                    .filter(|line| line.ends_with(&format!(" :{text}")))
+                    .count()
+                    == 1
+        } else {
+            response == format!("@label={label} :edge-a.test ACK")
+                && lines
+                    .iter()
+                    .all(|line| !line.ends_with(&format!(" :{text}")))
+        };
+        if !single {
+            return Err(failure(format!(
+                "{message}: the response is not its labeled {}: {lines:?}",
+                if echo { "echo" } else { "ACK" }
+            )));
+        }
+    }
+    // Every other member, on edge A, on edge B and on the coordinator,
+    // received the four messages without a label.
+    for (client, nickname) in [(&mut jon, "jon"), (&mut lia, "lia"), (&mut kai, "kai")] {
+        let mut received = 0;
+        let lines = client.read_until(|line| {
+            if LABELED_CHANNEL_MESSAGES
+                .iter()
+                .any(|(_, message, _)| line.ends_with(&format!(" {message}")))
+            {
+                received += 1;
+            }
+            received == LABELED_CHANNEL_MESSAGES.len()
+        })?;
+        if lines
+            .iter()
+            .any(|line| line.contains("label=") || line.contains("batch="))
+        {
+            return Err(failure(format!(
+                "{nickname}: a copy carries a label: {lines:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Sends `message` labeled `label`, then a `PING`, and reads until both the
+/// `PONG` and a line with the label arrived; a second `PING` then lets any
+/// further line about the message arrive before it. Returns every line read.
+fn labeled_exchange(client: &mut ArcClient, label: &str, message: &str) -> TestResult<Vec<String>> {
+    client.send(&format!("@label={label} {message}"))?;
+    client.send(&format!("PING :sent-{label}"))?;
+    let (sent, tag) = (format!(" :sent-{label}"), format!("@label={label} "));
+    let (mut ponged, mut labeled) = (false, false);
+    let mut lines = client.read_until(|line| {
+        ponged |= line.ends_with(&sent);
+        labeled |= line.starts_with(&tag);
+        ponged && labeled
+    })?;
+    client.send(&format!("PING :settled-{label}"))?;
+    let settled = format!(" :settled-{label}");
+    lines.extend(client.read_until(|line| line.ends_with(&settled))?);
+    Ok(lines)
+}
+
+/// Every welcome's `RPL_LUSER*` counters are the figures of its node's own
+/// `LUSERS` reply (Architecture 10.2 step 3): two edges serving different
+/// clients send the same fixed form, with no count, apart from the server
+/// prefix and the nickname, and the coordinator's welcome counts what its
+/// `LUSERS` reply counts, the whole network's sessions, as clients join on
+/// the coordinator and on the edges.
+#[test]
+fn welcome_counters_match_each_nodes_lusers_reply() -> TestResult {
+    let network = build_network()?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge_a = DaemonProcess::start(&network.edge_a.config_path)?;
+    let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
+    let outcome = wait_for_link(&network.edge_a, 0)
+        .and_then(|()| wait_for_link(&network.edge_b, 0))
+        .and_then(|()| exercise_welcome_counters(&network));
+    let stopped_a = edge_a.stop();
+    let stopped_b = edge_b.stop();
+    let stopped_core = coordinator.stop();
+    if let Err(error) = outcome {
+        return Err(failure(format!(
+            "{error}\n--- coordinator log ---\n{}\n--- edge a log ---\n{}\n--- edge b log ---\n{}",
+            network.coordinator.log_text(),
+            network.edge_a.log_text(),
+            network.edge_b.log_text()
+        )));
+    }
+    for (label, status) in [
+        ("edge a", stopped_a),
+        ("edge b", stopped_b),
+        ("coordinator", stopped_core),
+    ] {
+        let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+        if !status.success() {
+            return Err(failure(format!("{label} exited with {status}")));
+        }
+    }
+    Ok(())
+}
+
+fn exercise_welcome_counters(network: &Network) -> TestResult {
+    // Edge A serves one client, edge B two.
+    let (mut uma, welcome_a) = welcome_when_available(&network.edge_a, "uma")?;
+    let _vic = register_when_available(&network.edge_b, "vic")?;
+    let (mut wes, welcome_b) = welcome_when_available(&network.edge_b, "wes")?;
+    let on_a = welcome_counters(&welcome_a, "edge-a.test", "uma");
+    let on_b = welcome_counters(&welcome_b, "edge-b.test", "wes");
+    if on_a != on_b {
+        return Err(failure(format!(
+            "the edges' welcomes differ: {on_a:?} {on_b:?}"
+        )));
+    }
+    require_static(&on_a, "edge a's welcome")?;
+    // Each edge's welcome is its LUSERS reply.
+    require_static(&lusers(&mut uma, "edge-a.test", "uma")?, "edge a")?;
+    require_static(&lusers(&mut wes, "edge-b.test", "wes")?, "edge b")?;
+    // The coordinator counts the edges' three clients with its own, in its
+    // welcome as in its LUSERS reply, as clients join on both.
+    let _xia = coordinator_counts(network, "xia", 4)?;
+    let (_yan, welcome) = welcome_when_available(&network.edge_a, "yan")?;
+    require_static(
+        &welcome_counters(&welcome, "edge-a.test", "yan"),
+        "a later welcome on edge a",
+    )?;
+    let _zed = coordinator_counts(network, "zed", 6)?;
+    Ok(())
+}
+
+/// The `RPL_LUSER*` lines of a welcome with the server prefix and the
+/// nickname replaced, as `lusers` writes them.
+fn welcome_counters(lines: &[String], server: &str, nickname: &str) -> Vec<String> {
+    let mut counters = Vec::new();
+    for line in lines {
+        for code in ["251", "252", "253", "254", "255", "265", "266"] {
+            if let Some(rest) = line.strip_prefix(&format!(":{server} {code} {nickname} ")) {
+                counters.push(format!(":<server> {code} <nick> {rest}"));
+            }
+        }
+    }
+    counters
+}
+
+/// Registers `nickname` on the coordinator and requires its welcome and its
+/// `LUSERS` reply to count `users` sessions.
+fn coordinator_counts(network: &Network, nickname: &str, users: usize) -> TestResult<ArcClient> {
+    let (mut client, welcome) = welcome_when_available(&network.coordinator, nickname)?;
+    let expected = [format!(
+        ":<server> 251 <nick> :There are {users} users and 0 services on 1 servers"
+    )];
+    let counters = welcome_counters(&welcome, "core.test", nickname);
+    if counters != expected {
+        return Err(failure(format!(
+            "{nickname}'s welcome does not count {users} users: {counters:?}"
+        )));
+    }
+    client.send("LUSERS")?;
+    let reply = client.read_until(|line| line.contains(&format!(" 266 {nickname} ")))?;
+    let summary = format!(":core.test 251 {nickname} :There are {users} users on one server");
+    if !reply.contains(&summary) {
+        return Err(failure(format!(
+            "{nickname}'s LUSERS does not count {users} users: {reply:?}"
+        )));
+    }
+    Ok(client)
 }

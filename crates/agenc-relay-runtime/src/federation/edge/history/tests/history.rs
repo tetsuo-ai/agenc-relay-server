@@ -242,6 +242,7 @@ fn fixture_with_options(
             result: None,
             replies: Vec::new(),
             join_echoes: Vec::new(),
+            message_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
             completion_coverage: None,

@@ -593,13 +593,17 @@ fn render_lusers(
 
 /// The fixed `LUSERS` reply of an edge: the two numerics every `LUSERS`
 /// reply carries, `251` and `255`, with fixed text and no count, so the reply
-/// is the same on every edge whatever it serves.
+/// is the same on every edge whatever it serves. An edge's welcome sends it
+/// as its `RPL_LUSER*` counters.
 const STATIC_LUSERS: [(u16, &str); 2] = [
     (251, "User counts are not published by this server"),
     (255, "Local counts are not published by this server"),
 ];
 
-fn render_static_lusers(prefix: &str, nickname: &str) -> Result<Vec<WireMessage>, RuntimeError> {
+pub(crate) fn render_static_lusers(
+    prefix: &str,
+    nickname: &str,
+) -> Result<Vec<WireMessage>, RuntimeError> {
     STATIC_LUSERS
         .iter()
         .map(|(code, text)| numeric(prefix, *code, nickname, &[], text))

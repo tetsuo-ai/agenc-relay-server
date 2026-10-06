@@ -207,6 +207,7 @@ fn install_request(base: &mut EdgeFederation, header: RequestHeader, bytes: Vec<
             result: None,
             replies: Vec::new(),
             join_echoes: Vec::new(),
+            message_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
             completion_coverage: None,

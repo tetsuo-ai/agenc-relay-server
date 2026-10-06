@@ -2331,6 +2331,19 @@ async fn register(client: &mut Client, nickname: &str) -> TestResult {
 
 #[tokio::test]
 async fn edge_and_coordinator_interoperate_over_a_bridged_link() -> TestResult {
+    // The coordinator serves no clients here; its inbox stays open until stop.
+    run_bridge(|_hub_inbox, edge_inbox| exchange_over_bridge(edge_inbox)).await
+}
+
+/// Runs a coordinator and its edge over a bridged link and hands `driver`
+/// the coordinator's and the edge's client inboxes; both nodes stop after
+/// the driver ends.
+async fn run_bridge<Driver>(
+    driver: impl FnOnce(mpsc::Sender<StateCoreMessage>, mpsc::Sender<StateCoreMessage>) -> Driver,
+) -> TestResult
+where
+    Driver: Future<Output = TestResult>,
+{
     let mut coordinator_fixture =
         StateCoreFixture::with_federation_coordinator(entropy_script(), vec![edge_identity()])?;
     let mut edge_fixture = StateCoreFixture::with_edge(entropy_script(), hub_identity())?;
@@ -2340,9 +2353,7 @@ async fn edge_and_coordinator_interoperate_over_a_bridged_link() -> TestResult {
     let edge_task = tokio::spawn(edge_run);
     let hub_lifecycle = hub.lifecycle.clone();
     let edge_lifecycle = edge.lifecycle.clone();
-    // The coordinator serves no clients here; its inbox stays open until stop.
-    let _hub_inbox = hub.inbox.clone();
-    let outcome = drive_bridge(hub, edge).await;
+    let outcome = drive_bridge(&hub, &edge, driver).await;
     let _stop_edge = edge_lifecycle.request(LifecyclePhase::Stop).await;
     let _stop_hub = hub_lifecycle.request(LifecyclePhase::Stop).await;
     let hub_exit = tokio::time::timeout(std::time::Duration::from_secs(10), hub_task).await??;
@@ -2353,8 +2364,15 @@ async fn edge_and_coordinator_interoperate_over_a_bridged_link() -> TestResult {
     Ok(())
 }
 
-/// Establishes the bridged link and exercises two clients on the edge.
-async fn drive_bridge(hub: Node, edge: Node) -> TestResult {
+/// Establishes the bridged link and runs `driver` with both client inboxes.
+async fn drive_bridge<Driver>(
+    hub: &Node,
+    edge: &Node,
+    driver: impl FnOnce(mpsc::Sender<StateCoreMessage>, mpsc::Sender<StateCoreMessage>) -> Driver,
+) -> TestResult
+where
+    Driver: Future<Output = TestResult>,
+{
     let (to_edge_handle, to_edge_queue) = link_queue(1 << 20);
     let (to_hub_handle, to_hub_queue) = link_queue(1 << 20);
     let hub_link = LinkId::new(1);
@@ -2395,13 +2413,14 @@ async fn drive_bridge(hub: Node, edge: Node) -> TestResult {
         })
         .await
         .map_err(|_| "edge inbox closed")?;
+    let (to_edge, to_hub) = (edge.federation.clone(), hub.federation.clone());
     let pumps = tokio::spawn(async move {
         tokio::join!(
-            pump(to_edge_queue, HUB_NAME, edge.federation, edge_link, HUB),
-            pump(to_hub_queue, EDGE_NAME, hub.federation, hub_link, EDGE),
+            pump(to_edge_queue, HUB_NAME, to_edge, edge_link, HUB),
+            pump(to_hub_queue, EDGE_NAME, to_hub, hub_link, EDGE),
         );
     });
-    let outcome = exchange_over_bridge(edge.inbox).await;
+    let outcome = driver(hub.inbox.clone(), edge.inbox.clone()).await;
     pumps.abort();
     outcome
 }
@@ -4428,3 +4447,7 @@ mod request_completion;
 mod request_refusals;
 
 mod local_information;
+
+mod labeled_messages;
+
+mod welcome_counters;

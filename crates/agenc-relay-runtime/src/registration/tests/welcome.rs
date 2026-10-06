@@ -1,7 +1,9 @@
 //! The recovery NOTE of the welcome burst (architecture 10.2 step 5): one
 //! `NOTE * RECOVERY_EPOCH` right after the MOTD group, only for a connection
 //! that negotiated `agenc.ag/recovery`, carrying the epoch its `CAP LS`
-//! advertised, on both the local and the edge registration path.
+//! advertised, on both the local and the edge registration path; and the
+//! burst's `RPL_LUSER*` counters (step 3), the figures of the node's own
+//! `LUSERS` reply.
 #![forbid(unsafe_code)]
 
 use super::test_harness::{Harness, Role, TestResult};
@@ -176,11 +178,12 @@ async fn an_edge_registration_sends_the_epoch_note_after_the_motd_group() -> Tes
         );
         let lines = sink.lines();
         let welcome = burst(&lines)?;
+        // An edge's counters are its fixed LUSERS form, 251 and 255.
         if number == 1 {
             assert_eq!(
                 commands(&welcome),
                 [
-                    "001", "002", "003", "004", "005", "005", "005", "251", "422", "NOTE"
+                    "001", "002", "003", "004", "005", "005", "005", "251", "255", "422", "NOTE"
                 ],
                 "lines: {lines:?}"
             );
@@ -189,11 +192,116 @@ async fn an_edge_registration_sends_the_epoch_note_after_the_motd_group() -> Tes
             assert_eq!(
                 commands(&welcome),
                 [
-                    "001", "002", "003", "004", "005", "005", "005", "251", "422"
+                    "001", "002", "003", "004", "005", "005", "005", "251", "255", "422"
                 ],
                 "lines: {lines:?}"
             );
         }
+    }
+    Ok(())
+}
+
+/// The welcome's `RPL_LUSER*` counter lines.
+fn counters(lines: &[String]) -> Vec<&str> {
+    lines
+        .iter()
+        .filter(|line| {
+            matches!(
+                command(line),
+                "251" | "252" | "253" | "254" | "255" | "265" | "266"
+            )
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+/// A node without federation is the whole network, so its welcome counts
+/// its own registered connections, as before.
+#[tokio::test]
+async fn a_node_without_federation_counts_its_registered_connections() -> TestResult {
+    let mut harness = Harness::new(Role::Plain)?;
+    let first = local_guest(&mut harness, 1, "first", None).await?;
+    let second = local_guest(&mut harness, 2, "second", None).await?;
+    assert_eq!(
+        counters(&first),
+        [":server.example 251 first :There are 1 users and 0 services on 1 servers"]
+    );
+    assert_eq!(
+        counters(&second),
+        [":server.example 251 second :There are 2 users and 0 services on 1 servers"]
+    );
+    Ok(())
+}
+
+/// A coordinator's welcome counts every session of its domain, one homed on
+/// an edge among them, the figure its `LUSERS` reply gives.
+#[tokio::test]
+async fn a_coordinator_counts_the_sessions_of_its_domain() -> TestResult {
+    let mut harness = Harness::new(Role::Coordinator)?;
+    // A session homed on another node, for which this node holds no
+    // connection.
+    crate::test_support::seed_session(harness.fixture.context_mut()?, 9, "remote", None)?;
+    for (number, nick) in [(1, "first"), (2, "second")] {
+        let lines = local_guest(&mut harness, number, nick, None).await?;
+        let context = harness.fixture.context_mut()?;
+        let sessions = context.domain().session_count();
+        assert_eq!(sessions, usize::try_from(number)? + 1);
+        assert_eq!(
+            context.sessions().registered_len(),
+            usize::try_from(number)?
+        );
+        assert_eq!(
+            counters(&lines),
+            [format!(
+                ":server.example 251 {nick} :There are {sessions} users and 0 services on 1 servers"
+            )
+            .as_str()]
+        );
+    }
+    Ok(())
+}
+
+/// An edge's welcome sends its fixed `LUSERS` form, which holds no count:
+/// the same lines for every client apart from the nickname.
+#[tokio::test]
+async fn an_edge_sends_its_fixed_lusers_form() -> TestResult {
+    let mut harness = Harness::new(Role::Edge)?;
+    for (number, nick) in [(1_u64, "first"), (2, "second")] {
+        let sink = harness.open(number, true)?;
+        harness.line(number, &format!("NICK {nick}"))?;
+        let event_generation = match harness
+            .actions(number, &format!("USER {nick} 0 * :Real"))?
+            .into_iter()
+            .next()
+        {
+            Some(RegistrationAction::CommitRegistration { generation, .. }) => generation,
+            other => return Err(format!("expected the registration commit, got {other:?}").into()),
+        };
+        let seed = 60_u8.saturating_add(u8::try_from(number)?);
+        let context = harness.fixture.context_mut()?;
+        harness.router.apply_edge_completion(
+            context,
+            EdgeCompletion::SessionRegistered {
+                generation: ConnectionGeneration::new(number),
+                session_id: SessionId::from_bytes([seed; 16]),
+                user_id: UserId::from_bytes([seed.saturating_add(10); 16]),
+                event_generation,
+                nickname: nick.to_owned(),
+            },
+        );
+        let lines = sink.lines();
+        assert_eq!(
+            counters(&lines),
+            [
+                format!(":server.example 251 {nick} :User counts are not published by this server")
+                    .as_str(),
+                format!(
+                    ":server.example 255 {nick} :Local counts are not published by this server"
+                )
+                .as_str(),
+            ],
+            "lines: {lines:?}"
+        );
     }
     Ok(())
 }

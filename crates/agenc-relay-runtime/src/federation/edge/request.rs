@@ -80,6 +80,19 @@ pub enum EdgeCompletion {
         /// The client's original line.
         message: Box<ParsedMessage>,
     },
+    /// A committed message's one logical response: the requester's echoes
+    /// held for it, which the router labels, or none, for which a labeled
+    /// request gets a labeled `ACK`.
+    MessageCommitted {
+        /// The client connection.
+        generation: ConnectionGeneration,
+        /// The held echoes in delivery order, then the result's replies.
+        frames: Vec<agenc_relay_client_wire::WireMessage>,
+        /// Memory backing retained through publication of the held echoes.
+        echo_permits: Vec<crate::budget::MemoryPermit>,
+        /// The original message and its response label.
+        message: Box<ParsedMessage>,
+    },
     /// A covered JOIN result starts its bounded topic and NAMES response.
     JoinCommitted {
         /// The client connection.
@@ -174,6 +187,8 @@ pub(super) struct PendingRequest {
     pub(super) result_bytes: Vec<u8>,
     pub(super) replies: Vec<agenc_relay_client_wire::WireMessage>,
     pub(super) join_echoes: Vec<super::join_echo::JoinEcho>,
+    /// The requester's echoes a labeled message holds for its response.
+    pub(super) message_echoes: Vec<super::message_echo::MessageEcho>,
     pub(super) completion: Option<agenc_relay_types::EventId>,
     /// Generation of the completion event that durably covered this request.
     pub(super) completion_generation: Option<u64>,
@@ -419,6 +434,7 @@ pub(super) fn register_request(
             result_bytes: Vec::new(),
             replies: Vec::new(),
             join_echoes: Vec::new(),
+            message_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
             completion_coverage: None,
@@ -1559,6 +1575,7 @@ pub(super) fn receive_result(
     .map_err(|_| Violation::Codec)?;
     validate_result_generation(edge, header.request_id, &arm)?;
     super::join_echo::validate_result(edge, header.request_id, &arm)?;
+    super::message_echo::validate_result(pending, &arm)?;
     if pending.header.opcode == agenc_relay_types::FederationOpcode::HistoryQuery {
         return super::history::receive(edge, context, header, object.object_id(), arm);
     }
@@ -1919,6 +1936,17 @@ fn completed_request(
                 message,
                 resulting_state_generation,
                 pending.join_echoes,
+                pending.replies,
+            )
+        }
+        (PendingKind::Command { message }, ResultArm::Committed { .. })
+            if pending.header.opcode == agenc_relay_types::FederationOpcode::Message =>
+        {
+            super::message_echo::complete(
+                context,
+                generation,
+                message,
+                pending.message_echoes,
                 pending.replies,
             )
         }
