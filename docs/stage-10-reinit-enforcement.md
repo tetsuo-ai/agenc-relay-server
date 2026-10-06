@@ -328,20 +328,26 @@ The Stage 08 evidence that changed, for the TODO note and the push report:
 | Evidence | Transcript row, Section 21 gate | Stage 08 task |
 | --- | --- | --- |
 | `reinit_attempts_activate_or_abort_and_migrate_the_log` (domain, rewritten for `finalize_reinit`) and the three domain restore tests | `domain-reinit-log`, gate 14 | S08-012, S08-030 |
-| the model's new action and check, and its counts | `model-exhaustive` (gates 7, 22), `model-adversarial` (gate 7) | S08-008, S08-024, S08-030 |
+| the model's new action and check, and its counts | `model-exhaustive` (gates 7, 22), `model-adversarial` (gate 7) | S08-008, S08-024, S08-030, S08-038 |
 | `a_reinit_attempt_is_staged_acknowledged_aborted_and_finally_activated` and every coordinator test that stages an attempt, now after a finalized ReInit Commit | `coordinator-reinit`, gate 14 | S08-012, S08-030 |
 | the Stage 08 ReInit scenarios with a target the sequencer checks | (daemon scenarios of ENC-10) | S08-012, S08-030 |
 | second commit: the activation's route events in `a_reinit_attempt_is_staged_acknowledged_aborted_and_finally_activated` | `coordinator-reinit`, gate 14 | S08-012, S08-030 |
 | second commit: the Stage 08 activation scenario's successor traffic with no binding, also after a restart | (daemon scenario of ENC-10) | S08-012, S08-030 |
 | second commit: `RouteTable::install_successor` replacing the successor reservation (`route_table_successor.rs`, no transcript row) | none | S08-012 |
-| third commit: the retired phase's domain tests, beside the unchanged pinned tests of `restore_epoch` and `is_tombstone` | none (`domain-close-restore` and `domain-lifecycle-gate`, gate 8, unchanged) | S08-011, S08-012 |
+| second commit: `a_crash_on_either_side_of_the_activation_leaves_the_attempt_pending_or_the_successor` (no transcript row) | none (gate 8) | S08-012, S08-025 |
+| third commit: the retired phase's domain tests, beside the unchanged pinned tests of `restore_epoch` and `is_tombstone` | none (`domain-close-restore` and `domain-lifecycle-gate`, gate 8, unchanged) | S08-011, S08-012, S08-025 |
 | third commit: the restore of the previous profile's ReInit state (`previous_profile.rs`) | none | S08-012, S08-013, S08-015 |
 
-The gate numbers are the transcript catalog's; its gate 14 is the companion's
-ReInit race item, whose text since P-01 names the successor that takes
-traffic after activation and after a coordinator restart with no
-`EGROUP BIND`, and a crash on either side of the activation transaction. The
-second commit changes no model count: the model's route actions reserve,
+The gate numbers are the transcript catalog's, whose gates are those of the
+TODO catalog: gate 22 is S08-038's and gate 8 is S08-025's, so the model's
+count change is S08-038 evidence too, and the pinned gate 8 rows that run
+the third commit's `restore_epoch` and `is_tombstone`, with the second
+commit's crash test, are S08-025 evidence (both added to this map in the
+review's follow-up). Gate 14 is the companion's ReInit race item, whose
+text since P-01 names the successor that takes traffic after activation and
+after a coordinator restart with no `EGROUP BIND`, and a crash on either
+side of the activation transaction. The second commit changes no model
+count: the model's route actions reserve,
 bind, close and reopen, and none of them is a ReInit successor. The third
 commit adds `Phase::Retired`, which only a restore enters; the model never
 restores a log, so its counts do not change either, and its state key gives
@@ -628,6 +634,19 @@ route held to the rule, a route without records refused), 5 of 5 entries.
   policy's controllers name the previous root and no attempt of that
   conversation is authorized. The binding check of this change reads the old
   binding's retained facts and is not what refuses it.
+- The activation verifies the successor's policy under the principals'
+  current rosters (Q-RD-25), and every retry of the activation carries the
+  target fixed when the old ReInit Commit was finalized. Each device that
+  the successor policy names in its finality council or its controller
+  approvals must therefore still be active, under the certificate and the
+  root the policy names, in its principal's current roster when the
+  activation arrives. If a principal revokes such a device, or rotates its
+  root, between that finality and the activation, the activation is
+  refused on every retry and the conversation gets no successor, although
+  endpoints that verify the policy under the rosters the target's
+  `roster_heads` name, as companion 13.8 says, would accept it. Once the
+  rosters a pending target names are kept resident, the coordinator should
+  verify the policy under them instead.
 - A successor of a direct conversation is installed by the same code, but no
   coordinator test binds a direct conversation through the harness, so its
   entitlement branch is covered by no test; the route table's direct install
@@ -645,7 +664,30 @@ route held to the rule, a route without records refused), 5 of 5 entries.
   recognizes a previous-profile terminal from its rows, and it still reads
   the receipt of an attempt left open under the previous profile, whose
   layout the revision did not change, to restore that attempt's slot
-  (Q-RD-19).
+  (Q-RD-19). Three other existing reads meet state of the previous hash
+  and are unchanged: startup's object index decodes each retained terminal
+  request under this profile and skips one that does not decode, the ACK
+  context decodes a retained attempt, and a previous-profile ReInit
+  finalization's restored authority carries the digest of a target of the
+  previous layout, which no attempt of this profile matches, so that phase
+  admits no attempt (Q-RD-19, extended in the review's follow-up).
+- A previous-profile activation or abort is recognized from rows that agree
+  around a head record this profile does not decode; no stored field names
+  the profile a record was written under, so the rule has no positive
+  marker of the previous profile. No head of this profile that fails to
+  decode is known to be reachable (the decode budgets equal the writer's, a
+  group is bounded at 512 leaves and the store is authenticated); the rule
+  is to be narrowed if such a marker is ever stored (Q-RD-29).
+- Databases written by development builds of this profile from before this
+  topic, such as the program's pushed tip `6e84d29`, are not supported: an
+  activation they stored can lack the successor this topic installs with
+  it, or carry a target the sequencer's checks refuse, and a coordinator
+  then refuses to start (Q-RD-15, Q-RD-28). The only release,
+  `70c832c`, is G-08's and restores as described above. The operator guide
+  says so.
+- Retaining an installed successor's binding package for the
+  conversation's life, which its restore reads, is the subject of the
+  server topic `sdk/b-binding-retention`, not of this topic.
 - The restore fixtures come from the `70c832c` coordinator's test harness,
   not from a running `arcd` of that release, and cover one channel route.
 
@@ -712,6 +754,13 @@ branch. Its findings are taken up at the level of the rules below.
   generation-zero binding, so the refusal is that of the rule that
   `EGROUP BIND` binds generation zero only; dropping that rule from the
   route table fails the test.
+- The documentation follow-up adds the limitations above on the
+  successor policy's rosters at activation, on development stores of this
+  profile from before this topic (with a note in the operator guide), on
+  the previous-profile terminal's missing marker, on the other reads of
+  previous-hash state and on the retention of an installed successor's
+  binding package, and adds S08-038 and S08-025 to the Stage 08 evidence
+  map.
 
 ## Validation
 
@@ -833,6 +882,45 @@ On the tree of the fourth commit, before it was committed:
 - `python3 scripts/check-coverage.py audit` and `self-test` on both
   policies: passed (21 and 1,204 reviewed spans).
 - The program's fast static gate (59 commands): all passed.
+
+On the trees of the review's follow-up commits, before each was committed:
+
+- Every commit: `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  and `python3 scripts/check-source.py check` clean; `check-coverage.py
+  audit` and `self-test` on both policies, `git diff --check` and the
+  program's fast static gate (59 commands): all passed.
+- The shared helper commit: `cargo nextest run -p agenc-relay-e2ee --all-features --locked`:
+  351 passed; `python3 scripts/generate-e2ee-vectors.py --check`: unchanged;
+  its mutation campaign kills 12 of 12 (one after an added test case);
+  `cargo llvm-cov nextest -p agenc-relay-e2ee --branch`, after
+  `cargo llvm-cov clean`: the two replacement regions complete (8 of 8
+  regions, 4 of 4 branches), and `p04-reinit-predecessor-of-binding-tbs` 15
+  of 16 regions, short by an encoding failure of a decoded TBS.
+- The three coordinator commits (retained facts, the ReInit-closed restore,
+  the tests of the survivors and of `EGROUP BIND`):
+  `cargo nextest run -p agenc-relay-domain -p agenc-relay-runtime -p agenc-relay-e2ee -p agenc-relay-storage -p agenc-relay-testkit --all-features --locked`:
+  4,003, 4,004 and 4,006 passed, 3 skipped. The runtime's ten
+  `offline::tests` failed each time, and fail the same way with the
+  follow-up reverted: they initialize a node database on the host's root
+  file system, which was below the storage's default 5 percent reserve.
+  `cargo nextest run -p agenc-relay-server --test stage_eight_e2ee --all-features --locked`:
+  45 passed, 17 skipped, the two `cli_provisioning` tests failing for the
+  same reason; `bash scripts/run-stage-eight-model.sh` passed,
+  `bash scripts/run-stage-eight-transcripts.sh` passed every row but those
+  two tests, and `python3 scripts/check-stage-eight.py check` passed.
+- Revert proofs: the two expiry tests fail against the coordinator before
+  the follow-up, and the ReInit-closed restore test fails against its
+  parent. The campaigns kill 5 of 5, 3 of 4 and 2 of 2 mutations; the
+  survivor drops the record-kind filter of `reinit_finalized`, which only
+  spares decoding records that are no finalization.
+- `cargo llvm-cov nextest -p agenc-relay-runtime -p agenc-relay-domain --branch`:
+  `p04-reinit-authority-check-attempt` 24 of 24 regions,
+  `p04-startup-reinit-finalized` 15 of
+  15 and the respanned `p04-startup-restore-log-phase` 20 of 20;
+  `p04-reinit-install-prepare` 198 of 226 and
+  `cap76-startup-restore-successor-binding` 77 of 88, short by internal
+  failures as before.
 
 The workspace test run and the full `bash scripts/check-stage-nine.sh` run at
 the tip of the branch; their results are in the program's lane report.

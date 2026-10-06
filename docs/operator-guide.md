@@ -179,6 +179,12 @@ mixed-version operation of the encrypted profile.
   no attempt of this release. A conversation that was closed stays closed.
   Plaintext stays refused on all of these routes, and this release offers
   no way to bind such a channel to a new group.
+- Databases written by development builds of this profile from before its
+  ReInit enforcement are not supported: a coordinator refuses to start on
+  one that holds a ReInit activation its build stored without installing
+  the successor, or with a target this release does not admit. Start such a
+  test network again from new databases. Release candidate 3's databases
+  are upgraded as described above.
 - Do not start release candidate 3 on a database that this release has run
   on. The storage format is unchanged (schema generation 5), so nothing
   refuses it, but the database then holds encrypted state of this profile
