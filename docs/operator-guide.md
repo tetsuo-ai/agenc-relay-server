@@ -143,6 +143,8 @@ sequencer_credentials_file = "/etc/arcd/sequencer-credentials.bin"
 
 On each edge, set `enabled = true` and the same `sequencer_credentials_file`, without a sequencer key. Restart every node, because the credentials file is restart-only. Then `print-onboarding` on each node prints the four E2EE lines, with the generation and hash the command printed. The command creates only a new network's first document; later rotation and retirement documents are provisioned as described in [Rotate the sequencer credential](#rotate-the-sequencer-credential).
 
+The coordinator keeps what a live encrypted conversation's restart reads: each conversation's binding package for as long as its route exists, and the device rosters the conversation's binding, leaf proofs and published policies have named, which count toward that conversation's stored-bytes quota. A roster that no live conversation has named is collected once its account has replaced it and the retention window has passed. The coordinator holds every retained encrypted object other than message payloads in memory, up to 256 MiB in total, and refuses new ones with `E2EE_RATE_LIMITED` beyond that; `e2ee.global_disk_bytes`, the logical E2EE storage ceiling, does not raise it.
+
 ## Upgrade to a new encrypted profile
 
 A release whose encrypted profile hash differs from the running one is a

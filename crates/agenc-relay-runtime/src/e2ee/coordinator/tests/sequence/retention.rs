@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 
 mod replaced_candidates;
+mod rosters;
 
 use super::super::NOW;
 use super::object_expiry::sweep_writes;

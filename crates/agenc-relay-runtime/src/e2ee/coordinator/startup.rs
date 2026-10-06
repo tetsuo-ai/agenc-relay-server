@@ -630,7 +630,7 @@ pub(super) fn rebuild(
     }
     restore_successors(state, &network_id, &index)?;
     restore.gates.install(state)?;
-    coordinator.owner_reconstruction = restore.owners.finish(state);
+    coordinator.owner_reconstruction = restore.owners.for_network(network_id).finish(state);
     state.object_expiry = restore.object_expiry.unwrap_or_default();
     state.recovery = restore.recovery;
     coordinator.signer_history = restore.history.clone();

@@ -2,20 +2,21 @@
 //!
 //! A device-signed statement names the root and the exact roster its
 //! credential was authorized under, and that roster stops being the
-//! account's current one at the first rotation. A roster object is owned
-//! while it is the account's current roster; once superseded it stays
-//! resident only until object expiry collects it. The snapshot a statement
-//! names is resolved from the roster objects still resident and
-//! re-verified under the account's re-verified root chain, and a snapshot
-//! that is no longer resident resolves to nothing. Those are the roots and
-//! roster objects startup reconstruction consumes, so live admission and a
-//! reload decide alike.
+//! account's current one at the first rotation. A replaced roster stays
+//! resident while a live conversation's statement names it, held by that
+//! conversation's route row until the row's deletion (`roster_holds`);
+//! object expiry collects one that no route row holds. The snapshot a
+//! statement names is resolved from the resident roster objects and
+//! re-verified under the account's re-verified root chain, and a roster that
+//! is not resident resolves to nothing. Those are the roots and roster
+//! objects startup reconstruction consumes, so live admission and a reload
+//! decide alike.
 //! Whether the device is still roster-active now is the caller's separate
 //! check: a named snapshot proves who held the key, never who holds it now.
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_crypto::SemanticHashDomain;
 use agenc_relay_e2ee::identity::{VerifiedRoot, VerifiedRoster, restore_roster};
@@ -29,6 +30,15 @@ use super::CompanionState;
 
 /// Retained `device_roster` object identifiers by roster identifier.
 pub(crate) type Index = BTreeMap<[u8; 32], [u8; 32]>;
+
+/// One retained `device_roster` object: its signing root fingerprint,
+/// roster generation and object identifier.
+pub(crate) type Generation = ([u8; 32], u64, [u8; 32]);
+
+/// Retained `device_roster` objects by signing root fingerprint, roster
+/// generation and object identifier, so one root's rosters read oldest
+/// first.
+pub(crate) type Generations = BTreeSet<Generation>;
 
 /// The transient work one resolution may hold: the decoded roster object,
 /// its verified view, and the re-verified root chain.
@@ -58,16 +68,53 @@ fn decode(bytes: &[u8]) -> Option<ArcDeviceRoster> {
     ArcDeviceRoster::decode_exact(object.body(), &mut budget).ok()
 }
 
-/// Rebuilds the index from every retained roster object, as startup does
+/// Rebuilds both indexes from every retained roster object, as startup does
 /// once the durable objects are resident.
 pub(super) fn rebuild(state: &mut CompanionState) {
-    let rosters = state.objects.iter().filter_map(|(object_id, bytes)| {
-        let (kind, _) = ArcWireObject::peek(bytes).ok()?;
-        let roster = (kind == ArcWireObjectKind::DeviceRoster).then(|| decode(bytes))??;
-        let roster_id = semantic_id_of(SemanticHashDomain::RosterId, &roster.tbs).ok()?;
-        Some((roster_id, *object_id))
-    });
-    state.roster_snapshots = rosters.collect();
+    let rosters: Vec<([u8; 32], Generation)> = state
+        .objects
+        .iter()
+        .filter_map(|(object_id, bytes)| {
+            let (kind, _) = ArcWireObject::peek(bytes).ok()?;
+            let roster = (kind == ArcWireObjectKind::DeviceRoster).then(|| decode(bytes))??;
+            let roster_id = semantic_id_of(SemanticHashDomain::RosterId, &roster.tbs).ok()?;
+            let tbs = &roster.tbs;
+            Some((
+                roster_id,
+                (tbs.root_fingerprint, tbs.roster_generation, *object_id),
+            ))
+        })
+        .collect();
+    state.roster_generations = rosters.iter().map(|(_, entry)| *entry).collect();
+    state.roster_snapshots = rosters
+        .into_iter()
+        .map(|(roster_id, (_, _, object_id))| (roster_id, object_id))
+        .collect();
+}
+
+/// Forgets, in both indexes, a roster object that object expiry deleted.
+pub(super) fn forget(state: &mut CompanionState, object_id: &[u8; 32], bytes: &[u8]) {
+    let Some(roster) = decode(bytes) else {
+        return;
+    };
+    let tbs = &roster.tbs;
+    state
+        .roster_generations
+        .remove(&(tbs.root_fingerprint, tbs.roster_generation, *object_id));
+    let roster_id = semantic_id_of(SemanticHashDomain::RosterId, tbs);
+    if let Ok(roster_id) = roster_id
+        && state.roster_snapshots.get(&roster_id) == Some(object_id)
+    {
+        state.roster_snapshots.remove(&roster_id);
+    }
+}
+
+/// Indexes the roster object a publication retains, in both indexes.
+pub(super) fn retain(state: &mut CompanionState, roster: &VerifiedRoster, object_id: [u8; 32]) {
+    state.roster_snapshots.insert(roster.roster_id, object_id);
+    state
+        .roster_generations
+        .insert((roster.root_fingerprint, roster.generation, object_id));
 }
 
 /// Resolves the root and the retained roster snapshot `named` states for
