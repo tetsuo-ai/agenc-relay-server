@@ -1818,11 +1818,19 @@ fn current_policy(
 }
 
 /// Recovers the validation-time floor from every accepted candidate,
-/// including candidates that were later aborted or finalized.
+/// including candidates that were later aborted or finalized. A later
+/// candidate of the same epoch replaces an aborted one in that epoch's
+/// candidate slot row, the only durable row that names a candidate's
+/// Commit, so the replaced Commit is ordinary unowned material that object
+/// expiry may collect (companion 15 and 16); the replacing candidate's
+/// validation time is at least the replaced one's, so a replaced candidate
+/// whose Commit is gone adds nothing to the floor. A Commit its epoch's slot
+/// still names is retained, and its absence refuses the route.
 fn restore_validation_time(
     state: &CompanionState,
     expected: RouteExpectation,
     records: &BTreeMap<u64, &RecordRow>,
+    slots: &BTreeMap<([u8; 32], u64), CandidateRow>,
 ) -> Option<u64> {
     let mut validation_time = 0;
     for (sequence, record) in records {
@@ -1844,7 +1852,15 @@ fn restore_validation_time(
         {
             return None;
         }
-        let bytes = state.objects.get(&receipt.tbs.commit_object_id)?;
+        let Some(bytes) = state.objects.get(&receipt.tbs.commit_object_id) else {
+            let replaced = slots
+                .get(&(expected.conversation_id, receipt.tbs.prior_epoch))
+                .is_some_and(|slot| slot.commit_object_id != receipt.tbs.commit_object_id);
+            if replaced {
+                continue;
+            }
+            return None;
+        };
         let mut budget = DecodeBudget::new(MAX_LIVE_OBJECT, 1 << 16);
         let object =
             ArcWireObject::decode_kind(bytes, Some(ArcWireObjectKind::CommitMls), &mut budget)
@@ -2324,6 +2340,7 @@ fn restore_route(
             group_id: tbs.group_id.as_slice().try_into().ok()?,
         },
         &records,
+        &rows.candidates,
     )?;
     let mut conversation = ConversationState {
         binding_object_id: *binding_object_id,

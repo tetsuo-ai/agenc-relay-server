@@ -4,10 +4,11 @@ This record covers the server topic `sdk/b-binding-retention` of the SDK
 server program (decision D-39, 2026-10-06, outside master #35): the
 coordinator retains every object a live encrypted conversation's restart
 reads for as long as the conversation's route exists. The work
-lands in small commits; this one, the first, makes a route row hold its
-conversation's binding package. No specification, profile hash, registry
-entry, named limit, reply code, wire object, table, key, row kind, field or
-storage generation changed.
+lands in small commits: the first makes a route row hold its
+conversation's binding package, and the second takes a restart's
+validation-time floor from the Commits the candidate slots name. No
+specification, profile hash, registry entry, named limit, reply code, wire
+object, table, key, row kind, field or storage generation changed.
 
 ## A route row holds its binding package (first commit)
 
@@ -66,6 +67,29 @@ The owner matrix of [the object ownership record](stage-10-object-owners.md)
 gains this holding: the route row owns its route state object and the
 binding package of its binding.
 
+## A restart needs no Commit that no slot names (second commit)
+
+A restart restores each route's validation-time floor from its accepted
+candidates (`restore_validation_time` in
+`crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs`), re-verifying
+each candidate's Commit in route order. A candidate's Commit is named by its
+epoch's candidate slot row (`candidate/v1/<conversation><prior epoch>`),
+which a later candidate of the same epoch, after an abort, takes over; the
+replaced Commit is then ordinary material that no durable row names, which
+companion Sections 15 and 16 let object expiry collect ("the ordinary
+`SEQUENCER_RECORD_RETENTION` applies only to records not referenced by a live
+proof chain"). Every accepted candidate's validation time is at least the
+previous one's, so the replacing candidate's Commit carries a floor at least
+as late as the replaced one's.
+
+- A candidate whose Commit the store no longer holds adds nothing to the
+  floor when its epoch's slot row names another Commit.
+- A Commit its slot row still names is retained by that row, so its absence
+  is a storage fault and still refuses the route, as does a candidate
+  without a slot row.
+- The restore still reads every candidate's receipt, which its record row
+  retains, and checks its network, conversation and route sequence.
+
 ## Tests
 
 `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/retention.rs`
@@ -88,6 +112,13 @@ store:
 | `an_installed_successor_restarts_after_expiry_collects_every_unowned_object` | After a ReInit activation the successor's and the predecessor's route rows hold their packages; after expiry the restart restores the successor open, the predecessor migrated and the channel route on the successor, with a clean reconstruction. |
 | `an_installed_successor_restores_from_sealed_storage_after_expiry` | The same through sealed storage. |
 
+`crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/retention/replaced_candidates.rs`:
+
+| Test | What it pins |
+| --- | --- |
+| `a_route_restarts_after_the_commit_of_a_replaced_candidate_expires` | An aborted candidate replaced by a later candidate of the same epoch: expiry collects the replaced Commit and keeps the current one; the restart restores the route with the floor of the current Commit and its open candidate. |
+| `a_restart_still_refuses_a_route_whose_named_commit_is_missing` | A store without the Commit its slot row names refuses startup. |
+
 `every_owner_class_seals_and_reopens_with_the_same_accounts` (ownership
 suite) delivers the binding package of an unbound conversation to the
 mailbox, so a mailbox-class account still appears in its store now that the
@@ -104,10 +135,13 @@ Release policy (`conformance/release-critical-coverage.toml`):
   `e2ee-owner-stage-rows` only moved.
 - New: `retention-owner-staged-packages` (the staged packages a batch
   knows by binding identifier) and `retention-owner-held-packages`
-  (`Rebuild::derive_held`).
+  (`Rebuild::derive_held`), and, in the second commit,
+  `retention-startup-validation-floor` (the replaced-candidate rule; the
+  startup regions below it only moved).
 - A branch report of the runtime library scores the derivation 14 of 14,
   quotas 12 of 12, reconstruction 24 of 24 and the staged packages 4 of 4;
-  the held-packages region has no branch. The batch-derivation and
+  the held-packages region has no branch, and the floor rule 4 of 4. The
+  batch-derivation and
   stage-rows regions score 20 of 24 and 10 of 14 on lines this change does
   not touch (`Sizes::of` for an already accounted object and the undated
   acceptance floor), as before it.
@@ -131,6 +165,14 @@ derives the holding until a batch next writes the package's owner row.
 - Collecting a route's objects once its row is deleted is shown by deleting
   the row in a test batch.
 
+## Revert proofs
+
+- First commit: with `owners.rs` set back to its parent, the seven new
+  tests fail and the ownership suite passes.
+- Second commit: with `startup.rs` set back to its parent, the new restart
+  test fails and the missing-Commit refusal passes; with the rule widened to
+  skip every missing Commit, the missing-Commit refusal fails.
+
 ## Validation
 
 First commit, Rust 1.98.0, from the worktree root:
@@ -144,3 +186,6 @@ First commit, Rust 1.98.0, from the worktree root:
   is a timing failure that also fails at the parent `c262ce1` in two of
   three runs of the same command and passes alone.
 - The fast static gate (59 commands): exit 0.
+
+Second commit: the same commands; the runtime library run passes 2,714 of
+2,714; the fast static gate exits 0.

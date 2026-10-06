@@ -10,6 +10,8 @@
 
 use std::collections::BTreeSet;
 
+mod replaced_candidates;
+
 use super::super::NOW;
 use super::object_expiry::sweep_writes;
 use super::*;
