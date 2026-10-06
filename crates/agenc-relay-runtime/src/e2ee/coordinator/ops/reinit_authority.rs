@@ -5,24 +5,21 @@
 //! authorization must satisfy the current old policy, all before any
 //! sequencer signature.
 #![forbid(unsafe_code)]
-use super::super::{CompanionState, ConversationState};
+use super::super::ConversationState;
 use super::{Exec, Fail};
 use crate::budget::MemoryPermit;
 use agenc_relay_domain::e2ee::sequencer_log::{Phase, SequencerLog};
 use agenc_relay_e2ee::limits::{MAX_BINDING_PRINCIPALS, MAX_REINIT_OBJECT, MAX_ROSTER_OBJECT};
-use agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage;
 use agenc_relay_e2ee::objects::reinit::ArcReInitAttempt;
 use agenc_relay_e2ee::reinit_authorization::verify_reinit_attempt_authorization;
 use agenc_relay_e2ee::reinit_target::{AuthorizedReinit, CarriedTarget};
-use agenc_relay_e2ee::route::{PrincipalRosters, VerifiedBinding, verify_binding_package};
 use agenc_relay_e2ee::tls::DecodeBudget;
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 
-use super::super::roster_snapshots::{Named, RESOLUTION_WORK_BYTES, resolve};
-
-/// The work one binding principal may hold while an attempt is checked: its
-/// cloned verified roster and the retained roster snapshot its binding names.
-const PRINCIPAL_WORK_BYTES: usize = MAX_ROSTER_OBJECT * 4 + RESOLUTION_WORK_BYTES;
+/// The work one binding principal may hold while an attempt is checked or
+/// activated: its cloned verified current roster and the transient work of
+/// verifying under it.
+const PRINCIPAL_WORK_BYTES: usize = MAX_ROSTER_OBJECT * 4;
 
 /// The finalized ReInit Commit an attempt on `conversation` follows: the
 /// old group must be in its ReInit phase, and the authorized target recorded
@@ -54,11 +51,13 @@ pub(super) fn authorized(
 /// binding and plan are the carried target's, its KeyPackage plan forms the
 /// target's semantic plan, and the carried target's extension list describes
 /// the successor of the old conversation's current binding and yields the
-/// target's derived IDs (`AuthorizedReinit::check_attempt`). Returns the
-/// checked carried target. The caller holds the work memory
-/// [`reserve_work`] reserved.
+/// target's derived IDs (`AuthorizedReinit::check_attempt_from`), checked
+/// against the facts of the old conversation's current binding that the
+/// coordinator retained when it verified that binding
+/// ([`ConversationState::reinit_facts`]); no binding object or roster
+/// snapshot is read. Returns the checked carried target. The caller holds
+/// the work memory [`reserve_work`] reserved.
 pub(super) fn check_attempt(
-    exec: &Exec<'_>,
     authorized: &AuthorizedReinit,
     attempt: &ArcReInitAttempt,
     state: &ConversationState,
@@ -69,51 +68,11 @@ pub(super) fn check_attempt(
             &attempt.tbs.old_conversation_id,
         )
     };
-    let companion = &exec.coordinator.state;
-    let old_binding =
-        current_binding(companion, &exec.coordinator.network_id, state).ok_or_else(invalid)?;
+    let facts = state.reinit_facts.as_ref().ok_or_else(invalid)?;
     let mut budget = DecodeBudget::new(MAX_REINIT_OBJECT, 1 << 18);
     authorized
-        .check_attempt(attempt, &old_binding, &mut budget)
+        .check_attempt_from(attempt, facts, &mut budget)
         .map_err(|_| invalid())
-}
-
-/// The conversation's retained current binding, re-verified under the
-/// rosters its principals name (companion 13.7.2: the carried target is
-/// checked against the retained current binding), or `None` when it does
-/// not re-verify.
-pub(in crate::e2ee::coordinator) fn current_binding(
-    companion: &CompanionState,
-    network_id: &[u8; 32],
-    state: &ConversationState,
-) -> Option<VerifiedBinding> {
-    let package = super::route_successor::binding_object(companion, &state.binding_object_id)?;
-    let rosters = named_rosters(companion, network_id, &package)?;
-    verify_binding_package(network_id, &package, &rosters).ok()
-}
-
-/// The root and roster each binding principal names: the root of that
-/// fingerprint in the principal's re-verified root chain, and the retained
-/// roster snapshot of that root the binding names.
-pub(in crate::e2ee::coordinator) fn named_rosters(
-    state: &CompanionState,
-    network_id: &[u8; 32],
-    package: &ArcConversationBindingPackage,
-) -> Option<PrincipalRosters> {
-    let mut rosters = PrincipalRosters::new();
-    for principal in package.binding.tbs.principals.as_slice() {
-        let account = <[u8; 24]>::try_from(principal.account_id.as_slice()).ok()?;
-        let root = super::super::startup::principal_roots(state, network_id, &account)?
-            .into_iter()
-            .find(|root| root.fingerprint == principal.root_fingerprint)?;
-        let named = Named {
-            root_fingerprint: root.fingerprint,
-            root_generation: root.generation,
-            roster_id: principal.roster_id,
-        };
-        rosters.insert(account, resolve(state, network_id, &account, &named)?);
-    }
-    Some(rosters)
 }
 
 /// The attempt authorization's approvals satisfy the old conversation's
@@ -157,8 +116,8 @@ fn work_capacity(principals: usize) -> Option<usize> {
     if principals > MAX_BINDING_PRINCIPALS {
         return None;
     }
-    // Covers cloned verified rosters, the roster snapshots a binding names,
-    // bounded plan, target and TBS encodings, and controller sets.
+    // Covers cloned verified current rosters, bounded plan, target and TBS
+    // encodings, and controller sets.
     principals
         .checked_mul(PRINCIPAL_WORK_BYTES)?
         .checked_add(MAX_REINIT_OBJECT.checked_mul(2)?)?

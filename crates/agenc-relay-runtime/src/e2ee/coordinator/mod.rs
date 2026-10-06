@@ -371,6 +371,14 @@ pub struct ConversationState {
     /// that entered it carries no proof `AuthorizedReinit::from_proof`
     /// admits, so no attempt can follow it.
     pub reinit: Option<agenc_relay_e2ee::reinit_target::AuthorizedReinit>,
+    /// The facts of the current binding a ReInit successor must replace
+    /// (companion 13.8), taken from the binding as it was verified when it
+    /// was bound or installed, and at a restart from the retained binding
+    /// package the route restores from. The attempt check, the activation
+    /// and the restore of an installed successor read them, never the
+    /// rosters that verified the binding. `None` only in a state no bind,
+    /// install or restore produced.
+    pub reinit_facts: Option<agenc_relay_e2ee::reinit_target::ReinitPredecessor>,
 }
 
 /// One published policy the sequencer retains for its quorum check.

@@ -21,7 +21,7 @@ use agenc_relay_e2ee::objects::conversation::{
 use agenc_relay_e2ee::objects::federation::ArcRouteStateKind;
 use agenc_relay_e2ee::objects::reinit::ArcReInitAttempt;
 use agenc_relay_e2ee::policy::verify_policy;
-use agenc_relay_e2ee::route::verify_binding_package;
+use agenc_relay_e2ee::route::verify_replacement_binding;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsEncode, TlsVec};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use agenc_relay_storage::TableId;
@@ -92,17 +92,19 @@ pub(in crate::e2ee::coordinator) fn wire_object(
     ArcWireObject::new(kind, body.encode()?)?.encode()
 }
 
-// agenc-review: focus owner=runtime reviewed=2026-10-05 reason=one activation re-checks the carried target, re-verifies the successor binding and policy, pins an issuing credential, remaps the route and stages every successor row before any reply or event
+// agenc-review: focus owner=runtime reviewed=2026-10-06 reason=one activation re-checks the carried target against the retained old binding facts, verifies the successor binding and policy, pins an issuing credential, remaps the route and stages every successor row before any reply or event
 /// Prepares the installation of the successor of the activation
 /// `activation_id`, which completes `attempt` on `old`, whose retained facts
-/// are `old_state`: the attempt and the
-/// target it carries are checked again against the finalized ReInit Commit
-/// and the old binding, the successor's binding package and published
-/// policy are the target context's, verified under the rosters the
-/// successor binding names, and its pin is that context's sequencer
-/// credential, one this coordinator issues receipts under. Any refusal is
-/// `E2EE_BINDING_AUTH_INVALID` and retains nothing; an old group without a
-/// recorded authority is `E2EE_FINALITY_REQUIRED`.
+/// are `old_state`: the attempt and the target it carries are checked again
+/// against the finalized ReInit Commit and the old binding's retained facts
+/// ([`ConversationState::reinit_facts`]); the successor's binding package
+/// and published policy are the target context's, the package verified as
+/// the replacement the activation installs, which needs no roster, and the
+/// policy, with its controllers and council, under the principals' current
+/// rosters, which the coordinator always holds; and its pin is that
+/// context's sequencer credential, one this coordinator issues receipts
+/// under. Any refusal is `E2EE_BINDING_AUTH_INVALID` and retains nothing;
+/// an old group without a recorded authority is `E2EE_FINALITY_REQUIRED`.
 pub(super) fn prepare(
     exec: &Exec<'_>,
     old: &[u8; 32],
@@ -117,22 +119,20 @@ pub(super) fn prepare(
         .reinit
         .ok_or_else(|| Fail::with(E2eeReplyCode::FinalityRequired, old))?;
     let _work = super::reinit_authority::reserve_work(exec, old, old_state)?;
-    let old_binding = super::reinit_authority::current_binding(companion, network_id, old_state)
-        .ok_or_else(invalid)?;
+    let old_facts = old_state.reinit_facts.as_ref().ok_or_else(invalid)?;
     let mut budget = DecodeBudget::new(MAX_REINIT_OBJECT, 1 << 18);
     let carried = authorized
-        .check_attempt(attempt, &old_binding, &mut budget)
+        .check_attempt_from(attempt, old_facts, &mut budget)
         .map_err(|_| invalid())?;
     let context = carried.context();
     let package = package(context, &attempt.key_package_plan).map_err(|_| invalid())?;
-    let rosters = super::reinit_authority::named_rosters(companion, network_id, &package)
-        .ok_or_else(invalid)?;
-    let verified = verify_binding_package(network_id, &package, &rosters).map_err(|_| invalid())?;
+    let verified = verify_replacement_binding(network_id, &package).map_err(|_| invalid())?;
     exec.coordinator
         .signers()
         .and_then(|signers| signers.issuing_owner(&verified.sequencer_credential_id))
         .ok_or_else(invalid)?;
     let conversation_id = verified.conversation_id;
+    let rosters = super::route::rosters_of(exec, &verified.principals).map_err(|_| invalid())?;
     let policy = verify_policy(
         network_id,
         &conversation_id,

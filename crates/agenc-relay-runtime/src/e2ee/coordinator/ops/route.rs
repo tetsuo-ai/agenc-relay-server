@@ -782,6 +782,9 @@ pub(super) fn bound_state(
         current_policy_id: tbs.initial_policy_id,
         predecessor_close_id: (verified.route.incarnation > 0)
             .then_some(verified.route.predecessor_close_id),
+        reinit_facts: Some(
+            agenc_relay_e2ee::reinit_target::ReinitPredecessor::of_binding(verified),
+        ),
         ..ConversationState::default()
     })
 }

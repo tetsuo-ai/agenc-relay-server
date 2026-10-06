@@ -824,8 +824,9 @@ fn discard_route(state: &mut CompanionState, conversation: [u8; 32]) {
 }
 
 /// Checks the restored successor `new` of `old` against the target the
-/// activated attempt carries: its binding package is the one the activation
-/// installs and its log is anchored at the activation or continues from it.
+/// activated attempt carries, checked against the predecessor's retained
+/// binding facts: its binding package is the one the activation installs
+/// and its log is anchored at the activation or continues from it.
 /// Then selects its route over the predecessor's, whatever the read order,
 /// restores its lifecycle without a bootstrap, and gives it the context
 /// digest of the target's context (companion 2.2), not the target's digest.
@@ -836,15 +837,14 @@ fn restore_successor(
     new: [u8; 32],
     activation_id: [u8; 32],
 ) -> Option<()> {
-    use super::ops::{reinit_authority, reinit_install, route_successor};
+    use super::ops::{reinit_install, route_successor};
     let certificate = route_successor::activation(state, &old).ok()?;
     let attempt = &certificate.tbs.request.attempt;
-    let old_binding =
-        reinit_authority::current_binding(state, network_id, state.conversations.get(&old)?)?;
+    let old_facts = state.conversations.get(&old)?.reinit_facts?;
     let mut budget = DecodeBudget::new(MAX_REINIT_OBJECT, 1 << 18);
-    let carried = agenc_relay_e2ee::reinit_target::check_carried_target(
+    let carried = agenc_relay_e2ee::reinit_target::check_carried_target_from(
         network_id,
-        &old_binding,
+        &old_facts,
         &attempt.target,
         &mut budget,
     )
@@ -2358,6 +2358,9 @@ fn restore_route(
         predecessor_close_id: row.predecessor_close_id,
         last_validation_time,
         reinit,
+        reinit_facts: Some(
+            agenc_relay_e2ee::reinit_target::ReinitPredecessor::of_binding_tbs(tbs).ok()?,
+        ),
         ..ConversationState::default()
     };
     let historical = principal_rosters(state, network_id, &conversation, index);

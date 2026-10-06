@@ -1252,7 +1252,7 @@ pub fn submit_reinit_attempt(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let _work = super::reinit_authority::reserve_work(exec, &old_conversation_id, old_state)?;
-    super::reinit_authority::check_attempt(exec, &authorized, &attempt, old_state)?;
+    super::reinit_authority::check_attempt(&authorized, &attempt, old_state)?;
     super::recovery::vacant_successor(&exec.coordinator.state, &tbs.new_conversation_id)?;
     let mut next_log = log.clone();
     let slot = next_log

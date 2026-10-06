@@ -2,11 +2,14 @@
 //!
 //! A device-signed statement names the root and the exact roster its
 //! credential was authorized under, and that roster stops being the
-//! account's current one at the first rotation. Every published roster
-//! object stays retained, so the snapshot a statement names is resolved
-//! from the retained objects and re-verified under the account's
-//! re-verified root chain. Those are the roots and roster objects startup
-//! reconstruction consumes, so live admission and a reload decide alike.
+//! account's current one at the first rotation. A roster object is owned
+//! while it is the account's current roster; once superseded it stays
+//! resident only until object expiry collects it. The snapshot a statement
+//! names is resolved from the roster objects still resident and
+//! re-verified under the account's re-verified root chain, and a snapshot
+//! that is no longer resident resolves to nothing. Those are the roots and
+//! roster objects startup reconstruction consumes, so live admission and a
+//! reload decide alike.
 //! Whether the device is still roster-active now is the caller's separate
 //! check: a named snapshot proves who held the key, never who holds it now.
 

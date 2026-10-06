@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod declared_recovery;
+mod expiry;
 mod previous_profile;
 pub(in crate::e2ee::coordinator::tests::sequence) mod reconstruction;
 mod row_mismatch;
@@ -592,43 +593,51 @@ fn move_roster_on(fixture: &mut Fixture) -> TestResult<[u8; 32]> {
 }
 
 #[test]
-fn an_activation_checks_the_bindings_under_the_rosters_they_name() -> TestResult {
-    // The principal's roster moves on after the attempt: the old and the
-    // successor binding still name the original roster, whose retained
-    // snapshot verifies them, and the activation installs the successor.
-    let mut fixture = Fixture::prepare()?;
-    move_roster_on(&mut fixture)?;
-    let outcome = fixture.activate()?;
-    assert!(matches!(outcome.result, ResultBody::ReinitActivated(..)));
-    assert!(
-        fixture
-            .harness
-            .coordinator
-            .state
-            .conversations
-            .contains_key(&fixture.new)
-    );
-    // Without that snapshot the old binding cannot be checked again, and
-    // nothing is installed.
+fn an_activation_needs_neither_the_old_binding_object_nor_a_roster_it_names() -> TestResult {
+    // The principal's roster moves on after the attempt, and neither the
+    // old binding object nor the roster snapshot the bindings name is
+    // resident any more: the old binding's retained facts, the replacement
+    // the target names and the principals' current rosters install the
+    // successor all the same.
     let mut fixture = Fixture::prepare()?;
     let named = move_roster_on(&mut fixture)?;
-    let object = fixture
-        .harness
-        .coordinator
-        .state
+    let state = &mut fixture.harness.coordinator.state;
+    let snapshot = state
         .roster_snapshots
         .get(&named)
         .copied()
         .ok_or("the named roster snapshot")?;
-    assert!(
-        fixture
-            .harness
-            .coordinator
-            .state
-            .objects
-            .remove(&object)
-            .is_some()
+    let binding = state
+        .conversations
+        .get(&fixture.old)
+        .ok_or("old state")?
+        .binding_object_id;
+    for object in [snapshot, binding] {
+        assert!(state.objects.remove(&object).is_some());
+    }
+    let outcome = fixture.activate()?;
+    assert!(matches!(outcome.result, ResultBody::ReinitActivated(..)));
+    let installed = fixture
+        .harness
+        .coordinator
+        .state
+        .conversations
+        .get(&fixture.new)
+        .ok_or("the installed successor")?;
+    assert_eq!(
+        installed.binding_object_id,
+        object_id(&fixture.package_bytes()?)
     );
+    // Without the old binding's retained facts nothing is installed.
+    let mut fixture = Fixture::prepare()?;
+    fixture
+        .harness
+        .coordinator
+        .state
+        .conversations
+        .get_mut(&fixture.old)
+        .ok_or("old state")?
+        .reinit_facts = None;
     refused_activation(&mut fixture, E2eeReplyCode::BindingAuthInvalid)
 }
 

@@ -1,5 +1,6 @@
-//! A conversation's retained binding package, the requester's principal
-//! authority over it, and the retained activation of a migrated predecessor.
+//! The requester's principal authority over a conversation, the retained
+//! activation of a migrated predecessor, and, for tests, a conversation's
+//! retained binding package.
 
 #![forbid(unsafe_code)]
 
@@ -7,9 +8,8 @@ use agenc_relay_crypto::SemanticHashDomain;
 use agenc_relay_domain::e2ee::sequencer_log::Phase;
 use agenc_relay_e2ee::E2eeError;
 use agenc_relay_e2ee::ids::semantic_id_of;
-use agenc_relay_e2ee::limits::{MAX_BINDING_OBJECT, MAX_SEQUENCER_RECORD_OBJECT};
+use agenc_relay_e2ee::limits::MAX_SEQUENCER_RECORD_OBJECT;
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
-use agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage;
 use agenc_relay_e2ee::objects::reinit::ArcReInitActivationCertificate;
 use agenc_relay_e2ee::objects::sequencing::ArcSequencerRecord;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
@@ -18,16 +18,18 @@ use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use super::super::CompanionState;
 use super::{Exec, Fail};
 
-/// The retained binding package object `id`, decoded.
+/// The retained binding package object `id`, decoded, for the tests that
+/// build bindings from it; no coordinator check reads a binding object.
+#[cfg(test)]
 pub(in crate::e2ee::coordinator) fn binding_object(
     state: &CompanionState,
     id: &[u8; 32],
-) -> Option<ArcConversationBindingPackage> {
+) -> Option<agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage> {
     let bytes = state.objects.get(id)?;
     decode(
         bytes,
         ArcWireObjectKind::ConversationBinding,
-        MAX_BINDING_OBJECT,
+        agenc_relay_e2ee::limits::MAX_BINDING_OBJECT,
     )
     .ok()
 }

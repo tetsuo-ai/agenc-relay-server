@@ -15,12 +15,12 @@ use super::super::reinit_successor::{
 use super::*;
 use crate::e2ee::coordinator::tests::support::private_message_bytes;
 use crate::e2ee::coordinator::tests::{GROUP, INSTANCE, wire_raw};
-use agenc_relay_e2ee::ObjectId;
 use agenc_relay_e2ee::limits::MAX_BINDING_PRINCIPALS;
 use agenc_relay_e2ee::objects::aad::ArcApplicationAad;
 use agenc_relay_e2ee::objects::conversation::{
-    ArcBindingPrincipal, ArcCommitAuthorizationRule, ArcKeyPackagePlan, action_bits,
+    ArcCommitAuthorizationRule, ArcKeyPackagePlan, action_bits,
 };
+use agenc_relay_e2ee::reinit_target::ReinitPredecessor;
 use agenc_relay_e2ee::route::channel_route_binding;
 use agenc_relay_e2ee::tls::TlsEncode;
 
@@ -475,10 +475,11 @@ fn an_authorized_target_of_another_finalization_admits_no_attempt() -> TestResul
 }
 
 #[test]
-fn the_carried_target_is_checked_against_the_binding_under_the_rosters_it_names() -> TestResult {
-    // The principal's roster moves on after the binding: the binding still
-    // names its original roster, which the retained snapshot resolves, so
-    // the attempt is checked and admitted.
+fn the_carried_target_is_checked_against_the_retained_facts_of_the_old_binding() -> TestResult {
+    // The principal's roster moves on after the binding. The attempt is
+    // checked against the facts the coordinator retained when it verified
+    // the binding, so it is admitted when neither the roster snapshot the
+    // binding names nor the binding object is resident.
     let mut harness = Harness::new()?;
     let conversation = harness.bind_channel_for_reinit()?;
     let certificates = harness
@@ -503,9 +504,6 @@ fn the_carried_target_is_checked_against_the_binding_under_the_rosters_it_names(
     ok(harness.run(Op::PublishRoster, &[], Some(&roster_bytes))?)?;
     let old_state = accepted_state(&harness, conversation)?;
     let (_, bytes) = attempt(&harness, conversation, old_state, 0)?;
-    // Without the retained snapshot of the named roster, or without the
-    // retained binding, the binding cannot be checked and the attempt is
-    // refused.
     let roster_snapshot = harness
         .coordinator
         .state
@@ -522,52 +520,31 @@ fn the_carried_target_is_checked_against_the_binding_under_the_rosters_it_names(
         .get(&conversation)
         .ok_or("state")?
         .binding_object_id;
-    for missing in [roster_snapshot, binding_object] {
+    for missing in [
+        vec![roster_snapshot],
+        vec![binding_object],
+        vec![roster_snapshot, binding_object],
+    ] {
         let mut stripped = harness.reloaded()?;
-        let removed = stripped.coordinator.state.objects.remove(&missing);
-        assert!(removed.is_some());
-        refused(
-            &mut stripped,
-            conversation,
-            &bytes,
-            E2eeReplyCode::BindingAuthInvalid,
-        )?;
+        for object in missing {
+            assert!(stripped.coordinator.state.objects.remove(&object).is_some());
+        }
+        let outcome = ok(stripped.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
+        assert!(matches!(outcome.result, ResultBody::ReinitStaged(..)));
     }
-    let outcome = ok(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
-    assert!(matches!(outcome.result, ResultBody::ReinitStaged(..)));
     Ok(())
 }
 
-/// One edit of a binding principal the retained binding names.
-type PrincipalEdit = (&'static str, fn(&mut ArcBindingPrincipal) -> TestResult);
-
 #[test]
-fn an_attempt_is_refused_when_the_old_binding_cannot_be_checked_again() -> TestResult {
-    // The carried target is checked against the retained binding re-verified
-    // under the rosters its principals name. Retained state under which it
-    // does not re-verify, or more principals than a binding admits, refuses
-    // the attempt, retaining nothing.
+fn an_attempt_is_refused_unless_the_retained_facts_describe_its_predecessor() -> TestResult {
+    // The carried target must describe the successor of the binding whose
+    // facts the coordinator retained. Facts of another binding, no facts,
+    // or more principals than a binding admits refuse the attempt,
+    // retaining nothing.
     let mut harness = Harness::new()?;
     let conversation = harness.bind_channel_for_reinit()?;
     let old_state = accepted_state(&harness, conversation)?;
     let (_, bytes) = attempt(&harness, conversation, old_state, 0)?;
-    // The principal's root chain does not re-verify.
-    let root = wire(ArcWireObjectKind::RootIdentity, &harness.principal.root)?;
-    let mut rootless = harness.reloaded()?;
-    let removed = rootless
-        .coordinator
-        .state
-        .objects
-        .remove(ObjectId::compute(&root).as_bytes());
-    assert!(removed.is_some());
-    refused(
-        &mut rootless,
-        conversation,
-        &bytes,
-        E2eeReplyCode::BindingAuthInvalid,
-    )?;
-    // The binding names a root outside the principal's chain, or an account
-    // identifier of another length.
     let binding_id = harness
         .coordinator
         .state
@@ -575,28 +552,28 @@ fn an_attempt_is_refused_when_the_old_binding_cannot_be_checked_again() -> TestR
         .get(&conversation)
         .ok_or("state")?
         .binding_object_id;
-    let edits: [PrincipalEdit; 2] = [
-        ("root", |principal| {
-            principal.root_fingerprint = [9; 32];
-            Ok(())
-        }),
-        ("account", |principal| {
-            principal.account_id = Opaque::new(vec![1; 23])?;
-            Ok(())
-        }),
+    let package = crate::e2ee::coordinator::ops::route_successor::binding_object(
+        &harness.coordinator.state,
+        &binding_id,
+    )
+    .ok_or("binding")?;
+    type TbsEdit = fn(&mut agenc_relay_e2ee::objects::conversation::ArcConversationBindingTbs);
+    let edits: [(&str, TbsEdit); 3] = [
+        ("generation", |tbs| tbs.binding_generation += 1),
+        ("route binding", |tbs| tbs.route_binding[0] ^= 1),
+        ("route lock", |tbs| tbs.semantic_route_lock_id[0] ^= 1),
     ];
     for (name, edit) in edits {
+        let mut tbs = package.binding.tbs.clone();
+        edit(&mut tbs);
         let mut edited = harness.reloaded()?;
-        let mut package = crate::e2ee::coordinator::ops::route_successor::binding_object(
-            &edited.coordinator.state,
-            &binding_id,
-        )
-        .ok_or("binding")?;
-        let mut principals = package.binding.tbs.principals.as_slice().to_vec();
-        edit(principals.first_mut().ok_or("principal")?)?;
-        package.binding.tbs.principals = TlsVec::new(principals)?;
-        let binding = wire(ArcWireObjectKind::ConversationBinding, &package)?;
-        edited.coordinator.state.objects.insert(binding_id, binding);
+        edited
+            .coordinator
+            .state
+            .conversations
+            .get_mut(&conversation)
+            .ok_or("state")?
+            .reinit_facts = Some(ReinitPredecessor::of_binding_tbs(&tbs)?);
         refused(
             &mut edited,
             conversation,
@@ -605,6 +582,20 @@ fn an_attempt_is_refused_when_the_old_binding_cannot_be_checked_again() -> TestR
         )
         .map_err(|error| format!("{name}: {error}"))?;
     }
+    let mut factless = harness.reloaded()?;
+    factless
+        .coordinator
+        .state
+        .conversations
+        .get_mut(&conversation)
+        .ok_or("state")?
+        .reinit_facts = None;
+    refused(
+        &mut factless,
+        conversation,
+        &bytes,
+        E2eeReplyCode::BindingAuthInvalid,
+    )?;
     // More principals than a binding admits.
     let mut crowded = harness.reloaded()?;
     let accounts = &mut crowded

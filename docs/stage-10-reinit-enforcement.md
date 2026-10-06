@@ -79,11 +79,14 @@ order decision D-11a fixes, each refusal retaining nothing:
    binding and plan are the carried target's; its KeyPackage plan forms the
    target's member plan; and the carried extension list describes the
    successor of the old conversation's current binding and yields the
-   target's derived IDs. That binding is the retained binding package
-   re-verified under the rosters its principals name, each resolved from the
-   principal's re-verified root chain and the retained roster snapshot the
-   binding names, as leaf-membership proofs resolve theirs; a binding that
-   does not re-verify refuses the attempt the same way;
+   target's derived IDs. That binding is described by the facts the
+   coordinator retained when it verified the binding, at `EGROUP BIND`, at
+   the installation of a ReInit successor or, after a restart, from the
+   retained binding package its route restores from
+   (`ConversationState::reinit_facts`, the helper's `ReinitPredecessor`):
+   no binding object or roster snapshot is read, so their expiry refuses no
+   attempt, and a conversation without those facts refuses the attempt the
+   same way (`AuthorizedReinit::check_attempt_from`);
 5. the successor conversation is vacant in every representation
    (`E2EE_ROUTE_INVALID`), checked here instead of in the recovery
    admission, so it follows the checks above;
@@ -94,8 +97,8 @@ Steps 4 to 6 run under one bounded work reservation
 (`reinit_authority::reserve_work`): a conversation with more principals than
 a binding admits is `E2EE_BINDING_AUTH_INVALID` before any work, and an
 exhausted backing budget `E2EE_RATE_LIMITED`; the old-policy check reserved
-its own before, and the per-principal bound now includes the roster snapshot
-each principal's binding entry names. The questions file of this lane
+its own before, and the per-principal bound covers each principal's cloned
+current roster. The questions file of this lane
 records why the requester checks stay first, why the vacancy check moved and
 how the work is bounded (Q-RD-4, Q-RD-5, Q-RD-9). The old-policy
 authorization no longer compares the attempt's `old_reinit_state_id` with
@@ -110,21 +113,25 @@ activation", so that "no `EGROUP RESERVE` or `EGROUP BIND` precedes successor
 traffic" (step 6).
 
 `submit_reinit_terminal` prepares the installation once the activation's
-quorum is reached and before it signs or stages anything
-(`reinit_install::prepare`), and every refusal retains nothing:
+quorum is reached and before it stages anything
+(`reinit_install::prepare`); the activation certificate, which it signs
+before the quorum check, is dropped with any refusal, so every refusal
+retains nothing:
 
 - the old group must still hold the authority its ReInit finalization
   recorded (`E2EE_FINALITY_REQUIRED` otherwise), and, under the same bounded
   work reservation the attempt used, the activated attempt and its carried
-  target are checked again with `AuthorizedReinit::check_attempt` against
-  the old binding re-verified under the rosters it names;
+  target are checked again with `AuthorizedReinit::check_attempt_from`
+  against the old binding's retained facts;
 - the successor's binding package is the target context's `current_binding`
   with the `ArcInitialMemberPlan` the attempt's KeyPackage plan forms and no
-  root binding lock (`reinit_install::package`); it and the context's policy
-  verify under the rosters the successor binding names, and its pin, the
-  context's `sequencer`, must be a credential this coordinator issues
-  receipts under (Q-RD-12); any of these refused is
-  `E2EE_BINDING_AUTH_INVALID`;
+  root binding lock (`reinit_install::package`); the package verifies as
+  the replacement the activation installs (`route::verify_replacement_binding`,
+  which reads no roster), the context's policy, with its controllers and
+  finality council, verifies under the principals' current rosters, which
+  the coordinator always holds (Q-RD-25), and its pin, the context's
+  `sequencer`, must be a credential this coordinator issues receipts under
+  (Q-RD-12); any of these refused is `E2EE_BINDING_AUTH_INVALID`;
 - the route table replaces the predecessor's route by the successor
   (`RouteTable::install_successor`) only as the exact next binding of its
   lineage on the same concrete route, lock and incarnation, from a
@@ -363,11 +370,11 @@ gate 8) pass unchanged. No box changes.
   object after the ReInit finality, before and after a restart; a restart
   restores the phase and its authority, refuses a wrong digest and admits
   the authorized attempt; an authority of another finalization admits
-  nothing; the binding is checked under the rosters it names after the
-  principal's roster moved on, and a missing roster snapshot or binding, a
-  root chain that does not re-verify, a binding naming another root or an
-  account identifier of another length, or more principals than a binding
-  admits, refuses the attempt.
+  nothing; after the principal's roster moved on, the attempt is admitted
+  with neither the binding object nor the roster snapshot the binding names
+  resident, while facts of another binding (generation, route binding or
+  route lock), no facts, or more principals than a binding admits refuse it
+  (rewritten in the review's follow-up).
 - `crates/agenc-relay-runtime/src/e2ee/coordinator/tests/startup_heads.rs`:
   a ReInit finalization head restores the phase, an ordinary one leaves the
   group open, and each identity disagreement leaves the phase unrestorable;
@@ -400,9 +407,11 @@ Second commit:
   same activation then installs it. The route is neither reserved nor bound
   again. An activation without its authority, with a foreign authority, under
   an exhausted work budget, with a successor policy that does not verify,
-  with a pin this coordinator does not issue under, or when the old binding
-  cannot be checked again retains nothing, and the bindings are checked
-  under the rosters they name after the roster moved on. A restored
+  with a pin this coordinator does not issue under, or without the old
+  binding's retained facts retains nothing, and after the roster moved on
+  the activation installs the successor with neither the old binding object
+  nor the roster snapshot the bindings name resident (rewritten in the
+  review's follow-up). A restored
   successor keeps no bootstrap whatever the read order.
 - `successor/row_mismatch.rs`, `successor/target_mismatch.rs`,
   `successor/declared_recovery.rs` and `successor/reconstruction.rs` keep
@@ -472,7 +481,7 @@ coordinator, the second the seventh:
 | `E2EE-REQ-CCA2E69085E483C5155F` | carried target digest and the authorized digest | the same |
 | `E2EE-REQ-39DFA440E75F7F7495F2` | attempt fields against the carried target | the same |
 | `E2EE-REQ-B4977D179E4C66AAD737` | the KeyPackage plan forms the member plan | the same |
-| `E2EE-REQ-4A3F05D133A72461A8DC` | the carried list's structure and derived IDs | the same, against the binding re-verified under its named rosters |
+| `E2EE-REQ-4A3F05D133A72461A8DC` | the carried list's structure and derived IDs | the same, against the old binding's retained facts |
 | `E2EE-REQ-65D600D44A7F4FDA9EE6` | the atomic successor installation (second commit) | `reinit_install::prepare` and `package`, `RouteTable::install_successor`, the activation's batch and effect, `restore_successor` |
 
 No clause of the revision is left without an implementation in the
@@ -615,8 +624,8 @@ route held to the rule, a route without records refused), 5 of 5 entries.
   current root and roster heads, as before this change; after a principal
   rotates its root, which companion 8.2 follows with a ReInit, the old
   policy's controllers name the previous root and no attempt of that
-  conversation is authorized. The binding check of this change resolves the
-  root and roster the binding names and is not what refuses it.
+  conversation is authorized. The binding check of this change reads the old
+  binding's retained facts and is not what refuses it.
 - A successor of a direct conversation is installed by the same code, but no
   coordinator test binds a direct conversation through the harness, so its
   entitlement branch is covered by no test; the route table's direct install
@@ -656,6 +665,28 @@ branch. Its findings are taken up at the level of the rules below.
   order as the route requires them, and the plan. A replacement verifies to
   the same `VerifiedBinding` with or without rosters. The coordinator adopts
   both in the next commit.
+- The attempt check, the activation and the restore of an installed
+  successor rely on facts verified and retained when a binding was made,
+  never on objects that object expiry may remove. `EGROUP BIND` and the
+  installation keep the facts of the binding they verified
+  (`ConversationState::reinit_facts`); a restart rebuilds them from the
+  retained binding package its route restores from, without the rosters
+  that verified it. The attempt and the activation check the carried target
+  against them; the activation verifies the successor's package as a
+  replacement (`route::verify_replacement_binding`) and its policy under the
+  principals' current rosters (Q-RD-25), and `restore_successor` checks the
+  installed successor against them. `current_binding` and `named_rosters`
+  are removed with their two coverage regions, and the module documentation
+  of `roster_snapshots` states that a superseded roster object stays
+  resident only until object expiry collects it. No row changes (Q-RD-26):
+  the facts live in memory, and a binding package's retention for its
+  conversation's life is handled by the server topic
+  `sdk/b-binding-retention`. New tests run object expiry past a replaced
+  roster's retention, with the old binding object gone too, and then admit
+  the attempt and activate it, and restart a coordinator holding an
+  installed successor whose predecessor's binding names the collected
+  roster; both fail against the previous commit's coordinator. The C1 and
+  C2 tests now show that the retained facts decide.
 
 ## Validation
 
