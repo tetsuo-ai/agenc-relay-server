@@ -6,11 +6,11 @@ coordinator retains every object a live encrypted conversation's restart
 reads for as long as the conversation's route exists. The work
 lands in small commits: the first makes a route row hold its
 conversation's binding package, the second takes a restart's
-validation-time floor from the Commits the candidate slots name, and the
-third makes a route row hold the rosters its conversation's statements
-name. No specification, profile hash, registry entry, named limit, reply
-code, wire object, table, key, row kind, field or storage generation
-changed.
+validation-time floor from the Commits the candidate slots name, the third
+makes a route row hold the rosters its conversation's statements name, and
+the fourth restores stores written before these rules (G-08). No
+specification, profile hash, registry entry, named limit, reply code, wire
+object, table, key, row kind, field or storage generation changed.
 
 ## A route row holds its binding package (first commit)
 
@@ -66,9 +66,10 @@ The rule, in `crates/agenc-relay-runtime/src/e2ee/coordinator/owners.rs`:
   to a device's mailbox with `EKEY DELIVER BINDING`, stays a security proof
   of the conversation after those rows retire.
 
-The owner matrix of [the object ownership record](stage-10-object-owners.md)
-gains this holding: the route row owns its route state object and the
-binding package of its binding.
+This extends the owner matrix of
+[the object ownership record](stage-10-object-owners.md), which is left as
+written: the route row owns its route state object and the binding package
+of its binding.
 
 ## A restart needs no Commit that no slot names (second commit)
 
@@ -289,16 +290,50 @@ Release policy (`conformance/release-critical-coverage.toml`):
 
 Both policies' source inventories are refreshed.
 
-## Persistence (G-08)
+## Stores written before these rules (G-08, fourth commit)
 
-Additive within storage generation 5. No table, key, row kind, field or
-object layout changes, and startup writes nothing: the owner rows a batch
-writes already reference table-23 rows; a package's owner row also
-references its route row, and a held roster's owner row the route rows that
-hold it. A store written before this change restores, and its route rows
-hold their packages and the rosters their statements name from that restart
-on; each restart derives these holdings until a batch next writes the
-object's owner row.
+The decision is additive within storage generation 5 (decision D-06). No
+table, key, row kind, field or object layout changes, and startup writes
+nothing: the owner rows a batch writes already reference table-23 rows; a
+binding package's owner row also names its route row, and a held roster's
+owner row the route rows that hold it.
+
+`test-data/stage-ten/binding-retention/` holds three stores written by the
+test harness of two earlier coordinators, with the generator and commands
+in its README: a bound channel after its bootstrap activation and a bound
+channel whose account replaced its roster, both from release candidate 3
+(`70c832c`), and an installed ReInit successor from `main` after the merge
+of the P-04 topic (`c262ce1`). In
+`crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/retention/earlier_stores.rs`:
+
+| Test | What it pins |
+| --- | --- |
+| `every_store_that_holds_its_packages_restores_from_sealed_storage` | The three stores restore through the storage reads a restart uses. |
+| `an_earlier_bound_channel_restores_and_its_route_holds_its_package_from_then_on` | The restart derives the route row's holding of the package and rebuilds its account; object expiry past every window then keeps it, and `EGROUP QUERY CHANNEL` answers with it before and after another restart. |
+| `an_earlier_store_keeps_the_roster_its_policies_were_verified_under` | The restart holds the replaced roster under the route row, as the roster its binding names and the earliest that verifies both policies; after expiry and another restart it is still held, and both published policies and the current one restore. |
+| `an_earlier_installed_successor_restores_and_keeps_both_packages` | The successor restores open on the channel route, the successor's and the predecessor's route rows hold their packages, expiry keeps both, and another restart restores the successor. |
+| `a_store_without_a_routes_binding_package_refuses_startup` | A bound-channel or installed-successor store whose binding package rows are removed refuses startup, through the harness reload and through sealed storage. |
+
+A store that holds its routes' binding packages restores, and from that
+restart on its route rows hold their packages and the rosters their
+statements name. Each restart derives these holdings until a batch next
+writes the object's owner row, and the reconstruction counts such an
+account as rebuilt.
+
+A store that does not hold a route's binding package lacks the facts a
+restart restores that route from (group, suite, context core, principals,
+initial policies and the ReInit facts of the binding), and startup refuses
+it, as it refuses a route whose rows name any other object the store does
+not hold. A restart that instead restored such a route, held its semantic
+route lock and refused every operation on it would leave the route without
+any way back: companion 13.7.1 and 13.7.2 adopt a lost lineage's objects
+only through the server recovery gate, under the binding identifier it
+pins, and this coordinator's recovery resumes from the retained package.
+The decision is recorded for the owner.
+
+Downgrade: release candidate 3 reads a store this topic wrote, since no
+format changed, but does not derive these holdings; the operator guide
+already says not to start it on a database a later release has run on.
 
 ## Limitations
 
@@ -372,6 +407,10 @@ object's owner row.
   where the earliest-roster scan starts, and the other drops the
   trusted-time dating that every such batch's own statement rows already
   require.
+- Fourth commit: with every production file of this topic set back to
+  `c262ce1` and `roster_holds.rs` removed, the three earlier-store tests
+  that check the holding fail, and the sealed-storage restore and the
+  refusal of a store without its packages pass.
 
 ## Validation
 
@@ -392,3 +431,8 @@ Second commit: the same commands; the runtime library run passes 2,714 of
 
 Third commit: the same commands; the runtime library run passes
 2,732 of 2,732; the fast static gate exits 0.
+
+Fourth commit: the same commands; the runtime library run passes
+2,737 of 2,737, the workspace run with the host filter
+(`-E 'not (test(/offline::tests::/) | test(/cli_provisioning/))'`) passes
+4,823 of 4,823 with 62 skipped, and the fast static gate exits 0.
