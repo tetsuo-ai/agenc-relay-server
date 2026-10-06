@@ -214,6 +214,136 @@ that lets a bounded database grow, the resume of a construction stopped before
 its target existed, and the exact resume at a refused target batch (STO-07,
 issue #69) are recorded in
 [the restore and rekey admission record](stage-10-restore-rekey-admission.md).
+The recovery epoch NOTE the welcome burst now sends to a client that
+negotiated `agenc.ag/recovery`, whether or not it negotiated
+`standard-replies`, the `900` that now ends an authenticated registration's
+burst, read from the domain on a coordinator and from the session projection
+on an edge, the `900` and `ACCOUNT` lines that now follow a registered
+session's login on a coordinator, a standalone node or an edge, with the
+login projected to the edges, the federation codec rule that lets a
+recomputed channel membership keep the revision it joined at, with the edge
+check that a recompute changes only a member's role, and the origin
+generation an edge now declares after a registered connection's login
+(SC-007, SDK program, outside master #35), are recorded in
+[the login state record](stage-10-login-state.md).
+The one formatter that now frames the public cloak in every user mask and in
+every separate user and host field as Architecture Section 7.4 specifies, the
+local JOIN token bound grown for the framed mask, and the revert of each
+rendering site (AUD-18, SDK program item B-12, outside master #35) are
+recorded in [the framed cloak record](stage-10-framed-cloak.md). An explicit
+NAMES reply larger than one response batch, which closed the requester's
+connection on a node answering its own clients and which the framed tokens
+made more common, is delivered in pages as a JOIN's NAMES is (AUD-18 review,
+outside master #35); see [the explicit NAMES pages record](stage-10-explicit-names-pages.md).
+The local JOIN that a node's own router, core-only or a federated
+coordinator, applies in the step that admits it, whose NAMES snapshot now
+opens at once instead of never, so a lone `&` JOIN is answered and no longer
+holds the commands behind it (AUD-16, SDK program, outside master #35), is
+recorded in [the in-step local JOIN record](stage-10-in-step-local-join.md).
+The edge's own answers to `MOTD`, `LUSERS`, `VERSION`, `TIME`, `ADMIN` and
+`INFO`, which closed the requester's connection on an edge, from the
+single-node renderers with `LUSERS` in one fixed form without counts, also
+while partitioned and always after the connection's earlier requests, and
+`LINKS` forwarded to the coordinator (BLJ-R1, SDK program decisions D-28 and
+D-35, outside master #35), are recorded in
+[the edge local queries record](stage-10-edge-local-queries.md).
+The one labeled response an edge gives its client's labeled `PRIVMSG`,
+`NOTICE` or `TAGMSG`, the held echoes under `echo-message` and otherwise a
+labeled `ACK`, as the coordinator gives its own client, and every welcome's
+`RPL_LUSER*` counters, now the figures of the node's own `LUSERS` reply (SDK
+program decision D-36, outside master #35), are recorded in
+[the edge echo record](stage-10-edge-echo.md).
+The edge initialized by `arcd init` that starts, links and advertises the
+encrypted profile, its database complete without the fake OPAQUE record only a
+coordinator must hold, and the kill-and-restart comparison showing that this
+refusal does not explain RUN-08 (AUD-01, SDK program, outside master #35) are
+recorded in [the CLI edge initialization record](stage-10-cli-edge-initialization.md).
+The edge descriptor that pins the coordinator epoch the edge advertises,
+through the daemon's own selection, the refusal of an edge with no enabled
+coordinator record, and the node's own epoch printed by `arcd init` for its
+peers' records (AUD-03, SDK program, outside master #35) are recorded in
+[the edge descriptor epoch record](stage-10-edge-descriptor-epoch.md).
+The offline `arcd sequencer-credentials create` command that writes a new
+network's generation-zero sequencer credentials document from the shared
+encoders, byte-equal to the testkit's, the operator-guide procedure that
+enables the encrypted profile with it, and the three-node network provisioned
+through `arcd` (AUD-02, SDK program, outside master #35) are recorded in
+[the sequencer credentials record](stage-10-sequencer-credentials-command.md).
+The edge's labeled `REINIT-STAGED`, `REINIT-ACKED`, `REINIT-ACTIVATED` and
+`REINIT-ABORTED` replies, rendered by the result kind instead of as `ACKED`
+or `ABORTED`, and the untagged ACK notice or terminal broadcast the edge no
+longer sends to the connection whose request it completes (SC-013, SDK
+program, outside master #35), are recorded in
+[the requester replies record](stage-10-e2ee-requester-replies.md).
+`EKEY CLAIM STATUS` answered with the claim's stored target device instead of
+the asking device, and the disposition that leaves an empty claim result
+re-evaluated after a coordinator restart (SC-001 and SC-002, SDK program,
+outside master #35), are recorded in
+[the claim status record](stage-10-claim-status-target.md).
+The shared public verifiers corrected where they admitted correctly signed
+objects the companion refuses, a sequencer successor that reuses its
+predecessor's key, capability and leaf statements signed for another
+network, roster certificates whose enrollment issuance is not shown and a
+roster listing one certificate both active and revoked, together with the
+first-contact roster admission that takes that issuance as explicit
+evidence and the first-contact capability admission (X-10, SDK program,
+outside master #35), are recorded in
+[the shared verifier predicates record](stage-10-shared-verifier-predicates.md).
+The thirteen endpoint scalars of companion Section 16 that had no constant,
+and the table test that compares every Section 16 row with the `limits`
+module (X-11, SDK program, outside master #35), are recorded in
+[the companion client scalars record](stage-10-companion-client-scalars.md).
+The public OPAQUE profile and client modules of the auth crate, which give
+a client the coordinator's exact suite, key-stretching function, context and
+identities and the client half of registration and login (X-08, SDK program,
+outside master #35), are recorded in
+[the OPAQUE client profile record](stage-10-opaque-client-profile.md).
+The fuzz workspace's own selection of the reviewed local OPAQUE source,
+which it resolved from the unpatched release before, and the explicit root
+path edge that was measured but not applied because it fails the Section
+28.8 formatting gate (X-09, SDK program, outside master #35), are recorded in
+[the OPAQUE fuzz source record](stage-10-opaque-fuzz-source.md).
+The program's normative revision, which removes the finalization ID from the
+ReInit target, carries the target in every ReInit attempt with the
+sequencer's checks and the coordinator's atomic successor installation, and
+states the edge recovery-epoch, welcome `900`, pre-authentication default,
+crate-graph and formatting rules, moving the E2EE profile hash under profile
+version 1 (PC-001 with decisions D-13 to D-16 and D-30, SDK program item P-01,
+outside master #35), is recorded in
+[the ReInit target revision record](stage-10-reinit-target-revision.md).
+The `preauth_command` default burst of 24 that the configuration, the
+runtime's admission table and the golden configuration now use, as Section
+19.1 and Appendix C.6 specify, so that a client paced to the bucket finishes
+account creation or a login before registration within the registration
+limit, and the operator guide's section on the budget (AUD-07, SDK program
+item B-05, outside master #35), are recorded in
+[the pre-authentication default record](stage-10-preauth-default.md).
+The client wire crate's object-kind list completed with the four kinds it
+lacked and held equal, with its copied tag, fragment and object limits, to
+the crates that own them (X-12), the Appendix A.1 argument bounds made
+public for client encoders (X-07), the server-to-client base decoder, its
+framer, raw tag parser, registries and validators, with its fuzz target and
+hand-written vectors (X-05), and the reader of the E2EE replies with the
+charge of an object batch to its class and batch bounds (X-06, SDK program,
+outside master #35), are recorded in
+[the shared client wire record](stage-10-shared-client-wire.md).
+The shared ReInit target helper that rebuilds a target from its Proposal,
+checks the target every attempt carries for the sequencer, an endpoint and a
+later joiner, and binds them to the old ReInit finalization and the successor
+initial Commit, with the historical chain's carried-target checks, the
+independent ReInit vectors and the one-target Stage 08 fixture (P-02, SDK
+program, outside master #35), is recorded in
+[the ReInit target helper record](stage-10-reinit-target-helper.md).
+The ReInit successor verified under the rosters its own roster heads name,
+with root continuity from the old heads and its binding's principals, the
+root-rotation and suite-change vectors, and the channel-authority root that a
+ReInit cannot rotate (P-03, SDK program, outside master #35), are recorded in
+[the ReInit successor rosters record](stage-10-reinit-successor-rosters.md).
+The refusal of the previous encrypted profile, the profile-mismatch answer
+to an `ECAP` line of another profile, the mixed-version link through the
+daemons and the operator guide's upgrade note (P-05, SDK program, outside
+master #35) are recorded in
+[the previous-profile refusal record](stage-10-previous-profile-refusal.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

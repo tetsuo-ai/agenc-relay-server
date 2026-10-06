@@ -242,6 +242,7 @@ fn fixture_with_options(
             result: None,
             replies: Vec::new(),
             join_echoes: Vec::new(),
+            message_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
             completion_coverage: None,
@@ -351,7 +352,14 @@ async fn rendering_callback_rechecks_link_state_and_preserves_original_tags() ->
                     .ok_or("batch start")?
                     .contains("label=original")
             );
-            assert!(lines.get(1).ok_or("message")?.contains("old-sender!"));
+            // AUD-18: a replayed message keeps its sender's framed mask.
+            let cloak = agenc_relay_testkit::deterministic_cloak(1)?;
+            let source = format!(
+                " :old-sender!u-{}@h-{}.invalid PRIVMSG #room :history must wait",
+                std::str::from_utf8(cloak.user_component())?,
+                std::str::from_utf8(cloak.host_component())?,
+            );
+            assert!(lines.get(1).ok_or("message")?.ends_with(&source));
             assert!(lines.get(1).ok_or("message")?.contains("msgid="));
             assert!(lines.get(1).ok_or("message")?.contains("time="));
             assert!(lines.get(1).ok_or("message")?.contains("history must wait"));

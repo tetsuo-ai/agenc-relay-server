@@ -169,6 +169,25 @@ What it proves:
 - **What each endpoint can derive.** The activated successor's padded content
   decrypts in the continuing joiner's successor state, and the openmls state of
   the leaf removed before the ReInit derives nothing from it.
+- **One target, checked through the shared history** (PC-001 revision,
+  2026-10-04). The target is built once, before the ReInit Commit, and names
+  no state of the old group, so the digest the controller authorization
+  commits is the digest every attempt names, and every attempt carries that
+  target byte for byte in `ArcReInitAttempt.target`; the attempt-abort
+  scenario stages its attempt the same way. After the activation the scenario
+  fetches the daemon's retained records and replays them through
+  `HistoricalChain`, resumed at the accepted state before the ReInit
+  candidate: the finalization commits the target's digest, `AuthorizedReinit`
+  recomputes the finalization identifier and accepts the carried target, a
+  target with one field replaced neither matches the authorization nor binds
+  to the chain, the bound target admits the attempt receipt whose carried
+  target it equals, no target binds while that attempt is open, and the
+  activation ends the old lineage naming the successor conversation. The
+  replayed attempt does not satisfy the companion's successor initial-Commit
+  rule: its `initial_commit_bytes` are the mls-rs `GroupInfo` message (see
+  Limitations), which `AuthorizedReinit::check_initial_commit` refuses as
+  another message kind. `HistoricalChain` does not apply that rule, so this
+  scenario proves the one target, not the initial Commit.
 
 ## Fixtures
 
@@ -185,16 +204,27 @@ What it proves:
 ## Limitations
 
 - mls-rs produces a Welcome and a `GroupInfo` for a resumption successor, not a
-  separate initial-Commit message. The attempt therefore carries the successor's
+  separate initial-Commit message, and offers no way to set that Commit's
+  authenticated data. The attempt therefore carries the successor's
   `GroupInfo` message as `initial_commit_bytes`. The coordinator binds only its
   digest and never parses it; parsing the successor's Add set, KeyPackageRefs
   and resumption PSK usage is the endpoint check the companion assigns to
-  endpoints, and it is not claimed here.
+  endpoints, and it is not claimed here. The initial Commit's `ArcCommitAad`
+  naming the old finalization (companion 13.8, PC-001 revision) is checked by
+  `AuthorizedReinit::check_initial_commit` against the independent vectors in
+  `test-data/vectors/e2ee/reinit`, not against an mls-rs Commit.
+- For the same reason the scenario's ReInit proposal carries an empty
+  extension list: these endpoints advertise no ARC extension capability, and
+  the target the scenario builds carries a one-byte placeholder list. The
+  target's reconstruction from a real extension list, and the structural
+  checks of the list an attempt carries, are exercised by the ReInit vectors
+  for suites `0x0001` and `0x0003`, not by this scenario.
 - Three of the four successor result digests
   (`new_group_info_digest`, `new_group_context_digest`,
-  `new_ratchet_tree_digest`) have no Section 2.2 formula; each binds real
-  successor material through the object-identifier hash. The fourth, the
-  exporter authenticator, uses the label and context the companion fixes.
+  `new_ratchet_tree_digest`) are object-identifier hashes of successor
+  material, not the Section 2.2 formulas the companion registers for them.
+  The fourth, the exporter authenticator, uses the label and context the
+  companion fixes.
 - The successor route of the ReInit is not bound, so successor traffic is
   exchanged between the two endpoints rather than carried by the daemon. The
   `ArcStagedReInit` mailbox carrier is not exercised; the normal Welcome mailbox

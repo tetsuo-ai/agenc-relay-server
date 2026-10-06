@@ -1,0 +1,5 @@
+@label=req-1 :server.example BATCH +req-1 labeled-response
+@batch=req-1 :server.example 375 alice :- server.example Message of the day -
+@batch=req-1 :server.example 376 alice :End of /MOTD command
+:server.example BATCH -req-1
+@label=req-2 :server.example ACK

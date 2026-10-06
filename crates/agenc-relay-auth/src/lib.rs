@@ -5,11 +5,17 @@
 //! All private application messages enter through the fixed account-service
 //! HPKE envelope. OPAQUE state, credentials, transaction bindings, and
 //! completion receipts remain coordinator-owned and move-only.
+//!
+//! The public [`profile`] module owns the exact OPAQUE suite, key-stretching
+//! function, context and identities that both protocol halves use, and the
+//! public [`client`] module computes the client half over exact-size arrays.
 
 mod channel_key;
+pub mod client;
 mod error;
 mod invitation;
 mod opaque;
+pub mod profile;
 mod service;
 mod transaction;
 mod wire;

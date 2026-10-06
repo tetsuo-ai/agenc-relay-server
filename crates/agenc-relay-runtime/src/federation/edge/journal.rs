@@ -633,6 +633,7 @@ pub(super) fn restore_request(
             result_bytes: row.result_object,
             replies: Vec::new(),
             join_echoes: Vec::new(),
+            message_echoes: Vec::new(),
             completion: row
                 .completion_event_id
                 .map(agenc_relay_types::EventId::from_bytes),

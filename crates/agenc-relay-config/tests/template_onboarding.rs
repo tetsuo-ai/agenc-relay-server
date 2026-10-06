@@ -8,8 +8,8 @@ mod support;
 use agenc_relay_config::{
     BASE_PROFILE_SHA256_TOKEN, ConfigError, DisplayLabel, DnsName, E2EE_PROFILE_SHA256_TOKEN,
     InitProfile, InitValues, MAX_ONBOARDING_DESCRIPTOR_BYTES, NodeRole, OnboardingFacts,
-    OperatorTemplate, SequencerKeySetFacts, ValidationStage, parse_onboarding_descriptor,
-    render_onboarding, render_template,
+    OperatorTemplate, RATE_ROWS, RateKey, RateSpec, SequencerKeySetFacts, ValidationStage,
+    parse_onboarding_descriptor, render_onboarding, render_template,
 };
 use agenc_relay_types::{NetworkId, OperatorId, RecoveryEpoch, ServerId};
 use support::{DUAL, ONION, PUBLIC, parse};
@@ -66,6 +66,48 @@ fn generated_admin_admission_and_operator_identity_use_the_same_uid() -> TestRes
         assert_eq!(
             operator.signing_public_key,
             values.operator.signing_public_key
+        );
+    }
+    Ok(())
+}
+
+/// The document `arcd init` writes names no `[limits.rate]` table, so a node
+/// it initializes runs every Appendix C.6 rate default, among them the
+/// `preauth_command` burst of 24.
+#[test]
+fn every_profile_runs_the_appendix_c6_rate_defaults() -> TestResult {
+    for profile in [InitProfile::Public, InitProfile::Onion, InitProfile::Dual] {
+        let text = render_template(&values(profile)?)?;
+        let enabled = text
+            .replace(
+                "enabled = false\npurpose = \"client_tls\"",
+                "enabled = true\npurpose = \"client_tls\"",
+            )
+            .replace(
+                "enabled = false\npurpose = \"client_onion\"",
+                "enabled = true\npurpose = \"client_onion\"",
+            );
+        let enabled = if profile == InitProfile::Onion {
+            enabled.replace(
+                "coordinator_server_id = \"AgICAgICAgICAgICAgICAg\"\n# Fill",
+                "coordinator_server_id = \"AgICAgICAgICAgICAgICAg\"\nonion_address = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion\"\nonion_tls_spki_sha256 = \"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\"\n# Fill",
+            )
+        } else {
+            enabled
+        };
+        let config = parse(&enabled).map_err(|report| format!("{profile:?}: {report}"))?;
+        for row in &RATE_ROWS {
+            assert_eq!(
+                config.limits.rates.get(row.key),
+                row.default,
+                "{profile:?} {}",
+                row.name
+            );
+        }
+        assert_eq!(
+            config.limits.rates.get(RateKey::PreauthCommand),
+            RateSpec::new(1, 1, 24),
+            "{profile:?}"
         );
     }
     Ok(())
@@ -192,7 +234,7 @@ fn descriptor_lines_occur_in_order_and_omit_absent_endpoints_as_units() -> TestR
     );
     assert_eq!(
         E2EE_PROFILE_SHA256_TOKEN,
-        "wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U"
+        "CzmFweGfd-Vhc0E51lEx-xwfxct6Y6ERnKA7WmFYNSU"
     );
 
     let public = render_onboarding(&parse(PUBLIC)?, &facts())?;
@@ -302,6 +344,41 @@ fn descriptor_parser_rejects_noncanonical_scalars_and_reordered_fields() -> Test
     assert_eq!(
         parse_onboarding_descriptor(&"x".repeat(MAX_ONBOARDING_DESCRIPTOR_BYTES + 1)),
         Err(ConfigError::InvalidDocument)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_descriptor_of_the_previous_profile_is_refused() -> TestResult {
+    // Release candidate 3's profile token, then the tokens of drafts of the
+    // ReInit target revision that were never adopted: the program's
+    // superseded first round and the two revisions of its earlier rehearsal.
+    let previous = [
+        "wbUxP4p_GWzaMO6nl_satlsASlXXHPmoEHGScEbl05U",
+        "wdFNKl0-6lCHsd81UTpS74BG2BGg0yZUURoRCzwEkO8",
+        "7IkMThzSxSXro80LOF4RPUlMHJzf1GcDPZDiHxk9U-0",
+        "fApHHjGXpxyWRFMLG00LDDpXjORF6u13LPffgT2ALY0",
+    ];
+    let current = render_onboarding(&parse(PUBLIC)?, &facts())?;
+    parse_onboarding_descriptor(&current)?;
+    for token in previous {
+        let descriptor = current.replacen(E2EE_PROFILE_SHA256_TOKEN, token, 1);
+        assert_ne!(descriptor, current);
+        assert_eq!(
+            parse_onboarding_descriptor(&descriptor),
+            Err(ConfigError::InvalidValue),
+            "{token}"
+        );
+    }
+    // A node with the encrypted profile disabled prints no E2EE line, so its
+    // descriptor is the same under either revision.
+    let mut disabled = facts();
+    disabled.sequencer_key_set = None;
+    let core_only = render_onboarding(&parse(PUBLIC)?, &disabled)?;
+    assert!(!core_only.contains("e2ee-profile"));
+    assert_eq!(
+        parse_onboarding_descriptor(&core_only)?.sequencer_key_set,
+        None
     );
     Ok(())
 }

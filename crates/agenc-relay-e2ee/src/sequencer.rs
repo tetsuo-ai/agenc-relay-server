@@ -35,6 +35,11 @@ impl VerifiedSequencerCredential {
 }
 
 /// Verifies one credential, optionally continuing from its predecessor.
+///
+/// A successor never reuses its predecessor's public key (companion 9.2.1):
+/// that key could sign its own continuity, so the signature alone does not
+/// refuse it, and a verifier holding only public credentials has no signer
+/// installation behind it to catch the reuse.
 pub fn verify_sequencer_credential(
     network_id: &[u8; 32],
     credential: &ArcSequencerCredential,
@@ -61,6 +66,7 @@ pub fn verify_sequencer_credential(
             if previous.generation.checked_add(1) != Some(tbs.key_generation)
                 || tbs.previous_key_id != previous.credential_id
                 || !previous.interval.covers(ValidationTime(tbs.not_before))
+                || tbs.sequencer_public_key == *previous.key.as_bytes()
             {
                 return Err(E2eeError::InvalidValue);
             }

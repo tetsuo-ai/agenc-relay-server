@@ -13,6 +13,7 @@ use agenc_relay_auth::{
     AuthenticationGrantRecord, AuthenticationTransactionRecord, CreationTransactionRecord,
     CredentialChangeTransactionRecord, OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord,
 };
+use agenc_relay_config::NodeRole;
 use agenc_relay_domain::{
     DomainState, DurableAccount, DurableChannel, DurableSanction, DurableSession,
 };
@@ -74,7 +75,7 @@ pub const RECONSTRUCTED_TABLES: [TableId; 20] = [
 /// Account-service rows needed before the first live request is accepted.
 pub struct AccountServiceReconstruction {
     login_index_key_state: LoginIndexKeyState,
-    fake_opaque_record: [u8; OPAQUE_REGISTRATION_RECORD_BYTES],
+    fake_opaque_record: Option<[u8; OPAQUE_REGISTRATION_RECORD_BYTES]>,
     live_login_keys: BTreeMap<AccountId, StoredKey>,
     login_deletion_tombstones: BTreeMap<(u64, AccountId), StoredKey>,
     startup_transaction_cleanups: Vec<RecoveredAccountTransactionCleanup>,
@@ -87,10 +88,13 @@ impl AccountServiceReconstruction {
         self.login_index_key_state
     }
 
-    /// Returns the stable fake OPAQUE record restored from authenticated storage.
+    /// Returns the stable fake OPAQUE record restored from authenticated
+    /// storage. A coordinator's reconstruction always holds it; an edge's
+    /// holds it only when its database was seeded with one, and nothing on
+    /// an edge reads it.
     #[must_use]
-    pub const fn fake_opaque_record(&self) -> &[u8; OPAQUE_REGISTRATION_RECORD_BYTES] {
-        &self.fake_opaque_record
+    pub const fn fake_opaque_record(&self) -> Option<&[u8; OPAQUE_REGISTRATION_RECORD_BYTES]> {
+        self.fake_opaque_record.as_ref()
     }
 
     /// Borrows the one validated live private login-index key for each account.
@@ -175,7 +179,7 @@ struct AccountServiceScan {
 }
 
 impl AccountServiceScan {
-    fn finish(self) -> Result<AccountServiceReconstruction, RuntimeError> {
+    fn finish(self, role: NodeRole) -> Result<AccountServiceReconstruction, RuntimeError> {
         let Self {
             login_index_key_state,
             fake_opaque_record,
@@ -218,12 +222,28 @@ impl AccountServiceScan {
         )?;
         Ok(AccountServiceReconstruction {
             login_index_key_state,
-            fake_opaque_record: fake_opaque_record
-                .ok_or(RuntimeError::Storage(StorageError::StaleState))?,
+            fake_opaque_record: role_fake_opaque_record(role, fake_opaque_record)?,
             live_login_keys,
             login_deletion_tombstones,
             startup_transaction_cleanups,
         })
+    }
+}
+
+/// The fake OPAQUE record is account-service state. A coordinator hosts the
+/// account service and answers a login for an unknown name with that record,
+/// so its database must hold it. An edge forwards every account request to
+/// its coordinator, and `init` gives an edge no OPAQUE state (spec 22.3), so
+/// an edge database without the record is complete. A record an edge
+/// database was seeded with is admitted under the same row checks as before
+/// and never read.
+fn role_fake_opaque_record(
+    role: NodeRole,
+    record: Option<[u8; OPAQUE_REGISTRATION_RECORD_BYTES]>,
+) -> Result<Option<[u8; OPAQUE_REGISTRATION_RECORD_BYTES]>, RuntimeError> {
+    match (role, record) {
+        (NodeRole::Coordinator, None) => Err(RuntimeError::Storage(StorageError::StaleState)),
+        (NodeRole::Coordinator | NodeRole::Edge, record) => Ok(record),
     }
 }
 
@@ -408,11 +428,14 @@ struct Scan {
     account_service: AccountServiceScan,
 }
 
-/// Reads every reconstructed table and restores the domain state.
+/// Reads every reconstructed table and restores the domain state. `role` is
+/// the configured node role; it decides which account-service rows the
+/// database must hold.
 pub fn reconstruct(
     seed: &StateCoreSeed,
     port: &StoragePort,
     keys: &KeyDeriver,
+    role: NodeRole,
     monotonic_now: MonotonicTick,
     utc_now: UtcSecond,
 ) -> Result<Reconstruction, RuntimeError> {
@@ -424,7 +447,7 @@ pub fn reconstruct(
     }
     scan.bind_nicknames(keys)?;
     scan.bind_channel_names(keys)?;
-    let account_service = scan.account_service.finish()?;
+    let account_service = scan.account_service.finish(role)?;
     let revision =
         Revision::new(seed.storage().state_generation()).map_err(|_| RuntimeError::InvalidValue)?;
     let domain = DomainState::restore_authoritative(
@@ -2051,7 +2074,7 @@ mod tests {
             },
         );
 
-        let reconstruction = scan.finish()?;
+        let reconstruction = scan.finish(NodeRole::Coordinator)?;
         let [cleanup] = reconstruction.startup_transaction_cleanups() else {
             return Err(RuntimeError::InvalidValue);
         };
@@ -2075,7 +2098,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            missing.finish(),
+            missing.finish(NodeRole::Coordinator),
             Err(RuntimeError::Storage(StorageError::StaleState))
         ));
 
@@ -2099,7 +2122,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            mismatched.finish(),
+            mismatched.finish(NodeRole::Coordinator),
             Err(RuntimeError::Storage(StorageError::StaleState))
         ));
         Ok(())
@@ -2118,7 +2141,7 @@ mod tests {
             },
         );
 
-        let reconstruction = scan.finish()?;
+        let reconstruction = scan.finish(NodeRole::Coordinator)?;
         let [cleanup] = reconstruction.startup_transaction_cleanups() else {
             return Err(RuntimeError::InvalidValue);
         };
@@ -2230,7 +2253,7 @@ mod tests {
             .login_deletion_tombstones
             .insert((2_592_100, deleted_account_id), stored_login_key);
         assert!(matches!(
-            missing_owner.finish(),
+            missing_owner.finish(NodeRole::Coordinator),
             Err(RuntimeError::Storage(StorageError::StaleState))
         ));
         Ok(())
@@ -2286,11 +2309,11 @@ mod tests {
             key_state_key,
             &sealed_key_state,
         )?;
-        let account_service = scan.account_service.finish()?;
+        let account_service = scan.account_service.finish(NodeRole::Coordinator)?;
         assert_eq!(account_service.login_index_key_state(), key_state);
         assert_eq!(
             account_service.fake_opaque_record(),
-            profile.expose_fake_record_for_persistence()
+            Some(profile.expose_fake_record_for_persistence())
         );
 
         let invalid_value = PersistentRecordValue::new(
@@ -2377,7 +2400,7 @@ mod tests {
         )?);
         valid.account_service.fake_opaque_record =
             Some(*profile.expose_fake_record_for_persistence());
-        let reconstructed = valid.account_service.finish()?;
+        let reconstructed = valid.account_service.finish(NodeRole::Coordinator)?;
         assert!(
             reconstructed.live_login_keys().get(&account.account_id) == Some(&stored_login_key)
         );
@@ -2401,7 +2424,7 @@ mod tests {
         orphan_account.account_service.fake_opaque_record =
             Some(*profile.expose_fake_record_for_persistence());
         assert!(matches!(
-            orphan_account.account_service.finish(),
+            orphan_account.account_service.finish(NodeRole::Coordinator),
             Err(RuntimeError::Storage(StorageError::StaleState))
         ));
 
@@ -2484,7 +2507,7 @@ mod tests {
         missing_opaque
             .live_login_keys
             .insert(account_id(1), login_key.clone());
-        assert!(stale(missing_opaque.finish()));
+        assert!(stale(missing_opaque.finish(NodeRole::Coordinator)));
 
         let mut foreign_login = account_service_scan()?;
         foreign_login.live_accounts.insert(account_id(1));
@@ -2492,7 +2515,7 @@ mod tests {
             .live_login_keys
             .insert(account_id(2), login_key.clone());
         foreign_login.opaque_accounts.insert(account_id(1));
-        assert!(stale(foreign_login.finish()));
+        assert!(stale(foreign_login.finish(NodeRole::Coordinator)));
 
         let mut foreign_opaque = account_service_scan()?;
         foreign_opaque.live_accounts.insert(account_id(1));
@@ -2500,7 +2523,7 @@ mod tests {
             .live_login_keys
             .insert(account_id(1), login_key.clone());
         foreign_opaque.opaque_accounts.insert(account_id(2));
-        assert!(stale(foreign_opaque.finish()));
+        assert!(stale(foreign_opaque.finish(NodeRole::Coordinator)));
 
         let mut deleted = account_service_scan()?;
         deleted.deleted_accounts.insert(account_id(3));
@@ -2508,7 +2531,7 @@ mod tests {
         deleted
             .login_deletion_tombstones
             .insert((2_592_100, account_id(3)), login_key.clone());
-        let reconstruction = deleted.finish()?;
+        let reconstruction = deleted.finish(NodeRole::Coordinator)?;
         assert!(
             reconstruction
                 .login_deletion_tombstones()
@@ -2557,7 +2580,7 @@ mod tests {
                 expires_at: 905,
             },
         );
-        assert!(stale(login_only.finish()));
+        assert!(stale(login_only.finish(NodeRole::Coordinator)));
 
         let mut invitation_only = account_service_scan()?;
         invitation_only.invitation_reservations.insert(
@@ -2567,7 +2590,7 @@ mod tests {
                 expires_at: 905,
             },
         );
-        assert!(stale(invitation_only.finish()));
+        assert!(stale(invitation_only.finish(NodeRole::Coordinator)));
         Ok(())
     }
 
@@ -2587,7 +2610,7 @@ mod tests {
         plain
             .transactions
             .insert(change_id, RecoveredTransaction::CredentialChange);
-        let reconstruction = plain.finish()?;
+        let reconstruction = plain.finish(NodeRole::Coordinator)?;
         let cleanups = reconstruction.startup_transaction_cleanups();
         let recovered: Vec<TransactionId> = cleanups
             .iter()
@@ -2613,7 +2636,7 @@ mod tests {
                 expires_at: 906,
             },
         );
-        assert!(stale(with_login.finish()));
+        assert!(stale(with_login.finish(NodeRole::Coordinator)));
 
         let mut with_invitation = account_service_scan()?;
         with_invitation
@@ -2626,7 +2649,7 @@ mod tests {
                 expires_at: 906,
             },
         );
-        assert!(stale(with_invitation.finish()));
+        assert!(stale(with_invitation.finish(NodeRole::Coordinator)));
         Ok(())
     }
 
@@ -2651,7 +2674,7 @@ mod tests {
                 expires_at: 907,
             },
         );
-        assert!(stale(with_login.finish()));
+        assert!(stale(with_login.finish(NodeRole::Coordinator)));
 
         let mut with_invitation = account_service_scan()?;
         with_invitation
@@ -2664,7 +2687,7 @@ mod tests {
                 expires_at: 907,
             },
         );
-        assert!(stale(with_invitation.finish()));
+        assert!(stale(with_invitation.finish(NodeRole::Coordinator)));
 
         let mut with_metadata = account_service_scan()?;
         with_metadata.transactions.insert(
@@ -2675,7 +2698,7 @@ mod tests {
                 reservation_invitation: Some(invitation_id),
             },
         );
-        assert!(stale(with_metadata.finish()));
+        assert!(stale(with_metadata.finish(NodeRole::Coordinator)));
         Ok(())
     }
 
@@ -2703,7 +2726,7 @@ mod tests {
                 expires_at: 908,
             },
         );
-        assert!(stale(scan.finish()));
+        assert!(stale(scan.finish(NodeRole::Coordinator)));
         Ok(())
     }
 
@@ -2741,14 +2764,14 @@ mod tests {
                 expires_at,
             },
         );
-        assert!(stale(unexpected.finish()));
+        assert!(stale(unexpected.finish(NodeRole::Coordinator)));
 
         let mut missing = account_service_scan()?;
         missing
             .transactions
             .insert(transaction_id, creation(Some(invitation_id)));
         missing.login_reservations.insert(transaction_id, login());
-        assert!(stale(missing.finish()));
+        assert!(stale(missing.finish(NodeRole::Coordinator)));
 
         let mut wrong_id = account_service_scan()?;
         wrong_id
@@ -2762,7 +2785,7 @@ mod tests {
                 expires_at,
             },
         );
-        assert!(stale(wrong_id.finish()));
+        assert!(stale(wrong_id.finish(NodeRole::Coordinator)));
 
         let mut wrong_expiry = account_service_scan()?;
         wrong_expiry
@@ -2778,7 +2801,7 @@ mod tests {
                 expires_at: 910,
             },
         );
-        assert!(stale(wrong_expiry.finish()));
+        assert!(stale(wrong_expiry.finish(NodeRole::Coordinator)));
         Ok(())
     }
 
@@ -3511,6 +3534,31 @@ mod tests {
                 119,
             )));
             assert!(scan.account_service.invitation_reservations.is_empty());
+        }
+        Ok(())
+    }
+
+    /// AUD-01: an edge database written by `arcd init` holds no fake OPAQUE
+    /// record, and the edge reconstructs without it; a coordinator database
+    /// without the record is still refused, and a seeded record is kept on
+    /// either role.
+    #[test]
+    fn only_a_coordinator_database_requires_the_fake_opaque_record() -> Result<(), RuntimeError> {
+        let mut edge = account_service_scan()?;
+        edge.fake_opaque_record = None;
+        let reconstruction = edge.finish(NodeRole::Edge)?;
+        assert!(reconstruction.fake_opaque_record().is_none());
+
+        let mut coordinator = account_service_scan()?;
+        coordinator.fake_opaque_record = None;
+        assert!(stale(coordinator.finish(NodeRole::Coordinator)));
+
+        for role in [NodeRole::Coordinator, NodeRole::Edge] {
+            let reconstruction = account_service_scan()?.finish(role)?;
+            assert_eq!(
+                reconstruction.fake_opaque_record(),
+                Some(&[13; OPAQUE_REGISTRATION_RECORD_BYTES])
+            );
         }
         Ok(())
     }

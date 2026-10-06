@@ -8,8 +8,9 @@ use agenc_relay_client_wire::{
     AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec,
     MAX_TRADITIONAL_LINE_BYTES, OutputBudget, RegisteredCommandKind, RegistrationAction,
     RegistrationAuthCarrier, RegistrationError, RegistrationEvent, RegistrationPhase,
-    RegistrationState, RenderedMessage, SecretBytes, StreamFramer, WelcomeStep, WireMessage,
-    isupport_messages, numeric_reply, parse_message, split_capability_lines,
+    RegistrationState, RenderedMessage, SecretBytes, ServerStreamFramer, StreamFramer, WelcomeStep,
+    WireMessage, isupport_messages, numeric_reply, parse_message, parse_server_message,
+    split_capability_lines, user_mask,
 };
 use agenc_relay_types::NetworkId;
 use subtle::ConstantTimeEq as _;
@@ -20,6 +21,7 @@ const TRANSCRIPT_SERVER: &str = "server.example";
 const TRANSCRIPT_NETWORK_ID: NetworkId = NetworkId::from_bytes([0; 32]);
 const TRANSCRIPT_PING_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAA";
 const TRANSCRIPT_CONFIGURED_ACCESS_TOKEN: [u8; 32] = [0; 32];
+const TRANSCRIPT_CLOAK_SEED: u8 = 0;
 
 /// Direction or deterministic-time operation in one fixture step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +119,9 @@ pub enum ClientTranscriptError {
     ServerBytesMismatch,
     /// The transcript ended before all rendered responses were asserted.
     MissingServerBytes,
+    /// Asserted server bytes were not one line the server-to-client decoder
+    /// accepts.
+    ServerDecoding,
 }
 
 impl fmt::Display for ClientTranscriptError {
@@ -134,6 +139,7 @@ impl fmt::Display for ClientTranscriptError {
             Self::UnexpectedServerBytes => "client transcript has unexpected server bytes",
             Self::ServerBytesMismatch => "client transcript server bytes do not match",
             Self::MissingServerBytes => "client transcript omitted expected server bytes",
+            Self::ServerDecoding => "client transcript server bytes do not decode",
         };
         formatter.write_str(message)
     }
@@ -456,11 +462,10 @@ impl ClientTranscriptHarness {
             .expected_server
             .pop_front()
             .ok_or(ClientTranscriptError::UnexpectedServerBytes)?;
-        if expected.as_bytes() == bytes {
-            Ok(())
-        } else {
-            Err(ClientTranscriptError::ServerBytesMismatch)
+        if expected.as_bytes() != bytes {
+            return Err(ClientTranscriptError::ServerBytesMismatch);
         }
+        decode_server_frame(bytes)
     }
 
     fn apply_actions(
@@ -786,7 +791,17 @@ impl ClientTranscriptHarness {
                     Some("Current server recovery identity"),
                 )?)?;
             }
-            WelcomeStep::AccountState | WelcomeStep::RegistrationBatches => {}
+            WelcomeStep::AccountState => {
+                let mask = transcript_mask(target)?;
+                self.queue_wire(numeric_reply(
+                    TRANSCRIPT_SERVER,
+                    900,
+                    target,
+                    &[&mask, "*"],
+                    Some("You are now logged in"),
+                )?)?;
+            }
+            WelcomeStep::RegistrationBatches => {}
         }
         Ok(())
     }
@@ -820,6 +835,56 @@ impl ClientTranscriptHarness {
         self.expected_server.push_back(rendered);
         Ok(())
     }
+}
+
+/// Requires one server frame, CRLF included, to be exactly one line that a
+/// client's server-to-client decoder accepts: [`ServerStreamFramer`] and
+/// [`parse_server_message`]. The harness applies it to every server frame a
+/// fixture asserts.
+///
+/// # Errors
+///
+/// Returns [`ClientTranscriptError::ServerDecoding`] when the bytes do not
+/// frame as one line or the line does not decode, and
+/// [`ClientTranscriptError::AllocationFailed`] when the framer cannot
+/// reserve its buffer.
+pub fn decode_server_frame(bytes: &[u8]) -> Result<(), ClientTranscriptError> {
+    let mut framer =
+        ServerStreamFramer::new().map_err(|_| ClientTranscriptError::AllocationFailed)?;
+    let mut decoded = 0_usize;
+    let lines = framer
+        .feed(bytes, |line| {
+            if parse_server_message(line).is_ok() {
+                decoded = decoded.saturating_add(1);
+            }
+        })
+        .map_err(|_| ClientTranscriptError::ServerDecoding)?;
+    framer
+        .finish()
+        .map_err(|_| ClientTranscriptError::ServerDecoding)?;
+    if lines == 1 && decoded == 1 {
+        Ok(())
+    } else {
+        Err(ClientTranscriptError::ServerDecoding)
+    }
+}
+
+/// The user mask the transcript model gives its registered session
+/// `nickname`: the nickname and the deterministic cloak of fixture seed
+/// zero, spelled by [`user_mask`], the formatter the runtime uses for every
+/// user prefix (the framed cloak of Architecture 7.4). The model's account
+/// has no public label, so its `900` names `*`. The runtime's account-state
+/// tests compare this mask with the runtime's own renderers, so a change to
+/// the visible cloak spelling must change it too.
+///
+/// # Errors
+///
+/// Returns [`ClientTranscriptError::Rendering`] when the fixture cloak
+/// cannot be built or spelled.
+pub fn transcript_mask(nickname: &str) -> Result<String, ClientTranscriptError> {
+    let cloak = crate::deterministic_cloak(TRANSCRIPT_CLOAK_SEED)
+        .map_err(|_| ClientTranscriptError::Rendering)?;
+    user_mask(nickname, &cloak).map_err(|_| ClientTranscriptError::Rendering)
 }
 
 fn recovery_epoch(profile: &CapabilityProfile) -> Result<String, ClientTranscriptError> {

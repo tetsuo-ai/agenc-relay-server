@@ -301,3 +301,29 @@ fn the_context_core_seals_the_binding() -> TestResult {
     );
     Ok(())
 }
+
+/// The context's sequencer continues `previous_sequencer` through the shared
+/// credential chain, so a successor that reuses its predecessor's public key
+/// is refused here too (companion 9.2.1), while one with a fresh key
+/// verifies.
+#[test]
+fn a_context_sequencer_successor_needs_a_fresh_key() -> TestResult {
+    let principals = channel_principals()?;
+    let rosters = principal_rosters(&principals)?;
+    let mut context = context(&principals)?;
+    let first_secret = key(60);
+    let first = context.sequencer.clone();
+    let previous = verify_sequencer_credential(&NETWORK, &first, None)?;
+    let successor = |secret: &agenc_relay_crypto::Ed25519SecretKey| {
+        sequencer_credential(secret, 1, (500, 2_000_000), Some((&first_secret, &first)))
+    };
+    context.sequencer = successor(&key(61))?;
+    let verified = verify_context(&NETWORK, &context, &rosters, None, Some(&previous))?;
+    assert_eq!(verified.sequencer.generation, 1);
+    context.sequencer = successor(&first_secret)?;
+    assert_eq!(
+        verify_context(&NETWORK, &context, &rosters, None, Some(&previous)).map(|_| ()),
+        Err(E2eeError::InvalidValue)
+    );
+    Ok(())
+}

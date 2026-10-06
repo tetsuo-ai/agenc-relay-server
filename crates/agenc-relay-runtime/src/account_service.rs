@@ -5111,9 +5111,23 @@ impl AccountServiceCoordinator {
             None
         };
         let frames = self.response_frames(context, &request, response, sasl_accepted)?;
-        let fanout = context
-            .fanout_request_to(request.generation, frames)
-            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        let fanout = match (semantic_grant, bound) {
+            // A registered session's login follows its 903 with the later
+            // 900 and names a guest's new account to its account-notify
+            // peers (architecture 11.4).
+            (Some(grant), Some(bound)) => crate::mutation_render::render_account_login(
+                context,
+                request.generation,
+                bound,
+                grant.account_id(),
+                &plan,
+                frames,
+                &request.target,
+            )?,
+            _ => context
+                .fanout_request_to(request.generation, frames)
+                .map_err(|_| RuntimeError::MemoryExhausted)?,
+        };
         let next = sealed.response_intent().next_response_count();
         // The response count is checked before anything is staged so a
         // mismatch never leaves a committed batch without its live owner.

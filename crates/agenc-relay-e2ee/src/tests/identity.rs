@@ -1266,3 +1266,704 @@ fn leaf_authorizations_and_bundles_are_checked_against_their_roster() -> TestRes
     assert!(!client.same_client(&other_account, never));
     Ok(())
 }
+
+/// Capability statements and leaf authorizations sign their own
+/// `network_id`. A correctly signed statement for another network is
+/// refused under this network's roster on the checked and the restored
+/// path, and a credential bundle inherits the leaf refusal.
+#[test]
+fn statements_signed_for_another_network_are_refused_under_this_roster() -> TestResult {
+    let account = account_with(&[7])?;
+    assert_eq!(account.verified_roster.network_id, NETWORK);
+    let resigned_statement = |network: [u8; 32]| -> Result<ArcDeviceCapabilities, Box<dyn Error>> {
+        let mut statement = capabilities(7, &account.roster, 0, [0; 32], (100, 1_000), vec![1])?;
+        statement.tbs.network_id = network;
+        statement.device_signature =
+            sign(&key(7), SignatureDomain::DeviceCapabilities, &statement.tbs)?;
+        Ok(statement)
+    };
+    let foreign = resigned_statement([9; 32])?;
+    assert_eq!(
+        verify_capabilities(&account.verified_roster, &foreign, None),
+        Err(E2eeError::ProfileMismatch)
+    );
+    assert_eq!(
+        restore_capabilities(&account.verified_roster, &foreign),
+        Err(E2eeError::ProfileMismatch)
+    );
+    let own = resigned_statement(NETWORK)?;
+    assert!(verify_capabilities(&account.verified_roster, &own, None).is_ok());
+    assert!(restore_capabilities(&account.verified_roster, &own).is_ok());
+
+    let resigned_leaf = |network: [u8; 32]| -> Result<ArcLeafAuthorization, Box<dyn Error>> {
+        let mut leaf = leaf_authorization(&account.roster, &LeafSpec::new(7, 30))?;
+        leaf.tbs.network_id = network;
+        leaf.device_signature = sign(&key(7), SignatureDomain::LeafAuthorization, &leaf.tbs)?;
+        Ok(leaf)
+    };
+    let foreign_leaf = resigned_leaf([9; 32])?;
+    assert_eq!(
+        verify_leaf_authorization(&account.verified_roster, &foreign_leaf),
+        Err(E2eeError::ProfileMismatch)
+    );
+    let bundle =
+        |leaf_authorization: ArcLeafAuthorization| -> Result<ArcCredentialBundle, Box<dyn Error>> {
+            Ok(ArcCredentialBundle {
+                root: account.root.clone(),
+                device_certificate: certificate(
+                    &account.root_secret,
+                    &account.root,
+                    &DeviceSpec::new(7),
+                )?,
+                leaf_authorization,
+            })
+        };
+    assert_eq!(
+        verify_credential_bundle(&NETWORK, &account.verified_roster, &bundle(foreign_leaf)?),
+        Err(E2eeError::ProfileMismatch),
+        "the bundle inherits the leaf refusal"
+    );
+    let own_leaf = resigned_leaf(NETWORK)?;
+    assert!(verify_leaf_authorization(&account.verified_roster, &own_leaf).is_ok());
+    assert!(
+        verify_credential_bundle(&NETWORK, &account.verified_roster, &bundle(own_leaf)?).is_ok()
+    );
+    Ok(())
+}
+
+/// A certificate of `seed` under the account's root enrolled for roster
+/// generation `target`, with an enrollment interval around `issued_at`.
+fn enrolled(
+    account: &Account,
+    seed: u8,
+    target: u64,
+    issued_at: u64,
+) -> Result<ArcDeviceCertificate, Box<dyn Error>> {
+    Ok(certificate(
+        &account.root_secret,
+        &account.root,
+        &DeviceSpec {
+            target_roster_generation: target,
+            enrollment: (issued_at.saturating_sub(5), issued_at.saturating_add(5)),
+            ..DeviceSpec::new(seed)
+        },
+    )?)
+}
+
+/// The account's roster `generation` naming `previous`, starting at
+/// `not_before`, over `certificates` in Device ID order.
+fn signed_roster(
+    account: &Account,
+    generation: u64,
+    previous: [u8; 32],
+    not_before: u64,
+    certificates: Vec<ArcDeviceCertificate>,
+) -> Result<ArcDeviceRoster, Box<dyn Error>> {
+    signed_roster_revoking(
+        account,
+        generation,
+        previous,
+        not_before,
+        certificates,
+        Vec::new(),
+    )
+}
+
+/// [`signed_roster`] that also lists `revocations`, canonical.
+fn signed_roster_revoking(
+    account: &Account,
+    generation: u64,
+    previous: [u8; 32],
+    not_before: u64,
+    certificates: Vec<ArcDeviceCertificate>,
+    revocations: Vec<ArcDeviceRevocation>,
+) -> Result<ArcDeviceRoster, Box<dyn Error>> {
+    Ok(roster(
+        &account.root_secret,
+        &account.root,
+        generation,
+        previous,
+        (not_before, not_before + 1_000),
+        certificates,
+        revocations,
+    )?)
+}
+
+/// The revocation of device `seed`'s certificate `serial` in `generation`.
+fn revocation(seed: u8, serial: u64, generation: u64) -> ArcDeviceRevocation {
+    ArcDeviceRevocation {
+        device_id: [seed; 16],
+        certificate_serial: serial,
+        revoked_in_generation: generation,
+        reason_code: 1,
+    }
+}
+
+/// Companion 8.3: a certificate is issued in its target roster. One enrolled
+/// for a later generation than the roster carrying it was never issued and
+/// is refused on the checked, first-contact and restore paths alike.
+#[test]
+fn a_certificate_enrolled_for_a_later_generation_is_refused_on_every_path() -> TestResult {
+    let account = account_with(&[7])?;
+    let initial = roster(
+        &account.root_secret,
+        &account.root,
+        0,
+        [0; 32],
+        ROSTER_INTERVAL,
+        vec![
+            certificate(&account.root_secret, &account.root, &DeviceSpec::new(7))?,
+            enrolled(&account, 8, 1, ROSTER_INTERVAL.0)?,
+        ],
+        Vec::new(),
+    )?;
+    let root = &account.verified_root;
+    assert_eq!(
+        verify_roster(root, &initial, None),
+        Err(E2eeError::InvalidValue)
+    );
+    assert_eq!(
+        verify_first_contact_roster(root, &initial, &[]),
+        Err(E2eeError::InvalidValue)
+    );
+    assert_eq!(restore_roster(root, &initial), Err(E2eeError::InvalidValue));
+    let next = ROSTER_INTERVAL.1;
+    let successor = signed_roster(
+        &account,
+        1,
+        account.verified_roster.roster_id,
+        next,
+        vec![
+            certificate(&account.root_secret, &account.root, &DeviceSpec::new(7))?,
+            enrolled(&account, 8, 2, next)?,
+        ],
+    )?;
+    assert_eq!(
+        verify_roster(root, &successor, Some(&account.verified_roster)),
+        Err(E2eeError::InvalidValue)
+    );
+    assert_eq!(
+        verify_first_contact_roster(
+            root,
+            &successor,
+            std::slice::from_ref(&account.verified_roster)
+        ),
+        Err(E2eeError::InvalidValue)
+    );
+    assert_eq!(
+        restore_roster(root, &successor),
+        Err(E2eeError::InvalidValue)
+    );
+    Ok(())
+}
+
+/// On succession a certificate enrolled for an earlier generation must be
+/// active, unchanged, in the predecessor: it keeps working after its short
+/// enrollment interval, but a certificate never issued there, a replacement
+/// under a reused Device ID that claims the old target generation, and a
+/// revoked certificate coming back are refused. (A replacement enrolled for
+/// the roster's own generation passes the interval rule; refusing a reused
+/// Device ID, key or challenge is the endpoint's consumption check.)
+#[test]
+fn a_continuing_certificate_must_be_active_unchanged_in_the_predecessor() -> TestResult {
+    let account = account_with(&[7, 8])?;
+    let root = &account.verified_root;
+    let gen0 = &account.verified_roster;
+    let next = ROSTER_INTERVAL.1;
+    let kept = |seed: u8| certificate(&account.root_secret, &account.root, &DeviceSpec::new(seed));
+    // Devices 7 and 8 continue long after their enrollment interval (90, 100)
+    // closed; device 9 is enrolled for generation one.
+    let renewal = signed_roster(
+        &account,
+        1,
+        gen0.roster_id,
+        next,
+        vec![kept(7)?, kept(8)?, enrolled(&account, 9, 1, next)?],
+    )?;
+    let gen1 = verify_roster(root, &renewal, Some(gen0))?;
+    assert_eq!(gen1.devices.len(), 3);
+    assert_eq!(restore_roster(root, &renewal)?, gen1);
+    let refused = |certificates: Vec<ArcDeviceCertificate>| -> TestResult {
+        let roster = signed_roster(&account, 1, gen0.roster_id, next, certificates)?;
+        assert_eq!(
+            verify_roster(root, &roster, Some(gen0)),
+            Err(E2eeError::InvalidValue)
+        );
+        Ok(())
+    };
+    // A new device claiming an earlier target generation.
+    refused(vec![kept(7)?, kept(8)?, enrolled(&account, 9, 0, next)?])?;
+    // A different certificate for an active Device ID, claiming the old target.
+    let replacement = certificate(
+        &account.root_secret,
+        &account.root,
+        &DeviceSpec {
+            serial: 2,
+            ..DeviceSpec::new(8)
+        },
+    )?;
+    refused(vec![kept(7)?, replacement])?;
+    // Device 8 is dropped, so revoked, in generation one; its certificate
+    // cannot return in generation two.
+    let dropped = signed_roster(&account, 1, gen0.roster_id, next, vec![kept(7)?])?;
+    let dropped = verify_roster(root, &dropped, Some(gen0))?;
+    let returned = signed_roster(
+        &account,
+        2,
+        dropped.roster_id,
+        next + 1_000,
+        vec![kept(7)?, kept(8)?],
+    )?;
+    assert_eq!(
+        verify_roster(root, &returned, Some(&dropped)),
+        Err(E2eeError::InvalidValue)
+    );
+    Ok(())
+}
+
+/// First contact checks no predecessor, so a continuing certificate shows
+/// its issuance in a supplied roster of the same root at exactly its target
+/// generation, and the lineage shape still holds.
+#[test]
+fn first_contact_requires_the_issuance_of_every_continuing_certificate() -> TestResult {
+    let account = account_with(&[7, 8])?;
+    let root = &account.verified_root;
+    let gen0 = account.verified_roster.clone();
+    assert_eq!(
+        verify_first_contact_roster(root, &account.roster, &[])?,
+        gen0,
+        "at generation zero first contact is the initial check"
+    );
+    let kept = |seed: u8| certificate(&account.root_secret, &account.root, &DeviceSpec::new(seed));
+    let first = ROSTER_INTERVAL.1;
+    let renewal = signed_roster(
+        &account,
+        1,
+        gen0.roster_id,
+        first,
+        vec![kept(7)?, kept(8)?, enrolled(&account, 9, 1, first)?],
+    )?;
+    let gen1 = verify_roster(root, &renewal, Some(&gen0))?;
+    assert_eq!(
+        verify_first_contact_roster(root, &renewal, &[]),
+        Err(E2eeError::InvalidValue),
+        "devices 7 and 8 show no issuance"
+    );
+    assert_eq!(
+        verify_first_contact_roster(root, &renewal, std::slice::from_ref(&gen0))?,
+        gen1
+    );
+    let second = first + 1_000;
+    let later = signed_roster(
+        &account,
+        2,
+        gen1.roster_id,
+        second,
+        vec![
+            kept(7)?,
+            kept(8)?,
+            enrolled(&account, 9, 1, first)?,
+            enrolled(&account, 10, 2, second)?,
+        ],
+    )?;
+    let gen2 = verify_roster(root, &later, Some(&gen1))?;
+    for issuance in [
+        vec![gen0.clone(), gen1.clone()],
+        vec![gen1.clone(), gen0.clone()],
+    ] {
+        assert_eq!(verify_first_contact_roster(root, &later, &issuance)?, gen2);
+    }
+    assert_eq!(
+        verify_first_contact_roster(root, &later, std::slice::from_ref(&gen0)),
+        Err(E2eeError::InvalidValue),
+        "device 9 was issued in generation one"
+    );
+    assert_eq!(
+        verify_first_contact_roster(root, &later, std::slice::from_ref(&gen1)),
+        Err(E2eeError::InvalidValue),
+        "devices 7 and 8 were issued in generation zero, not one"
+    );
+    let mut foreign = gen0.clone();
+    foreign.root_fingerprint = [9; 32];
+    assert_eq!(
+        verify_first_contact_roster(root, &later, &[foreign, gen1.clone()]),
+        Err(E2eeError::InvalidValue),
+        "issuance under another root"
+    );
+    // The target-generation roster must hold the exact certificate: one of
+    // that root and generation without the device, or holding another
+    // certificate for its Device ID, shows no issuance.
+    let issued_without = |certificates: Vec<ArcDeviceCertificate>| -> TestResult {
+        let other = roster(
+            &account.root_secret,
+            &account.root,
+            0,
+            [0; 32],
+            ROSTER_INTERVAL,
+            certificates,
+            Vec::new(),
+        )?;
+        let other = verify_roster(root, &other, None)?;
+        assert_eq!(
+            verify_first_contact_roster(root, &later, &[other, gen1.clone()]),
+            Err(E2eeError::InvalidValue),
+            "device 8's certificate was not issued in that generation-zero roster"
+        );
+        Ok(())
+    };
+    issued_without(vec![kept(7)?])?;
+    let replaced = certificate(
+        &account.root_secret,
+        &account.root,
+        &DeviceSpec {
+            serial: 2,
+            ..DeviceSpec::new(8)
+        },
+    )?;
+    issued_without(vec![kept(7)?, replaced])?;
+    // The current-target enrollment rule applies unchanged.
+    let late = signed_roster(
+        &account,
+        1,
+        gen0.roster_id,
+        first,
+        vec![kept(7)?, kept(8)?, enrolled(&account, 9, 1, first + 100)?],
+    )?;
+    assert_eq!(
+        verify_first_contact_roster(root, &late, std::slice::from_ref(&gen0)),
+        Err(E2eeError::InvalidValue)
+    );
+    // Generation zero alone names the all-zero predecessor.
+    let rootless = signed_roster(&account, 1, [0; 32], first, vec![kept(7)?, kept(8)?])?;
+    assert_eq!(
+        verify_first_contact_roster(root, &rootless, std::slice::from_ref(&gen0)),
+        Err(E2eeError::InvalidValue)
+    );
+    let named = signed_roster(&account, 0, [3; 32], ROSTER_INTERVAL.0, vec![kept(7)?])?;
+    assert_eq!(
+        verify_first_contact_roster(root, &named, &[]),
+        Err(E2eeError::InvalidValue)
+    );
+    Ok(())
+}
+
+/// Companion 8.4: `(Device ID, certificate_serial)` is unique and absence
+/// from the active set means revoked, so no roster lists one certificate both
+/// active and revoked. Every path refuses it, at generation zero and on
+/// succession, where the predecessor's revocation is carried while the
+/// certificate stays listed; revoking a certificate the roster no longer
+/// lists is admitted.
+#[test]
+fn a_certificate_listed_active_and_revoked_is_refused_on_every_path() -> TestResult {
+    let account = account_with(&[7, 8])?;
+    let root = &account.verified_root;
+    let gen0 = &account.verified_roster;
+    let kept = |seed: u8| certificate(&account.root_secret, &account.root, &DeviceSpec::new(seed));
+    let refused_everywhere =
+        |roster: &ArcDeviceRoster, predecessor: Option<&VerifiedRoster>| -> TestResult {
+            assert_eq!(
+                verify_roster(root, roster, predecessor),
+                Err(E2eeError::InvalidValue)
+            );
+            let issuance: Vec<VerifiedRoster> = predecessor.into_iter().cloned().collect();
+            assert_eq!(
+                verify_first_contact_roster(root, roster, &issuance),
+                Err(E2eeError::InvalidValue)
+            );
+            assert_eq!(restore_roster(root, roster), Err(E2eeError::InvalidValue));
+            Ok(())
+        };
+    let initial = roster(
+        &account.root_secret,
+        &account.root,
+        0,
+        [0; 32],
+        ROSTER_INTERVAL,
+        vec![kept(7)?, kept(8)?],
+        vec![revocation(8, 1, 0)],
+    )?;
+    refused_everywhere(&initial, None)?;
+    let next = ROSTER_INTERVAL.1;
+    let carried = signed_roster_revoking(
+        &account,
+        1,
+        gen0.roster_id,
+        next,
+        vec![kept(7)?, kept(8)?],
+        vec![revocation(8, 1, 1)],
+    )?;
+    refused_everywhere(&carried, Some(gen0))?;
+    let dropped = signed_roster_revoking(
+        &account,
+        1,
+        gen0.roster_id,
+        next,
+        vec![kept(7)?],
+        vec![revocation(8, 1, 1)],
+    )?;
+    let gen1 = verify_roster(root, &dropped, Some(gen0))?;
+    assert_eq!(gen1.revocations, vec![([8; 16], 1)]);
+    assert_eq!(
+        verify_first_contact_roster(root, &dropped, std::slice::from_ref(gen0))?,
+        gen1
+    );
+    assert_eq!(restore_roster(root, &dropped)?, gen1);
+    Ok(())
+}
+
+/// First contact given `chain`, the complete chain from generation zero
+/// below `roster` under its root, decides exactly as succession from the
+/// chain's last roster does; returns that decision.
+fn first_contact_as_succession(
+    root: &VerifiedRoot,
+    roster: &ArcDeviceRoster,
+    chain: &[VerifiedRoster],
+) -> Result<VerifiedRoster, E2eeError> {
+    let checked = verify_roster(root, roster, chain.last());
+    assert_eq!(
+        verify_first_contact_roster(root, roster, chain),
+        checked,
+        "first contact agrees with succession"
+    );
+    checked
+}
+
+/// First contact holds a roster to every supplied roster of its root below
+/// it, as succession holds it to its predecessor (companion 8.3 and 8.4): a
+/// continuing certificate is listed, unchanged, by each one from its target
+/// generation on; the one just below is the predecessor the roster names;
+/// and every revocation they list is still listed. Given the complete chain
+/// from generation zero under its root, first contact decides exactly as the
+/// checked path does.
+#[test]
+fn first_contact_holds_a_roster_to_every_supplied_roster_of_its_root() -> TestResult {
+    let account = account_with(&[7, 8])?;
+    let root = &account.verified_root;
+    let gen0 = account.verified_roster.clone();
+    let kept = |seed: u8| certificate(&account.root_secret, &account.root, &DeviceSpec::new(seed));
+    let first = ROSTER_INTERVAL.1;
+    let second = first + 1_000;
+    // Generation one drops device 8 without a revocation entry; generation
+    // two lists its certificate again.
+    let dropped = signed_roster(&account, 1, gen0.roster_id, first, vec![kept(7)?])?;
+    let dropped = verify_roster(root, &dropped, Some(&gen0))?;
+    let relisted = signed_roster(
+        &account,
+        2,
+        dropped.roster_id,
+        second,
+        vec![kept(7)?, kept(8)?],
+    )?;
+    assert_eq!(
+        first_contact_as_succession(root, &relisted, &[gen0.clone(), dropped.clone()]),
+        Err(E2eeError::InvalidValue),
+        "the roster between shows the certificate dropped"
+    );
+    assert!(
+        verify_first_contact_roster(root, &relisted, std::slice::from_ref(&gen0)).is_ok(),
+        "without the roster that dropped it nothing shows the drop: first contact \
+         claims no complete history"
+    );
+    // Generation one revokes device 8's certificate. Listing it again in
+    // generation two is refused whether the revocation is carried or not,
+    // and so is dropping the revocation alone; carrying it is admitted.
+    let revoked = signed_roster_revoking(
+        &account,
+        1,
+        gen0.roster_id,
+        first,
+        vec![kept(7)?],
+        vec![revocation(8, 1, 1)],
+    )?;
+    let revoked = verify_roster(root, &revoked, Some(&gen0))?;
+    let chain = [gen0.clone(), revoked.clone()];
+    for (certificates, revocations) in [
+        (vec![kept(7)?, kept(8)?], vec![revocation(8, 1, 1)]),
+        (vec![kept(7)?, kept(8)?], Vec::new()),
+        (vec![kept(7)?], Vec::new()),
+    ] {
+        let next = signed_roster_revoking(
+            &account,
+            2,
+            revoked.roster_id,
+            second,
+            certificates,
+            revocations,
+        )?;
+        assert_eq!(
+            first_contact_as_succession(root, &next, &chain),
+            Err(E2eeError::InvalidValue)
+        );
+    }
+    let carried = signed_roster_revoking(
+        &account,
+        2,
+        revoked.roster_id,
+        second,
+        vec![kept(7)?],
+        vec![revocation(8, 1, 1)],
+    )?;
+    assert_eq!(
+        first_contact_as_succession(root, &carried, &chain)?.revocations,
+        vec![([8; 16], 1)]
+    );
+    // A supplied generation-one roster that is not the predecessor the
+    // roster names (another root-signed generation one) refuses it, though
+    // it lists the same certificates.
+    let gen1 = signed_roster(&account, 1, gen0.roster_id, first, vec![kept(7)?, kept(8)?])?;
+    let gen1 = verify_roster(root, &gen1, Some(&gen0))?;
+    let fork = signed_roster(
+        &account,
+        1,
+        gen0.roster_id,
+        first + 1,
+        vec![kept(7)?, kept(8)?],
+    )?;
+    let fork = verify_roster(root, &fork, Some(&gen0))?;
+    let gen2 = signed_roster(
+        &account,
+        2,
+        gen1.roster_id,
+        second,
+        vec![kept(7)?, kept(8)?],
+    )?;
+    assert_eq!(
+        first_contact_as_succession(root, &gen2, &[gen0.clone(), fork]),
+        Err(E2eeError::InvalidValue)
+    );
+    let verified = first_contact_as_succession(root, &gen2, &[gen0.clone(), gen1.clone()])?;
+    // A supplied roster of another root is not its history either, whatever
+    // its generation, identifier and revocations.
+    let mut foreign = gen1.clone();
+    foreign.root_fingerprint = [9; 32];
+    foreign.roster_id = [5; 32];
+    foreign.revocations = vec![([8; 16], 1)];
+    assert_eq!(
+        verify_first_contact_roster(root, &gen2, &[gen0.clone(), gen1.clone(), foreign])?,
+        verified
+    );
+    // A supplied roster at the roster's own generation is not its history:
+    // another root-signed generation two that drops and revokes device 8 is
+    // not consulted (comparing heads is the caller's PinnedHead).
+    let other = signed_roster_revoking(
+        &account,
+        2,
+        gen1.roster_id,
+        second + 1,
+        vec![kept(7)?],
+        vec![revocation(8, 1, 2)],
+    )?;
+    let other = verify_roster(root, &other, Some(&gen1))?;
+    assert_eq!(
+        verify_first_contact_roster(root, &gen2, &[gen0, gen1, other])?,
+        verified
+    );
+    Ok(())
+}
+
+/// First contact admits a capability statement of a device active in the
+/// roster at any generation with no predecessor at hand, so an imported
+/// nonzero head needs neither succession nor restore. Only the lineage shape
+/// replaces the predecessor step, generation zero alone naming the all-zero
+/// predecessor; every other rule of the checked path applies, and with the
+/// predecessor the result equals the checked one.
+#[test]
+fn first_contact_admits_a_capability_head_at_any_generation() -> TestResult {
+    let account = account_with(&[7])?;
+    let roster = &account.verified_roster;
+    let statement = |device: u8, generation: u64, previous: [u8; 32]| {
+        capabilities(
+            device,
+            &account.roster,
+            generation,
+            previous,
+            (100, 200),
+            vec![1, 3],
+        )
+    };
+    let genesis = statement(7, 0, [0; 32])?;
+    let first = verify_capabilities(roster, &genesis, None)?;
+    assert_eq!(verify_first_contact_capabilities(roster, &genesis)?, first);
+    let next = statement(7, 1, first.capability_id)?;
+    let checked = verify_capabilities(roster, &next, Some(&first))?;
+    assert_eq!(
+        verify_capabilities(roster, &next, None),
+        Err(E2eeError::InvalidValue),
+        "succession needs the predecessor"
+    );
+    assert_eq!(verify_first_contact_capabilities(roster, &next)?, checked);
+    let later = statement(7, 5, [4; 32])?;
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &later)?.generation,
+        5
+    );
+    for (generation, previous) in [(1, [0; 32]), (0, [3; 32])] {
+        assert_eq!(
+            verify_first_contact_capabilities(roster, &statement(7, generation, previous)?),
+            Err(E2eeError::InvalidValue),
+            "generation zero, and only it, names the all-zero predecessor"
+        );
+    }
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &statement(8, 1, first.capability_id)?),
+        Err(E2eeError::InvalidValue),
+        "a device the roster does not list"
+    );
+    let mut foreign = next.clone();
+    foreign.tbs.network_id = [9; 32];
+    foreign.device_signature = sign(&key(7), SignatureDomain::DeviceCapabilities, &foreign.tbs)?;
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &foreign),
+        Err(E2eeError::ProfileMismatch)
+    );
+    let mut forged = next;
+    forged.device_signature = [1; 64];
+    assert_eq!(
+        verify_first_contact_capabilities(roster, &forged),
+        Err(E2eeError::SignatureInvalid)
+    );
+    Ok(())
+}
+
+/// Companion 8.3: a certificate enrolled for the roster's own generation
+/// needs an enrollment interval that covers the roster's `not_before`, both
+/// ends inclusive, on the checked, first-contact and restore paths alike.
+#[test]
+fn the_current_target_enrollment_interval_includes_both_ends() -> TestResult {
+    let account = account_with(&[7])?;
+    let root = &account.verified_root;
+    let not_before = ROSTER_INTERVAL.0;
+    let decisions = |enrollment: (u64, u64)| -> Result<Vec<bool>, Box<dyn Error>> {
+        let certificate = certificate(
+            &account.root_secret,
+            &account.root,
+            &DeviceSpec {
+                enrollment,
+                ..DeviceSpec::new(7)
+            },
+        )?;
+        let roster = roster(
+            &account.root_secret,
+            &account.root,
+            0,
+            [0; 32],
+            ROSTER_INTERVAL,
+            vec![certificate],
+            Vec::new(),
+        )?;
+        Ok(vec![
+            verify_roster(root, &roster, None).is_ok(),
+            verify_first_contact_roster(root, &roster, &[]).is_ok(),
+            restore_roster(root, &roster).is_ok(),
+        ])
+    };
+    for (enrollment, admitted) in [
+        ((not_before, not_before + 10), true),
+        ((not_before - 10, not_before), true),
+        ((not_before + 1, not_before + 11), false),
+        ((not_before - 11, not_before - 1), false),
+    ] {
+        assert_eq!(decisions(enrollment)?, vec![admitted; 3], "{enrollment:?}");
+    }
+    Ok(())
+}

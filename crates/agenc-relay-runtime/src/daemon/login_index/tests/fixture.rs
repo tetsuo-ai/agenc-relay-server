@@ -147,6 +147,7 @@ impl FaultFixture {
             &seed,
             &owner.port(),
             &keys,
+            self.config.network.role,
             MonotonicTick::from_ticks(0),
             UtcSecond::from_unix_seconds(60),
         )?;

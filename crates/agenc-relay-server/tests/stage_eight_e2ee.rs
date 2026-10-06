@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use agenc_relay_auth::profile::{
+    AgencOpaqueSuite, FallibleOpaqueRng, FixedArgon2id, opaque_context, opaque_identifiers,
+};
 use agenc_relay_auth::{
     ACCOUNT_SERVICE_ENVELOPE_BYTES, ACCOUNT_SERVICE_RESPONSE_BYTES, AccountRequestPayload,
     AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
@@ -73,17 +76,11 @@ use agenc_relay_types::{
     AccountId, AccountServiceCompletionStatus, DatabaseId, NetworkId, NormalizedLogin,
     OpaqueCredentialId, OperatorId, RecoveryEpoch, RequestId, ServerId, ServerIncarnation,
 };
-use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use opaque_ke::errors::InternalError;
-use opaque_ke::generic_array::{ArrayLength, GenericArray};
-use opaque_ke::ksf::Ksf;
-use opaque_ke::rand::{CryptoRng, Error as RandError, RngCore};
 use opaque_ke::{
-    CipherSuite, ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, CredentialResponse, Identifiers, RegistrationResponse,
-    Ristretto255, TripleDh,
+    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+    ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
 };
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -98,6 +95,10 @@ const DISK_RESERVE_BYTES: u64 = 67_108_864;
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "stage_eight_e2ee/claim_restart.rs"]
+mod claim_restart;
+#[path = "stage_eight_e2ee/cli_provisioning.rs"]
+mod cli_provisioning;
 #[path = "stage_eight_e2ee/close_authority.rs"]
 mod close_authority;
 #[path = "stage_eight_e2ee/credential_bounds.rs"]
@@ -106,16 +107,24 @@ mod credential_bounds;
 mod credential_replacement;
 #[path = "stage_eight_e2ee/encrypted_clients.rs"]
 mod encrypted_clients;
+#[path = "stage_eight_e2ee/login_after_registration.rs"]
+mod login_after_registration;
 #[path = "support/loopback_ports.rs"]
 mod loopback_ports;
+#[path = "stage_eight_e2ee/mixed_profile.rs"]
+mod mixed_profile;
 #[path = "stage_eight_e2ee/recovery_submission.rs"]
 mod recovery_submission;
+#[path = "stage_eight_e2ee/requester_copies.rs"]
+mod requester_copies;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
 mod stage_ten_capacity;
 #[path = "stage_eight_e2ee/stage_ten_drills.rs"]
 mod stage_ten_drills;
 #[path = "stage_eight_e2ee/stage_ten_login_index.rs"]
 mod stage_ten_login_index;
+#[path = "stage_eight_e2ee/welcome_recovery.rs"]
+mod welcome_recovery;
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 /// The edge registers a client only once its coordinator link is ACTIVE;
 /// registration attempts before that fail closed and are retried.
@@ -915,6 +924,14 @@ struct ArcClient {
     e2ee_refilled: Instant,
     /// Decoded bytes the dedicated ingress bucket still holds.
     e2ee_bytes: f64,
+    /// SASL completed on this connection, so its welcome burst ends with the
+    /// authenticated account state (architecture 10.2 step 6).
+    logged_in: bool,
+    /// The nickname the connection registered under; a login after
+    /// registration follows its `903` with `900` (architecture 11.4).
+    registered: Option<String>,
+    /// The last `900` the connection read.
+    account_state: Option<String>,
 }
 
 /// Companion Section 16 admits four E2EE command lines a second per session
@@ -1030,6 +1047,9 @@ impl ArcClient {
             e2ee_tokens: E2EE_LINE_BURST,
             e2ee_refilled: Instant::now(),
             e2ee_bytes: E2EE_INGRESS_BURST,
+            logged_in: false,
+            registered: None,
+            account_state: None,
         })
     }
 
@@ -1148,6 +1168,7 @@ impl ArcClient {
             let unavailable = line.contains("NETWORK_UNAVAILABLE");
             lines.push(line);
             if welcome {
+                self.registered = Some(nickname.to_owned());
                 return Ok(Registration::Welcome(lines));
             }
             if unavailable {
@@ -1297,7 +1318,6 @@ const ACCOUNT_HPKE_PRIVATE: [u8; 32] = [33; 32];
 /// envelope binds to it.
 const COORDINATOR_RECOVERY_EPOCH: RecoveryEpoch = RecoveryEpoch::from_bytes([22; 16]);
 const ACCOUNT_PASSWORD: &[u8] = b"stage eight account password";
-const TEST_ARGON2_SALT: [u8; 16] = [0; 16];
 const AUTH_CHUNK_CHARACTERS: usize = 400;
 const ACCOUNT_REQUEST_CHARACTERS: usize = 6_302;
 const ACCOUNT_RESPONSE_CHARACTERS: usize = 5_790;
@@ -1349,98 +1369,11 @@ fn apply_e2ee_overrides(
     Ok(())
 }
 
-struct TestOpaqueSuite;
-
-impl CipherSuite for TestOpaqueSuite {
-    type OprfCs = Ristretto255;
-    type KeyExchange = TripleDh<Ristretto255, opaque_sha2::Sha512>;
-    type Ksf = TestArgon2id;
-}
-
-#[derive(Default)]
-struct TestArgon2id;
-
-impl Ksf for TestArgon2id {
-    fn hash<L: ArrayLength<u8>>(
-        &self,
-        input: GenericArray<u8, L>,
-    ) -> Result<GenericArray<u8, L>, InternalError> {
-        if input.len() != 64 {
-            return Err(InternalError::KsfError);
-        }
-        let parameters =
-            Params::new(65_536, 3, 4, Some(64)).map_err(|_| InternalError::KsfError)?;
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, parameters);
-        let mut output = GenericArray::default();
-        argon2
-            .hash_password_into(&input, &TEST_ARGON2_SALT, &mut output)
-            .map_err(|_| InternalError::KsfError)?;
-        Ok(output)
-    }
-}
-
-struct TestOpaqueRng {
-    failed: bool,
-}
-
-impl TestOpaqueRng {
-    const fn new() -> Self {
-        Self { failed: false }
-    }
-
-    fn fill_or_latch(&mut self, destination: &mut [u8]) {
-        if self.failed || OsEntropy::fill(destination).is_err() {
-            destination.fill(0);
-            self.failed = true;
-        }
-    }
-
-    fn require_success(&self) -> TestResult {
-        if self.failed {
-            Err(failure("test OPAQUE entropy was unavailable"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl RngCore for TestOpaqueRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut bytes = [0; 4];
-        self.fill_or_latch(&mut bytes);
-        u32::from_be_bytes(bytes)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut bytes = [0; 8];
-        self.fill_or_latch(&mut bytes);
-        u64::from_be_bytes(bytes)
-    }
-
-    fn fill_bytes(&mut self, destination: &mut [u8]) {
-        self.fill_or_latch(destination);
-    }
-
-    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), RandError> {
-        self.fill_or_latch(destination);
+fn require_entropy(rng: &FallibleOpaqueRng<OsEntropy>) -> TestResult {
+    if rng.succeeded() {
         Ok(())
-    }
-}
-
-impl CryptoRng for TestOpaqueRng {}
-fn opaque_context(network_id: NetworkId) -> Vec<u8> {
-    let mut context = b"agenc-chat account authentication v1".to_vec();
-    context.extend_from_slice(network_id.as_bytes());
-    context
-}
-
-fn opaque_identifiers<'a>(
-    network_id: &'a NetworkId,
-    credential_id: &'a OpaqueCredentialId,
-) -> Identifiers<'a> {
-    Identifiers {
-        client: Some(credential_id.expose_for_account_service()),
-        server: Some(network_id.as_bytes()),
+    } else {
+        Err(failure("test OPAQUE entropy was unavailable"))
     }
 }
 
@@ -1629,9 +1562,22 @@ impl ArcClient {
         self.send(&format!("NICK {nickname}"))?;
         self.send(&format!("USER {nickname} 0 * :Stage Six Account"))?;
         self.send("CAP END")?;
-        read_until(&mut self.reader, |line| {
+        self.read_welcome(nickname)
+    }
+
+    /// Reads the welcome burst through the MOTD group and, after a SASL
+    /// login, the authenticated account state that ends it.
+    fn read_welcome(&mut self, nickname: &str) -> TestResult<Vec<String>> {
+        let mut welcome = read_until(&mut self.reader, |line| {
             line.contains(" 376 ") || line.contains(" 422 ")
-        })
+        })?;
+        if self.logged_in {
+            let account_state = read_account_state(&mut self.reader, nickname)?;
+            self.account_state = Some(account_state.clone());
+            welcome.push(account_state);
+        }
+        self.registered = Some(nickname.to_owned());
+        Ok(welcome)
     }
 
     fn account_exchange(
@@ -1855,8 +1801,8 @@ fn create_live_account_with(
     requests: [RequestId; 2],
 ) -> TestResult<AccountId> {
     let [start_request, finish_request] = requests;
-    let mut rng = TestOpaqueRng::new();
-    let registration = ClientRegistration::<TestOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
@@ -1888,12 +1834,12 @@ fn create_live_account_with(
     let registration_finish = registration.state.finish(
         &mut rng,
         ACCOUNT_PASSWORD,
-        RegistrationResponse::<TestOpaqueSuite>::deserialize(
+        RegistrationResponse::<AgencOpaqueSuite>::deserialize(
             response.expose_for_account_response(),
         )?,
         ClientRegistrationFinishParameters::new(
             opaque_identifiers(&NETWORK_ID, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let registration_record = finish_registration(
@@ -1903,7 +1849,7 @@ fn create_live_account_with(
             .as_slice()
             .try_into()?,
     )?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
 
     let (finish_envelope, finish_token) = seal_account_payload(
         fixture,
@@ -1962,8 +1908,8 @@ fn authenticate_live_account_with(
     expected_account: AccountId,
 ) -> TestResult {
     let [start_request, finish_request] = requests;
-    let mut rng = TestOpaqueRng::new();
-    let login = ClientLogin::<TestOpaqueSuite>::start(&mut rng, password)?;
+    let mut rng = FallibleOpaqueRng::new(OsEntropy);
+    let login = ClientLogin::<AgencOpaqueSuite>::start(&mut rng, password)?;
     let ke1 = OpaqueKe1::from_bytes(login.message.serialize().as_slice().try_into()?)?;
     let (start_envelope, start_token) = seal_account_payload(
         fixture,
@@ -1985,19 +1931,19 @@ fn authenticate_live_account_with(
     else {
         return Err(failure("authentication returned the wrong challenge"));
     };
-    let context = opaque_context(NETWORK_ID);
+    let context = opaque_context(&NETWORK_ID);
     let login_finish = login.state.finish(
         &mut rng,
         password,
-        CredentialResponse::<TestOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
+        CredentialResponse::<AgencOpaqueSuite>::deserialize(ke2.expose_for_account_response())?,
         ClientLoginFinishParameters::new(
             Some(&context),
             opaque_identifiers(&NETWORK_ID, &credential_id),
-            Some(&TestArgon2id),
+            Some(&FixedArgon2id),
         ),
     )?;
     let ke3 = OpaqueKe3::from_bytes(login_finish.message.serialize().as_slice().try_into()?)?;
-    rng.require_success()?;
+    require_entropy(&rng)?;
     let (finish_envelope, finish_token) = seal_account_payload(
         fixture,
         NETWORK_ID,
@@ -2017,7 +1963,27 @@ fn authenticate_live_account_with(
     if !numeric.contains(" 903 ") {
         return Err(failure("successful authentication omitted numeric 903"));
     }
+    client.logged_in = true;
+    if let Some(nickname) = client.registered.clone() {
+        // A registered session's login follows 903 with 900 (11.4).
+        client.account_state = Some(read_account_state(&mut client.reader, &nickname)?);
+    }
     Ok(())
+}
+
+/// The `900` that ends an authenticated registration's welcome burst
+/// (architecture 10.2 step 6): the session's own mask and its account's
+/// public label, or `*`.
+fn read_account_state<R: BufRead>(reader: &mut R, nickname: &str) -> TestResult<String> {
+    let line = read_line_for(reader, "authenticated account state")?;
+    if !line.contains(&format!(" 900 {nickname} {nickname}!"))
+        || !line.ends_with(" :You are now logged in")
+    {
+        return Err(failure(format!(
+            "an authenticated welcome did not end with its account state: {line}"
+        )));
+    }
+    Ok(line)
 }
 
 /// One E2EE principal: its signing keys, its account, and a label counter.
@@ -2114,6 +2080,85 @@ fn labeled_reply(client: &mut ArcClient, label: &str) -> TestResult<Vec<String>>
             true
         })
         .map_err(|error| failure(format!("waiting for label {label}: {error}")))
+}
+
+/// The requester's labeled completion, which `labeled_reply` returns last.
+/// The unlabeled broadcast or notice that can arrive before it is not the
+/// command's result (companion 11.7), so a reply token is checked here.
+fn completion_line(reply: &[String]) -> TestResult<&String> {
+    reply
+        .last()
+        .filter(|line| tag_value(line, "label").is_some())
+        .ok_or_else(|| failure(format!("no labeled completion in {reply:?}")))
+}
+
+/// The verb and identifiers a result line names, without its tags and
+/// prefix.
+fn result_words(line: &str) -> Option<Vec<String>> {
+    words(line).get(1..).map(<[String]>::to_vec)
+}
+
+/// The requester's labeled `verb` completion, required to be the only line
+/// of its reply naming that result: companion 11.7 and 12.5 answer the
+/// requesting connection with exactly one labeled scalar and send the
+/// untagged broadcast of the same result only to the other eligible sinks.
+/// A line naming another result is earlier traffic the connection had not
+/// read yet.
+fn only_completion<'a>(reply: &'a [String], verb: &str) -> TestResult<&'a String> {
+    let completion = completion_line(reply)?;
+    let token = format!(" EGROUP {verb} ");
+    if !completion.contains(&token) {
+        return Err(failure(format!(
+            "the labeled completion is not {verb}: {reply:?}"
+        )));
+    }
+    let result = result_words(completion);
+    let naming = reply
+        .iter()
+        .filter(|line| line.contains(&token) && result_words(line) == result)
+        .count();
+    if naming != 1 {
+        return Err(failure(format!(
+            "the requester received {naming} {verb} lines naming its result, not one labeled completion: {reply:?}"
+        )));
+    }
+    Ok(completion)
+}
+
+/// Requires the reply to an ACK submission to carry no `verb` notice of the
+/// submitted ACK `object`: the submitter receives only its labeled `ACKED`
+/// or `REINIT-ACKED`, and the untagged notice goes to the other sessions
+/// (companion 11.7 and 12.5).
+fn assert_no_own_notice(reply: &[String], verb: &str, object: &[u8]) -> TestResult {
+    let own = base64url_encode(e2ee::ObjectId::compute(object).as_bytes());
+    let token = format!(" EGROUP {verb} ");
+    if reply
+        .iter()
+        .any(|line| line.contains(&token) && line.contains(&own))
+    {
+        return Err(failure(format!(
+            "the submitter received the notice of its own ACK: {reply:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Requires the last of `lines`, which another sink read, to be the
+/// untagged broadcast of the terminal `completion` names: the same verb and
+/// identifiers, without a label.
+fn assert_same_terminal(lines: &[String], completion: &[String]) -> TestResult {
+    let broadcast = lines
+        .last()
+        .ok_or_else(|| failure("no terminal broadcast was read"))?;
+    if tag_value(broadcast, "label").is_some() {
+        return Err(failure(format!("the broadcast is labeled: {broadcast}")));
+    }
+    assert_eq!(
+        result_words(broadcast),
+        completion.first().and_then(|line| result_words(line)),
+        "the broadcast and the labeled completion name the same terminal"
+    );
+    Ok(())
 }
 
 /// Reassembles the object a reply carried in its fragment tags: the server
@@ -2297,25 +2342,39 @@ fn authenticated_client(
         creation.negotiate_sasl()?;
         create_live_account(&mut creation, fixture, login, request_seed)?
     };
+    let auth_seed = request_seed
+        .checked_add(2)
+        .ok_or_else(|| failure("authentication request seed overflow"))?;
+    let client = authenticated_session(fixture, nickname, login, auth_seed, account_id)?;
+    Ok((client, account_id))
+}
+
+/// Authenticates a new connection on `fixture` as the existing
+/// `account_id` under the account requests of `request_seed`, and registers
+/// it as `nickname`.
+fn authenticated_session(
+    fixture: &NodeFixture,
+    nickname: &str,
+    login: &str,
+    request_seed: u8,
+    account_id: AccountId,
+) -> TestResult<ArcClient> {
     let mut client = ArcClient::connect(fixture)?;
     client.send("CAP LS 302")?;
     client.read_until(|line| line.contains(" CAP * LS ") && !line.contains(" CAP * LS * :"))?;
     let acknowledged = client.send_until(&format!("CAP REQ :{E2EE_CAPS}"), " CAP * ACK ")?;
     assert_contains(&acknowledged, "agenc.ag/e2ee-mls")?;
-    let auth_seed = request_seed
-        .checked_add(2)
-        .ok_or_else(|| failure("authentication request seed overflow"))?;
     authenticate_live_account(
         &mut client,
         fixture,
         login,
         ACCOUNT_PASSWORD,
-        auth_seed,
+        request_seed,
         account_id,
     )?;
     let registered = client.complete_registration(nickname)?;
     assert_contains(&registered, &format!(" 001 {nickname} "))?;
-    Ok((client, account_id))
+    Ok(client)
 }
 
 /// Publishes the identity and roster and attaches the device.
@@ -2885,11 +2944,12 @@ fn activate_bootstrap_with(
         &request,
     )?;
     let reply = labeled_reply(client, &label)?;
+    let completion = std::slice::from_ref(only_completion(&reply, "FINALIZED")?);
     assert_contains(
-        &reply,
+        completion,
         &format!(" EGROUP FINALIZED {conversation_token} 1 "),
     )?;
-    assert_eq!(hash_at(&reply, "FINALIZED", 5)?, finalization_id);
+    assert_eq!(hash_at(completion, "FINALIZED", 5)?, finalization_id);
     // An identical retry returns the committed result under the new label.
     let retry_label = binder.label();
     send_object(
@@ -3012,8 +3072,9 @@ fn close_conversation_at(
         &object,
     )?;
     let reply = labeled_reply(client, &label)?;
-    assert_contains(&reply, &format!(" EGROUP CLOSED {conversation} "))?;
-    assert_eq!(hash_at(&reply, "CLOSED", 4)?, close_id);
+    let completion = std::slice::from_ref(only_completion(&reply, "CLOSED")?);
+    assert_contains(completion, &format!(" EGROUP CLOSED {conversation} "))?;
+    assert_eq!(hash_at(completion, "CLOSED", 4)?, close_id);
     Ok(close_id)
 }
 
@@ -3452,7 +3513,8 @@ mod real_clients {
     };
     use agenc_relay_testkit::e2ee::objects::conversation::ArcJoinTransitionProofBundle;
     use agenc_relay_testkit::e2ee::objects::sequencing::{
-        ArcDeliveredWelcome, ArcNormalJoinAuthorizationProof,
+        ArcAbortCoreTbs, ArcAbortRequest, ArcCommitAbortReason, ArcDeliveredWelcome,
+        ArcNormalJoinAuthorizationProof,
     };
     use mls_rs::client_builder::MlsConfig;
     use mls_rs::crypto::{SignaturePublicKey as RsPublicKey, SignatureSecretKey as RsSecretKey};
@@ -3740,7 +3802,9 @@ mod real_clients {
             &format!("EGROUP SUBMIT ACK {conversation_token}"),
             &object,
         )?;
-        assert_contains(&labeled_reply(client, &label)?, " EGROUP ACKED ")?;
+        let reply = labeled_reply(client, &label)?;
+        only_completion(&reply, "ACKED")?;
+        assert_no_own_notice(&reply, "ACK", &object)?;
         Ok(ack)
     }
 
@@ -3856,16 +3920,85 @@ mod real_clients {
             &request,
         )?;
         let reply = labeled_reply(client, &label)?;
+        let completion = std::slice::from_ref(only_completion(&reply, "FINALIZED")?);
         assert_contains(
-            &reply,
+            completion,
             &format!(" EGROUP FINALIZED {conversation_token} {resulting_epoch} "),
         )?;
-        assert_eq!(hash_at(&reply, "FINALIZED", 5)?, finalization_id);
+        assert_eq!(hash_at(completion, "FINALIZED", 5)?, finalization_id);
         Ok(Certified {
             finalization_id,
-            record_id: hash_at(&reply, "FINALIZED", 6)?,
+            record_id: hash_at(completion, "FINALIZED", 6)?,
             receipt,
         })
+    }
+
+    /// Aborts `sequenced` with one request that carries the votes of the
+    /// binder and `co_voters` (companion 12.4), and returns the binder's
+    /// labeled `ABORTED` completion, the only line of its reply that names
+    /// the abort.
+    pub(super) fn abort_candidate(
+        client: &mut ArcClient,
+        binder: &mut Principal,
+        co_voters: &[&Principal],
+        bound: &BoundConversation,
+        sequenced: Sequenced,
+        prior_epoch: u64,
+    ) -> TestResult<String> {
+        let core = ArcAbortCoreTbs {
+            profile_version: 1,
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            prior_state_id: sequenced.receipt.tbs.prior_state_id,
+            candidate_id: sequenced.candidate_id,
+            prior_epoch,
+            reason: ArcCommitAbortReason::SenderWithdrawn,
+            evidence_digest: [0; 32],
+        };
+        let abort_id = semantic_id_of(SemanticHashDomain::AbortId, &core)?;
+        let slot = VoteSlot {
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            prior_epoch,
+            prior_state_id: core.prior_state_id,
+            candidate_sequence: sequenced.receipt.tbs.candidate_sequence,
+            predecessor_record_id: sequenced.receipt.tbs.predecessor_record_id,
+        };
+        let terminal = Terminal::abort(abort_id, u16::from(core.reason.value()))?;
+        let tbs = vote_tbs(&slot, sequenced.candidate_id, terminal);
+        let mut votes = vec![builders::finality_vote(&binder.keys, binder.device, &tbs)?];
+        for voter in co_voters {
+            votes.push(builders::finality_vote(&voter.keys, voter.device, &tbs)?);
+        }
+        votes.sort_by_key(|vote| (vote.signer_root_fingerprint, vote.signer_device_id));
+        let request = wire_object(
+            ArcWireObjectKind::AbortRequest,
+            &ArcAbortRequest {
+                core,
+                receipt: sequenced.receipt,
+                votes: TlsVec::new(votes)?,
+            },
+        )?;
+        let conversation_token = base64url_encode(&bound.conversation);
+        let label = binder.label();
+        send_object(
+            client,
+            &label,
+            &format!("EGROUP SUBMIT ABORT {conversation_token}"),
+            &request,
+        )?;
+        let reply = labeled_reply(client, &label)?;
+        let completion = std::slice::from_ref(only_completion(&reply, "ABORTED")?);
+        assert_contains(
+            completion,
+            &format!(" EGROUP ABORTED {conversation_token} "),
+        )?;
+        assert_eq!(hash_at(completion, "ABORTED", 4)?, sequenced.candidate_id);
+        assert_eq!(hash_at(completion, "ABORTED", 5)?, abort_id);
+        completion
+            .first()
+            .cloned()
+            .ok_or_else(|| failure("no labeled ABORTED completion"))
     }
 
     /// Sequences `commit` as the candidate of `bound`, acknowledges it, and
@@ -4172,7 +4305,10 @@ mod real_clients {
     }
 
     /// Claims one package of `target` under the claim nonce `nonce`, so a
-    /// second claim for the same device is a distinct request.
+    /// second claim for the same device is a distinct request. The claimant
+    /// then asks `CLAIM STATUS` for the same operation, as after a lost
+    /// reply, and receives the stored result of the claim: the target's
+    /// device, reference and object, not its own device (companion 11.6).
     pub(super) fn claim_package_with(
         client: &mut ArcClient,
         claimant: &mut Principal,
@@ -4188,7 +4324,30 @@ mod real_clients {
         ))?;
         let reply = labeled_reply(client, &label)?;
         assert_contains(&reply, " EKEY CLAIMED ")?;
-        mls_body(&batch_object(&reply)?, ArcWireObjectKind::KeyPackageMls)
+        let claimed = claimed_words(&reply)?;
+        assert_eq!(claimed.get(3), Some(&target.device_token()), "{claimed:?}");
+        let object = batch_object(&reply)?;
+        let label = claimant.label();
+        client.send(&format!(
+            "@label={label} EKEY CLAIM STATUS {}",
+            base64url_encode(&nonce)
+        ))?;
+        let status = labeled_reply(client, &label)?;
+        assert_eq!(claimed_words(&status)?, claimed, "{status:?}");
+        assert_eq!(batch_object(&status)?, object);
+        mls_body(&object, ArcWireObjectKind::KeyPackageMls)
+    }
+
+    /// The words of the `EKEY CLAIMED` metadata line of a claim reply.
+    pub(super) fn claimed_words(reply: &[String]) -> TestResult<Vec<String>> {
+        reply
+            .iter()
+            .map(|line| words(line))
+            .find(|words| {
+                words.get(1).is_some_and(|word| word == "EKEY")
+                    && words.get(2).is_some_and(|word| word == "CLAIMED")
+            })
+            .ok_or_else(|| failure(format!("no EKEY CLAIMED line in {reply:?}")))
     }
 
     /// Delivers `welcome` to `target` under the finalization that added it,

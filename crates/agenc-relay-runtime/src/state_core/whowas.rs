@@ -439,13 +439,14 @@ mod tests {
             .session(owner.user_id)
             .ok_or("session")?
             .public_cloak();
+        // The retained cloak renders in its Architecture 7.4 framing.
         assert_eq!(
             row.middle(),
             &[
                 "AfterAgain",
                 "Before",
-                std::str::from_utf8(cloak.user_component())?,
-                std::str::from_utf8(cloak.host_component())?,
+                &format!("u-{}", std::str::from_utf8(cloak.user_component())?),
+                &format!("h-{}.invalid", std::str::from_utf8(cloak.host_component())?),
                 "*"
             ]
         );

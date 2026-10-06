@@ -15,6 +15,7 @@ mod history;
 mod join_echo;
 mod journal;
 mod journal_retry;
+mod message_echo;
 mod ordinary_batch;
 pub(crate) use render::prefix as source_prefix;
 mod render;
@@ -62,7 +63,7 @@ use crate::observe::health::{ReadinessGate, ReadinessStage};
 use crate::state_core::StateCoreContext;
 use crate::sync::Arc;
 
-pub(crate) use request::is_local_user_mode_query;
+pub(crate) use request::served_while_unavailable;
 pub use request::{EdgeCompletion, RemoteCarrierOutcome};
 pub use startup::{EdgeRestoreCause, EdgeRestoreRefusal, EdgeRestoreStep};
 
@@ -713,6 +714,56 @@ impl EdgeFederation {
     #[must_use]
     pub const fn replica(&self) -> &EdgeReplica {
         &self.replica
+    }
+
+    /// What a `900` names for one authenticated session this edge homes,
+    /// read from the session projection its coordinator installed. A session
+    /// the replica does not hold, or one without an account, has no
+    /// logged-in state.
+    pub(crate) fn logged_in(
+        &self,
+        user_id: UserId,
+    ) -> Result<crate::client_render::LoggedIn, RuntimeError> {
+        let record = self
+            .replica
+            .session(user_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if record.account.is_none() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(crate::client_render::LoggedIn {
+            mask: render::prefix(&record.source_view())?,
+            label: record
+                .account_label
+                .as_ref()
+                .map_or("*", agenc_relay_domain::AccountLabelValue::as_str)
+                .to_owned(),
+        })
+    }
+
+    /// The account the session projection of one session this edge homes
+    /// names, if any.
+    pub(crate) fn home_session_account(&self, user_id: UserId) -> Option<AccountId> {
+        self.replica
+            .session(user_id)?
+            .account
+            .map(|(account_id, _)| account_id)
+    }
+
+    /// Lets a router test install the projections a coordinator would send.
+    #[cfg(test)]
+    pub(crate) fn replica_mut(&mut self) -> &mut EdgeReplica {
+        &mut self.replica
+    }
+
+    /// The prefix an edge renders on every line of `source`, which a `900`
+    /// repeats, for router tests that compare a line with the renderer
+    /// itself.
+    #[cfg(test)]
+    pub(crate) fn rendered_prefix(
+        source: &agenc_relay_domain::federation::SourceView,
+    ) -> Result<String, RuntimeError> {
+        render::prefix(source)
     }
 
     /// Dispatches one link message; completions are returned to the router.

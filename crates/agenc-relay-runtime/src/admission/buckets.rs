@@ -473,7 +473,7 @@ impl BucketKind {
             Self::NewDirectTcp => (1, 1, 8),
             Self::NewOnionConnection => (8, 1, 32),
             Self::TlsHandshake => (4, 1, 16),
-            Self::PreAuthCommand => (1, 1, 10),
+            Self::PreAuthCommand => (1, 1, 24),
             Self::RegisteredCommand => (4, 1, 20),
             Self::GuestMessage => (1, 2, 4),
             Self::AccountMessage => (2, 1, 10),

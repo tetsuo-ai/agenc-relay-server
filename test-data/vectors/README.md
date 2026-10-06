@@ -10,11 +10,56 @@ complete file and its generator source to SHA-256.
 
 ## E2EE companion vectors
 
-`e2ee/identity` and `e2ee/recovery` are written by
+`e2ee/identity`, `e2ee/recovery` and `e2ee/reinit` are written by
 `scripts/generate-e2ee-vectors.py`, an independent Python TLS encoder and
 Ed25519 signer that never calls the Rust codec; `--check` fails on any drift
-in either set. The identity set covers the companion Section 8 objects and
-is read by `crates/agenc-relay-e2ee/tests/identity_vectors.rs`.
+in any set, including a stale or missing file. The identity set covers the
+companion Section 8 objects and is read by
+`crates/agenc-relay-e2ee/tests/identity_vectors.rs`.
+
+The ReInit set covers the companion Section 13.8 target construction and is
+read byte for byte by `crates/agenc-relay-e2ee/tests/reinit_vectors.rs`. For
+suites `0x0001` and `0x0003` it carries the successor extension list a
+`ReInit` Proposal carries, the `ArcReInitTargetTBS` that list reconstructs, its
+Section 2.2 digest, and a complete sequencer log of the old conversation from
+its pinned genesis binding through the ReInit finalization, the attempt
+receipt and the activation, with the attempt object, which carries the
+target byte for byte, a successor initial Commit whose `ArcCommitAad` names
+the old finalization, and the ReInit binding-chain and policy-chain entries a
+later joiner of that successor checks against the target the activation's
+attempt carries, after the old genesis entry. A suite-`0x0001` log also
+advances the accepted state, aborts one ReInit candidate and retries one
+attempt, and still carries one target. Rejection files duplicate the context
+extension, omit `required_capabilities`, carry a later joiner's context with
+its own pending join, change the context core, keep the pinned-revision
+target layout that named the finalization ID, name the activation in the
+initial Commit, name another target's digest (and carry that target) in an
+otherwise valid attempt and receipt, and name the authorized digest while
+carrying another target.
+
+The ReInit set also covers the successor rosters. Account `d` rotates its root
+continuously (`root-d-1.bin`, whose continuity signature is by `d`'s old root,
+and `roster-d-1.bin` under it), and the `rotation` successor names that root
+in its roster heads, binding principals, policy and plan; its log runs from the
+ReInit candidate through activation under the old council, with the attempt,
+the initial Commit and a later joiner's entries. `rotation-0003` is the same
+rotation with a suite change from `0x0001` to `0x0003`, reconstructed only.
+The rejection files for the rosters are a generation-one root of `d` with the
+same fingerprint and a continuity signature by another key, another valid
+generation-one root of `d` (`root-d-1-sibling.bin`) from which the rotation
+does not descend, a successor naming
+a generation-zero root of `d` that does not continue the old one (with its own
+root and roster files), a successor whose binding keeps `d`'s old root while
+its heads, policy and plan name the new one, and a successor naming a
+continuously rotated root of `c` (`root-c-1.bin`, `roster-c-1.bin`), the
+channel-authority root the old semantic route lock names.
+
+Two more rejection files hold a successor binding to the shape every binding
+has against the semantic route it carries: a successor whose context, binding,
+policy and context core name the direct kind while its binding keeps the old
+channel's semantic route, lock, channel instance and route binding, as the
+Proposal's extension list (`reject-extensions-kind-changed.bin`) and as the
+target a sender carrying that list builds (`reject-target-kind-changed.bin`).
 
 The recovery set covers the ENC-01 public-evidence contract: every `.bin`
 file is one complete encoded `ArcWireObject` of kind `recovery_submission`
@@ -33,6 +78,18 @@ submission's element unsupplied. These are synthetic public-envelope vectors
 whose close element names the head record rather than a real finalization
 certificate; they do not substitute for real MLS endpoint evidence, and their
 Rust consumers are owned by ENC-02 through ENC-05 under master #35.
+
+## Server-to-client wire vectors
+
+`server-wire-v1.vectors` holds lines a server sends, written by hand from
+Architecture Sections 7.4, 9.1, 9.2, 9.4, 9.5 and 10.3 and Appendix A.2,
+in the four-field `evidence-id|surface|encoding|payload` form that
+`scripts/check-stage-two.py` binds to the Stage 02 evidence IDs. A surface
+`accept/<name>` must decode and rebuild byte for byte from its parts;
+`reject/<stage>/<error>/<name>` must fail at the framing, tags or message
+stage with that error. An ascii payload is one line without its CRLF; a hex
+payload is a whole stream. `crates/agenc-relay-client-wire/tests/server_vectors.rs`
+reads them.
 
 ## Stage 04 files
 

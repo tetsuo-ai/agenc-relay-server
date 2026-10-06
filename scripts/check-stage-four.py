@@ -9,6 +9,7 @@ import hashlib
 import re
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
 
@@ -30,9 +31,11 @@ EXPECTED_CRYPTO_MODULES = {
 }
 EXPECTED_AUTH_MODULES = {
     "channel_key.rs",
+    "client.rs",
     "error.rs",
     "invitation.rs",
     "opaque.rs",
+    "profile.rs",
     "service.rs",
     "transaction.rs",
     "wire.rs",
@@ -157,6 +160,7 @@ EXPECTED_VECTOR_FILES = {
 EXPECTED_CONSTANT_TIME_SURFACES = {
     "crates/agenc-relay-auth/src/service.rs",
     "crates/agenc-relay-auth/src/opaque.rs",
+    "crates/agenc-relay-auth/src/profile.rs",
     "crates/agenc-relay-crypto/src/hash.rs",
     "crates/agenc-relay-crypto/src/storage.rs",
     "vendor/opaque-ke-4.0.1/src/opaque.rs",
@@ -211,6 +215,16 @@ REQUIRED_SURFACES = (
     "pub struct BoundedCryptoPool",
     "pub trait CryptoPort",
     "pub struct OpaqueProfile",
+    "pub struct AgencOpaqueSuite",
+    "pub struct FixedArgon2id",
+    "pub struct FallibleOpaqueRng<E>",
+    "pub fn opaque_context",
+    "pub fn opaque_identifiers",
+    "pub fn registration_start<E: EntropySource>",
+    "pub fn registration_finish<E: EntropySource>",
+    "pub fn login_start<E: EntropySource>",
+    "pub fn login_finish<E: EntropySource>",
+    "pub enum OpaqueClientError",
     "pub struct AccountServiceEnvelope",
     "pub fn begin_account_creation",
     "pub fn begin_authentication",
@@ -416,6 +430,31 @@ def validate_modules(root: Path) -> None:
         raise StageFourError("crypto/auth source exposes a forbidden algorithm or serialization surface")
 
 
+def validate_fuzz_opaque_patch(manifest: dict[str, object]) -> None:
+    """Require the separately resolved fuzz workspace to select the reviewed source."""
+    patches = manifest.get("patch")
+    crates_io = patches.get("crates-io") if isinstance(patches, dict) else None
+    opaque_patch = crates_io.get("opaque-ke") if isinstance(crates_io, dict) else None
+    if opaque_patch != {"path": f"../{EXPECTED_SOURCE_PATCH['path']}"}:
+        raise StageFourError("fuzz workspace does not select the reviewed local OPAQUE source")
+
+
+def validate_opaque_lock(lock: dict[str, object], name: str) -> None:
+    """Require one OPAQUE package in a lockfile, resolved from the reviewed local source."""
+    packages = lock.get("package")
+    if not isinstance(packages, list):
+        raise StageFourError(f"{name} has no package records")
+    matches = [
+        package
+        for package in packages
+        if isinstance(package, dict) and package.get("name") == EXPECTED_SOURCE_PATCH["package"]
+    ]
+    if len(matches) != 1 or matches[0].get("version") != EXPECTED_SOURCE_PATCH["version"]:
+        raise StageFourError(f"{name} does not resolve exactly one reviewed OPAQUE package")
+    if "checksum" in matches[0] or "source" in matches[0]:
+        raise StageFourError(f"{name} does not select the reviewed local OPAQUE source")
+
+
 def validate_manifests(root: Path, profile: dict[str, object]) -> None:
     """Check exact direct dependency sets, features, sources, and checksums."""
     crypto = load_toml(root / "crates/agenc-relay-crypto/Cargo.toml")
@@ -497,6 +536,11 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
                 )
             if matches[0].get("source") != "registry+https://github.com/rust-lang/crates.io-index":
                 raise StageFourError(f"Cargo.lock source differs for {record['logical_name']}")
+    # The fuzz workspace resolves its own lockfile and links the auth crate
+    # too; the root [patch] does not reach it, so it repeats the selection.
+    validate_fuzz_opaque_patch(load_toml(root / "fuzz/Cargo.toml"))
+    validate_opaque_lock(lock, "Cargo.lock")
+    validate_opaque_lock(load_toml(root / "fuzz/Cargo.lock"), "fuzz/Cargo.lock")
     for package_name, expected_versions in EXPECTED_DUPLICATE_GENERATIONS.items():
         actual_versions = {
             str(package.get("version"))
@@ -625,12 +669,14 @@ def validate_vectors(root: Path) -> None:
     crypto_test = root / "crates/agenc-relay-crypto/tests/stage_four_vectors.rs"
     auth_test = root / "crates/agenc-relay-auth/tests/stage_four_vectors.rs"
     security_test = root / "crates/agenc-relay-auth/tests/stage_four_security.rs"
-    for path in (crypto_test, auth_test, security_test):
+    client_test = root / "crates/agenc-relay-auth/tests/opaque_client.rs"
+    for path in (crypto_test, auth_test, security_test, client_test):
         if not path.is_file():
             raise StageFourError(f"Stage-04 vector or security test is absent: {path}")
     crypto_source = crypto_test.read_text(encoding="utf-8")
     auth_source = auth_test.read_text(encoding="utf-8")
     security_source = security_test.read_text(encoding="utf-8")
+    client_source = client_test.read_text(encoding="utf-8")
     crypto_markers = (
         "stage-four-crypto-v1.vectors",
         "immutable_storage_vector_rejects_tamper_and_context_substitution",
@@ -650,12 +696,25 @@ def validate_vectors(root: Path) -> None:
         "CryptoWorkerError::WorkerPanicked",
         "CryptoWorkerError::CancelledBeforeStart",
     )
+    # The public profile and client modules reproduce the immutable OPAQUE
+    # vector byte for byte and keep their refusal paths distinct.
+    client_markers = (
+        "stage-four-opaque-v1.vectors",
+        "public_modules_reproduce_vec_s04_007_opaque_byte_for_byte",
+        "client_calls_interoperate_with_the_coordinator_profile",
+        "reflected_or_undecodable_server_messages_are_refused",
+        "failed_entropy_and_out_of_profile_passwords_are_refused",
+        "a_latched_generator_is_refused_before_any_work",
+        "the_adapter_stays_latched_after_its_source_recovers",
+    )
     if any(marker not in crypto_source for marker in crypto_markers):
         raise StageFourError("crypto golden-vector suite misses a required negative")
     if any(marker not in auth_source for marker in auth_markers):
         raise StageFourError("auth golden-vector suite misses a required negative")
     if any(marker not in security_source for marker in security_markers):
         raise StageFourError("Stage-04 security suite misses timing or secret-canary coverage")
+    if any(marker not in client_source for marker in client_markers):
+        raise StageFourError("public OPAQUE client suite misses its vector or a required negative")
 
 
 def validate_constant_time_review(root: Path) -> None:
@@ -737,8 +796,13 @@ def validate(root: Path) -> None:
 
 def expect_rejection(label: str, document: dict[str, object], fragment: str) -> None:
     """Require one profile mutation to reach its intended rejection."""
+    expect_failure(label, lambda: validate_profile(document), fragment)
+
+
+def expect_failure(label: str, action: Callable[[], None], fragment: str) -> None:
+    """Require one seeded mutation to reach its intended rejection."""
     try:
-        validate_profile(document)
+        action()
     except StageFourError as error:
         if fragment not in str(error):
             raise StageFourError(f"self-test {label!r} reached the wrong branch: {error}") from error
@@ -762,7 +826,78 @@ def self_test(root: Path) -> int:
     malformed = copy.deepcopy(valid)
     malformed["source_patch"]["tree_sha256"] = "0" * 64  # type: ignore[index]
     expect_rejection("vendored patch digest", malformed, "source profile")
-    return 4
+    cases = 4
+
+    fuzz_manifest = load_toml(root / "fuzz/Cargo.toml")
+    validate_fuzz_opaque_patch(fuzz_manifest)
+    unpatched = copy.deepcopy(fuzz_manifest)
+    del unpatched["patch"]["crates-io"]["opaque-ke"]  # type: ignore[index]
+    expect_failure(
+        "fuzz workspace without the OPAQUE patch",
+        lambda: validate_fuzz_opaque_patch(unpatched),
+        "fuzz workspace does not select the reviewed local OPAQUE source",
+    )
+    moved = copy.deepcopy(fuzz_manifest)
+    moved["patch"]["crates-io"]["opaque-ke"] = {  # type: ignore[index]
+        "path": "../vendor/opaque-ke-4.0.2"
+    }
+    expect_failure(
+        "fuzz OPAQUE patch naming another directory",
+        lambda: validate_fuzz_opaque_patch(moved),
+        "fuzz workspace does not select the reviewed local OPAQUE source",
+    )
+    cases += 2
+
+    root_lock = load_toml(root / "Cargo.lock")
+    fuzz_lock = load_toml(root / "fuzz/Cargo.lock")
+    validate_opaque_lock(root_lock, "Cargo.lock")
+    validate_opaque_lock(fuzz_lock, "fuzz/Cargo.lock")
+    registry_lock = copy.deepcopy(fuzz_lock)
+    for package in registry_lock["package"]:  # type: ignore[union-attr]
+        if package.get("name") == "opaque-ke":
+            package["source"] = "registry+https://github.com/rust-lang/crates.io-index"
+            package["checksum"] = EXPECTED_SOURCE_PATCH["upstream_checksum"]
+    expect_failure(
+        "registry OPAQUE in the fuzz lock",
+        lambda: validate_opaque_lock(registry_lock, "fuzz/Cargo.lock"),
+        "does not select the reviewed local OPAQUE source",
+    )
+    duplicated = copy.deepcopy(root_lock)
+    duplicated["package"].append(  # type: ignore[union-attr]
+        {
+            "name": "opaque-ke",
+            "version": "4.0.1",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "checksum": EXPECTED_SOURCE_PATCH["upstream_checksum"],
+        }
+    )
+    expect_failure(
+        "second OPAQUE package in a lock",
+        lambda: validate_opaque_lock(duplicated, "Cargo.lock"),
+        "does not resolve exactly one reviewed OPAQUE package",
+    )
+    # A Git source has no checksum; its source key alone must be refused.
+    git_lock = copy.deepcopy(root_lock)
+    for package in git_lock["package"]:  # type: ignore[union-attr]
+        if package.get("name") == "opaque-ke":
+            package["source"] = "git+https://github.com/facebook/opaque-ke?tag=v4.0.1#0000000"
+            package.pop("checksum", None)
+    expect_failure(
+        "Git OPAQUE without a checksum in a lock",
+        lambda: validate_opaque_lock(git_lock, "Cargo.lock"),
+        "does not select the reviewed local OPAQUE source",
+    )
+    other_version = copy.deepcopy(fuzz_lock)
+    for package in other_version["package"]:  # type: ignore[union-attr]
+        if package.get("name") == "opaque-ke":
+            package["version"] = "4.0.2"
+    expect_failure(
+        "local OPAQUE at another version in a lock",
+        lambda: validate_opaque_lock(other_version, "fuzz/Cargo.lock"),
+        "does not resolve exactly one reviewed OPAQUE package",
+    )
+    cases += 4
+    return cases
 
 
 def fail(message: str) -> NoReturn:

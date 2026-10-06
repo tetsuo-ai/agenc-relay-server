@@ -186,6 +186,7 @@ fn edge_with_pending(command: &str, header: RequestHeader) -> TestResult<EdgeFed
             result_bytes: Vec::new(),
             replies: Vec::new(),
             join_echoes: Vec::new(),
+            message_echoes: Vec::new(),
             completion: None,
             completion_generation: None,
             completion_coverage: None,

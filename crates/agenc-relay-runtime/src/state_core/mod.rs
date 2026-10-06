@@ -917,6 +917,12 @@ impl StateCoreContext {
         })
     }
 
+    /// The configured ceiling of one response batch, which one logical reply
+    /// sent through the fanout may not exceed (Appendix C).
+    pub(crate) const fn response_batch_bytes(&self) -> usize {
+        self.runtime_resource_limits.response_batch_bytes()
+    }
+
     /// Sends a query response through the existing fanout path while moving
     /// its snapshot lease into the final queued frame.
     pub(crate) fn send_query_to(
@@ -4542,11 +4548,12 @@ mod lifecycle_tests {
             crate::test_support::StateCoreFixture::with_registration_router(vec![7; 1024])?;
         let core = fixture.state_mut()?;
         let queue = open_queued_connection(core)?;
-        core.context.buckets_mut().reload(RateLimits::defaults());
+        let limits = RateLimits::defaults();
+        core.context.buckets_mut().reload(limits);
         let demand = BucketDemand::new(
             BucketKind::PreAuthCommand,
             BucketKey::Connection(ConnectionGeneration::new(1)),
-            10,
+            limits.rate(BucketKind::PreAuthCommand).burst(),
         )?;
         let now = core.context.now();
         core.context
@@ -5832,6 +5839,14 @@ impl StateCoreContext {
     /// Installs the published MOTD text a fixture's registration burst renders.
     pub(crate) fn set_motd_for_test(&mut self, motd: Option<&str>) {
         self.motd = motd.map(Arc::from);
+    }
+
+    /// Lowers the response batch ceiling from the fixture's hard maximum, so a
+    /// test can run at the Appendix C default a configured node uses.
+    pub(crate) fn set_response_batch_bytes_for_test(&mut self, bytes: usize) {
+        self.runtime_resource_limits = self
+            .runtime_resource_limits
+            .with_response_batch_bytes(bytes);
     }
 
     /// Advances a fixture's timer clock without changing its wall-clock trust anchor.

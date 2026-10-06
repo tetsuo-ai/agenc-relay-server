@@ -1369,7 +1369,7 @@ impl Campaign<'_> {
         client.send("CAP END")?;
         client.send("NICK campaign-account")?;
         client.send("USER campaign 0 * :Campaign Account")?;
-        client.read_until(|line| line.contains(" 376 ") || line.contains(" 422 "))?;
+        client.read_welcome("campaign-account")?;
         self.shared.record(
             |latencies| &mut latencies.opaque,
             self.shared.nanos() - started,

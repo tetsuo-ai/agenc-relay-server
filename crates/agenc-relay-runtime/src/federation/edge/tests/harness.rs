@@ -2331,6 +2331,19 @@ async fn register(client: &mut Client, nickname: &str) -> TestResult {
 
 #[tokio::test]
 async fn edge_and_coordinator_interoperate_over_a_bridged_link() -> TestResult {
+    // The coordinator serves no clients here; its inbox stays open until stop.
+    run_bridge(|_hub_inbox, edge_inbox| exchange_over_bridge(edge_inbox)).await
+}
+
+/// Runs a coordinator and its edge over a bridged link and hands `driver`
+/// the coordinator's and the edge's client inboxes; both nodes stop after
+/// the driver ends.
+async fn run_bridge<Driver>(
+    driver: impl FnOnce(mpsc::Sender<StateCoreMessage>, mpsc::Sender<StateCoreMessage>) -> Driver,
+) -> TestResult
+where
+    Driver: Future<Output = TestResult>,
+{
     let mut coordinator_fixture =
         StateCoreFixture::with_federation_coordinator(entropy_script(), vec![edge_identity()])?;
     let mut edge_fixture = StateCoreFixture::with_edge(entropy_script(), hub_identity())?;
@@ -2340,9 +2353,7 @@ async fn edge_and_coordinator_interoperate_over_a_bridged_link() -> TestResult {
     let edge_task = tokio::spawn(edge_run);
     let hub_lifecycle = hub.lifecycle.clone();
     let edge_lifecycle = edge.lifecycle.clone();
-    // The coordinator serves no clients here; its inbox stays open until stop.
-    let _hub_inbox = hub.inbox.clone();
-    let outcome = drive_bridge(hub, edge).await;
+    let outcome = drive_bridge(&hub, &edge, driver).await;
     let _stop_edge = edge_lifecycle.request(LifecyclePhase::Stop).await;
     let _stop_hub = hub_lifecycle.request(LifecyclePhase::Stop).await;
     let hub_exit = tokio::time::timeout(std::time::Duration::from_secs(10), hub_task).await??;
@@ -2353,8 +2364,15 @@ async fn edge_and_coordinator_interoperate_over_a_bridged_link() -> TestResult {
     Ok(())
 }
 
-/// Establishes the bridged link and exercises two clients on the edge.
-async fn drive_bridge(hub: Node, edge: Node) -> TestResult {
+/// Establishes the bridged link and runs `driver` with both client inboxes.
+async fn drive_bridge<Driver>(
+    hub: &Node,
+    edge: &Node,
+    driver: impl FnOnce(mpsc::Sender<StateCoreMessage>, mpsc::Sender<StateCoreMessage>) -> Driver,
+) -> TestResult
+where
+    Driver: Future<Output = TestResult>,
+{
     let (to_edge_handle, to_edge_queue) = link_queue(1 << 20);
     let (to_hub_handle, to_hub_queue) = link_queue(1 << 20);
     let hub_link = LinkId::new(1);
@@ -2395,13 +2413,14 @@ async fn drive_bridge(hub: Node, edge: Node) -> TestResult {
         })
         .await
         .map_err(|_| "edge inbox closed")?;
+    let (to_edge, to_hub) = (edge.federation.clone(), hub.federation.clone());
     let pumps = tokio::spawn(async move {
         tokio::join!(
-            pump(to_edge_queue, HUB_NAME, edge.federation, edge_link, HUB),
-            pump(to_hub_queue, EDGE_NAME, hub.federation, hub_link, EDGE),
+            pump(to_edge_queue, HUB_NAME, to_edge, edge_link, HUB),
+            pump(to_hub_queue, EDGE_NAME, to_hub, hub_link, EDGE),
         );
     });
-    let outcome = exchange_over_bridge(edge.inbox).await;
+    let outcome = driver(hub.inbox.clone(), edge.inbox.clone()).await;
     pumps.abort();
     outcome
 }
@@ -2430,12 +2449,18 @@ async fn exchange_over_bridge(inbox: mpsc::Sender<StateCoreMessage>) -> TestResu
     assert!(
         lines
             .iter()
-            .any(|line| line.starts_with(":tess!") && line.contains(" JOIN #bridge")),
+            .any(|line| has_framed_source(line, "tess") && line.contains(" JOIN #bridge")),
         "{lines:?}"
     );
     tess.line("PRIVMSG #bridge :hello sam").await?;
     let lines = sam.wait_for("PRIVMSG #bridge :hello sam").await?;
-    assert!(lines.iter().any(|line| line.starts_with(":tess!")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| has_framed_source(line, "tess")
+                && line.ends_with(" PRIVMSG #bridge :hello sam")),
+        "{lines:?}"
+    );
     assert!(
         !tess
             .sink
@@ -2518,7 +2543,10 @@ async fn exchange_more_over_bridge(sam: &mut Client, tess: &mut Client) -> TestR
     sam.wait_for("MODE #bridge -m").await?;
     tess.line("PRIVMSG sam :direct hello").await?;
     let lines = sam.wait_for("PRIVMSG sam :direct hello").await?;
-    assert!(lines.iter().any(|line| line.starts_with(":tessa!")));
+    assert!(
+        lines.iter().any(|line| has_framed_source(line, "tessa")),
+        "{lines:?}"
+    );
     explicit_queries_over_bridge(sam).await?;
     tess.line("MODE tessa").await?;
     tess.wait_for(" 221 tessa +i").await?;
@@ -2551,6 +2579,14 @@ async fn explicit_queries_over_bridge(client: &mut Client) -> TestResult {
         assert!(
             replies.iter().any(|line| line.contains(ending)),
             "explicit query {command} failed: {replies:?}"
+        );
+        let framed = framed_query_fields(command, &replies);
+        let names_a_cloak = ["WHO ", "WHOIS ", "USERHOST ", "WHOWAS "]
+            .iter()
+            .any(|query| command.starts_with(query));
+        assert!(
+            framed > 0 || !names_a_cloak,
+            "{command} named no framed cloak: {replies:?}"
         );
     }
     let before = client.sink.lines().len();
@@ -2640,6 +2676,78 @@ async fn explicit_queries_over_bridge(client: &mut Client) -> TestResult {
     client.line("NICK sammy").await?;
     client.wait_for("NICK :sammy").await?;
     Ok(())
+}
+
+/// AUD-18: whether a user field and a host field are a public cloak framed as
+/// Architecture 7.4 specifies, checked independently of the formatter.
+fn is_framed_cloak(user: &str, host: &str) -> bool {
+    fn base32(text: &str, length: usize) -> bool {
+        text.len() == length
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'a'..=b'z' | b'2'..=b'7'))
+    }
+    user.strip_prefix("u-").is_some_and(|user| base32(user, 10))
+        && host
+            .strip_prefix("h-")
+            .and_then(|host| host.strip_suffix(".invalid"))
+            .is_some_and(|host| base32(host, 16))
+}
+
+/// The space-separated fields of a line after its tag section.
+fn untagged_fields(line: &str) -> Vec<&str> {
+    let body = match line.strip_prefix('@') {
+        Some(tagged) => tagged.split_once(' ').map_or("", |(_, body)| body),
+        None => line,
+    };
+    body.split(' ').collect()
+}
+
+/// Whether a line's source prefix is `nickname`'s framed user mask.
+fn has_framed_source(line: &str, nickname: &str) -> bool {
+    untagged_fields(line)
+        .first()
+        .and_then(|source| source.strip_prefix(':'))
+        .and_then(|source| source.strip_prefix(nickname))
+        .and_then(|source| source.strip_prefix('!'))
+        .and_then(|source| source.split_once('@'))
+        .is_some_and(|(user, host)| is_framed_cloak(user, host))
+}
+
+/// Counts the cloaks of the WHO, WHOIS, WHOWAS and USERHOST replies among
+/// `replies`, and fails on any that is not framed.
+fn framed_query_fields(command: &str, replies: &[String]) -> usize {
+    let mut framed = 0;
+    for line in replies {
+        let fields = untagged_fields(line);
+        let cloaks: Vec<(&str, &str)> = match fields.get(1).copied() {
+            Some("311" | "314" | "352") => fields
+                .get(4)
+                .zip(fields.get(5))
+                .map(|(user, host)| (*user, *host))
+                .into_iter()
+                .collect(),
+            Some("302") => line
+                .rsplit_once(" :")
+                .map_or("", |(_, users)| users)
+                .split(' ')
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    entry
+                        .split_once('=')
+                        .and_then(|(_, reply)| reply.get(1..))
+                        .and_then(|address| address.split_once('@'))
+                        .unwrap_or(("", ""))
+                })
+                .collect(),
+            _ => continue,
+        };
+        for (user, host) in cloaks {
+            assert!(is_framed_cloak(user, host), "{command}: {line}");
+            framed += 1;
+        }
+    }
+    framed
 }
 
 async fn new_query_reply(client: &Client, before: usize, ending: &str) -> TestResult<Vec<String>> {
@@ -3910,6 +4018,208 @@ mod accounts {
         })
         .await
     }
+
+    /// One SASL exchange from the mechanism selection to the client's `903`,
+    /// answered by the scripted coordinator as `account`. Returns the finish
+    /// request's header.
+    async fn authenticate(
+        hub: &mut Hub,
+        client: &mut Client,
+        account: AccountId,
+        seed: u8,
+        earlier_chunks: usize,
+    ) -> TestResult<RequestHeader> {
+        client.line("AUTHENTICATE AGENC-OPAQUE").await?;
+        let start = crate::test_support::sealed_authentication_start(
+            NETWORK,
+            RecoveryEpoch::from_bytes([34; 16]),
+            "quinn-account",
+            seed,
+        )?;
+        send_envelope(client, &start).await?;
+        let (header, _, bytes) = hub.next_request().await?;
+        let response = challenge_response()?;
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::AuthChallenge(response.try_clone()?),
+            Vec::new(),
+            None,
+        )
+        .await?;
+        wait_for_chunks(client, earlier_chunks, 15).await?;
+        let finish = crate::test_support::sealed_authentication_finish(
+            NETWORK,
+            RecoveryEpoch::from_bytes([34; 16]),
+            seed.wrapping_add(1),
+        )?;
+        send_envelope(client, &finish).await?;
+        let (header, operation, bytes) = hub.next_request().await?;
+        let FederatedOperation::AccountService {
+            opcode: FederationOpcode::OpaqueAuthFinish,
+            ..
+        } = operation
+        else {
+            return Err("expected a forwarded authentication finish".into());
+        };
+        hub.result(
+            &header,
+            &bytes,
+            &ResultArm::Authenticated {
+                account_id: account,
+                account_session_generation: 1,
+                auth_grant_id: [9; 32],
+            },
+            response_chunks(&response)?,
+            None,
+        )
+        .await?;
+        wait_for_chunks(client, earlier_chunks.saturating_add(15), 15).await?;
+        Ok(header)
+    }
+
+    /// Architecture 20.7: a login, like a session registration, is the next
+    /// origin generation before any request under it. A registered guest's
+    /// committed login declares the account it now holds, and the
+    /// connection's next carrier waits for that declaration's
+    /// acknowledgement and travels under it, so the coordinator checks it
+    /// against the session's current account.
+    #[tokio::test]
+    async fn a_login_after_registration_declares_its_account_before_the_next_carrier() -> TestResult
+    {
+        run_edge(|federation, inbox| async move {
+            let mut hub = Hub::new(federation);
+            hub.establish().await?;
+            hub.synchronize().await?;
+            let mut client = Client::open(inbox, 1).await?;
+            hub.ack_origin().await?;
+            client.line("CAP LS 302").await?;
+            client.line("CAP REQ :sasl").await?;
+            client.line("NICK quinn").await?;
+            client.line("USER quinn 0 * :Quinn Real").await?;
+            client.line("CAP END").await?;
+            let (header, operation, bytes) = hub.next_request().await?;
+            let FederatedOperation::SessionOpen {
+                auth_grant_id: None,
+                ..
+            } = operation
+            else {
+                return Err("expected a guest session_open".into());
+            };
+            let session_id = SessionId::from_bytes([61; 16]);
+            let user_id = UserId::from_bytes([62; 16]);
+            hub.state_generation += 1;
+            let generation = hub.state_generation;
+            hub.event(
+                &ProjectedEvent::SessionVisible(SessionEventView {
+                    source: source(user_id, "quinn", 1)?,
+                    home_projection: Some(session_record(
+                        session_id, user_id, "quinn", generation, 1,
+                    )?),
+                }),
+                None,
+            )
+            .await?;
+            let completion = hub
+                .event(
+                    &ProjectedEvent::RequestCompleted {
+                        resulting_state_generation: generation,
+                    },
+                    Some(RequestCorrelation {
+                        replay_key: header.replay_key,
+                        request_id: header.request_id,
+                    }),
+                )
+                .await?;
+            hub.result(
+                &header,
+                &bytes,
+                &ResultArm::SessionRegistered(SessionRegistered {
+                    session_id,
+                    user_id,
+                    session_revision: generation,
+                    account: None,
+                    resulting_state_generation: generation,
+                }),
+                Vec::new(),
+                Some(completion),
+            )
+            .await?;
+            client.wait_for(" 001 quinn ").await?;
+            // Generation one carries the guest session.
+            hub.ack_origin().await?;
+
+            let account = AccountId::parse("a_AAAAAAAAAAAAAAAAAAAAAA")?;
+            let login = authenticate(&mut hub, &mut client, account, 81, 0).await?;
+            assert_eq!(login.replay_key.origin_generation, 1);
+            client.wait_for(" 903 quinn ").await?;
+
+            // The next carrier of the connection, a reauthentication.
+            client.line("AUTHENTICATE AGENC-OPAQUE").await?;
+            let start = crate::test_support::sealed_authentication_start(
+                NETWORK,
+                RecoveryEpoch::from_bytes([34; 16]),
+                "quinn-account",
+                83,
+            )?;
+            send_envelope(&mut client, &start).await?;
+            let (frame, object) = hub
+                .expect_frame(|frame, object| {
+                    object.is_some()
+                        && match frame {
+                            FederationFrame::Request { .. } => true,
+                            // A journal commit replays the acknowledged
+                            // declaration unchanged.
+                            FederationFrame::OriginUpdate { descriptor, .. } => {
+                                descriptor.generation > 1
+                            }
+                            _ => false,
+                        }
+                })
+                .await?;
+            let FederationFrame::OriginUpdate { descriptor, .. } = frame else {
+                return Err("the next carrier left under the guest generation".into());
+            };
+            let object = object.ok_or("origin without object")?;
+            let mut budget = DecodeBudget::new(8_192, 64);
+            let record = agenc_relay_federation_wire::OriginRecord::from_object(
+                &SchemaObject::decode_exact("FederationOrigin", object.as_slice(), &mut budget)?,
+            )?;
+            assert_eq!(descriptor.generation, 2);
+            assert_eq!(record.generation, 2);
+            assert_eq!(
+                record
+                    .session
+                    .map(|session| (session.session_id, session.user_id)),
+                Some((session_id, user_id))
+            );
+            assert_eq!(
+                record
+                    .account
+                    .map(|declared| (declared.account_id, declared.account_session_generation)),
+                Some((account, 1))
+            );
+            hub.frame(FederationFrame::OriginAck {
+                edge_server_id: EDGE,
+                server_incarnation: descriptor.server_incarnation,
+                origin_id: descriptor.origin_id,
+                generation: descriptor.generation,
+                object_id: Some(object.object_id()),
+            })
+            .await?;
+            let (header, operation, _) = hub.next_request().await?;
+            assert!(matches!(
+                operation,
+                FederatedOperation::AccountService {
+                    opcode: FederationOpcode::OpaqueAuthStart,
+                    ..
+                }
+            ));
+            assert_eq!(header.replay_key.origin_generation, 2);
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[tokio::test]
@@ -4135,3 +4445,9 @@ mod result_refusals;
 
 mod request_completion;
 mod request_refusals;
+
+mod local_information;
+
+mod labeled_messages;
+
+mod welcome_counters;

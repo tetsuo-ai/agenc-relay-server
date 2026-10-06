@@ -1,0 +1,4 @@
+:server.example FAIL PRIVMSG E2EE_REQUIRED #garden :Encryption is required
+:server.example WARN * SLOW_CONSUMER :Output queue nearing capacity
+:server.example FAIL * CHALLENGE :x
+:server.example 317 alice bob 30 :seconds idle

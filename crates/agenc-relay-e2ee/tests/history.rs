@@ -653,6 +653,29 @@ fn a_sequencer_rotation_changes_the_committed_credential_for_later_positions() -
         log.finalization_request(&candidate, council.authorization(tbs)?, &council)?;
     let policy_id = log.policy_id;
     let record = log.finalization(request, id, policy_id)?;
+    // A successor reusing the current credential's key is refused in its
+    // place (companion 9.2.1), though that key signs its continuity.
+    let same_key = sequencer_credential(
+        &key(SEQUENCER_SEED),
+        1,
+        (100, 1_000_000),
+        Some((&key(SEQUENCER_SEED), &genesis.credential)),
+    )?
+    .encode()?;
+    let mut probe = chain.clone();
+    assert_eq!(
+        probe
+            .advance(
+                &record.bytes,
+                &RecordReferences {
+                    sequencer_credential: Some(&same_key),
+                    ..RecordReferences::default()
+                },
+                &mut budget(),
+            )
+            .err(),
+        Some(E2eeError::InvalidValue)
+    );
     let credential_bytes = successor.encode()?;
     let step = chain.advance(
         &record.bytes,
@@ -834,7 +857,7 @@ fn a_reinit_runs_attempt_abort_attempt_and_activation_to_its_terminal() -> TestR
     let genesis = Genesis::new()?;
     let (mut chain, mut log) = activated(&genesis)?;
     let council = operational_council(&genesis);
-    let target = [72; 32];
+    let target = log.target_digest()?;
     let (candidate_record, candidate) = log.candidate([2; 32])?;
     adopt(&mut chain, &candidate_record)?;
     let tbs = log.authorization_tbs(
@@ -907,7 +930,7 @@ fn a_reinit_runs_attempt_abort_attempt_and_activation_to_its_terminal() -> TestR
     let activation = log.reinit_activation(&receipt, &attempt, &council)?;
     let step = adopt(&mut chain, &activation)?;
     assert!(
-        matches!(step, ChainStep::ReinitActivated { new_conversation_id, quorum_votes: 2, .. } if new_conversation_id == [70; 32])
+        matches!(step, ChainStep::ReinitActivated { new_conversation_id, quorum_votes: 2, .. } if new_conversation_id == log.target.new_conversation_id)
     );
     assert!(chain.is_terminal());
     assert!(

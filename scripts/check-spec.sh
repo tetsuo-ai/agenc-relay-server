@@ -32,7 +32,7 @@ expected_files = {
     "rfcs/rfc9420-mls-protocol.txt": "251ab11076c43fd4b8dc080a068a8caaf55e2fc5e6aa61d4274961627f32624b",
     "rfcs/rfc9525-tls-service-identity.txt": "ed8116c2435376dffe37ec2ca688c3a8515e36820852b29e0b6cdfbe92abd2c5",
     "rfcs/rfc9750-mls-architecture.txt": "6aa156c5592f99802aae9c39510bf347cacee4abdb1c34baab4c933a6cd992dd",
-    "docs/arc-mls-e2ee-extension.md": "57d6d98df53ce8f738da463304fb47726c9133ef0bec5b268a8cadbc117405bc",
+    "docs/arc-mls-e2ee-extension.md": "4fa947bf4edfe146de8f6a72932b93625828b0fd6eea46976e699ab06719658c",
     "docs/federation-v1-profile.registry": "1b94cb7b43dc458ff683ddcfd86eed1939128a7a6d0229b89342bd6816eb5411",
 }
 
@@ -443,7 +443,7 @@ e2ee_profile_token = base64.urlsafe_b64encode(
     e2ee_profile_digest
 ).rstrip(b"=").decode("ascii")
 expected_e2ee_profile_hash = (
-    "c1b5313f8a7f196cda30eea797fb1ab65b004a55d71cf9a81071927046e5d395"
+    "0b3985c1e19f77e561734139d65131fb1c1fc5cb7a63a1119ca03b5a61583525"
 )
 if e2ee_profile_hash != expected_e2ee_profile_hash:
     errors.append(
@@ -909,7 +909,7 @@ e2ee_text = validate_markdown(
     e2ee, "companion E2EE spec", list(range(1, 25)), list("AB")
 )
 sources_text = validate_markdown(
-    sources, "protocol source ledger", list(range(1, 9)), []
+    sources, "protocol source ledger", list(range(1, 10)), []
 )
 for match in re.finditer(r"\bSection (\d+)(?:\.\d+)*", e2ee_text):
     number = int(match.group(1))

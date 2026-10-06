@@ -6,11 +6,14 @@ use std::fmt::Write as _;
 
 use agenc_relay_types::{
     AccountDeletionToken, AccountId, CLIENT_COMMANDS, ChannelName, NetworkId, Nickname,
-    PublicErrorCode, RecoveryEpoch, SERVER_COMMANDS, SERVER_NUMERICS, SafeContext,
+    PublicCloak, PublicErrorCode, RecoveryEpoch, SERVER_COMMANDS, SERVER_NUMERICS, SafeContext,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+use crate::MAX_NICKNAME_BYTES;
+use crate::registration_command::validate_nickname;
+use crate::server_tags::is_batch_reference;
 use crate::{
     CapabilityState, MAX_CLIENT_ONLY_TAGS, MAX_CLIENT_ONLY_TOTAL_BYTES,
     MAX_CLIENT_ONLY_VALUE_BYTES, MAX_CLIENT_TAG_DATA_BYTES, MAX_COMBINED_TAG_SECTION_BYTES,
@@ -825,6 +828,102 @@ fn decimal_text(value: u64) -> Result<String, RenderError> {
     Ok(output)
 }
 
+const CLOAK_USER_COMPONENT_BYTES: usize = 10;
+const CLOAK_HOST_COMPONENT_BYTES: usize = 16;
+pub(crate) const CLOAK_USER_FRAME: &str = "u-";
+pub(crate) const CLOAK_HOST_FRAME: &str = "h-";
+pub(crate) const CLOAK_HOST_SUFFIX: &str = ".invalid";
+
+/// Bytes of a public cloak's visible user field: `u-` and the ten base32
+/// characters of its user component (Architecture 7.4).
+pub const VISIBLE_CLOAK_USER_BYTES: usize = CLOAK_USER_FRAME.len() + CLOAK_USER_COMPONENT_BYTES;
+/// Bytes of a public cloak's visible host field: `h-`, the sixteen base32
+/// characters of its host component, and `.invalid` (Architecture 7.4).
+pub const VISIBLE_CLOAK_HOST_BYTES: usize =
+    CLOAK_HOST_FRAME.len() + CLOAK_HOST_COMPONENT_BYTES + CLOAK_HOST_SUFFIX.len();
+/// Bytes of the longest visible user mask: a 32-byte nickname, `!`, the
+/// visible user field, `@`, and the visible host field.
+pub const MAX_USER_MASK_BYTES: usize =
+    MAX_NICKNAME_BYTES + 1 + VISIBLE_CLOAK_USER_BYTES + 1 + VISIBLE_CLOAK_HOST_BYTES;
+
+/// One public cloak in its visible spelling (Architecture 7.4).
+///
+/// A [`PublicCloak`] holds only its two random lowercase base32 components,
+/// and stored and federated cloaks keep that form. Every client-visible
+/// rendering frames them: the user field is `u-<10 base32>`, the host field
+/// is `h-<16 base32>.invalid`, and a user mask is
+/// `<nickname>!<user field>@<host field>`. Renderers take the mask of every
+/// user source prefix and `userhost-in-names` token, and the separate fields
+/// of the `WHO`, `WHOIS`, `WHOWAS` and `USERHOST` replies, from here, so
+/// every surface spells one user the same way.
+#[derive(Clone, Eq, PartialEq)]
+pub struct VisibleCloak {
+    user: String,
+    host: String,
+}
+
+impl VisibleCloak {
+    /// Frames both components of one public cloak.
+    pub fn new(cloak: &PublicCloak) -> Result<Self, RenderError> {
+        let user: &[u8; CLOAK_USER_COMPONENT_BYTES] = cloak.user_component();
+        let host: &[u8; CLOAK_HOST_COMPONENT_BYTES] = cloak.host_component();
+        Ok(Self {
+            user: framed_cloak_field(CLOAK_USER_FRAME, user, "")?,
+            host: framed_cloak_field(CLOAK_HOST_FRAME, host, CLOAK_HOST_SUFFIX)?,
+        })
+    }
+
+    /// Borrows the visible user field, `u-<10 base32>`.
+    #[must_use]
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    /// Borrows the visible host field, `h-<16 base32>.invalid`.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Renders the user mask `<nickname>!<user field>@<host field>`.
+    ///
+    /// The nickname must match the Architecture 7.2 grammar, so a mask is
+    /// never longer than [`MAX_USER_MASK_BYTES`].
+    pub fn mask(&self, nickname: &str) -> Result<String, RenderError> {
+        validate_nickname(nickname).map_err(|_| RenderError::InvalidSyntax)?;
+        let mut mask = String::new();
+        mask.try_reserve_exact(nickname.len() + 2 + self.user.len() + self.host.len())
+            .map_err(|_| RenderError::AllocationFailed)?;
+        mask.push_str(nickname);
+        mask.push('!');
+        mask.push_str(&self.user);
+        mask.push('@');
+        mask.push_str(&self.host);
+        Ok(mask)
+    }
+}
+
+/// Renders the visible user mask of one session,
+/// `<nickname>!u-<10 base32>@h-<16 base32>.invalid` (Architecture 7.4).
+///
+/// This is the source prefix of every line a user originates, on every node
+/// and in every history replay.
+pub fn user_mask(nickname: &str, cloak: &PublicCloak) -> Result<String, RenderError> {
+    VisibleCloak::new(cloak)?.mask(nickname)
+}
+
+fn framed_cloak_field(frame: &str, component: &[u8], suffix: &str) -> Result<String, RenderError> {
+    let component = std::str::from_utf8(component).map_err(|_| RenderError::InvalidSyntax)?;
+    let mut field = String::new();
+    field
+        .try_reserve_exact(frame.len() + component.len() + suffix.len())
+        .map_err(|_| RenderError::AllocationFailed)?;
+    field.push_str(frame);
+    field.push_str(component);
+    field.push_str(suffix);
+    Ok(field)
+}
+
 /// Builds one three-digit numeric whose shape is owned by Stage 02.
 ///
 /// Registry membership alone is insufficient. Numerics owned by later stages
@@ -1470,15 +1569,11 @@ fn validate_correlation(value: &str) -> Result<(), RenderError> {
 }
 
 fn validate_batch_reference(value: &str) -> Result<(), RenderError> {
-    if value.is_empty()
-        || value.len() > MAX_CORRELATION_TAG_BYTES
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(RenderError::InvalidCorrelation);
+    if is_batch_reference(value) {
+        Ok(())
+    } else {
+        Err(RenderError::InvalidCorrelation)
     }
-    Ok(())
 }
 
 fn command_bytes(

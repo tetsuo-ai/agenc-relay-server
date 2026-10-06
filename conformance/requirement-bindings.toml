@@ -1,6 +1,6 @@
 # Reviewed implementation ownership; normative text remains generated separately.
 schema_version = 1
-binding_count = 251
+binding_count = 272
 
 [[binding]]
 id = "ARCH-AUTH-01"
@@ -1149,6 +1149,153 @@ target_crates = ["agenc-relay-e2ee"]
 task_ids = ["S01-010"]
 evidence_ids = ["EVID-E2EE-REQ-1CF30FAFE8FA36F5CF2E"]
 status = "implemented"
+
+[[binding]]
+id = "E2EE-REQ-0178BBD7E7A2A76F4D6D"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-0178BBD7E7A2A76F4D6D"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-06A132AFEEEA39A18944"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-06A132AFEEEA39A18944"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-110D92BDA8FFA62CB76B"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-110D92BDA8FFA62CB76B"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-39DFA440E75F7F7495F2"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-004"]
+evidence_ids = ["EVID-E2EE-REQ-39DFA440E75F7F7495F2"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-3E01466276139F12C048"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-3E01466276139F12C048"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-4A3F05D133A72461A8DC"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-004"]
+evidence_ids = ["EVID-E2EE-REQ-4A3F05D133A72461A8DC"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-5CE2946BC4C5748CBAD9"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-5CE2946BC4C5748CBAD9"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-65D600D44A7F4FDA9EE6"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-004"]
+evidence_ids = ["EVID-E2EE-REQ-65D600D44A7F4FDA9EE6"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-667141DBC7473B7A0F9D"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-004"]
+evidence_ids = ["EVID-E2EE-REQ-667141DBC7473B7A0F9D"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-6A3059C08EDF34B7BA92"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-6A3059C08EDF34B7BA92"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-6D390E4D9F1DEA0EEF68"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-6D390E4D9F1DEA0EEF68"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-78EA2878D8AF97B72939"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-78EA2878D8AF97B72939"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-91603206702A296AE34F"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-004"]
+evidence_ids = ["EVID-E2EE-REQ-91603206702A296AE34F"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-978953B8799A08B41F25"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-978953B8799A08B41F25"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-9C570091CD7134A351DB"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-9C570091CD7134A351DB"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-B4977D179E4C66AAD737"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-004"]
+evidence_ids = ["EVID-E2EE-REQ-B4977D179E4C66AAD737"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-B7019C9600DEEE9F73B2"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-B7019C9600DEEE9F73B2"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-C32EDD6C33F900C062E9"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-C32EDD6C33F900C062E9"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-CCA2E69085E483C5155F"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-004"]
+evidence_ids = ["EVID-E2EE-REQ-CCA2E69085E483C5155F"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-CD50092C1042C824D3AE"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-CD50092C1042C824D3AE"]
+status = "unimplemented"
+
+[[binding]]
+id = "E2EE-REQ-FB9D986123B9141AF6AB"
+target_crates = ["agenc-relay-e2ee"]
+task_ids = ["S10-005"]
+evidence_ids = ["EVID-E2EE-REQ-FB9D986123B9141AF6AB"]
+status = "unimplemented"
 
 [[binding]]
 id = "E2EE-REQ-FC9468555542933311EE"

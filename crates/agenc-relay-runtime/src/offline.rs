@@ -13,6 +13,11 @@ pub use crate::daemon::login_index::{
 mod restore;
 pub use restore::execute_stopped_restore;
 
+mod sequencer_credentials;
+pub use sequencer_credentials::{
+    SequencerCredentialsReceipt, SequencerCredentialsRequest, create_sequencer_credentials,
+};
+
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -111,6 +116,9 @@ pub struct InitReceipt {
     pub network_id: NetworkId,
     /// Fresh local server identity.
     pub server_id: ServerId,
+    /// Fresh recovery epoch of the new database: the epoch this node's
+    /// federation hello carries, which a peer's record for it pins.
+    pub recovery_epoch: RecoveryEpoch,
     /// Fresh local operator identity.
     pub operator_id: OperatorId,
     /// Offline operator signing-key path.
@@ -799,6 +807,41 @@ fn validate_creation_parent(path: &Path, exact_mode: Option<u32>) -> Result<(), 
     Ok(())
 }
 
+/// Refuses a new file's path when its parent directory, or any directory
+/// above it, is group- or world-writable: the protected-ancestor rule the
+/// daemon's protected read applies to every file it reads (spec 22.2), so
+/// every later reader would refuse a file created there. Each directory is
+/// opened below the one before it without following a symbolic link, as
+/// `open_physical_directory` opens it.
+fn validate_protected_ancestors(path: &Path) -> Result<(), OfflineError> {
+    let parent = path.parent().ok_or(OfflineError::InvalidRequest)?;
+    if !safe_absolute_path(parent) {
+        return Err(OfflineError::InvalidRequest);
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = fs::File::from(
+        openat(CWD, Path::new("/"), flags, Mode::empty()).map_err(|_| OfflineError::Filesystem)?,
+    );
+    for component in parent.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = fs::File::from(
+                    openat(&directory, Path::new(name), flags, Mode::empty())
+                        .map_err(|_| OfflineError::Filesystem)?,
+                );
+            }
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(OfflineError::InvalidRequest);
+            }
+        }
+        if opened_directory_identity(&directory)?.mode & 0o022 != 0 {
+            return Err(OfflineError::Filesystem);
+        }
+    }
+    Ok(())
+}
+
 fn validate_data_path(path: &Path) -> Result<(), OfflineError> {
     validate_data_path_for_privilege(path, geteuid().is_root())
 }
@@ -1286,6 +1329,7 @@ fn init_receipt(request: &InitRequest, identity: InitIdentity) -> InitReceipt {
     InitReceipt {
         network_id: identity.network_id,
         server_id: identity.server_id,
+        recovery_epoch: identity.recovery_epoch,
         operator_id: identity.operator_id,
         operator_signing_key_file: request.operator_signing_key_file.clone(),
         tor_snippet: format!(
@@ -1357,7 +1401,11 @@ fn validate_account_hpke_pin(config: &Config, secrets: &SecretSet) -> Result<(),
     Ok(())
 }
 
-/// Renders the canonical stopped-node onboarding descriptor.
+/// Renders the canonical stopped-node onboarding descriptor. Its
+/// `recovery-epoch` is the epoch the node advertises in `agenc.ag/recovery`:
+/// a coordinator's own database epoch, and on an edge the pin of its enabled
+/// coordinator record. An edge without one advertises no coordinator and is
+/// refused.
 pub fn render_onboarding(config_path: &Path) -> Result<String, OfflineError> {
     let config = load_config(config_path, ValidationDepth::Document)?;
     let secrets = SecretSet::load(&config)?;
@@ -1389,11 +1437,26 @@ pub fn render_onboarding(config_path: &Path) -> Result<String, OfflineError> {
         None => None,
     };
     let facts = OnboardingFacts {
-        recovery_epoch: header.recovery_epoch,
+        recovery_epoch: advertised_recovery_epoch(&config, header.recovery_epoch)?,
         account_service_hpke_key_id: *hpke.key_id().as_bytes(),
         sequencer_key_set,
     };
     Ok(render_config_onboarding(&config, &facts)?)
+}
+
+/// The epoch a descriptor pins, the one the daemon's CAP advertises (spec
+/// 9.3, invariant ID-06): a coordinator's database epoch, or an edge's
+/// coordinator record pin through the daemon's own selection.
+fn advertised_recovery_epoch(
+    config: &Config,
+    database_epoch: RecoveryEpoch,
+) -> Result<RecoveryEpoch, OfflineError> {
+    match config.network.role {
+        NodeRole::Coordinator => Ok(database_epoch),
+        NodeRole::Edge => {
+            crate::daemon::edge_advertised_recovery_epoch(config).ok_or(OfflineError::Configuration)
+        }
+    }
 }
 
 /// Issues one canonical three-line account-creation invitation envelope.
@@ -2326,6 +2389,105 @@ mod tests {
         Ok(())
     }
 
+    /// Enables federation in a test node's configuration with one peer
+    /// record, the shape the coordinator or edge enrollment edit writes.
+    fn enroll_test_peer(
+        root: &Path,
+        role: NodeRole,
+        server_id: ServerId,
+        recovery_epoch: RecoveryEpoch,
+        enabled: bool,
+    ) -> Result<(), OfflineError> {
+        let config_path = root.join("etc/config.toml");
+        let text = fs::read_to_string(&config_path).map_err(|_| OfflineError::Filesystem)?;
+        let endpoints = match role {
+            NodeRole::Coordinator => "\"tcp:127.0.0.1:7000\"",
+            NodeRole::Edge => "",
+        };
+        let peer = format!(
+            "[[federation.peer]]\nserver_id = \"{}\"\nserver_name = \"peer.example\"\nrole = \"{}\"\nrecovery_epoch = \"{}\"\nendpoints = [{endpoints}]\ncertificate_spki_sha256 = \"{}\"\nsigning_public_key = \"{}\"\nenabled = {enabled}\n\n",
+            server_id.to_base64url(),
+            role.as_str(),
+            recovery_epoch.to_base64url(),
+            encode_base64url_32(&[5; 32]),
+            encode_base64url_32(&[6; 32]),
+        );
+        let tls = root.join("etc/tls");
+        let ca_file = tls.join("federation-ca.pem");
+        let mut enrolled = text
+            .replacen(
+                "enabled = false\nsigning_private_key_file",
+                &format!(
+                    "enabled = true\nprivate_ca_file = \"{}\"\nsigning_private_key_file",
+                    ca_file.display()
+                ),
+                1,
+            )
+            .replacen(
+                "connect_timeout_seconds = 10\n\n",
+                &format!("connect_timeout_seconds = 10\n\n{peer}"),
+                1,
+            );
+        // A federated coordinator serves exactly one federation listener.
+        if role == NodeRole::Edge {
+            write_secret(&tls.join("federation.key"), &[43; 64])?;
+            let listener = format!(
+                "[[listeners.endpoint]]\nname = \"federation\"\nenabled = true\npurpose = \"federation\"\nbind = \"127.0.0.1:7001\"\nmax_connections = 64\ntls_certificate_file = \"{}\"\ntls_private_key_file = \"{}\"\nclient_ca_file = \"{}\"\n\n",
+                tls.join("federation.crt").display(),
+                tls.join("federation.key").display(),
+                ca_file.display(),
+            );
+            enrolled = enrolled.replacen(
+                "[[listeners.endpoint]]\nname = \"admin-local\"",
+                &format!("{listener}[[listeners.endpoint]]\nname = \"admin-local\""),
+                1,
+            );
+        }
+        if enrolled == text {
+            return Err(OfflineError::Configuration);
+        }
+        fs::write(&config_path, enrolled).map_err(|_| OfflineError::Filesystem)
+    }
+
+    /// Replaces the one peer record's recovery epoch and enabled flag.
+    fn repin_test_peer(
+        root: &Path,
+        from: RecoveryEpoch,
+        to: RecoveryEpoch,
+        enabled: bool,
+    ) -> Result<(), OfflineError> {
+        let config_path = root.join("etc/config.toml");
+        let text = fs::read_to_string(&config_path).map_err(|_| OfflineError::Filesystem)?;
+        let old = format!("recovery_epoch = \"{}\"", from.to_base64url());
+        if text.matches(&old).count() != 1 {
+            return Err(OfflineError::Configuration);
+        }
+        let repinned = text
+            .replacen(
+                &old,
+                &format!("recovery_epoch = \"{}\"", to.to_base64url()),
+                1,
+            )
+            .replacen(
+                "\nenabled = true\n\n[storage]",
+                &format!("\nenabled = {enabled}\n\n[storage]"),
+                1,
+            );
+        fs::write(&config_path, repinned).map_err(|_| OfflineError::Filesystem)
+    }
+
+    fn database_recovery_epoch(config_path: &Path) -> Result<RecoveryEpoch, OfflineError> {
+        let config = load_config(config_path, ValidationDepth::Document)?;
+        let secrets = SecretSet::load(&config)?;
+        Ok(verify_database_header(&config, &secrets)?.recovery_epoch)
+    }
+
+    /// AUD-03: an edge's descriptor pins the epoch the edge advertises, the
+    /// pin of its enabled coordinator record, read without fake OPAQUE
+    /// state. It never pins the edge's own database epoch: an edge with no
+    /// enabled coordinator record gets no descriptor, and when the
+    /// coordinator's epoch changes and the record is re-pinned the
+    /// descriptor follows it.
     #[test]
     fn edge_onboarding_uses_read_only_reconstruction_without_fake_opaque_state()
     -> Result<(), OfflineError> {
@@ -2335,14 +2497,26 @@ mod tests {
         let descriptor_path = root.0.join("trusted-edge-connect.txt");
         write_secret(&descriptor_path, trusted.as_bytes())?;
         let mut request = test_request(&root.0)?;
+        let coordinator_server_id = ServerId::from_bytes([8; 16]);
         request.mode = InitMode::Edge {
             coordinator_descriptor: descriptor_path,
-            coordinator_server_id: ServerId::from_bytes([8; 16]),
+            coordinator_server_id,
         };
         let config_path = request.config_path.clone();
-        initialize_node(request)?;
+        let receipt = initialize_node(request)?;
         enable_test_listener(&root.0)?;
+        assert_eq!(
+            render_onboarding(&config_path),
+            Err(OfflineError::Configuration)
+        );
 
+        enroll_test_peer(
+            &root.0,
+            NodeRole::Coordinator,
+            coordinator_server_id,
+            parsed.recovery_epoch,
+            true,
+        )?;
         let rendered = render_onboarding(&config_path)?;
         let rendered = parse_onboarding_descriptor(&rendered)?;
         assert_eq!(rendered.network_id, parsed.network_id);
@@ -2350,7 +2524,273 @@ mod tests {
             rendered.account_service_hpke_public_key,
             parsed.account_service_hpke_public_key
         );
-        assert_ne!(rendered.recovery_epoch, parsed.recovery_epoch);
+        assert_eq!(rendered.recovery_epoch, parsed.recovery_epoch);
+        let own = database_recovery_epoch(&config_path)?;
+        assert_eq!(receipt.recovery_epoch, own);
+        assert_ne!(rendered.recovery_epoch, own);
+
+        let changed = RecoveryEpoch::from_bytes([9; 16]);
+        repin_test_peer(&root.0, parsed.recovery_epoch, changed, true)?;
+        let followed = parse_onboarding_descriptor(&render_onboarding(&config_path)?)?;
+        assert_eq!(followed.recovery_epoch, changed);
+        assert_eq!(
+            parse_onboarding_descriptor(&trusted)?.recovery_epoch,
+            parsed.recovery_epoch
+        );
+
+        repin_test_peer(&root.0, changed, changed, false)?;
+        assert_eq!(
+            render_onboarding(&config_path),
+            Err(OfflineError::Configuration)
+        );
+        Ok(())
+    }
+
+    /// AUD-03: a coordinator's descriptor still pins its own database epoch,
+    /// which its receipt printed, whatever its edge records pin.
+    #[test]
+    fn coordinator_onboarding_pins_its_own_database_epoch() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        let config_path = request.config_path.clone();
+        let receipt = initialize_node(request)?;
+        enable_test_listener(&root.0)?;
+        let edge_epoch = RecoveryEpoch::from_bytes([11; 16]);
+        enroll_test_peer(
+            &root.0,
+            NodeRole::Edge,
+            ServerId::from_bytes([12; 16]),
+            edge_epoch,
+            true,
+        )?;
+        let rendered = parse_onboarding_descriptor(&render_onboarding(&config_path)?)?;
+        let own = database_recovery_epoch(&config_path)?;
+        assert_eq!(rendered.recovery_epoch, own);
+        assert_eq!(receipt.recovery_epoch, own);
+        assert_ne!(rendered.recovery_epoch, edge_epoch);
+        Ok(())
+    }
+
+    /// A request for the coordinator `test_request` initializes, over the
+    /// interval the daemon fixtures use.
+    fn credentials_request(root: &Path, output: PathBuf) -> SequencerCredentialsRequest {
+        SequencerCredentialsRequest {
+            config_path: root.join("etc/config.toml"),
+            sequencer_key_file: root.join("data/keys/sequencer.key"),
+            not_before: 0,
+            not_after: 4_000_000_000,
+            output,
+        }
+    }
+
+    /// AUD-02: `arcd sequencer-credentials create` writes, byte for byte,
+    /// the document the testkit builds for the same network, sequencer key
+    /// and interval, at mode 0644; startup's own reader accepts it with the
+    /// key-set facts the command reports; and it never replaces a file.
+    #[test]
+    fn sequencer_credentials_equal_the_testkit_document() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        initialize_node(test_request(&root.0)?)?;
+        enable_test_listener(&root.0)?;
+        let output = root.0.join("sequencer-credentials.bin");
+        let request = credentials_request(&root.0, output.clone());
+        let receipt = create_sequencer_credentials(&request)?;
+
+        let written = fs::read(&output).map_err(|_| OfflineError::Filesystem)?;
+        let seed: [u8; 32] = fs::read(&request.sequencer_key_file)
+            .map_err(|_| OfflineError::Filesystem)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| OfflineError::Configuration)?;
+        let expected = agenc_relay_testkit::e2ee_client::sequencer_credentials_document(
+            [1; 32],
+            &Ed25519SecretKey::from_bytes(seed),
+            (0, 4_000_000_000),
+        )
+        .map_err(|_| OfflineError::Cryptography)?;
+        assert_eq!(written, expected);
+        let (_, key_set) = crate::daemon::load_sequencer_credentials(&output, &[1; 32], || {})
+            .map_err(|_| OfflineError::Configuration)?;
+        assert_eq!(
+            receipt,
+            SequencerCredentialsReceipt {
+                set_generation: 0,
+                key_set_hash: key_set.digest,
+            }
+        );
+        // Public and never group- or world-writable, whatever the umask of
+        // the process that created it.
+        let mode = fs::symlink_metadata(&output)
+            .map_err(|_| OfflineError::Filesystem)?
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o644);
+
+        assert_eq!(
+            create_sequencer_credentials(&request),
+            Err(OfflineError::ExistingTarget)
+        );
+        assert_eq!(fs::read(&output).ok(), Some(written));
+        Ok(())
+    }
+
+    /// AUD-02: an empty or reversed interval, a relative output or one whose
+    /// name is not UTF-8, one below a group-writable directory at any depth
+    /// or below a symbolic link, and a key file outside the protected-file
+    /// rules are refused before anything is written.
+    #[test]
+    fn sequencer_credentials_refuse_bad_intervals_outputs_and_keys() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        initialize_node(test_request(&root.0)?)?;
+        enable_test_listener(&root.0)?;
+        let output = root.0.join("refused-credentials.bin");
+        for (not_before, not_after) in [(5, 5), (6, 5)] {
+            let mut request = credentials_request(&root.0, output.clone());
+            request.not_before = not_before;
+            request.not_after = not_after;
+            assert_eq!(
+                create_sequencer_credentials(&request),
+                Err(OfflineError::InvalidRequest)
+            );
+        }
+        let relative = credentials_request(&root.0, PathBuf::from("credentials.bin"));
+        assert_eq!(
+            create_sequencer_credentials(&relative),
+            Err(OfflineError::InvalidRequest)
+        );
+        // A final name that is not UTF-8 below a valid directory: only the
+        // output's own path check refuses it.
+        let non_utf8 = root.0.join(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"credentials-\xff.bin"),
+        );
+        assert_eq!(
+            create_sequencer_credentials(&credentials_request(&root.0, non_utf8.clone())),
+            Err(OfflineError::InvalidRequest)
+        );
+        // The daemon's protected read refuses a file below any group- or
+        // world-writable directory, not only below its parent.
+        let shared = root.0.join("shared");
+        create_private_directory(&shared)?;
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o770))
+            .map_err(|_| OfflineError::Filesystem)?;
+        let nested = shared.join("private");
+        create_private_directory(&nested)?;
+        // Nor does it follow a symbolic link on the way, even to a
+        // private directory.
+        let linked = root.0.join("linked");
+        std::os::unix::fs::symlink(root.0.join("etc"), &linked)
+            .map_err(|_| OfflineError::Filesystem)?;
+        for exposed in [
+            shared.join("credentials.bin"),
+            nested.join("credentials.bin"),
+            linked.join("credentials.bin"),
+        ] {
+            let request = credentials_request(&root.0, exposed);
+            assert_eq!(
+                create_sequencer_credentials(&request),
+                Err(OfflineError::Filesystem)
+            );
+        }
+
+        let short_key = root.0.join("short-sequencer.key");
+        write_secret(&short_key, &[7; 31])?;
+        let readable_key = root.0.join("readable-sequencer.key");
+        write_secret(&readable_key, &[7; 32])?;
+        fs::set_permissions(&readable_key, fs::Permissions::from_mode(0o644))
+            .map_err(|_| OfflineError::Filesystem)?;
+        for key in [short_key, readable_key] {
+            let mut request = credentials_request(&root.0, output.clone());
+            request.sequencer_key_file = key;
+            assert_eq!(
+                create_sequencer_credentials(&request),
+                Err(OfflineError::Configuration)
+            );
+        }
+        assert!(fs::symlink_metadata(&output).is_err());
+        assert!(fs::symlink_metadata(&non_utf8).is_err());
+        assert!(fs::symlink_metadata(shared.join("credentials.bin")).is_err());
+        assert!(fs::symlink_metadata(nested.join("credentials.bin")).is_err());
+        assert!(fs::symlink_metadata(root.0.join("etc/credentials.bin")).is_err());
+        Ok(())
+    }
+
+    /// Opens the database `init` wrote under `config_path` and runs the
+    /// startup reconstruction `serve` runs, under `role`.
+    fn reconstruct_initialized(
+        config_path: &Path,
+        role: NodeRole,
+    ) -> Result<
+        Result<crate::state_core::reconstruct::Reconstruction, crate::RuntimeError>,
+        OfflineError,
+    > {
+        let config = load_config(config_path, ValidationDepth::Document)?;
+        let secrets = SecretSet::load(&config)?;
+        let qualifications = embedded_storage_qualifications()?;
+        let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
+        let owner = StorageOwner::start(StorageOpenConfig {
+            expected_network_id: config.network.network_id,
+            expected_server_id: config.server.server_id,
+            state_directory,
+            storage_master_key: StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
+            rollback_guard_root_key: RollbackGuardRootKey::from_bytes(
+                *secrets.rollback_guard_root().expose(),
+            ),
+            login_index_key: LoginIndexKey::from_bytes(*secrets.login_index().expose()),
+            previous_login_index_key: None,
+            limits: limits_from_config(&config),
+        })?;
+        let seed = crate::StateCoreSeed::from_storage(&owner)?;
+        let keys = crate::state_core::durable::KeyDeriver::new(
+            StorageMasterKey::from_bytes(*secrets.storage_master().expose()),
+            seed.storage().database_binding(),
+            seed.storage().storage_key_generation(),
+        )
+        .map_err(|_| OfflineError::Storage)?;
+        let reconstruction = crate::state_core::reconstruct::reconstruct(
+            &seed,
+            &owner.port(),
+            &keys,
+            role,
+            agenc_relay_types::MonotonicTick::from_ticks(1),
+            UtcSecond::from_unix_seconds(1),
+        );
+        owner.shutdown()?;
+        Ok(reconstruction)
+    }
+
+    /// AUD-01: `serve` reconstructs an edge database exactly as `init`
+    /// wrote it, without the fake OPAQUE record it never had; a coordinator
+    /// database keeps its record and the edge database is still refused
+    /// under the coordinator role.
+    #[test]
+    fn initialized_databases_reconstruct_under_their_own_role() -> Result<(), OfflineError> {
+        let root = TestDirectory::create()?;
+        let request = test_request(&root.0)?;
+        let coordinator_config = request.config_path.clone();
+        initialize_node(request)?;
+        enable_test_listener(&root.0)?;
+        let coordinator = reconstruct_initialized(&coordinator_config, NodeRole::Coordinator)?
+            .map_err(|_| OfflineError::Storage)?;
+        assert!(coordinator.account_service.fake_opaque_record().is_some());
+
+        let edge_root = TestDirectory::create()?;
+        let descriptor_path = edge_root.0.join("trusted-edge-connect.txt");
+        write_secret(&descriptor_path, valid_descriptor()?.as_bytes())?;
+        let mut request = test_request(&edge_root.0)?;
+        request.mode = InitMode::Edge {
+            coordinator_descriptor: descriptor_path,
+            coordinator_server_id: ServerId::from_bytes([8; 16]),
+        };
+        let edge_config = request.config_path.clone();
+        initialize_node(request)?;
+        enable_test_listener(&edge_root.0)?;
+        let edge = reconstruct_initialized(&edge_config, NodeRole::Edge)?
+            .map_err(|_| OfflineError::Storage)?;
+        assert!(edge.account_service.fake_opaque_record().is_none());
+        assert!(matches!(
+            reconstruct_initialized(&edge_config, NodeRole::Coordinator)?,
+            Err(crate::RuntimeError::Storage(StorageError::StaleState))
+        ));
         Ok(())
     }
 

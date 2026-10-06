@@ -63,6 +63,7 @@ EXPECTED_LATER_FUZZ_TARGETS = (
     "wss_frame",
     "history_records",
     "release_decision",
+    "server_framing",
 )
 EXPECTED_FUZZ_POLICY = {
     "schema_version": 1,
@@ -99,6 +100,9 @@ EXPECTED_MODULES = {
     "registration.rs",
     "registration_command.rs",
     "render.rs",
+    "server_framing.rs",
+    "server_message.rs",
+    "server_tags.rs",
     "tags.rs",
     "text.rs",
     "websocket.rs",
@@ -323,6 +327,7 @@ def validate(root: Path) -> tuple[int, int]:
     known = {record.get("id") for record in records if isinstance(record, dict) and isinstance(record.get("id"), str)}
     transcript_count = validate_fixture(root / "test-data/transcripts/client-registration-v1.transcript", known)
     vector_count = validate_fixture(root / "test-data/vectors/client-wire-v1.vectors", known)
+    vector_count += validate_fixture(root / "test-data/vectors/server-wire-v1.vectors", known)
     validate_fuzz(root)
     check_generator(root)
     return transcript_count, vector_count
