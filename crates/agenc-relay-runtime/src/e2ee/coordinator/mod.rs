@@ -62,6 +62,7 @@ pub(crate) mod request_expiry;
 mod resident;
 pub(crate) mod response_read;
 pub mod results;
+mod roster_holds;
 mod roster_snapshots;
 mod sequencer_signing;
 pub(crate) mod signer_startup;
@@ -248,6 +249,10 @@ pub struct CompanionState {
     /// naming a predecessor roster resolves as it does at startup
     /// (companion 13.7.3).
     pub(crate) roster_snapshots: roster_snapshots::Index,
+    /// The same roster objects by signing root and roster generation, so the
+    /// earliest roster that verifies a policy is found without a scan
+    /// (`roster_holds`).
+    pub(crate) roster_generations: roster_snapshots::Generations,
     /// Roots published before their first roster.
     pub pending_roots: BTreeMap<[u8; 32], VerifiedRoot>,
     /// Outstanding attach challenges by account digest and device.
@@ -1080,6 +1085,7 @@ impl CompanionCoordinator {
     ) -> Result<owners::Staged, E2eeReplyCode> {
         let mut staged = owners::stage(
             &self.state,
+            &self.network_id,
             writes,
             now,
             security_mutation,

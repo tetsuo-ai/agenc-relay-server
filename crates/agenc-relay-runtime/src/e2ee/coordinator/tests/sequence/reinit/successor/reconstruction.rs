@@ -231,7 +231,7 @@ fn append_missing(rows: &mut Vec<Write>, source: &[Write]) -> TestResult {
     Ok(())
 }
 
-pub(super) async fn reconstruct(
+pub(in crate::e2ee::coordinator::tests::sequence) async fn reconstruct(
     rows: &[Write],
 ) -> TestResult<(CompanionCoordinator, Result<(), CompanionFault>)> {
     let mut storage = StateCoreFixture::new(vec![44; 65_536])?;

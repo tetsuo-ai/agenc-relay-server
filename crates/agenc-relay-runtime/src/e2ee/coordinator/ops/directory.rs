@@ -291,9 +291,7 @@ pub fn publish_roster(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let root = *root;
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
-        companion
-            .roster_snapshots
-            .insert(verified.roster_id, object_id);
+        super::super::roster_snapshots::retain(companion, &verified, object_id);
         companion.pending_roots.remove(&account_digest);
         companion
             .principals
