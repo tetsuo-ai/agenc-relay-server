@@ -7,7 +7,7 @@ use super::*;
 
 fn prepare(opcode: Op) -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
     let mut harness = Harness::new()?;
-    let conversation = harness.bind_channel()?;
+    let conversation = harness.bind_channel_for_reinit()?;
     let old_state = *harness
         .coordinator
         .state
@@ -63,7 +63,7 @@ fn prepare(opcode: Op) -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
             profile_version: 1,
             network_id: NETWORK,
             old_conversation_id: conversation,
-            new_conversation_id: NEW_CONVERSATION,
+            new_conversation_id: new_conversation()?,
             old_reinit_state_id: old_state,
             attempt_sequence: 0,
             reinit_attempt_id: attempt_id,

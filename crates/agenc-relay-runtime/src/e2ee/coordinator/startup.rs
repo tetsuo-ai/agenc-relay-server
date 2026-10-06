@@ -65,6 +65,7 @@ use agenc_relay_e2ee::limits::{
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::objects::conversation::{
     ArcCommitAuthorizationRule, ArcConversationBindingPackage, ArcConversationKind, ArcPolicy,
+    action_bits,
 };
 use agenc_relay_e2ee::objects::federation::ArcFederationRouteState;
 use agenc_relay_e2ee::objects::identity::{
@@ -75,6 +76,7 @@ use agenc_relay_e2ee::objects::sequencing::{
     ArcAbortRequest, ArcFinalityVote, ArcFinalizationRequest, ArcSequencerRecord,
 };
 use agenc_relay_e2ee::policy::verify_policy;
+use agenc_relay_e2ee::reinit_target::AuthorizedReinit;
 use agenc_relay_e2ee::route::PrincipalRosters;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_relay_storage::e2ee_records::origin::OriginSequenceRow;
@@ -626,7 +628,7 @@ pub(super) fn rebuild(
     for (conversation_id, row) in restore.routes {
         restore_route(state, &network_id, &index, &rows, conversation_id, &row);
     }
-    restore_successors(state, &index)?;
+    restore_successors(state, &network_id, &index)?;
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.finish(state);
     state.object_expiry = restore.object_expiry.unwrap_or_default();
@@ -710,10 +712,15 @@ fn open_receipt_credential(
     }
 }
 
-/// Activation creates a successor anchor before that conversation has its
-/// own route. Restore these anchors after every existing route has loaded.
+/// An activation installs its successor in the transaction that stores the
+/// activation certificate (companion 13.8), so the successor of every
+/// migrated predecessor restores from its own route row, binding and policy
+/// rows like any route. Once every route has loaded, each is checked against
+/// the target its predecessor's activated attempt carries, and a migrated
+/// predecessor without its installed successor is a storage fault.
 fn restore_successors(
     state: &mut CompanionState,
+    network_id: &[u8; 32],
     index: &ObjectIndex,
 ) -> Result<(), super::CompanionFault> {
     let mut verified = std::collections::BTreeSet::new();
@@ -738,28 +745,9 @@ fn restore_successors(
     // Keep the original predecessor ordering after the allocation-free check.
     successors.sort_unstable_by_key(|(old, _, _)| *old);
     for (old, conversation_id, activation_id) in successors {
-        if state.conversations.contains_key(&conversation_id) {
-            restore_successor_binding(state, old, conversation_id)
-                .ok_or(super::CompanionFault::Storage)?;
-            verified.insert(conversation_id);
-        } else {
-            if state.logs.contains_key(&conversation_id)
-                || state.lifecycles.contains_key(&conversation_id)
-                || state
-                    .routes
-                    .route(&ConversationId(conversation_id))
-                    .is_some()
-            {
-                return Err(super::CompanionFault::Storage);
-            }
-            state.logs.insert(
-                conversation_id,
-                SequencerLog::from_activation(conversation_id, activation_id),
-            );
-            state
-                .lifecycles
-                .insert(conversation_id, Lifecycle::successor());
-        }
+        restore_successor(state, network_id, old, conversation_id, activation_id)
+            .ok_or(super::CompanionFault::Storage)?;
+        verified.insert(conversation_id);
     }
     discard_unanchored_successors(state, index, &verified);
     Ok(())
@@ -792,11 +780,37 @@ fn discard_unanchored_successors(
         if predecessor == Some(id) {
             continue;
         }
+        // A successor of a retired predecessor, bound under the previous
+        // profile, is retired with it: its activation cannot be checked.
+        let retired = |old: &[u8; 32]| {
+            state
+                .logs
+                .get(old)
+                .is_some_and(|log| log.phase() == Phase::Retired)
+        };
+        if !verified.contains(&id) && predecessor.as_ref().is_some_and(retired) {
+            retire_route(state, id);
+            continue;
+        }
         if !verified.contains(&id)
             || predecessor.is_none_or(|old| !state.conversations.contains_key(&old))
         {
             discard_route(state, id);
         }
+    }
+}
+
+/// Retires the restored route of `conversation`: its log keeps its head and
+/// accepted state in the retired phase.
+fn retire_route(state: &mut CompanionState, conversation: [u8; 32]) {
+    if let Some(log) = state.logs.get_mut(&conversation) {
+        *log = SequencerLog::restore(
+            conversation,
+            log.head(),
+            *log.accepted_state_id(),
+            log.accepted_epoch(),
+            Phase::Retired,
+        );
     }
 }
 
@@ -809,27 +823,39 @@ fn discard_route(state: &mut CompanionState, conversation: [u8; 32]) {
     state.lifecycles.remove(&conversation);
 }
 
-/// Rechecks activation-bound metadata and selects the successor's route indexes
-/// after all route rows have loaded, independent of conversation-ID ordering.
-fn restore_successor_binding(
+/// Checks the restored successor `new` of `old` against the target the
+/// activated attempt carries, checked against the predecessor's retained
+/// binding facts: its binding package is the one the activation installs
+/// and its log is anchored at the activation or continues from it.
+/// Then selects its route over the predecessor's, whatever the read order,
+/// restores its lifecycle without a bootstrap, and gives it the context
+/// digest of the target's context (companion 2.2), not the target's digest.
+fn restore_successor(
     state: &mut CompanionState,
+    network_id: &[u8; 32],
     old: [u8; 32],
     new: [u8; 32],
+    activation_id: [u8; 32],
 ) -> Option<()> {
-    use super::ops::route_successor;
+    use super::ops::{reinit_install, route_successor};
     let certificate = route_successor::activation(state, &old).ok()?;
-    let context_digest = certificate.tbs.request.attempt.tbs.target_context_digest;
-    let package = route_successor::binding(state, &new).ok()?;
-    let activation_id = route_successor::verify(
-        state,
-        &certificate.tbs.network_id,
-        &old,
-        &package,
-        &context_digest,
+    let attempt = &certificate.tbs.request.attempt;
+    let old_facts = state.conversations.get(&old)?.reinit_facts?;
+    let mut budget = DecodeBudget::new(MAX_REINIT_OBJECT, 1 << 18);
+    let carried = agenc_relay_e2ee::reinit_target::check_carried_target_from(
+        network_id,
+        &old_facts,
+        &attempt.target,
+        &mut budget,
     )
     .ok()?;
+    let package = reinit_install::package(carried.context(), &attempt.key_package_plan).ok()?;
+    let bytes =
+        reinit_install::wire_object(ArcWireObjectKind::ConversationBinding, &package).ok()?;
+    let installed = state.conversations.get(&new)?.binding_object_id;
     let log = state.logs.get(&new)?;
-    if log.accepted_epoch() < 1
+    if installed != *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes()
+        || log.accepted_epoch() < 1
         || (!log.head().recorded
             && (log.accepted_state_id() != &activation_id
                 || log.head().record_id != activation_id
@@ -837,6 +863,9 @@ fn restore_successor_binding(
     {
         return None;
     }
+    let context_digest =
+        agenc_relay_e2ee::ids::semantic_id_of(SemanticHashDomain::ContextHash, carried.context())
+            .ok()?;
     state
         .routes
         .select_restored_successor(ConversationId(old), ConversationId(new))
@@ -1438,10 +1467,43 @@ struct RestoredLogPhase {
     next_attempt_sequence: u32,
 }
 
-/// A ReInit receipt or terminal at the durable head determines whether an
-/// attempt is still open, another attempt may follow, or the group migrated.
-// agenc-review: focus owner=runtime reviewed=2026-09-04 reason=the head receipt and terminal alternatives restore the phase together with exact durable row identity checks
+/// The phase the durable head restores (`head_log_phase`), except that a
+/// group the head leaves open while any retained finalization is that of a
+/// ReInit Commit is retired (`reinit_finalized`). A route row whose head is
+/// not its last retained record restores nothing.
 fn restore_log_phase(
+    state: &CompanionState,
+    conversation_id: [u8; 32],
+    row: &RouteRow,
+    records: &BTreeMap<u64, &RecordRow>,
+) -> Option<RestoredLogPhase> {
+    if !head_is_last_record(row, records) {
+        return None;
+    }
+    let mut restored = head_log_phase(state, conversation_id, row, records)?;
+    if restored.phase == Phase::Open && reinit_finalized(state, records) {
+        restored.phase = Phase::Retired;
+    }
+    Some(restored)
+}
+
+/// Whether the head that route `row` names is its last retained record, at
+/// that record's route sequence and under its identifier. A closed route's
+/// head is its close, which is not a retained record, and a route without a
+/// retained record has no recorded head.
+fn head_is_last_record(row: &RouteRow, records: &BTreeMap<u64, &RecordRow>) -> bool {
+    row.close_id.is_some()
+        || records.last_key_value().is_none_or(|(sequence, record)| {
+            *sequence == row.route_sequence && record.record_id == row.sequencer_head_id
+        })
+}
+
+/// The finalization of a ReInit Commit, or a ReInit receipt or terminal, at
+/// the durable head determines whether the old group is closed with an
+/// attempt still to come, open, or followed by another, or migrated; a
+/// ReInit terminal of the previous profile retires it.
+// agenc-review: focus owner=runtime reviewed=2026-10-05 reason=the head finalization, receipt and terminal alternatives restore the phase together with exact durable row identity checks
+fn head_log_phase(
     state: &CompanionState,
     conversation_id: [u8; 32],
     row: &RouteRow,
@@ -1457,18 +1519,34 @@ fn restore_log_phase(
     let Some(record) = records.get(&row.route_sequence).filter(|record| {
         matches!(
             record.record_kind,
-            REINIT_ATTEMPT_RECORD | REINIT_ACTIVATION_RECORD | REINIT_ABORT_RECORD
+            FINALIZATION_RECORD
+                | REINIT_ATTEMPT_RECORD
+                | REINIT_ACTIVATION_RECORD
+                | REINIT_ABORT_RECORD
         )
     }) else {
         return Some(restored);
     };
-    let decoded: ArcSequencerRecord = decode_object(
+    let Some(decoded) = decode_object::<ArcSequencerRecord>(
         state,
         &record.record_object_id,
         ArcWireObjectKind::SequencerRecord,
         MAX_SEQUENCER_RECORD_OBJECT,
-    )?;
+    ) else {
+        // A ReInit terminal of the previous profile, which this profile does
+        // not read, retires the route; any other undecodable head refuses.
+        previous_profile_terminal(state, row, records, record)?;
+        restored.phase = Phase::Retired;
+        return Some(restored);
+    };
     match decoded {
+        ArcSequencerRecord::Finalization(certificate) => {
+            if let Some(phase) =
+                finalization_head_phase(conversation_id, row, record, &certificate.tbs)?
+            {
+                restored.phase = phase;
+            }
+        }
         ArcSequencerRecord::ReinitAttempt(receipt) => {
             let tbs = receipt.tbs;
             if record.record_kind != REINIT_ATTEMPT_RECORD
@@ -1526,6 +1604,112 @@ fn restore_log_phase(
         _ => return None,
     }
     Some(restored)
+}
+
+/// The phase a finalization at the durable head restores: the finalization
+/// of a ReInit Commit, whose authorization carries the ReInit bit, closed
+/// the old group and entered the ReInit phase at that finalization
+/// (companion 13.8 step 2), and must be exactly the record its route row
+/// names; any other finalization leaves the phase the row gives (`Some(None)`).
+fn finalization_head_phase(
+    conversation_id: [u8; 32],
+    row: &RouteRow,
+    record: &RecordRow,
+    tbs: &agenc_relay_e2ee::objects::sequencing::ArcCommitFinalizationTbs,
+) -> Option<Option<Phase>> {
+    if tbs.request.proof.authorization.tbs.action_bits & action_bits::REINIT == 0 {
+        return Some(None);
+    }
+    let exact = record.record_kind == FINALIZATION_RECORD
+        && tbs.conversation_id == conversation_id
+        && tbs.predecessor_record_id == record.predecessor_record_id
+        && tbs.finalization_id == row.accepted_state_id
+        && tbs.finalization_id == row.sequencer_head_id
+        && tbs.route_sequence == row.route_sequence;
+    exact.then_some(Some(Phase::Reinit {
+        old_reinit_state_id: tbs.finalization_id,
+    }))
+}
+
+/// Whether `record`, the head its route `row` names, is a ReInit activation
+/// or abort record of the previous profile. Such a record embeds an attempt
+/// of the previous layout, which this profile neither parses nor
+/// reinterprets (companion 2.3), so only its rows are compared: the head's
+/// record row is a terminal of one of those kinds whose identifier is the
+/// route row's head and whose predecessor is the attempt receipt before it,
+/// and its retained object is a sequencer record, which the caller found
+/// does not decode under this profile. `None` refuses the route.
+fn previous_profile_terminal(
+    state: &CompanionState,
+    row: &RouteRow,
+    records: &BTreeMap<u64, &RecordRow>,
+    record: &RecordRow,
+) -> Option<()> {
+    let receipt = row
+        .route_sequence
+        .checked_sub(1)
+        .and_then(|sequence| records.get(&sequence))?;
+    let bytes = state.objects.get(&record.record_object_id)?;
+    let envelope = ArcWireObject::peek(bytes).ok().map(|(kind, _)| kind);
+    (matches!(
+        record.record_kind,
+        REINIT_ACTIVATION_RECORD | REINIT_ABORT_RECORD
+    ) && record.terminal
+        && record.record_id == row.sequencer_head_id
+        && record.predecessor_record_id == receipt.record_id
+        && receipt.record_kind == REINIT_ATTEMPT_RECORD
+        && envelope == Some(ArcWireObjectKind::SequencerRecord))
+    .then_some(())
+}
+
+/// Whether any retained finalization is that of a ReInit Commit, whose
+/// authorization carries the ReInit bit. Such a finalization closes the old
+/// group for good (companion 13.8 step 2), so a head that would leave the
+/// group open cannot be continued: under this profile no open head follows
+/// one, and under the previous profile, whose ReInit phase began only at the
+/// first attempt, ordinary records could.
+fn reinit_finalized(state: &CompanionState, records: &BTreeMap<u64, &RecordRow>) -> bool {
+    records.values().any(|record| {
+        record.record_kind == FINALIZATION_RECORD
+            && matches!(
+                decode_object(
+                    state,
+                    &record.record_object_id,
+                    ArcWireObjectKind::SequencerRecord,
+                    MAX_SEQUENCER_RECORD_OBJECT,
+                ),
+                Some(ArcSequencerRecord::Finalization(certificate))
+                    if certificate.tbs.request.proof.authorization.tbs.action_bits
+                        & action_bits::REINIT
+                        != 0
+            )
+    })
+}
+
+/// The authorized ReInit of the finalization that entered a restored ReInit
+/// phase, from its retained record (companion 13.8): `None` when no
+/// retained finalization record names that state or its proof binds no
+/// authorized target, so no attempt follows it. An authority whose proof
+/// names another finalization than the accepted state admits no attempt
+/// either (`ops::reinit_authority::authorized`).
+fn restored_authority(
+    state: &CompanionState,
+    records: &BTreeMap<u64, &RecordRow>,
+    finalization_id: &[u8; 32],
+) -> Option<AuthorizedReinit> {
+    let record = records.values().find(|record| {
+        record.record_kind == FINALIZATION_RECORD && record.record_id == *finalization_id
+    })?;
+    let decoded: ArcSequencerRecord = decode_object(
+        state,
+        &record.record_object_id,
+        ArcWireObjectKind::SequencerRecord,
+        MAX_SEQUENCER_RECORD_OBJECT,
+    )?;
+    let ArcSequencerRecord::Finalization(certificate) = decoded else {
+        return None;
+    };
+    AuthorizedReinit::from_proof(&certificate.tbs.request.proof).ok()
 }
 
 /// Restores the log head, epoch position, and ReInit phase from retained rows.
@@ -2120,6 +2304,12 @@ fn restore_route(
         .candidates
         .get(&(conversation_id, route.finalized_epoch));
     let log = restore_log(state, conversation_id, row, &route, &records, candidate)?;
+    let reinit = match log.phase() {
+        Phase::Reinit {
+            old_reinit_state_id,
+        } => restored_authority(state, &records, &old_reinit_state_id),
+        _ => None,
+    };
     let activated = records
         .values()
         .any(|record| activates_bootstrap(state, record));
@@ -2162,6 +2352,10 @@ fn restore_route(
         blocked_credential_id: row.blocked_credential_id,
         predecessor_close_id: row.predecessor_close_id,
         last_validation_time,
+        reinit,
+        reinit_facts: Some(
+            agenc_relay_e2ee::reinit_target::ReinitPredecessor::of_binding_tbs(tbs).ok()?,
+        ),
         ..ConversationState::default()
     };
     let historical = principal_rosters(state, network_id, &conversation, index);

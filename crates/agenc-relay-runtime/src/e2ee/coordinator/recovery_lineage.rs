@@ -403,8 +403,10 @@ pub(crate) fn resume(
         (Phase::Open, None) => Lifecycle::Active,
         (Phase::Closed { close_id }, _) => Lifecycle::Closed { close_id },
         // ReInit lineages resume nothing: their attempt positions are not
-        // retained as chain facts.
-        (Phase::Reinit { .. } | Phase::Migrated { .. }, _) => return Err(Code::RouteInvalid),
+        // retained as chain facts. A retired lineage resumes nothing either.
+        (Phase::Reinit { .. } | Phase::Migrated { .. } | Phase::Retired, _) => {
+            return Err(Code::RouteInvalid);
+        }
     };
     let resumed = ResumedChain {
         binding,

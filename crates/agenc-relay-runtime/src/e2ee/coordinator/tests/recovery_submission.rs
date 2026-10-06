@@ -1205,3 +1205,47 @@ fn a_recovery_element_is_accepted_only_from_the_device_that_submitted_it() -> Te
     ));
     Ok(())
 }
+
+#[test]
+fn a_route_restored_pending_in_its_reinit_phase_resumes_nothing() -> TestResult {
+    // The ReInit finalization at the restored head closed the old group: the
+    // recovery carrier cannot resume a chain past it (companion 13.7.4 and
+    // 13.8), and a submission for the next position changes nothing.
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
+    finish_at(&mut harness, conversation, 0, None, 150)?;
+    let finalization = harness.finalize_reinit(conversation)?;
+    let pending = restored_pending(&mut harness, conversation)?;
+    let log = pending
+        .coordinator
+        .state
+        .logs
+        .get(&conversation)
+        .ok_or("restored log")?;
+    assert_eq!(
+        log.phase(),
+        agenc_relay_domain::e2ee::sequencer_log::Phase::Reinit {
+            old_reinit_state_id: finalization
+        }
+    );
+    let head = log.head();
+    assert!(matches!(
+        resume(&pending.coordinator, &conversation),
+        Err(E2eeReplyCode::RouteInvalid)
+    ));
+    let mut pending = pending;
+    let spec = Spec {
+        route_sequence: head.sequence.saturating_add(1),
+        predecessor: head.record_id,
+        kind: ArcRecoveryElementKind::RecordElement,
+        object_kind: ArcWireObjectKind::SequencerRecord,
+        element_object_id: [7; 32],
+    };
+    let (submission, _) = signed(tbs_for(&pending, conversation, &spec)?)?;
+    assert_eq!(
+        code(pending.run(Op::SubmitRecovery, &conversation, Some(&submission))?),
+        Some(E2eeReplyCode::RouteInvalid)
+    );
+    assert_pending_unchanged(&pending, &conversation);
+    Ok(())
+}

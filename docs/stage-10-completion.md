@@ -344,6 +344,15 @@ to an `ECAP` line of another profile, the mixed-version link through the
 daemons and the operator guide's upgrade note (P-05, SDK program, outside
 master #35) are recorded in
 [the previous-profile refusal record](stage-10-previous-profile-refusal.md).
+The ReInit phase the coordinator enters when a ReInit Commit finalizes, with
+the sequencer's attempt checks against that finalization's authorized target
+in the order decision D-11a fixes, the phase and its authority restored after
+a restart, the successor the activation installs in its own transaction with
+no reservation or binding and that a restart restores from its own rows, the
+restore of ReInit state stored under the previous profile, which keeps such
+groups closed, and the Stage 08 model's ReInit finalization (P-04 with G-07
+and G-08, SDK program, outside master #35), are recorded in
+[the ReInit enforcement record](stage-10-reinit-enforcement.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

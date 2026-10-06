@@ -677,3 +677,149 @@ fn a_binding_needs_a_device_that_may_bind_and_refuses_approvals_from_others() ->
     assert!(verify_binding_package(&NETWORK, &honest, &mixed_rosters).is_ok());
     Ok(())
 }
+
+#[test]
+fn a_replacement_verifies_without_rosters_as_it_does_with_them() -> TestResult {
+    let principals = vec![principal(40, &ACCOUNT, &[7])?];
+    let rosters = rosters(&principals)?;
+    let authority = root_fingerprint(&principals.first().ok_or("principal")?.root)?;
+    let spec = BindingSpec {
+        principals: &principals,
+        route: channel_route(b"#room", authority)?,
+        channel_instance_id: Some([1; 16]),
+        conversation_nonce: None,
+        group_id: [25; 32],
+        generation: 0,
+        previous_binding_id: [0; 32],
+        lock_sequence: 0,
+        plan_devices: vec![(&ACCOUNT, authority, 7)],
+    };
+    let package = binding_package(&spec)?;
+    let current = verify_binding_package(&NETWORK, &package, &rosters)?;
+    let replacement = binding_package(&BindingSpec {
+        route: channel_route(b"#room", authority)?,
+        generation: 1,
+        previous_binding_id: current.binding_id,
+        plan_devices: vec![(&ACCOUNT, authority, 7)],
+        ..spec
+    })?;
+    let verified = verify_replacement_binding(&NETWORK, &replacement)?;
+    assert_eq!(
+        verified,
+        verify_binding_package(&NETWORK, &replacement, &rosters)?
+    );
+    // A generation-zero binding needs its approvals and locks verified, also
+    // when it carries none.
+    assert_eq!(
+        verify_replacement_binding(&NETWORK, &package),
+        Err(E2eeError::InvalidValue)
+    );
+    let mut bare = package.clone();
+    bare.binding.approvals = TlsVec::new(Vec::new())?;
+    bare.root_binding_locks = TlsVec::new(Vec::new())?;
+    assert_eq!(
+        verify_replacement_binding(&NETWORK, &bare),
+        Err(E2eeError::InvalidValue)
+    );
+    let mut locked = replacement.clone();
+    locked.root_binding_locks = package.root_binding_locks.clone();
+    let mut approved = replacement.clone();
+    approved.binding.approvals = package.binding.approvals.clone();
+    let mut planless = replacement.clone();
+    let mut entries = planless.initial_member_plan.entries.as_slice().to_vec();
+    entries.first_mut().ok_or("plan entry")?.capability_id = [1; 32];
+    planless.initial_member_plan = ArcInitialMemberPlan {
+        entries: TlsVec::new(entries)?,
+    };
+    let mut no_principal = replacement.clone();
+    let mut named = no_principal.binding.tbs.principals.as_slice().to_vec();
+    named.first_mut().ok_or("principal")?.root_fingerprint = [8; 32];
+    no_principal.binding.tbs.principals = TlsVec::new(named)?;
+    let foreign = binding_package(&BindingSpec {
+        route: channel_route(b"#room", [9; 32])?,
+        generation: 1,
+        previous_binding_id: current.binding_id,
+        plan_devices: vec![(&ACCOUNT, authority, 7)],
+        ..spec
+    })?;
+    let mut reshaped = replacement.clone();
+    reshaped.binding.tbs.previous_binding_id = [0; 32];
+    // Two principals out of canonical order, and more than a binding admits.
+    let first = replacement
+        .binding
+        .tbs
+        .principals
+        .as_slice()
+        .first()
+        .cloned()
+        .ok_or("principal")?;
+    let mut second = first.clone();
+    second.account_id = account_field(&OTHER_ACCOUNT)?;
+    let mut unordered = replacement.clone();
+    unordered.binding.tbs.principals = TlsVec::new(vec![second, first.clone()])?;
+    let mut crowded = replacement.clone();
+    crowded.binding.tbs.principals = TlsVec::new(vec![first; MAX_BINDING_PRINCIPALS + 1])?;
+    assert_eq!(
+        verify_replacement_binding(&NETWORK, &crowded),
+        Err(E2eeError::LimitExceeded)
+    );
+    for (name, refused) in [
+        ("locks", &locked),
+        ("approvals", &approved),
+        ("another plan", &planless),
+        ("no principal under the authority root", &no_principal),
+        ("an authority root no principal holds", &foreign),
+        ("shape", &reshaped),
+        ("principals out of order", &unordered),
+    ] {
+        assert!(
+            verify_replacement_binding(&NETWORK, refused).is_err(),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_direct_replacement_names_both_route_accounts_in_order() -> TestResult {
+    let principals = vec![
+        principal(40, &ACCOUNT, &[7])?,
+        principal(41, &OTHER_ACCOUNT, &[9])?,
+    ];
+    let rosters = rosters(&principals)?;
+    let current = verify_binding_package(
+        &NETWORK,
+        &binding_package(&direct_spec(&principals)?)?,
+        &rosters,
+    )?;
+    let replacement = binding_package(&BindingSpec {
+        generation: 1,
+        previous_binding_id: current.binding_id,
+        ..direct_spec(&principals)?
+    })?;
+    assert_eq!(
+        verify_replacement_binding(&NETWORK, &replacement)?,
+        verify_binding_package(&NETWORK, &replacement, &rosters)?
+    );
+    let mut reversed = replacement.clone();
+    let mut entries = reversed.binding.tbs.principals.as_slice().to_vec();
+    entries.reverse();
+    reversed.binding.tbs.principals = TlsVec::new(entries)?;
+    let mut single = replacement.clone();
+    let first = single
+        .binding
+        .tbs
+        .principals
+        .as_slice()
+        .first()
+        .cloned()
+        .ok_or("principal")?;
+    single.binding.tbs.principals = TlsVec::new(vec![first])?;
+    for (name, refused) in [("reversed", &reversed), ("one account", &single)] {
+        assert!(
+            verify_replacement_binding(&NETWORK, refused).is_err(),
+            "{name}"
+        );
+    }
+    Ok(())
+}

@@ -49,7 +49,7 @@ pub(super) fn authorize_attempt(harness: &Harness, attempt: &mut ArcReInitAttemp
 
 fn prepared() -> TestResult<(Harness, [u8; 32], ArcReInitAttempt)> {
     let mut harness = Harness::new()?;
-    let conversation = harness.bind_channel()?;
+    let conversation = harness.bind_channel_for_reinit()?;
     let old_state = *harness
         .coordinator
         .state
@@ -344,14 +344,6 @@ fn reinit_authorization_refuses_exhausted_work_memory_before_signing() -> TestRe
 fn reinit_authorization_requires_the_original_old_state_on_later_attempts() -> TestResult {
     for substitute in [false, true] {
         let (mut harness, conversation, mut attempt) = prepared()?;
-        let old_state = attempt.tbs.old_reinit_state_id;
-        harness
-            .coordinator
-            .state
-            .logs
-            .get_mut(&conversation)
-            .ok_or("log")?
-            .enter_reinit(old_state)?;
         if substitute {
             attempt.tbs.old_reinit_state_id = [99; 32];
         }
