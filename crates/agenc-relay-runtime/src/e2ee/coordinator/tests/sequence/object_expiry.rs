@@ -167,6 +167,24 @@ fn capture(
     Prepared::capture(coordinator, progress, now, &backing())
 }
 
+/// [`sweep`], returning the durable writes the pass staged instead.
+pub(super) fn sweep_writes(
+    coordinator: &mut CompanionCoordinator,
+    now: u64,
+) -> TestResult<Vec<Write>> {
+    let progress = coordinator.expiry_progress();
+    let prepared = capture(coordinator, progress, now).map_err(|fault| format!("{fault}"))?;
+    let mut writes = prepared.writes(STATE_GENERATION)?;
+    let staged = coordinator
+        .stage_owners(&mut writes, now, false, STATE_GENERATION)
+        .map_err(code)?;
+    prepared
+        .apply(coordinator)
+        .map_err(|fault| format!("{fault}"))?;
+    staged.apply(&mut coordinator.state);
+    Ok(writes)
+}
+
 /// Captures one pass at `now`, stages it as the worker does, and publishes
 /// its receipt. Returns the objects the pass deleted.
 pub(super) fn sweep(coordinator: &mut CompanionCoordinator, now: u64) -> TestResult<usize> {

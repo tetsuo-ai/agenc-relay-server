@@ -1,4 +1,5 @@
-//! Successor reservations retain route authority and projection ordering.
+//! A ReInit activation installs its successor in place of the predecessor's
+//! route, and restore keeps the successor's projection.
 
 #![forbid(unsafe_code)]
 
@@ -49,62 +50,167 @@ fn entries(target: RouteTarget) -> (RouteEntry, RouteEntry, BindingSummary) {
 }
 
 #[test]
-fn direct_successor_reservations_require_the_owner_nonce_and_exact_lineage() -> TestResult {
-    let pair = DirectPair::new(account(1), account(2))?;
-    let (old, new, summary) = entries(RouteTarget::Direct(pair));
-    let mut routes = RouteTable::new();
-    routes.restore_entry(old);
-    let id = ReservationId([7; 16]);
-    assert_eq!(
-        routes.reserve_successor(id, old.conversation_id, pair.larger(), Some([6; 32]), 10),
-        Err(RouteConflict::ReservationInvalid)
-    );
-    routes.reserve_successor(id, old.conversation_id, pair.smaller(), Some([6; 32]), 10)?;
-    assert_eq!(
-        routes.bind(id, pair.smaller(), summary, 1),
-        Err(RouteConflict::BadState)
-    );
-    assert_eq!(
-        routes.bind_successor(id, pair.larger(), summary, 1),
-        Err(RouteConflict::ReservationInvalid)
-    );
-    let wrong = BindingSummary {
-        conversation_nonce: Some([8; 32]),
-        ..summary
-    };
-    assert_eq!(
-        routes.bind_successor(id, pair.smaller(), wrong, 1),
-        Err(RouteConflict::NotSuccessor)
-    );
-    let genesis = BindingSummary {
-        binding_generation: 0,
-        previous_binding_id: [0; 32],
-        ..summary
-    };
-    assert_eq!(
-        routes.bind_successor(id, pair.smaller(), genesis, 1),
-        Err(RouteConflict::NotSuccessor)
-    );
-    assert_eq!(routes.bind_successor(id, pair.smaller(), summary, 1)?, new);
-    assert_eq!(routes.direct_route(&pair), Some(&new));
-    assert!(!routes.direct_plaintext_allowed(&pair));
-    assert_eq!(routes.route(&old.conversation_id), Some(&old));
+fn installing_a_successor_replaces_the_route_and_keeps_the_predecessor_entry() -> TestResult {
+    for target in [
+        RouteTarget::Channel(ChannelInstanceId::from_bytes([9; 16])),
+        RouteTarget::Direct(DirectPair::new(account(1), account(2))?),
+    ] {
+        let (old, new, summary) = entries(target);
+        let mut routes = RouteTable::new();
+        routes.restore_entry(old);
+        assert_eq!(routes.install_successor(old.conversation_id, summary)?, new);
+        let projected = match target {
+            RouteTarget::Channel(channel) => {
+                assert!(!routes.channel_plaintext_allowed(&channel));
+                routes.channel_route(&channel)
+            }
+            RouteTarget::Direct(pair) => {
+                assert!(!routes.direct_plaintext_allowed(&pair));
+                routes.direct_route(&pair)
+            }
+        };
+        assert_eq!(projected, Some(&new));
+        assert_eq!(routes.route(&old.conversation_id), Some(&old));
+        assert!(routes.is_current(&new.conversation_id));
+        assert!(!routes.is_current(&old.conversation_id));
+        // The predecessor no longer owns the route: a second install from it
+        // is refused.
+        let again = BindingSummary {
+            conversation_id: ConversationId([8; 32]),
+            ..summary
+        };
+        assert_eq!(
+            routes.install_successor(old.conversation_id, again),
+            Err(RouteConflict::NotSuccessor)
+        );
+    }
     Ok(())
 }
 
 #[test]
-fn expired_successor_reservations_cannot_replace_the_route() -> TestResult {
-    let (old, _, summary) = entries(RouteTarget::Channel(ChannelInstanceId::from_bytes([9; 16])));
+fn installing_a_successor_checks_every_lineage_field() -> TestResult {
+    let channel = ChannelInstanceId::from_bytes([9; 16]);
+    let other = ChannelInstanceId::from_bytes([10; 16]);
+    let (old, new, summary) = entries(RouteTarget::Channel(channel));
     let mut routes = RouteTable::new();
-    routes.restore_entry(old);
-    let id = ReservationId([7; 16]);
-    routes.reserve_successor(id, old.conversation_id, account(1), None, 10)?;
     assert_eq!(
-        routes.bind_successor(id, account(1), summary, 10),
-        Err(RouteConflict::ReservationInvalid)
+        routes.install_successor(old.conversation_id, summary),
+        Err(RouteConflict::RouteInvalid)
     );
-    assert_eq!(routes.expire_reservations(10), 1);
-    assert_eq!(routes.reservation_predecessor(&id), None);
+    let stale_routes: [(RouteEntry, Option<RouteEntry>); 4] = [
+        (
+            RouteEntry {
+                lifecycle: RouteLifecycle::Closing,
+                ..old
+            },
+            None,
+        ),
+        (
+            RouteEntry {
+                recovery: RecoveryState::Pending,
+                ..old
+            },
+            None,
+        ),
+        // The successor conversation already has a route.
+        (
+            old,
+            Some(RouteEntry {
+                target: RouteTarget::Channel(other),
+                lock: SemanticLockId([9; 32]),
+                ..new
+            }),
+        ),
+        // Another route took the predecessor's indexes.
+        (
+            old,
+            Some(RouteEntry {
+                conversation_id: ConversationId([8; 32]),
+                binding_generation: 2,
+                ..old
+            }),
+        ),
+    ];
+    for (stale, beside) in stale_routes {
+        let mut routes = RouteTable::new();
+        routes.restore_entry(stale);
+        if let Some(beside) = beside {
+            routes.restore_entry(beside);
+        }
+        let before = routes.clone();
+        assert_eq!(
+            routes.install_successor(old.conversation_id, summary),
+            Err(RouteConflict::NotSuccessor)
+        );
+        assert_eq!(routes, before);
+    }
+    let wrong_summaries = [
+        BindingSummary {
+            channel_instance_id: None,
+            ..summary
+        },
+        BindingSummary {
+            channel_instance_id: Some(other),
+            ..summary
+        },
+        BindingSummary {
+            conversation_nonce: Some([6; 32]),
+            ..summary
+        },
+        BindingSummary {
+            lock: SemanticLockId([9; 32]),
+            ..summary
+        },
+        BindingSummary {
+            incarnation: 1,
+            ..summary
+        },
+        BindingSummary {
+            binding_generation: 0,
+            previous_binding_id: [0; 32],
+            ..summary
+        },
+        BindingSummary {
+            binding_generation: 2,
+            ..summary
+        },
+        BindingSummary {
+            previous_binding_id: [9; 32],
+            ..summary
+        },
+        BindingSummary {
+            conversation_id: old.conversation_id,
+            ..summary
+        },
+    ];
+    for wrong in wrong_summaries {
+        let mut routes = RouteTable::new();
+        routes.restore_entry(old);
+        assert_eq!(
+            routes.install_successor(old.conversation_id, wrong),
+            Err(RouteConflict::NotSuccessor)
+        );
+    }
+    // A direct successor names a nonce and no channel instance.
+    let pair = DirectPair::new(account(1), account(2))?;
+    let (old, _, summary) = entries(RouteTarget::Direct(pair));
+    for wrong in [
+        BindingSummary {
+            conversation_nonce: None,
+            ..summary
+        },
+        BindingSummary {
+            channel_instance_id: Some(channel),
+            ..summary
+        },
+    ] {
+        let mut routes = RouteTable::new();
+        routes.restore_entry(old);
+        assert_eq!(
+            routes.install_successor(old.conversation_id, wrong),
+            Err(RouteConflict::NotSuccessor)
+        );
+    }
     Ok(())
 }
 
@@ -125,110 +231,6 @@ fn restoring_predecessor_after_successor_keeps_the_latest_projection() -> TestRe
         assert_eq!(projected, Some(&new));
         assert_eq!(routes.route(&old.conversation_id), Some(&old));
     }
-    Ok(())
-}
-
-#[test]
-fn successor_reservations_refuse_routes_that_lost_traffic_indexes_or_targets() -> TestResult {
-    let channel = ChannelInstanceId::from_bytes([9; 16]);
-    let (old, new, _) = entries(RouteTarget::Channel(channel));
-    let id = ReservationId([7; 16]);
-    let mut routes = RouteTable::new();
-    routes.restore_entry(RouteEntry {
-        lifecycle: RouteLifecycle::Closing,
-        ..old
-    });
-    assert_eq!(
-        routes.reserve_successor(id, old.conversation_id, account(1), None, 10),
-        Err(RouteConflict::GroupConflict)
-    );
-    let mut routes = RouteTable::new();
-    routes.restore_entry(old);
-    routes.restore_entry(new);
-    assert_eq!(
-        routes.reserve_successor(id, old.conversation_id, account(1), None, 10),
-        Err(RouteConflict::GroupConflict)
-    );
-    let mut routes = RouteTable::new();
-    routes.restore_entry(old);
-    routes.reserve_successor(id, old.conversation_id, account(1), None, 10)?;
-    assert_eq!(
-        routes.reserve_successor(
-            ReservationId([8; 16]),
-            old.conversation_id,
-            account(1),
-            None,
-            10
-        ),
-        Err(RouteConflict::GroupConflict)
-    );
-    Ok(())
-}
-
-#[test]
-fn binding_a_successor_checks_every_lineage_field() -> TestResult {
-    let channel = ChannelInstanceId::from_bytes([9; 16]);
-    let other = ChannelInstanceId::from_bytes([10; 16]);
-    let (old, new, summary) = entries(RouteTarget::Channel(channel));
-    let id = ReservationId([7; 16]);
-    let reserved = || -> Result<RouteTable, RouteConflict> {
-        let mut routes = RouteTable::new();
-        routes.restore_entry(old);
-        routes.reserve_successor(id, old.conversation_id, account(1), None, 10)?;
-        Ok(routes)
-    };
-    let stale_routes: [RouteEntry; 4] = [
-        RouteEntry {
-            lifecycle: RouteLifecycle::Closing,
-            ..old
-        },
-        new,
-        RouteEntry {
-            target: RouteTarget::Channel(other),
-            ..old
-        },
-        RouteEntry {
-            conversation_id: new.conversation_id,
-            target: RouteTarget::Channel(other),
-            lock: SemanticLockId([9; 32]),
-            ..old
-        },
-    ];
-    for stale in stale_routes {
-        let mut routes = reserved()?;
-        routes.restore_entry(stale);
-        assert_eq!(
-            routes.bind_successor(id, account(1), summary, 1),
-            Err(RouteConflict::NotSuccessor)
-        );
-    }
-    let wrong_summaries = [
-        BindingSummary {
-            channel_instance_id: None,
-            ..summary
-        },
-        BindingSummary {
-            lock: SemanticLockId([9; 32]),
-            ..summary
-        },
-        BindingSummary {
-            incarnation: 1,
-            ..summary
-        },
-        BindingSummary {
-            previous_binding_id: [9; 32],
-            ..summary
-        },
-    ];
-    for wrong in wrong_summaries {
-        let mut routes = reserved()?;
-        assert_eq!(
-            routes.bind_successor(id, account(1), wrong, 1),
-            Err(RouteConflict::NotSuccessor)
-        );
-    }
-    let mut routes = reserved()?;
-    assert_eq!(routes.bind_successor(id, account(1), summary, 1)?, new);
     Ok(())
 }
 

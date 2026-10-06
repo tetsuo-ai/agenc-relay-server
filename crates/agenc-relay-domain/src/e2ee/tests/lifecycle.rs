@@ -136,3 +136,25 @@ fn the_recovery_gate_only_moves_forward() -> Result<(), Box<dyn std::error::Erro
     assert!(!LifecycleError::Overflow.to_string().is_empty());
     Ok(())
 }
+
+#[test]
+fn a_retired_route_is_a_tombstone_that_takes_no_traffic() -> Result<(), Box<dyn std::error::Error>>
+{
+    let log = open_log()?;
+    let retired = SequencerLog::restore(
+        *log.conversation_id(),
+        log.head(),
+        *log.accepted_state_id(),
+        log.accepted_epoch(),
+        Phase::Retired,
+    );
+    let live = Lifecycle::successor();
+    assert!(!live.is_tombstone(&log));
+    assert!(live.is_tombstone(&retired));
+    assert_eq!(
+        live.check_application(&retired),
+        Err(LifecycleError::Closed)
+    );
+    assert_eq!(live.check_candidate(&retired), Err(LifecycleError::Closed));
+    Ok(())
+}

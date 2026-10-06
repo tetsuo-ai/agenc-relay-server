@@ -132,6 +132,12 @@ pub enum Phase {
         /// The close identifier.
         close_id: Id,
     },
+    /// Restored from stored state this profile does not continue: ReInit
+    /// state of the previous profile, or ordinary records that the previous
+    /// profile let follow a finalized ReInit Commit. The group takes no
+    /// candidate, terminal, application object, attempt or close; only a
+    /// restore enters this phase.
+    Retired,
 }
 
 /// The log.
@@ -215,10 +221,11 @@ impl SequencerLog {
 
     /// Restores the epoch position of a reloaded log: the active candidate,
     /// if the head record is one, and the attempts the epoch consumed. With
-    /// no active candidate the next candidate follows the head record.
+    /// no active candidate the next candidate follows the head record. A
+    /// retired log keeps no candidate, so no terminal completes one.
     pub fn restore_epoch(&mut self, candidate: Option<CandidateSlot>, attempts: u32) {
         self.attempts = attempts;
-        match candidate {
+        match candidate.filter(|_| self.phase != Phase::Retired) {
             Some(slot) => {
                 self.next_candidate_sequence = slot.position.candidate_sequence;
                 self.candidate = Some(slot);
@@ -449,21 +456,27 @@ impl SequencerLog {
         self.head.recorded && self.head.record_id == *terminal_id && self.candidate.is_none()
     }
 
-    /// Closes the old group after a finalized ReInit Commit whose
-    /// finalization identifier is `old_reinit_state_id`.
-    pub fn enter_reinit(&mut self, old_reinit_state_id: Id) -> Result<(), LogError> {
-        if !matches!(self.phase, Phase::Open) || self.candidate.is_some() {
+    /// Finalizes the active candidate of a ReInit Commit, whose authorization
+    /// carries the ReInit bit, and closes the old group in the same step: the
+    /// finalization becomes the accepted state as [`Self::finalize`] makes it,
+    /// and the log enters [`Phase::Reinit`] at that state, so no ordinary
+    /// candidate, application object or close follows it, and the first
+    /// attempt names the finalization as its predecessor (companion 13.8
+    /// steps 2 and 4). This is the only transition into the ReInit phase.
+    pub fn finalize_reinit(
+        &mut self,
+        candidate_id: &Id,
+        finalization_id: Id,
+        resulting_epoch: u64,
+    ) -> Result<TerminalPosition, LogError> {
+        if !matches!(self.phase, Phase::Open) {
             return Err(LogError::Closed);
         }
-        if self.accepted_state_id != old_reinit_state_id {
-            return Err(LogError::EpochStale);
-        }
+        let position = self.finalize(candidate_id, finalization_id, resulting_epoch)?;
         self.phase = Phase::Reinit {
-            old_reinit_state_id,
+            old_reinit_state_id: finalization_id,
         };
-        self.next_attempt_sequence = 0;
-        self.next_predecessor = old_reinit_state_id;
-        Ok(())
+        Ok(position)
     }
 
     /// The position the next ReInit attempt receipt must occupy.

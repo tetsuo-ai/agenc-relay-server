@@ -3696,7 +3696,7 @@ mod real_clients {
     pub(super) struct Sequenced {
         pub(super) candidate_id: [u8; 32],
         commit_object_id: [u8; 32],
-        receipt: ArcCandidateReceipt,
+        pub(super) receipt: ArcCandidateReceipt,
         canonical_validation_time: u64,
     }
 

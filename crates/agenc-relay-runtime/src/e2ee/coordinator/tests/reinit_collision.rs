@@ -3,7 +3,6 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::e2ee::coordinator::tests::support::commit_approval;
 use agenc_relay_e2ee::objects::reinit::{
     ArcReInitAck, ArcReInitActivationCoreTbs, ArcReInitActivationRequest, ArcReInitAttempt,
 };
@@ -14,6 +13,7 @@ fn partial_retained_successor_state_cannot_be_reused() -> TestResult {
         let mut fixture = Harness::new()?;
         let old = fixture.bind_channel()?;
         let target = other_binding(&fixture)?.conversation;
+        fixture.finalize_reinit_to(old, OTHER_GROUP)?;
         let attempt = successor_attempt(&fixture, old, target)?;
         let bytes = wire(ArcWireObjectKind::ReinitAttempt, &attempt)?;
         let normal = ok(evaluate_request(
@@ -51,6 +51,8 @@ fn partial_retained_successor_state_cannot_be_reused() -> TestResult {
     Ok(())
 }
 
+/// The attempt for the successor on `#other`'s group that the finalized
+/// ReInit Commit of `old` authorized.
 fn successor_attempt(
     fixture: &Harness,
     old: [u8; 32],
@@ -63,21 +65,8 @@ fn successor_attempt(
         .get(&old)
         .ok_or("old log")?
         .accepted_state_id();
-    let (mut attempt, _) = super::super::super::reinit::attempt(fixture, old, state, 0)?;
-    attempt.tbs.new_conversation_id = target;
-    attempt.tbs.target_group_id = Opaque::from_slice(&OTHER_GROUP)?;
-    attempt.authorization.tbs.new_conversation_id = target;
-    let approval = commit_approval(
-        &fixture.principal,
-        DEVICE,
-        &attempt.authorization.tbs,
-        SignatureDomain::ReinitAttemptAuthorization,
-    )?;
-    attempt.authorization.approvals = TlsVec::new(vec![approval])?;
-    attempt.tbs.attempt_authorization_id = semantic_id_of(
-        SemanticHashDomain::ReinitAttemptAuthorizationId,
-        &attempt.authorization.tbs,
-    )?;
+    let (attempt, _) = super::super::super::reinit::attempt(fixture, old, state, 0)?;
+    assert_eq!(attempt.tbs.new_conversation_id, target);
     Ok(attempt)
 }
 
@@ -146,6 +135,7 @@ fn an_attempt_cannot_target_an_existing_normal_conversation() -> TestResult {
     let mut fixture = Harness::new()?;
     let old = fixture.bind_channel()?;
     let target = other_binding(&fixture)?.conversation;
+    fixture.finalize_reinit_to(old, OTHER_GROUP)?;
     let attempt = successor_attempt(&fixture, old, target)?;
     let bytes = wire(ArcWireObjectKind::ReinitAttempt, &attempt)?;
     let positive = ok(evaluate_request(
@@ -175,6 +165,7 @@ fn activation_cannot_overwrite_an_existing_normal_conversation() -> TestResult {
     let mut fixture = Harness::new()?;
     let old = fixture.bind_channel()?;
     let target = other_binding(&fixture)?.conversation;
+    fixture.finalize_reinit_to(old, OTHER_GROUP)?;
     let attempt = successor_attempt(&fixture, old, target)?;
     let bytes = wire(ArcWireObjectKind::ReinitAttempt, &attempt)?;
     ok(fixture.run(Op::SubmitReinitAttempt, &old, Some(&bytes))?)?;

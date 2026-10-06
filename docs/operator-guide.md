@@ -168,10 +168,30 @@ mixed-version operation of the encrypted profile.
   until the client is upgraded and never fall back to plaintext (companion
   Section 11.1). Plaintext channels keep working.
 - This release does not migrate ReInit state stored under the previous
-  profile. A conversation whose latest sequencer record is a ReInit
-  activation or abort of the previous profile is not restored, and a ReInit
+  profile; the coordinator starts with it and keeps each such conversation
+  closed. A conversation whose latest sequencer record is a ReInit
+  activation or abort of the previous profile is retired, together with a
+  successor bound for it, and so is a conversation that took ordinary
+  records after its ReInit Commit was finalized: a retired conversation
+  accepts no Commit, application message, ReInit attempt or close. A ReInit
   attempt left open under the previous profile can neither complete nor be
-  aborted after the upgrade. How such state migrates is not yet defined.
+  aborted, and a ReInit Commit finalized under the previous profile admits
+  no attempt of this release. A conversation that was closed stays closed.
+  Plaintext stays refused on all of these routes, and this release offers
+  no way to bind such a channel to a new group.
+- Databases written by development builds of this profile from before its
+  ReInit enforcement are not supported: a coordinator refuses to start on
+  one that holds a ReInit activation its build stored without installing
+  the successor, or with a target this release does not admit. Start such a
+  test network again from new databases. Release candidate 3's databases
+  are upgraded as described above.
+- Do not start release candidate 3 on a database that this release has run
+  on. The storage format is unchanged (schema generation 5), so nothing
+  refuses it, but the database then holds encrypted state of this profile
+  that release candidate 3 does not read as this release does. Going back
+  to release candidate 3 means restoring a backup taken before the upgrade
+  into a new directory with the stopped `storage restore` command, which
+  declares a new recovery epoch.
 - After the upgrade, run `print-onboarding` on every node that has the
   encrypted profile enabled, distribute the new descriptor, and create new
   account invitations from it. A client refuses a descriptor whose

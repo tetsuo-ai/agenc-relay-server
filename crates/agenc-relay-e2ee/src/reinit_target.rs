@@ -244,7 +244,12 @@ pub fn reconstruct_reinit_target(
     proposal: &ReinitProposal<'_>,
     budget: &mut DecodeBudget,
 ) -> Result<ReinitTarget, E2eeError> {
-    let target = successor_target(network_id, &Predecessor::of(old.binding), proposal, budget)?;
+    let target = successor_target(
+        network_id,
+        &ReinitPredecessor::of_binding(old.binding),
+        proposal,
+        budget,
+    )?;
     let context = &target.context;
     check_rosters_named(
         network_id,
@@ -356,12 +361,29 @@ pub fn check_carried_target(
     target: &ArcReInitTargetTbs,
     budget: &mut DecodeBudget,
 ) -> Result<CarriedTarget, E2eeError> {
-    carried_after(network_id, &Predecessor::of(old_binding), target, budget)
+    check_carried_target_from(
+        network_id,
+        &ReinitPredecessor::of_binding(old_binding),
+        target,
+        budget,
+    )
+}
+
+/// [`check_carried_target`] against `predecessor`, the facts of the old
+/// conversation's current binding that the verifier retained when it
+/// verified that binding.
+pub fn check_carried_target_from(
+    network_id: &[u8; 32],
+    predecessor: &ReinitPredecessor,
+    target: &ArcReInitTargetTbs,
+    budget: &mut DecodeBudget,
+) -> Result<CarriedTarget, E2eeError> {
+    carried_after(network_id, predecessor, target, budget)
 }
 
 fn carried_after(
     network_id: &[u8; 32],
-    old: &Predecessor,
+    old: &ReinitPredecessor,
     target: &ArcReInitTargetTbs,
     budget: &mut DecodeBudget,
 ) -> Result<CarriedTarget, E2eeError> {
@@ -377,7 +399,7 @@ fn carried_after(
 /// successor the context and its binding describe (the second).
 fn successor_target(
     network_id: &[u8; 32],
-    old: &Predecessor,
+    old: &ReinitPredecessor,
     proposal: &ReinitProposal<'_>,
     budget: &mut DecodeBudget,
 ) -> Result<CarriedTarget, E2eeError> {
@@ -484,11 +506,17 @@ fn extension_parts<'a>(
     }
 }
 
-/// What a ReInit successor's binding must replace: the old conversation's
-/// current binding, from the verifier's retained [`VerifiedBinding`] or, for
-/// a later joiner, from the binding-chain entry that precedes the ReInit
+/// What a ReInit successor's binding must replace (companion 13.8): the old
+/// conversation's current binding, reduced to the facts a target is checked
+/// against, its conversation, binding ID, generation, semantic route lock,
+/// concrete route and channel instance or conversation nonce. A verifier
+/// takes them from a binding it verified when the binding was bound or
+/// installed and has retained since, so its checks of a later attempt need
+/// neither that binding's object nor the rosters that verified it; a later
+/// joiner takes them from the binding-chain entry that precedes the ReInit
 /// entry.
-struct Predecessor {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReinitPredecessor {
     conversation_id: SemanticId,
     binding_id: SemanticId,
     generation: u64,
@@ -498,8 +526,10 @@ struct Predecessor {
     conversation_nonce: Option<[u8; 32]>,
 }
 
-impl Predecessor {
-    fn of(binding: &VerifiedBinding) -> Self {
+impl ReinitPredecessor {
+    /// The facts of `binding`, as verified.
+    #[must_use]
+    pub fn of_binding(binding: &VerifiedBinding) -> Self {
         Self {
             conversation_id: binding.conversation_id,
             binding_id: binding.binding_id,
@@ -511,8 +541,10 @@ impl Predecessor {
         }
     }
 
-    fn of_entry(entry: &ArcBindingChainEntry) -> Result<Self, E2eeError> {
-        let binding = &entry.package.binding.tbs;
+    /// The facts of the binding `binding`, which the caller verified when it
+    /// was bound or installed (or whose chain entry the caller verifies):
+    /// for a verified binding they equal [`Self::of_binding`]'s.
+    pub fn of_binding_tbs(binding: &ArcConversationBindingTbs) -> Result<Self, E2eeError> {
         Ok(Self {
             conversation_id: binding.conversation_id,
             binding_id: semantic_id_of(SemanticHashDomain::BindingId, binding)?,
@@ -532,7 +564,7 @@ struct Successor<'a> {
     conversation_id: &'a SemanticId,
     group_id: &'a [u8; GROUP_ID_BYTES],
     proposal: &'a ReinitProposal<'a>,
-    old: &'a Predecessor,
+    old: &'a ReinitPredecessor,
 }
 
 impl Successor<'_> {
@@ -1004,11 +1036,23 @@ impl AuthorizedReinit {
         old_binding: &VerifiedBinding,
         budget: &mut DecodeBudget,
     ) -> Result<CarriedTarget, E2eeError> {
+        self.check_attempt_from(attempt, &ReinitPredecessor::of_binding(old_binding), budget)
+    }
+
+    /// [`Self::check_attempt`] against `predecessor`, the facts of the old
+    /// conversation's current binding that the sequencer retained when it
+    /// verified that binding, with the same reply-code reading.
+    pub fn check_attempt_from(
+        &self,
+        attempt: &ArcReInitAttempt,
+        predecessor: &ReinitPredecessor,
+        budget: &mut DecodeBudget,
+    ) -> Result<CarriedTarget, E2eeError> {
         self.check_carried_links(attempt)?;
         if formed_plan_id(&attempt.key_package_plan)? != attempt.target.initial_member_plan_id {
             return Err(E2eeError::InvalidValue);
         }
-        check_carried_target(&self.network_id, old_binding, &attempt.target, budget)
+        check_carried_target_from(&self.network_id, predecessor, &attempt.target, budget)
     }
 
     /// An endpoint's check of one attempt against its own reconstruction
@@ -1074,7 +1118,7 @@ impl AuthorizedReinit {
         let request = &activation.tbs.request;
         let attempt = &request.attempt;
         self.check_carried_links(attempt)?;
-        let old = Predecessor::of_entry(previous)?;
+        let old = ReinitPredecessor::of_binding_tbs(&previous.package.binding.tbs)?;
         let carried = carried_after(&self.network_id, &old, &attempt.target, budget)?;
         self.check_activation_core(activation)?;
         check_binding_entry(&carried, entry)?;

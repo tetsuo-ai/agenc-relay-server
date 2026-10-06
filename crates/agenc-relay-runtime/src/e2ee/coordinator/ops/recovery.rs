@@ -3,10 +3,10 @@
 #![forbid(unsafe_code)]
 
 use agenc_relay_domain::e2ee::lifecycle::RecoveryGate;
-use agenc_relay_domain::e2ee::{ConversationId, DirectPair, RecoveryState, ReservationId};
+use agenc_relay_domain::e2ee::{ConversationId, DirectPair, RecoveryState};
 use agenc_relay_e2ee::limits::MAX_REINIT_OBJECT;
 use agenc_relay_e2ee::objects::federation::ArcFederationOpcode as Op;
-use agenc_relay_e2ee::objects::reinit::{ArcReInitActivationRequest, ArcReInitAttempt};
+use agenc_relay_e2ee::objects::reinit::ArcReInitActivationRequest;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use agenc_relay_types::{AccountId, ChannelInstanceId};
@@ -67,23 +67,22 @@ pub(super) fn admit(exec: &Exec<'_>) -> Result<(), Fail> {
 
 fn reinit(exec: &Exec<'_>) -> Result<(), Fail> {
     direct_mutation(exec)?;
+    // An attempt's successor is checked by its handler, after the refusal
+    // of an attempt outside the ReInit phase and the checks against the
+    // authorized target (companion 13.8; decision D-11a).
+    if exec.opcode() == Op::SubmitReinitAttempt {
+        return Ok(());
+    }
     let (object, _) = exec.payload()?;
     let mut budget = DecodeBudget::new(MAX_REINIT_OBJECT, 1 << 18);
-    let successor = if exec.opcode() == Op::SubmitReinitAttempt {
-        let attempt = ArcReInitAttempt::decode_exact(object.body(), &mut budget)
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
-        attempt.tbs.new_conversation_id
-    } else {
-        let request = ArcReInitActivationRequest::decode_exact(object.body(), &mut budget)
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
-        request.core.new_conversation_id
-    };
-    // A new successor must be absent in every representation, including
-    // recovery tombstones. This also excludes Pending, Conflict and Closed.
-    vacant_successor(&exec.coordinator.state, &successor)
+    let request = ArcReInitActivationRequest::decode_exact(object.body(), &mut budget)
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    vacant_successor(&exec.coordinator.state, &request.core.new_conversation_id)
 }
 
-fn vacant_successor(state: &CompanionState, successor: &[u8; 32]) -> Result<(), Fail> {
+/// A new successor must be absent in every representation, including
+/// recovery tombstones. This also excludes Pending, Conflict and Closed.
+pub(super) fn vacant_successor(state: &CompanionState, successor: &[u8; 32]) -> Result<(), Fail> {
     if state.routes.route(&ConversationId(*successor)).is_some()
         || state.conversations.contains_key(successor)
         || state.logs.contains_key(successor)
@@ -167,20 +166,11 @@ fn reserve_direct(exec: &Exec<'_>) -> Result<(), Fail> {
 
 fn bind(exec: &Exec<'_>) -> Result<(), Fail> {
     exec.attached_device()?;
-    let (reservation, conversation) = exec.params().read(|reader| {
-        let reservation = reader.fixed::<16>()?;
+    let conversation = exec.params().read(|reader| {
+        reader.fixed::<16>()?;
         let conversation = reader.fixed::<32>()?;
         reader.fixed::<32>()?;
-        Ok((reservation, conversation))
+        Ok(conversation)
     })?;
-    mutation(exec, &conversation)?;
-    let predecessor = exec
-        .coordinator
-        .state
-        .routes
-        .reservation_predecessor(&ReservationId(reservation));
-    match predecessor {
-        Some(predecessor) => mutation(exec, &predecessor.0),
-        None => Ok(()),
-    }
+    mutation(exec, &conversation)
 }

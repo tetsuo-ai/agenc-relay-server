@@ -9,6 +9,7 @@ use agenc_relay_e2ee::objects::reinit::{
 
 pub(super) fn prepare(activate: bool) -> TestResult<Prepared> {
     let (mut harness, conversation) = bound()?;
+    harness.finalize_reinit(conversation)?;
     let old = *harness
         .coordinator
         .state

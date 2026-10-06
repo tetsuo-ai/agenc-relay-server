@@ -1,11 +1,13 @@
 //! Public ReInit ACK fields must match the current retained attempt.
 #![forbid(unsafe_code)]
 use super::*;
+use crate::e2ee::coordinator::tests::sequence::reinit_successor::{LEAF_ZERO, creator_entry};
 use crate::e2ee::coordinator::tests::support::{key, sign};
+use agenc_relay_e2ee::objects::conversation::ArcKeyPackagePlan;
 
 fn refuses(change: impl FnOnce(&mut ArcReInitAckTbs), expected: E2eeReplyCode) -> TestResult {
     let mut harness = Harness::new()?;
-    let conversation = harness.bind_channel()?;
+    let conversation = harness.bind_channel_for_reinit()?;
     let old_state = *harness
         .coordinator
         .state
@@ -79,7 +81,7 @@ fn activation_case(
     change: Option<fn(&mut ArcReInitAckTbs)>,
 ) -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
     let mut harness = Harness::new()?;
-    let conversation = harness.bind_channel()?;
+    let conversation = harness.bind_channel_for_reinit()?;
     let old_state = *harness
         .coordinator
         .state
@@ -104,7 +106,7 @@ fn activation_case(
         profile_version: 1,
         network_id: NETWORK,
         old_conversation_id: conversation,
-        new_conversation_id: NEW_CONVERSATION,
+        new_conversation_id: new_conversation()?,
         old_reinit_state_id: old_state,
         attempt_sequence: 0,
         reinit_attempt_id: attempt_id,
@@ -284,7 +286,7 @@ fn reinit_ack_refuses_ack_kind_substitution() -> TestResult {
 
 fn retained_attempt_case(initial_bytes: usize) -> TestResult<(Harness, [u8; 32], Vec<u8>)> {
     let mut harness = Harness::new()?;
-    let conversation = harness.bind_channel()?;
+    let conversation = harness.bind_channel_for_reinit()?;
     let old_state = *harness
         .coordinator
         .state
@@ -354,6 +356,18 @@ fn reinit_ack_refuses_a_missing_retained_attempt_before_writing() -> TestResult 
 fn reinit_ack_accepts_a_reserved_welcome_ref_and_refuses_an_unknown_ref() -> TestResult {
     let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
     let conversation = harness.bind_channel()?;
+    // The ReInit Commit authorized the successor whose plan carries the
+    // joiner with its reserved package.
+    let creator = creator_entry(&harness)?;
+    let mut joiner = creator.clone();
+    joiner.creator = 0;
+    joiner.device_id = [SECOND_DEVICE; 16];
+    joiner.capability_id = [SECOND_DEVICE; 32];
+    joiner.key_package_ref = Opaque::new(vec![88; 32])?;
+    let plan = ArcKeyPackagePlan {
+        entries: TlsVec::new(vec![creator, joiner])?,
+    };
+    harness.finalize_reinit_with(conversation, plan, &[LEAF_ZERO])?;
     let old_state = *harness
         .coordinator
         .state
@@ -361,21 +375,7 @@ fn reinit_ack_accepts_a_reserved_welcome_ref_and_refuses_an_unknown_ref() -> Tes
         .get(&conversation)
         .ok_or("log")?
         .accepted_state_id();
-    let (mut attempt, _) = attempt(&harness, conversation, old_state, 0)?;
-    let creator = attempt
-        .key_package_plan
-        .entries
-        .as_slice()
-        .first()
-        .ok_or("creator")?
-        .clone();
-    let mut joiner = creator.clone();
-    joiner.creator = 0;
-    joiner.device_id = [SECOND_DEVICE; 16];
-    joiner.key_package_ref = Opaque::new(vec![88; 32])?;
-    attempt.key_package_plan.entries = TlsVec::new(vec![creator, joiner])?;
-    super::attempt_authority::authorize_attempt(&harness, &mut attempt)?;
-    let bytes = wire(ArcWireObjectKind::ReinitAttempt, &attempt)?;
+    let (_, bytes) = attempt(&harness, conversation, old_state, 0)?;
     ok(harness.run(Op::SubmitReinitAttempt, &conversation, Some(&bytes))?)?;
     let receipt = staged_receipt(&harness, conversation)?;
     // The joiner device attests to old leaf 1 under its own leaf key.

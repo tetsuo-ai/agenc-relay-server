@@ -170,7 +170,7 @@ fn evaluate_finalization(
     evaluate_request(harness, Op::SubmitFinalization, &conversation, Some(bytes))
 }
 
-fn evaluate_request(
+pub(in crate::e2ee::coordinator::tests) fn evaluate_request(
     harness: &mut Harness,
     opcode: Op,
     parameters: &[u8],

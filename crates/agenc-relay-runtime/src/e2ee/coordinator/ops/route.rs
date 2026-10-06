@@ -6,8 +6,7 @@ use agenc_relay_domain::e2ee::lifecycle::Lifecycle;
 use agenc_relay_domain::e2ee::projection::{EntitlementReason, EventKind};
 use agenc_relay_domain::e2ee::sequencer_log::SequencerLog;
 use agenc_relay_domain::e2ee::{
-    BindingSummary, ConversationId, DirectPair, ReservationId, RouteReservation, RouteTarget,
-    SemanticLockId,
+    BindingSummary, ConversationId, DirectPair, ReservationId, RouteTarget, SemanticLockId,
 };
 use agenc_relay_e2ee::envelope::{RouteExpectation, verify_application_object};
 use agenc_relay_e2ee::limits::{
@@ -25,8 +24,8 @@ use agenc_relay_e2ee::objects::conversation::{
 use agenc_relay_e2ee::objects::federation::{ArcFederationRouteState, ArcRouteStateKind};
 use agenc_relay_e2ee::objects::sequencing::ArcGroupGenesisTbs;
 use agenc_relay_e2ee::route::{
-    PrincipalRosters, channel_name_hash, channel_route_binding, direct_route_binding,
-    verify_binding_package,
+    PrincipalRosters, VerifiedBinding, channel_name_hash, channel_route_binding,
+    direct_route_binding, verify_binding_package,
 };
 use agenc_relay_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
@@ -289,10 +288,7 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
         let pair =
             DirectPair::new(first, second).map_err(|_| Fail::from(E2eeReplyCode::RouteInvalid))?;
-        let nonce = match super::route_successor::direct_nonce(exec, &pair)? {
-            Some(nonce) => nonce,
-            None => exec.random()?,
-        };
+        let nonce = exec.random()?;
         let (a, b) = if requester <= peer {
             (requester, peer)
         } else {
@@ -335,33 +331,20 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         (None, Some(pair)) => RouteTarget::Direct(pair),
         _ => return Err(E2eeReplyCode::InvalidFragment.into()),
     };
-    let successor = super::route_successor::reserve(
-        exec,
-        &mut probe,
-        RouteReservation {
-            reservation_id: ReservationId(reservation_id),
-            target,
-            conversation_nonce: nonce,
-            owner,
-            expires_at,
-        },
-    )?;
-    let claim = match (successor, instance, pair) {
-        (true, _, _) => Ok(()),
-        (false, Some(instance), None) => probe.reserve_channel(
-            ReservationId(reservation_id),
-            ChannelInstanceId::from_bytes(instance),
-            owner,
-            expires_at,
-        ),
-        (false, None, Some(pair)) => probe.reserve_direct(
+    // An existing route is not reserved here: a ReInit successor is
+    // installed by its activation, never through a reservation (companion
+    // 13.8).
+    let claim = match target {
+        RouteTarget::Channel(instance) => {
+            probe.reserve_channel(ReservationId(reservation_id), instance, owner, expires_at)
+        }
+        RouteTarget::Direct(pair) => probe.reserve_direct(
             ReservationId(reservation_id),
             pair,
             nonce.unwrap_or([0; 32]),
             owner,
             expires_at,
         ),
-        _ => return Err(E2eeReplyCode::InvalidFragment.into()),
     };
     claim.map_err(|_| Fail::from(E2eeReplyCode::GroupConflict))?;
     let mut outcome = Outcome::scalar(ResultBody::Reserved(reservation_id, object_id));
@@ -594,54 +577,21 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let owner = AccountId::parse_wire_bytes(&account)
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
     let locks = chained_locks(exec, &package, &verified, &conversation_id)?;
-    let summary = BindingSummary {
-        conversation_id: ConversationId(conversation_id),
-        lock: SemanticLockId(verified.route.lock_id),
-        incarnation: verified.route.incarnation,
-        predecessor_close_id: verified.route.predecessor_close_id,
-        binding_id: verified.binding_id,
-        binding_generation: verified.generation,
-        previous_binding_id: verified.previous_binding_id,
-        channel_instance_id: verified
-            .channel_instance_id
-            .map(ChannelInstanceId::from_bytes),
-        conversation_nonce: verified.conversation_nonce,
-    };
     let mut routes = exec.coordinator.state.routes.clone();
-    let predecessor = routes.reservation_predecessor(&ReservationId(reservation_id));
-    let activation_id = if let Some(predecessor) = predecessor {
-        super::route_successor::owner(exec, &predecessor.0)?;
-        if !verified.principals.contains(&account) {
-            return Err(Fail::with(
-                E2eeReplyCode::BindingAuthInvalid,
-                &conversation_id,
-            ));
-        }
-        Some(
-            super::route_successor::verify(
-                &exec.coordinator.state,
-                &exec.coordinator.network_id,
-                &predecessor.0,
-                &package,
-                &context_digest,
-            )
-            .map_err(|_| Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id))?,
+    let entry = routes
+        .bind(
+            ReservationId(reservation_id),
+            owner,
+            binding_summary(&verified),
+            exec.now,
         )
-    } else {
-        None
-    };
-    let entry = if activation_id.is_some() {
-        routes.bind_successor(ReservationId(reservation_id), owner, summary, exec.now)
-    } else {
-        routes.bind(ReservationId(reservation_id), owner, summary, exec.now)
-    }
-    .map_err(|conflict| match conflict {
-        agenc_relay_domain::e2ee::RouteConflict::GroupConflict
-        | agenc_relay_domain::e2ee::RouteConflict::ForkedLineage => {
-            Fail::with(E2eeReplyCode::GroupConflict, &conversation_id)
-        }
-        _ => Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id),
-    })?;
+        .map_err(|conflict| match conflict {
+            agenc_relay_domain::e2ee::RouteConflict::GroupConflict
+            | agenc_relay_domain::e2ee::RouteConflict::ForkedLineage => {
+                Fail::with(E2eeReplyCode::GroupConflict, &conversation_id)
+            }
+            _ => Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id),
+        })?;
     let genesis = ArcGroupGenesisTbs {
         network_id: exec.coordinator.network_id,
         conversation_id,
@@ -650,54 +600,14 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         context_core_id: verified.context_core_id,
     };
     let genesis_id = CompanionCoordinator::id_of(SemanticHashDomain::GroupGenesisId, &genesis)?;
-    let (log, lifecycle) = match activation_id {
-        Some(activation_id) => {
-            let expected = SequencerLog::from_activation(conversation_id, activation_id);
-            if exec.coordinator.state.logs.get(&conversation_id) != Some(&expected) {
-                return Err(Fail::with(
-                    E2eeReplyCode::BindingAuthInvalid,
-                    &conversation_id,
-                ));
-            }
-            (expected, Lifecycle::successor())
-        }
-        None => (
-            SequencerLog::genesis(conversation_id, genesis_id),
-            Lifecycle::bootstrap(),
-        ),
-    };
+    let (log, lifecycle) = (
+        SequencerLog::genesis(conversation_id, genesis_id),
+        Lifecycle::bootstrap(),
+    );
     let kind = verified.route.kind;
-    let direct_accounts = match verified.principals.as_slice() {
-        [a, b] if kind == ArcConversationKind::Direct => Some((*a, *b)),
-        _ => None,
-    };
-    let channel_name_hash = match &verified.route.key {
-        agenc_relay_e2ee::route::SemanticRouteKey::Channel { canonical_name, .. } => {
-            channel_name_hash(canonical_name)
-                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?
-        }
-        agenc_relay_e2ee::route::SemanticRouteKey::Direct { .. } => [0; 32],
-    };
-    let mut state = ConversationState {
-        binding_object_id: *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes(),
-        context_core_id: verified.context_core_id,
-        context_digest,
-        cipher_suite: verified.cipher_suite,
-        group_id: package.binding.tbs.group_id.as_slice().to_vec(),
-        route_binding: verified.route_binding,
-        lock_id: verified.route.lock_id,
-        channel_name_hash,
-        direct_accounts,
-        binding: verified.binding_id,
-        sequencer_credential_id: verified.sequencer_credential_id,
-        principal_accounts: principal_accounts(&package)?,
-        initial_policy_id: package.binding.tbs.initial_policy_id,
-        required_operational_policy_id: package.binding.tbs.required_operational_policy_id,
-        current_policy_id: package.binding.tbs.initial_policy_id,
-        predecessor_close_id: (verified.route.incarnation > 0)
-            .then_some(verified.route.predecessor_close_id),
-        ..ConversationState::default()
-    };
+    let mut state = bound_state(&verified, &package, bytes)?;
+    state.context_digest = context_digest;
+    let direct_accounts = state.direct_accounts;
     let route_object = route_state_object(
         exec,
         &state,
@@ -774,23 +684,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         agenc_relay_domain::e2ee::RouteTarget::Direct(_) => vec![exec.home],
     };
     let hosts = targets.clone();
-    if let Some(old) = predecessor {
-        for target in exec
-            .peers
-            .iter()
-            .copied()
-            .filter(|peer| exec.coordinator.state.entitlements.entitled(*peer, &old.0))
-        {
-            outcome.events.push(exec.event(
-                EventKind::RouteStateHidden,
-                Some(old.0),
-                target,
-                0,
-                Vec::new(),
-                None,
-            ));
-        }
-    }
     for target in targets {
         outcome.events.push(exec.event(
             EventKind::RouteStateChanged,
@@ -804,9 +697,6 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let home = exec.home;
     outcome.effects.push(Box::new(move |companion| {
         companion.routes = routes;
-        if let Some(old) = predecessor {
-            companion.entitlements.retire_conversation(old.0);
-        }
         companion.logs.insert(conversation_id, log);
         companion.lifecycles.insert(conversation_id, lifecycle);
         companion.conversations.insert(conversation_id, state);
@@ -835,6 +725,68 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         }
     }));
     Ok(outcome)
+}
+
+/// What the route table admits of a verified binding.
+pub(super) fn binding_summary(verified: &VerifiedBinding) -> BindingSummary {
+    BindingSummary {
+        conversation_id: ConversationId(verified.conversation_id),
+        lock: SemanticLockId(verified.route.lock_id),
+        incarnation: verified.route.incarnation,
+        predecessor_close_id: verified.route.predecessor_close_id,
+        binding_id: verified.binding_id,
+        binding_generation: verified.generation,
+        previous_binding_id: verified.previous_binding_id,
+        channel_instance_id: verified
+            .channel_instance_id
+            .map(ChannelInstanceId::from_bytes),
+        conversation_nonce: verified.conversation_nonce,
+    }
+}
+
+/// The retained facts a conversation bound by the verified binding of
+/// `package`, whose complete wire object is `bytes`, starts with: its
+/// route, principals and initial policies, with the context digest and the
+/// route object left to the caller.
+pub(super) fn bound_state(
+    verified: &VerifiedBinding,
+    package: &ArcConversationBindingPackage,
+    bytes: &[u8],
+) -> Result<ConversationState, Fail> {
+    let direct_accounts = match verified.principals.as_slice() {
+        [a, b] if verified.route.kind == ArcConversationKind::Direct => Some((*a, *b)),
+        _ => None,
+    };
+    let channel_name_hash = match &verified.route.key {
+        agenc_relay_e2ee::route::SemanticRouteKey::Channel { canonical_name, .. } => {
+            channel_name_hash(canonical_name)
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?
+        }
+        agenc_relay_e2ee::route::SemanticRouteKey::Direct { .. } => [0; 32],
+    };
+    let tbs = &package.binding.tbs;
+    Ok(ConversationState {
+        binding_object_id: *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes(),
+        context_core_id: verified.context_core_id,
+        cipher_suite: verified.cipher_suite,
+        group_id: tbs.group_id.as_slice().to_vec(),
+        route_binding: verified.route_binding,
+        lock_id: verified.route.lock_id,
+        channel_name_hash,
+        direct_accounts,
+        binding: verified.binding_id,
+        sequencer_credential_id: verified.sequencer_credential_id,
+        principal_accounts: principal_accounts(package)?,
+        initial_policy_id: tbs.initial_policy_id,
+        required_operational_policy_id: tbs.required_operational_policy_id,
+        current_policy_id: tbs.initial_policy_id,
+        predecessor_close_id: (verified.route.incarnation > 0)
+            .then_some(verified.route.predecessor_close_id),
+        reinit_facts: Some(
+            agenc_relay_e2ee::reinit_target::ReinitPredecessor::of_binding(verified),
+        ),
+        ..ConversationState::default()
+    })
 }
 
 /// `query_channel` and `query_direct`.

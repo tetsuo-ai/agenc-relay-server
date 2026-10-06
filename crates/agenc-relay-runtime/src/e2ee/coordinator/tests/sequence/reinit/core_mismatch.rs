@@ -11,7 +11,7 @@ type ActivationEdit = fn(&mut ArcReInitActivationCoreTbs);
 
 fn staged() -> TestResult<(Harness, [u8; 32], [u8; 32])> {
     let mut harness = Harness::new()?;
-    let conversation = harness.bind_channel()?;
+    let conversation = harness.bind_channel_for_reinit()?;
     let old_state = *harness
         .coordinator
         .state
@@ -30,6 +30,13 @@ fn an_attempt_naming_another_conversation_or_network_is_refused() -> TestResult 
     other_conversation.tbs.old_conversation_id = [1; 32];
     let mut other_network = attempt.clone();
     other_network.tbs.network_id = [2; 32];
+    let before = harness
+        .coordinator
+        .state
+        .logs
+        .get(&conversation)
+        .cloned()
+        .ok_or("log")?;
     for substituted in [other_conversation, other_network] {
         let bytes = wire(ArcWireObjectKind::ReinitAttempt, &substituted)?;
         assert_eq!(
@@ -37,16 +44,12 @@ fn an_attempt_naming_another_conversation_or_network_is_refused() -> TestResult 
             Some(E2eeReplyCode::RouteInvalid)
         );
     }
-    assert!(!matches!(
-        harness
-            .coordinator
-            .state
-            .logs
-            .get(&conversation)
-            .ok_or("log")?
-            .phase(),
-        Phase::Reinit { .. }
-    ));
+    // A refused attempt records nothing: the log keeps its open slot.
+    assert_eq!(
+        harness.coordinator.state.logs.get(&conversation),
+        Some(&before)
+    );
+    assert!(before.reinit_attempt().is_none());
     Ok(())
 }
 
@@ -140,7 +143,7 @@ fn an_activation_core_must_repeat_the_attempt_its_result_and_its_acknowledgement
         profile_version: 1,
         network_id: NETWORK,
         old_conversation_id: conversation,
-        new_conversation_id: NEW_CONVERSATION,
+        new_conversation_id: new_conversation()?,
         old_reinit_state_id: old_state,
         attempt_sequence: 0,
         reinit_attempt_id: attempt_id,
@@ -208,7 +211,8 @@ fn an_activation_core_must_repeat_the_attempt_its_result_and_its_acknowledgement
 
 #[test]
 fn an_acknowledgement_naming_another_conversation_or_network_is_refused() -> TestResult {
-    let (mut harness, conversation, _) = staged()?;
+    let mut harness = Harness::new()?;
+    let conversation = harness.bind_channel()?;
     // A commit ACK for the open candidate that names another conversation.
     let (_, commit_id, candidate_id) = submit_candidate(&mut harness, conversation, 0, 20)?;
     let elsewhere = super::super::ack([9; 32], 0, candidate_id, commit_id)?;
