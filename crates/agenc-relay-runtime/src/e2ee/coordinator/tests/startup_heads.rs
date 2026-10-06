@@ -477,3 +477,80 @@ fn a_restored_reinit_phase_takes_its_authority_only_from_its_finalization_record
     );
     Ok(())
 }
+
+/// The phase restored for a log whose ReInit finalization at `SEQUENCE` is
+/// followed by an ordinary candidate at `SEQUENCE + 2`, the route row's head,
+/// with an attempt receipt or nothing between them.
+fn phase_after_a_reinit_finalization(with_attempt: bool) -> TestResult<Option<Phase>> {
+    let record = ArcSequencerRecord::Finalization(finalization(action_bits::REINIT)?);
+    let bytes =
+        ArcWireObject::new(ArcWireObjectKind::SequencerRecord, record.encode()?)?.encode()?;
+    let object_id = *ObjectId::compute(&bytes).as_bytes();
+    let mut state = CompanionState::default();
+    state.objects.insert(object_id, bytes);
+    let reinit = RecordRow {
+        record_object_id: object_id,
+        record_id: ACCEPTED,
+        record_kind: FINALIZATION_RECORD,
+        terminal: true,
+        predecessor_record_id: PREDECESSOR,
+    };
+    let attempt = RecordRow {
+        record_object_id: [0x41; 32],
+        record_id: [0x42; 32],
+        record_kind: REINIT_ATTEMPT_RECORD,
+        terminal: false,
+        predecessor_record_id: ACCEPTED,
+    };
+    let candidate = candidate_row([0x44; 32]);
+    let mut records = BTreeMap::from([(SEQUENCE, &reinit), (SEQUENCE + 2, &candidate)]);
+    if with_attempt {
+        records.insert(SEQUENCE + 1, &attempt);
+    }
+    let row = RouteRow {
+        sequencer_head_id: [0x44; 32],
+        route_sequence: SEQUENCE + 2,
+        ..route_row()
+    };
+    Ok(restore_log_phase(&state, OLD, &row, &records).map(|restored| restored.phase))
+}
+
+#[test]
+fn a_head_after_a_reinit_finalization_never_restores_an_open_group() -> TestResult {
+    // A ReInit finalization closes the old group for good: a head that
+    // would leave it open retires it, whatever lies between them.
+    assert_eq!(
+        phase_after_a_reinit_finalization(true)?,
+        Some(Phase::Retired)
+    );
+    assert_eq!(
+        phase_after_a_reinit_finalization(false)?,
+        Some(Phase::Retired)
+    );
+    // An ordinary finalization in the log leaves the group open.
+    let record = ArcSequencerRecord::Finalization(finalization(action_bits::ROSTER)?);
+    let bytes =
+        ArcWireObject::new(ArcWireObjectKind::SequencerRecord, record.encode()?)?.encode()?;
+    let object_id = *ObjectId::compute(&bytes).as_bytes();
+    let mut state = CompanionState::default();
+    state.objects.insert(object_id, bytes);
+    let ordinary = RecordRow {
+        record_object_id: object_id,
+        record_id: ACCEPTED,
+        record_kind: FINALIZATION_RECORD,
+        terminal: true,
+        predecessor_record_id: PREDECESSOR,
+    };
+    let candidate = candidate_row([0x44; 32]);
+    let records = BTreeMap::from([(SEQUENCE, &ordinary), (SEQUENCE + 1, &candidate)]);
+    let row = RouteRow {
+        sequencer_head_id: [0x44; 32],
+        route_sequence: SEQUENCE + 1,
+        ..route_row()
+    };
+    assert_eq!(
+        restore_log_phase(&state, OLD, &row, &records).map(|restored| restored.phase),
+        Some(Phase::Open)
+    );
+    Ok(())
+}

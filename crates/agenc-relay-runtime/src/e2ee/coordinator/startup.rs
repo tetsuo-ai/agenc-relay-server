@@ -1468,9 +1468,9 @@ struct RestoredLogPhase {
 }
 
 /// The phase the durable head restores (`head_log_phase`), except that a
-/// group the head leaves open whose log went on with ordinary records after
-/// a finalized ReInit Commit is retired (`ordinary_after_reinit`). A route
-/// row whose head is not its last retained record restores nothing.
+/// group the head leaves open while any retained finalization is that of a
+/// ReInit Commit is retired (`reinit_finalized`). A route row whose head is
+/// not its last retained record restores nothing.
 fn restore_log_phase(
     state: &CompanionState,
     conversation_id: [u8; 32],
@@ -1481,7 +1481,7 @@ fn restore_log_phase(
         return None;
     }
     let mut restored = head_log_phase(state, conversation_id, row, records)?;
-    if restored.phase == Phase::Open && ordinary_after_reinit(state, records) {
+    if restored.phase == Phase::Open && reinit_finalized(state, records) {
         restored.phase = Phase::Retired;
     }
     Some(restored)
@@ -1662,20 +1662,15 @@ fn previous_profile_terminal(
     .then_some(())
 }
 
-/// Whether the log holds a finalized ReInit Commit followed by a record
-/// other than a ReInit attempt receipt. Under the previous profile the
-/// ReInit phase began only at the first attempt, so ordinary records could
-/// follow such a finalization; this profile closes the group at the
-/// finalization (companion 13.8 step 2) and does not continue a group that
-/// went on after it.
-fn ordinary_after_reinit(state: &CompanionState, records: &BTreeMap<u64, &RecordRow>) -> bool {
-    records.iter().any(|(sequence, record)| {
-        let followed = sequence
-            .checked_add(1)
-            .and_then(|next| records.get(&next))
-            .is_some_and(|next| next.record_kind != REINIT_ATTEMPT_RECORD);
-        followed
-            && record.record_kind == FINALIZATION_RECORD
+/// Whether any retained finalization is that of a ReInit Commit, whose
+/// authorization carries the ReInit bit. Such a finalization closes the old
+/// group for good (companion 13.8 step 2), so a head that would leave the
+/// group open cannot be continued: under this profile no open head follows
+/// one, and under the previous profile, whose ReInit phase began only at the
+/// first attempt, ordinary records could.
+fn reinit_finalized(state: &CompanionState, records: &BTreeMap<u64, &RecordRow>) -> bool {
+    records.values().any(|record| {
+        record.record_kind == FINALIZATION_RECORD
             && matches!(
                 decode_object(
                     state,

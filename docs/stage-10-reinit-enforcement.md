@@ -228,10 +228,9 @@ This commit keeps the coordinator startable and every such group closed:
   and `EGROUP BIND` cannot be checked against its activation and is retired
   with its predecessor (`discard_unanchored_successors`, `retire_route`), in
   binding-generation order, so a chain of them is retired.
-- A group that its head leaves open, but whose log holds a finalized ReInit
-  Commit followed by any record other than an attempt receipt, is retired
-  (`restore_log_phase`, `ordinary_after_reinit`) once the head's own checks
-  have passed.
+- A group that its head leaves open while its log holds a finalized ReInit
+  Commit is retired (`restore_log_phase`, `reinit_finalized`) once the
+  head's own checks have passed.
 - Unchanged: an attempt left open restores open in the ReInit phase and can
   neither complete nor be aborted, because its object has the previous
   layout; no other attempt follows it, refused with
@@ -687,6 +686,14 @@ branch. Its findings are taken up at the level of the rules below.
   installed successor whose predecessor's binding names the collected
   roster; both fail against the previous commit's coordinator. The C1 and
   C2 tests now show that the retained facts decide.
+- A restart retires a group whose head would leave it open whenever any
+  retained finalization is that of a ReInit Commit (`reinit_finalized`,
+  which replaces `ordinary_after_reinit`). Stores of this coordinator never
+  hold such a log and the ten `70c832c` stores restore as before. A unit
+  test restores two logs whose open head follows a retained ReInit
+  finalization as retired, and one whose finalization is ordinary as open;
+  it fails against the previous commit. The coverage region of the old
+  helper is replaced by `p04-startup-reinit-finalized`.
 
 ## Validation
 
