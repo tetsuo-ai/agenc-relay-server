@@ -93,6 +93,44 @@ fn a_reload_refuses_a_route_row_that_no_longer_matches_its_activation_record() -
     Ok(())
 }
 
+#[test]
+fn a_reload_refuses_a_successor_route_row_under_another_lock_or_incarnation() -> TestResult {
+    // The successor keeps the semantic lock and the incarnation of its
+    // predecessor's route (companion 13.8): a successor route row that
+    // names another restores nothing.
+    type RowEdit = fn(&mut RouteRow);
+    let edits: [(&str, RowEdit); 2] = [
+        ("another semantic lock", |row| row.lock_id[0] ^= 1),
+        ("another incarnation", |row| {
+            row.predecessor_close_id = Some([7; 32]);
+        }),
+    ];
+    let mut unedited = Fixture::prepare()?;
+    unedited.activate()?;
+    let restored = unedited.harness.reloaded()?;
+    assert_eq!(
+        restored
+            .coordinator
+            .state
+            .logs
+            .get(&unedited.new)
+            .map(SequencerLog::phase),
+        Some(Phase::Open)
+    );
+    for (name, edit) in edits {
+        let mut fixture = Fixture::prepare()?;
+        fixture.activate()?;
+        let key = RouteRow::key(&fixture.new)?;
+        rewrite(&mut fixture.harness, &key, |body| {
+            let mut row = RouteRow::decode(&body)?;
+            edit(&mut row);
+            Ok(row.encode()?)
+        })?;
+        assert!(fixture.harness.reloaded().is_err(), "{name}");
+    }
+    Ok(())
+}
+
 /// Aborts the staged attempt of `fixture` with its single device's vote.
 fn abort(fixture: &mut Fixture) -> TestResult {
     let old_state = *fixture

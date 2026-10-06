@@ -2,7 +2,8 @@
 //! activation and the restore of an installed successor read the facts of
 //! the old binding that the coordinator retained when it verified the
 //! binding, so the expiry of the roster snapshot that binding names, once
-//! the principal's roster has moved on, refuses none of them.
+//! the principal's roster has moved on, refuses none of them, and neither
+//! does a later rotation of the principal's account root.
 
 #![forbid(unsafe_code)]
 
@@ -111,6 +112,59 @@ fn an_installed_successor_restarts_after_the_roster_its_predecessor_named_expire
     assert_eq!(
         state.logs.get(&fixture.new).map(SequencerLog::phase),
         Some(Phase::Open)
+    );
+    assert_eq!(
+        state
+            .routes
+            .channel_route(&agenc_relay_types::ChannelInstanceId::from_bytes(INSTANCE))
+            .map(|route| route.conversation_id.0),
+        Some(fixture.new)
+    );
+    Ok(())
+}
+
+#[test]
+fn an_installed_successor_restarts_after_its_principal_rotates_the_account_root() -> TestResult {
+    use crate::e2ee::coordinator::tests::{DEVICE, ROOT_SEED, support};
+    let mut fixture = Fixture::prepare()?;
+    fixture.activate()?;
+    let harness = &mut fixture.harness;
+    let secret = support::key(ROOT_SEED + 1);
+    let root = support::root(
+        &secret,
+        &harness.account,
+        1,
+        (0, 2_000_000),
+        Some((&harness.principal.root_secret, &harness.principal.root)),
+    )?;
+    let bytes = wire(ArcWireObjectKind::RootIdentity, &root)?;
+    ok(harness.run(Op::PublishIdentity, &[], Some(&bytes))?)?;
+    let mut device = support::DeviceSpec::new(DEVICE);
+    device.target_roster_generation = 1;
+    let roster = support::roster(
+        &secret,
+        &root,
+        1,
+        support::roster_id(&harness.principal.roster)?,
+        (100, 100 + 6 * 24 * 3600),
+        vec![support::certificate(&secret, &root, &device)?],
+        Vec::new(),
+    )?;
+    let bytes = wire(ArcWireObjectKind::DeviceRoster, &roster)?;
+    ok(harness.run(Op::PublishRoster, &[], Some(&bytes))?)?;
+    // The principal's newest root is no longer the one the bindings name.
+    let restarted = fixture.harness.reloaded()?;
+    let state = &restarted.coordinator.state;
+    assert_eq!(
+        state.logs.get(&fixture.new).map(SequencerLog::phase),
+        Some(Phase::Open)
+    );
+    assert_eq!(
+        state.logs.get(&fixture.old).map(SequencerLog::phase),
+        Some(Phase::Migrated {
+            activation_id: fixture.activation_id,
+            new_conversation_id: fixture.new,
+        })
     );
     assert_eq!(
         state

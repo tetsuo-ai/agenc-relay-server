@@ -403,8 +403,10 @@ Second commit:
   candidate with no binding, and the candidate survives a restart. An
   activation evaluated but not committed leaves, after a restart, the old
   route closed with its attempt pending and no part of the successor, and the
-  same activation then installs it. The route is neither reserved nor bound
-  again. An activation without its authority, with a foreign authority, under
+  same activation then installs it. The route is not reserved again, and
+  the successor's package, of generation one, does not bind even through a
+  live reservation of its channel, which then binds a generation-zero
+  binding (rewritten in the review's follow-up). An activation without its authority, with a foreign authority, under
   an exhausted work budget, with a successor policy that does not verify,
   with a pin this coordinator does not issue under, or without the old
   binding's retained facts retains nothing, and after the roster moved on
@@ -558,10 +560,11 @@ vacancy in the handler and in the admission, the six identity conditions of
 a restored finalization head, the restored authority, the authority of
 another record, and the domain's phase entry and its precondition) kill 23,
 so the campaign kills 27 of its 28 entries. The survivor takes the principal's
-newest root instead of the root the binding names: only a root rotation
-makes them differ, and after one the old-policy authorization, which this
-change does not alter, refuses the attempt whichever root the binding check
-took (see the limitations).
+newest root instead of the root the binding names. This record first called
+it equivalent, which it is not: a test of a restart after a root rotation
+that follows the activation, run against the code before the review's
+follow-up with the survivor applied, fails. The follow-up removed the code
+the survivor changes (see the review section).
 
 The second commit's campaign, run the same way (the domain's route table
 tests for the route table mutations), reverts three rules and 26 single
@@ -582,11 +585,11 @@ elsewhere, the restore's binding comparison, its four anchor conditions, its
 lifecycle, its route selection and its missing-successor fault, and the
 route table's eight install conditions), 25 are killed, so the campaign
 kills 28 of its 29 entries. The survivor skips the route selection after the
-restore's checks: `restore_entry` already gives the route to the higher
-binding generation of one lock and incarnation whatever the read order, and
-the lineage the selection checks follows from the binding comparison before
-it, so no reachable store distinguishes it; the selection is kept as it was
-before this change.
+restore's checks. This record first called it indistinguishable, which it
+is not: the selection is the only check that the successor's route row
+keeps the semantic lock and the incarnation of its predecessor's route,
+which the restored route takes from that row. The review's follow-up adds a
+test that changes either in the successor's row, and it kills the survivor.
 
 The third commit's campaign, run the same way (the domain and testkit
 suites for the two domain mutations, the runtime's E2EE tests otherwise),
@@ -694,6 +697,21 @@ branch. Its findings are taken up at the level of the rules below.
   finalization as retired, and one whose finalization is ordinary as open;
   it fails against the previous commit. The coverage region of the old
   helper is replaced by `p04-startup-reinit-finalized`.
+- The survivors of the first two campaigns are not equivalent, and tests
+  now tell them apart (see the revert proofs and mutations). A coordinator
+  holding an installed successor restarts with it after the principal
+  rotates its account root: the test passes against the code before this
+  follow-up and fails with the first campaign's survivor applied to that
+  code (the tip no longer has the code it changes). A successor route row
+  that names another semantic lock or another incarnation than its
+  predecessor's route refuses startup, which kills the second campaign's
+  survivor. The
+  reservation test's `EGROUP BIND` case now binds the successor's package
+  through a live reservation of its channel, in a coordinator that never
+  bound the channel, and the same reservation then binds the
+  generation-zero binding, so the refusal is that of the rule that
+  `EGROUP BIND` binds generation zero only; dropping that rule from the
+  route table fails the test.
 
 ## Validation
 

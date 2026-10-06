@@ -445,16 +445,40 @@ fn the_successor_is_never_reserved_or_bound() -> TestResult {
         code(fixture.harness.run(Op::ReserveChannel, &reserve, None)?),
         Some(E2eeReplyCode::GroupConflict)
     );
-    let mut bind = [7; 16].to_vec();
+    // Nor does the successor's package bind through a reservation, even a
+    // live one for its channel: `EGROUP BIND` binds generation zero only.
+    // Here the channel was never bound, so the reservation is live, and
+    // the same reservation then binds the generation-zero binding.
+    let mut harness = Harness::new()?;
+    harness.publish_identity_and_roster()?;
+    harness.attach()?;
+    let outcome = ok(harness.run(Op::ReserveChannel, &reserve, None)?)?;
+    let ResultBody::Reserved(reservation_id, _) = outcome.result else {
+        return Err("expected a reservation".into());
+    };
+    let mut bind = reservation_id.to_vec();
     bind.extend_from_slice(&fixture.new);
     bind.extend_from_slice(&fixture.context_digest()?);
     let package = fixture.package_bytes()?;
-    let before = fixture.harness.coordinator.state.conversations.clone();
+    let (conversations, routes) = (
+        harness.coordinator.state.conversations.clone(),
+        harness.coordinator.state.routes.clone(),
+    );
     assert_eq!(
-        code(fixture.harness.run(Op::BindGroup, &bind, Some(&package))?),
+        code(harness.run(Op::BindGroup, &bind, Some(&package))?),
         Some(E2eeReplyCode::BindingAuthInvalid)
     );
-    assert_eq!(fixture.harness.coordinator.state.conversations, before);
+    assert_eq!(harness.coordinator.state.conversations, conversations);
+    assert_eq!(harness.coordinator.state.routes, routes);
+    let mut bind = reservation_id.to_vec();
+    bind.extend_from_slice(&agenc_relay_e2ee::ids::conversation_id(
+        &NETWORK,
+        &crate::e2ee::coordinator::tests::GROUP,
+    )?);
+    bind.extend_from_slice(&[44; 32]);
+    let binding = harness.binding_bytes()?;
+    let outcome = ok(harness.run(Op::BindGroup, &bind, Some(&binding))?)?;
+    assert!(matches!(outcome.result, ResultBody::Bound { .. }));
     Ok(())
 }
 
