@@ -638,6 +638,25 @@ route held to the rule, a route without records refused), 5 of 5 entries.
 - The restore fixtures come from the `70c832c` coordinator's test harness,
   not from a running `arcd` of that release, and cover one channel route.
 
+## Review
+
+An independent review of this topic led to follow-up commits on the same
+branch. Its findings are taken up at the level of the rules below.
+
+- The shared helper checks a carried target against the facts of the old
+  conversation's current binding that a verifier retained when it verified
+  that binding (`agenc_relay_e2ee::reinit_target::ReinitPredecessor`, read
+  from a `VerifiedBinding` or from the binding's TBS, with
+  `check_carried_target_from` and `AuthorizedReinit::check_attempt_from`;
+  the earlier entry points delegate to them), and
+  `route::verify_replacement_binding` verifies a replacement package of
+  generation one or later, which a checked terminal record installs, without
+  the principals' rosters: the semantic route and the binding shape, the
+  concrete route, empty approvals and locks, the principals in canonical
+  order as the route requires them, and the plan. A replacement verifies to
+  the same `VerifiedBinding` with or without rosters. The coordinator adopts
+  both in the next commit.
+
 ## Validation
 
 On the tree of this commit, before it was committed, with Rust 1.98.0:

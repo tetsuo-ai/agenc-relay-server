@@ -283,6 +283,88 @@ pub fn verify_binding_package(
     })
 }
 
+/// Verifies a replacement binding package, of generation one or later, that
+/// is installed by a terminal record the caller has checked, such as the
+/// successor a quorum-activated ReInit installs (companion 9.4 and 13.8),
+/// without the principals' rosters: the semantic route, the shape every
+/// binding has against it, the concrete route, the empty approval and lock
+/// vectors of a replacement, the principals in canonical order and as the
+/// route requires them (both direct accounts, or a principal under the
+/// channel's authority root), and the initial member plan. A replacement
+/// derives its authority from that terminal record, so no roster snapshot
+/// it names has to be resident. The result's `locks` are empty.
+pub fn verify_replacement_binding(
+    network_id: &[u8; 32],
+    package: &ArcConversationBindingPackage,
+) -> Result<VerifiedBinding, E2eeError> {
+    let tbs = &package.binding.tbs;
+    let route = verify_semantic_route(network_id, &tbs.semantic_route)?;
+    check_binding_shape(network_id, tbs, &route)?;
+    if tbs.binding_generation == 0
+        || !package.binding.approvals.is_empty()
+        || !package.root_binding_locks.is_empty()
+    {
+        return Err(E2eeError::InvalidValue);
+    }
+    let (group_id, route_binding, instance, nonce) = concrete_route(network_id, tbs, &route)?;
+    let principal_ids = replacement_principals(tbs, &route)?;
+    let plan_id = verify_initial_member_plan(&package.initial_member_plan)?;
+    if plan_id != tbs.initial_member_plan_id {
+        return Err(E2eeError::InvalidValue);
+    }
+    Ok(VerifiedBinding {
+        binding_id: semantic_id_of(SemanticHashDomain::BindingId, tbs)?,
+        generation: tbs.binding_generation,
+        previous_binding_id: tbs.previous_binding_id,
+        route,
+        conversation_id: tbs.conversation_id,
+        group_id,
+        route_binding,
+        channel_instance_id: instance,
+        conversation_nonce: nonce,
+        cipher_suite: tbs.cipher_suite,
+        initial_member_plan_id: tbs.initial_member_plan_id,
+        context_core_id: tbs.context_core_id,
+        sequencer_credential_id: tbs.sequencer_credential_id,
+        principals: principal_ids,
+        locks: Vec::new(),
+    })
+}
+
+/// The principals a replacement binding names, in canonical order, as its
+/// route requires them: exactly the two direct accounts, or at least one
+/// principal under the channel's authority root.
+fn replacement_principals(
+    tbs: &ArcConversationBindingTbs,
+    route: &SemanticRoute,
+) -> Result<Vec<AccountIdBytes>, E2eeError> {
+    let entries = tbs.principals.as_slice();
+    if entries.len() > MAX_BINDING_PRINCIPALS {
+        return Err(E2eeError::LimitExceeded);
+    }
+    ensure_canonical(entries, |entry| entry.account_id.clone())?;
+    let mut ids = Vec::new();
+    ids.try_reserve(entries.len())
+        .map_err(|_| E2eeError::BudgetExceeded)?;
+    for entry in entries {
+        ids.push(account_id_bytes(&entry.account_id)?);
+    }
+    let agrees = match &route.key {
+        SemanticRouteKey::Direct {
+            account_a,
+            account_b,
+        } => ids == [*account_a, *account_b],
+        SemanticRouteKey::Channel { authority_root, .. } => entries
+            .iter()
+            .any(|entry| entry.root_fingerprint == *authority_root),
+    };
+    if agrees {
+        Ok(ids)
+    } else {
+        Err(E2eeError::InvalidValue)
+    }
+}
+
 /// The shape every binding meets against the semantic route it carries
 /// (companion 9.4): this profile, network and MLS version with an enabled
 /// suite, the route's conversation kind and semantic route lock, a previous

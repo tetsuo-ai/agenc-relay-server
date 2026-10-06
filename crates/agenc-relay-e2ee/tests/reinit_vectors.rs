@@ -30,7 +30,9 @@ use agenc_relay_e2ee::history::{ChainStep, Lifecycle};
 use agenc_relay_e2ee::ids::semantic_id_of;
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::objects::reinit::ArcReInitTargetTbs;
-use agenc_relay_e2ee::reinit_target::{AuthorizedReinit, check_carried_target};
+use agenc_relay_e2ee::reinit_target::{
+    AuthorizedReinit, ReinitPredecessor, check_carried_target, check_carried_target_from,
+};
 use agenc_relay_e2ee::{TlsDecode, TlsEncode};
 
 /// Every decoded record, attempt and target re-encodes to its exact bytes.
@@ -158,6 +160,17 @@ fn both_suites_rebuild_one_target_and_activate_it_through_the_shared_history() -
         assert_eq!(&carried, target.carried(), "{prefix}");
         assert_eq!(
             check_carried_target(&network()?, &old_binding, &attempt.target, &mut budget())?,
+            carried
+        );
+        // The same checks against the facts the sequencer retained when it
+        // verified the old binding.
+        let facts = retained_facts()?;
+        assert_eq!(
+            authorized.check_attempt_from(&attempt, &facts, &mut budget())?,
+            carried
+        );
+        assert_eq!(
+            check_carried_target_from(&network()?, &facts, &attempt.target, &mut budget())?,
             carried
         );
         authorized.check_attempt_target(&attempt, &target)?;
@@ -440,5 +453,72 @@ fn an_attempt_carrying_another_target_than_the_authorized_one_is_refused() -> Te
     chain.bind_reinit_target(target.tbs())?;
     assert!(advance_attempt(&mut chain, receipt, object).is_err());
     assert_eq!(chain.head(), &head);
+    Ok(())
+}
+
+/// The facts of the old conversation's genesis binding, read from its
+/// retained package without the rosters that verified it.
+fn retained_facts() -> TestResult<ReinitPredecessor> {
+    let bytes = read("genesis-binding.bin")?;
+    let mut budget = budget();
+    let object = ArcWireObject::decode_kind(
+        &bytes,
+        Some(ArcWireObjectKind::ConversationBinding),
+        &mut budget,
+    )?;
+    let package =
+        agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage::decode_exact(
+            object.body(),
+            &mut budget,
+        )?;
+    Ok(ReinitPredecessor::of_binding_tbs(&package.binding.tbs)?)
+}
+
+#[test]
+fn the_facts_of_a_retained_binding_are_those_of_the_verified_binding() -> TestResult {
+    let (binding, _) = old_authority()?;
+    let facts = retained_facts()?;
+    assert_eq!(facts, ReinitPredecessor::of_binding(&binding));
+    // The facts of another binding of the conversation describe another
+    // predecessor, which no successor in the vectors replaces.
+    let target = Proposal::of(1)?.reconstruct()?;
+    check_carried_target_from(&network()?, &facts, target.tbs(), &mut budget())?;
+    let bytes = read("genesis-binding.bin")?;
+    let mut budget = budget();
+    let object = ArcWireObject::decode_kind(
+        &bytes,
+        Some(ArcWireObjectKind::ConversationBinding),
+        &mut budget,
+    )?;
+    let package =
+        agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage::decode_exact(
+            object.body(),
+            &mut budget,
+        )?;
+    let mut later = package.binding.tbs.clone();
+    later.binding_generation += 1;
+    let mut renamed = package.binding.tbs.clone();
+    renamed.previous_binding_id = [9; 32];
+    // A channel instance or a conversation nonce of another length names no
+    // concrete route.
+    for (name, edit) in [("instance", (true, false)), ("nonce", (false, true))] {
+        let mut odd = package.binding.tbs.clone();
+        if edit.0 {
+            odd.channel_instance_id = agenc_relay_e2ee::Opaque::from_slice(&[1; 5])?;
+        }
+        if edit.1 {
+            odd.conversation_nonce = agenc_relay_e2ee::Opaque::from_slice(&[1; 5])?;
+        }
+        assert!(ReinitPredecessor::of_binding_tbs(&odd).is_err(), "{name}");
+    }
+    for (name, tbs) in [("generation", &later), ("binding", &renamed)] {
+        let other = ReinitPredecessor::of_binding_tbs(tbs)?;
+        assert_ne!(other, facts, "{name}");
+        assert!(
+            check_carried_target_from(&network()?, &other, target.tbs(), &mut self::budget())
+                .is_err(),
+            "{name}"
+        );
+    }
     Ok(())
 }
