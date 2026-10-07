@@ -10,9 +10,11 @@ it, and answers a request that completes past its peer's ceiling with its
 failed result. The second assembles an edge's coordinator deliveries outside
 the recent-object cache and releases the coordinator's partial objects when
 its link closes. The third refuses a base declaration naming a session or
-account the coordinator removed for that origin alone. No specification,
-profile hash, registry entry, named limit, reply code, wire object, table,
-key, row kind, field or storage generation changed.
+account the coordinator removed for that origin alone. The fourth refuses a
+companion declaration naming a device attachment another attachment of the
+device superseded for that origin alone. No specification, profile hash,
+registry entry, named limit, reply code, wire object, table, key, row kind,
+field or storage generation changed.
 
 ## The coordinator's recent-object cache (first commit)
 
@@ -287,6 +289,69 @@ and `coordinator-refused-declaration-deletion` (branches) and
 `coordinator-refused-declaration` (regions). No reviewed region of the
 changed files changed its span. Both source inventories are refreshed.
 
+## A companion declaration naming a superseded attachment closes only its origin (fourth commit)
+
+The companion text this rule implements:
+
+- Section 11.6: `session_generation` "is a durable nonzero uint64 counter
+  scoped to the Account ID and Device ID", "every successful attachment
+  increments it exactly once", and "`FINISH` succeeds only by
+  compare-and-swap against the durable prior value"; Section 11.9:
+  `E2EE_DEVICE_REQUIRED` is "Connection lacks a current roster-active device
+  attachment".
+- Section 12.5: "An attached device requires an authenticated account, has
+  a 16-byte Device ID and nonzero device-session generation"; device attach
+  advances "the one shared base origin generation before either profile
+  accepts a request under it"; "`DEL` supplies the next unused sequence and
+  permanently fences later requests"; and "reconnect must replay RESET and
+  origin state before resuming".
+
+The coordinator mirrors a declared attachment only at the directory's
+current generation. The rules, in
+`crates/agenc-relay-runtime/src/e2ee/coordinator/sync.rs`:
+
+- **The declaration is refused for its origin alone.** A declaration whose
+  device session generation the directory has advanced past is refused
+  (`mirrored_device`, `MirrorFault::Superseded`, `refuse_declaration`):
+  nothing is acknowledged, and the companion origin is fenced at the
+  generation and next sequence it holds, as a deletion there would. The link
+  stays up. A generation the directory has not reached, or any other
+  disagreement, is still a violation.
+- **Every later declaration of the origin is refused alike.** The edge
+  answers the connection's encrypted commands with `E2EE_SYNCING` while its
+  declaration is unacknowledged, and carries the attachment into the
+  declarations of later base generations; each of them, and a replay on a
+  later link, is refused without change until the edge deletes the origin
+  (`refused_origins`). A new incarnation of the edge forgets the previous
+  one's refusals.
+- **The edge's deletion is acknowledged.** It names the generation of the
+  last declaration its link carried, which is the one refused last, and the
+  coordinator acknowledges it; the origin stays fenced (`origin_del`).
+- An attachment the coordinator accepted stays accepted: the identical
+  declaration of the accepted state is acknowledged again after the device
+  attaches elsewhere (first commit).
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::coordinator::tests::sync::superseded_attachments::a_declaration_naming_a_superseded_attachment_closes_only_its_origin` | The directory is at generation two; the declaration naming generation one is not acknowledged and fences the origin where it stood, a later declaration (a logout still naming the device) is refused alike, and the deletion naming the generation refused last is acknowledged. |
+| `e2ee::coordinator::tests::sync::superseded_attachments::an_attachment_the_directory_never_reached_is_still_a_violation` | A declaration naming a generation above the directory's is a violation, and nothing is fenced. |
+| `e2ee::coordinator::tests::sync::superseded_attachments::a_refused_declaration_replayed_on_the_next_link_is_refused_again` | After the link is replaced, READY follows the RESET, the replayed declaration is refused again, and the deletion is acknowledged. |
+| `e2ee::coordinator::tests::sync::superseded_attachments::an_accepted_attachment_is_acknowledged_again_after_another_supersedes_it` | A declaration accepted at the directory's generation is acknowledged again on the next link after the device attaches on another connection. |
+
+With the coordinator's `sync.rs` and `mod.rs` set back to the third commit,
+the first and third tests fail and the other 99 synchronization tests pass.
+Single edits fail tests as well, one for each part of the rule: dropping
+the refusal fails the first and third; not refusing a later declaration of
+a refused origin fails the first; not acknowledging the deletion of the
+generation refused last fails the first and third; and refusing without
+fencing fails the first.
+
+The release coverage policy gains `companion-superseded-attachment`
+(branches) and `companion-refused-declaration` (regions), and re-reviews and
+respans `cap78-sync-origin-reset`, `cap78-sync-origin-del` and
+`cap90-current-base-origin-admission`; the other regions of the file move
+with unchanged spans. Both source inventories are refreshed.
+
 ## Validation
 
 Each commit, Rust 1.98.0, from the worktree root: `cargo clippy --workspace
@@ -311,5 +376,8 @@ proof and single edits above ran the edge tests of the runtime library.
 Third commit: the runtime library run passes 2,778 of 2,778. The revert
 proof and single edits above ran the coordinator tests of the runtime
 library.
+
+Fourth commit: the runtime library run passes 2,782 of 2,782. The revert
+proof and single edits above ran the coordinator's synchronization tests.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

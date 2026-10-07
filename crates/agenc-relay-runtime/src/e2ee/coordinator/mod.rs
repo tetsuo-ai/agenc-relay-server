@@ -511,6 +511,10 @@ pub struct CompanionCoordinator {
     assembler: E2eeAssembler,
     /// The monotonic second the recent-object cache was last expired at.
     recent_expired_at: u64,
+    /// The generation of the last declaration of each origin that named an
+    /// attachment another attachment of its device superseded; the refusal
+    /// fenced the origin.
+    refused_origins: BTreeMap<CompanionOriginKey, u64>,
     open: BTreeMap<(ServerId, [u8; 16]), OpenRequest>,
     queued: BTreeMap<ServerId, VecDeque<QueuedCompanion>>,
     /// The state.
@@ -577,6 +581,7 @@ impl CompanionCoordinator {
                 RecentCeiling::PerSender,
             ),
             recent_expired_at: 0,
+            refused_origins: BTreeMap::new(),
             open: BTreeMap::new(),
             queued: BTreeMap::new(),
             state: CompanionState::default(),

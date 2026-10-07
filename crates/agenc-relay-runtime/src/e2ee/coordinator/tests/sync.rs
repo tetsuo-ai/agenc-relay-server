@@ -12,6 +12,7 @@ mod origin_mirror;
 mod origin_refusals;
 mod recent_objects;
 mod review_witness;
+mod superseded_attachments;
 
 use agenc_relay_crypto::SemanticHashDomain;
 use agenc_relay_e2ee::federation::frames::{CompanionFrame, DeliveryPosition};
