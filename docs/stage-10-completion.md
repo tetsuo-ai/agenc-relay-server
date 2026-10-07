@@ -360,6 +360,10 @@ a route row's holding of the rosters its conversation's statements name,
 and the restore of stores written before these rules (D-39 with G-08, SDK
 program, outside master #35), are recorded in
 [the binding retention record](stage-10-binding-retention.md).
+An edge's companion origin deletion naming the generation of the last
+declaration its link carried and its next unused sequence, where the
+coordinator fences the origin (D-37, SDK program, outside master #35), is
+recorded in [the origin deletion record](stage-10-origin-deletion.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

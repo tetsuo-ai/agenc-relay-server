@@ -235,27 +235,35 @@ impl E2eeEdge {
         edge.advance_origin(context, generation);
     }
 
-    /// A connection ended: its companion origin is deleted at the next
-    /// unused sequence.
+    /// A connection ended: its companion origin is deleted at the generation
+    /// the coordinator holds and the next unused sequence under it (12.5).
+    /// The coordinator holds the last declaration this link carried, which
+    /// precedes the DEL, whether or not its acknowledgement has arrived; a
+    /// generation the edge has not sequenced yet starts at zero. An origin
+    /// no declaration on the live link names sends no DEL; either way the
+    /// connection's companion state is released.
     pub fn delete_origin(
         &mut self,
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         generation: ConnectionGeneration,
     ) {
-        let Some(origin) = self.origins.remove(&generation) else {
-            return;
-        };
-        let Some(acked) = origin.acked else {
-            return;
-        };
-        if let Ok(line) = self.line(&CompanionFrame::OriginDel {
-            coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
-            server_incarnation: self.config.incarnation,
-            origin_id: origin.origin_id,
-            origin_generation: acked,
-            next_operation_sequence: origin.next_sequence,
-        }) {
+        let deletion = self.origins.get(&generation).and_then(|origin| {
+            let declared = origin.declared?;
+            let next_operation_sequence = if origin.sequenced == Some(declared) {
+                origin.next_sequence
+            } else {
+                0
+            };
+            Some(CompanionFrame::OriginDel {
+                coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
+                server_incarnation: self.config.incarnation,
+                origin_id: origin.origin_id,
+                origin_generation: declared,
+                next_operation_sequence,
+            })
+        });
+        if let Some(Ok(line)) = deletion.map(|frame| self.line(&frame)) {
             self.send(context, edge, vec![line]);
         }
         self.connection_closed(generation);

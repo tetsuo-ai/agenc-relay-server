@@ -4,6 +4,7 @@
 //! transfer, driven through the frame entry point with a fake base host.
 
 mod delivery_restart;
+pub(crate) mod edge_peer;
 mod frame_addressing;
 mod inactive_ready;
 mod origin_admission;
@@ -517,14 +518,14 @@ fn origins_mirror_the_acked_base_declaration() -> TestResult {
     assert_eq!(updated.next_sequence, 0);
     assert_eq!(updated.account_id, Some(sync.harness.account));
 
-    // DEL must name the next unused sequence; then the origin is fenced.
+    // DEL must name the generation in force; then the origin is fenced.
     assert_eq!(
         sync.frame(CompanionFrame::OriginDel {
             coordinator_server_id: COORDINATOR,
             server_incarnation: INCARNATION,
             origin_id: ORIGIN,
-            origin_generation: 1,
-            next_operation_sequence: 4,
+            origin_generation: 0,
+            next_operation_sequence: 5,
         })
         .err(),
         Some(CompanionFault::Protocol)
