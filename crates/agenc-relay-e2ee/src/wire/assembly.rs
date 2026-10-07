@@ -24,9 +24,25 @@ use crate::wire::carrier::{CarrierCommand, ObjectLimit};
 use crate::wire::fragment::FragmentTag;
 use crate::wire::reply::E2eeReplyCode;
 
-/// Maximum completed submission tuples retained by one assembler. New
-/// submissions reserve a slot before allocation; live entries are not evicted.
+/// Maximum completed submission tuples retained by one assembler, or by one
+/// sender under [`RecentCeiling::PerSender`]. New submissions reserve a slot
+/// before allocation; live entries are not evicted.
 pub const MAX_RECENT_OBJECTS: usize = 4_096;
+
+/// How [`MAX_RECENT_OBJECTS`] bounds the completed submissions an assembler
+/// keeps for the recent-object idempotency cache (11.8).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RecentCeiling {
+    /// One ceiling over every sender: a new submission past it is refused
+    /// before any reservation.
+    #[default]
+    Shared,
+    /// One ceiling per sender: a new submission past its sender's ceiling
+    /// still assembles within its quotas, but keeps no recent tuple, which
+    /// [`E2eeAssembler::is_recent`] reports once it completes. The receiver
+    /// decides the outcome of such a submission from its own records.
+    PerSender,
+}
 
 /// Where a fragment came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -310,6 +326,9 @@ pub enum Ingest {
 #[derive(Clone, Debug)]
 struct Assembly {
     scopes: QuotaScopes,
+    /// Whether completion keeps the tuple in the recent-object cache; the
+    /// slot is reserved while the assembly is open.
+    records: bool,
     count: u32,
     total: usize,
     received: Vec<bool>,
@@ -347,14 +366,26 @@ pub struct E2eeAssembler {
     /// again there, for example when a coordinator delivers an object a
     /// local client submitted.
     recent: BTreeMap<AssemblyKey, u64>,
+    /// How [`MAX_RECENT_OBJECTS`] bounds `recent`.
+    ceiling: RecentCeiling,
+    /// The recent tuples of each sender.
+    recent_by_sender: BTreeMap<Sender, usize>,
 }
 
 impl E2eeAssembler {
     /// An assembler with the given quota limits.
     #[must_use]
     pub fn new(limits: QuotaLimits) -> Self {
+        Self::with_ceiling(limits, RecentCeiling::Shared)
+    }
+
+    /// An assembler with the given quota limits whose recent-object cache is
+    /// bounded as `ceiling` states.
+    #[must_use]
+    pub fn with_ceiling(limits: QuotaLimits, ceiling: RecentCeiling) -> Self {
         Self {
             quotas: QuotaLedger::new(limits),
+            ceiling,
             ..Self::default()
         }
     }
@@ -384,14 +415,10 @@ impl E2eeAssembler {
         if tag.object_id != key.object_id {
             return Err(AssemblyError::InvalidFragment);
         }
-        if !self.open.contains_key(&key) {
-            if key.direction != Direction::Response && self.is_recent(&key) {
-                return Ok(Ingest::Recent);
-            }
-            if key.direction != Direction::Response && !self.has_recent_capacity() {
-                return Err(AssemblyError::ReassemblyLimit);
-            }
-            self.open_assembly(&key, scopes, limit, tag, now)?;
+        if !self.open.contains_key(&key)
+            && let Some(answer) = self.admit(&key, scopes, limit, tag, now)?
+        {
+            return Ok(answer);
         }
         match self.place(&key, tag, now) {
             Ok(Ingest::Incomplete) if self.is_complete(&key) => self.finish(&key),
@@ -403,6 +430,33 @@ impl E2eeAssembler {
         }
     }
 
+    /// Opens the assembly of a new submission, or answers its exact copy
+    /// from the recent-object cache. Past the ceiling a new submission is
+    /// refused before any reservation under [`RecentCeiling::Shared`], and
+    /// assembles without a recent tuple under [`RecentCeiling::PerSender`].
+    fn admit(
+        &mut self,
+        key: &AssemblyKey,
+        scopes: QuotaScopes,
+        limit: ObjectLimit,
+        tag: &FragmentTag,
+        now: u64,
+    ) -> Result<Option<Ingest>, AssemblyError> {
+        if key.direction == Direction::Response {
+            self.open_assembly(key, scopes, limit, tag, now, false)?;
+            return Ok(None);
+        }
+        if self.is_recent(key) {
+            return Ok(Some(Ingest::Recent));
+        }
+        let records = self.has_recent_capacity(key);
+        if !records && self.ceiling == RecentCeiling::Shared {
+            return Err(AssemblyError::ReassemblyLimit);
+        }
+        self.open_assembly(key, scopes, limit, tag, now, records)?;
+        Ok(None)
+    }
+
     fn open_assembly(
         &mut self,
         key: &AssemblyKey,
@@ -410,6 +464,7 @@ impl E2eeAssembler {
         limit: ObjectLimit,
         tag: &FragmentTag,
         now: u64,
+        records: bool,
     ) -> Result<(), AssemblyError> {
         let total = usize::try_from(tag.total).map_err(|_| AssemblyError::ObjectTooLarge)?;
         if total > limit.max_bytes || tag.count > limit.max_fragments {
@@ -430,6 +485,7 @@ impl E2eeAssembler {
             key.clone(),
             Assembly {
                 scopes,
+                records,
                 count: tag.count,
                 total,
                 received: vec![false; count],
@@ -503,15 +559,23 @@ impl E2eeAssembler {
             .is_some_and(|assembly| assembly.received_count == assembly.count)
     }
 
-    /// Every open submission reserves its eventual recent tuple, so
-    /// finishing several outstanding assemblies cannot exceed the cap.
-    fn has_recent_capacity(&self) -> bool {
+    /// Every open submission that records reserves its eventual recent
+    /// tuple, so finishing several outstanding assemblies cannot exceed the
+    /// ceiling: over every sender, or over the sender of `key` alone.
+    fn has_recent_capacity(&self, key: &AssemblyKey) -> bool {
+        let per_sender = self.ceiling == RecentCeiling::PerSender;
+        let counted = |sender: &Sender| !per_sender || *sender == key.sender;
         let reserved = self
             .open
-            .keys()
-            .filter(|key| key.direction != Direction::Response)
+            .iter()
+            .filter(|(open, assembly)| assembly.records && counted(&open.sender))
             .count();
-        self.recent.len().saturating_add(reserved) < MAX_RECENT_OBJECTS
+        let held = if per_sender {
+            self.recent_by_sender.get(&key.sender).copied().unwrap_or(0)
+        } else {
+            self.recent.len()
+        };
+        held.saturating_add(reserved) < MAX_RECENT_OBJECTS
     }
 
     fn finish(&mut self, key: &AssemblyKey) -> Result<Ingest, AssemblyError> {
@@ -525,8 +589,9 @@ impl E2eeAssembler {
         let retained_until = assembly
             .last
             .saturating_add(RECENT_OBJECT_IDEMPOTENCY_RETENTION_SECONDS);
-        if key.direction != Direction::Response {
-            self.recent.insert(key.clone(), retained_until);
+        if assembly.records && self.recent.insert(key.clone(), retained_until).is_none() {
+            let held = self.recent_by_sender.entry(key.sender).or_default();
+            *held = held.saturating_add(1);
         }
         Ok(Ingest::Complete(assembly.buffer))
     }
@@ -558,9 +623,46 @@ impl E2eeAssembler {
     /// outcome of such submissions uses this when the path that carried
     /// them is gone, such as the requests of a closed federation link.
     pub fn forget_recent(&mut self, select: impl Fn(&AssemblyKey) -> bool) -> usize {
-        let before = self.recent.len();
-        self.recent.retain(|key, _| !select(key));
-        before.saturating_sub(self.recent.len())
+        self.retain_recent(|key, _| !select(key))
+    }
+
+    /// Forgets one completed submission; returns whether it was recent.
+    pub fn forget(&mut self, key: &AssemblyKey) -> bool {
+        if self.recent.remove(key).is_none() {
+            return false;
+        }
+        self.release_sender_slot(&key.sender);
+        true
+    }
+
+    /// Forgets the completed submissions whose idempotency window ended by
+    /// `now` and leaves open assemblies alone; returns how many it forgot.
+    pub fn expire_recent(&mut self, now: u64) -> usize {
+        self.retain_recent(|_, until| *until > now)
+    }
+
+    fn retain_recent(&mut self, mut keep: impl FnMut(&AssemblyKey, &u64) -> bool) -> usize {
+        let mut released = Vec::new();
+        self.recent.retain(|key, until| {
+            let kept = keep(key, until);
+            if !kept {
+                released.push(key.sender);
+            }
+            kept
+        });
+        for sender in &released {
+            self.release_sender_slot(sender);
+        }
+        released.len()
+    }
+
+    fn release_sender_slot(&mut self, sender: &Sender) {
+        if let Some(held) = self.recent_by_sender.get_mut(sender) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                self.recent_by_sender.remove(sender);
+            }
+        }
     }
 
     /// Discards every assembly past its idle or absolute deadline and
@@ -575,7 +677,7 @@ impl E2eeAssembler {
         for key in &expired {
             self.discard(key);
         }
-        self.recent.retain(|_, until| *until > now);
+        self.expire_recent(now);
         expired
     }
 

@@ -369,6 +369,12 @@ after READY, under its acknowledged generation, and its base origin deletion
 naming a pending update only once a link carried it (D-37, SDK program,
 outside master #35), are recorded in [the origin deletion
 record](stage-10-origin-deletion.md).
+What one peer asks of the coordinator being refused for that request alone
+and never failing the federation link, beginning with the coordinator's
+recent-object cache bounded per peer, expired at the companion idempotency
+retention and answering a request past its peer's ceiling with its failed
+result (D-41, SDK program, outside master #35), is recorded in [the link
+faults record](stage-10-link-faults.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

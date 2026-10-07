@@ -996,3 +996,54 @@ pub(crate) fn membership_proof(
         tbs,
     })
 }
+
+impl crate::e2ee::coordinator::CompanionCoordinator {
+    /// Whether the request or payload object `object_id` of the request
+    /// `correlation` names, from `peer`, keeps a recent tuple.
+    pub(crate) fn holds_request_object(
+        &self,
+        peer: agenc_relay_types::ServerId,
+        correlation: &agenc_relay_e2ee::federation::frames::Correlation,
+        object_id: [u8; 32],
+    ) -> bool {
+        self.assembler.is_recent(&Self::assembly_key(
+            peer,
+            correlation,
+            request_command(),
+            object_id,
+        ))
+    }
+
+    /// Completes `bytes` from `peer` at `now_millis` as an object of the
+    /// request `correlation` names, the way its payload assembles.
+    pub(crate) fn complete_request_object(
+        &mut self,
+        peer: agenc_relay_types::ServerId,
+        correlation: &agenc_relay_e2ee::federation::frames::Correlation,
+        bytes: &[u8],
+        now_millis: u64,
+    ) -> Result<(), crate::e2ee::coordinator::CompanionFault> {
+        use crate::e2ee::coordinator::CompanionFault;
+        let object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
+        let key = Self::assembly_key(peer, correlation, request_command(), object_id);
+        let fragments = agenc_relay_e2ee::wire::fragment::fragment_object(bytes)
+            .map_err(|_| CompanionFault::Protocol)?;
+        for fragment in fragments {
+            let _progress = self.ingest(
+                key.clone(),
+                peer,
+                agenc_relay_e2ee::wire::carrier::CarrierCommand::DeliverWelcome,
+                &fragment,
+                now_millis,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The carrier every request and payload object assembles under.
+fn request_command() -> agenc_relay_e2ee::wire::carrier::CarrierCommand {
+    agenc_relay_e2ee::wire::carrier::CarrierCommand::Federation(
+        agenc_relay_e2ee::object::ArcWireObjectKind::FederationRequest,
+    )
+}

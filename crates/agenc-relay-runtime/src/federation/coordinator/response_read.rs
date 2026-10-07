@@ -150,6 +150,12 @@ fn advance(
     let output = job.finish(executor).map_err(companion::fault_violation)?;
     coordinator.counters.requests_replayed =
         coordinator.counters.requests_replayed.saturating_add(1);
+    // The stored result answers the request: its replay row answers any later
+    // copy, so its objects leave the recent-object cache, as for a resident
+    // replay.
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor.request_answered(identity.peer, &identity.correlation);
+    }
     send(coordinator, context, link, identity.peer, output);
     Ok(())
 }

@@ -366,20 +366,21 @@ impl CompanionCoordinator {
             scope: None,
             object_id: agenc_relay_e2ee::ObjectId::from_bytes(descriptor.object_id),
         };
-        let bytes = match self.ingest(key, peer, command, &fragment, now_millis)? {
+        let bytes = match self.ingest(key.clone(), peer, command, &fragment, now_millis)? {
             super::Ingested::Complete(bytes) => bytes,
             super::Ingested::Pending => return Ok(Vec::new()),
             super::Ingested::Recent => return self.redeclared(peer, &descriptor),
         };
+        // The origin table, not the recent-object cache, decides a repeated
+        // declaration: an identical one is acknowledged again, any other is
+        // checked anew, and none holds a slot of its peer's cache.
+        self.assembler.forget(&key);
+        if self.holds_declaration(&origin_key, &descriptor) {
+            return self.redeclared(peer, &descriptor);
+        }
         let origin = decode_origin(&bytes)?;
         let object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
-        let matches = origin.network_id == self.network_id
-            && origin.home_server_id == *peer.as_bytes()
-            && origin.server_incarnation == descriptor.server_incarnation
-            && origin.origin_id == descriptor.origin_id
-            && origin.origin_generation == descriptor.origin_generation
-            && object_id == descriptor.object_id;
-        if !matches {
+        if !self.describes(&origin, peer, &descriptor, object_id) {
             return Err(CompanionFault::Protocol);
         }
         let mirrored = self.mirror_origin(&origin, &bytes, &base)?;
@@ -398,8 +399,35 @@ impl CompanionCoordinator {
         Ok(vec![Action::Send(vec![ack])])
     }
 
-    /// An origin object the assembler already completed: the identical
-    /// declaration of the accepted state again is acknowledged again.
+    /// Whether the descriptor and the complete object name the same origin
+    /// state on this network from `peer`.
+    fn describes(
+        &self,
+        origin: &ArcFederationOrigin,
+        peer: ServerId,
+        descriptor: &OriginDescriptor,
+        object_id: [u8; 32],
+    ) -> bool {
+        origin.network_id == self.network_id
+            && origin.home_server_id == *peer.as_bytes()
+            && origin.server_incarnation == descriptor.server_incarnation
+            && origin.origin_id == descriptor.origin_id
+            && origin.origin_generation == descriptor.origin_generation
+            && object_id == descriptor.object_id
+    }
+
+    /// Whether the descriptor names exactly the accepted, unfenced state of
+    /// the origin.
+    fn holds_declaration(&self, key: &CompanionOriginKey, descriptor: &OriginDescriptor) -> bool {
+        self.state.origins.get(key).is_some_and(|origin| {
+            !origin.fenced
+                && origin.object_id == descriptor.object_id
+                && origin.generation == descriptor.origin_generation
+        })
+    }
+
+    /// The identical declaration of the accepted state again is
+    /// acknowledged again.
     fn redeclared(
         &mut self,
         peer: ServerId,

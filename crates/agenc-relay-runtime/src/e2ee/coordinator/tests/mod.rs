@@ -332,6 +332,7 @@ impl Harness {
             },
             request: wire(ArcWireObjectKind::FederationRequest, &request)?,
             payload: payload.map(<[u8]>::to_vec),
+            refusal: None,
         })
     }
 

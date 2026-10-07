@@ -61,6 +61,7 @@ mod retained_resume;
 mod ordinary_acks;
 
 mod combined_barriers;
+mod companion_refusals;
 mod object_reads;
 mod response_reads;
 #[path = "startup_cross_profile.rs"]

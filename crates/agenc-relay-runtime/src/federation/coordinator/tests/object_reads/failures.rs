@@ -114,6 +114,7 @@ async fn quiescing_keeps_read_ownership_and_does_not_run_queued_requests() -> Te
             correlation: f.complete.correlation,
             request: f.complete.request.clone(),
             payload: None,
+            refusal: None,
         }),
     )
     .map_err(|e| format!("queue: {e:?}"))?;

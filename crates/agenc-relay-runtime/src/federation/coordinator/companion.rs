@@ -496,6 +496,7 @@ pub(super) fn run_with_object(
     complete: CompleteRequest,
     resolved: Option<&crate::e2ee::coordinator::object_read::Resolved>,
 ) -> Result<(), Violation> {
+    let correlation = complete.correlation;
     let peers: Vec<ServerId> = coordinator.peers.keys().copied().collect();
     let origins = &coordinator.origins;
     let facts_for = |key: OriginKey| OriginFacts {
@@ -556,12 +557,27 @@ pub(super) fn run_with_object(
             Ok(())
         }
         Staged::Replay(lines) => {
-            coordinator.counters.requests_replayed =
-                coordinator.counters.requests_replayed.saturating_add(1);
-            send_lines(coordinator, context, link, peer, lines);
+            replayed(coordinator, context, (link, peer), &correlation, lines);
             Ok(())
         }
     }
+}
+
+/// Sends a request's stored result again; its replay row answers any later
+/// copy, so its objects leave the recent-object cache.
+fn replayed(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    (link, peer): (LinkId, ServerId),
+    correlation: &agenc_relay_e2ee::federation::frames::Correlation,
+    lines: Vec<FederationLineText>,
+) {
+    coordinator.counters.requests_replayed =
+        coordinator.counters.requests_replayed.saturating_add(1);
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor.request_answered(peer, correlation);
+    }
+    send_lines(coordinator, context, link, peer, lines);
 }
 
 /// Sends `lines` to the live link of `peer`, retiring the link on refusal.
@@ -901,6 +917,7 @@ pub(super) fn drain_queued(
             correlation: queued.correlation,
             request: queued.request,
             payload: queued.payload,
+            refusal: queued.refusal,
         };
         if let Err(violation) = run(coordinator, context, queued.link, queued.peer, complete) {
             coordinator.fail_link(context, queued.link, queued.peer, violation);
