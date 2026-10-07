@@ -7,4 +7,14 @@
 # openmls_rust_crypto is a testkit dev-dependency for the Stage 08
 # cross-implementation gate. No production crate graph contains it
 # (scripts/check-workspace.py enforces that); it runs no code at runtime.
-ignore = ["RUSTSEC-2026-0173"]
+#
+# RUSTSEC-2026-0330 and RUSTSEC-2026-0331: libcrux-kem 0.0.9 can panic on a
+# short hybrid key or seed. It is listed in Cargo.lock only because the lock
+# file records every optional dependency: hpke-rs 0.7.0 pins it through its
+# optional `libcrux` feature (hpke-rs-libcrux =0.7.0, libcrux-kem =0.0.9),
+# which no workspace crate enables, so it is in no resolved build graph
+# (`cargo tree -i libcrux-kem --target all -e all --all-features` prints
+# nothing, and `cargo deny check`, which scans the resolved all-features
+# graph, passes). The fixed 0.0.10 needs hpke-rs 0.8, which openmls_rust_crypto
+# 0.6.0 does not accept. Remove these entries when that dependency moves.
+ignore = ["RUSTSEC-2026-0173", "RUSTSEC-2026-0330", "RUSTSEC-2026-0331"]

@@ -2612,7 +2612,9 @@ recorded here so a later reviewer does not have to rediscover them.
   dependencies; `.cargo/audit.toml` ignores RUSTSEC-2026-0173, an
   unmaintained compile-time proc macro that openmls_rust_crypto reaches
   through the experimental HPKE feature and that no production crate graph
-  contains; the daemon's own view of their framing is what is compared,
+  contains, and RUSTSEC-2026-0330 and RUSTSEC-2026-0331 against libcrux-kem
+  0.0.9, which Cargo.lock lists only as an optional hpke-rs dependency that
+  no workspace crate enables (SDK program, outside master #35); the daemon's own view of their framing is what is compared,
   and any deviation between the libraries is recorded in
   `conformance/e2ee-interop-matrix.toml` rather than hidden.
 - Completed local submissions retain a bounded reply for 30 minutes, scoped
