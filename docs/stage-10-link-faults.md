@@ -13,9 +13,10 @@ its link closes. The third refuses a base declaration naming a session or
 account the coordinator removed for that origin alone. The fourth refuses a
 companion declaration naming a device attachment another attachment of the
 device superseded for that origin alone. The fifth answers a companion
-request whose batch storage refused with its failed result. No
-specification, profile hash, registry entry, named limit, reply code, wire
-object, table, key, row kind, field or storage generation changed.
+request whose batch storage refused with its failed result. The sixth adds
+daemon tests. No specification, profile hash, registry entry, named limit,
+reply code, wire object, table, key, row kind, field or storage generation
+changed.
 
 ## The coordinator's recent-object cache (first commit)
 
@@ -419,6 +420,37 @@ The release coverage policy gains `companion-rejected-request-answer`
 `cap79-fresh-object-006-run-with-object`; the other regions of the changed
 files move with unchanged spans. Both source inventories are refreshed.
 
+## Daemon tests (sixth commit)
+
+`crates/agenc-relay-server/tests/stage_eight_e2ee/link_faults.rs` runs the
+production coordinator and two production edges of the Stage 08 network
+with both profiles active:
+
+| Test | What it drives |
+| --- | --- |
+| `link_faults::companion_requests_and_guest_origins_past_one_recent_object_ceiling_keep_the_link` | Four sessions authenticated on edge A as one account ask `EKEY WHOAMI` repeatedly, each answered as its account, while guests from 24 loopback prefixes register on edge A and end their connections, each declaring and deleting its companion origin; together they pass one recent-object ceiling. A last guest registers after them. The coordinator logs no link closure and edge A no new link. |
+| `link_faults::a_declaration_naming_a_fenced_session_is_refused_for_its_origin` | Edge A dials the coordinator through a relay the test cuts and heals. A session authenticated on edge A as an account; while edge A's link is cut, the account's credential change on edge B fences every session of the account; edge A's next link declares the session again, the coordinator refuses that origin alone, the fence ends the connection, and a guest registers on edge A. After the heal edge A links once, and no link closes. |
+| `link_faults::a_superseded_attachment_declared_to_a_restarted_coordinator_is_refused_for_its_origin` | A session on edge A attaches a device; edge A's link is cut and the coordinator restarts without the companion origins it held in memory; the same device attaches on edge B; edge A's next link declares the session's attachment again and the coordinator refuses that origin alone: the session's encrypted commands get `E2EE_SYNCING`, edge B's session is served, the session's end is acknowledged, and a guest registers on edge A. After the heal edge A links once, and no link closes. |
+
+The relay is a plain TCP forwarder between edge A and the coordinator's
+federation listener; the TLS session runs end to end through it, and the
+relay counts the bytes it forwards. The test cuts it only once the
+coordinator reports no unacknowledged base delivery (`STATS FEDERATION`
+`base_outbox_objects`) and the relay has carried nothing for half a
+second, within the network wait, so that each edge resumes from the cursor
+the coordinator committed (companion Section 12.5). The base side is checked
+directly; the companion side is covered only by that quiet window, since the
+coordinator reports no count of unacknowledged companion events. The first test takes about
+five minutes on this host, where the coordinator commits each request's
+result and each guest's registration, origins and close one at a time; the
+other two take about twenty seconds each. The unit tests of the first five
+commits pin the rules deterministically, including the expiry, which a
+daemon test cannot wait thirty minutes for.
+
+The three tests fail at the start commit, built from its own sources with
+the test files of this commit. The fenced-session test also fails at the
+second commit, and the superseded-attachment test at the third.
+
 ## Validation
 
 Each commit, Rust 1.98.0, from the worktree root: `cargo clippy --workspace
@@ -450,5 +482,15 @@ proof and single edits above ran the coordinator's synchronization tests.
 Fifth commit: the runtime library run passes 2,785 of 2,785. The revert
 proof and single edits above ran the coordinator tests of the runtime
 library.
+
+Sixth commit: the runtime library run passes 2,785 of 2,785, and `cargo
+nextest run -p agenc-relay-server --test stage_eight_e2ee --all-features
+--locked --no-fail-fast -E 'test(/link_faults::/)'` passes 3 of 3
+(23.5 s, 21.2 s and 310.2 s), and the two relay tests pass 20 runs of
+20 confined to two processors. The earlier-revision runs above export each
+revision with `git archive`, copy in this commit's three test files, give
+every source a new modification time so that nothing built from another
+tree in the shared target directory is reused, and run the same command
+with each test's filter.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.
