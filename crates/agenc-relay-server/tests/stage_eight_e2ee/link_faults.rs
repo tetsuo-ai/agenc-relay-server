@@ -7,7 +7,9 @@
 //! account's credential change removes a session the edge declares again, or
 //! another connection supersedes a device attachment the edge declares again
 //! to a restarted coordinator. Each declaration is refused for its origin
-//! alone, and the link stays up.
+//! alone, and the link stays up. Edge A's link is also cut while the
+//! acknowledgement of an event it applied is still in flight, and it resumes
+//! (companion 12.5).
 #![forbid(unsafe_code)]
 
 use std::io::Read;
@@ -221,6 +223,8 @@ struct Relay {
     address: SocketAddr,
     /// Bytes forwarded so far, both directions together.
     traffic: Arc<std::sync::atomic::AtomicU64>,
+    /// Milliseconds the relay holds what edge A sends before forwarding it.
+    delay: Arc<AtomicU64>,
     open: Arc<std::sync::atomic::AtomicBool>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     streams: Arc<std::sync::Mutex<Vec<TcpStream>>>,
@@ -236,10 +240,11 @@ impl Relay {
         let open = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
         let traffic = Arc::new(AtomicU64::new(0));
+        let delay = Arc::new(AtomicU64::new(0));
         let streams = Arc::new(std::sync::Mutex::new(Vec::new()));
         let acceptor = {
             let (open, stop, streams) = (open.clone(), stop.clone(), streams.clone());
-            let traffic = traffic.clone();
+            let (traffic, delay) = (traffic.clone(), delay.clone());
             thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     let Ok((inbound, _)) = listener.accept() else {
@@ -255,13 +260,12 @@ impl Relay {
                     };
                     let pipes = (|| -> io::Result<()> {
                         inbound.set_nonblocking(false)?;
-                        for (from, to) in [
-                            (inbound.try_clone()?, outbound.try_clone()?),
-                            (outbound.try_clone()?, inbound.try_clone()?),
-                        ] {
-                            let traffic = traffic.clone();
-                            thread::spawn(move || forward(from, to, &traffic));
-                        }
+                        let (from, to) = (inbound.try_clone()?, outbound.try_clone()?);
+                        let (sent, held) = (traffic.clone(), delay.clone());
+                        thread::spawn(move || forward_held(from, to, sent, held));
+                        let (from, to) = (outbound.try_clone()?, inbound.try_clone()?);
+                        let sent = traffic.clone();
+                        thread::spawn(move || forward(from, to, &sent));
                         if let Ok(mut live) = streams.lock() {
                             live.push(inbound.try_clone()?);
                             live.push(outbound.try_clone()?);
@@ -275,6 +279,7 @@ impl Relay {
         Ok(Self {
             address,
             traffic,
+            delay,
             open,
             stop,
             streams,
@@ -299,6 +304,15 @@ impl Relay {
     fn traffic(&self) -> u64 {
         self.traffic.load(Ordering::SeqCst)
     }
+
+    /// Holds what edge A sends for `delay` before forwarding it, so a cut
+    /// drops what is still held.
+    fn hold_outbound(&self, delay: Duration) {
+        self.delay.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
 }
 
 /// Copies `from` to `to`, counting every forwarded byte, and closes `to`
@@ -315,6 +329,46 @@ fn forward(mut from: TcpStream, mut to: TcpStream, traffic: &std::sync::atomic::
         traffic.fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::SeqCst);
     }
     let _closed = to.shutdown(std::net::Shutdown::Both);
+}
+
+/// Chunks the relay's holding stage keeps at most; the reader waits beyond.
+const HELD_CHUNKS: usize = 256;
+
+/// Copies `from` to `to` as [`forward`] does, holding each chunk for the
+/// relay's delay first; when `from` ends, what is still held is written only
+/// while `to` stays open, so a cut drops it.
+fn forward_held(
+    mut from: TcpStream,
+    mut to: TcpStream,
+    traffic: Arc<std::sync::atomic::AtomicU64>,
+    delay: Arc<AtomicU64>,
+) {
+    let (held, release) = std::sync::mpsc::sync_channel::<(Instant, Vec<u8>)>(HELD_CHUNKS);
+    let writer = thread::spawn(move || {
+        for (due, bytes) in release {
+            thread::sleep(due.saturating_duration_since(Instant::now()));
+            if to.write_all(&bytes).is_err() {
+                break;
+            }
+            traffic.fetch_add(
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                Ordering::SeqCst,
+            );
+        }
+        let _closed = to.shutdown(std::net::Shutdown::Both);
+    });
+    let mut buffer = [0_u8; 16 * 1024];
+    while let Ok(read) = from.read(&mut buffer) {
+        let Some(bytes) = buffer.get(..read).filter(|bytes| !bytes.is_empty()) else {
+            break;
+        };
+        let due = Instant::now() + Duration::from_millis(delay.load(Ordering::SeqCst));
+        if held.send((due, bytes.to_vec())).is_err() {
+            break;
+        }
+    }
+    drop(held);
+    let _joined = writer.join();
 }
 
 impl Drop for Relay {
@@ -420,10 +474,10 @@ fn unacknowledged_deliveries(network: &Network) -> TestResult<u64> {
 
 /// Waits, within the network wait, until the coordinator holds no
 /// unacknowledged base delivery and edge A's relayed link has carried
-/// nothing for `QUIET`, so each edge resumes from the cursor the coordinator
-/// committed (companion 12.5). The base side is checked directly; the
-/// companion side is covered only by the quiet window, since the
-/// coordinator reports no count of unacknowledged companion events.
+/// nothing for `QUIET`, so the refusal tests cut a link that carries nothing
+/// the test does not control and replay only what they arranged. A resume
+/// needs no such wait (companion 12.5): the in-flight test cuts without
+/// it.
 fn settled(network: &Network, relay: &Relay) -> TestResult {
     let deadline = Instant::now() + NETWORK_WAIT;
     let mut seen = relay.traffic();
@@ -594,5 +648,113 @@ fn a_superseded_attachment_declared_to_a_restarted_coordinator_is_refused_for_it
                 "aftersupersede",
             )
         })
+    })
+}
+
+/// Cuts of edge A's link in the in-flight test.
+const IN_FLIGHT_CUTS: u64 = 4;
+/// How long the relay holds what edge A sends in the in-flight test: long
+/// enough that each cut drops the acknowledgement edge A wrote just before.
+const IN_FLIGHT_HOLD: Duration = Duration::from_millis(300);
+
+/// Publishes the device's capability statement at `generation`, chained to
+/// `previous`, and returns its identifier. The coordinator delivers the
+/// request's completion event to edge A, which answers the client only
+/// after it applied that event and wrote its `EACK`.
+fn publish_capabilities(
+    client: &mut ArcClient,
+    keys: &mut Principal,
+    generation: u64,
+    previous: [u8; 32],
+) -> TestResult<[u8; 32]> {
+    let capabilities = builders::capabilities(
+        keys.device,
+        &keys.keys.roster,
+        generation,
+        previous,
+        (200, 3_600),
+        vec![1],
+    )?;
+    let identifier = semantic_id_of(SemanticHashDomain::CapabilityId, &capabilities.tbs)?;
+    let object = wire_object(ArcWireObjectKind::DeviceCapabilities, &capabilities)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let label = keys.label();
+        send_object(
+            client,
+            &label,
+            &format!("EKEY PUBLISH CAPABILITIES {}", keys.device_token()),
+            &object,
+        )?;
+        let reply = labeled_reply(client, &label)?;
+        if reply
+            .iter()
+            .any(|line| line.contains(" EKEY STORED CAPABILITIES "))
+        {
+            return Ok(identifier);
+        }
+        // Until the coordinator acknowledges the declaration that names the
+        // attached device, edge A answers E2EE_SYNCING.
+        if Instant::now() > deadline || !reply.iter().any(|line| line.contains("E2EE_SYNCING")) {
+            return Err(failure(format!(
+                "the capability statement was not stored: {reply:?}"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_link_cut_while_acknowledgements_are_in_flight_resumes() -> TestResult {
+    run_relayed(|network, relay, _coordinator| {
+        wait_for_link(&network.edge_a, 0)?;
+        wait_for_link(&network.edge_b, 0)?;
+        wait_for_account_authority(&network.edge_a)?;
+        let (mut session, account) = step(
+            "edge A session",
+            authenticated_client(&network.edge_a, "inflight", LOGIN, 61),
+        )?;
+        let mut keys = Principal::new(ROOT, DEVICE, account)?;
+        account_ready(&mut session, "ready")?;
+        step("edge A attach", publish_and_attach(&mut session, &mut keys))?;
+        let before = link_events(network);
+        relay.hold_outbound(IN_FLIGHT_HOLD);
+        let mut previous = [0; 32];
+        for round in 0..IN_FLIGHT_CUTS {
+            let (closures, established) = link_events(network);
+            previous = step(
+                "capabilities",
+                publish_capabilities(&mut session, &mut keys, round, previous),
+            )?;
+            // No wait: the acknowledgement of the event behind that reply is
+            // still in flight when the link is cut.
+            relay.cut();
+            wait_for_closures(network, closures + 1)?;
+            relay.heal();
+            wait_for_link(&network.edge_a, established)?;
+            // The link resumes: the session is served again over it, and the
+            // link neither closes nor links again meanwhile.
+            step(
+                "resumed",
+                account_ready(&mut session, &format!("round{round}-")),
+            )?;
+            if link_events(network) != (closures + 1, established + 1) {
+                return Err(failure(format!(
+                    "edge A's link did not resume after cut {round}: {:?} -> {:?}",
+                    (closures + 1, established + 1),
+                    link_events(network)
+                )));
+            }
+        }
+        thread::sleep(Duration::from_secs(2));
+        let cuts = usize::try_from(IN_FLIGHT_CUTS)?;
+        let expected = (before.0 + cuts, before.1 + cuts);
+        if link_events(network) != expected {
+            return Err(failure(format!(
+                "edge A's link failed after its last resume: {expected:?} -> {:?}",
+                link_events(network)
+            )));
+        }
+        Ok(())
     })
 }

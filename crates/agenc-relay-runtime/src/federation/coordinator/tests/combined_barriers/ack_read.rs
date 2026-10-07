@@ -495,3 +495,40 @@ async fn an_ack_read_completing_behind_a_staged_batch_fails_its_link() -> TestRe
     fixture.coordinator.pending = None;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_queued_base_request_waits_for_a_companion_read_in_flight() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(pending()).await?;
+    let (inbox, _receiver) = tokio::sync::mpsc::channel(1);
+    let mut edge = super::super::Edge::new(inbox, 50);
+    let origin = super::super::Origin::new(70);
+    super::super::enqueue(
+        &mut fixture.coordinator,
+        &mut edge,
+        &origin,
+        LinkId::new(1),
+        71,
+    )?;
+    // The read's completion must find no batch of this coordinator open, so
+    // the queued request runs only after it.
+    request::drain_queued(&mut fixture.coordinator, fixture.core.context_mut()?);
+    assert!(fixture.coordinator.companion_ack_read.is_some());
+    assert!(fixture.coordinator.pending.is_none());
+    assert_eq!(
+        fixture
+            .coordinator
+            .peers
+            .get(&PEER)
+            .ok_or("peer")?
+            .queued
+            .len(),
+        1
+    );
+    assert_eq!(finish_reads(&mut fixture).await?, 3);
+    assert!(
+        fixture.coordinator.pending.is_some(),
+        "the read staged its acknowledgement"
+    );
+    assert_eq!(fixture.coordinator.counters.violations, 0);
+    Ok(())
+}

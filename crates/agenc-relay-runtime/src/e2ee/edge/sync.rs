@@ -74,6 +74,12 @@ impl E2eeEdge {
         if self.snapshot_ready_pending() {
             return self.resend_ready(context, edge);
         }
+        // ERESUME names the durable cursor (companion 12.5): an event commit
+        // still in flight installs a later one, so the resume waits for its
+        // receipt and follows it.
+        if matches!(self.commit, Some(super::PendingCommit::Event { .. })) {
+            return false;
+        }
         let delivery = self.resume_delivery();
         let frame = CompanionFrame::Resume {
             coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),

@@ -405,3 +405,74 @@ async fn a_request_whose_link_closed_before_storage_refused_its_batch_is_left_fo
     assert_eq!(f.coordinator.counters.violations, 0);
     Ok(())
 }
+
+impl Fixture {
+    /// Another router's batch opens in the state core: the coordinator's own
+    /// slot is free, and its plan could not join that batch.
+    fn open_other_batch(&mut self) -> TestResult {
+        let context = self.core.context_mut()?;
+        let plan = context.domain().plan_account_service_checkpoint()?;
+        let revision = plan.resulting_revision().get();
+        let write = self.coordinator.peer_row_at(PEER, revision, None)?;
+        context
+            .stage_durable_with_account_service(
+                plan,
+                crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+                None,
+                0,
+                vec![write],
+            )
+            .map_err(|error| format!("other batch: {error:?}"))?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_companion_request_waits_while_another_router_has_a_batch_open() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    f.open_other_batch()?;
+    f.submit(&f.whoami(sequence)?)?;
+    // The request waits in its peer's queue instead of failing to stage,
+    // and a drain while the batch is open leaves it there.
+    companion::drain_queued(&mut f.coordinator, f.core.context_mut()?);
+    assert!(f.coordinator.pending.is_none());
+    assert!(f.executor()?.has_queued(PEER));
+    assert!(f.live());
+    assert_eq!(f.coordinator.counters.violations, 0);
+    // The other batch's receipt runs it.
+    f.core.commit_staged_batch().await?;
+    f.coordinator.batch_applied(f.core.context_mut()?);
+    assert!(f.coordinator.pending.is_some());
+    f.commit_pending().await?;
+    assert_eq!(
+        f.answers().await?,
+        vec![(sequence, Answered::Other(ArcFederationResultKind::Account))]
+    );
+    assert_eq!(f.next_sequence()?, sequence + 1);
+    assert!(f.live());
+    assert_eq!(f.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_companion_request_waiting_for_a_refused_batch_runs_at_the_refusal() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    f.open_other_batch()?;
+    f.submit(&f.whoami(sequence)?)?;
+    assert!(f.executor()?.has_queued(PEER));
+    // Storage refuses the other batch: no receipt follows, and the refusal
+    // runs the queued request.
+    f.reject()?;
+    assert!(!f.executor()?.has_queued(PEER));
+    assert!(f.coordinator.pending.is_some());
+    f.commit_pending().await?;
+    assert_eq!(
+        f.answers().await?,
+        vec![(sequence, Answered::Other(ArcFederationResultKind::Account))]
+    );
+    assert!(f.live());
+    assert_eq!(f.coordinator.counters.violations, 0);
+    Ok(())
+}

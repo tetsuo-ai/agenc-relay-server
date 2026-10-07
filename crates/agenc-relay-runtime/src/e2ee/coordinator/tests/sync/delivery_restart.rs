@@ -608,7 +608,7 @@ async fn wrong_event_generation_id_and_partial_barrier_ack_do_not_stage_a_cursor
 }
 
 #[tokio::test]
-async fn current_profile_exposes_the_lost_ack_cursor_mismatch_after_a_real_restart() -> TestResult {
+async fn a_lost_ack_cursor_after_a_real_restart_commits_before_resume_ok() -> TestResult {
     let mut fixture = RestartFixture::new().await?;
     let last = fixture.copies.last().ok_or("last event")?;
     let position = DeliveryPosition {
@@ -617,17 +617,14 @@ async fn current_profile_exposes_the_lost_ack_cursor_mismatch_after_a_real_resta
         delivery_sequence: last.row.sequence,
         event_id: last.row.event_id,
     };
-    fixture.restart().await?;
-    let result = fixture.frame(CompanionFrame::Resume {
+    let resume = CompanionFrame::Resume {
         coordinator_server_id: position.server_id,
         server_incarnation: INCARNATION,
         delivery_generation: position.delivery_generation,
         last: Some((position.delivery_sequence, position.event_id)),
-    });
-    assert!(
-        result.is_err(),
-        "this is evidence of the current profile's unresolved lost-EACK boundary"
-    );
+    };
+    fixture.restart().await?;
+    // An ordinary EACK still advances by exactly one.
     let stream = fixture
         .coordinator
         .state
@@ -639,7 +636,54 @@ async fn current_profile_exposes_the_lost_ack_cursor_mismatch_after_a_real_resta
         stream.acknowledge(position.delivery_sequence, position.event_id, agenc_relay_storage::e2ee_records::delivery_recovery::Acknowledgement::AcknowledgedTimeUnknown),
         Err(CompanionFault::Protocol)
     );
-    assert_eq!(stream.rows.len(), 2);
+    // The edge's cursor names the last delivered row, whose EACK the
+    // restart lost: the resume stages that cumulative acknowledgement and
+    // sends nothing before it commits.
+    let actions = fixture.frame(resume.clone())?;
+    let Some(Action::Stage { writes, work }) = actions.into_iter().next() else {
+        return Err("the lost acknowledgement must stage first".into());
+    };
+    assert!(matches!(&work, PendingWork::Acknowledgement(ack) if ack.resumes()));
+    assert!(!fixture.coordinator.delivering(home()));
+    fixture.coordinator.set_pending(work);
+    fixture.commit(writes).await?;
+    assert!(matches!(
+        fixture.coordinator.batch_applied(Some(0))?,
+        Some(Committed::Acknowledged(peer)) if peer == home()
+    ));
+    let lines = fixture
+        .coordinator
+        .resume_ack_committed(home(), LinkId::new(1))?;
+    let parsed = lines
+        .iter()
+        .map(|line| parse(line))
+        .collect::<TestResult<Vec<_>>>()?;
+    assert!(matches!(
+        parsed.as_slice(),
+        [CompanionFrame::ResumeOk { next_delivery_sequence, .. }]
+            if *next_delivery_sequence == position.delivery_sequence + 1
+    ));
+    assert!(fixture.coordinator.delivering(home()));
+    let stream = fixture
+        .coordinator
+        .state
+        .streams
+        .get(&home())
+        .ok_or("stream")?;
+    assert_eq!(
+        stream.acked,
+        Some((position.delivery_sequence, position.event_id))
+    );
+    assert!(stream.rows.iter().all(events::StreamRow::acked));
+    // The committed cursor survives the next restart, and the same resume
+    // is then exact.
+    fixture.restart().await?;
+    let again = frames(&fixture.frame(resume)?)?;
+    assert!(matches!(
+        again.as_slice(),
+        [CompanionFrame::ResumeOk { next_delivery_sequence, .. }]
+            if *next_delivery_sequence == position.delivery_sequence + 1
+    ));
     Ok(())
 }
 

@@ -3,10 +3,12 @@
 
 mod ack_faults;
 mod ack_read;
+mod lost_acks;
 mod maintenance;
 mod page_read;
 mod replay;
 mod resume_prefix;
+mod write_contention;
 
 use super::*;
 use crate::e2ee::coordinator::events::{self, DeliveryStream, EventContent};

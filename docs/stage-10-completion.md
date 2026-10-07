@@ -381,6 +381,11 @@ recent-object cache bounded per peer, expired at the companion idempotency
 retention and answering a request past its peer's ceiling with its failed
 result (D-41, SDK program, outside master #35), is recorded in [the link
 faults record](stage-10-link-faults.md).
+A federation link resuming after a lost acknowledgement, beginning with the
+coordinator taking an `ERESUME` cursor that names a retained delivered row
+past its committed acknowledgement as that row's cumulative `EACK`, committed
+before `ERESUME OK` (D-44, SDK program, outside master #35), is recorded in
+[the link resume record](stage-10-link-resume.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

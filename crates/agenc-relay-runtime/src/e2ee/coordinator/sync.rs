@@ -695,8 +695,10 @@ impl CompanionCoordinator {
         Ok(vec![Action::Send(vec![ack])])
     }
 
-    /// ERESUME: an exact cursor resumes the retained stream; a new scope or
-    /// a base-forced reset opens an ESTATE transfer.
+    /// ERESUME: an exact cursor resumes the retained stream, and a cursor
+    /// naming a retained delivered row past the committed acknowledgement
+    /// first commits that acknowledgement (companion 12.5); a new scope or a
+    /// base-forced reset opens an ESTATE transfer.
     // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=a resume carries the frame fields, the clock, the host, and entropy through one decision
     #[allow(clippy::too_many_arguments)]
     pub(super) fn resume(

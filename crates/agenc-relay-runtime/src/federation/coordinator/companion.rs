@@ -359,14 +359,19 @@ fn execute_or_queue(
     peer: ServerId,
     complete: CompleteRequest,
 ) -> Result<(), Violation> {
-    let replay_busy = coordinator.replay_io_busy();
+    let replay_busy = coordinator.companion_busy();
     let Some(executor) = coordinator.companion_exec.as_mut() else {
         return Err(Violation::Companion(CompanionViolation::Unsupported));
     };
     if !executor.accepting_requests(peer) {
         return Err(Violation::Companion(CompanionViolation::Request));
     }
-    if coordinator.pending.is_some() || replay_busy || executor.has_pending() {
+    if coordinator.pending.is_some()
+        || replay_busy
+        || executor.has_pending()
+        || context.in_flight()
+        || context.pending_len() != 0
+    {
         return executor
             .enqueue(link, peer, complete)
             .map_err(fault_violation);
@@ -380,7 +385,17 @@ struct StagedCompanion {
     work: PendingWork,
 }
 
-/// Stages one executor batch beside a checkpoint plan.
+/// A companion batch that found a batch open, waiting for it to settle.
+pub(super) struct HeldStage {
+    link: LinkId,
+    peer: ServerId,
+    staged: StagedCompanion,
+}
+
+/// Stages one executor batch beside a checkpoint plan. While a batch is
+/// open, the coordinator's own or one another router staged, this batch is
+/// held and staged when that batch settles (`stage_held`): local write
+/// contention never fails the link.
 fn stage(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
@@ -390,9 +405,40 @@ fn stage(
     work: PendingWork,
 ) -> Result<(), Violation> {
     let staged = StagedCompanion { writes, work };
-    if coordinator.pending.is_some() {
-        return Err(Violation::Ceiling);
+    if coordinator.pending.is_some() || context.in_flight() || context.pending_len() != 0 {
+        if coordinator.companion_held.is_some() {
+            return Err(Violation::Ceiling);
+        }
+        coordinator.companion_held = Some(Box::new(HeldStage { link, peer, staged }));
+        return Ok(());
     }
+    stage_now(coordinator, context, link, peer, staged)
+}
+
+/// Stages the companion batch held for a free slot once no batch is open;
+/// a refusal then is the batch's own and fails its link as before.
+pub(super) fn stage_held(coordinator: &mut FederationCoordinator, context: &mut StateCoreContext) {
+    if coordinator.pending.is_some() || context.in_flight() || context.pending_len() != 0 {
+        return;
+    }
+    let Some(held) = coordinator.companion_held.take() else {
+        return;
+    };
+    let HeldStage { link, peer, staged } = *held;
+    if let Err(violation) = stage_now(coordinator, context, link, peer, staged)
+        && coordinator.link_is_live(link, peer)
+    {
+        coordinator.fail_link(context, link, peer, violation);
+    }
+}
+
+fn stage_now(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    staged: StagedCompanion,
+) -> Result<(), Violation> {
     let resume = matches!(&staged.work, PendingWork::Acknowledgement(ack) if ack.resumes());
     let barrier = match &staged.work {
         PendingWork::Acknowledgement(ack) => {
@@ -410,9 +456,6 @@ fn stage(
         }
         _ => None,
     };
-    if resume && barrier.is_none() {
-        return Err(Violation::Acknowledgement);
-    }
     let plan = context
         .domain()
         .plan_account_service_checkpoint()
@@ -925,12 +968,17 @@ pub(super) fn answer_rejected(
     }
 }
 
-/// Runs queued companion requests while no batch is in flight.
+/// Runs queued companion requests while no batch is open and no other
+/// companion work owns the next one.
 pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
 ) {
-    while coordinator.pending.is_none() && !coordinator.replay_io_busy() {
+    while coordinator.pending.is_none()
+        && !coordinator.companion_busy()
+        && !context.in_flight()
+        && context.pending_len() == 0
+    {
         let Some(queued) = coordinator
             .companion_exec
             .as_mut()

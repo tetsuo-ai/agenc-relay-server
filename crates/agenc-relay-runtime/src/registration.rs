@@ -3498,64 +3498,14 @@ impl CommandRouter for RegistrationRouter {
         }
     }
 
-    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=a rejected batch notifies every attached role in a fixed order so no role observes the others' rollback out of sequence
     fn batch_rejected(
         &mut self,
         context: &mut StateCoreContext,
         origin: Option<crate::state_core::StagedOrigin>,
         error: agenc_relay_storage::StorageError,
     ) {
-        let witness_rejection = self
-            .e2ee
-            .as_ref()
-            .and_then(|e2ee| e2ee.witness_rejection(context));
-        context.discard_local_join_seeds();
-        if let Some(federation) = self.federation.as_mut() {
-            federation.batch_rejected_with_error(context, error);
-        }
-        if let (Some(accounts), Some(federation)) =
-            (self.accounts.as_mut(), self.federation.as_mut())
-        {
-            crate::remote_accounts::batch_settled(context, accounts, federation);
-        }
-        if let Some(edge) = self.edge.as_mut() {
-            edge.batch_rejected_with_error(context, error);
-        }
-        if let Some(e2ee) = self.e2ee.as_mut()
-            && !e2ee.witness_batch_rejected(witness_rejection)
-        {
-            e2ee.batch_rejected();
-        }
-        let generation = origin.as_ref().map(StagedOrigin::generation);
-        if generation
-            .is_some_and(|generation| self.reject_pending_registration(context, generation))
-        {
-            self.retry_session_closes(context);
-            self.resume_ready_join_commands(context);
-            return;
-        }
-        if let Some((generation, accounts)) = generation.zip(self.accounts.as_mut())
-            && accounts.account_deletion_rejected(context, generation)
-        {
-            if let Some(origin) = origin {
-                reject_staged_origin(context, origin);
-            }
-            self.retry_session_closes(context);
-            self.resume_ready_join_commands(context);
-            return;
-        }
-        let completions = self
-            .accounts
-            .as_mut()
-            .map(|accounts| accounts.batch_rejected(context, generation));
-        if let Some(origin) = origin {
-            reject_staged_origin(context, origin);
-        }
-        if let Some(completions) = completions {
-            self.apply_account_completions(context, completions);
-        }
-        self.retry_session_closes(context);
-        self.resume_ready_join_commands(context);
+        self.settle_rejected_batch(context, origin, error);
+        self.drain_e2ee_events(context);
     }
 
     fn timer_fired(&mut self, context: &mut StateCoreContext, entry: TimerEntry) {
@@ -3775,6 +3725,78 @@ fn schedule_connection_timer(
 }
 
 impl RegistrationRouter {
+    // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=a rejected batch notifies every attached role in a fixed order so no role observes the others' rollback out of sequence
+    fn settle_rejected_batch(
+        &mut self,
+        context: &mut StateCoreContext,
+        origin: Option<crate::state_core::StagedOrigin>,
+        error: agenc_relay_storage::StorageError,
+    ) {
+        let witness_rejection = self
+            .e2ee
+            .as_ref()
+            .and_then(|e2ee| e2ee.witness_rejection(context));
+        context.discard_local_join_seeds();
+        if let Some(federation) = self.federation.as_mut() {
+            federation.batch_rejected_with_error(context, error);
+        }
+        if let (Some(accounts), Some(federation)) =
+            (self.accounts.as_mut(), self.federation.as_mut())
+        {
+            crate::remote_accounts::batch_settled(context, accounts, federation);
+        }
+        if let Some(edge) = self.edge.as_mut() {
+            edge.batch_rejected_with_error(context, error);
+        }
+        if let Some(e2ee) = self.e2ee.as_mut()
+            && !e2ee.witness_batch_rejected(witness_rejection)
+        {
+            e2ee.batch_rejected();
+        }
+        let generation = origin.as_ref().map(StagedOrigin::generation);
+        if generation
+            .is_some_and(|generation| self.reject_pending_registration(context, generation))
+        {
+            self.retry_session_closes(context);
+            self.resume_ready_join_commands(context);
+            return;
+        }
+        if let Some((generation, accounts)) = generation.zip(self.accounts.as_mut())
+            && accounts.account_deletion_rejected(context, generation)
+        {
+            if let Some(origin) = origin {
+                reject_staged_origin(context, origin);
+            }
+            self.retry_session_closes(context);
+            self.resume_ready_join_commands(context);
+            return;
+        }
+        let completions = self
+            .accounts
+            .as_mut()
+            .map(|accounts| accounts.batch_rejected(context, generation));
+        if let Some(origin) = origin {
+            reject_staged_origin(context, origin);
+        }
+        if let Some(completions) = completions {
+            self.apply_account_completions(context, completions);
+        }
+        self.retry_session_closes(context);
+        self.resume_ready_join_commands(context);
+    }
+
+    /// Companion events that waited for a batch the state core refused
+    /// apply now, after every role settled the refusal: no receipt follows
+    /// a refusal, so nothing else would drain them (companion 12.5).
+    fn drain_e2ee_events(&mut self, context: &mut StateCoreContext) {
+        let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut()) else {
+            return;
+        };
+        for output in e2ee.drain_waiting_events(context, edge) {
+            let _sent = context.send_to(output.generation, output.frames);
+        }
+    }
+
     /// The timers this router's own owners consume: the response floor,
     /// the JOIN/NAMES continuation, federation, the edge, and the
     /// companion witness retry.

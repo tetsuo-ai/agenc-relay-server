@@ -59,7 +59,8 @@ The rules, in `crates/agenc-relay-e2ee/src/wire/assembly.rs` and
   fragment, at most once a second (`CompanionCoordinator::expire_recent`,
   `E2eeAssembler::expire_recent`). Expiry leaves open assemblies to their own
   idle and absolute deadlines, which the assembler enforces at their next
-  fragment.
+  fragment. The [link resume record](stage-10-link-resume.md) replaces this
+  rule: expiry now also discards open assemblies past their deadlines.
 - **A request past its peer's ceiling is refused for that request.** Past
   its peer's ceiling a request or payload object still assembles within its
   quotas, but keeps no recent tuple. The request is then answered with a
@@ -440,7 +441,9 @@ coordinator reports no unacknowledged base delivery (`STATS FEDERATION`
 second, within the network wait, so that each edge resumes from the cursor
 the coordinator committed (companion Section 12.5). The base side is checked
 directly; the companion side is covered only by that quiet window, since the
-coordinator reports no count of unacknowledged companion events. The first test takes about
+coordinator reports no count of unacknowledged companion events. The [link
+resume record](stage-10-link-resume.md) states why the wait remains: a
+resume no longer needs it. The first test takes about
 five minutes on this host, where the coordinator commits each request's
 result and each guest's registration, origins and close one at a time; the
 other two take about twenty seconds each. The unit tests of the first five
