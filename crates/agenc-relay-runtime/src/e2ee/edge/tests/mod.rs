@@ -144,6 +144,7 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
         subject: None,
         request_object_id: [7; 32],
         sequence,
+        origin_generation: 0,
         frames: Vec::new(),
         result_object_id: None,
         result: answered.then(|| super::result::DecodedResult {
@@ -207,10 +208,18 @@ fn unanswered_requests_are_resent_after_origin_ready() {
     ready.acked = Some(2);
     edge.origins.insert(acked, ready);
     edge.origins.insert(silent, origin([6; 16], 1, 1));
-    edge.pending.insert([3; 16], pending(1, 3, false));
-    edge.pending.insert([1; 16], pending(1, 1, false));
-    edge.pending.insert([2; 16], pending(1, 2, true));
-    edge.pending.insert([4; 16], pending(2, 0, false));
+    // Each request names the generation its origin is acknowledged under, so
+    // a resume sends it again only while that generation is the one in force.
+    for (id, connection, sequence, answered, origin_generation) in [
+        ([3; 16], 1, 3, false, 2),
+        ([1; 16], 1, 1, false, 2),
+        ([2; 16], 1, 2, true, 2),
+        ([4; 16], 2, 0, false, 1),
+    ] {
+        let mut request = pending(connection, sequence, answered);
+        request.origin_generation = origin_generation;
+        edge.pending.insert(id, request);
+    }
     assert_eq!(edge.resend_order(), vec![[1; 16], [3; 16]]);
     edge.acknowledge_origin([6; 16], 1);
     assert_eq!(edge.resend_order(), vec![[4; 16], [1; 16], [3; 16]]);

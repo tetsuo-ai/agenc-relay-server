@@ -183,23 +183,36 @@ impl E2eeEdge {
     /// `EORIGIN ACK`: the declared generation is in force. A new generation
     /// starts its operation sequence at zero; the replayed declaration of
     /// the generation already in force keeps counting, as the coordinator
-    /// does.
+    /// does. An origin's first acknowledgement on a link already past
+    /// EORIGIN READY resends its unanswered requests, as READY resends
+    /// those of the origins acknowledged before it.
     pub(super) fn origin_acked(
         &mut self,
-        _context: &mut StateCoreContext,
-        _edge: &mut EdgeFederation,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
         origin_id: [u8; 16],
         generation: u64,
         _state_object: bool,
     ) -> Result<(), Refusal> {
-        self.acknowledge_origin(origin_id, generation);
+        let settled = self.acknowledge_origin(origin_id, generation);
+        if self.phase == Phase::Active {
+            // Only the connections this acknowledgement settled resend, and
+            // only their requests named under this generation.
+            let order = self.unanswered_of(|connection| settled.contains(connection));
+            self.resend_pending(context, edge, order);
+        }
         Ok(())
     }
 
     /// Applies one acknowledged declaration to every origin that declared
-    /// `generation`.
-    pub(super) fn acknowledge_origin(&mut self, origin_id: [u8; 16], generation: u64) {
-        for origin in self.origins.values_mut() {
+    /// `generation`, and returns the connections it settles there.
+    pub(super) fn acknowledge_origin(
+        &mut self,
+        origin_id: [u8; 16],
+        generation: u64,
+    ) -> Vec<ConnectionGeneration> {
+        let mut settled = Vec::new();
+        for (connection, origin) in self.origins.iter_mut() {
             if origin.origin_id == origin_id && origin.declared == Some(generation) {
                 origin.acked = Some(generation);
                 if origin
@@ -212,8 +225,10 @@ impl E2eeEdge {
                     origin.next_sequence = 0;
                     origin.sequenced = Some(generation);
                 }
+                settled.push(*connection);
             }
         }
+        settled
     }
 
     /// A device attached on `generation`: the shared base origin generation

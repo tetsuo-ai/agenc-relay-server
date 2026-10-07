@@ -9,6 +9,7 @@ use agenc_relay_storage::e2ee_records::DELIVERY_ROW_KIND;
 
 use super::router::Refusal;
 use super::{ClientOutput, E2eeEdge, Phase};
+use crate::connection::ConnectionGeneration;
 use crate::federation::edge::EdgeFederation;
 use crate::state_core::StateCoreContext;
 
@@ -131,8 +132,11 @@ impl E2eeEdge {
     }
 
     /// `EORIGIN READY`: requests flow. Every request still waiting for its
-    /// result is resent in origin and sequence order; the coordinator
-    /// answers an executed one from its replay table and runs the rest.
+    /// result under its origin's acknowledged generation is resent in origin
+    /// and sequence order; the coordinator answers an executed one from its
+    /// replay table and runs the rest. An origin whose replayed declaration
+    /// is acknowledged after READY resends its requests with that
+    /// acknowledgement (`origin_acked`).
     pub(super) fn origins_ready(
         &mut self,
         context: &mut StateCoreContext,
@@ -142,21 +146,36 @@ impl E2eeEdge {
             return Err(E2eeReplyCode::Syncing.into());
         }
         self.phase = Phase::Active;
-        self.resend_pending(context, edge);
+        let order = self.resend_order();
+        self.resend_pending(context, edge, order);
         Ok(())
     }
 
     /// The unanswered requests of every acknowledged origin, in operation
     /// sequence order: what a resume sends again.
     pub(super) fn resend_order(&self) -> Vec<[u8; 16]> {
+        self.unanswered_of(|_| true)
+    }
+
+    /// The unanswered requests of the acknowledged origins of the
+    /// connections `selected` admits, in operation sequence order, each named
+    /// under the generation its origin is acknowledged at. A request named
+    /// under an earlier generation is never resent: the coordinator holds the
+    /// later generation and keeps no replay row for it, so the request gets
+    /// no reply and stays pending until its connection ends.
+    pub(super) fn unanswered_of(
+        &self,
+        selected: impl Fn(&ConnectionGeneration) -> bool,
+    ) -> Vec<[u8; 16]> {
         let mut order: Vec<(u64, [u8; 16])> = self
             .pending
             .iter()
-            .filter(|(_, pending)| pending.result.is_none())
+            .filter(|(_, pending)| pending.result.is_none() && selected(&pending.generation))
             .filter(|(_, pending)| {
-                self.origins
-                    .get(&pending.generation)
-                    .is_some_and(|origin| origin.acked.is_some() && origin.acked == origin.declared)
+                self.origins.get(&pending.generation).is_some_and(|origin| {
+                    origin.acked == origin.declared
+                        && origin.acked == Some(pending.origin_generation)
+                })
             })
             .map(|(request_id, pending)| (pending.sequence, *request_id))
             .collect();
@@ -167,9 +186,14 @@ impl E2eeEdge {
             .collect()
     }
 
-    /// Resends the unanswered requests of every acknowledged origin.
-    fn resend_pending(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
-        for request_id in self.resend_order() {
+    /// Resends the requests of `order` exactly as first sent.
+    pub(super) fn resend_pending(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        order: Vec<[u8; 16]>,
+    ) {
+        for request_id in order {
             let lines = self
                 .pending
                 .get(&request_id)

@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
-//! Reconnecting a companion origin must replay the declaration bytes exactly;
-//! its deletion names the generation the coordinator holds and the next
+//! Reconnecting a companion origin must replay the declaration bytes exactly
+//! and send its unanswered requests again once the replayed declaration is
+//! acknowledged, each only under the generation its origin is acknowledged
+//! at; its deletion names the generation the coordinator holds and the next
 //! sequence the edge has not used under it (12.5), and an ended connection
 //! releases its companion state.
 
@@ -625,5 +627,688 @@ async fn an_ended_connection_releases_its_requests_without_a_live_declaration() 
         edge.pending.is_empty(),
         "the ended connection's request is released"
     );
+    Ok(())
+}
+
+/// An active edge whose one request under generation zero went out on a
+/// link that then closed before the coordinator received it; the edge has
+/// sent EORIGIN RESET on the next link and replayed its declaration, and
+/// the coordinator held the base origin set `base_ready` at the RESET.
+/// Returns the edge, its link, the coordinator, the coordinator's answers
+/// so far and the request's lines.
+async fn relinked_with_a_lost_request(
+    fixture: &mut StateCoreFixture,
+    base_ready: bool,
+) -> TestResult<(
+    EdgeFederation,
+    LinkQueue,
+    E2eeEdge,
+    EdgePeer,
+    Vec<CompanionFrame>,
+    Vec<String>,
+)> {
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let mut peer = EdgePeer::reset()?;
+    let connection = ConnectionGeneration::new(1);
+    declared(
+        fixture, &mut base, &mut queue, &mut edge, &mut peer, connection,
+    )
+    .await?;
+    edge.phase = Phase::Active;
+    let sent = whoami(fixture, &mut base, &mut queue, &mut edge, connection).await?;
+    edge.link_down();
+    peer.link_lost(base_ready);
+    edge.begin_origins(fixture.context_mut()?, &mut base)
+        .map_err(|error| error.code.to_string())?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &EdgePeer::facts(0),
+        0,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let answers = relay(&mut queue, &mut peer).await?;
+    Ok((base, queue, edge, peer, answers, sent))
+}
+
+/// Companion 12.5: a reconnect replays RESET and origin state before it
+/// resumes, and the coordinator answers EORIGIN RESET with READY as soon as
+/// the base origin set is ready, so READY can precede the acknowledgement of
+/// a replayed declaration. That acknowledgement sends the origin's
+/// unanswered requests again, exactly as first sent, and the coordinator
+/// runs them under the generation it holds.
+#[tokio::test]
+async fn requests_resend_when_their_origin_is_acknowledged_after_ready() -> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue, mut edge, mut peer, answers, sent) =
+        relinked_with_a_lost_request(&mut fixture, true).await?;
+    let [
+        ready @ CompanionFrame::OriginReady { .. },
+        acknowledgement @ CompanionFrame::OriginAck {
+            origin_generation: 0,
+            object_id: Some(_),
+            ..
+        },
+    ] = answers.as_slice()
+    else {
+        return Err(format!("READY, then the acknowledgement: {answers:?}").into());
+    };
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, vec![ready.clone()]);
+    assert!(
+        lines(&mut queue).await.is_empty(),
+        "READY resends no origin it has not seen acknowledged"
+    );
+    let _outputs = edge.handle_frames(
+        fixture.context_mut()?,
+        &mut base,
+        vec![acknowledgement.clone()],
+    );
+    let resent = lines(&mut queue).await;
+    assert_eq!(resent, sent, "the request goes out again as first sent");
+    for line in &resent {
+        peer.deliver(line, "edge.example")
+            .map_err(|fault| format!("the coordinator refused {line:?}: {fault:?}"))?;
+    }
+    assert_eq!(
+        peer.held()?,
+        Held {
+            generation: 0,
+            next_sequence: 1,
+            fenced: false,
+        },
+        "the coordinator ran the request"
+    );
+    edge.delete_origin(
+        fixture.context_mut()?,
+        &mut base,
+        ConnectionGeneration::new(1),
+    );
+    let deleted = relay(&mut queue, &mut peer).await?;
+    assert!(deletion_acknowledged(&deleted, 0), "{deleted:?}");
+    assert_eq!(peer.held()?, fenced(0, 1));
+    Ok(())
+}
+
+/// When the base origin set is not ready at the RESET, the acknowledgement
+/// of the replayed declaration precedes READY, and READY resends the
+/// origin's unanswered requests once. A later acknowledgement on the same
+/// link, of a new generation, of another origin or of a generation never
+/// declared, sends nothing.
+#[tokio::test]
+async fn requests_resend_once_when_ready_follows_the_acknowledgement() -> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue, mut edge, mut peer, answers, sent) =
+        relinked_with_a_lost_request(&mut fixture, false).await?;
+    assert!(
+        matches!(
+            answers.as_slice(),
+            [CompanionFrame::OriginAck {
+                origin_generation: 0,
+                object_id: Some(_),
+                ..
+            }]
+        ),
+        "the acknowledgement alone: {answers:?}"
+    );
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, answers);
+    assert!(
+        lines(&mut queue).await.is_empty(),
+        "an acknowledgement before READY sends nothing"
+    );
+    let ready = peer.base_ready()?;
+    assert!(matches!(
+        ready.as_slice(),
+        [CompanionFrame::OriginReady { .. }]
+    ));
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, ready);
+    let resent = lines(&mut queue).await;
+    assert_eq!(resent, sent, "READY sends the request again as first sent");
+    for line in &resent {
+        peer.deliver(line, "edge.example")
+            .map_err(|fault| format!("the coordinator refused {line:?}: {fault:?}"))?;
+    }
+    assert_eq!(peer.held()?.next_sequence, 1, "the coordinator ran it");
+    let connection = ConnectionGeneration::new(1);
+    peer.base_generation(1)?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &EdgePeer::facts(1),
+        1,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let advanced = relay(&mut queue, &mut peer).await?;
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, advanced);
+    let origin_id = EdgePeer::facts(1).origin_id;
+    for (acknowledged, generation) in [([0x99; 16], 1), (origin_id, 7)] {
+        edge.origin_acked(
+            fixture.context_mut()?,
+            &mut base,
+            acknowledged,
+            generation,
+            true,
+        )
+        .map_err(|error| error.code.to_string())?;
+    }
+    assert!(
+        lines(&mut queue).await.is_empty(),
+        "no later acknowledgement on the link sends the request again"
+    );
+    let origin = edge.origins.get(&connection).ok_or("origin")?;
+    assert_eq!((origin.declared, origin.acked), (Some(1), Some(1)));
+    Ok(())
+}
+
+/// A request went out under generation zero on a link that closed before
+/// the coordinator received it; before the companion replays its origins on
+/// the next link the shared base origin advances (a login completed), so
+/// the edge declares generation one, which the coordinator accepts as the
+/// successor of the generation zero it held. The resume names each
+/// unanswered request only under the generation its origin is acknowledged
+/// at, so the request waits rather than going out under the superseded
+/// generation. Returns the coordinator's refusals, if any, of request lines
+/// the edge sent; `base_ready` decides whether READY precedes the
+/// acknowledgement of the replayed declaration.
+async fn relinked_after_the_origin_generation_advanced(
+    base_ready: bool,
+) -> TestResult<Vec<String>> {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let mut peer = EdgePeer::reset()?;
+    let connection = ConnectionGeneration::new(1);
+    declared(
+        &mut fixture,
+        &mut base,
+        &mut queue,
+        &mut edge,
+        &mut peer,
+        connection,
+    )
+    .await?;
+    edge.phase = Phase::Active;
+    let _sent = whoami(&mut fixture, &mut base, &mut queue, &mut edge, connection).await?;
+    edge.link_down();
+    peer.link_lost(base_ready);
+    peer.base_generation(1)?;
+    edge.begin_origins(fixture.context_mut()?, &mut base)
+        .map_err(|error| error.code.to_string())?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &EdgePeer::facts(1),
+        1,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let mut answers = relay(&mut queue, &mut peer).await?;
+    if !base_ready {
+        answers.extend(peer.base_ready()?);
+    }
+    let mut refusals = Vec::new();
+    for answer in answers {
+        let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, vec![answer]);
+        for line in lines(&mut queue).await {
+            if line.contains(" EREQUEST ")
+                && let Err(fault) = peer.deliver(&line, "edge.example")
+            {
+                refusals.push(format!("{fault:?} for {line}"));
+            }
+        }
+    }
+    Ok(refusals)
+}
+
+/// READY precedes the acknowledgement of the replayed declaration: neither
+/// resends the request under the superseded generation.
+#[tokio::test]
+async fn a_superseded_generation_request_is_held_when_ready_precedes_the_acknowledgement()
+-> TestResult {
+    let refusals = Box::pin(relinked_after_the_origin_generation_advanced(true)).await?;
+    assert!(refusals.is_empty(), "the coordinator refused: {refusals:?}");
+    Ok(())
+}
+
+/// The acknowledgement of the replayed declaration precedes READY: neither
+/// resends the request under the superseded generation.
+#[tokio::test]
+async fn a_superseded_generation_request_is_held_when_the_acknowledgement_precedes_ready()
+-> TestResult {
+    let refusals = Box::pin(relinked_after_the_origin_generation_advanced(false)).await?;
+    assert!(refusals.is_empty(), "the coordinator refused: {refusals:?}");
+    Ok(())
+}
+
+/// The payload the requests below carry: a complete wire object.
+fn payload_object() -> TestResult<Vec<u8>> {
+    Ok(ArcWireObject::new(ArcWireObjectKind::RootIdentity, vec![12; 32])?.encode()?)
+}
+
+/// Makes the edge's one unanswered request carry a payload: it is encoded
+/// again under the same correlation as a `publish_identity` request that
+/// names the payload object, which follows it, as the edge sends a request
+/// that carries an object. Returns the request's lines.
+fn carry_payload(edge: &mut E2eeEdge) -> TestResult<Vec<String>> {
+    use agenc_relay_e2ee::objects::federation::{ArcFederationOpcode, ArcFederationRequest};
+    let payload = payload_object()?;
+    let payload_object_id = *agenc_relay_e2ee::ObjectId::compute(&payload).as_bytes();
+    let (network_id, home_server_id, server_incarnation) = (
+        edge.config.network_id,
+        *edge.config.server_id.as_bytes(),
+        edge.config.incarnation,
+    );
+    let pending = edge
+        .pending
+        .values_mut()
+        .next()
+        .ok_or("one unanswered request")?;
+    let Some(CompanionFrame::Request { correlation, .. }) = pending.frames.first().cloned() else {
+        return Err("the request's first frame".into());
+    };
+    let request = ArcFederationRequest {
+        profile_version: 1,
+        network_id,
+        home_server_id,
+        server_incarnation,
+        origin_id: correlation.origin_id,
+        origin_generation: correlation.origin_generation,
+        operation_sequence: correlation.operation_sequence,
+        request_id: correlation.request_id,
+        opcode: ArcFederationOpcode::PublishIdentity,
+        encoded_parameters: Opaque::new(Vec::new())?,
+        payload_object_id: Opaque::new(payload_object_id.to_vec())?,
+    };
+    let bytes =
+        ArcWireObject::new(ArcWireObjectKind::FederationRequest, request.encode()?)?.encode()?;
+    let request_object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
+    let mut frames: Vec<CompanionFrame> = fragment_object(&bytes)?
+        .into_iter()
+        .map(|fragment| CompanionFrame::Request {
+            correlation,
+            object_id: request_object_id,
+            fragment,
+        })
+        .collect();
+    frames.extend(
+        fragment_object(&payload)?
+            .into_iter()
+            .map(|fragment| CompanionFrame::Payload {
+                correlation,
+                object_id: payload_object_id,
+                fragment,
+            }),
+    );
+    pending.frames = frames.clone();
+    pending.request_object_id = request_object_id;
+    frames
+        .iter()
+        .map(|frame| {
+            edge.line(frame)
+                .map(|line| line.as_str().to_owned())
+                .map_err(|error| error.code.to_string().into())
+        })
+        .collect()
+}
+
+/// How far the request a closed link carried got at the coordinator.
+#[derive(Clone, Copy, Debug)]
+enum Reached {
+    /// Its request object completed and waited for its payload.
+    RequestObject,
+    /// It completed and waited for the executor.
+    Unexecuted,
+    /// It ran; its result was lost with the link.
+    Executed,
+}
+
+/// What a resume sent and the coordinator answered.
+struct Resumed {
+    /// The request's lines as first sent.
+    sent: Vec<String>,
+    /// The lines the resume sent again.
+    resent: Vec<String>,
+    /// The coordinator's refusals of them.
+    refusals: Vec<String>,
+    /// The results the coordinator answered them with.
+    results: usize,
+    /// What the coordinator then holds for the origin.
+    held: Held,
+}
+
+/// An active edge sends one request under generation zero, with or without
+/// a payload, which gets as far as `reached` at the coordinator before the
+/// link closes. On the next link the edge replays its origin; the
+/// coordinator held the base origin set `base_ready` at the RESET, so READY
+/// comes before or after the acknowledgement of the replayed declaration.
+/// Every line the edge then sends is delivered to the coordinator.
+async fn resumed_after(
+    reached: Reached,
+    carries_payload: bool,
+    base_ready: bool,
+) -> TestResult<Resumed> {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let mut peer = EdgePeer::reset()?;
+    let connection = ConnectionGeneration::new(1);
+    declared(
+        &mut fixture,
+        &mut base,
+        &mut queue,
+        &mut edge,
+        &mut peer,
+        connection,
+    )
+    .await?;
+    edge.phase = Phase::Active;
+    let mut sent = whoami(&mut fixture, &mut base, &mut queue, &mut edge, connection).await?;
+    if carries_payload {
+        sent = carry_payload(&mut edge)?;
+    }
+    for line in &sent {
+        let outcome = match reached {
+            Reached::RequestObject if !line.contains(" EREQUEST ") => Ok(()),
+            Reached::RequestObject | Reached::Unexecuted => {
+                peer.deliver_unexecuted(line, "edge.example")
+            }
+            Reached::Executed => peer.deliver(line, "edge.example").map(|_lost| ()),
+        };
+        outcome.map_err(|fault| format!("the first copy was refused: {fault:?}"))?;
+    }
+    edge.link_down();
+    peer.link_lost(base_ready);
+    edge.begin_origins(fixture.context_mut()?, &mut base)
+        .map_err(|error| error.code.to_string())?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &EdgePeer::facts(0),
+        0,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let mut answers = relay(&mut queue, &mut peer).await?;
+    if !base_ready {
+        answers.extend(peer.base_ready()?);
+    }
+    let mut resumed = Resumed {
+        sent,
+        resent: Vec::new(),
+        refusals: Vec::new(),
+        results: 0,
+        held: peer.held()?,
+    };
+    for answer in answers {
+        let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, vec![answer]);
+        for line in lines(&mut queue).await {
+            match peer.deliver(&line, "edge.example") {
+                Ok(frames) => {
+                    resumed.results += frames
+                        .iter()
+                        .filter(|frame| matches!(frame, CompanionFrame::Result { .. }))
+                        .count();
+                }
+                Err(fault) => resumed.refusals.push(format!("{fault:?} for {line}")),
+            }
+            resumed.resent.push(line);
+        }
+    }
+    resumed.held = peer.held()?;
+    Ok(resumed)
+}
+
+/// The request shapes a closed link can leave unexecuted at the
+/// coordinator: complete, with or without a payload, or with its payload
+/// still outstanding.
+const LEFT_UNEXECUTED: [(Reached, bool); 3] = [
+    (Reached::Unexecuted, false),
+    (Reached::Unexecuted, true),
+    (Reached::RequestObject, true),
+];
+
+/// Requires that the resume sent the request again exactly as first sent
+/// and that the coordinator ran it once, at sequence zero.
+fn assert_ran(resumed: &Resumed, case: &str) {
+    assert!(
+        resumed.refusals.is_empty(),
+        "{case}: the coordinator refused {:?}",
+        resumed.refusals
+    );
+    assert_eq!(
+        resumed.resent, resumed.sent,
+        "{case}: the request goes out again as first sent"
+    );
+    assert_eq!(
+        resumed.held,
+        Held {
+            generation: 0,
+            next_sequence: 1,
+            fenced: false,
+        },
+        "{case}: the coordinator ran the request once"
+    );
+}
+
+/// Companion 12.5: a request a closed link left unexecuted is sent again
+/// once its origin is replayed, here at the acknowledgement that follows
+/// READY, and the coordinator runs it at its sequence. It completed the
+/// request's objects on the closed link but keeps no replay row for it, so
+/// the copy the next link carries is assembled and classified again.
+#[tokio::test]
+async fn a_request_left_unexecuted_runs_when_resent_after_ready() -> TestResult {
+    for (reached, carries_payload) in LEFT_UNEXECUTED {
+        let resumed = Box::pin(resumed_after(reached, carries_payload, true)).await?;
+        assert_ran(&resumed, &format!("{reached:?}, payload {carries_payload}"));
+        assert_eq!(resumed.results, 0, "nothing is answered from a replay row");
+    }
+    Ok(())
+}
+
+/// The same requests when the acknowledgement of the replayed declaration
+/// precedes READY, which then sends them again.
+#[tokio::test]
+async fn a_request_left_unexecuted_runs_when_ready_follows_the_acknowledgement() -> TestResult {
+    for (reached, carries_payload) in LEFT_UNEXECUTED {
+        let resumed = Box::pin(resumed_after(reached, carries_payload, false)).await?;
+        assert_ran(&resumed, &format!("{reached:?}, payload {carries_payload}"));
+        assert_eq!(resumed.results, 0, "nothing is answered from a replay row");
+    }
+    Ok(())
+}
+
+/// Architecture 20.5 and companion 12.5: an exact duplicate returns the
+/// stored result. A request that ran before its link closed is sent again
+/// with its payload, if any, and the coordinator answers it once from its
+/// replay row without running it again, in both orders of READY and the
+/// acknowledgement.
+#[tokio::test]
+async fn an_executed_request_resent_on_the_next_link_returns_its_stored_result() -> TestResult {
+    for carries_payload in [false, true] {
+        for base_ready in [true, false] {
+            let resumed = Box::pin(resumed_after(
+                Reached::Executed,
+                carries_payload,
+                base_ready,
+            ))
+            .await?;
+            let case = format!("payload {carries_payload}, READY first {base_ready}");
+            assert_ran(&resumed, &case);
+            assert_eq!(resumed.results, 1, "{case}: the stored result answers it");
+        }
+    }
+    Ok(())
+}
+
+/// Two origins resume on one link. The first one's replayed declaration is
+/// acknowledged before READY, which resends its request; the second one's
+/// is acknowledged after READY. That later acknowledgement resends only the
+/// requests of the origin it settles, never again those READY resent on
+/// the link.
+#[tokio::test]
+async fn a_later_acknowledgement_resends_only_the_requests_of_the_origin_it_settles() -> TestResult
+{
+    // Distinct entropy gives the two requests distinct request IDs.
+    let entropy = (0..4_096_u16)
+        .map(|index| u8::try_from(index % 251))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut fixture = StateCoreFixture::new(entropy)?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let mut peer = EdgePeer::reset()?;
+    let second_origin = [0x55; 16];
+    let origins = [
+        (ConnectionGeneration::new(1), EdgePeer::facts(0)),
+        (
+            ConnectionGeneration::new(2),
+            EdgePeer::facts_of(second_origin, 0),
+        ),
+    ];
+    for (connection, facts) in &origins {
+        edge.declare_origin(fixture.context_mut()?, &mut base, *connection, facts, 0)
+            .map_err(|error| error.code.to_string())?;
+        let answers = relay(&mut queue, &mut peer).await?;
+        acknowledge(&mut edge, &answers);
+    }
+    edge.phase = Phase::Active;
+    let mut sent = Vec::new();
+    for (connection, _) in &origins {
+        sent.push(whoami(&mut fixture, &mut base, &mut queue, &mut edge, *connection).await?);
+    }
+    edge.link_down();
+    peer.link_lost(false);
+    edge.begin_origins(fixture.context_mut()?, &mut base)
+        .map_err(|error| error.code.to_string())?;
+    // The coordinator acknowledges the first replayed declaration, the base
+    // origin set then becomes ready, and the second declaration follows.
+    let mut from_coordinator = Vec::new();
+    for (index, (connection, facts)) in origins.iter().enumerate() {
+        edge.declare_origin(fixture.context_mut()?, &mut base, *connection, facts, 0)
+            .map_err(|error| error.code.to_string())?;
+        let mut answers = relay(&mut queue, &mut peer).await?;
+        if index == 0 {
+            answers.extend(peer.base_ready()?);
+        }
+        from_coordinator.extend(answers);
+    }
+    let [
+        first_acknowledgement @ CompanionFrame::OriginAck { .. },
+        ready @ CompanionFrame::OriginReady { .. },
+        second_acknowledgement @ CompanionFrame::OriginAck { .. },
+    ] = from_coordinator.as_slice()
+    else {
+        return Err(
+            format!("acknowledgement, READY, acknowledgement: {from_coordinator:?}").into(),
+        );
+    };
+    let [first_sent, second_sent] = sent.as_slice() else {
+        return Err("two requests".into());
+    };
+    let expected = [Vec::new(), first_sent.clone(), second_sent.clone()];
+    let delivered = [first_acknowledgement, ready, second_acknowledgement];
+    for (frame, expected) in delivered.into_iter().zip(expected) {
+        let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, vec![frame.clone()]);
+        let resent = lines(&mut queue).await;
+        assert_eq!(resent, expected, "after {frame:?}");
+        for line in &resent {
+            peer.deliver(line, "edge.example")
+                .map_err(|fault| format!("the coordinator refused {line:?}: {fault:?}"))?;
+        }
+    }
+    assert_eq!(
+        peer.held()?.next_sequence,
+        1,
+        "the first origin's request ran"
+    );
+    assert_eq!(
+        peer.held_of(second_origin)?.next_sequence,
+        1,
+        "the second origin's request ran"
+    );
+    Ok(())
+}
+
+/// READY reaches the edge while a newer declaration of the origin, which
+/// the link carried before READY arrived, awaits its acknowledgement: the
+/// coordinator holds the newer generation, so READY resends nothing named
+/// under the acknowledged one, and the newer acknowledgement does not
+/// resend a request named under the generation it replaced. That request
+/// gets no reply; the connection's end releases it.
+#[tokio::test]
+async fn ready_resends_nothing_while_a_newer_declaration_awaits_its_acknowledgement() -> TestResult
+{
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let mut peer = EdgePeer::reset()?;
+    let connection = ConnectionGeneration::new(1);
+    declared(
+        &mut fixture,
+        &mut base,
+        &mut queue,
+        &mut edge,
+        &mut peer,
+        connection,
+    )
+    .await?;
+    edge.phase = Phase::Active;
+    let _sent = whoami(&mut fixture, &mut base, &mut queue, &mut edge, connection).await?;
+    edge.link_down();
+    peer.link_lost(false);
+    edge.begin_origins(fixture.context_mut()?, &mut base)
+        .map_err(|error| error.code.to_string())?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &EdgePeer::facts(0),
+        0,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let replayed = relay(&mut queue, &mut peer).await?;
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, replayed);
+    assert!(
+        lines(&mut queue).await.is_empty(),
+        "an acknowledgement before READY sends nothing"
+    );
+    // The base origin advances and the edge declares generation one; the
+    // coordinator's READY is on its way, and it reads the declaration after.
+    peer.base_generation(1)?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &EdgePeer::facts(1),
+        1,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let ready = peer.base_ready()?;
+    let advanced = relay(&mut queue, &mut peer).await?;
+    for (step, frames) in [("READY", ready), ("the acknowledgement", advanced)] {
+        let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, frames);
+        let sent = lines(&mut queue).await;
+        let refused: Vec<String> = sent
+            .iter()
+            .filter_map(|line| {
+                peer.deliver(line, "edge.example")
+                    .err()
+                    .map(|fault| format!("{fault:?} for {line}"))
+            })
+            .collect();
+        assert!(
+            sent.is_empty(),
+            "{step} sends nothing named under generation zero: {sent:?}, refused {refused:?}"
+        );
+    }
+    let origin = edge.origins.get(&connection).ok_or("origin")?;
+    assert_eq!((origin.declared, origin.acked), (Some(1), Some(1)));
+    assert_eq!(edge.pending.len(), 1, "the request stays unanswered");
+    edge.delete_origin(fixture.context_mut()?, &mut base, connection);
+    let deleted = relay(&mut queue, &mut peer).await?;
+    assert!(deletion_acknowledged(&deleted, 1), "{deleted:?}");
+    assert_eq!(peer.held()?, fenced(1, 0));
+    assert!(edge.pending.is_empty(), "the connection's end releases it");
     Ok(())
 }
