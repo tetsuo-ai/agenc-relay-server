@@ -329,3 +329,99 @@ fn key_packages_of_another_version_or_leaf_source_are_refused() -> TestResult {
     );
     Ok(())
 }
+
+/// `SHA256(label || input)`, computed here without the crate's label table.
+fn labeled_sha256(label: &[u8], input: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(label);
+    hasher.update(input);
+    hasher.finalize().into()
+}
+
+#[test]
+fn a_leaf_credential_hash_reads_the_leafs_whole_basic_credential() -> TestResult {
+    let secret = Ed25519SecretKey::from_bytes([25; 32]);
+    let sample = key_package(&secret, None)?;
+    let MlsOuterMessage::KeyPackage(package) = parse_mls_message(&sample.bytes, &mut budget())?
+    else {
+        return Err("expected a key package".into());
+    };
+    let identity = b"identity bundle bytes";
+    // credential_type basic (1), then identity<V>.
+    let mut canonical = vec![0, 1];
+    opaque_v(&mut canonical, identity)?;
+    let credential = package.leaf_node.credential()?;
+    assert_eq!(credential.as_bytes(), canonical.as_slice());
+    assert_eq!(package.leaf_node.encoded_credential, canonical);
+    assert_eq!(EncodedBasicCredential::parse(&canonical)?, credential);
+    assert_eq!(
+        credential.old_credential_hash()?,
+        labeled_sha256(b"ARC-MLS/1 old credential hash", &canonical)
+    );
+    let mut indexed = 7_u32.to_be_bytes().to_vec();
+    indexed.extend_from_slice(&canonical);
+    assert_eq!(
+        credential.resulting_leaf_credential_hash(7)?,
+        labeled_sha256(b"ARC-MLS/1 resulting leaf credential", &indexed)
+    );
+    // Neither the bare identity nor identity<V> without its type is the
+    // input: each hashes to another value.
+    let mut without_type = Vec::new();
+    opaque_v(&mut without_type, identity)?;
+    for other in [identity.as_slice(), without_type.as_slice()] {
+        assert_ne!(
+            credential.old_credential_hash()?,
+            labeled_sha256(b"ARC-MLS/1 old credential hash", other)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn other_credential_encodings_are_not_a_leaf_credential() -> TestResult {
+    let identity = b"identity bundle bytes";
+    let mut without_type = Vec::new();
+    opaque_v(&mut without_type, identity)?;
+    // A bare identity that starts with the basic type value, as an encoded
+    // ArcCredentialBundle does (its profile version), still is not one
+    // credential.
+    let mut bundle_like = vec![0, 1];
+    bundle_like.extend_from_slice(&[1; 32]);
+    let mut x509 = vec![0, 2];
+    opaque_v(&mut x509, identity)?;
+    let mut canonical = vec![0, 1];
+    opaque_v(&mut canonical, identity)?;
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    let truncated = canonical
+        .get(..canonical.len().saturating_sub(1))
+        .unwrap_or_default();
+    let non_minimal = [0, 1, 0x40, 0x01, 7];
+    for (input, refusal) in [
+        (identity.as_slice(), E2eeError::ProfileMismatch),
+        (without_type.as_slice(), E2eeError::ProfileMismatch),
+        (bundle_like.as_slice(), E2eeError::TrailingBytes),
+        (x509.as_slice(), E2eeError::ProfileMismatch),
+        (trailing.as_slice(), E2eeError::TrailingBytes),
+        (truncated, E2eeError::Truncated),
+        (non_minimal.as_slice(), E2eeError::NonCanonical),
+        (&[0], E2eeError::Truncated),
+    ] {
+        assert_eq!(
+            EncodedBasicCredential::parse(input),
+            Err(refusal),
+            "{input:?}"
+        );
+    }
+    // A leaf whose public field was changed after parsing is checked again.
+    let secret = Ed25519SecretKey::from_bytes([26; 32]);
+    let sample = key_package(&secret, None)?;
+    let MlsOuterMessage::KeyPackage(package) = parse_mls_message(&sample.bytes, &mut budget())?
+    else {
+        return Err("expected a key package".into());
+    };
+    let mut leaf = package.leaf_node;
+    leaf.encoded_credential = leaf.credential_identity.clone();
+    assert_eq!(leaf.credential(), Err(E2eeError::ProfileMismatch));
+    Ok(())
+}

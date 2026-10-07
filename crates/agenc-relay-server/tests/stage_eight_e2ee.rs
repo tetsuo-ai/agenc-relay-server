@@ -2216,8 +2216,9 @@ const BINDER_LEAF_SEED: u8 = 158;
 
 /// The old MLS leaf one device proves and acknowledges with: the exact
 /// signature key its endpoint holds, that leaf's index in the group, and the
-/// digest of the credential the key carries. Every membership proof and every
-/// ACK signature built from it is the endpoint's own (companion 13.7.3).
+/// `old_credential_hash` of the credential the leaf carries (companion 2.2).
+/// Every membership proof and every ACK signature built from it is the
+/// endpoint's own (companion 13.7.3).
 struct OldLeaf {
     secret: Ed25519SecretKey,
     index: u32,
@@ -2235,13 +2236,16 @@ impl OldLeaf {
         }
     }
 
-    /// The leaf an MLS library holds under `secret`, whose basic credential
-    /// is the encoded bundle `credential`, at group position `index`.
+    /// The leaf an MLS library holds under `secret` at group position
+    /// `index`, whose `Credential` the library encodes as `credential`: the
+    /// basic credential type followed by `identity<V>`, hashed through the
+    /// shared leaf credential helper.
     fn real(secret: Ed25519SecretKey, index: u32, credential: &[u8]) -> TestResult<Self> {
         Ok(Self {
             secret,
             index,
-            credential_hash: e2ee::ids::old_credential_hash(credential)?,
+            credential_hash: e2ee::mls_outer::EncodedBasicCredential::parse(credential)?
+                .old_credential_hash()?,
         })
     }
 }
@@ -3523,13 +3527,14 @@ mod real_clients {
     use mls_rs::group::ReceivedMessage;
     use mls_rs::identity::SigningIdentity;
     use mls_rs::identity::basic::{BasicCredential as RsBasicCredential, BasicIdentityProvider};
+    use mls_rs::mls_rs_codec::MlsEncode as _;
     use mls_rs::mls_rules::{CommitOptions, DefaultMlsRules, EncryptionOptions};
     use mls_rs::time::MlsTime;
     use mls_rs::{CipherSuite as RsSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessage};
     use mls_rs_crypto_rustcrypto::RustCryptoProvider;
     use openmls::group::PURE_CIPHERTEXT_WIRE_FORMAT_POLICY;
     use openmls::key_packages::Lifetime as OpenMlsLifetime;
-    use openmls::prelude::tls_codec::Deserialize as _;
+    use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
     use openmls::prelude::{
         BasicCredential, Capabilities, Ciphersuite, CredentialType, CredentialWithKey, GroupId,
         KeyPackage as OpenMlsKeyPackage, LeafNodeParameters, MlsGroup, MlsGroupJoinConfig,
@@ -3597,6 +3602,29 @@ mod real_clients {
             builders::credential_bundle(&principal.keys, principal.device, authorization)?
                 .encode()?,
         )
+    }
+
+    /// The `Credential` a leaf of `principal` carries under
+    /// `leaf_public_key`, as both libraries encode it: the basic credential
+    /// type followed by `identity<V>`, whose identity is
+    /// [`credential_identity`].
+    pub(super) fn encoded_credential(
+        principal: &Principal,
+        interval: (u64, u64),
+        leaf_public_key: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        let identity = credential_identity(principal, interval, leaf_public_key)?;
+        let openmls = openmls::prelude::Credential::from(BasicCredential::new(identity.clone()))
+            .tls_serialize_detached()?;
+        let mls_rs = RsBasicCredential::new(identity)
+            .into_credential()
+            .mls_encode_to_vec()?;
+        if openmls != mls_rs {
+            return Err(failure(
+                "openmls and mls-rs encode the leaf credential differently",
+            ));
+        }
+        Ok(openmls)
     }
 
     pub(super) fn commit_aad(

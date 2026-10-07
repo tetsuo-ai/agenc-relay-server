@@ -7,7 +7,9 @@
 //! created and decrypts a message from it. Every outcome is recorded in
 //! `conformance/e2ee-interop-matrix.toml`; the test fails when an observed
 //! outcome differs from the recorded one, so a deviation is visible rather
-//! than hidden.
+//! than hidden. The credential a KeyPackage leaf carries, as the daemon's
+//! parser reads it, is also each library's own `Credential` encoding, the
+//! input of the companion's credential hashes.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -19,18 +21,21 @@ use agenc_relay_e2ee::limits::{
     MAX_KEY_PACKAGE_OBJECT, MAX_LIVE_OBJECT, MAX_WELCOME_MAILBOX_OBJECT,
 };
 use agenc_relay_e2ee::mls_outer::{
-    MlsContentType, MlsOuterMessage, parse_mls_message, verify_key_package_signatures,
+    MlsContentType, MlsOuterMessage, PublicLeafNode, parse_mls_message,
+    verify_key_package_signatures,
 };
 use mls_rs::client_builder::MlsConfig;
 use mls_rs::identity::SigningIdentity;
 use mls_rs::identity::basic::{BasicCredential as RsBasicCredential, BasicIdentityProvider};
+use mls_rs::mls_rs_codec::MlsEncode as _;
 use mls_rs::mls_rules::{CommitOptions, DefaultMlsRules};
 use mls_rs::{CipherSuite as RsSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessage};
 use mls_rs_crypto_rustcrypto::RustCryptoProvider;
-use openmls::prelude::tls_codec::Deserialize as _;
+use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use sha2::{Digest as _, Sha256};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -489,5 +494,89 @@ fn two_independent_mls_libraries_agree_with_the_daemon_view() -> TestResult {
             >= 8,
         "at least the framing of both libraries must agree with the daemon"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The leaf credential the companion's credential hashes read.
+
+/// Identity lengths that take each RFC 9420 length-prefix width: one, two
+/// and four bytes.
+const CREDENTIAL_IDENTITY_LENGTHS: [usize; 3] = [21, 1_000, 20_000];
+
+fn credential_identity(length: usize) -> TestResult<Vec<u8>> {
+    Ok((0..length)
+        .map(|index| u8::try_from(index % 251))
+        .collect::<Result<_, _>>()?)
+}
+
+/// The leaf of a KeyPackage as the daemon's outer parser reads it.
+fn daemon_leaf(bytes: &[u8]) -> TestResult<PublicLeafNode> {
+    let mut budget = DecodeBudget::new(MAX_KEY_PACKAGE_OBJECT, 1 << 14);
+    let MlsOuterMessage::KeyPackage(package) = parse_mls_message(bytes, &mut budget)? else {
+        return Err("daemon: not a key package".into());
+    };
+    verify_key_package_signatures(&package)?;
+    Ok(package.leaf_node)
+}
+
+/// The parser's credential slice of `leaf` is `library_encoding`, the
+/// credential's RFC 9420 encoding (type basic, then `identity<V>`), and the
+/// shared hashes read exactly those bytes.
+fn assert_leaf_credential(
+    library: &str,
+    leaf: &PublicLeafNode,
+    identity: &[u8],
+    library_encoding: &[u8],
+) -> TestResult {
+    let context = format!("{library}, identity of {} bytes", identity.len());
+    let credential = leaf.credential()?;
+    assert_eq!(credential.as_bytes(), library_encoding, "{context}");
+    assert_eq!(leaf.credential_identity, identity, "{context}");
+    let (credential_type, rest) = library_encoding.split_at_checked(2).ok_or("short")?;
+    assert_eq!(credential_type, [0, 1], "{context}: credential type basic");
+    assert!(rest.ends_with(identity), "{context}");
+    let old = Sha256::new()
+        .chain_update(b"ARC-MLS/1 old credential hash")
+        .chain_update(library_encoding)
+        .finalize();
+    assert_eq!(
+        credential.old_credential_hash()?,
+        old.as_slice(),
+        "{context}"
+    );
+    let resulting = Sha256::new()
+        .chain_update(b"ARC-MLS/1 resulting leaf credential")
+        .chain_update(3_u32.to_be_bytes())
+        .chain_update(library_encoding)
+        .finalize();
+    assert_eq!(
+        credential.resulting_leaf_credential_hash(3)?,
+        resulting.as_slice(),
+        "{context}"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_parsed_leaf_credential_is_each_librarys_credential_encoding() -> TestResult {
+    for (_suite, open, rs) in suites() {
+        for length in CREDENTIAL_IDENTITY_LENGTHS {
+            let identity = credential_identity(length)?;
+
+            let party = OpenMlsParty::new(&identity, open)?;
+            let (package, bytes) = party.key_package()?;
+            let encoding = package.leaf_node().credential().tls_serialize_detached()?;
+            assert_leaf_credential("openmls", &daemon_leaf(&bytes)?, &identity, &encoding)?;
+
+            let client = rs_client(&identity, rs)?;
+            let bytes = rs_key_package(&client)?;
+            let package = MlsMessage::from_bytes(&bytes)?
+                .into_key_package()
+                .ok_or("mls-rs: not a key package")?;
+            let encoding = package.signing_identity().credential.mls_encode_to_vec()?;
+            assert_leaf_credential("mls-rs", &daemon_leaf(&bytes)?, &identity, &encoding)?;
+        }
+    }
     Ok(())
 }
