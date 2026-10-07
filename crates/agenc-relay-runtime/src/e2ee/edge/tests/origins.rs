@@ -1312,3 +1312,50 @@ async fn ready_resends_nothing_while_a_newer_declaration_awaits_its_acknowledgem
     assert!(edge.pending.is_empty(), "the connection's end releases it");
     Ok(())
 }
+
+/// Only an origin's first acknowledgement on a link past READY resends its
+/// unanswered requests: the same acknowledgement repeated on that link
+/// resends nothing, since the requests went out on the link already.
+#[tokio::test]
+async fn a_repeated_acknowledgement_on_the_link_resends_nothing() -> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue, mut edge, mut peer, answers, sent) =
+        relinked_with_a_lost_request(&mut fixture, true).await?;
+    let [
+        ready @ CompanionFrame::OriginReady { .. },
+        acknowledgement @ CompanionFrame::OriginAck { .. },
+    ] = answers.as_slice()
+    else {
+        return Err(format!("READY, then the acknowledgement: {answers:?}").into());
+    };
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, vec![ready.clone()]);
+    let _outputs = edge.handle_frames(
+        fixture.context_mut()?,
+        &mut base,
+        vec![acknowledgement.clone()],
+    );
+    let resent = lines(&mut queue).await;
+    assert_eq!(resent, sent);
+    for line in &resent {
+        peer.deliver_unexecuted(line, "edge.example")
+            .map_err(|fault| format!("{fault:?}"))?;
+    }
+    let _outputs = edge.handle_frames(
+        fixture.context_mut()?,
+        &mut base,
+        vec![acknowledgement.clone()],
+    );
+    let again = lines(&mut queue).await;
+    let mut refusals = Vec::new();
+    for line in &again {
+        if let Err(fault) = peer.deliver(line, "edge.example") {
+            refusals.push(format!("{fault:?}"));
+        }
+    }
+    assert!(
+        again.is_empty(),
+        "a repeated acknowledgement resent {} lines; coordinator: {refusals:?}",
+        again.len()
+    );
+    Ok(())
+}

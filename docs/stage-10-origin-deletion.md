@@ -162,6 +162,13 @@ The rule, in `crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs`
   and other peers' requests and the closed peer's origin declarations keep the
   cache's answer.
 
+Companion Section 11.8 has a duplicate content address use the recent-object
+idempotency cache "rather than consuming a second reservation or causing
+repeat fanout". Once a link closes, its peer's request entries leave that
+cache, so a copy the next link carries reserves assembly once more, within
+the same quotas and released on completion, and the replay rows supply the
+prior outcome, so there is still no repeat fanout.
+
 | Test | What it pins |
 | --- | --- |
 | `e2ee::coordinator::tests::sync::a_request_a_closed_link_left_unexecuted_assembles_again_on_the_next` | A request object completes on a link that closes before its payload arrives; the next link carries the request and its payload exactly as first sent, and the coordinator hands the complete request to its executor. |
@@ -209,7 +216,9 @@ The rule, in `crates/agenc-relay-runtime/src/e2ee/edge/origins.rs` and
   their requests (`unanswered_of`, `resend_pending`).
 - An acknowledgement before READY resends nothing, since READY does, and a
   later acknowledgement on the same link resends nothing, since the origin's
-  requests went out on that link already.
+  requests went out on that link already: `acknowledge_origin` settles a
+  connection only when its declaration on the link was not yet acknowledged
+  at that generation, so the same acknowledgement repeated settles nothing.
 - A resume resends a request only while its origin's declaration on the link
   is acknowledged, so no newer declaration awaits its acknowledgement, and
   only under the generation its origin is acknowledged at
@@ -237,12 +246,17 @@ stored result, and answers an executed one from them:
 | `a_request_left_unexecuted_runs_when_ready_follows_the_acknowledgement` | The same three requests when the acknowledgement precedes READY, which resends them. |
 | `an_executed_request_resent_on_the_next_link_returns_its_stored_result` | A request that ran on the closed link, with and without a payload, in both orders: it is resent as first sent and the coordinator answers it once from its replay row without running it again. |
 | `a_later_acknowledgement_resends_only_the_requests_of_the_origin_it_settles` | Two origins resume on one link; the first one's replayed declaration is acknowledged before READY, which resends its request, and the second one's after READY, whose acknowledgement resends only the second origin's request. |
+| `a_repeated_acknowledgement_on_the_link_resends_nothing` | READY precedes the acknowledgement, which resends the request; the coordinator completes it without running it, and the same acknowledgement repeated on the link resends nothing. |
 | `ready_resends_nothing_while_a_newer_declaration_awaits_its_acknowledgement` | The edge declares generation one after the replayed declaration of generation zero is acknowledged and before READY arrives: READY resends nothing, the acknowledgement of generation one resends nothing named under generation zero, and the connection's end releases the request and deletes the origin at generation one. |
 | `a_superseded_generation_request_is_held_when_ready_precedes_the_acknowledgement` and `..._when_the_acknowledgement_precedes_ready` | The base generation advanced before the companion replays its origin, so the edge declares generation one on the new link: neither order resends the request named under generation zero, and the coordinator refuses nothing. |
 
 `e2ee::edge::tests::unanswered_requests_are_resent_after_origin_ready` pins
 the resend order across origins with each request named under its origin's
 acknowledged generation.
+
+Settling a connection at every acknowledgement that matches its declaration,
+instead of only at the first one on the link, fails
+`a_repeated_acknowledgement_on_the_link_resends_nothing`.
 
 With the edge's `origins.rs` and `sync.rs` set back to the second commit,
 `requests_resend_when_their_origin_is_acknowledged_after_ready`,
@@ -362,16 +376,21 @@ base deletion names (branches), and moves the seven `cap13-mod-*` regions of
 the base edge's `mod.rs` and the five other regions of its `request.rs`,
 whose spans are unchanged.
 
+The sixth re-reviews and respans `edge-origin-attachment-settlement`, whose
+function now settles a connection only at the first acknowledgement of its
+declaration on the link, and moves `edge-companion-origin-deletion` and
+`edge-origin-acknowledgement-resend`, whose spans are unchanged.
+
 Both source inventories are refreshed in each commit.
 
 A runtime branch report at the tip (`RUSTC_BOOTSTRAP=1 cargo llvm-cov
 nextest -p agenc-relay-runtime --lib --all-features --branch --locked
---no-fail-fast -E 'not test(/offline::tests::/)'`, 2,760 of 2,760 pass)
+--no-fail-fast -E 'not test(/offline::tests::/)'`, 2,761 of 2,761 pass)
 scores every new or re-reviewed region in full:
 `edge-companion-origin-deletion` 2/2 branches,
 `companion-closed-link-request-classification` 23/23 regions,
 `edge-origin-acknowledgement-resend` 2/2 and
-`edge-origin-attachment-settlement` 8/8 branches, and
+`edge-origin-attachment-settlement` 10/10 branches, and
 `edge-origin-deletion-generation` 2/2 branches. `cap78-sync-origin-del`
 scores 39 of 40 regions, the uncovered one the unchanged `?` on rendering
 the acknowledgement line, and `cap13-mod-link-closed` 33 of 34, the
@@ -420,5 +439,9 @@ every revision. A first run of the same command passed 4,847:
 a load-dependent single-node test this series does not reach, failed once
 there and passes alone in 5 of 5 runs. The daemon revert and repeat runs
 above ran the test binary directly, eight at a time.
+
+Sixth commit: the runtime library run passes 2,761 of 2,761, and the branch
+report above scores the re-reviewed region in full. The single edit above
+ran the edge tests of the runtime library.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

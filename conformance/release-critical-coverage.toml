@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1037
-reviewed_source_sha256 = "f2c3d62e384261b45163d03f27c2848ae1d9d1af6d05bbfd1c6b9cd44158727e"
+reviewed_source_sha256 = "12e4997cf77b5fa7f5991c8eefb4fe5151dd3007ab2089cd9c2cdc2f1a396805"
 deferred = []
 
 [[region]]
@@ -13651,21 +13651,21 @@ id = "edge-origin-attachment-settlement"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/origins.rs"
 item = "acknowledge_origin"
-source_sha256 = "0331f40ca36f26363e3e6b125b3d408ca5d34f63d10c1cb6bb9dc1712600a324"
-start_line = 209
-end_line = 232
-span_sha256 = "a3414d01dbc30437fee12ef15dd7fa4ce2c1fa2cb012874b58d76924360ef81b"
+source_sha256 = "d1a4121d8b37a4718d041d6ea858cb7722213d2e7798d2955ea872d3d19bc617"
+start_line = 211
+end_line = 237
+span_sha256 = "69f4d6455092d01e7a26fbde85c8287ebf66669dfe407b97c3a48ac4325a399b"
 metric = "branches"
-reason = "An acknowledged declaration settles an origin only once a generation after the attachment is acknowledged, and reports each connection it settles."
+reason = "An acknowledged declaration settles an origin only once a generation after the attachment is acknowledged, and reports a connection as settled only at the first acknowledgement of its declaration on the link at that generation."
 
 [[region]]
 id = "edge-companion-origin-deletion"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/origins.rs"
 item = "delete_origin"
-source_sha256 = "0331f40ca36f26363e3e6b125b3d408ca5d34f63d10c1cb6bb9dc1712600a324"
-start_line = 266
-end_line = 280
+source_sha256 = "d1a4121d8b37a4718d041d6ea858cb7722213d2e7798d2955ea872d3d19bc617"
+start_line = 271
+end_line = 285
 span_sha256 = "df38943435c487dc53557e241653bb02e5dbcd8124bfc6d7900040fee109f32e"
 metric = "branches"
 reason = "A companion origin deletion names the generation of the last declaration its link carried, which the coordinator holds when the deletion arrives, and the edge's next unused sequence under it, zero for a generation the edge does not sequence yet; an origin no live declaration names sends none."
@@ -13675,7 +13675,7 @@ id = "edge-origin-acknowledgement-resend"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/origins.rs"
 item = "origin_acked"
-source_sha256 = "0331f40ca36f26363e3e6b125b3d408ca5d34f63d10c1cb6bb9dc1712600a324"
+source_sha256 = "d1a4121d8b37a4718d041d6ea858cb7722213d2e7798d2955ea872d3d19bc617"
 start_line = 189
 end_line = 205
 span_sha256 = "e2c8f5791a29a975df1909beb4da65de462d0df2efd4b83fa7dbabe8e1b3d903"

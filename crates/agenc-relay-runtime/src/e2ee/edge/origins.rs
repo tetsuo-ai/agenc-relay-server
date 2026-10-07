@@ -205,7 +205,9 @@ impl E2eeEdge {
     }
 
     /// Applies one acknowledged declaration to every origin that declared
-    /// `generation`, and returns the connections it settles there.
+    /// `generation`, and returns the connections it settles there: those
+    /// whose declaration on the link was not yet acknowledged at that
+    /// generation. A repeated acknowledgement settles nothing.
     pub(super) fn acknowledge_origin(
         &mut self,
         origin_id: [u8; 16],
@@ -214,6 +216,7 @@ impl E2eeEdge {
         let mut settled = Vec::new();
         for (connection, origin) in self.origins.iter_mut() {
             if origin.origin_id == origin_id && origin.declared == Some(generation) {
+                let first = origin.acked != Some(generation);
                 origin.acked = Some(generation);
                 if origin
                     .predates_device
@@ -225,7 +228,9 @@ impl E2eeEdge {
                     origin.next_sequence = 0;
                     origin.sequenced = Some(generation);
                 }
-                settled.push(*connection);
+                if first {
+                    settled.push(*connection);
+                }
             }
         }
         settled
