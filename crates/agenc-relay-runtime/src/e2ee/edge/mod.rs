@@ -179,6 +179,8 @@ pub(crate) enum PendingCommit {
     Event {
         completion: completion::PreparedCompletion,
         position: agenc_relay_e2ee::federation::frames::DeliveryPosition,
+        /// The applied event's object identifier.
+        object_id: [u8; 32],
         outputs: Vec<ClientOutput>,
     },
     /// The READY of a snapshot was recorded.
@@ -205,6 +207,9 @@ pub(crate) enum PendingCommit {
     /// An unresolvable fork marks its row `conflict` (12.5.1).
     WitnessConflict { conversation: [u8; 32] },
 }
+
+/// The delivery generation, sequence and Event ID of an applied event.
+type AppliedPosition = (u64, u64, [u8; 16]);
 
 /// The companion parts of one open barrier by part index, each with its
 /// payload when the event named one.
@@ -246,6 +251,13 @@ pub struct E2eeEdge {
     witness_request_wake: Option<crate::state_core::timers::TimerEntry>,
     queued: VecDeque<(CompanionFrame, Vec<u8>)>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
+    /// The delivery generation, sequence and Event ID of the event this
+    /// edge applied last, with its object identifier: an exact duplicate at
+    /// the installed cursor must carry that object (companion 12.5). Held in
+    /// memory only; when the cursor moved otherwise, by a restart, a
+    /// snapshot or a barrier, it no longer matches and the Event ID alone
+    /// identifies the event.
+    applied_object: Option<(AppliedPosition, [u8; 32])>,
     channel_names: BTreeMap<ChannelInstanceId, String>,
     attachments: Vec<(ConnectionGeneration, [u8; 16], u64)>,
     /// Companion parts of open cross-profile barriers by mutation and part
@@ -254,6 +266,27 @@ pub struct E2eeEdge {
     /// Rendered lines of a staged barrier, released once its receipt stands.
     barrier_pending: Option<([u8; 16], Vec<ClientOutput>)>,
     counters: E2eeEdgeCounters,
+}
+
+#[cfg(test)]
+impl E2eeEdge {
+    /// Router tests: a resumed link's state, the active phase at the durable
+    /// cursor `cursor` of delivery generation `generation`.
+    pub(crate) fn resume_for_test(&mut self, generation: u64, cursor: (u64, [u8; 16])) {
+        self.phase = Phase::Active;
+        self.delivery.generation = generation;
+        self.delivery.cursor = Some(cursor);
+        self.witness_snapshot_required = false;
+    }
+
+    /// Router tests: the events waiting behind a batch, and whether an
+    /// event's batch is staged.
+    pub(crate) fn event_state_for_test(&self) -> (usize, bool) {
+        (
+            self.queued.len(),
+            matches!(self.commit, Some(PendingCommit::Event { .. })),
+        )
+    }
 }
 
 /// Counters exposed through `STATS E2EE`.
@@ -306,6 +339,7 @@ impl E2eeEdge {
             witness_resolution: None,
             witness_request_wake: None,
             queued: VecDeque::new(),
+            applied_object: None,
             events_in: BTreeMap::new(),
             channel_names: BTreeMap::new(),
             attachments: Vec::new(),

@@ -6,9 +6,12 @@ resumes after an acknowledgement is lost in a link cut or a coordinator
 restart, and local write contention never fails it. The first commit has the
 coordinator take an `ERESUME` cursor that names a retained delivered row past
 its committed acknowledgement as that row's cumulative `EACK`, committed
-before `ERESUME OK`. No specification, profile hash, registry entry, named
-limit, reply code, wire object, table, key, row kind, field or storage
-generation changed.
+before `ERESUME OK`. The second has the edge admit each event at the next
+exact cursor after the events still committing or queued, acknowledge an
+exact duplicate at its installed cursor again without reapplying it, and
+resume from the cursor its last event commit installs. No specification,
+profile hash, registry entry, named limit, reply code, wire object, table,
+key, row kind, field or storage generation changed.
 
 ## Decision: the reading of companion Section 12.5 for a resume cursor
 
@@ -151,6 +154,88 @@ The release coverage policy gains `companion-resume-cursor` and
 `acknowledge_resume`), `companion-acknowledgement-preparedack-apply` and
 `companion-companion-stage`; the other regions of the changed files move
 with unchanged spans. Both source inventories are refreshed.
+
+## The edge admits events in order and acknowledges a duplicate again (second commit)
+
+The companion text this rule implements, Section 12.5:
+
+- "The edge admits the complete event and payload, validates the next exact
+  cursor and all route/origin/source constraints, and obtains the complete
+  bounded client-fanout reservation before opening its apply transaction";
+  "Only after commit does it make frames visible and send EACK".
+- "An exact duplicate at the installed cursor is re-ACKed without
+  reapplying state or rerendering; a gap, conflicting ID/object, decreased
+  state generation, or other generation blocks E2EE processing and closes
+  the link."
+- "After a same-incarnation link reconnect and profile negotiation, the edge
+  sends ERESUME with its durable cursor"; the coordinator "retransmits every
+  unacknowledged row byte-for-byte".
+
+The rules, in `crates/agenc-relay-runtime/src/e2ee/edge/events.rs`,
+`sync.rs` and `crates/agenc-relay-runtime/src/registration.rs`:
+
+- **An exact duplicate at the installed cursor is acknowledged again.** An
+  ordinary event whose delivery generation, sequence and Event ID equal the
+  installed cursor is answered with its `EACK` again; nothing applies,
+  commits or renders (`acknowledge_duplicate`). The edge keeps the object
+  identifier of the event it applied last beside its position, in memory
+  only, and a duplicate whose object differs from it is refused and the link
+  closes. When the cursor moved otherwise, by a restart, a snapshot or a
+  barrier, that object is unknown and the Event ID identifies the event. The
+  installed sequence under another Event ID, a sequence behind the cursor
+  and another generation are still refused, and the link closes.
+  Cross-profile parts are acknowledged by the combined transaction alone
+  (Section 12.5: "no individual part [...] emits EACK") and are not covered
+  by this rule.
+- **The next exact cursor follows the events already admitted.** An event
+  is admitted at one past the last event the edge admitted, whether that
+  event is installed, committing, or queued behind a commit
+  (`next_admitted_sequence`), so an event admitted while an earlier one
+  commits or waits takes its exact place. A gap is still refused.
+- **An event waits while the state core cannot take its batch.** It queues,
+  in order, while the edge's own commit is open, while a batch is in flight,
+  or while another router gathers a batch (`holds_events`), and while earlier
+  events still wait (`admit_ordinary`). Every receipt drains the queue in
+  order, and so does every refusal: once every role has settled a batch that
+  storage refused, the router applies the events that waited for it
+  (`RegistrationRouter::drain_e2ee_events`,
+  `E2eeEdge::drain_waiting_events`). The state core reads link traffic only
+  while no batch is open, so the queue holds only events admitted behind the
+  batch they wait for and never outlives it; it needs no bound of its own.
+- **A resume names the cursor its event commit installs.** While an event's
+  commit is in flight, the next link's `ERESUME` waits for its receipt
+  (`link_active`). The receipt sends the event's `EACK` only on the link
+  that delivered it, in the origin or active phase (`acknowledge_applied`);
+  after link loss the next `ERESUME` names that cursor instead.
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::edge::tests::projection::event_admission::an_exact_duplicate_at_the_installed_cursor_is_acknowledged_again` | An exact duplicate at the installed cursor gets its `EACK` again with nothing staged; the installed sequence under another Event ID, a sequence behind the cursor and another generation are refused. |
+| `e2ee::edge::tests::projection::event_admission::a_duplicate_carrying_another_object_at_the_installed_cursor_is_refused` | After an event applies, another object under its position and Event ID is refused with no `EACK`, and the exact object is acknowledged again with nothing staged. |
+| `e2ee::edge::tests::projection::event_admission::the_next_events_wait_behind_the_one_committing` | While the first event commits, the next two are admitted and queued, a gap past them is refused, and the three commit and are acknowledged in order. |
+| `e2ee::edge::tests::projection::event_admission::an_event_waits_while_another_router_gathers_a_batch` | An event that arrives while another router's batch gathers is queued, applies at that batch's receipt and is acknowledged at its own. |
+| `e2ee::edge::tests::projection::event_admission::events_stay_in_order_behind_a_refused_batch` | After storage refuses the batch an event waited for, the event applies at the refusal; the next event queues behind it, and the receipts acknowledge both in order. |
+| `e2ee::edge::tests::projection::event_admission::an_event_never_applies_ahead_of_one_still_waiting` | With an event still waiting and no batch open, the next event queues behind it, and a drain applies both in order. |
+| `e2ee::edge::tests::projection::event_admission::a_resume_names_the_cursor_its_event_commit_installs` | The link closes while an event commits: no `ERESUME` goes out before the receipt, the receipt sends no `EACK`, and the `ERESUME` then names the event's position. |
+| `registration::e2ee_line_tests::companion_events_waiting_for_a_refused_batch_apply_at_the_refusal` | Through the registration router: an event that waits for another router's batch applies when the router settles that batch's refusal. |
+
+Single edits fail tests, each run on the edge and registration router
+tests: dropping the duplicate rule fails the two duplicate tests; admitting
+only at the installed cursor fails the committing and refused-batch tests;
+holding events only for a batch in flight fails the gathering, refused-batch
+and router tests; resuming during an event commit fails the resume test;
+sending the receipt's `EACK` whatever the phase fails the resume test;
+applying an event while earlier ones still wait fails the ordering test;
+ignoring a conflicting object, or not recording the applied object, fails
+the object test; draining nothing at a refusal fails the refused-batch and
+router tests; and a router that does not drain at a refusal fails the router
+test.
+
+The release coverage policy gains `edge-event-admission`,
+`edge-duplicate-event` and `edge-applied-event-ack` (branches) and
+`edge-event-hold` (regions), and re-reviews and respans
+`cap74-sync-link-active`; the other regions of the changed files move with
+unchanged spans. Both source inventories are refreshed.
 
 ## Validation
 
