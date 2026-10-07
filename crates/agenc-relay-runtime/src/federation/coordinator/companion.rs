@@ -410,9 +410,6 @@ fn stage(
         }
         _ => None,
     };
-    if resume && barrier.is_none() {
-        return Err(Violation::Acknowledgement);
-    }
     let plan = context
         .domain()
         .plan_account_service_checkpoint()

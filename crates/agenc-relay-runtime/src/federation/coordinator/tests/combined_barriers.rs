@@ -3,6 +3,7 @@
 
 mod ack_faults;
 mod ack_read;
+mod lost_acks;
 mod maintenance;
 mod page_read;
 mod replay;

@@ -1683,13 +1683,27 @@ impl FederationCoordinator {
             Some(PendingCommit::CompanionRestore(receipt)) => {
                 startup::retirement::rejected(self, context, *receipt, error);
             }
-            Some(PendingCommit::Companion { peer, link, .. }) => {
+            Some(PendingCommit::Companion {
+                peer, link, resume, ..
+            }) => {
+                let acknowledgement = resume
+                    || self.companion_exec.as_ref().is_some_and(|executor| {
+                        matches!(
+                            executor.pending,
+                            Some(crate::e2ee::coordinator::sync::PendingWork::Acknowledgement(_))
+                        )
+                    });
                 let rejected = self
                     .companion_exec
                     .as_mut()
                     .and_then(CompanionCoordinator::batch_rejected);
                 if let Some(request) = rejected {
                     companion::answer_rejected(self, context, link, peer, request);
+                } else if acknowledgement && self.link_is_live(link, peer) {
+                    // An acknowledgement that did not persist loses its
+                    // link: the edge resumes from its durable cursor, which
+                    // names it again (companion 12.5).
+                    self.fail_link(context, link, peer, Violation::Ceiling);
                 }
             }
             Some(PendingCommit::SnapshotRows { peer } | PendingCommit::SnapshotReady { peer }) => {

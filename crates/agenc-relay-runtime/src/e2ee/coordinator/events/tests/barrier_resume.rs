@@ -89,7 +89,7 @@ fn an_already_acknowledged_row_is_not_part_of_the_recovered_prefix() -> TestResu
 fn an_unacknowledged_resume_records_nothing() -> TestResult {
     let mut stream = open_prefix()?;
     assert!(matches!(
-        stream.acknowledge_barrier_resume(1, LAST, Acknowledgement::Unacknowledged),
+        stream.acknowledge_resume(1, LAST, Acknowledgement::Unacknowledged),
         Err(CompanionFault::Protocol)
     ));
     assert_eq!(stream.acked, None, "the refusal committed no coverage");
@@ -99,7 +99,7 @@ fn an_unacknowledged_resume_records_nothing() -> TestResult {
     );
     assert_eq!(stream.barrier, Some((0, 1)), "the gate stays open");
 
-    stream.acknowledge_barrier_resume(1, LAST, Acknowledgement::received_at(Some(100)))?;
+    stream.acknowledge_resume(1, LAST, Acknowledgement::received_at(Some(100)))?;
     assert_eq!(stream.acked, Some((1, LAST)));
     Ok(())
 }

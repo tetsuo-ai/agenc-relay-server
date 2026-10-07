@@ -69,7 +69,7 @@ impl PreparedAck {
             return Err(CompanionFault::Storage);
         }
         if self.resume {
-            stream.acknowledge_barrier_resume(
+            stream.acknowledge_resume(
                 self.position.delivery_sequence,
                 self.position.event_id,
                 self.acknowledgement,
@@ -222,7 +222,12 @@ fn write_proposal(
 #[path = "acknowledgement/tests/reconstruction.rs"]
 mod reconstruction_tests;
 
-/// The caller has checked the historical resume scope and exact barrier endpoint.
+/// An ERESUME cursor past the committed acknowledgement names the last row
+/// the edge acknowledged, whose EACK this coordinator never committed
+/// (companion 12.5): it is a cumulative EACK of the retained delivered
+/// prefix through that row, committed before ERESUME OK. Any other cursor
+/// is a mismatch and stays fatal. The caller has checked the resume scope
+/// and generation.
 pub(crate) fn prepare_resume(
     coordinator: &CompanionCoordinator,
     peer: ServerId,
@@ -251,13 +256,10 @@ pub(crate) fn prepare_resume(
         || super::cursor(stream)? != *owner.cursor()
         || position.server_id != *coordinator.server_id.as_bytes()
         || position.delivery_generation != stream.generation
-        || stream
-            .barrier
-            .is_none_or(|(_, last)| last != position.delivery_sequence)
     {
         return Err(CompanionFault::Protocol);
     }
-    stream.validate_barrier_resume(position.delivery_sequence, position.event_id)?;
+    stream.validate_resume(position.delivery_sequence, position.event_id)?;
     read::Request::new(stream, peer, link, position, true, trusted_ack_unix_seconds)?
         .plan(coordinator)
 }
