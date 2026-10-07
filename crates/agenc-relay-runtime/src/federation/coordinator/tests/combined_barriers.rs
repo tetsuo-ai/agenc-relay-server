@@ -8,6 +8,7 @@ mod maintenance;
 mod page_read;
 mod replay;
 mod resume_prefix;
+mod write_contention;
 
 use super::*;
 use crate::e2ee::coordinator::events::{self, DeliveryStream, EventContent};

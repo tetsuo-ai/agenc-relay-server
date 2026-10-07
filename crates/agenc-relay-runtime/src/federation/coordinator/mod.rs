@@ -290,10 +290,10 @@ pub struct FederationCoordinator {
     crypto: Option<PendingCrypto>,
     replays: BTreeMap<StorageReadId, (LinkId, ServerId, OperationDescriptor)>,
     loader: startup::Loader,
-    /// Frames and objects that arrived while a federation batch was in
-    /// flight; they replay in order once the batch commits. Peers pipeline
-    /// their synchronization frames, so refusing them would close every
-    /// reconnecting link.
+    /// Frames and objects that arrived while a batch was open, the
+    /// coordinator's own or another router's; they replay in order once it
+    /// settles. Peers pipeline their synchronization frames, so refusing
+    /// them would close every reconnecting link.
     backlog: VecDeque<FederationInbound>,
     /// The peer whose queue drained last; the next drain starts after it.
     drain_cursor: Option<ServerId>,
@@ -307,6 +307,9 @@ pub struct FederationCoordinator {
     companion_ack_read: Option<Box<companion::ack_read::Pending>>,
     companion_response_read: Option<Box<response_read::Pending>>,
     companion_object_read: Option<Box<object_read::Pending>>,
+    /// A companion batch that found a batch open; it is staged once that
+    /// batch settles (`companion::stage_held`).
+    companion_held: Option<Box<companion::HeldStage>>,
     replay_maintenance: replay_maintenance::Worker,
     mailbox_expiry: mailbox_expiry::Worker,
     request_expiry: request_expiry::Worker,
@@ -390,6 +393,7 @@ impl FederationCoordinator {
             companion_ack_read: None,
             companion_response_read: None,
             companion_object_read: None,
+            companion_held: None,
             replay_maintenance: replay_maintenance::Worker::default(),
             mailbox_expiry: mailbox_expiry::Worker::default(),
             request_expiry: request_expiry::Worker::default(),
@@ -473,22 +477,35 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         peer: ServerId,
     ) -> Result<(), PeerQuarantineRefusal> {
-        let Some(state) = self.peers.get_mut(&peer) else {
+        let Some(state) = self.peers.get(&peer) else {
             return Err(PeerQuarantineRefusal::UnknownPeer);
         };
         if state.quarantined {
             return Err(PeerQuarantineRefusal::AlreadyQuarantined);
         }
-        if self.pending.is_some() {
+        // An open batch, the coordinator's own or another router's, or
+        // companion work that owns the next batch refuses the command before
+        // it changes anything.
+        if self.holds_traffic(context) {
             return Err(PeerQuarantineRefusal::Busy);
         }
-        state.quarantined = true;
         let live = state.live.as_ref().map(|live| live.link);
+        self.set_quarantined(peer, true);
         if let Some(link) = live {
             self.fail_link(context, link, peer, Violation::Phase);
         }
         self.stage_rows(context, Vec::new(), PendingCommit::Acknowledged, Some(peer))
-            .map_err(|_| PeerQuarantineRefusal::Busy)
+            .map_err(|_| {
+                // The fence did not stage: memory keeps agreeing with storage.
+                self.set_quarantined(peer, false);
+                PeerQuarantineRefusal::Busy
+            })
+    }
+
+    fn set_quarantined(&mut self, peer: ServerId, quarantined: bool) {
+        if let Some(state) = self.peers.get_mut(&peer) {
+            state.quarantined = quarantined;
+        }
     }
 
     /// Returns the configured identity of one edge.
@@ -509,7 +526,7 @@ impl FederationCoordinator {
     #[must_use]
     pub fn reload_ready(&self) -> bool {
         self.pending.is_none()
-            && !self.replay_io_busy()
+            && !self.companion_busy()
             && self.crypto.is_none()
             && self.replays.is_empty()
             && !self.history.busy()
@@ -534,7 +551,7 @@ impl FederationCoordinator {
         if !self.peers.contains_key(&peer) {
             return;
         }
-        if (self.pending.is_some() || self.replay_io_busy())
+        if self.holds_traffic(context)
             && matches!(
                 event,
                 LinkEvent::Frame(_) | LinkEvent::Object { .. } | LinkEvent::Companion(_)
@@ -1427,6 +1444,10 @@ impl FederationCoordinator {
         let pending = self.take_pending_for_receipt(context);
         if self.apply_pending_receipt(context, pending, &events) {
             self.deliver_committed_then_continue(context, events);
+        } else {
+            // The receipt retired its link; the work that waited for this
+            // batch still continues.
+            self.continue_after_commit(context);
         }
     }
 
@@ -1561,6 +1582,8 @@ impl FederationCoordinator {
     }
 
     fn continue_after_commit(&mut self, context: &mut StateCoreContext) {
+        // A companion batch held for a free slot goes first.
+        companion::stage_held(self, context);
         // A startup write that just committed resumes the reload here rather
         // than at the next maintenance tick.
         self.continue_restore(context);
@@ -1575,7 +1598,7 @@ impl FederationCoordinator {
         if context.in_flight()
             || context.pending_len() != 0
             || self.loader.blocks_admission()
-            || self.replay_io_busy()
+            || self.companion_busy()
         {
             return;
         }
@@ -1620,6 +1643,23 @@ impl FederationCoordinator {
             || self.replay_maintenance.busy()
     }
 
+    /// Whether companion work owns the next batch: a storage read or replay
+    /// maintenance in flight, or a companion batch held for a free slot.
+    fn companion_busy(&self) -> bool {
+        self.replay_io_busy() || self.companion_held.is_some()
+    }
+
+    /// Whether link traffic waits in the backlog: a batch is open, the
+    /// coordinator's own or one another router staged, or companion work
+    /// owns the next batch. A frame handled now could not stage its batch,
+    /// and local write contention never fails a link.
+    fn holds_traffic(&self, context: &StateCoreContext) -> bool {
+        self.pending.is_some()
+            || context.in_flight()
+            || context.pending_len() != 0
+            || self.companion_busy()
+    }
+
     fn continue_delivery_work(&mut self, context: &mut StateCoreContext, peer: ServerId) {
         origin::continue_ready(self, context, peer);
         if self.pending.is_some() {
@@ -1651,7 +1691,9 @@ impl FederationCoordinator {
         context.reject_remote_account_results();
         self.remote_grant_rejected();
         self.reject_pending_batch(context, error);
+        companion::stage_held(self, context);
         request::drain_queued(self, context);
+        companion::drain_queued(self, context);
         self.drain_backlog(context);
     }
 
@@ -1765,7 +1807,7 @@ impl FederationCoordinator {
     /// Replays backlogged link traffic in arrival order until a replayed
     /// item stages the next batch.
     fn drain_backlog(&mut self, context: &mut StateCoreContext) {
-        while self.pending.is_none() && !self.replay_io_busy() && !self.loader.blocks_admission() {
+        while !self.holds_traffic(context) && !self.loader.blocks_admission() {
             let Some(message) = self.backlog.pop_front() else {
                 break;
             };

@@ -9,7 +9,9 @@ its committed acknowledgement as that row's cumulative `EACK`, committed
 before `ERESUME OK`. The second has the edge admit each event at the next
 exact cursor after the events still committing or queued, acknowledge an
 exact duplicate at its installed cursor again without reapplying it, and
-resume from the cursor its last event commit installs. No specification,
+resume from the cursor its last event commit installs. The third keeps the
+coordinator's link traffic and companion batches waiting while any batch is
+open, so local write contention never fails a link. No specification,
 profile hash, registry entry, named limit, reply code, wire object, table,
 key, row kind, field or storage generation changed.
 
@@ -236,6 +238,93 @@ The release coverage policy gains `edge-event-admission`,
 `edge-event-hold` (regions), and re-reviews and respans
 `cap74-sync-link-active`; the other regions of the changed files move with
 unchanged spans. Both source inventories are refreshed.
+
+## Local write contention never fails a link (third commit)
+
+The state core stages one batch at a time: a plan staged while a batch is in
+flight, or while another router's batch gathers, is refused as busy, since
+it cannot join that batch. The rules, in
+`crates/agenc-relay-runtime/src/federation/coordinator/`:
+
+- **Link traffic waits while any batch is open.** Base frames and objects
+  and admitted companion frames wait in the coordinator's backlog, in
+  arrival order, while a batch is open, the coordinator's own or one another
+  router staged, and while companion work owns the next batch
+  (`FederationCoordinator::holds_traffic`, used by `inbound` and
+  `drain_backlog`). Every commit and every refusal replays the backlog. A
+  base `FACK`, an origin declaration or a snapshot `READY` that arrives
+  while another router's batch is open therefore stages its batch once that
+  batch settles, as each already did behind the coordinator's own batch.
+  The backlog's bound is unchanged.
+- **A companion batch waits for a free slot.** A companion batch that finds
+  a batch open, staged after a commit (a snapshot page, a fetch), after a
+  storage read (an acknowledgement prefix, a page) or by a frame, is held
+  (`companion::stage`, `HeldStage`) and staged once no batch is open
+  (`stage_held`), first at the next commit's receipt and also after a
+  refused batch; at a receipt where an earlier role has already staged its
+  next batch, it stays held for that one. While it is held, companion work
+  owns the next batch
+  (`companion_busy`): link traffic, queued companion and base requests,
+  background work and a reload wait for it. A refusal when it is finally
+  staged is the batch's own and fails its link as before.
+- **Queued requests wait for an open batch.** A companion request arriving
+  while any batch is open joins its peer's queue (`execute_or_queue`), and
+  the queue drains only when no batch is open and no other companion work
+  owns the next one (`companion::drain_queued`). Queued base requests also
+  wait while companion work owns the next batch (`request::drain_queued`),
+  so a companion read's completion never finds a batch of this coordinator
+  open. A refused batch drains both queues and the backlog, as a receipt
+  does (`batch_rejected_with_error`), and so does a receipt that retires
+  its link because its request cannot settle (`batch_applied`).
+- **A quarantine waits for an open batch.** `PEER QUARANTINE` is refused as
+  busy while any batch is open or companion work owns the next batch,
+  before it changes anything; a fence that storage does not take leaves the
+  peer unquarantined (`admin_quarantine_peer`).
+
+The held batch is boxed: it adds one pointer to the coordinator.
+
+| Test | What it pins |
+| --- | --- |
+| `federation::coordinator::tests::combined_barriers::write_contention::a_base_ack_waits_while_another_router_has_a_batch_open` | Through real storage: a base `FACK` that arrives while another router's batch gathers waits in the backlog; that batch's receipt replays it, it stages and commits, and the link stays up. |
+| `federation::coordinator::tests::combined_barriers::write_contention::a_companion_frame_waits_while_another_router_has_a_batch_open` | An admitted companion frame waits in the backlog while another router's batch is open, and nothing is staged or sent. |
+| `federation::coordinator::tests::combined_barriers::write_contention::a_companion_batch_that_finds_a_batch_open_is_staged_when_it_settles` | A resume acknowledgement staged while another router's batch is open is held, holds link traffic and any reload, and is staged at that batch's receipt or after storage refuses it; `ERESUME OK` follows its own commit. |
+| `federation::coordinator::tests::companion_refusals::a_companion_request_waits_while_another_router_has_a_batch_open` | A companion request arriving while another router's batch is open joins its queue, a drain then leaves it there, and the batch's receipt runs it at its sequence. |
+| `federation::coordinator::tests::combined_barriers::ack_read::a_queued_base_request_waits_for_a_companion_read_in_flight` | A queued base request does not run while a companion acknowledgement read is in flight; the read then stages its acknowledgement. |
+| `federation::coordinator::tests::combined_barriers::write_contention::a_held_batch_stays_held_while_another_batch_opens_at_its_receipt` | The batch a held one waited for commits, and another router stages its next batch before the coordinator's receipt: the held batch stays held with the link up, is staged at the next receipt, and `ERESUME OK` follows its own. |
+| `federation::coordinator::tests::companion_refusals::a_companion_request_waiting_for_a_refused_batch_runs_at_the_refusal` | Storage refuses the batch a queued companion request waited for: the refusal runs the request, which is answered at its sequence. |
+| `federation::coordinator::tests::a_receipt_that_retires_its_link_still_replays_the_backlog` | A receipt whose request cannot settle retires its link, and another peer's frame waiting in the backlog still runs. |
+| `federation::coordinator::tests::combined_barriers::write_contention::a_quarantine_is_refused_while_a_batch_is_open_and_changes_nothing` | With another router's batch open, or a companion batch held, `PEER QUARANTINE` is refused as busy, the peer stays unquarantined and its link up. |
+
+`federation::coordinator::tests::a_request_waits_while_another_router_has_a_batch_open`
+now requires the request to wait in the backlog rather than in its peer's
+request queue.
+
+Single edits fail tests, each run on the coordinator tests above, the
+combined barrier and companion refusal tests: holding traffic only for the
+coordinator's own batch fails three; refusing a companion batch that finds a
+batch open fails the held-batch test; staging the held batch at no commit,
+or at no refusal, fails it as well; running a companion request into
+another router's batch fails the request test; not counting the held batch
+as companion work fails the held-batch test; letting queued base requests
+run during a companion read fails the read test; draining companion
+requests while another router's batch is open fails the request test;
+staging the held batch whatever batch is open fails the receipt-order test;
+not draining companion requests at a refusal fails the refused-request
+test; stopping at a receipt that retires its link fails the backlog test;
+and refusing a quarantine only for the coordinator's own batch fails the
+quarantine test.
+
+The release coverage policy gains `companion-companion-stage-now`
+(regions), `companion-held-stage` (branches), `coordinator-traffic-hold`
+and `coordinator-companion-busy` (regions) and
+`coordinator-quarantine-admission` (branches); re-reviews and respans
+`companion-companion-stage` (now the hold decision of `stage`),
+`cap81-mod-federationcoordinator-batch-rejected-with-error`,
+`cap79-maintenance-056-reject-pending-batch`,
+`cap79-mailbox-expiry-027-batch-applied` and
+`cap79-request-expiry-022-apply-pending-receipt`; and moves the other
+regions of the changed files, whose spans are unchanged. Both source
+inventories are refreshed.
 
 ## Validation
 

@@ -2848,9 +2848,11 @@ async fn a_request_waits_while_another_router_has_a_batch_open() -> TestResult {
         }
     })?;
     // The request waits for the open batch instead of planning against a
-    // state that is about to change and being refused as busy.
+    // state that is about to change and being refused as busy: link traffic
+    // waits in the backlog while any router's batch is open.
+    assert_eq!(coordinator.backlog.len(), 1, "the request waits");
     let state = coordinator.peers.get(&peer).ok_or("peer state missing")?;
-    assert_eq!(state.queued.len(), 1, "the request is queued");
+    assert!(state.queued.is_empty(), "the request is not yet planned");
     assert!(state.live.is_some(), "the link stays live");
     assert_eq!(coordinator.counters().violations, 0);
     let answered =
@@ -5137,3 +5139,71 @@ mod companion_negotiation;
 mod link_refusals;
 mod outbox_window;
 mod receipt_settlement;
+
+#[tokio::test]
+async fn a_receipt_that_retires_its_link_still_replays_the_backlog() -> TestResult {
+    let (first, second) = (
+        ServerId::from_bytes([50; 16]),
+        ServerId::from_bytes([60; 16]),
+    );
+    let (first_incarnation, second_incarnation) = (
+        ServerIncarnation::from_bytes([51; 16]),
+        ServerIncarnation::from_bytes([61; 16]),
+    );
+    let mut fixture = StateCoreFixture::with_registration_router(entropy_script())?;
+    // One earlier commit, so the receipt below belongs to the staged request.
+    {
+        let context = fixture.context_mut()?;
+        let plan = context
+            .domain()
+            .plan_account_created(agenc_relay_domain::AccountState::new(
+                agenc_relay_testkit::account_id(9),
+                agenc_relay_testkit::generation(1)?,
+                context.domain().revision(),
+            ))?;
+        context
+            .stage_durable(
+                plan,
+                crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+                None,
+                0,
+            )
+            .map_err(|error| format!("earlier batch: {error:?}"))?;
+    }
+    fixture.commit_staged_batch().await?;
+    let context = fixture.context_mut()?;
+    let mut coordinator = standalone_coordinator_pair(first, second);
+    let (first_handle, _first_queue) = link_queue(1 << 20);
+    let (second_handle, _second_queue) = link_queue(1 << 20);
+    coordinator.inbound(
+        context,
+        established(1, first, first_incarnation, first_handle),
+    );
+    coordinator.inbound(
+        context,
+        established(2, second, second_incarnation, second_handle),
+    );
+    // The first peer's request batch is in flight; its origin was never
+    // declared, so its receipt cannot settle and retires that link. The
+    // second peer's RESET waits behind the batch.
+    coordinator.pending = Some(staged_request(first, first_incarnation));
+    coordinator.inbound(context, reset_frame(2, second, second_incarnation));
+    assert_eq!(coordinator.backlog.len(), 1);
+    coordinator.batch_applied(context);
+    assert!(
+        coordinator
+            .peers
+            .get(&first)
+            .is_some_and(|state| state.live.is_none())
+    );
+    // The receipt still replays the backlog: the second peer's RESET runs.
+    assert!(coordinator.backlog.is_empty());
+    assert_eq!(
+        coordinator
+            .peers
+            .get(&second)
+            .and_then(|state| state.incarnation),
+        Some(second_incarnation)
+    );
+    Ok(())
+}
