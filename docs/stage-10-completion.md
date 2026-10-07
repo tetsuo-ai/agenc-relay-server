@@ -369,6 +369,12 @@ after READY, under its acknowledged generation, and its base origin deletion
 naming a pending update only once a link carried it (D-37, SDK program,
 outside master #35), are recorded in [the origin deletion
 record](stage-10-origin-deletion.md).
+The leaf credential that `old_credential_hash` and
+`resulting_leaf_credential_hash` read, the canonical TLS encoding of the
+leaf's RFC 9420 `Credential` whose `credential_type` is basic, with the shared
+helper over it and its check against two MLS libraries (D-42, SDK program,
+outside master #35), is recorded in [the credential hash
+record](stage-10-credential-hash.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

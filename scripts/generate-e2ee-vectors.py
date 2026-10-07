@@ -43,6 +43,13 @@ name another conversation kind than the semantic route it keeps, as an
 extension list and as the target built from it. Signatures are real; MLS
 inputs are synthetic.
 
+Every `old_credential_hash` hashes the canonical encoding of the leaf's RFC
+9420 basic `Credential`, its credential type followed by `identity<V>`, as a
+KeyPackage leaf carries it. In the identity and recovery sets the identity is
+the leaf's credential bundle; in the ReInit set a principal's old leaf
+identity is its root identity followed by its device certificate, an MLS
+input the set synthesizes.
+
 Usage: python3 scripts/generate-e2ee-vectors.py [--check]
 """
 
@@ -138,6 +145,17 @@ def mls_varint(value: int) -> bytes:
 
 def opaque_v(data: bytes) -> bytes:
     return mls_varint(len(data)) + data
+
+
+CREDENTIAL_TYPE_BASIC = 1
+
+
+def encoded_basic_credential(identity: bytes) -> bytes:
+    """A leaf's RFC 9420 `Credential` of type basic, canonically encoded: the
+    `uint16` `credential_type`, then `identity<V>`. A KeyPackage leaf carries
+    these bytes, and they are the `encoded_BasicCredential` the companion's
+    credential hashes read (Section 2.2)."""
+    return u16(CREDENTIAL_TYPE_BASIC) + opaque_v(identity)
 
 
 def mls_sign(private: Ed25519PrivateKey, label: str, content: bytes) -> bytes:
@@ -289,8 +307,7 @@ def key_package(identity: bytes, leaf_seed: int) -> bytes:
     leaf = (
         opaque_v(bytes([11] * 32))
         + opaque_v(public(leaf_private))
-        + u16(1)
-        + opaque_v(identity)
+        + encoded_basic_credential(identity)
         + encoded_capabilities()
         + u8(1)
         + u64(100)
@@ -480,8 +497,9 @@ def submission(
     return tbs, wire_object(KIND_RECOVERY_SUBMISSION, tbs + sign(key(device_seed), "recovery submission", tbs))
 
 
-def old_credential_hash(bundle: bytes) -> bytes:
-    return semantic_id("old credential hash", opaque_v(bundle))
+def old_credential_hash(identity: bytes) -> bytes:
+    """`old_credential_hash` of the leaf whose basic credential carries `identity`."""
+    return semantic_id("old credential hash", encoded_basic_credential(identity))
 
 
 def membership_proof(
@@ -864,7 +882,7 @@ class RPrincipal:
         self.capability_id = r_capability_id(self.account, self.seed, self.fp, self.roster_id)
         self.old_leaf = key(R_OLD_LEAF_SEEDS[index])
         self.old_leaf_index = index
-        self.old_credential_hash = semantic_id("old credential hash", opaque_v(self.root + cert))
+        self.old_credential_hash = old_credential_hash(self.root + cert)
         self.root_generation = 0
 
     def approval(self, label: str, tbs: bytes) -> bytes:

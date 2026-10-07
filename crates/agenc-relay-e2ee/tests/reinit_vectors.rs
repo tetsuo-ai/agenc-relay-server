@@ -5,8 +5,9 @@
 //! 0x0003, written by `scripts/generate-e2ee-vectors.py`. Every record is
 //! adopted by the shared historical chain; the target is rebuilt from the
 //! Proposal's extension list byte for byte; the old finalization, the attempt
-//! and the successor initial Commit are checked against that one target; and
-//! every rejection vector is refused.
+//! and the successor initial Commit are checked against that one target;
+//! every rejection vector is refused; and every attempt and ACK names its old
+//! leaf by the hash of that leaf's basic `Credential`.
 
 #[path = "reinit/support.rs"]
 mod support;
@@ -24,12 +25,17 @@ mod join;
 #[path = "reinit/rosters.rs"]
 mod rosters;
 
+use std::fs;
+
 use agenc_relay_crypto::SemanticHashDomain;
 use agenc_relay_e2ee::E2eeError;
 use agenc_relay_e2ee::history::{ChainStep, Lifecycle};
 use agenc_relay_e2ee::ids::semantic_id_of;
+use agenc_relay_e2ee::mls_outer::{EncodedBasicCredential, mls_varint_encode};
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
+use agenc_relay_e2ee::objects::identity::ArcDeviceRoster;
 use agenc_relay_e2ee::objects::reinit::ArcReInitTargetTbs;
+use agenc_relay_e2ee::objects::sequencing::ArcSequencerRecord;
 use agenc_relay_e2ee::reinit_target::{
     AuthorizedReinit, ReinitPredecessor, check_carried_target, check_carried_target_from,
 };
@@ -520,5 +526,97 @@ fn the_facts_of_a_retained_binding_are_those_of_the_verified_binding() -> TestRe
             "{name}"
         );
     }
+    Ok(())
+}
+
+/// `old_credential_hash` of principal `name`'s old leaf (`c` holds leaf 0,
+/// `d` leaf 1), over the canonical encoding of that leaf's basic
+/// `Credential`: the basic credential type, then `identity<V>`. The set's
+/// MLS inputs are synthetic, and a principal's old leaf identity is its root
+/// identity followed by the device certificate its roster holds.
+fn old_leaf_credential_hash(name: &str) -> TestResult<[u8; 32]> {
+    let mut budget = budget();
+    let root = ArcWireObject::decode_kind(
+        &read(&format!("root-{name}.bin"))?,
+        Some(ArcWireObjectKind::RootIdentity),
+        &mut budget,
+    )?;
+    let roster = ArcWireObject::decode_kind(
+        &read(&format!("roster-{name}.bin"))?,
+        Some(ArcWireObjectKind::DeviceRoster),
+        &mut budget,
+    )?;
+    let roster = ArcDeviceRoster::decode_exact(roster.body(), &mut budget)?;
+    let [device] = roster.tbs.active_devices.as_slice() else {
+        return Err(format!("roster-{name}.bin holds more than one device").into());
+    };
+    let mut identity = root.body().to_vec();
+    identity.extend_from_slice(&device.certificate.encode()?);
+    let mut credential = vec![0, 1];
+    mls_varint_encode(&mut credential, identity.len())?;
+    credential.extend_from_slice(&identity);
+    Ok(EncodedBasicCredential::parse(&credential)?.old_credential_hash()?)
+}
+
+/// Every ACK and attempt of the set names its old leaf by
+/// `old_credential_hash` over that leaf's basic `Credential` (companion 2.2):
+/// each attempt's creator, each Commit ACK in a finalization record and each
+/// ReInit ACK, with the attempt it acknowledges, in an activation record.
+#[test]
+fn every_old_leaf_is_named_by_its_basic_credential() -> TestResult {
+    let expected = [
+        old_leaf_credential_hash("c")?,
+        old_leaf_credential_hash("d")?,
+    ];
+    let named = |index: u32, hash: &[u8; 32], file: &str| -> TestResult {
+        let index = usize::try_from(index)?;
+        let expected = expected.get(index).ok_or(format!("{file}: leaf {index}"))?;
+        assert_eq!(hash, expected, "{file}: leaf {index}");
+        Ok(())
+    };
+    let (mut attempts, mut commit_acks, mut reinit_acks) = (0, 0, 0);
+    let mut names = fs::read_dir(directory())?
+        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+        .collect::<TestResult<Vec<String>>>()?;
+    names.sort();
+    for file in names.iter().filter(|name| !name.starts_with("reject-")) {
+        if file.contains("record-") {
+            match record(file)? {
+                ArcSequencerRecord::Finalization(certificate) => {
+                    for ack in certificate.tbs.request.proof.acknowledgements.as_slice() {
+                        named(ack.tbs.old_leaf_index, &ack.tbs.old_credential_hash, file)?;
+                        commit_acks += 1;
+                    }
+                }
+                ArcSequencerRecord::ReinitActivation(certificate) => {
+                    let request = &certificate.tbs.request;
+                    let tbs = &request.attempt.tbs;
+                    named(
+                        tbs.creator_old_leaf_index,
+                        &tbs.creator_old_credential_hash,
+                        file,
+                    )?;
+                    attempts += 1;
+                    for ack in request.acknowledgements.as_slice() {
+                        named(ack.tbs.old_leaf_index, &ack.tbs.old_credential_hash, file)?;
+                        reinit_acks += 1;
+                    }
+                }
+                _ => {}
+            }
+        } else if file.contains("-attempt-") && !file.contains("initial-commit") {
+            let tbs = attempt(file)?.tbs;
+            named(
+                tbs.creator_old_leaf_index,
+                &tbs.creator_old_credential_hash,
+                file,
+            )?;
+            attempts += 1;
+        }
+    }
+    assert!(
+        attempts > 0 && commit_acks > 0 && reinit_acks > 0,
+        "attempts {attempts}, commit ACKs {commit_acks}, ReInit ACKs {reinit_acks}"
+    );
     Ok(())
 }

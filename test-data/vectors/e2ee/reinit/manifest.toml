@@ -82,8 +82,8 @@ route_sequence = "0"
 [[vectors]]
 file = "record-01-bootstrap-finalization.bin"
 encoded_length = 2030
-sha256 = "c63f34ffb516f1c386403ae4dd59dc15a5e27e10659a68fbf3393cc67352535b"
-semantic_id = "4c49b6a77c130a061f7544cbd8eac122b41d19d0735e5f57a3806c2b7b24a5a6"
+sha256 = "16a4e2c083153d81835d982c9a090300f8e3ff2b279d8a04b898e1f7395e2c93"
+semantic_id = "5c58a7275e06fe95d1af790d2af67f8b1e87a24a883f1beb876dace9a1a97056"
 route_sequence = "1"
 policy_object = "policy-operational.bin"
 
@@ -120,46 +120,46 @@ policy_id = "7c571c5d208fc038d3936f1555c1da5ce3dbd87bf2fd2446b332f619255bc30b"
 [[vectors]]
 file = "suite-0001-record-02-reinit-candidate.bin"
 encoded_length = 301
-sha256 = "f3a64ae245510c97ba7a074f69d944bcd548e147c7c496701d9affac23982698"
-semantic_id = "feee0b6d44e1327d7d2283b9e71ea297347cd3ec9398fb1f076d13bb54520a5a"
+sha256 = "8f175ce073fa55c52c59e42b751c04488a71a2dbbf5d920e79ce8994502c13db"
+semantic_id = "8929fb0fe89cf97906c06bcf3c2ff02ed5d185df66f86b4c7253b0018496fc24"
 route_sequence = "2"
-prior_state_id = "4c49b6a77c130a061f7544cbd8eac122b41d19d0735e5f57a3806c2b7b24a5a6"
+prior_state_id = "5c58a7275e06fe95d1af790d2af67f8b1e87a24a883f1beb876dace9a1a97056"
 
 [[vectors]]
 file = "suite-0001-record-03-reinit-finalization.bin"
 encoded_length = 2030
-sha256 = "2b8860d1ad097642b9d95a8a9d8345ef13911224d68990f4124b16fbe726d01f"
-semantic_id = "77a3cb6f37059f09af883e4cb2d80ebaed357ffb193ab1ad0337bfd4d3eb26c5"
+sha256 = "70619e6508b77dcb5922abe93f23ffbcdf49dbb0e2d04d2bbae65c9d666b8b1e"
+semantic_id = "5315fc172b4887aa79b37cf150e5f02747c0fdd198aaf49ecb60912fa16ad23e"
 route_sequence = "3"
-commit_authorization_id = "e51d30c461281afa5ef7bab416c207832cb7c983c7418ea65a1d7c5d965ac5af"
+commit_authorization_id = "f472541e219791792ce296f32e7837625a855c30c26be788b65b209225f13dc5"
 transition_target_digest = "1f40473d4920b89175846ecc75ab7301b4150b990a1feff077378d3e05257f21"
 
 [[vectors]]
 file = "suite-0001-initial-commit-0.bin"
 encoded_length = 285
-sha256 = "31fb4d5542bc01a4e8d748632d713ef46b87be6b7cea5f0677be74e579fb9a1e"
-prior_state_id = "77a3cb6f37059f09af883e4cb2d80ebaed357ffb193ab1ad0337bfd4d3eb26c5"
+sha256 = "9c8f74e6ffe5bdaa8346449c4ab6933a3bf72a58115f0220f27f7ca35a03a5f1"
+prior_state_id = "5315fc172b4887aa79b37cf150e5f02747c0fdd198aaf49ecb60912fa16ad23e"
 
 [[vectors]]
 file = "suite-0001-attempt-0.bin"
 encoded_length = 3757
-sha256 = "8fcdc62bc98ed66e3827e531c50707b77ba864743be009c1799de3df5060aa31"
-reinit_attempt_id = "5ca2042eb970fbe1cbc30f0e8e77205b018c78810090f6ef20300a155e449ae7"
-initial_commit_digest = "8320c33983dcacaa189809d02c59f2decdfc1a2482783fa92931df1334e0ac5b"
+sha256 = "08e4410672665bb4eb9c453df756226ab3fad934f493a77bf7052744206cf7ca"
+reinit_attempt_id = "9cf068aa4e21285fe7f9a91a2a767f9cfc7445b196c1e2c46d5e3cfb4462d377"
+initial_commit_digest = "9eb6caeb86b64637fc5d7429293f59b64b8a5b4b058f430f27d80c7cb27b949f"
 
 [[vectors]]
 file = "suite-0001-record-04-attempt-0-receipt.bin"
 encoded_length = 317
-sha256 = "73b14465170c23384e224f62a0b9524c289f707433c7cf11829a4ac50b74e502"
-semantic_id = "5ca2042eb970fbe1cbc30f0e8e77205b018c78810090f6ef20300a155e449ae7"
+sha256 = "8646328f25a1a21b14944c5a0bf468fbff28af749ab9540caa69cf0ed8181a7b"
+semantic_id = "9cf068aa4e21285fe7f9a91a2a767f9cfc7445b196c1e2c46d5e3cfb4462d377"
 route_sequence = "4"
 attempt_object = "suite-0001-attempt-0.bin"
 
 [[vectors]]
 file = "suite-0001-record-05-activation.bin"
 encoded_length = 5747
-sha256 = "f97adee93b242a01a05cebc491dde0517486cd05e88dc685b430647fce77c222"
-semantic_id = "9937f2a5161a6afdc90f7535c497910dd8e9f1c98d7d0b28863c3e2c9a605147"
+sha256 = "f0a99b4b5a63ee73c1c02930a330a167207b8c84ba332113b3691235cbba7236"
+semantic_id = "bcdbb74e144f08f1dc11e9ce40e65f05e2ab0c8861a9ecdb99b1763a23c60ab4"
 route_sequence = "5"
 
 [[vectors]]
@@ -195,147 +195,147 @@ policy_id = "f91dca29e432bb05ade376ab398defb536186ff55475d061d3ba459815dc5b4f"
 [[vectors]]
 file = "suite-0003-record-02-reinit-candidate.bin"
 encoded_length = 301
-sha256 = "99f74bd7f6e566872a55d3d8ed029d9b82ebe125ae922307bb3f347343c07314"
-semantic_id = "b0b96d932a23e8d1fba178d8232a4b7f23999d6f8142febc8ada2fc9acb12355"
+sha256 = "2c939276d54edd304188851ce3c5def4d62cba9c1ae3f67b7a89bcbfd40b3a8c"
+semantic_id = "0cfa9965d84d4ab4e1066d08a8b1bbac26aa3d9aeb561432102a22cf4d20b692"
 route_sequence = "2"
-prior_state_id = "4c49b6a77c130a061f7544cbd8eac122b41d19d0735e5f57a3806c2b7b24a5a6"
+prior_state_id = "5c58a7275e06fe95d1af790d2af67f8b1e87a24a883f1beb876dace9a1a97056"
 
 [[vectors]]
 file = "suite-0003-record-03-reinit-finalization.bin"
 encoded_length = 2030
-sha256 = "769cf30216577d80c6a22ece4a419c8ef1fb699901bbf29c5d3365fc07fe3061"
-semantic_id = "449c3a96073409593b9a51263e28b9fc35b79c7497234c5a8870b66f30074a51"
+sha256 = "5d834214c79b72e2f7ab69c423c967ef4933581d2525eb28a9d9eb8d76c8926b"
+semantic_id = "f78f8f248128e1163c07f27fe24d615543dc1e7402f13442b39ce6b2aa4c6b68"
 route_sequence = "3"
-commit_authorization_id = "45e3a679244832aed9d394e998f6ade53ff230caebf3df6ae51c5b8468559e7f"
+commit_authorization_id = "671579c895ebb83524504123028dfad9b307deeba5d9dfb7b8c7b87c00dba30c"
 transition_target_digest = "23fe280db0ca9889388dba63c77eb22ffe044fa3ed3fde94f247547f707db069"
 
 [[vectors]]
 file = "suite-0003-initial-commit-0.bin"
 encoded_length = 285
-sha256 = "6486a0c8ca46233a425d94fbfc25427db1f5cafa8b5c10c64fea2f13b91a430a"
-prior_state_id = "449c3a96073409593b9a51263e28b9fc35b79c7497234c5a8870b66f30074a51"
+sha256 = "693281b2cc7a1e44b56a5c9033dc26b4eeca22ed95eef58fee3ae3978b219f09"
+prior_state_id = "f78f8f248128e1163c07f27fe24d615543dc1e7402f13442b39ce6b2aa4c6b68"
 
 [[vectors]]
 file = "suite-0003-attempt-0.bin"
 encoded_length = 3757
-sha256 = "82bdee1c555e83c695cede89685de977abfa04ff55732238c2e3df0a349add9e"
-reinit_attempt_id = "dd29339c2196d5a1a7e550dd634dff7a0fc6520c49a34a5437b9bacef2712ad2"
-initial_commit_digest = "fe884671d0905cf912d631527f07f59d275cc24b03991df3399a09d28870852b"
+sha256 = "b5f62877a1e6e297d1dc1f349d312146ccbb7362ed4b875055ec6bb4333bad3e"
+reinit_attempt_id = "7f243cba86177e9bb52996e2835820b68506fab09b606a103081077e64bba586"
+initial_commit_digest = "a38afa37b0d3fa0335a1bae7bd28168376ed7867fda0e171939ba72dd9033ef3"
 
 [[vectors]]
 file = "suite-0003-record-04-attempt-0-receipt.bin"
 encoded_length = 317
-sha256 = "707d49ad2f873d10d168a77104bfe24ee457cc7b1dc33f383063a18262993750"
-semantic_id = "dd29339c2196d5a1a7e550dd634dff7a0fc6520c49a34a5437b9bacef2712ad2"
+sha256 = "b140c64d7fe8b26cf2bbdaf28842a77d5d5bfde2da165b82a72a0c5d6b0d3c89"
+semantic_id = "7f243cba86177e9bb52996e2835820b68506fab09b606a103081077e64bba586"
 route_sequence = "4"
 attempt_object = "suite-0003-attempt-0.bin"
 
 [[vectors]]
 file = "suite-0003-record-05-activation.bin"
 encoded_length = 5747
-sha256 = "b211b4701c1ccf20c1f38d13f21e5df09f76171d3cf4497f23e40eb04286496f"
-semantic_id = "1a8be300426c3d0572f7d0e2b59a595f502313a264b5f69061a7c4dec302be97"
+sha256 = "c53504d6c9a070d3d4ce4b2a1b7ec53d563734f186b7ba9b046755e914acbfb5"
+semantic_id = "1c723eb5626f7ab22f255c8323f8fd0ea859f647b48a45e7113dba0c98fd7c66"
 route_sequence = "5"
 
 [[vectors]]
 file = "advanced-record-02-routine-candidate.bin"
 encoded_length = 301
-sha256 = "28f048f1643ee4e629439d4cb9f2049b228afa37d57cf68a91e0ae7e254ceda0"
-semantic_id = "0ba087be4e60024cd0d06f192a58e1fa4f51906cee40d2647c899529d83584bb"
+sha256 = "8e3d45876cd2e14f0c96227aa4d501304547cdff707e465d3029146847ebdda8"
+semantic_id = "21861e5e193593cb3b6a54e294fcf3f8fae32581ce3645b15c5b74bb236f08ff"
 route_sequence = "2"
 
 [[vectors]]
 file = "advanced-record-03-routine-finalization.bin"
 encoded_length = 1886
-sha256 = "1c4e6e9acea22289b8546282c94756aa36a9309778601c0be487c7dc9e13a4f9"
-semantic_id = "9c7fc683a06e4040afda65a766b9a0aad20011242ca87d3de8d3642213d597ac"
+sha256 = "f7f60406e1a08a5843860ac8c5954e91a705ac445955dab75275b46b7e47c90a"
+semantic_id = "c23c2b552f449ffe2c1f02ed7d4eed7166b0ec15e189f6644569f89de8fe42f0"
 route_sequence = "3"
 
 [[vectors]]
 file = "advanced-record-04-reinit-candidate-aborted.bin"
 encoded_length = 301
-sha256 = "154aafb918869c3e4492cedfb3ed8ff3cd3cf9412b0b33874f798079ce87798a"
-semantic_id = "2a056c279e16bd9d2e5192412d4465b6f2b49a93d04340ac25230bfe87220707"
+sha256 = "ede9ff947a2804b76f4e36f9f672523f0e8f3620e7eadd8e58978f568c28c7a6"
+semantic_id = "bc35c2c206bc9801dbd6415bca726dfc0cfc2f2e2641cd650d0263b711de6b7e"
 route_sequence = "4"
 
 [[vectors]]
 file = "advanced-record-05-candidate-abort.bin"
 encoded_length = 996
-sha256 = "0c5034cbdf0b0b56e92cb44a15050d267c61ea6671d0e08a97e60e4c2ff3da99"
-semantic_id = "25a3b60292941e14f015f5f284103338d83029402022fc9df07e5193e1e3d692"
+sha256 = "ecf1698a047b2bc91231fc49d36ff8a6926c783607f803ce6d120a5435a42c0e"
+semantic_id = "a3bd5f2d61ace9370b809043e7985e72bdd9fbba630753ab81befed048601d05"
 route_sequence = "5"
 
 [[vectors]]
 file = "advanced-record-06-reinit-candidate.bin"
 encoded_length = 301
-sha256 = "8d48e53b3a9cd49163dd713a7dcc5a5d733bc81eae33c3385c526967fd455208"
-semantic_id = "9ce2a9409de444b7b722e0aab1d5f3b3d2d50d54e70c64ab186688b465524f20"
+sha256 = "8012d4df163d2466c76306760aa2d4e73170fd24b2b64e94c350249d4776e67d"
+semantic_id = "12e7a15debdf921d65b88347e81775bbf0570e5a9e17af4217053ca3429393c9"
 route_sequence = "6"
-prior_state_id = "9c7fc683a06e4040afda65a766b9a0aad20011242ca87d3de8d3642213d597ac"
+prior_state_id = "c23c2b552f449ffe2c1f02ed7d4eed7166b0ec15e189f6644569f89de8fe42f0"
 
 [[vectors]]
 file = "advanced-record-07-reinit-finalization.bin"
 encoded_length = 2030
-sha256 = "322a205655da39bf6a6a955c644fe060029ca5b9db9f85050d9c01c8f324a7a1"
-semantic_id = "181677f83940409e4d9be1cfc63313c161edde39e61ebf87a3ce98faa8d774d5"
+sha256 = "30a877a39684a3a523d3994b82621251ff1d62de3d94ee17a53231b5d020c0b9"
+semantic_id = "cd9f693a6ec8afacb955289c84c17290234a480aa38f0e08d61fd845d9e70a78"
 route_sequence = "7"
-commit_authorization_id = "28d9c0a681579b88d5b43abd4b1eabeb6c0a55aa39cc990fd53d3a79dc9f9efb"
+commit_authorization_id = "19ed003257e36f3609ffadddb88c979f56716d85f2a2ab29a15560fae237b60e"
 transition_target_digest = "1f40473d4920b89175846ecc75ab7301b4150b990a1feff077378d3e05257f21"
 
 [[vectors]]
 file = "advanced-initial-commit-0.bin"
 encoded_length = 285
-sha256 = "2a9c0ecc13f3f734838a5362355d959974e5afb7d7f8bcf46fe426c55fc01b5b"
-prior_state_id = "181677f83940409e4d9be1cfc63313c161edde39e61ebf87a3ce98faa8d774d5"
+sha256 = "a9df4cf7b8c7e06ff01660b398f8f08601f1dc24c0b5ccd502c26f6e20290865"
+prior_state_id = "cd9f693a6ec8afacb955289c84c17290234a480aa38f0e08d61fd845d9e70a78"
 
 [[vectors]]
 file = "advanced-attempt-0.bin"
 encoded_length = 3757
-sha256 = "2faac42e7e8c8dacab3441f3e04b2242c66a197e4543c2486b9e9ce0085e1697"
-reinit_attempt_id = "1c05983e8aeea98274ce9415c124be35cdbd80d41d96ef8f30d7c27904cffee5"
-initial_commit_digest = "d780e445d93b78d5d29d86bc5c79765d1c72166bdd6ad77200b2fe31d1824d75"
+sha256 = "8edce86eec0b052e5fa4b4b30a33d62c57950a11883fc2deb4620d292f58a523"
+reinit_attempt_id = "ed0fb0fbd66edd4f7f95c6772c4e1d4cefd7433140ab50e1ce7a3b86f2165347"
+initial_commit_digest = "3d546421ad713bc8538aea536f8341980a3017e27d727fd0144bafa2ed7d98f1"
 
 [[vectors]]
 file = "advanced-record-08-attempt-0-receipt.bin"
 encoded_length = 317
-sha256 = "104c0065cec38e31ecf8f28379fda72fa14c945d98820cbda6696f4055dbeeed"
-semantic_id = "1c05983e8aeea98274ce9415c124be35cdbd80d41d96ef8f30d7c27904cffee5"
+sha256 = "916fa6eb2da5f97b8f59b972a88e8b7b027796141f8bb67ed81a303edefff535"
+semantic_id = "ed0fb0fbd66edd4f7f95c6772c4e1d4cefd7433140ab50e1ce7a3b86f2165347"
 route_sequence = "8"
 attempt_object = "advanced-attempt-0.bin"
 
 [[vectors]]
 file = "advanced-record-09-attempt-abort.bin"
 encoded_length = 4792
-sha256 = "9a51907cacd6004aabb1eedfeef3093ae420e6231f98c6de14651d507751b5e8"
-semantic_id = "1383aa0bffa32a91e617a73caaf1b49334763cc8b343881561793579a772470e"
+sha256 = "beca28251f6c9bf48c2faf4192b1e609da21ee274eeaac91c81b85b8dfdb6212"
+semantic_id = "96fcd2f4133cbc524792b7ca4a9aa43aed6ec9498b1fd2af656d1e7ed76e83eb"
 route_sequence = "9"
 
 [[vectors]]
 file = "advanced-initial-commit-1.bin"
 encoded_length = 285
-sha256 = "de91504aa0d803e7fd6058e6c2fda08dcf94558cddf4b0420b0acd5db62267f4"
-prior_state_id = "181677f83940409e4d9be1cfc63313c161edde39e61ebf87a3ce98faa8d774d5"
+sha256 = "ef887b3d99eff00f7773b5a01e159833f9ebbce5c0c1d9f4e61e0acf8f56ae17"
+prior_state_id = "cd9f693a6ec8afacb955289c84c17290234a480aa38f0e08d61fd845d9e70a78"
 
 [[vectors]]
 file = "advanced-attempt-1.bin"
 encoded_length = 3757
-sha256 = "c613bfedeff4c7f06841cb2a99536fe9161bbb3d2c859e00347a6f703a4e099e"
-reinit_attempt_id = "e8c89d4e32e98d8eca946cd9381f2a37bd05b5a8e77bc1947561a5a6f814e2b6"
-initial_commit_digest = "42316ea363e94c057adbc4086dd05df17016d85e8d3b23d053bb439b5ea3e6e8"
+sha256 = "092f2c6314d811ad7d6b5ef4d8a4e6b58cd1e57d3751d690be5d6dd9a2477b81"
+reinit_attempt_id = "11fd499bfce2b30319c66e320a06c3f2d33957c87141d401614af171cd572c7e"
+initial_commit_digest = "259ee8172a747f42931405e3a5ba97871f34366146aa1b19d5378e82bfc61752"
 
 [[vectors]]
 file = "advanced-record-10-attempt-1-receipt.bin"
 encoded_length = 317
-sha256 = "f832920b01ba0e98774ee1ce3f1b55b70608866e2ca2a17e82b0ac2ec8c71758"
-semantic_id = "e8c89d4e32e98d8eca946cd9381f2a37bd05b5a8e77bc1947561a5a6f814e2b6"
+sha256 = "07b8074294d69b4564c9499c929d147110ab8c540fb22fd9ceb7ad5edcec9112"
+semantic_id = "11fd499bfce2b30319c66e320a06c3f2d33957c87141d401614af171cd572c7e"
 route_sequence = "10"
 attempt_object = "advanced-attempt-1.bin"
 
 [[vectors]]
 file = "advanced-record-11-activation.bin"
 encoded_length = 5747
-sha256 = "faf95385abfb9c0e98e227d57e21229651c1ecc92bf5c02edaec83ace600b7c6"
-semantic_id = "1c568cf060d7899da67dcd7f96cc8203d0eee57eab689515e6728bc64e383816"
+sha256 = "4c427409a5fae45a8d982c122e53b98c7cb9d5579e1dcae17327d280ed1ee7cb"
+semantic_id = "fa24f45aaa9bb1fac1d5bc86725e2006b46b2fcd576b0a5282208217c0425f7e"
 route_sequence = "11"
 
 [[vectors]]
@@ -403,46 +403,46 @@ policy_id = "30e16da56b76b83a50a58882c908979e727423bb8af8214b4210058667714cee"
 [[vectors]]
 file = "rotation-record-02-reinit-candidate.bin"
 encoded_length = 301
-sha256 = "bc8e768c4553ce8a0fe7cbb3376d8a2dedc3b919f7001b48185ef49e7b768804"
-semantic_id = "ba50f7005c709851cb07a5382cd15a53ce5a73844d2f4bdc8a2e8b0b327450bd"
+sha256 = "2864a1a416945989a402937b03a9c1873ce1f500bb25400cf546b22d34710fde"
+semantic_id = "d0162fb1dcfd28dbe1e20d036cc9b08f5992736f7531c80f384a456fdf7707e0"
 route_sequence = "2"
-prior_state_id = "4c49b6a77c130a061f7544cbd8eac122b41d19d0735e5f57a3806c2b7b24a5a6"
+prior_state_id = "5c58a7275e06fe95d1af790d2af67f8b1e87a24a883f1beb876dace9a1a97056"
 
 [[vectors]]
 file = "rotation-record-03-reinit-finalization.bin"
 encoded_length = 2030
-sha256 = "206586d39d77f80063e0d91973140071a9b3a1e58d820061329ce461290733b1"
-semantic_id = "d2655327133ad223f6ff48aa59d9d5c57089235c16950eb8ccb44813428c242e"
+sha256 = "0fe4662dfb15ed69324a6f63130d329eb5d268ef397d14ff5e22a3c80c4d9d4c"
+semantic_id = "a8ecfec289683bbd603580550c59b9e8677fd2977c9e25c4046954b9fea94ef5"
 route_sequence = "3"
-commit_authorization_id = "932dbcd6d2990f07498c177a7edeff2f5426832c2187fe862d2b5dcc6e9a012d"
+commit_authorization_id = "410de5a1f952b631a396e5ec521aeca051843def8f77504536c0fc4be3e4bba9"
 transition_target_digest = "e5394664098f0e94baeaff3319acefa41cc94835cdeb2f7e4c0e30750dc488cc"
 
 [[vectors]]
 file = "rotation-initial-commit-0.bin"
 encoded_length = 285
-sha256 = "2ade5af7fde5dc71288b3c26a9c14f5b02831b7315f3badddd1d266641cc72e6"
-prior_state_id = "d2655327133ad223f6ff48aa59d9d5c57089235c16950eb8ccb44813428c242e"
+sha256 = "d4a69b1a794ada6a0eb110bf58d48efe31d14ff7cf874abc942a059378a9fad2"
+prior_state_id = "a8ecfec289683bbd603580550c59b9e8677fd2977c9e25c4046954b9fea94ef5"
 
 [[vectors]]
 file = "rotation-attempt-0.bin"
 encoded_length = 3757
-sha256 = "a39e4083ebc7045c5b0915b29cdb735d724b2886b68c48c819ea8b9957b078ba"
-reinit_attempt_id = "7059a649e1b6e22e15ead703334ec9c4d2dc187f0d931bea20dde2fe3ffbddc2"
-initial_commit_digest = "5bb6a7f2f39365f6c17223805d8aae857fb16877d3017db852b6a8468bf35a2a"
+sha256 = "959255f7f635a7aa2457c9e89948cab0cc8e476cd2edf24c1fd06b992ca887d1"
+reinit_attempt_id = "673dfeab9cefa4fbb4f003f55d25c6518d77660f10175550565f8eace4320816"
+initial_commit_digest = "34c3d77e38b4f11b6cac57be44a5c95b60e2af39e828761b7a43c89c3129bce4"
 
 [[vectors]]
 file = "rotation-record-04-attempt-0-receipt.bin"
 encoded_length = 317
-sha256 = "0606f3a61872c1770923463fbd111b218413867a0eccc3dc42155adad645ad53"
-semantic_id = "7059a649e1b6e22e15ead703334ec9c4d2dc187f0d931bea20dde2fe3ffbddc2"
+sha256 = "2d94b6b5e8b64dfb6216c8ef749107364233cba9890e0f99bde64caf8918f394"
+semantic_id = "673dfeab9cefa4fbb4f003f55d25c6518d77660f10175550565f8eace4320816"
 route_sequence = "4"
 attempt_object = "rotation-attempt-0.bin"
 
 [[vectors]]
 file = "rotation-record-05-activation.bin"
 encoded_length = 5747
-sha256 = "e50b3656184d68125a4812ceb443f9d2f84fc688135859d15c708034a5fbfa1e"
-semantic_id = "2b9ca7cc1f1dfe8a96476f697a7a19f7efabb76376e8f34611b85b5d51ce503e"
+sha256 = "abeab12070500c472bd0d41ed8d25e5cc7f5900f9e91055190f8f5920f1271ec"
+semantic_id = "a67c364067f9715ad928d1373b7ee92abfe02b222c4d1ffbeb3682a73ab0acd8"
 route_sequence = "5"
 
 [[vectors]]
@@ -559,41 +559,41 @@ expected = "E2eeError::InvalidValue"
 [[vectors]]
 file = "reject-target-pinned-layout.bin"
 encoded_length = 1982
-sha256 = "45339ecd3b1a8302d4603f7ce3d4cb83e20ead25baed04b657b09c155e154375"
-finalization_id = "77a3cb6f37059f09af883e4cb2d80ebaed357ffb193ab1ad0337bfd4d3eb26c5"
+sha256 = "1e8efbaa293b35147ffb181cb27c3792fd333862f806ff7c6e0f34ab89aedb4c"
+finalization_id = "5315fc172b4887aa79b37cf150e5f02747c0fdd198aaf49ecb60912fa16ad23e"
 
 [[vectors]]
 file = "reject-initial-commit-names-activation.bin"
 encoded_length = 285
-sha256 = "788e784e73f21b4ff4de1070db62d9284a9264bd97ebab5e82483b5d91d6a51a"
-prior_state_id = "9937f2a5161a6afdc90f7535c497910dd8e9f1c98d7d0b28863c3e2c9a605147"
+sha256 = "a13bf3d13f9b7f10d701bf0c152a908b28b5f88a3829e9633526a0d143fc2033"
+prior_state_id = "bcdbb74e144f08f1dc11e9ce40e65f05e2ab0c8861a9ecdb99b1763a23c60ab4"
 
 [[vectors]]
 file = "reject-other-digest-attempt-0.bin"
 encoded_length = 3757
-sha256 = "97a03e03815b213756ffc384a111dccf3f10f94d5a3eb6aed8017ddc485409ae"
-reinit_attempt_id = "a09a450eb2bfff5212d47015652d694503cc28cf9aa713e220d6e4aecd33a59f"
-initial_commit_digest = "1c713afd2d8259ce8b126ce704a677528f836ed378260e2021f90e6a6bc75b5b"
+sha256 = "49b87aaef23e8d294728a530fe8f0682e7cb7335bd7aa9976e982f2cb3c759ff"
+reinit_attempt_id = "63846d19c1bb4f2c8a52f0843f42e7e5c8b295c037cafbf883e53b40327ac6a5"
+initial_commit_digest = "4e4e7d27e104343d37d956bb403793016766236f653621bb23b0aebefa855883"
 
 [[vectors]]
 file = "reject-other-digest-record-04-attempt-0-receipt.bin"
 encoded_length = 317
-sha256 = "1f13c2f691fef6bafebf178cfd16e91d3494875461e0809e4e2d8ad8fadd58d7"
-semantic_id = "a09a450eb2bfff5212d47015652d694503cc28cf9aa713e220d6e4aecd33a59f"
+sha256 = "b795967f94f793d5acf8ee4d3d45d5f8e023b11ba05d43993bcd3c091fec58b5"
+semantic_id = "63846d19c1bb4f2c8a52f0843f42e7e5c8b295c037cafbf883e53b40327ac6a5"
 route_sequence = "4"
 attempt_object = "reject-other-digest-attempt-0.bin"
 
 [[vectors]]
 file = "reject-carried-target-attempt-0.bin"
 encoded_length = 3757
-sha256 = "6768ca0d106d31096d986032bdf9c6ea98d2a65227dbb6f2bcdc4a0e06c1d1fb"
-reinit_attempt_id = "a8f063fec3b8225f3bb683cda3f4055372f5a4c7ee02e994ce5d061bf0778709"
-initial_commit_digest = "ff77f4f2853811a3d480e3d95610322dfa715c657659b81bd19bee7f836e87d7"
+sha256 = "c7489e54a1f5d7946b5b4758e563c4ac02e69ba65cd6b4877690efb2aa0c6f13"
+reinit_attempt_id = "94ea3f15494409133c89382c5c71a1ad6be75185cb09d8f438333d40d7db17d1"
+initial_commit_digest = "eb4f41f2a0796965e8761b260aad895a2158c32a1da9d1e3447efdee7f606279"
 
 [[vectors]]
 file = "reject-carried-target-record-04-attempt-0-receipt.bin"
 encoded_length = 317
-sha256 = "b68ee16adc8277aa7fd9f5da95dedceff5c91a27e048d952494ac96e0ffa111f"
-semantic_id = "a8f063fec3b8225f3bb683cda3f4055372f5a4c7ee02e994ce5d061bf0778709"
+sha256 = "aaa1815a7225a97e71bd0b0e798d71dba7f28e4e6e2b534837c568ea8bdaf675"
+semantic_id = "94ea3f15494409133c89382c5c71a1ad6be75185cb09d8f438333d40d7db17d1"
 route_sequence = "4"
 attempt_object = "reject-carried-target-attempt-0.bin"
