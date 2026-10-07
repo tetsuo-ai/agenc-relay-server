@@ -37,6 +37,7 @@ fn complete_with(harness: &Harness, edit: RequestEdit) -> TestResult<CompleteReq
         correlation,
         request: wire(ArcWireObjectKind::FederationRequest, &request)?,
         payload: None,
+        refusal: None,
     })
 }
 

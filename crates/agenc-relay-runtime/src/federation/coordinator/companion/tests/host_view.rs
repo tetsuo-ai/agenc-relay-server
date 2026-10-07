@@ -484,6 +484,7 @@ fn request() -> CompleteRequest {
         },
         request: vec![1],
         payload: None,
+        refusal: None,
     }
 }
 

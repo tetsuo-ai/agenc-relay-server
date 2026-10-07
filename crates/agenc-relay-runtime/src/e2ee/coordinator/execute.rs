@@ -250,20 +250,25 @@ pub(crate) fn run_with_object(
     let state_generation = plan.resulting_revision().get();
     let source_view = source_view_bytes(view.context, facts);
     let mut pool = EntropyPool::fill(view.context.entropy_mut())?;
-    let prepared = execute(
-        coordinator,
-        view.context,
-        &view.peers,
-        peer,
-        &origin,
-        &decoded,
-        now,
-        state_generation,
-        facts.user_id,
-        source_view,
-        &mut pool,
-        resolved,
-    );
+    let prepared = match complete.refusal {
+        // A refused fresh request commits its failed result, which consumes
+        // its operation sequence, and no semantic mutation (12.5).
+        Some(code) => ops::Prepared::Complete(Box::new(Outcome::failed(code, Vec::new()))),
+        None => execute(
+            coordinator,
+            view.context,
+            &view.peers,
+            peer,
+            &origin,
+            &decoded,
+            now,
+            state_generation,
+            facts.user_id,
+            source_view,
+            &mut pool,
+            resolved,
+        ),
+    };
     let mut outcome = match prepared {
         ops::Prepared::Complete(outcome) => *outcome,
         ops::Prepared::Read(request) => {
@@ -356,6 +361,7 @@ pub(crate) fn run_with_object(
             effects: assembled.effects,
             barriers: assembled.barriers,
             object_backing: resolved.map(super::object_read::Resolved::backing),
+            request: complete,
         },
     )));
     Ok(Staged::Batch)

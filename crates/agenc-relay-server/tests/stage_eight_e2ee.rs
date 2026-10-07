@@ -107,6 +107,8 @@ mod credential_bounds;
 mod credential_replacement;
 #[path = "stage_eight_e2ee/encrypted_clients.rs"]
 mod encrypted_clients;
+#[path = "stage_eight_e2ee/link_faults.rs"]
+mod link_faults;
 #[path = "stage_eight_e2ee/login_after_registration.rs"]
 mod login_after_registration;
 #[path = "support/loopback_ports.rs"]

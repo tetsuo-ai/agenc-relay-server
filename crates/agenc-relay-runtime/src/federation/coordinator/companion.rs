@@ -496,6 +496,7 @@ pub(super) fn run_with_object(
     complete: CompleteRequest,
     resolved: Option<&crate::e2ee::coordinator::object_read::Resolved>,
 ) -> Result<(), Violation> {
+    let correlation = complete.correlation;
     let peers: Vec<ServerId> = coordinator.peers.keys().copied().collect();
     let origins = &coordinator.origins;
     let facts_for = |key: OriginKey| OriginFacts {
@@ -556,12 +557,27 @@ pub(super) fn run_with_object(
             Ok(())
         }
         Staged::Replay(lines) => {
-            coordinator.counters.requests_replayed =
-                coordinator.counters.requests_replayed.saturating_add(1);
-            send_lines(coordinator, context, link, peer, lines);
+            replayed(coordinator, context, (link, peer), &correlation, lines);
             Ok(())
         }
     }
+}
+
+/// Sends a request's stored result again; its replay row answers any later
+/// copy, so its objects leave the recent-object cache.
+fn replayed(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    (link, peer): (LinkId, ServerId),
+    correlation: &agenc_relay_e2ee::federation::frames::Correlation,
+    lines: Vec<FederationLineText>,
+) {
+    coordinator.counters.requests_replayed =
+        coordinator.counters.requests_replayed.saturating_add(1);
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor.request_answered(peer, correlation);
+    }
+    send_lines(coordinator, context, link, peer, lines);
 }
 
 /// Sends `lines` to the live link of `peer`, retiring the link on refusal.
@@ -881,6 +897,34 @@ pub(super) fn snapshot_timer_fired(
     true
 }
 
+/// Answers a request whose batch storage refused with its failed result
+/// `E2EE_RATE_LIMITED`, staged as its own batch (companion 12.5): the
+/// result consumes the request's operation sequence and commits no
+/// semantic mutation, so the origin's next request follows it. A link that
+/// closed meanwhile is left alone, since the next link carries the request
+/// again; when storage refuses even the failed result, the link is retired
+/// as for a base request.
+pub(super) fn answer_rejected(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    mut request: CompleteRequest,
+) {
+    if !coordinator.link_is_live(link, peer) {
+        return;
+    }
+    let outcome = if request.refusal.is_some() {
+        Err(Violation::Ceiling)
+    } else {
+        request.refusal = Some(E2eeReplyCode::RateLimited);
+        run(coordinator, context, link, peer, request)
+    };
+    if let Err(violation) = outcome {
+        coordinator.fail_link(context, link, peer, violation);
+    }
+}
+
 /// Runs queued companion requests while no batch is in flight.
 pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,
@@ -901,6 +945,7 @@ pub(super) fn drain_queued(
             correlation: queued.correlation,
             request: queued.request,
             payload: queued.payload,
+            refusal: queued.refusal,
         };
         if let Err(violation) = run(coordinator, context, queued.link, queued.peer, complete) {
             coordinator.fail_link(context, queued.link, queued.peer, violation);

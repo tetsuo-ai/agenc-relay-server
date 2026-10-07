@@ -10,7 +10,9 @@ mod inactive_ready;
 mod origin_admission;
 mod origin_mirror;
 mod origin_refusals;
+mod recent_objects;
 mod review_witness;
+mod superseded_attachments;
 
 use agenc_relay_crypto::SemanticHashDomain;
 use agenc_relay_e2ee::federation::frames::{CompanionFrame, DeliveryPosition};
@@ -1073,8 +1075,8 @@ fn a_closed_link_forgets_only_its_own_requests() -> TestResult {
         object_id: agenc_relay_e2ee::ObjectId::from_bytes(object_id(&declaration)),
     };
     assert!(
-        sync.harness.coordinator.assembler.is_recent(&declared),
-        "the closed peer's declaration keeps its cached answer"
+        !sync.harness.coordinator.assembler.is_recent(&declared),
+        "a declaration holds no cache slot: the origin table answers its repeat"
     );
     let mut refused = false;
     for frame in fragments {

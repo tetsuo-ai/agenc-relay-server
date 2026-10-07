@@ -223,8 +223,11 @@ impl E2eeEdge {
         if let Some(head) = route.get_mut(..16) {
             head.copy_from_slice(&position.event_id);
         }
+        // A delivery is keyed by its position, not its content: it never
+        // takes a recent-object slot, and its exact copy is assembled again
+        // and checked against the cursor (companion 11.8, 12.5).
         let key = AssemblyKey {
-            direction: Direction::Remote,
+            direction: Direction::Response,
             sender: Sender::Peer(*self.config.coordinator_server_id.as_bytes()),
             command,
             route,

@@ -192,7 +192,9 @@ enum PendingCommit {
     OriginAck {
         peer: ServerId,
         link: LinkId,
-        frame: FederationFrame,
+        /// The acknowledgement, absent when a refused declaration closed
+        /// the origin and nothing is acknowledged.
+        frame: Option<FederationFrame>,
         closed_carrier: Option<crate::connection::ConnectionGeneration>,
         _charge: Option<IngressCharge>,
     },
@@ -278,6 +280,9 @@ pub struct FederationCoordinator {
     origin_objects: BTreeMap<OriginKey, Vec<u8>>,
     /// Registration ownership before the edge acknowledges its principal UPDATE.
     registered_sessions: BTreeMap<OriginKey, std::collections::BTreeSet<agenc_relay_types::UserId>>,
+    /// The generation of the last declaration of each origin that named a
+    /// principal this coordinator had removed; the refusal closed the origin.
+    refused_declarations: BTreeMap<OriginKey, u64>,
     retained: BTreeMap<OperationKey, RetainedRequest>,
     peers: BTreeMap<ServerId, PeerState>,
     links: BTreeMap<LinkId, ServerId>,
@@ -367,6 +372,7 @@ impl FederationCoordinator {
             origins: OriginTable::new(),
             origin_objects: BTreeMap::new(),
             registered_sessions: BTreeMap::new(),
+            refused_declarations: BTreeMap::new(),
             retained: BTreeMap::new(),
             peers,
             links: BTreeMap::new(),
@@ -1351,13 +1357,15 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         peer: ServerId,
         link: LinkId,
-        frame: FederationFrame,
+        frame: Option<FederationFrame>,
         closed_carrier: Option<crate::connection::ConnectionGeneration>,
     ) {
         if let Some(generation) = closed_carrier {
             self.retire_remote_carrier(generation);
         }
-        let _live = self.send_frame(context, link, peer, &frame);
+        if let Some(frame) = frame {
+            let _live = self.send_frame(context, link, peer, &frame);
+        }
         origin::continue_ready(self, context, peer);
     }
 
@@ -1675,9 +1683,13 @@ impl FederationCoordinator {
             Some(PendingCommit::CompanionRestore(receipt)) => {
                 startup::retirement::rejected(self, context, *receipt, error);
             }
-            Some(PendingCommit::Companion { .. }) => {
-                if let Some(executor) = self.companion_exec.as_mut() {
-                    executor.batch_rejected();
+            Some(PendingCommit::Companion { peer, link, .. }) => {
+                let rejected = self
+                    .companion_exec
+                    .as_mut()
+                    .and_then(CompanionCoordinator::batch_rejected);
+                if let Some(request) = rejected {
+                    companion::answer_rejected(self, context, link, peer, request);
                 }
             }
             Some(PendingCommit::SnapshotRows { peer } | PendingCommit::SnapshotReady { peer }) => {

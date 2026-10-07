@@ -105,6 +105,44 @@ pub(super) fn rotating_key_set() -> Option<agenc_relay_e2ee::sequencer::Sequence
         .ok()
 }
 
+/// Fills the edge's recent-object cache with completed client submissions,
+/// one per connection, up to its shared ceiling.
+pub(super) fn fill_client_cache(edge: &mut E2eeEdge) -> Result<(), Box<dyn std::error::Error>> {
+    use agenc_relay_e2ee::wire::assembly::{
+        AssemblyKey, Direction, Ingest, MAX_RECENT_OBJECTS, QuotaScopes, Sender,
+    };
+    use agenc_relay_e2ee::wire::carrier::CarrierCommand;
+    for index in 0..MAX_RECENT_OBJECTS {
+        let bytes = u64::try_from(index)?.to_be_bytes().to_vec();
+        let fragment = agenc_relay_e2ee::wire::fragment::fragment_object(&bytes)?
+            .into_iter()
+            .next()
+            .ok_or("fragment")?;
+        let key = AssemblyKey {
+            direction: Direction::LocalIngress,
+            sender: Sender::Connection {
+                connection: u64::try_from(index)?,
+                session_generation: 1,
+            },
+            command: CarrierCommand::Tagmsg,
+            route: [3; 32],
+            scope: None,
+            object_id: fragment.object_id,
+        };
+        let completed = edge.assembler.ingest(
+            key,
+            QuotaScopes::default(),
+            CarrierCommand::Tagmsg.limit(),
+            &fragment,
+            0,
+        )?;
+        if completed != Ingest::Complete(bytes) {
+            return Err("a client submission did not complete".into());
+        }
+    }
+    Ok(())
+}
+
 fn edge() -> E2eeEdge {
     E2eeEdge::new(E2eeEdgeConfig {
         network_id: [1; 32],

@@ -583,3 +583,160 @@ fn remote_assembly_tolerates_any_order_and_expires_by_deadline() -> TestResult {
     assert_eq!(assembler.open_count(), 0);
     Ok(())
 }
+
+/// Completes one single-fragment object from `sender` keyed by `index`.
+fn complete_from(
+    assembler: &mut E2eeAssembler,
+    sender: [u8; 16],
+    index: usize,
+    now: u64,
+) -> Result<(AssemblyKey, Ingest), Box<dyn Error>> {
+    let bytes = u64::try_from(index)?.to_be_bytes().to_vec();
+    let fragment = fragment_object(&bytes)?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let key = AssemblyKey {
+        sender: Sender::Peer(sender),
+        ..remote_key(ObjectId::compute(&bytes))
+    };
+    let peer = QuotaScopes {
+        peer: Some(sender),
+        ..QuotaScopes::default()
+    };
+    let outcome = assembler.ingest(key.clone(), peer, LIVE, &fragment, now)?;
+    Ok((key, outcome))
+}
+
+#[test]
+fn a_per_sender_ceiling_assembles_past_it_without_a_recent_tuple() -> TestResult {
+    let mut assembler =
+        E2eeAssembler::with_ceiling(QuotaLimits::default(), RecentCeiling::PerSender);
+    for index in 0..MAX_RECENT_OBJECTS {
+        let (key, outcome) = complete_from(&mut assembler, [4; 16], index, 10)?;
+        assert!(matches!(outcome, Ingest::Complete(_)));
+        assert!(assembler.is_recent(&key));
+    }
+    // Past its sender's ceiling an object still completes, keeps no tuple
+    // and holds no reservation.
+    let (past, outcome) = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS, 11)?;
+    assert!(matches!(outcome, Ingest::Complete(_)));
+    assert!(!assembler.is_recent(&past));
+    assert_eq!(assembler.quotas().reserved_bytes(), 0);
+    let (again, outcome) = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS, 12)?;
+    assert_eq!(again, past);
+    assert!(matches!(outcome, Ingest::Complete(_)), "it assembles again");
+    // Another sender keeps its own ceiling.
+    let (other, outcome) = complete_from(&mut assembler, [5; 16], 0, 12)?;
+    assert!(matches!(outcome, Ingest::Complete(_)));
+    assert!(assembler.is_recent(&other));
+    // The shared ceiling still refuses before any reservation.
+    let mut shared = E2eeAssembler::default();
+    for index in 0..MAX_RECENT_OBJECTS {
+        let _completed = complete_from(&mut shared, [4; 16], index, 10)?;
+    }
+    let refused = complete_from(&mut shared, [5; 16], MAX_RECENT_OBJECTS, 11);
+    assert!(refused.is_err());
+    assert_eq!(shared.quotas().reserved_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn an_open_submission_reserves_its_senders_slot() -> TestResult {
+    let mut assembler =
+        E2eeAssembler::with_ceiling(QuotaLimits::default(), RecentCeiling::PerSender);
+    for index in 0..MAX_RECENT_OBJECTS - 1 {
+        let _completed = complete_from(&mut assembler, [4; 16], index, 10)?;
+    }
+    // The last slot goes to the first of two open objects of the sender.
+    let bytes = object(7_000);
+    let fragments = fragment_object(&bytes)?;
+    let first = fragments.first().ok_or("fragment")?;
+    let open = AssemblyKey {
+        sender: Sender::Peer([4; 16]),
+        ..remote_key(ObjectId::compute(&bytes))
+    };
+    let second = AssemblyKey {
+        route: [8; 32],
+        ..open.clone()
+    };
+    assert_eq!(
+        assembler.ingest(open.clone(), QuotaScopes::default(), LIVE, first, 11)?,
+        Ingest::Incomplete
+    );
+    assert_eq!(
+        assembler.ingest(second.clone(), QuotaScopes::default(), LIVE, first, 11)?,
+        Ingest::Incomplete
+    );
+    for fragment in fragments.iter().skip(1) {
+        let _open = assembler.ingest(open.clone(), QuotaScopes::default(), LIVE, fragment, 12)?;
+        let _second =
+            assembler.ingest(second.clone(), QuotaScopes::default(), LIVE, fragment, 12)?;
+    }
+    assert!(assembler.is_recent(&open));
+    assert!(!assembler.is_recent(&second));
+    Ok(())
+}
+
+#[test]
+fn expiring_recent_objects_releases_their_slots_and_keeps_open_assemblies() -> TestResult {
+    let mut assembler =
+        E2eeAssembler::with_ceiling(QuotaLimits::default(), RecentCeiling::PerSender);
+    let mut first = None;
+    for index in 0..MAX_RECENT_OBJECTS {
+        let (key, _) = complete_from(&mut assembler, [4; 16], index, 10)?;
+        first.get_or_insert(key);
+    }
+    let first = first.ok_or("first object")?;
+    let bytes = object(7_000);
+    let fragments = fragment_object(&bytes)?;
+    let open = AssemblyKey {
+        sender: Sender::Peer([6; 16]),
+        ..remote_key(ObjectId::compute(&bytes))
+    };
+    assert_eq!(
+        assembler.ingest(
+            open.clone(),
+            QuotaScopes::default(),
+            LIVE,
+            fragments.first().ok_or("fragment")?,
+            10
+        )?,
+        Ingest::Incomplete
+    );
+    let ends = 10 + RECENT_OBJECT_IDEMPOTENCY_RETENTION_SECONDS;
+    assert_eq!(assembler.expire_recent(ends - 1), 0);
+    assert!(assembler.is_recent(&first));
+    assert_eq!(assembler.expire_recent(ends), MAX_RECENT_OBJECTS);
+    assert!(!assembler.is_recent(&first));
+    assert_eq!(assembler.open_count(), 1, "open assemblies are left alone");
+    let (key, outcome) = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS, ends)?;
+    assert!(matches!(outcome, Ingest::Complete(_)));
+    assert!(assembler.is_recent(&key), "the sender records again");
+    Ok(())
+}
+
+#[test]
+fn forgetting_one_object_releases_its_senders_slot() -> TestResult {
+    let mut assembler =
+        E2eeAssembler::with_ceiling(QuotaLimits::default(), RecentCeiling::PerSender);
+    let mut first = None;
+    for index in 0..MAX_RECENT_OBJECTS {
+        let (key, _) = complete_from(&mut assembler, [4; 16], index, 10)?;
+        first.get_or_insert(key);
+    }
+    let first = first.ok_or("first object")?;
+    assert!(assembler.forget(&first));
+    assert!(!assembler.forget(&first), "forgotten once");
+    let (key, _) = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS, 11)?;
+    assert!(assembler.is_recent(&key));
+    let (past, _) = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS + 1, 11)?;
+    assert!(!assembler.is_recent(&past));
+    assert_eq!(
+        assembler.forget_recent(|key| key.sender == Sender::Peer([4; 16])),
+        MAX_RECENT_OBJECTS
+    );
+    let (again, _) = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS + 1, 12)?;
+    assert!(assembler.is_recent(&again));
+    Ok(())
+}

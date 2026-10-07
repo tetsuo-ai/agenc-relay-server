@@ -557,8 +557,9 @@ impl E2eeEdge {
     ) -> Result<Option<Vec<u8>>, Refusal> {
         let coordinator = *self.config.coordinator_server_id.as_bytes();
         let command = CarrierCommand::Federation(kind);
+        // A resolution object is keyed by its token, not its content.
         let key = AssemblyKey {
-            direction: Direction::Remote,
+            direction: Direction::Response,
             sender: Sender::Peer(coordinator),
             command,
             route,

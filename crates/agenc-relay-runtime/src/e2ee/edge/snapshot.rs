@@ -364,8 +364,10 @@ impl E2eeEdge {
             return Err(E2eeReplyCode::Syncing.into());
         }
         let command = CarrierCommand::Federation(ArcWireObjectKind::FederationState);
+        // An entry is keyed by its page of one cut, not its content: a page
+        // published again on a new link stages again (companion 12.5).
         let key = AssemblyKey {
-            direction: Direction::Remote,
+            direction: Direction::Response,
             sender: Sender::Peer(coordinator),
             command,
             route: conversation_id,
