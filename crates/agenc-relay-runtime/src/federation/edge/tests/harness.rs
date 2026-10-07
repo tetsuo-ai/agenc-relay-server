@@ -4433,6 +4433,8 @@ mod carrier_during_origin_update;
 
 mod origin_acks;
 
+mod origin_deletion;
+
 mod restored_journal;
 
 mod restored_projection;

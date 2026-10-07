@@ -183,24 +183,40 @@ impl E2eeEdge {
     /// `EORIGIN ACK`: the declared generation is in force. A new generation
     /// starts its operation sequence at zero; the replayed declaration of
     /// the generation already in force keeps counting, as the coordinator
-    /// does.
+    /// does. An origin's first acknowledgement on a link already past
+    /// EORIGIN READY resends its unanswered requests, as READY resends
+    /// those of the origins acknowledged before it.
     pub(super) fn origin_acked(
         &mut self,
-        _context: &mut StateCoreContext,
-        _edge: &mut EdgeFederation,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
         origin_id: [u8; 16],
         generation: u64,
         _state_object: bool,
     ) -> Result<(), Refusal> {
-        self.acknowledge_origin(origin_id, generation);
+        let settled = self.acknowledge_origin(origin_id, generation);
+        if self.phase == Phase::Active {
+            // Only the connections this acknowledgement settled resend, and
+            // only their requests named under this generation.
+            let order = self.unanswered_of(|connection| settled.contains(connection));
+            self.resend_pending(context, edge, order);
+        }
         Ok(())
     }
 
     /// Applies one acknowledged declaration to every origin that declared
-    /// `generation`.
-    pub(super) fn acknowledge_origin(&mut self, origin_id: [u8; 16], generation: u64) {
-        for origin in self.origins.values_mut() {
+    /// `generation`, and returns the connections it settles there: those
+    /// whose declaration on the link was not yet acknowledged at that
+    /// generation. A repeated acknowledgement settles nothing.
+    pub(super) fn acknowledge_origin(
+        &mut self,
+        origin_id: [u8; 16],
+        generation: u64,
+    ) -> Vec<ConnectionGeneration> {
+        let mut settled = Vec::new();
+        for (connection, origin) in self.origins.iter_mut() {
             if origin.origin_id == origin_id && origin.declared == Some(generation) {
+                let first = origin.acked != Some(generation);
                 origin.acked = Some(generation);
                 if origin
                     .predates_device
@@ -212,8 +228,12 @@ impl E2eeEdge {
                     origin.next_sequence = 0;
                     origin.sequenced = Some(generation);
                 }
+                if first {
+                    settled.push(*connection);
+                }
             }
         }
+        settled
     }
 
     /// A device attached on `generation`: the shared base origin generation
@@ -235,27 +255,35 @@ impl E2eeEdge {
         edge.advance_origin(context, generation);
     }
 
-    /// A connection ended: its companion origin is deleted at the next
-    /// unused sequence.
+    /// A connection ended: its companion origin is deleted at the generation
+    /// the coordinator holds and the next unused sequence under it (12.5).
+    /// The coordinator holds the last declaration this link carried, which
+    /// precedes the DEL, whether or not its acknowledgement has arrived; a
+    /// generation the edge has not sequenced yet starts at zero. An origin
+    /// no declaration on the live link names sends no DEL; either way the
+    /// connection's companion state is released.
     pub fn delete_origin(
         &mut self,
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         generation: ConnectionGeneration,
     ) {
-        let Some(origin) = self.origins.remove(&generation) else {
-            return;
-        };
-        let Some(acked) = origin.acked else {
-            return;
-        };
-        if let Ok(line) = self.line(&CompanionFrame::OriginDel {
-            coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
-            server_incarnation: self.config.incarnation,
-            origin_id: origin.origin_id,
-            origin_generation: acked,
-            next_operation_sequence: origin.next_sequence,
-        }) {
+        let deletion = self.origins.get(&generation).and_then(|origin| {
+            let declared = origin.declared?;
+            let next_operation_sequence = if origin.sequenced == Some(declared) {
+                origin.next_sequence
+            } else {
+                0
+            };
+            Some(CompanionFrame::OriginDel {
+                coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
+                server_incarnation: self.config.incarnation,
+                origin_id: origin.origin_id,
+                origin_generation: declared,
+                next_operation_sequence,
+            })
+        });
+        if let Some(Ok(line)) = deletion.map(|frame| self.line(&frame)) {
             self.send(context, edge, vec![line]);
         }
         self.connection_closed(generation);

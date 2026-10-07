@@ -129,6 +129,14 @@ enum Phase {
 /// The origin one client connection declares (spec 20.5).
 struct ConnectionOrigin {
     pending_updates: VecDeque<agenc_relay_federation_wire::OriginRecord>,
+    /// Whether the first pending update went out on a link, ahead of any
+    /// deletion this edge sends for the origin after it. It is set when that
+    /// update is transmitted and cleared only when the update is
+    /// acknowledged and retired, so it is retained across a link loss: a
+    /// closed connection's origin replays only its deletion, which names the
+    /// generation of the update a link carried for as long as that update is
+    /// unacknowledged.
+    update_sent: bool,
     origin_id: OriginId,
     connection_id: ConnectionId,
     connection_nonce: [u8; 32],
@@ -1082,6 +1090,7 @@ impl EdgeFederation {
                 return Err(Violation::Consistency);
             }
             origin.pending_updates.pop_front();
+            origin.update_sent = false;
             origin.generation = generation;
             origin.sequence = 0;
             origin.previous_object_id = update.previous_origin_object_id;
@@ -1193,6 +1202,7 @@ impl EdgeFederation {
             generation,
             ConnectionOrigin {
                 pending_updates: VecDeque::new(),
+                update_sent: false,
                 origin_id: OriginId::from_bytes(origin_id),
                 connection_id: ConnectionId::from_bytes(connection_id),
                 connection_nonce: nonce,

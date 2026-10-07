@@ -315,25 +315,90 @@ fn delete(sync: &mut Sync, generation: u64, next: u64) -> Result<Vec<Action>, Co
     })
 }
 
+/// The fence state of the one declared origin: its next sequence and
+/// whether a deletion fenced it.
+fn fence(sync: &Sync) -> TestResult<(u64, bool)> {
+    let origin = sync
+        .harness
+        .coordinator
+        .state
+        .origins
+        .values()
+        .next()
+        .ok_or("origin")?;
+    Ok((origin.next_sequence, origin.fenced))
+}
+
+/// Companion 12.5: "`DEL` supplies the next unused sequence and permanently
+/// fences later requests". The deletion names the generation the
+/// coordinator holds and a next sequence at or above the one executed
+/// there; the origin is fenced at the stated sequence.
 #[test]
 fn a_delete_must_name_the_accepted_generation_and_next_sequence() -> TestResult {
     let (mut sync, _) = accepted()?;
+    // Three requests executed under generation zero.
+    sync.harness
+        .coordinator
+        .state
+        .origins
+        .values_mut()
+        .next()
+        .ok_or("origin")?
+        .next_sequence = 3;
     assert_eq!(
-        delete(&mut sync, 1, 0).err(),
+        delete(&mut sync, 1, 3).err(),
+        Some(CompanionFault::Protocol),
+        "another generation is refused"
+    );
+    assert_eq!(
+        delete(&mut sync, 0, 2).err(),
+        Some(CompanionFault::Protocol),
+        "a sequence below the executed one is refused"
+    );
+    assert_eq!(fence(&sync)?, (3, false));
+    let actions = delete(&mut sync, 0, 5)?;
+    assert!(matches!(
+        frames(&actions)?.as_slice(),
+        [CompanionFrame::OriginAck {
+            object_id: None,
+            origin_generation: 0,
+            ..
+        }]
+    ));
+    assert_eq!(fence(&sync)?, (5, true), "fenced at the stated sequence");
+    assert_eq!(
+        delete(&mut sync, 0, 4).err(),
+        Some(CompanionFault::Protocol),
+        "the fence keeps the stated sequence"
+    );
+    assert_eq!(frames(&delete(&mut sync, 0, 5)?)?.len(), 1);
+    assert_eq!(fence(&sync)?, (5, true));
+    Ok(())
+}
+
+#[test]
+fn a_delete_naming_another_coordinator_or_a_stale_incarnation_is_refused() -> TestResult {
+    let (mut sync, _) = accepted()?;
+    let refused = sync.frame(CompanionFrame::OriginDel {
+        coordinator_server_id: [0x77; 16],
+        server_incarnation: INCARNATION,
+        origin_id: ORIGIN,
+        origin_generation: 0,
+        next_operation_sequence: 0,
+    });
+    assert_eq!(refused.err(), Some(CompanionFault::Protocol));
+    sync.host.incarnation = Some([0x55; 16]);
+    assert_eq!(
+        delete(&mut sync, 0, 0).err(),
         Some(CompanionFault::Protocol)
     );
-    assert_eq!(
-        delete(&mut sync, 0, 5).err(),
-        Some(CompanionFault::Protocol)
-    );
-    assert!(
-        sync.harness
-            .coordinator
-            .state
-            .origins
-            .values()
-            .all(|origin| !origin.fenced)
-    );
+    assert_eq!(fence(&sync)?, (0, false), "nothing is fenced");
+    Ok(())
+}
+
+#[test]
+fn a_delete_at_the_executed_sequence_fences_there() -> TestResult {
+    let (mut sync, _) = accepted()?;
     let actions = delete(&mut sync, 0, 0)?;
     assert!(matches!(
         frames(&actions)?.as_slice(),
@@ -343,14 +408,7 @@ fn a_delete_must_name_the_accepted_generation_and_next_sequence() -> TestResult 
             ..
         }]
     ));
-    assert!(
-        sync.harness
-            .coordinator
-            .state
-            .origins
-            .values()
-            .all(|origin| origin.fenced)
-    );
+    assert_eq!(fence(&sync)?, (0, true));
     Ok(())
 }
 

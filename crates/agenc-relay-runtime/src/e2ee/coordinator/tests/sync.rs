@@ -4,6 +4,7 @@
 //! transfer, driven through the frame entry point with a fake base host.
 
 mod delivery_restart;
+pub(crate) mod edge_peer;
 mod frame_addressing;
 mod inactive_ready;
 mod origin_admission;
@@ -517,14 +518,14 @@ fn origins_mirror_the_acked_base_declaration() -> TestResult {
     assert_eq!(updated.next_sequence, 0);
     assert_eq!(updated.account_id, Some(sync.harness.account));
 
-    // DEL must name the next unused sequence; then the origin is fenced.
+    // DEL must name the generation in force; then the origin is fenced.
     assert_eq!(
         sync.frame(CompanionFrame::OriginDel {
             coordinator_server_id: COORDINATOR,
             server_incarnation: INCARNATION,
             origin_id: ORIGIN,
-            origin_generation: 1,
-            next_operation_sequence: 4,
+            origin_generation: 0,
+            next_operation_sequence: 5,
         })
         .err(),
         Some(CompanionFault::Protocol)
@@ -953,6 +954,147 @@ fn a_retransmitted_request_replays_its_stored_result() -> TestResult {
     }
     let lines = frames(&replay)?;
     assert!(matches!(lines.first(), Some(CompanionFrame::Result { .. })));
+    Ok(())
+}
+
+/// A request whose object completed on a link that then closed before its
+/// payload arrived is carried again, exactly as first sent, by the edge's
+/// next link. The coordinator never ran it and keeps no replay row for it,
+/// so it assembles the request again and runs it with its payload. On its
+/// own link the same copy before an answer stays a violation
+/// (`a_retransmitted_request_replays_its_stored_result`).
+#[test]
+fn a_request_a_closed_link_left_unexecuted_assembles_again_on_the_next() -> TestResult {
+    use agenc_relay_e2ee::objects::federation::ArcFederationOpcode as Op;
+    use agenc_relay_e2ee::tls::TlsEncode;
+    let mut sync = Sync::new()?;
+    let payload = agenc_relay_e2ee::object::ArcWireObject::new(
+        ArcWireObjectKind::RootIdentity,
+        vec![12; 32],
+    )?
+    .encode()?;
+    let complete = sync
+        .harness
+        .request(Op::PublishIdentity, &[], Some(&payload))?;
+    let wire_correlation = agenc_relay_e2ee::federation::frames::Correlation {
+        peer_server_id: COORDINATOR,
+        ..complete.correlation
+    };
+    let request_object = object_id(&complete.request);
+    let request_frames: Vec<CompanionFrame> = fragment_object(&complete.request)?
+        .into_iter()
+        .map(|fragment| CompanionFrame::Request {
+            correlation: wire_correlation,
+            object_id: request_object,
+            fragment,
+        })
+        .collect();
+    let payload_object = object_id(&payload);
+    let payload_frames: Vec<CompanionFrame> = fragment_object(&payload)?
+        .into_iter()
+        .map(|fragment| CompanionFrame::Payload {
+            correlation: wire_correlation,
+            object_id: payload_object,
+            fragment,
+        })
+        .collect();
+    // The request object completes on the first link and awaits its payload.
+    for frame in request_frames.clone() {
+        assert!(
+            sync.frame(frame)?.is_empty(),
+            "the request awaits its payload"
+        );
+    }
+    // The link closes, and the edge's next link starts with a RESET.
+    sync.harness.coordinator.link_closed(home());
+    sync.reset()?;
+    let mut actions = Vec::new();
+    for frame in request_frames.into_iter().chain(payload_frames) {
+        actions.extend(sync.frame(frame)?);
+    }
+    let [Action::Execute(run)] = actions.as_slice() else {
+        return Err(format!("one request to run, not {} actions", actions.len()).into());
+    };
+    assert_eq!(run.request, complete.request);
+    assert_eq!(run.payload.as_deref(), Some(payload.as_slice()));
+    Ok(())
+}
+
+/// A closed link forgets only its own peer's completed request objects:
+/// another peer's request keeps its cached answer, so a copy on that peer's
+/// own link before the answer stays a violation, and the closed peer's
+/// origin declarations keep theirs, so a replayed declaration is answered
+/// as a redeclaration.
+#[test]
+fn a_closed_link_forgets_only_its_own_requests() -> TestResult {
+    use agenc_relay_e2ee::objects::federation::ArcFederationOpcode as Op;
+    use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, Sender};
+    use agenc_relay_e2ee::wire::carrier::CarrierCommand;
+    let mut sync = Sync::new()?;
+    sync.reset()?;
+    let (_, declaration) = origin_object(0, [0; 32], None, None)?;
+    let _acknowledged = sync.declare(false, 0, &declaration)?;
+    let complete = sync.harness.request(Op::Whoami, &[], None)?;
+    let request_object = object_id(&complete.request);
+    let fragments: Vec<CompanionFrame> = fragment_object(&complete.request)?
+        .into_iter()
+        .map(|fragment| CompanionFrame::Request {
+            correlation: agenc_relay_e2ee::federation::frames::Correlation {
+                peer_server_id: COORDINATOR,
+                ..complete.correlation
+            },
+            object_id: request_object,
+            fragment,
+        })
+        .collect();
+    // Another peer's link carries a request, which awaits the executor.
+    let other = ServerId::from_bytes([9; 16]);
+    let mut first = Vec::new();
+    for frame in fragments.clone() {
+        first.extend(sync.harness.coordinator.on_frame(
+            LinkId::new(2),
+            other,
+            frame,
+            NOW_MILLIS,
+            &sync.host,
+            &mut sync.entropy,
+        )?);
+    }
+    assert!(matches!(first.as_slice(), [Action::Execute(_)]));
+    sync.harness.coordinator.link_closed(home());
+    let mut route = [0; 32];
+    route.get_mut(..16).ok_or("route")?.copy_from_slice(&ORIGIN);
+    let declared = AssemblyKey {
+        direction: Direction::Remote,
+        sender: Sender::Peer(HOME),
+        command: CarrierCommand::Federation(ArcWireObjectKind::FederationOrigin),
+        route,
+        scope: None,
+        object_id: agenc_relay_e2ee::ObjectId::from_bytes(object_id(&declaration)),
+    };
+    assert!(
+        sync.harness.coordinator.assembler.is_recent(&declared),
+        "the closed peer's declaration keeps its cached answer"
+    );
+    let mut refused = false;
+    for frame in fragments {
+        match sync.harness.coordinator.on_frame(
+            LinkId::new(2),
+            other,
+            frame,
+            NOW_MILLIS,
+            &sync.host,
+            &mut sync.entropy,
+        ) {
+            Ok(actions) => assert!(actions.is_empty(), "the copy is not run again"),
+            Err(CompanionFault::Protocol) => refused = true,
+            Err(fault) => return Err(format!("{fault:?}").into()),
+        }
+    }
+    assert!(
+        refused,
+        "another peer's copy before its answer stays a violation"
+    );
     Ok(())
 }
 

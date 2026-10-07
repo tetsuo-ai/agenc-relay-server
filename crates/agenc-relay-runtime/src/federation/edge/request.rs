@@ -311,7 +311,7 @@ fn send_origin_declaration(
         generation: record.generation,
         object_id,
     };
-    let _sent = edge.send_object(context, &encoded, |fragment| {
+    let sent = edge.send_object(context, &encoded, |fragment| {
         if update {
             agenc_relay_federation_wire::FederationFrame::OriginUpdate {
                 descriptor,
@@ -324,6 +324,19 @@ fn send_origin_declaration(
             }
         }
     });
+    if sent {
+        note_update_sent(edge, generation);
+    }
+}
+
+/// Records that the first pending update of the connection's origin went
+/// out on the live link, ahead of any DEL this edge sends after it.
+fn note_update_sent(edge: &mut EdgeFederation, generation: ConnectionGeneration) {
+    if let Some(origin) = edge.origins.get_mut(&generation)
+        && !origin.pending_updates.is_empty()
+    {
+        origin.update_sent = true;
+    }
 }
 
 /// Sends FORIGIN DEL for a closed connection. The origin stays retained,
@@ -353,15 +366,14 @@ fn send_origin_del(
     let Some(origin) = edge.origins.get(&generation) else {
         return;
     };
-    // An update still in flight precedes the DEL on the link, so the
-    // coordinator holds that generation, with no operation under it yet,
-    // by the time the DEL arrives.
-    let (declared_generation, next_operation_sequence) = origin
-        .pending_updates
-        .front()
-        .map_or((origin.generation, origin.sequence), |update| {
-            (update.generation, 0)
-        });
+    // The DEL names the generation the coordinator holds when it arrives:
+    // that of an update this link already carried ahead of it, with no
+    // operation under it yet, and otherwise the acknowledged generation
+    // with its next operation sequence (spec 20.7).
+    let (declared_generation, next_operation_sequence) = match origin.pending_updates.front() {
+        Some(update) if origin.update_sent => (update.generation, 0),
+        _ => (origin.generation, origin.sequence),
+    };
     let frame = agenc_relay_federation_wire::FederationFrame::OriginDel {
         coordinator_server_id: edge.config.coordinator.server_id(),
         server_incarnation: edge.config.incarnation,

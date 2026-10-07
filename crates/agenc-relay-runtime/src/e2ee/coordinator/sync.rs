@@ -578,7 +578,9 @@ impl CompanionCoordinator {
         Ok(next_sequence)
     }
 
-    /// EORIGIN DEL: fences the origin at its next unused sequence.
+    /// EORIGIN DEL (12.5): the edge supplies its next unused sequence under
+    /// the generation this coordinator holds, at or above the next sequence
+    /// executed here, and the origin is fenced there for good.
     pub(super) fn origin_del(
         &mut self,
         peer: ServerId,
@@ -598,10 +600,11 @@ impl CompanionCoordinator {
         // under it are refused already.
         if let Some(origin) = self.state.origins.get_mut(&key) {
             if origin.generation != descriptor.origin_generation
-                || origin.next_sequence != next_operation_sequence
+                || next_operation_sequence < origin.next_sequence
             {
                 return Err(CompanionFault::Protocol);
             }
+            origin.next_sequence = next_operation_sequence;
             origin.fenced = true;
             // The connection ended: the edge's direct standings await a
             // hosting check by the next mutation plan (12.5).

@@ -140,6 +140,40 @@ fn a_recent_object_is_scoped_to_its_direction_and_sender() -> TestResult {
 }
 
 #[test]
+fn a_forgotten_recent_object_assembles_again() -> TestResult {
+    let bytes = object(100);
+    let fragments = fragment_object(&bytes)?;
+    let first = fragments.first().ok_or("fragment")?;
+    let request = remote_key(ObjectId::compute(&bytes));
+    let declaration = AssemblyKey {
+        command: CarrierCommand::Federation(ArcWireObjectKind::FederationOrigin),
+        ..request.clone()
+    };
+    let mut assembler = E2eeAssembler::default();
+    for key in [&request, &declaration] {
+        assert_eq!(
+            assembler.ingest(key.clone(), scopes(), LIVE, first, 10)?,
+            Ingest::Complete(bytes.clone())
+        );
+    }
+    // Only the selected submissions are forgotten.
+    let forgotten = assembler.forget_recent(|key| key.command == request.command);
+    assert_eq!(forgotten, 1);
+    assert!(!assembler.is_recent(&request));
+    assert!(assembler.is_recent(&declaration));
+    assert_eq!(
+        assembler.ingest(request.clone(), scopes(), LIVE, first, 11)?,
+        Ingest::Complete(bytes)
+    );
+    assert_eq!(
+        assembler.ingest(declaration, scopes(), LIVE, first, 11)?,
+        Ingest::Recent
+    );
+    assert_eq!(assembler.forget_recent(|_| false), 0);
+    Ok(())
+}
+
+#[test]
 fn the_same_object_on_another_route_assembles_as_a_new_submission() -> TestResult {
     let bytes = object(100);
     let fragments = fragment_object(&bytes)?;
