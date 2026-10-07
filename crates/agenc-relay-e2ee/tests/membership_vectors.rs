@@ -4,6 +4,8 @@
 //! `scripts/generate-e2ee-vectors.py` encodes decode, verify against the
 //! generator's root and roster, recompute the recorded identifiers, and
 //! follow the admission and signer rules their manifest dispositions name.
+//! Each proof of device 7's leaf names it by `old_credential_hash` over the
+//! leaf's basic `Credential` as the identity set's KeyPackage carries it.
 
 use std::error::Error;
 use std::fs;
@@ -13,9 +15,11 @@ use agenc_relay_crypto::SignatureDomain;
 use agenc_relay_e2ee::identity::{
     VerifiedRoot, VerifiedRoster, verify_root_identity, verify_roster,
 };
+use agenc_relay_e2ee::limits::MAX_KEY_PACKAGE_OBJECT;
 use agenc_relay_e2ee::membership::{
     AdmissionRefusal, LeafMembershipSet, MembershipRefusal, verify_leaf_membership_proof,
 };
+use agenc_relay_e2ee::mls_outer::{MlsOuterMessage, parse_mls_message};
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
 use agenc_relay_e2ee::objects::identity::{ArcDeviceRoster, ArcRootIdentity};
 use agenc_relay_e2ee::objects::membership::{ArcLeafDispositionKind, ArcLeafMembershipProof};
@@ -214,5 +218,34 @@ fn a_tampered_generator_proof_is_refused() -> TestResult {
         verify_leaf_membership_proof(&NETWORK, &[0x44; 32], &proof, &root, &roster).err(),
         Some(MembershipRefusal::Invalid)
     );
+    Ok(())
+}
+
+/// The proofs that name device 7's leaf carry `old_credential_hash` over that
+/// leaf's basic `Credential`, the slice the outer parser reads from the
+/// identity set's KeyPackage of device 7, whose identity is the identity
+/// set's credential bundle (companion 2.2).
+#[test]
+fn generator_proofs_name_the_leaf_by_its_basic_credential() -> TestResult {
+    let mut budget = DecodeBudget::new(MAX_KEY_PACKAGE_OBJECT, 1 << 12);
+    let MlsOuterMessage::KeyPackage(package) =
+        parse_mls_message(&read("identity", "key-package-7.bin")?, &mut budget)?
+    else {
+        return Err("key-package-7.bin is not a KeyPackage".into());
+    };
+    assert_eq!(
+        package.leaf_node.credential_identity,
+        read("identity", "credential-bundle-7.bin")?
+    );
+    let expected = package.leaf_node.credential()?.old_credential_hash()?;
+    for file in [
+        "membership-continuing.bin",
+        "reject-duplicate-continuing-leaf.bin",
+        "reject-revoked-device.bin",
+    ] {
+        let (proof, _) =
+            body::<ArcLeafMembershipProof>(file, ArcWireObjectKind::LeafMembershipProof)?;
+        assert_eq!(proof.tbs.old_credential_hash, expected, "{file}");
+    }
     Ok(())
 }
