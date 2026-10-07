@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
-use precis_profiles::precis_core::profile::PrecisFastInvocation as _;
+use precis_profiles::precis_core::profile::{PrecisFastInvocation as _, Rules as _};
 use precis_profiles::{Nickname as PrecisNickname, UsernameCaseMapped};
 use zeroize::Zeroize;
 
@@ -15,6 +15,10 @@ pub const MAX_PRECIS_INPUT_BYTES: usize = 256;
 /// Maximum UTF-8 bytes in a prepared display name.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 64;
 const MAX_DNS_LABEL_BYTES: usize = 63;
+/// Applications of the RFC 8266 enforcement rules before a result that has not
+/// stabilized is refused: the bound the pinned PRECIS dependency applies to its
+/// own profile (RFC 8266 Section 2.1 and RFC 8264 Section 7).
+const PRECIS_ENFORCEMENT_PASSES: usize = 3;
 
 fn is_ascii_name_character(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
@@ -215,12 +219,19 @@ fn canonicalize_precis_spaces(input: &str) -> Result<String, ValidationError> {
     if input.len() > MAX_PRECIS_INPUT_BYTES {
         return Err(ValidationError::TooLong);
     }
+    collapse_precis_spaces(input)
+}
+
+/// Applies the RFC 8266 additional mapping rule: every `Zs` space becomes one
+/// ASCII space, interior runs collapse to one, and leading and trailing spaces
+/// are removed.
+fn collapse_precis_spaces(input: &str) -> Result<String, ValidationError> {
     let mut canonical = String::new();
     canonical
         .try_reserve_exact(input.len())
         .map_err(|_| ValidationError::AllocationFailed)?;
     let mut pending_space = false;
-    for (_byte_index, character) in input.char_indices() {
+    for character in input.chars() {
         if is_space_separator(character) {
             pending_space = !canonical.is_empty();
             continue;
@@ -305,14 +316,24 @@ pub struct DisplayName(String);
 
 impl DisplayName {
     /// Applies RFC 8266 through the bounded private PRECIS adapter.
+    ///
+    /// The adapter applies the enforcement rules itself until the result is
+    /// stable: each pass checks the FreeformClass, collapses spaces and then
+    /// normalizes, so spaces are collapsed after normalization. Every input is
+    /// either prepared or refused with a typed error.
     pub fn prepare(input: &str) -> Result<Self, ValidationError> {
-        let space_safe = canonicalize_precis_spaces(input)?;
-        let prepared =
-            PrecisNickname::enforce(space_safe).map_err(|_| ValidationError::PrecisRejected)?;
-        if prepared.len() > MAX_DISPLAY_NAME_BYTES {
-            return Err(ValidationError::TooLong);
+        let mut current = canonicalize_precis_spaces(input)?;
+        for _pass in 0..PRECIS_ENFORCEMENT_PASSES {
+            let next = enforce_nickname_rules(&current)?;
+            if next == current {
+                if current.len() > MAX_DISPLAY_NAME_BYTES {
+                    return Err(ValidationError::TooLong);
+                }
+                return Ok(Self(current));
+            }
+            current = next;
         }
-        into_owned_fallible(prepared).map(Self)
+        Err(ValidationError::PrecisRejected)
     }
 
     /// Borrows the prepared display text.
@@ -320,6 +341,21 @@ impl DisplayName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// One application of the RFC 8266 Section 2.3 enforcement rules: the
+/// FreeformClass preparation check, the additional mapping rule, NFKC and the
+/// non-empty check. The dependency supplies only the class check and NFKC.
+fn enforce_nickname_rules(input: &str) -> Result<String, ValidationError> {
+    PrecisNickname::prepare(input).map_err(|_| ValidationError::PrecisRejected)?;
+    let spaced = collapse_precis_spaces(input)?;
+    let normalized = PrecisNickname::new()
+        .normalization_rule(spaced)
+        .map_err(|_| ValidationError::PrecisRejected)?;
+    if normalized.is_empty() {
+        return Err(ValidationError::PrecisRejected);
+    }
+    into_owned_fallible(normalized)
 }
 
 /// A configured lowercase ASCII DNS server name.
