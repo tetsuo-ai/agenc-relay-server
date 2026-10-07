@@ -168,9 +168,10 @@ pub(super) fn genesis_anchor(bound: &BoundConversation) -> TestResult<[u8; 32]> 
 }
 
 /// The old-leaf evidence of a real MLS endpoint: the signature key its
-/// library holds, that leaf's index in the group, and the digest of the
-/// basic credential the leaf carries, so every companion proof and ACK the
-/// endpoint signs is bound to the leaf it actually operates.
+/// library holds, that leaf's index in the group, and the
+/// `old_credential_hash` of the `Credential` the leaf carries, so every
+/// companion proof and ACK the endpoint signs is bound to the leaf it
+/// actually operates.
 pub(super) fn real_leaf(
     owner: &Principal,
     interval: (u64, u64),
@@ -178,9 +179,47 @@ pub(super) fn real_leaf(
     index: u32,
 ) -> TestResult<OldLeaf> {
     let secret = Ed25519SecretKey::from_bytes(seed);
-    let credential =
-        real_clients::credential_identity(owner, interval, &builders::public(&secret))?;
+    let credential = real_clients::encoded_credential(owner, interval, &builders::public(&secret))?;
     OldLeaf::real(secret, index, &credential)
+}
+
+/// A real leaf's credential hash is the shared helper's hash of the
+/// credential that each library's KeyPackage under the same leaf key carries,
+/// as the daemon's outer parser reads it (companion 2.2). No daemon runs.
+#[test]
+fn a_real_leaf_is_named_by_the_credential_its_key_package_carries() -> TestResult {
+    let account = AccountId::from_random(agenc_relay_types::AccountRandomId::from_bytes([233; 16]));
+    let owner = Principal::new(ALICE_ROOT, ALICE_DEVICE, account)?;
+    let interval = (1_000, 1_000 + real_clients::LEAF_LIFETIME);
+    let leaf = real_leaf(&owner, interval, ALICE_LEAF, 0)?;
+    let openmls =
+        real_clients::OpenMlsMember::with_leaf(&owner, interval, ALICE_LEAF)?.key_package()?;
+    let mls_rs = real_clients::mls_rs_client_with_leaf(&owner, interval, ALICE_LEAF)?
+        .generate_key_package_message(
+            Default::default(),
+            Default::default(),
+            Some(MlsTime::from(interval.0)),
+        )?
+        .to_bytes()?;
+    for (library, package) in [("openmls", openmls), ("mls-rs", mls_rs)] {
+        let mut budget = DecodeBudget::new(e2ee::limits::MAX_KEY_PACKAGE_OBJECT, 1 << 14);
+        let e2ee::mls_outer::MlsOuterMessage::KeyPackage(package) =
+            e2ee::mls_outer::parse_mls_message(&package, &mut budget)?
+        else {
+            return Err(failure(format!("{library} wrote no KeyPackage")));
+        };
+        assert_eq!(
+            package.leaf_node.signature_key,
+            builders::public(&leaf.secret).to_vec(),
+            "{library}"
+        );
+        assert_eq!(
+            leaf.credential_hash,
+            package.leaf_node.credential()?.old_credential_hash()?,
+            "{library}"
+        );
+    }
+    Ok(())
 }
 
 /// Starts the three daemons, runs `scenario`, and stops them. A failure is

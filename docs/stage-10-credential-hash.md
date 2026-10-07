@@ -21,8 +21,9 @@ credential.
 
 The first commit gives the shared code one helper over that input, checked
 against openmls and mls-rs. The second has the independent vector generator
-hash the same input and regenerates the vectors that carry these hashes. No
-specification text, profile hash, registry
+hash the same input and regenerates the vectors that carry these hashes. The
+third has the Stage 08 daemon tests hash a real endpoint's leaf credential
+through the shared helper. No specification text, profile hash, registry
 entry, named limit, reply code, wire object, table, key, row kind, field or
 storage generation changed, and no runtime path changed: the coordinator
 compares the credential hashes that ACKs, leaf-membership proofs and ReInit
@@ -162,6 +163,44 @@ with the vector files set back to the parent under the new generator,
 `generate-e2ee-vectors.py --check` exits 1 and both tests fail. Every other
 vector test passes in each case.
 
+## The Stage 08 leaf hashes the same input (third commit)
+
+The Stage 08 daemon tests drive real openmls and mls-rs endpoints
+(`encrypted_clients`). Each endpoint's leaf-membership proofs and ACKs carry
+the `old_credential_hash` of the leaf it operates (`OldLeaf`).
+
+- `real_clients::encoded_credential` encodes the `Credential` that a
+  principal's leaf carries under a given leaf key, through openmls
+  (`tls_serialize_detached`) and mls-rs (`mls_encode_to_vec`). It fails
+  unless both libraries produce the same bytes: the basic credential type,
+  then `identity<V>`, whose identity is the encoded credential bundle the
+  leaf authorization names.
+- `encrypted_clients::real_leaf` passes those bytes to `OldLeaf::real`, which
+  hashes them through `EncodedBasicCredential::parse` and
+  `old_credential_hash`.
+- The daemon compares the carried values, so every scenario's outcome is
+  unchanged: the recovery, rotation and both ReInit scenarios and the
+  two-edge binding test pass.
+
+Test: `encrypted_clients::a_real_leaf_is_named_by_the_credential_its_key_package_carries`
+runs without a daemon. It builds a real leaf and both libraries' KeyPackages
+under the same leaf key, reads each KeyPackage with the daemon's outer
+parser, and requires that the leaf's hash is the shared helper's hash of
+each KeyPackage leaf's credential.
+
+Revert proofs, each failing the test (exit 100):
+
+- with the helper set back to hashing the encoded credential bundle alone,
+  the hashes differ;
+- passing the bundle to the shared helper fails, because the helper refuses
+  it (`TrailingBytes`: the bundle starts with its profile version, which
+  reads as the basic type);
+- a credential without its type fails as well.
+
+The Welcome delivery of the Stage 08 fixture keeps the all-zero
+`resulting_leaf_credential_hash` in its normal-join proof. No daemon path
+reads that field, and only the joining endpoint checks it.
+
 ## For the next normative revision
 
 The companion does not define `encoded_BasicCredential` in words. Adding a
@@ -186,7 +225,7 @@ The first commit changes `mls_outer.rs` and the documentation of two
 functions in `ids.rs`. `mls_outer.rs` has no reviewed region; the five
 `companion-ids-*` regions of the release policy below the changed comments
 move, with their spans unchanged. Both source inventories are refreshed. The
-second commit changes no production source.
+second and third commits change no production source.
 
 ## Validation
 
@@ -211,5 +250,24 @@ agenc-relay-e2ee --all-features --locked --no-fail-fast`, 356 of 356 pass;
 `python3 scripts/generate-e2ee-vectors.py --check`; `python3
 scripts/check-coverage.py audit` on both policies; `git diff --cached
 --check`; and the 59-command fast gate on the staged tree, 59 of 59.
+
+Third commit, each exit 0: `cargo clippy --workspace --all-targets
+--all-features --locked -- -D warnings`; `cargo nextest run -p
+agenc-relay-server --test stage_eight_e2ee --all-features --locked
+--no-fail-fast -E 'not test(/cli_provisioning/)'`, 47 of 47 pass with 19
+skipped (the 17 ignored Stage 10 drill and capacity tests and the two
+excluded tests below);
+`python3 scripts/check-coverage.py audit` on both policies; `git diff
+--cached --check`; and the 59-command fast gate on the staged tree, 59 of
+59.
+
+At the tip, `cargo nextest run --workspace --all-features --locked
+--no-fail-fast -E 'not (test(/offline::tests::/) |
+test(/cli_provisioning/))'` passes 4,855 of 4,855 with 62 skipped, exit 0.
+The excluded ten runtime `offline::tests` and two Stage 08
+`cli_provisioning` tests fail on this host at every revision, because its
+root file system is below the storage reserve: run alone they fail with
+`Error: Storage` and `authenticated storage operation failed`, and the other
+26 tests their filter selects pass.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.
