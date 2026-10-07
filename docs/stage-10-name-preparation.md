@@ -97,6 +97,16 @@ was added, and the panic hook and the supervisor are unchanged.
   combining marks, `Zs` spaces, conjoining jamo, a default-ignorable and a
   control character); every string of up to four characters over a
   sixteen-character alphabet; and seeded random strings.
+- `crates/agenc-relay-server/tests/stage_six_daemon/display_name_preparation.rs`,
+  `display_names_are_prepared_or_refused_through_the_daemon`, runs the
+  production daemon. A registered client in a shared channel sends 24
+  `SETNAME` lines whose names need spaces collapsed after normalization; an
+  observer holding `setname` must receive each change with the exact
+  prepared name. A refused name gets the grammar refusal and is not
+  announced. Three further clients register with such names as their
+  `USER` realname, and the observer's extended `JOIN` must carry the
+  prepared realname. Both clients still get `TIME`, and the daemon stops
+  cleanly on `DIE`.
 
 ## Fuzzing
 

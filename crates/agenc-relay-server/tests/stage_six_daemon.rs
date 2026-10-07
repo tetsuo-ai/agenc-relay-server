@@ -7,6 +7,8 @@ mod loopback_ports;
 
 #[path = "stage_six_daemon/cloak_spelling.rs"]
 mod cloak_spelling;
+#[path = "stage_six_daemon/display_name_preparation.rs"]
+mod display_name_preparation;
 #[path = "stage_six_daemon/idle_capacity.rs"]
 mod idle_capacity;
 
