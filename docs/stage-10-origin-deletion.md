@@ -3,13 +3,16 @@
 This record covers decision D-37 of the SDK server program (2026-10-07,
 outside master #35): each origin deletion an edge sends names the generation
 the coordinator holds for that origin and the edge's next unused sequence
-under it, and the coordinator fences the origin at that sequence. The first
-commit makes the companion `EORIGIN DEL` name the generation of the last
-declaration its link carried, has the coordinator fence a companion origin
-at the next unused sequence the edge states, and releases an ended
-connection's companion state whether or not a deletion is sent. No
-specification, profile hash, registry entry, named limit, reply code, wire
-object, table, key, row kind, field or storage generation changed.
+under it, and the coordinator fences the origin at that sequence; a request
+that a new link carries again is classified against the coordinator's replay
+rows. The first commit makes the companion `EORIGIN DEL` name the generation
+of the last declaration its link carried, has the coordinator fence a
+companion origin at the next unused sequence the edge states, and releases
+an ended connection's companion state whether or not a deletion is sent. The
+second has the coordinator assemble and classify again, against its replay
+rows, a request object that a closed link carried. No specification, profile
+hash, registry entry, named limit, reply code, wire object, table, key, row
+kind, field or storage generation changed.
 
 ## The companion deletion names the last declared generation (first commit)
 
@@ -112,6 +115,57 @@ tests; leaving the fence at the executed sequence fails
 `a_delete_must_name_the_accepted_generation_and_next_sequence`; and
 accepting any sequence fails the latter.
 
+## A request a new link carries again is classified against the replay rows (second commit)
+
+The text this rule implements:
+
+- Architecture Section 20.5: "an exact duplicate returns the stored result
+  without re-execution".
+- Companion Section 12.5: "Exact duplicates return the stored result", and
+  "Link loss immediately fences execution from that link; reconnect must
+  replay RESET and origin state before resuming."
+- Companion Section 12.5, on a replaced link: "a partially or completely
+  written frame is treated as unacknowledged and may be sent byte-for-byte
+  after reconnect."
+- Companion Section 16: "A byte-identical retry found in the idempotency cache
+  returns the prior outcome without repeated fanout, KeyPackage consumption,
+  or sequencing."
+
+The coordinator's assembler keeps a recent-object cache (companion Section
+11.8): on the link that carried a request, a byte-identical copy of its
+completed object is answered from that request's replay row
+(`CompanionCoordinator::replay_recent`), never run again. A request whose
+object completed on a link that then closed has an outcome only if it ran
+there.
+
+The rule, in `crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs`
+(`CompanionCoordinator::link_closed`) and
+`crates/agenc-relay-e2ee/src/wire/assembly.rs`
+(`E2eeAssembler::forget_recent`):
+
+- When a link closes, the coordinator drops its peer's open payload waits,
+  queued requests and open assemblies, as before, and now also forgets which
+  of that peer's request and payload objects completed.
+- A request the next link carries again, exactly as first sent, is therefore
+  assembled and classified against the replay rows like any complete request
+  (`request::classify`): an executed one returns its stored result without
+  running again, and one that never ran runs at its sequence.
+- Nothing else changes: on the link that carried it a copy before its answer
+  is still a violation (`a_retransmitted_request_replays_its_stored_result`),
+  and other peers' requests and the closed peer's origin declarations keep the
+  cache's answer.
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::coordinator::tests::sync::a_request_a_closed_link_left_unexecuted_assembles_again_on_the_next` | A request object completes on a link that closes before its payload arrives; the next link carries the request and its payload exactly as first sent, and the coordinator hands the complete request to its executor. |
+| `e2ee::coordinator::tests::sync::a_closed_link_forgets_only_its_own_requests` | Another peer's request awaits the executor when the peer's link closes; that other peer's copy on its own link before an answer is still refused, and the closed peer's origin declaration keeps its cache entry. |
+| `wire::assembly::tests::a_forgotten_recent_object_assembles_again` (`agenc-relay-e2ee`) | The assembler forgets only the submissions selected: a forgotten one assembles again and the others still answer as recent. |
+
+With `link_closed` set back to the first commit, the first test fails.
+Forgetting the closed peer's origin declarations too, or every peer's
+requests, fails the second test; keeping the selected entries instead of
+forgetting them fails the assembler test and both coordinator tests.
+
 ## Coverage
 
 The release coverage policy gains `edge-companion-origin-deletion` (first
@@ -121,6 +175,11 @@ respans `cap78-sync-origin-del`, whose reason now names the fence at the
 stated sequence, and moves `edge-origin-attachment-settlement` in the edge's
 `origins.rs` and the other regions of the coordinator's `sync.rs`, whose
 spans are unchanged.
+
+The second commit adds `companion-closed-link-request-classification`, what
+a closed link drops and forgets (regions), and moves the regions of the
+coordinator's `mod.rs` below it and the assembler's
+`e2ee-assembly-error-arms`, whose spans are unchanged.
 
 Both source inventories are refreshed in each commit.
 
@@ -143,5 +202,10 @@ which is below its storage reserve, at every revision.
 First commit: the runtime library run passes 2,745 of 2,745. The revert
 proofs and single-edit mutations above ran the edge and coordinator origin
 tests of the runtime library.
+
+Second commit: the runtime library run passes 2,747 of 2,747, and `cargo
+nextest run -p agenc-relay-e2ee --all-features --locked --no-fail-fast`
+passes 352 of 352. The revert proof and single edits above ran the
+coordinator and assembler tests.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

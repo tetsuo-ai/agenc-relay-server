@@ -552,6 +552,17 @@ impl E2eeAssembler {
         keys.len()
     }
 
+    /// Forgets the completed submissions `select` names, so the next copy of
+    /// each assembles again rather than meeting [`Ingest::Recent`]; returns
+    /// how many were forgotten. A receiver whose durable records decide the
+    /// outcome of such submissions uses this when the path that carried
+    /// them is gone, such as the requests of a closed federation link.
+    pub fn forget_recent(&mut self, select: impl Fn(&AssemblyKey) -> bool) -> usize {
+        let before = self.recent.len();
+        self.recent.retain(|key, _| !select(key));
+        before.saturating_sub(self.recent.len())
+    }
+
     /// Discards every assembly past its idle or absolute deadline and
     /// forgets expired recent objects; returns the discarded keys.
     pub fn expire(&mut self, now: u64) -> Vec<AssemblyKey> {
