@@ -121,3 +121,62 @@ fn a_payload_must_follow_the_exact_event_that_named_it() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn an_event_assembles_whatever_the_client_cache_holds() -> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut edge = edge();
+    super::fill_client_cache(&mut edge)?;
+    // A delivery is keyed by its position and holds no recent-object slot.
+    let event = notice(Some([99; 32]))?;
+    let bytes = event_bytes(&event)?;
+    assert!(!deliver(&mut edge, &mut fixture, &bytes, false)?);
+    assert!(edge.events_in.contains_key(&POSITION.event_id));
+    Ok(())
+}
+
+#[test]
+fn a_lost_link_releases_the_coordinators_partial_objects() -> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut edge = edge();
+    let payload =
+        ArcWireObject::new(ArcWireObjectKind::ApplicationMls, vec![12; 8_000])?.encode()?;
+    let payload_id = *agenc_relay_e2ee::ObjectId::compute(&payload).as_bytes();
+    let event = event_bytes(&notice(Some(payload_id))?)?;
+    assert!(!deliver(&mut edge, &mut fixture, &event, false)?);
+    let fragments = agenc_relay_e2ee::wire::fragment::fragment_object(&payload)?;
+    let first = fragments.first().ok_or("fragment")?.clone();
+    edge.on_event_frame(
+        fixture.context_mut()?,
+        &mut base_edge(),
+        POSITION,
+        payload_id,
+        first,
+        true,
+    )
+    .map_err(|refusal| refusal.code.to_string())?;
+    assert_eq!(edge.assembler.open_count(), 1);
+    edge.link_down();
+    assert_eq!(
+        edge.assembler.open_count(),
+        0,
+        "the partial payload is released"
+    );
+    // Well past the idle deadline, the next link carries the event and its
+    // payload again from their first fragments.
+    fixture.context_mut()?.set_monotonic_for_test(120_000);
+    assert!(!deliver(&mut edge, &mut fixture, &event, false)?);
+    for fragment in fragments.into_iter().take(2) {
+        edge.on_event_frame(
+            fixture.context_mut()?,
+            &mut base_edge(),
+            POSITION,
+            payload_id,
+            fragment,
+            true,
+        )
+        .map_err(|refusal| refusal.code.to_string())?;
+    }
+    assert_eq!(edge.assembler.open_count(), 1, "the payload assembles anew");
+    Ok(())
+}

@@ -290,6 +290,28 @@ async fn an_authenticated_continuation_installs_its_head_and_deletes_the_row() -
 }
 
 #[tokio::test]
+async fn a_resolution_assembles_whatever_the_client_cache_holds() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(requesting()).await?;
+    crate::e2ee::edge::tests::fill_client_cache(&mut fixture.companion)?;
+    // The resolution and its records are keyed by their token, and hold no
+    // recent-object slot.
+    let records = continuation()?;
+    let head = records.last().ok_or("records")?.semantic_id;
+    let object = resolution_object(CONVERSATION, &records, (EXPECTED + 1, head))?;
+    feed(&mut fixture, delivery(&records, &object)?)?;
+    fixture.core.commit_staged_batch().await?;
+    assert!(
+        fixture
+            .companion
+            .batch_applied(fixture.core.context_mut()?, &mut fixture.base)
+            .is_empty()
+    );
+    assert!(!fixture.companion.witness_recovery_pending());
+    assert!(!stored_witness(&mut fixture)?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_empty_answer_retains_the_row_and_repeats_its_request() -> TestResult {
     let (mut fixture, mut queue) = Box::pin(requesting()).await?;
     let object = resolution_object(CONVERSATION, &[], (EXPECTED, HEAD))?;

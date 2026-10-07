@@ -1456,3 +1456,37 @@ async fn a_cut_may_restate_a_direct_route_this_edge_already_projects() -> TestRe
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_page_published_again_on_the_next_link_stages_again() -> TestResult {
+    let entries = entries(3)?;
+    let digest = digest_of(&entries)?;
+    let mut fixture = Fixture::resuming(false)?;
+    fixture.begin(0, 3, 3, digest)?;
+    for (conversation, bytes) in entries.iter().take(2) {
+        fixture.entry(0, *conversation, bytes)?;
+    }
+    fixture.edge.link_down();
+    assert!(fixture.edge.snapshot.is_none());
+    fixture
+        .edge
+        .link_active(fixture.core.context_mut()?, &mut fixture.base);
+    assert_eq!(fixture.edge.phase(), Phase::Resuming);
+    // The coordinator publishes the pending cut again from its first page,
+    // and the entries the closed link carried stage again.
+    let batches = fixture.transfer(&entries)?;
+    assert_eq!(batches.len(), 1);
+    assert_eq!(fixture.edge.phase(), Phase::AwaitingActive);
+    Ok(())
+}
+
+#[tokio::test]
+async fn entries_assemble_whatever_the_client_cache_holds() -> TestResult {
+    let entries = entries(2)?;
+    let mut fixture = Fixture::resuming(false)?;
+    super::fill_client_cache(&mut fixture.edge)?;
+    let batches = fixture.transfer(&entries)?;
+    assert_eq!(batches.len(), 1);
+    assert_eq!(fixture.edge.phase(), Phase::AwaitingActive);
+    Ok(())
+}

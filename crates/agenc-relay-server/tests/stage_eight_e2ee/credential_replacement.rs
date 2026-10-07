@@ -6,7 +6,11 @@ use agenc_relay_auth::{CredentialChangeFinish, CredentialChangeStart};
 
 const REPLACEMENT: &[u8] = b"a different credential for the edge regression";
 
-fn replace(client: &mut ArcClient, fixture: &NodeFixture, account_id: AccountId) -> TestResult {
+pub(super) fn replace(
+    client: &mut ArcClient,
+    fixture: &NodeFixture,
+    account_id: AccountId,
+) -> TestResult {
     let mut rng = FallibleOpaqueRng::new(OsEntropy);
     let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, REPLACEMENT)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(

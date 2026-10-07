@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use agenc_relay_client_wire::{CapabilityState, WireMessage};
 use agenc_relay_domain::e2ee::RouteTable;
 use agenc_relay_e2ee::federation::frames::CompanionFrame;
-use agenc_relay_e2ee::wire::assembly::{E2eeAssembler, QuotaLimits};
+use agenc_relay_e2ee::wire::assembly::{E2eeAssembler, QuotaLimits, Sender};
 use agenc_relay_federation_wire::FederationLineText;
 use agenc_relay_types::{ChannelInstanceId, ServerId, UserId};
 
@@ -344,6 +344,9 @@ impl E2eeEdge {
     pub fn link_down(&mut self) {
         self.barrier_completions.clear();
         self.phase = Phase::Down;
+        // The next link carries every object again from its first fragment.
+        let coordinator = Sender::Peer(*self.config.coordinator_server_id.as_bytes());
+        let _discarded = self.assembler.discard_sender(&coordinator);
         // A resolution token belongs to one link incarnation (12.5.1).
         self.witness_resolution = None;
         self.snapshot_link_down();

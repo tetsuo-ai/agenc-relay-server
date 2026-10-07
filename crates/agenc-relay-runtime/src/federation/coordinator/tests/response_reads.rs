@@ -25,7 +25,8 @@ async fn complete_and_recent_requests_replay_all_cold_bodies_in_original_order()
     let mut fixture = Box::pin(Fixture::new(None)).await?;
     let initial = fixture.core.context_mut()?.head().storage_commit_sequence;
     for replay_count in 1..=2 {
-        // First ingress assembles and decodes the complete request; second ingress hits Recent.
+        // Each ingress assembles and decodes the complete request: the
+        // previous replay released its objects from the recent-object cache.
         fixture.submit()?;
         assert!(fixture.coordinator.companion_response_read.is_some());
         assert!(!fixture.coordinator.reload_ready());
@@ -41,6 +42,44 @@ async fn complete_and_recent_requests_replay_all_cold_bodies_in_original_order()
         assert!(fixture.coordinator.pending.is_none());
         assert!(fixture.executor()?.state.objects.is_empty());
     }
+    Ok(())
+}
+
+/// A request whose stored result is read back from storage keeps its
+/// request and payload objects while the read runs, and releases them when
+/// the result is sent, as a resident replay does (companion 12.5).
+#[tokio::test]
+async fn a_cold_replay_releases_the_request_and_payload_objects() -> TestResult {
+    let mut fixture = Box::pin(Fixture::new(None)).await?;
+    let correlation = Correlation {
+        peer_server_id: *PEER.as_bytes(),
+        server_incarnation: *INCARNATION.as_bytes(),
+        origin_id: fixture.decoded.request.origin_id,
+        origin_generation: fixture.decoded.request.origin_generation,
+        operation_sequence: fixture.decoded.request.operation_sequence,
+        request_id: fixture.decoded.request.request_id,
+    };
+    let payload = vec![7; 64];
+    let payload_id = *ObjectId::compute(&payload).as_bytes();
+    let request_id = fixture.decoded.request_object_id;
+    let now = crate::e2ee::link::tick_millis(fixture.core.context_mut()?.now());
+    fixture
+        .coordinator
+        .companion_exec
+        .as_mut()
+        .ok_or("executor")?
+        .complete_request_object(PEER, &correlation, &payload, now)
+        .map_err(|e| format!("payload: {e:?}"))?;
+    fixture.submit()?;
+    assert!(fixture.coordinator.companion_response_read.is_some());
+    let executor = fixture.executor()?;
+    assert!(executor.holds_request_object(PEER, &correlation, request_id));
+    assert!(executor.holds_request_object(PEER, &correlation, payload_id));
+    fixture.finish_reads().await?;
+    fixture.expect_complete_output().await?;
+    let executor = fixture.executor()?;
+    assert!(!executor.holds_request_object(PEER, &correlation, request_id));
+    assert!(!executor.holds_request_object(PEER, &correlation, payload_id));
     Ok(())
 }
 

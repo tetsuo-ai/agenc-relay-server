@@ -24,7 +24,7 @@ use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::sequencer::SequencerKeySet;
 use agenc_relay_e2ee::tls::TlsEncode;
 use agenc_relay_e2ee::wire::assembly::{
-    AssemblyKey, Direction, E2eeAssembler, Ingest, QuotaScopes, Sender,
+    AssemblyKey, Direction, E2eeAssembler, Ingest, QuotaLimits, QuotaScopes, RecentCeiling, Sender,
 };
 use agenc_relay_e2ee::wire::carrier::CarrierCommand;
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
@@ -432,6 +432,9 @@ pub struct PendingCompanion {
     pub barriers: Vec<execute::BarrierPlanned>,
     /// A cold response keeps its input, staging, and output backing through publication.
     pub(crate) object_backing: Option<std::sync::Arc<crate::budget::MemoryPermit>>,
+    /// The request itself, answered with its failed result when storage
+    /// refuses this batch.
+    pub(crate) request: CompleteRequest,
 }
 
 /// A request waiting behind an in-flight batch.
@@ -446,6 +449,8 @@ pub struct QueuedCompanion {
     pub request: Vec<u8>,
     /// The payload object, if any.
     pub payload: Option<Vec<u8>>,
+    /// The refusal the request is answered with, if any.
+    pub refusal: Option<E2eeReplyCode>,
 }
 
 /// One companion request with its optional payload, complete.
@@ -456,6 +461,10 @@ pub struct CompleteRequest {
     pub request: Vec<u8>,
     /// Payload bytes.
     pub payload: Option<Vec<u8>>,
+    /// Set when the request is refused rather than run: a fresh request is
+    /// answered with this failed result, which consumes its operation
+    /// sequence and commits no semantic mutation (companion 12.5).
+    pub refusal: Option<E2eeReplyCode>,
 }
 
 /// What one fragment did to its assembly.
@@ -473,6 +482,7 @@ struct OpenRequest {
     correlation: Correlation,
     request: Vec<u8>,
     payload_object_id: Option<[u8; 32]>,
+    refusal: Option<E2eeReplyCode>,
 }
 
 /// The coordinator.
@@ -502,6 +512,12 @@ pub struct CompanionCoordinator {
     /// The ownership accounts of the batch in flight, installed on commit.
     pending_owners: Option<owners::Staged>,
     assembler: E2eeAssembler,
+    /// The monotonic second the recent-object cache was last expired at.
+    recent_expired_at: u64,
+    /// The generation of the last declaration of each origin that named an
+    /// attachment another attachment of its device superseded; the refusal
+    /// fenced the origin.
+    refused_origins: BTreeMap<CompanionOriginKey, u64>,
     open: BTreeMap<(ServerId, [u8; 16]), OpenRequest>,
     queued: BTreeMap<ServerId, VecDeque<QueuedCompanion>>,
     /// The state.
@@ -563,7 +579,12 @@ impl CompanionCoordinator {
             owner_reconstruction: owners::Diagnostics::default(),
             pending_owners: None,
             current_credential: None,
-            assembler: E2eeAssembler::default(),
+            assembler: E2eeAssembler::with_ceiling(
+                QuotaLimits::default(),
+                RecentCeiling::PerSender,
+            ),
+            recent_expired_at: 0,
+            refused_origins: BTreeMap::new(),
             open: BTreeMap::new(),
             queued: BTreeMap::new(),
             state: CompanionState::default(),
@@ -854,15 +875,45 @@ impl CompanionCoordinator {
             peer: Some(*peer.as_bytes()),
             ..QuotaScopes::default()
         };
+        let now = now_millis / 1_000;
+        self.expire_recent(now);
         match self
             .assembler
-            .ingest(key, scopes, command.limit(), fragment, now_millis / 1_000)
+            .ingest(key, scopes, command.limit(), fragment, now)
         {
             Ok(Ingest::Complete(bytes)) => Ok(Ingested::Complete(bytes)),
             Ok(Ingest::Incomplete | Ingest::Duplicate) => Ok(Ingested::Pending),
             Ok(Ingest::Recent) => Ok(Ingested::Recent),
             Err(error) => Err(CompanionFault::Assembly(error.reply_code())),
         }
+    }
+
+    /// Forgets, at most once a second, every completed object whose
+    /// recent-object idempotency window has ended (companion 11.8, 16).
+    fn expire_recent(&mut self, now: u64) {
+        if now > self.recent_expired_at {
+            self.recent_expired_at = now;
+            let _forgotten = self.assembler.expire_recent(now);
+        }
+    }
+
+    /// A request's answer is durable or was replayed: its replay row answers
+    /// any later copy (companion 12.5), so its request and payload objects
+    /// leave the recent-object cache and release their peer's slots.
+    pub fn request_answered(&mut self, peer: ServerId, correlation: &Correlation) {
+        let sender = Sender::Peer(*peer.as_bytes());
+        let requests = CarrierCommand::Federation(ArcWireObjectKind::FederationRequest);
+        let route = correlation.request_id_route();
+        self.assembler.forget_recent(|key| {
+            key.sender == sender && key.command == requests && key.route == route
+        });
+    }
+
+    /// Whether the completed object of `key` keeps a recent tuple: one that
+    /// does not completed past its peer's ceiling, and its request is
+    /// refused (companion 11.8, 16).
+    fn refusal_for(&self, key: &AssemblyKey) -> Option<E2eeReplyCode> {
+        (!self.assembler.is_recent(key)).then_some(E2eeReplyCode::ReassemblyLimit)
     }
 
     /// EREQUEST: a complete request executes; a retransmitted request the
@@ -886,7 +937,7 @@ impl CompanionCoordinator {
         };
         let command = CarrierCommand::Federation(ArcWireObjectKind::FederationRequest);
         let key = Self::assembly_key(peer, &correlation, command, object_id);
-        let bytes = match self.ingest(key, peer, command, &fragment, now_millis)? {
+        let bytes = match self.ingest(key.clone(), peer, command, &fragment, now_millis)? {
             Ingested::Complete(bytes) => bytes,
             Ingested::Pending => return Ok(Vec::new()),
             Ingested::Recent => return self.replay_recent(peer, &correlation, object_id),
@@ -897,6 +948,7 @@ impl CompanionCoordinator {
             correlation,
             request: bytes,
             payload_object_id,
+            refusal: self.refusal_for(&key),
         };
         if open.payload_object_id.is_some() {
             if self.open.len() >= MAX_QUEUED_COMPANION_REQUESTS {
@@ -909,6 +961,7 @@ impl CompanionCoordinator {
             correlation: open.correlation,
             request: open.request,
             payload: None,
+            refusal: open.refusal,
         })])
     }
 
@@ -987,16 +1040,19 @@ impl CompanionCoordinator {
         let command = CarrierCommand::Federation(ArcWireObjectKind::FederationRequest);
         let key = Self::assembly_key(peer, &correlation, command, object_id);
         let limit_command = CarrierCommand::DeliverWelcome;
-        let bytes = match self.ingest(key, peer, limit_command, &fragment, now_millis)? {
-            Ingested::Complete(bytes) => bytes,
-            Ingested::Pending => return Ok(Vec::new()),
-            Ingested::Recent => self
-                .state
-                .objects
-                .get(&object_id)
-                .cloned()
-                .ok_or(CompanionFault::Protocol)?,
-        };
+        let (bytes, refusal) =
+            match self.ingest(key.clone(), peer, limit_command, &fragment, now_millis)? {
+                Ingested::Complete(bytes) => (bytes, self.refusal_for(&key)),
+                Ingested::Pending => return Ok(Vec::new()),
+                Ingested::Recent => (
+                    self.state
+                        .objects
+                        .get(&object_id)
+                        .cloned()
+                        .ok_or(CompanionFault::Protocol)?,
+                    None,
+                ),
+            };
         let open = self
             .open
             .remove(&(peer, correlation.request_id))
@@ -1005,6 +1061,7 @@ impl CompanionCoordinator {
             correlation: open.correlation,
             request: open.request,
             payload: Some(bytes),
+            refusal: open.refusal.or(refusal),
         })])
     }
 
@@ -1025,6 +1082,7 @@ impl CompanionCoordinator {
             correlation: request.correlation,
             request: request.request,
             payload: request.payload,
+            refusal: request.refusal,
         });
         Ok(())
     }
@@ -1143,6 +1201,7 @@ impl CompanionCoordinator {
                 for effect in std::mem::take(&mut pending.effects) {
                     effect(&mut self.state);
                 }
+                self.request_answered(pending.peer, &pending.correlation);
                 Ok(Some(sync::Committed::Request(pending)))
             }
         }
@@ -1159,10 +1218,14 @@ impl CompanionCoordinator {
             .sum()
     }
 
-    /// Drops the staged batch after a rejected commit.
-    pub fn batch_rejected(&mut self) {
-        self.pending = None;
+    /// Drops the staged batch after a rejected commit and returns the
+    /// request it would have answered, if it was a request's batch.
+    pub fn batch_rejected(&mut self) -> Option<CompleteRequest> {
         self.pending_owners = None;
+        match self.pending.take() {
+            Some(sync::PendingWork::Request(pending)) => Some(pending.request),
+            _ => None,
+        }
     }
 
     /// Installs an explicit object in a test fixture. Live requests use resident admission.

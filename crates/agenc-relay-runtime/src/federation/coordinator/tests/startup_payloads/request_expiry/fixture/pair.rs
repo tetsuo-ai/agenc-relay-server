@@ -50,6 +50,7 @@ pub(super) fn create(
         },
         request: request_bytes,
         payload: None,
+        refusal: None,
     };
     let decoded = request::decode(executor, &complete).map_err(|e| format!("request: {e:?}"))?;
     let outcome = Outcome::scalar(ResultBody::Empty(EmptyKind::Identity));

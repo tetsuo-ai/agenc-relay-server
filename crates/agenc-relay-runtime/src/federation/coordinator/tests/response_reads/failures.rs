@@ -153,6 +153,7 @@ fn queue_complete(fixture: &mut Fixture) -> TestResult {
         },
         request: fixture.request_bytes.clone(),
         payload: None,
+        refusal: None,
     };
     companion::apply(
         &mut fixture.coordinator,
