@@ -152,6 +152,10 @@ pub(crate) struct PendingRequest {
     pub(crate) request_object_id: [u8; 32],
     /// The operation sequence, for resending in order.
     pub(crate) sequence: u64,
+    /// The acknowledged origin generation the request was sent under. A
+    /// resume resends the request only while that generation is the one the
+    /// coordinator still holds for the origin.
+    pub(crate) origin_generation: u64,
     /// The request and payload frames exactly as first sent, resent after
     /// a resume while the result is outstanding.
     pub(crate) frames: Vec<agenc_relay_e2ee::federation::frames::CompanionFrame>,

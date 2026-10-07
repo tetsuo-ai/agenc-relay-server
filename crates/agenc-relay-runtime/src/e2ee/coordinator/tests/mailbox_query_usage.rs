@@ -255,18 +255,30 @@ fn mailbox_query_origin_close_releases_only_after_the_exact_descriptor_passes() 
     };
     let before = source.query_sessions.queue_snapshot();
     assert_eq!(before.query_snapshots(), 1);
-    assert!(
-        source
-            .coordinator
-            .origin_del(
-                ServerId::from_bytes(HOME),
-                descriptor,
-                source.sequence + 1,
-                &Host(INCARNATION)
-            )
-            .is_err()
-    );
-    assert_eq!(source.query_sessions.queue_snapshot(), before);
+    // A deletion naming another generation, or a sequence below the one
+    // executed, is refused and releases nothing.
+    let other_generation = OriginDescriptor {
+        origin_generation: 1,
+        ..descriptor
+    };
+    let below = source
+        .sequence
+        .checked_sub(1)
+        .ok_or("an executed request")?;
+    for (refused, next) in [(other_generation, source.sequence), (descriptor, below)] {
+        assert!(
+            source
+                .coordinator
+                .origin_del(
+                    ServerId::from_bytes(HOME),
+                    refused,
+                    next,
+                    &Host(INCARNATION)
+                )
+                .is_err()
+        );
+        assert_eq!(source.query_sessions.queue_snapshot(), before);
+    }
     source.coordinator.origin_del(
         ServerId::from_bytes(HOME),
         descriptor,

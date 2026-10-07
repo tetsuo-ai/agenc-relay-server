@@ -540,6 +540,7 @@ impl E2eeEdge {
                 subject,
                 request_object_id,
                 sequence: correlation.operation_sequence,
+                origin_generation: correlation.origin_generation,
                 frames,
                 result: None,
                 result_object_id: None,

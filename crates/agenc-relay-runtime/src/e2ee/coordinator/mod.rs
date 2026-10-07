@@ -1051,13 +1051,21 @@ impl CompanionCoordinator {
         self.pending.is_some()
     }
 
-    /// Drops every open assembly and queued request of `peer`.
+    /// Drops every open assembly and queued request of `peer`, and forgets
+    /// which of its request and payload objects completed. The next link may
+    /// carry a request again exactly as first sent (12.5); that copy is
+    /// assembled and classified against the replay rows (20.5), so an
+    /// executed request returns its stored result and one that never ran
+    /// runs at its sequence.
     pub fn link_closed(&mut self, peer: ServerId) {
         self.link_lost(peer);
         self.open.retain(|(open_peer, _), _| *open_peer != peer);
         self.queued.remove(&peer);
+        let sender = Sender::Peer(*peer.as_bytes());
+        self.assembler.discard_sender(&sender);
+        let requests = CarrierCommand::Federation(ArcWireObjectKind::FederationRequest);
         self.assembler
-            .discard_sender(&Sender::Peer(*peer.as_bytes()));
+            .forget_recent(|key| key.sender == sender && key.command == requests);
     }
 
     /// Marks the batch the owner just staged for this executor.
