@@ -176,27 +176,38 @@ async fn byte_budget_refusal_before_io_or_after_decode_releases_owned_bytes() ->
 }
 
 #[tokio::test]
-async fn rejecting_the_staged_write_keeps_sequence_and_releases_body_backing() -> TestResult {
+async fn rejecting_the_staged_write_releases_body_backing_and_answers_a_failed_result() -> TestResult
+{
     let mut f = Box::pin(Fixture::new(true)).await?;
     let budget = f.core.context_mut()?.backing_budget_for_test();
     let baseline = budget.charged();
     let sequence = f.next_sequence()?;
     f.submit()?;
     f.resolve().await?;
-    assert!(budget.charged() > baseline);
+    let with_body = budget.charged();
+    assert!(with_body > baseline);
     f.core
         .state_mut()?
         .reject_fixture_batch_before_submission(agenc_relay_storage::StorageError::QueueFull)?;
     f.coordinator.batch_rejected(f.core.context_mut()?);
+    // The refused batch released the body; its request's failed result is
+    // staged in its place, and nothing is published or consumed before it
+    // commits.
+    assert!(f.coordinator.pending.is_some());
+    assert!(budget.charged() < with_body);
     assert_eq!(f.next_sequence()?, sequence);
     assert_eq!(f.handle.queued_bytes(), 0);
-    assert_eq!(budget.charged(), baseline);
     assert!(
         !f.executor()?
             .state
             .results
             .contains_key(ObjectId::compute(&f.complete.request).as_bytes())
     );
+    assert!(!f.executor()?.state.objects.contains_key(&f.object_id));
+    // The failed result consumes the sequence and retains no object.
+    f.commit_pending().await?;
+    assert_eq!(f.next_sequence()?, sequence + 1);
+    assert!(f.handle.queued_bytes() > 0);
     assert!(!f.executor()?.state.objects.contains_key(&f.object_id));
     Ok(())
 }

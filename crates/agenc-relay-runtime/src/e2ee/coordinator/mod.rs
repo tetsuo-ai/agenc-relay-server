@@ -432,6 +432,9 @@ pub struct PendingCompanion {
     pub barriers: Vec<execute::BarrierPlanned>,
     /// A cold response keeps its input, staging, and output backing through publication.
     pub(crate) object_backing: Option<std::sync::Arc<crate::budget::MemoryPermit>>,
+    /// The request itself, answered with its failed result when storage
+    /// refuses this batch.
+    pub(crate) request: CompleteRequest,
 }
 
 /// A request waiting behind an in-flight batch.
@@ -1215,10 +1218,14 @@ impl CompanionCoordinator {
             .sum()
     }
 
-    /// Drops the staged batch after a rejected commit.
-    pub fn batch_rejected(&mut self) {
-        self.pending = None;
+    /// Drops the staged batch after a rejected commit and returns the
+    /// request it would have answered, if it was a request's batch.
+    pub fn batch_rejected(&mut self) -> Option<CompleteRequest> {
         self.pending_owners = None;
+        match self.pending.take() {
+            Some(sync::PendingWork::Request(pending)) => Some(pending.request),
+            _ => None,
+        }
     }
 
     /// Installs an explicit object in a test fixture. Live requests use resident admission.

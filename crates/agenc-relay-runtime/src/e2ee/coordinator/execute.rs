@@ -361,6 +361,7 @@ pub(crate) fn run_with_object(
             effects: assembled.effects,
             barriers: assembled.barriers,
             object_backing: resolved.map(super::object_read::Resolved::backing),
+            request: complete,
         },
     )));
     Ok(Staged::Batch)

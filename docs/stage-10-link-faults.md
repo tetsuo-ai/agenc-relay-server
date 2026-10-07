@@ -12,9 +12,10 @@ the recent-object cache and releases the coordinator's partial objects when
 its link closes. The third refuses a base declaration naming a session or
 account the coordinator removed for that origin alone. The fourth refuses a
 companion declaration naming a device attachment another attachment of the
-device superseded for that origin alone. No specification, profile hash,
-registry entry, named limit, reply code, wire object, table, key, row kind,
-field or storage generation changed.
+device superseded for that origin alone. The fifth answers a companion
+request whose batch storage refused with its failed result. No
+specification, profile hash, registry entry, named limit, reply code, wire
+object, table, key, row kind, field or storage generation changed.
 
 ## The coordinator's recent-object cache (first commit)
 
@@ -352,6 +353,72 @@ respans `cap78-sync-origin-reset`, `cap78-sync-origin-del` and
 `cap90-current-base-origin-admission`; the other regions of the file move
 with unchanged spans. Both source inventories are refreshed.
 
+## A request whose batch storage refused is answered with its failed result (fifth commit)
+
+The companion text this rule implements:
+
+- Section 12.5: "Every opcode permits `failed`. A failed result ... never
+  consumes or partially commits the requested semantic mutation"; the
+  coordinator's transaction writes the "request result, and next sequence",
+  and "It sends ERESULT/ERESPONSE and semantic events only from those
+  durable rows"; and within an origin generation "each new logical request
+  increments" the operation sequence.
+- Section 11.9: `E2EE_RATE_LIMITED` is "Operation exceeded an authenticated
+  quota". The table has no internal or storage code, and Section 16 refuses
+  storage at the global E2EE disk ceiling under that quota.
+- Architecture 20.5: "a sequence gap returns `ORIGIN_GAP`, blocks that
+  origin, and requires origin resynchronization".
+
+The rules, in
+`crates/agenc-relay-runtime/src/federation/coordinator/companion.rs` and
+`crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs`:
+
+- **The refused batch's request is answered.** A companion request's
+  result, events and next sequence commit in one batch. The staged batch
+  keeps its request (`PendingCompanion::request`), and the executor hands
+  it back when storage refuses the batch
+  (`CompanionCoordinator::batch_rejected`). On its live link the coordinator
+  answers it with the failed result `E2EE_RATE_LIMITED`, staged as its own
+  batch (`answer_rejected`): the result consumes the request's operation
+  sequence and commits no semantic mutation, so the origin's next request
+  follows it, and an exact copy returns that stored result. The link stays
+  up. `E2EE_RATE_LIMITED` is also the code the coordinator already gives a
+  request whose storage plan it cannot make (`e2ee/coordinator/execute.rs`:
+  the clock and checkpoint-plan failures).
+- **A closed link is left alone.** When the request's link closed before
+  storage refused its batch, nothing is staged: the next link carries the
+  request again, and it is classified against the replay rows.
+- **Storage refusing the failed result retires the link**, as storage
+  refusing a base request's batch does: no answer can be made durable.
+
+| Test | What it pins |
+| --- | --- |
+| `federation::coordinator::tests::companion_refusals::a_request_whose_batch_storage_refused_is_answered_with_its_failed_result` | Storage refuses the first request's batch while the origin's next request waits behind it; the first is answered `E2EE_RATE_LIMITED` at its sequence, the next runs at the following one, the link stays up, and the first request's copy returns its stored failed result. |
+| `federation::coordinator::tests::companion_refusals::a_failed_result_storage_also_refuses_retires_the_link` | Storage refuses the failed result's batch as well: the link is retired and the sequence is not consumed. |
+| `federation::coordinator::tests::companion_refusals::a_request_whose_link_closed_before_storage_refused_its_batch_is_left_for_the_next_link` | The link closes before storage refuses the batch: nothing is staged, the sequence is not consumed, and nothing counts as a violation. |
+
+`federation::coordinator::tests::object_reads::failures::rejecting_the_staged_write_releases_body_backing_and_answers_a_failed_result`,
+renamed from `rejecting_the_staged_write_keeps_sequence_and_releases_body_backing`,
+now also requires the failed result staged in place of the refused batch:
+the body's backing is released, nothing is published or consumed before
+that result commits, and its commit consumes the sequence and retains no
+object.
+
+With the rejection rule of the coordinator's `mod.rs` set back to the
+fourth commit, the first two tests and the renamed one fail and the other
+331 coordinator tests pass. Single edits fail tests as well, one for each part
+of the rule: running the refused batch's request again instead of refusing
+it fails the first two; answering a refused failed result again instead of
+retiring the link fails the second; and answering a request whose link
+closed fails the third.
+
+The release coverage policy gains `companion-rejected-request-answer`
+(branches), and re-reviews and respans
+`companion-mod-companioncoordinator-batch-rejected`,
+`cap79-maintenance-056-reject-pending-batch` and
+`cap79-fresh-object-006-run-with-object`; the other regions of the changed
+files move with unchanged spans. Both source inventories are refreshed.
+
 ## Validation
 
 Each commit, Rust 1.98.0, from the worktree root: `cargo clippy --workspace
@@ -379,5 +446,9 @@ library.
 
 Fourth commit: the runtime library run passes 2,782 of 2,782. The revert
 proof and single edits above ran the coordinator's synchronization tests.
+
+Fifth commit: the runtime library run passes 2,785 of 2,785. The revert
+proof and single edits above ran the coordinator tests of the runtime
+library.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

@@ -205,6 +205,12 @@ fn an_answered_request_releases_its_objects() -> TestResult {
             effects: Vec::new(),
             barriers: Vec::new(),
             object_backing: None,
+            request: CompleteRequest {
+                correlation: answered.correlation,
+                request: answered.request.clone(),
+                payload: answered.payload.clone(),
+                refusal: None,
+            },
         })));
     let committed = sync
         .harness

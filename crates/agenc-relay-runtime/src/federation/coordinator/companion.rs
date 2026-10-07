@@ -897,6 +897,34 @@ pub(super) fn snapshot_timer_fired(
     true
 }
 
+/// Answers a request whose batch storage refused with its failed result
+/// `E2EE_RATE_LIMITED`, staged as its own batch (companion 12.5): the
+/// result consumes the request's operation sequence and commits no
+/// semantic mutation, so the origin's next request follows it. A link that
+/// closed meanwhile is left alone, since the next link carries the request
+/// again; when storage refuses even the failed result, the link is retired
+/// as for a base request.
+pub(super) fn answer_rejected(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    mut request: CompleteRequest,
+) {
+    if !coordinator.link_is_live(link, peer) {
+        return;
+    }
+    let outcome = if request.refusal.is_some() {
+        Err(Violation::Ceiling)
+    } else {
+        request.refusal = Some(E2eeReplyCode::RateLimited);
+        run(coordinator, context, link, peer, request)
+    };
+    if let Err(violation) = outcome {
+        coordinator.fail_link(context, link, peer, violation);
+    }
+}
+
 /// Runs queued companion requests while no batch is in flight.
 pub(super) fn drain_queued(
     coordinator: &mut FederationCoordinator,

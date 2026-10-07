@@ -323,3 +323,85 @@ async fn a_refused_request_commits_its_failed_result_at_its_sequence() -> TestRe
     assert_eq!(f.coordinator.counters.violations, 0);
     Ok(())
 }
+
+impl Fixture {
+    /// Storage refuses the staged batch before it is submitted.
+    fn reject(&mut self) -> TestResult {
+        self.core
+            .state_mut()?
+            .reject_fixture_batch_before_submission(agenc_relay_storage::StorageError::QueueFull)?;
+        self.coordinator.batch_rejected(self.core.context_mut()?);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_request_whose_batch_storage_refused_is_answered_with_its_failed_result() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    let first = f.whoami(sequence)?;
+    let second = f.whoami(sequence + 1)?;
+    f.submit(&first)?;
+    assert!(f.coordinator.pending.is_some());
+    // The origin's next request waits behind the staged batch.
+    f.submit(&second)?;
+    f.reject()?;
+    // The refused batch's request is answered with its own failed result.
+    assert!(f.coordinator.pending.is_some());
+    f.commit_pending().await?;
+    let limited = Answered::Failed(E2eeReplyCode::RateLimited.token().to_owned());
+    let account = Answered::Other(ArcFederationResultKind::Account);
+    assert_eq!(
+        f.answers().await?,
+        vec![(sequence, limited), (sequence + 1, account)]
+    );
+    assert_eq!(f.next_sequence()?, sequence + 2);
+    assert!(f.live());
+    assert_eq!(f.coordinator.counters.violations, 0);
+    // The refused request again returns its stored failed result.
+    f.submit(&first)?;
+    f.commit_pending().await?;
+    let limited = Answered::Failed(E2eeReplyCode::RateLimited.token().to_owned());
+    assert_eq!(f.answers().await?, vec![(sequence, limited)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_result_storage_also_refuses_retires_the_link() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    f.submit(&f.whoami(sequence)?)?;
+    f.reject()?;
+    assert!(
+        f.coordinator.pending.is_some(),
+        "the failed result is staged"
+    );
+    f.reject()?;
+    assert!(!f.live());
+    assert_eq!(f.next_sequence()?, sequence);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_request_whose_link_closed_before_storage_refused_its_batch_is_left_for_the_next_link()
+-> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    f.submit(&f.whoami(sequence)?)?;
+    f.coordinator.inbound(
+        f.core.context_mut()?,
+        FederationInbound {
+            link: LinkId::new(1),
+            peer: PEER,
+            event: LinkEvent::Closed(LinkCloseReason::PeerClosed),
+            charge: None,
+        },
+    );
+    f.reject()?;
+    // Nothing is staged and nothing counts as a violation: the next link
+    // carries the request again.
+    assert!(f.coordinator.pending.is_none());
+    assert_eq!(f.next_sequence()?, sequence);
+    assert_eq!(f.coordinator.counters.violations, 0);
+    Ok(())
+}

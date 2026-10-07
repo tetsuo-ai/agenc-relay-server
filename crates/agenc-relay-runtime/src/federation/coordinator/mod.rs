@@ -1683,9 +1683,13 @@ impl FederationCoordinator {
             Some(PendingCommit::CompanionRestore(receipt)) => {
                 startup::retirement::rejected(self, context, *receipt, error);
             }
-            Some(PendingCommit::Companion { .. }) => {
-                if let Some(executor) = self.companion_exec.as_mut() {
-                    executor.batch_rejected();
+            Some(PendingCommit::Companion { peer, link, .. }) => {
+                let rejected = self
+                    .companion_exec
+                    .as_mut()
+                    .and_then(CompanionCoordinator::batch_rejected);
+                if let Some(request) = rejected {
+                    companion::answer_rejected(self, context, link, peer, request);
                 }
             }
             Some(PendingCommit::SnapshotRows { peer } | PendingCommit::SnapshotReady { peer }) => {
