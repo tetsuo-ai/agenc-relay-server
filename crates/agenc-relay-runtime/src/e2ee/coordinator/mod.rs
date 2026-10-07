@@ -512,7 +512,8 @@ pub struct CompanionCoordinator {
     /// The ownership accounts of the batch in flight, installed on commit.
     pending_owners: Option<owners::Staged>,
     assembler: E2eeAssembler,
-    /// The monotonic second the recent-object cache was last expired at.
+    /// The monotonic second the assembler last expired its open assemblies
+    /// and recent-object cache at.
     recent_expired_at: u64,
     /// The generation of the last declaration of each origin that named an
     /// attachment another attachment of its device superseded; the refusal
@@ -876,7 +877,7 @@ impl CompanionCoordinator {
             ..QuotaScopes::default()
         };
         let now = now_millis / 1_000;
-        self.expire_recent(now);
+        self.expire_assemblies(now);
         match self
             .assembler
             .ingest(key, scopes, command.limit(), fragment, now)
@@ -888,12 +889,14 @@ impl CompanionCoordinator {
         }
     }
 
-    /// Forgets, at most once a second, every completed object whose
+    /// At most once a second, discards every open assembly past its idle
+    /// or absolute deadline, which releases its peer's and the global
+    /// reassembly quota, and forgets every completed object whose
     /// recent-object idempotency window has ended (companion 11.8, 16).
-    fn expire_recent(&mut self, now: u64) {
+    fn expire_assemblies(&mut self, now: u64) {
         if now > self.recent_expired_at {
             self.recent_expired_at = now;
-            let _forgotten = self.assembler.expire_recent(now);
+            let _discarded = self.assembler.expire(now);
         }
     }
 

@@ -59,7 +59,8 @@ The rules, in `crates/agenc-relay-e2ee/src/wire/assembly.rs` and
   fragment, at most once a second (`CompanionCoordinator::expire_recent`,
   `E2eeAssembler::expire_recent`). Expiry leaves open assemblies to their own
   idle and absolute deadlines, which the assembler enforces at their next
-  fragment.
+  fragment. The [link resume record](stage-10-link-resume.md) replaces this
+  rule: expiry now also discards open assemblies past their deadlines.
 - **A request past its peer's ceiling is refused for that request.** Past
   its peer's ceiling a request or payload object still assembles within its
   quotas, but keeps no recent tuple. The request is then answered with a

@@ -11,7 +11,9 @@ exact cursor after the events still committing or queued, acknowledge an
 exact duplicate at its installed cursor again without reapplying it, and
 resume from the cursor its last event commit installs. The third keeps the
 coordinator's link traffic and companion batches waiting while any batch is
-open, so local write contention never fails a link. No specification,
+open, so local write contention never fails a link. The fourth has the
+coordinator discard a stale partial object at its deadline, which releases
+its quota. No specification,
 profile hash, registry entry, named limit, reply code, wire object, table,
 key, row kind, field or storage generation changed.
 
@@ -325,6 +327,45 @@ and `coordinator-companion-busy` (regions) and
 `cap79-request-expiry-022-apply-pending-receipt`; and moves the other
 regions of the changed files, whose spans are unchanged. Both source
 inventories are refreshed.
+
+## The coordinator discards a stale partial object at its deadline (fourth commit)
+
+The companion text this rule implements, Section 11.8: a receiver discards an
+assembly when "the reassembly timeout, connection quota, account quota, or
+route quota is exceeded"; before the first fragment it "atomically reserves
+declared `total` bytes and one object against the connection, Account ID,
+route, federation peer, and process-global reassembly quotas", and "Every
+quota is released on completion or discard"; "Remote/federated and response
+fragments may arrive out of order".
+
+The rule, in `crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs`:
+
+- **A stale partial object releases its quota.** At most once a second,
+  before it ingests the next companion fragment from any peer, the
+  coordinator discards every open assembly past its idle or absolute
+  deadline, which releases its peer's and the global reassembly quota, and
+  forgets every completed object whose idempotency window ended
+  (`CompanionCoordinator::expire_assemblies`, formerly `expire_recent`, now
+  calling `E2eeAssembler::expire`). This replaces the link faults record's
+  rule that recent-object expiry left open assemblies to their deadlines,
+  which the assembler enforced only at their next fragment. A fragment that
+  arrives after its assembly was discarded starts a new assembly, as any
+  first fragment of a federated object may, under the same quotas and
+  deadlines. A peer sends each object's fragments once on a link, so such an
+  assembly completes only if the object is sent again; otherwise it is
+  discarded at its own deadline, and the request it carries waits for the
+  next link, which sends it again. The edge's router already expires its
+  assembler this way.
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::coordinator::tests::sync::recent_objects::a_stale_partial_object_releases_its_peers_quota` | A request's partial payload holds one open object and its bytes; one second before its deadline another request keeps it; when the deadline is reached, the next fragment from another peer discards it and both the peer's and the global quota are back to zero. |
+
+With recent-object expiry alone in its place, the test fails.
+
+The release coverage policy re-reviews `companion-recent-object-expiry`,
+whose item is now `expire_assemblies`; the other regions of the file move
+with unchanged spans. Both source inventories are refreshed.
 
 ## Validation
 
