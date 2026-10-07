@@ -23,7 +23,8 @@ signature keys of their own. The two are now the same key.
 
 `OldLeaf` names the exact signature key an endpoint's MLS library holds, that
 leaf's index in the group, and `old_credential_hash` computed over the encoded
-credential bundle the leaf actually carries. `OpenMlsMember::with_leaf` and
+credential bundle the leaf actually carries (since D-42, over the leaf's
+encoded basic `Credential`; see [the credential hash record](stage-10-credential-hash.md)). `OpenMlsMember::with_leaf` and
 `mls_rs_client_with_leaf` build each library's signer from that key, so:
 
 - the Section 13.7.3 leaf-membership proof names the leaf key the library

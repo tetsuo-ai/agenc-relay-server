@@ -38,7 +38,7 @@ attempts carry, and never computes one from a credential.
   `parse_leaf_node` now calls for the slice it records as
   `PublicLeafNode::encoded_credential`). Another credential type is refused
   with `ProfileMismatch`; a short input, trailing bytes and a non-minimal
-  length prefix are refused as the parser refuses them. The bare identity,
+  length prefix are refused. The bare identity,
   which is the encoded `ArcCredentialBundle`, and `identity<V>` without its
   credential type are not a credential, and are refused.
 - `EncodedBasicCredential::old_credential_hash` and
@@ -211,13 +211,36 @@ revision and its refreeze. This topic changes neither that document nor
 this sentence to Section 2.2, as a paragraph directly after the registry
 table:
 
-> In the `old_credential_hash` and `resulting_leaf_credential_hash` rows,
-> `encoded_BasicCredential` is the canonical TLS encoding of the leaf's
-> RFC 9420 `Credential` whose `credential_type` is `basic`: the `uint16`
-> `credential_type` followed by `opaque identity<V>`, whose `identity` is the
-> exact `ArcCredentialBundle` (Section 8.5).
+> Wherever this document hashes `encoded_BasicCredential` (the
+> `old_credential_hash` and `resulting_leaf_credential_hash` rows and their
+> restatements in Sections 12.3 and 12.4), it is the canonical TLS encoding
+> of the RFC 9420 `Credential` in the `credential` field of the `LeafNode`
+> the hash names, byte for byte, whose `credential_type` is `basic`
+> (`0x0001`): the `uint16` `credential_type` followed by
+> `opaque identity<V>`, whose `identity` is the exact `ArcCredentialBundle`
+> (Section 8.5). It is not the identity alone, and not `identity<V>`
+> without its `credential_type`, as an implementation's own
+> `BasicCredential` type may encode it. `TLS-encode(resulting_leaf_index,
+> encoded_BasicCredential)` is the `uint32` index followed by those bytes,
+> with no further length prefix.
 
-`TODO.md` lists it as an open item.
+RFC 9420 Section 5.3 defines no standalone `BasicCredential`: the basic
+case is a `Credential` whose `credential_type` is `basic`. A library may
+still define a type of that name that encodes only `identity<V>` (mls-rs
+0.56.0's `mls-rs-core` 0.27.0 `BasicCredential` does), which is the reading
+the generator used before this topic; the sentence above names and excludes
+it.
+
+`TODO.md` lists the sentence as an open item, and the Stage 08 Welcome
+delivery's all-zero `resulting_leaf_credential_hash` as another: a
+conforming joiner would refuse it, so it should be computed through
+`EncodedBasicCredential::resulting_leaf_credential_hash` over the claimed
+KeyPackage's leaf.
+
+This record supersedes the statement of
+[the encrypted client proof record](stage-10-encrypted-client-proof.md) that
+`OldLeaf` hashes the encoded credential bundle: it hashes the leaf's encoded
+basic `Credential`.
 
 ## Coverage
 
