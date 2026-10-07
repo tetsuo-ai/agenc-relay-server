@@ -11,6 +11,9 @@ mod barrier_resume_tests;
 #[cfg(test)]
 #[path = "events/cache/tests/mod.rs"]
 mod cache_tests;
+#[cfg(test)]
+#[path = "events/tests/resume_cursor.rs"]
+mod resume_cursor_tests;
 mod row_storage;
 mod shared_bytes;
 pub use shared_bytes::SharedBytes;
@@ -144,6 +147,28 @@ impl DeliveryStream {
         Ok(())
     }
 
+    /// A resume cursor past the committed acknowledgement (companion 12.5)
+    /// names the last row the edge acknowledged: a row this stream delivered
+    /// and still retains unacknowledged, with its exact event ID, at the end
+    /// of a contiguous unacknowledged prefix. It acknowledges that prefix
+    /// cumulatively. Inside an open barrier only the barrier's end
+    /// qualifies, and never a row the barrier still holds back.
+    pub(super) fn validate_resume(
+        &self,
+        sequence: u64,
+        event_id: [u8; 16],
+    ) -> Result<(), CompanionFault> {
+        if self.hold_after.is_some_and(|last| sequence > last) {
+            return Err(CompanionFault::Protocol);
+        }
+        match self.barrier {
+            Some((first, _)) if sequence >= first => {
+                self.validate_barrier_resume(sequence, event_id)
+            }
+            _ => self.validate_prefix(sequence, event_id),
+        }
+    }
+
     /// A resume may recover a lost ordinary prefix only through the exact gate end.
     pub(super) fn validate_barrier_resume(
         &self,
@@ -153,6 +178,12 @@ impl DeliveryStream {
         if self.barrier.is_none_or(|(_, last)| sequence != last) {
             return Err(CompanionFault::Protocol);
         }
+        self.validate_prefix(sequence, event_id)
+    }
+
+    /// The unacknowledged rows after the committed acknowledgement run
+    /// contiguously to `sequence`, whose row carries `event_id`.
+    fn validate_prefix(&self, sequence: u64, event_id: [u8; 16]) -> Result<(), CompanionFault> {
         let mut expected = self
             .acked
             .map_or(Some(0), |(acked, _)| acked.checked_add(1))
@@ -177,7 +208,9 @@ impl DeliveryStream {
         Err(CompanionFault::Protocol)
     }
 
-    pub(super) fn acknowledge_barrier_resume(
+    /// Records the cumulative acknowledgement a resume cursor carries
+    /// ([`Self::validate_resume`]).
+    pub(super) fn acknowledge_resume(
         &mut self,
         sequence: u64,
         event_id: [u8; 16],
@@ -186,7 +219,7 @@ impl DeliveryStream {
         if !acknowledgement.is_acknowledged() {
             return Err(CompanionFault::Protocol);
         }
-        self.validate_barrier_resume(sequence, event_id)?;
+        self.validate_resume(sequence, event_id)?;
         self.record_acknowledgement(sequence, event_id, acknowledgement);
         Ok(())
     }

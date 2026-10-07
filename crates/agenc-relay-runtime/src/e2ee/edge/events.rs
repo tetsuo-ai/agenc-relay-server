@@ -37,7 +37,7 @@ use agenc_relay_types::{AccountId, ChannelInstanceId, UserId};
 use crate::connection::ConnectionGeneration;
 
 use super::router::Refusal;
-use super::{ClientOutput, E2eeEdge, PendingCommit};
+use super::{ClientOutput, E2eeEdge, PendingCommit, Phase};
 use crate::federation::edge::EdgeFederation;
 use crate::state_core::StateCoreContext;
 
@@ -158,6 +158,18 @@ fn optional<const N: usize>(field: &[u8]) -> Option<[u8; N]> {
     field.try_into().ok()
 }
 
+/// The object identifier of an event as delivered: the hash of its
+/// canonical wire object.
+fn event_object_id(event: &ArcFederationEvent) -> Result<[u8; 32], Refusal> {
+    let bytes = ArcWireObject::new(
+        ArcWireObjectKind::FederationEvent,
+        event.encode().map_err(|_| E2eeReplyCode::InvalidFragment)?,
+    )
+    .and_then(|object| object.encode())
+    .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+    Ok(*agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes())
+}
+
 impl E2eeEdge {
     /// `EEVENT` fragments: the event object assembles; its payload follows
     /// on `EDATA` when the event names one.
@@ -270,13 +282,30 @@ impl E2eeEdge {
         if let Some(mutation_id) = optional::<16>(event.cross_profile_mutation_id.as_slice()) {
             return self.barrier_part(context, edge, open, payload, mutation_id);
         }
+        self.admit_ordinary(context, edge, open, payload)
+    }
+
+    /// An ordinary event: it applies at the next exact cursor after the
+    /// events already admitted, or waits behind them; an exact duplicate at
+    /// the installed cursor is acknowledged again (companion 12.5).
+    fn admit_ordinary(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        open: OpenEvent,
+        payload: Option<Vec<u8>>,
+    ) -> Result<Vec<ClientOutput>, Refusal> {
         self.adopt_barrier_cursor(edge);
-        if self.delivery.generation != open.position.delivery_generation
-            || open.position.delivery_sequence != self.delivery.next_sequence()
-        {
+        if self.delivery.generation != open.position.delivery_generation {
             return Err(E2eeReplyCode::Syncing.into());
         }
-        if self.holds_events(context) {
+        if self.acknowledge_duplicate(context, edge, &open)? {
+            return Ok(Vec::new());
+        }
+        if open.position.delivery_sequence != self.next_admitted_sequence() {
+            return Err(E2eeReplyCode::Syncing.into());
+        }
+        if self.holds_events(context) || !self.queued.is_empty() {
             self.queued.push_back((
                 CompanionFrame::Ack(open.position),
                 payload.unwrap_or_default(),
@@ -287,10 +316,98 @@ impl E2eeEdge {
         self.apply_event(context, edge, open, payload)
     }
 
-    /// Whether an event must wait: this profile's own slot is taken or a
-    /// base batch is in flight; both profiles drain after every commit.
+    /// An exact duplicate at the installed cursor is acknowledged again
+    /// without reapplying state or rendering (companion 12.5); one whose
+    /// object conflicts with the event applied there is refused, and the
+    /// link closes. Returns whether `open` was such a duplicate.
+    fn acknowledge_duplicate(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        open: &OpenEvent,
+    ) -> Result<bool, Refusal> {
+        let position = open.position;
+        if self.delivery.cursor != Some((position.delivery_sequence, position.event_id)) {
+            return Ok(false);
+        }
+        let installed = (
+            position.delivery_generation,
+            position.delivery_sequence,
+            position.event_id,
+        );
+        let object = event_object_id(&open.event)?;
+        if self
+            .applied_object
+            .is_some_and(|(at, applied)| at == installed && applied != object)
+        {
+            return Err(E2eeReplyCode::Syncing.into());
+        }
+        self.send_ack(context, edge, position);
+        Ok(true)
+    }
+
+    /// Applies the events that waited for a batch the state core refused:
+    /// no receipt follows a refusal, so nothing else would drain them.
+    pub fn drain_waiting_events(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+    ) -> Vec<ClientOutput> {
+        self.drain_queued(context, edge)
+    }
+
+    /// The sequence the next ordinary event must carry (companion 12.5:
+    /// the next exact cursor): one past the last event this edge admitted,
+    /// whether installed, committing, or queued behind a commit.
+    fn next_admitted_sequence(&self) -> u64 {
+        let queued = self.queued.iter().rev().find_map(|(frame, _)| match frame {
+            CompanionFrame::Ack(position) => Some(position.delivery_sequence),
+            _ => None,
+        });
+        let committing = match &self.commit {
+            Some(PendingCommit::Event { position, .. }) => Some(position.delivery_sequence),
+            _ => None,
+        };
+        queued.or(committing).map_or_else(
+            || self.delivery.next_sequence(),
+            |sequence| sequence.saturating_add(1),
+        )
+    }
+
+    /// Whether an event must wait: this profile's own slot is taken, or a
+    /// batch is in flight or gathering for any router, so its plan could
+    /// not be staged now; events drain in order after every commit.
     fn holds_events(&self, context: &StateCoreContext) -> bool {
-        self.commit.is_some() || context.in_flight()
+        self.commit.is_some() || context.in_flight() || context.pending_len() != 0
+    }
+
+    /// The EACK of an applied event goes out on the link that delivered
+    /// it. A link that closed meanwhile never carries it: the next link's
+    /// ERESUME names this cursor instead (companion 12.5).
+    fn acknowledge_applied(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        position: DeliveryPosition,
+    ) {
+        if matches!(self.phase, Phase::Origins | Phase::Active) {
+            self.send_ack(context, edge, position);
+        }
+    }
+
+    /// Sends the EACK of `position` to the coordinator.
+    fn send_ack(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        position: DeliveryPosition,
+    ) {
+        if let Ok(line) = self.line(&CompanionFrame::Ack(DeliveryPosition {
+            server_id: *self.config.coordinator_server_id.as_bytes(),
+            ..position
+        })) {
+            self.send(context, edge, vec![line]);
+        }
     }
 
     /// Hands a cross-profile part to the base edge's barrier owner.
@@ -583,6 +700,7 @@ impl E2eeEdge {
         outputs.extend(rendered);
         self.checkpoint_witnesses(conversation, &mut writes)?;
         let position = open.position;
+        let object_id = event_object_id(event)?;
         let mut delivery = self.delivery;
         delivery.advance(position);
         writes.push(cursor_write(&self.config, &delivery).map_err(|_| E2eeReplyCode::RateLimited)?);
@@ -591,6 +709,7 @@ impl E2eeEdge {
             writes,
             PendingCommit::Event {
                 position,
+                object_id,
                 outputs,
                 completion,
             },
@@ -935,19 +1054,23 @@ impl E2eeEdge {
         match self.commit.take() {
             Some(PendingCommit::Event {
                 position,
+                object_id,
                 outputs: rendered,
                 completion,
             }) => {
                 self.commit_projection();
                 self.delivery.advance(position);
+                self.applied_object = Some((
+                    (
+                        position.delivery_generation,
+                        position.delivery_sequence,
+                        position.event_id,
+                    ),
+                    object_id,
+                ));
                 outputs.extend(self.commit_completion(context, completion));
                 self.counters.events_applied = self.counters.events_applied.saturating_add(1);
-                if let Ok(line) = self.line(&CompanionFrame::Ack(DeliveryPosition {
-                    server_id: *self.config.coordinator_server_id.as_bytes(),
-                    ..position
-                })) {
-                    self.send(context, edge, vec![line]);
-                }
+                self.acknowledge_applied(context, edge, position);
                 outputs.extend(rendered);
             }
             Some(PendingCommit::SnapshotPage { cursor }) => {

@@ -115,8 +115,11 @@ pub(super) fn drain_queued(
     context: &mut StateCoreContext,
 ) {
     loop {
+        // Companion work that owns the next batch goes first: a companion
+        // read's completion then finds no batch of this coordinator open.
         if coordinator.pending.is_some()
             || coordinator.history.busy()
+            || coordinator.companion_busy()
             || context.in_flight()
             || context.pending_len() != 0
         {

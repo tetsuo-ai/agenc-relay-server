@@ -260,3 +260,89 @@ fn a_declaration_holds_no_slot_and_is_acknowledged_again() -> TestResult {
     }
     Ok(())
 }
+
+/// A request whose payload has more than one fragment, from `peer`, fed up
+/// to and excluding the payload's last fragment at `now_millis`.
+fn submit_partial(
+    sync: &mut Sync,
+    peer: ServerId,
+    count: u64,
+    payload: &[u8],
+    now_millis: u64,
+) -> TestResult {
+    let (correlation, bytes) = request(count, Some(payload))?;
+    let mut frames = Vec::new();
+    for fragment in fragment_object(&bytes)? {
+        frames.push(CompanionFrame::Request {
+            correlation,
+            object_id: object_id(&bytes),
+            fragment,
+        });
+    }
+    let mut fragments = fragment_object(payload)?;
+    assert!(fragments.len() > 1, "the payload spans fragments");
+    fragments.pop();
+    for fragment in fragments {
+        frames.push(CompanionFrame::Payload {
+            correlation,
+            object_id: object_id(payload),
+            fragment,
+        });
+    }
+    for frame in frames {
+        let actions = sync
+            .harness
+            .coordinator
+            .on_frame(
+                LinkId::new(1),
+                peer,
+                frame,
+                now_millis,
+                &sync.host,
+                &mut sync.entropy,
+            )
+            .map_err(|fault| format!("{fault:?}"))?;
+        assert!(actions.is_empty(), "nothing completes");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_stale_partial_object_releases_its_peers_quota() -> TestResult {
+    let mut sync = Sync::new()?;
+    let payload = vec![0x5a; 9_000];
+    submit_partial(&mut sync, home(), 0, &payload, NOW_MILLIS)?;
+    let quotas = |sync: &Sync| {
+        let ledger = sync.harness.coordinator.assembler.quotas();
+        (ledger.open_objects(), ledger.reserved_bytes())
+    };
+    assert_eq!(sync.harness.coordinator.assembler.open_count(), 1);
+    let held = quotas(&sync);
+    assert_eq!(held.0, 1);
+    assert!(
+        held.1 >= payload.len(),
+        "the partial payload holds its quota"
+    );
+    // The payload's assembly deadline is the welcome carrier's.
+    let (absolute, idle) = CarrierCommand::DeliverWelcome.limit().deadline.seconds();
+    let deadline = idle.min(absolute);
+    // One second before its deadline the partial object is kept.
+    submit(
+        &mut sync,
+        home(),
+        1,
+        None,
+        NOW_MILLIS + (deadline - 1) * 1_000,
+    )
+    .map_err(|fault| format!("{fault:?}"))?;
+    assert_eq!(sync.harness.coordinator.assembler.open_count(), 1);
+    assert_eq!(quotas(&sync), held);
+    // When its deadline is reached, the next fragment from any peer
+    // discards it, and its peer's and the global quota are released.
+    let other = ServerId::from_bytes([9; 16]);
+    submit(&mut sync, other, 2, None, NOW_MILLIS + deadline * 1_000)
+        .map_err(|fault| format!("{fault:?}"))?;
+    assert_eq!(sync.harness.coordinator.assembler.open_count(), 0);
+    assert_eq!(quotas(&sync), (0, 0));
+    Ok(())
+}

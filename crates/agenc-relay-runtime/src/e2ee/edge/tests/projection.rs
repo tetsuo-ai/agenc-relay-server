@@ -427,3 +427,6 @@ mod restore_rows;
 
 #[path = "witness_persistence.rs"]
 mod witness_persistence;
+
+#[path = "event_admission.rs"]
+mod event_admission;
