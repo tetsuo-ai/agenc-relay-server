@@ -7,9 +7,11 @@ link that carries it. The first commit bounds the coordinator's
 recent-object cache per peer, expires it at the companion idempotency
 retention, releases an answered request's objects, keeps declarations out of
 it, and answers a request that completes past its peer's ceiling with its
-failed result. No specification, profile hash, registry entry, named limit,
-reply code, wire object, table, key, row kind, field or storage generation
-changed.
+failed result. The second assembles an edge's coordinator deliveries outside
+the recent-object cache and releases the coordinator's partial objects when
+its link closes. No specification, profile hash, registry entry, named
+limit, reply code, wire object, table, key, row kind, field or storage
+generation changed.
 
 ## The coordinator's recent-object cache (first commit)
 
@@ -132,6 +134,69 @@ The release coverage policy gains `e2ee-assembly-recent-ceiling` and
 `cap79-response-021-advance`, and moves the other regions of the changed
 files, whose spans are unchanged. Both source inventories are refreshed.
 
+## An edge's coordinator deliveries hold no recent-object slot (second commit)
+
+The companion text this rule implements:
+
+- Section 11.8 keys an in-progress object by its exact tuple and has
+  "duplicate content addresses use the recent-object idempotency cache";
+  Section 16 bounds that cache's retention.
+- Section 12.5 positions every delivery: an event at its delivery generation
+  and sequence ("An exact duplicate at the installed cursor is re-ACKed
+  without reapplying state"), a snapshot entry at its page of one immutable
+  cut ("An exact FETCH retry returns the byte-identical page", and after
+  link loss a pending cut is published again from its first page), and
+  Section 12.5.1 a witness resolution under its token.
+- Section 12.5, on a replaced link: "a partially or completely written
+  frame is treated as unacknowledged and may be sent byte-for-byte after
+  reconnect".
+
+The edge's assembler serves both its clients' submissions and the
+coordinator's deliveries. The rules, in
+`crates/agenc-relay-runtime/src/e2ee/edge/`:
+
+- **A delivery holds no recent-object slot.** An event and its payload
+  (`assemble_event`), a snapshot entry (`state_entry`) and a witness
+  resolution object (`witness_object`) are assembled as server responses
+  (`Direction::Response`): they are keyed by their position, cut or token,
+  and the cache never applies to them. A delivery is never refused because
+  the edge's clients filled the shared ceiling, and its exact copy on a
+  later link is assembled again and checked against the delivery cursor,
+  the cut or the token. The recent-object cache holds only client
+  submissions, which expire as client lines arrive (`client_line`).
+- **A lost link releases the coordinator's partial objects.** When the
+  link closes, the edge discards every open assembly of the coordinator
+  (`E2eeEdge::link_down`), as it already drops the events awaiting their
+  payload; the next link carries each object again from its first fragment,
+  so an assembly the closed link left half-complete never meets its copy
+  after its deadline.
+
+A prerequisite recorded for the companion resume follow-up, not changed
+here: the edge re-acknowledges an exact duplicate event at its installed
+cursor without reapplying state (Section 12.5) before the coordinator
+retransmits from its committed acknowledgement.
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::edge::tests::event_faults::an_event_assembles_whatever_the_client_cache_holds` | With the client cache at its ceiling, an event is assembled and waits for its payload. |
+| `e2ee::edge::tests::snapshot::entries_assemble_whatever_the_client_cache_holds` | With the client cache at its ceiling, a cut's entries stage and its READY follows. |
+| `e2ee::edge::tests::projection::witness_persistence::resolution::a_resolution_assembles_whatever_the_client_cache_holds` | With the client cache at its ceiling, an authenticated continuation resolves the witness row. |
+| `e2ee::edge::tests::snapshot::a_page_published_again_on_the_next_link_stages_again` | Two entries of page zero arrive before the link closes; the next link publishes the cut again from page zero, and every entry stages. |
+| `e2ee::edge::tests::event_faults::a_lost_link_releases_the_coordinators_partial_objects` | A payload's first fragment arrives before the link closes; the closed link releases it, and two minutes later the next link's copy assembles anew. |
+
+With `events.rs`, `snapshot.rs`, `witness_resolution.rs` and `mod.rs` of
+the edge set back to the first commit, all five tests fail. Single edits
+fail tests as well: dropping the response direction of events, entries or
+witness objects fails the matching test (both snapshot tests for entries),
+and dropping the release of the coordinator's partial objects at link loss
+fails the lost-link test.
+
+The release coverage policy gains `edge-delivery-assembly`,
+`edge-witness-object-assembly` and `edge-link-down-partial-objects`
+(regions), re-reviews and respans `edge-snapshot-receiver`, and moves the
+other regions of the changed files, whose spans are unchanged. Both source
+inventories are refreshed.
+
 ## Validation
 
 Each commit, Rust 1.98.0, from the worktree root: `cargo clippy --workspace
@@ -149,5 +214,8 @@ First commit: the runtime library run passes 2,767 of 2,767, and `cargo
 nextest run -p agenc-relay-e2ee --all-features --locked --no-fail-fast`
 passes 356 of 356. The single edits above ran the assembler,
 coordinator, refusal and response read tests.
+
+Second commit: the runtime library run passes 2,772 of 2,772. The revert
+proof and single edits above ran the edge tests of the runtime library.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

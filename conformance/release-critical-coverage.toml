@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1039
-reviewed_source_sha256 = "4e2504c6514f52f1c3878cba68feedeed1742a6dcf81dd6bf954fc1dc5d48e5c"
+reviewed_source_sha256 = "74df056292f0d460f4726f76eed53f01c0f12a8b1828c8acefff87ee41d6fcdd"
 deferred = []
 
 [[region]]
@@ -7075,12 +7075,24 @@ id = "cap74-mod-is-active"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/mod.rs"
 item = "is_active"
-source_sha256 = "cbd936bb580b4834a9562ab441bf2ee8a0c951ebff8b054d1d56300f561d1070"
+source_sha256 = "50792e27f92f527f908e195da2fc812caafdd75d69faa4781e9316696ba64fe6"
 start_line = 332
 end_line = 334
 span_sha256 = "4aaedc36f5c4e794ded67a68a1499925950860c72fa6a29c007fe85177335931"
 metric = "regions"
 reason = "Pending or persisted chain-witness evidence blocks normal synchronization, frame admission and encrypted client requests. Only the owned durable failure path publishes the original link failure. COV-07: re-anchored from 278-280, which held no item this row describes, to `E2eeEdge::is_active`, and the span it now covers was re-reviewed."
+
+[[region]]
+id = "edge-link-down-partial-objects"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/edge/mod.rs"
+item = "link_down"
+source_sha256 = "50792e27f92f527f908e195da2fc812caafdd75d69faa4781e9316696ba64fe6"
+start_line = 344
+end_line = 360
+span_sha256 = "8bfbfd58690fcdf7fef00f8e69f0670509c9deca6fabe395c5f1a90c7d09a216"
+metric = "regions"
+reason = "A lost link releases the coordinator's partial objects with its other link state, so the next link's copies assemble from their first fragment."
 
 [[region]]
 id = "cap74-router-accept-line"
@@ -13903,7 +13915,7 @@ id = "edge-snapshot-page-partition"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/snapshot.rs"
 item = "page_partition"
-source_sha256 = "45e48605d4ec1c1bc265461fcb236b8433dde5cea6f410358eb789462c33a79a"
+source_sha256 = "e78229dca9afd43e355b8bb3202c9a5df59160ced67cd8a94d45c6049809f3aa"
 start_line = 198
 end_line = 213
 span_sha256 = "63de17198a8b25fe82d2568c717707481dc4236d5df756fb5e868860957751f6"
@@ -13915,21 +13927,21 @@ id = "edge-snapshot-receiver"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/snapshot.rs"
 item = "install_snapshot_backing"
-source_sha256 = "45e48605d4ec1c1bc265461fcb236b8433dde5cea6f410358eb789462c33a79a"
+source_sha256 = "e78229dca9afd43e355b8bb3202c9a5df59160ced67cd8a94d45c6049809f3aa"
 start_line = 218
-end_line = 815
-span_sha256 = "ed85fef288ef19a3f0c87bf96bf6a12abda5607c386c595b94ed89b7f4a0f87a"
+end_line = 817
+span_sha256 = "adaf494015b7f698c5cabc3b8af121dce7beaa39f30a1224a27e06cfbd43e975"
 metric = "branches"
-reason = "A declared count above the ceiling is refused before allocation; each entry is verified, charged and retained in order; each page is one bounded batch; READY is durable before it is sent and resent on reconnect; ACTIVE alone swaps the generation; migration and cleanup run in bounded receipt-owned batches; a lost link abandons only a staging generation (companion 12.5)."
+reason = "A declared count above the ceiling is refused before allocation; each entry is verified, charged and retained in order; an entry is keyed by its page of one cut and holds no recent-object slot, so a page published again on a new link stages again; each page is one bounded batch; READY is durable before it is sent and resent on reconnect; ACTIVE alone swaps the generation; migration and cleanup run in bounded receipt-owned batches; a lost link abandons only a staging generation (companion 12.5)."
 
 [[region]]
 id = "edge-snapshot-steps"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/snapshot.rs"
 item = "Step"
-source_sha256 = "45e48605d4ec1c1bc265461fcb236b8433dde5cea6f410358eb789462c33a79a"
-start_line = 824
-end_line = 895
+source_sha256 = "e78229dca9afd43e355b8bb3202c9a5df59160ced67cd8a94d45c6049809f3aa"
+start_line = 826
+end_line = 897
 span_sha256 = "45be8299f29d3ce0ff5f4d36fca6492d30403d8dc81dd3fe1ba8ad688a536f20"
 metric = "branches"
 reason = "One migration batch moves at most STEP_ROWS conversations into the active keys and deletes the stale rows up to the same cursor; one cleanup batch deletes at most STEP_ROWS abandoned rows; the marker goes only when nothing remains."
@@ -13939,9 +13951,9 @@ id = "edge-snapshot-restore"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/snapshot.rs"
 item = "snapshot_stray_row"
-source_sha256 = "45e48605d4ec1c1bc265461fcb236b8433dde5cea6f410358eb789462c33a79a"
-start_line = 900
-end_line = 986
+source_sha256 = "e78229dca9afd43e355b8bb3202c9a5df59160ced67cd8a94d45c6049809f3aa"
+start_line = 902
+end_line = 988
 span_sha256 = "eedba0981fd8a02f05596a8670844f8ff3daefa362e19483967ece753604b5c3"
 metric = "branches"
 reason = "A restored READY generation rebuilds its pending projection and must be complete; an ACTIVE generation owns every conversation beyond its migration cursor through its pending rows and treats other active rows there as stale; a staging generation and stray rows are queued for deletion (companion 12.5)."
@@ -13951,12 +13963,36 @@ id = "edge-route-projection-writes"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-relay-runtime/src/e2ee/edge/events.rs"
 item = "decode_route"
-source_sha256 = "1db5a372cb2040b7676f48515ad88ab95d87b241c782c179bed3c89ba26e1b70"
-start_line = 600
-end_line = 676
+source_sha256 = "31887f4b658d53eb7a83ea3d99a20dfc5e26e6e918cc1403e2a4f7c6378009dc"
+start_line = 603
+end_line = 679
 span_sha256 = "eb27370dcc1c557b03c93a8908f093482f7ad5d31cbd9fa61bc0302683216c8e"
 metric = "branches"
 reason = "A route state object projects only for this network and only when its cut does not precede the witnessed head; a live change during a migration also refreshes or removes the conversation's pending row."
+
+[[region]]
+id = "edge-delivery-assembly"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/edge/events.rs"
+item = "assemble_event"
+source_sha256 = "31887f4b658d53eb7a83ea3d99a20dfc5e26e6e918cc1403e2a4f7c6378009dc"
+start_line = 213
+end_line = 250
+span_sha256 = "b1c83e3df42ee7999a6b8277c327d907e2b3e41683997b1ffc7be64a63e513ef"
+metric = "regions"
+reason = "A coordinator event or payload is keyed by its delivery position and holds no recent-object slot, so its exact copy is assembled again and checked against the cursor rather than dropped as recent."
+
+[[region]]
+id = "edge-witness-object-assembly"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/edge/witness_resolution.rs"
+item = "witness_object"
+source_sha256 = "e7005f25848887e016918eba1024e3b97367682b76cf6c1f32ca3f9d4c5f2026"
+start_line = 550
+end_line = 584
+span_sha256 = "a039a7600f76afb7cdfb3aa27cda4a4d65ecec4a30e60eb1912c5257a4251796"
+metric = "regions"
+reason = "A witness resolution object is keyed by its token and holds no recent-object slot."
 
 [[region]]
 id = "edge-snapshot-marker-row"
