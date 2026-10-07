@@ -15,9 +15,10 @@ sent. The second has the coordinator assemble and classify again, against
 its replay rows, a request object that a closed link carried. The third
 resends an origin's unanswered requests when its replayed declaration is
 acknowledged after `EORIGIN READY`, each only under the generation its
-origin is acknowledged at. No specification, profile hash, registry entry,
-named limit, reply code, wire object, table, key, row kind, field or storage
-generation changed.
+origin is acknowledged at. The fourth makes the base `FORIGIN DEL` name a
+pending update only once a link carried it, also on a later link. No
+specification, profile hash, registry entry, named limit, reply code, wire
+object, table, key, row kind, field or storage generation changed.
 
 ## The companion deletion names the last declared generation (first commit)
 
@@ -262,6 +263,60 @@ fails
 and dropping the generation scope fails both superseded-generation tests and
 two others.
 
+## The base deletion names an update only once a link carried it (fourth commit)
+
+The architecture text this rule implements:
+
+- Section 20.5: a session registration or another replacement of the
+  connection's security principal "increments the origin generation and resets
+  its operation sequence to zero only after an acknowledged `FORIGIN UPDATE`".
+- Section 20.7: "`UPDATE` increments by one and names the exact previous
+  object", and "DEL is durable, permanently rejects later requests, and
+  retains the stated next sequence for replay checking."
+- Section 20.7: "RESET fences all live execution from that edge until it has
+  replayed each origin and receives READY."
+
+The coordinator's origin table is unchanged (`OriginTable::delete`). The
+coordinator closes a session registered under an origin whose update it
+never received through the committed registration (`registered_sessions`),
+as before.
+
+The rule, in `crates/agenc-relay-runtime/src/federation/edge/request.rs` and
+`mod.rs`:
+
+- A pending update goes out once its journal row is durable. The edge records
+  in memory that the first pending update went out on a link
+  (`ConnectionOrigin::update_sent`, set by `note_update_sent`) and clears that
+  record only when the update is acknowledged and the next one becomes first.
+  A link loss keeps it: a closed connection's origin replays only its
+  deletion, never its update (`replay_origin`).
+- `FORIGIN DEL` names that update's generation at sequence zero once a link
+  carried it, and otherwise the acknowledged generation with its next
+  operation sequence (`send_origin_del`), so a deletion replayed on a later
+  link names what the first one did.
+- The record is in memory; no journal row changes.
+
+`crates/agenc-relay-runtime/src/federation/edge/tests/origin_deletion.rs`
+drives the real `EdgeFederation` over a live link queue and storage, and
+applies the `UPDATE` and `DEL` frames it sends to the coordinator's origin
+table, which holds generation zero after three requests:
+
+| Test | What it pins |
+| --- | --- |
+| `a_deletion_names_the_acknowledged_generation_until_the_update_is_sent` | An origin whose pending update no link has carried declares nothing more and is deleted at the acknowledged generation zero and sequence three, which the table accepts. |
+| `a_deletion_names_the_update_the_link_carried` | An origin whose pending update the link carried is deleted at that update's generation and sequence zero, which the table accepts after the update. |
+| `a_deletion_after_an_acknowledged_update_names_that_generation` | Once the first update is acknowledged, a second pending update no link has carried leaves the deletion at the acknowledged generation one. |
+| `a_relinked_deletion_names_the_update_the_first_link_carried` | The first link carries the update and the deletion and is lost before either acknowledgement arrives; the table turns ready again with the origin deleted, and the deletion the next link carries names the generation the first one did, which the table accepts. |
+
+With `mod.rs`, `request.rs`, `journal.rs` and the history test fixture set
+back to the third commit, the first and third tests fail; the second and
+fourth pass there too. Single edits fail tests as well: naming a pending
+update whether or not a link carried it fails the first and third;
+forgetting the record when the link closes fails
+`a_relinked_deletion_names_the_update_the_first_link_carried`; and keeping
+it when the update is acknowledged fails
+`a_deletion_after_an_acknowledged_update_names_that_generation`.
+
 ## Coverage
 
 The release coverage policy gains `edge-companion-origin-deletion` (first
@@ -283,6 +338,11 @@ acknowledgement resends which requests (branches), re-reviews and respans
 connections an acknowledgement settles, and moves the three `cap74-sync-*`
 regions of the edge's `sync.rs`, `cap74-mod-is-active`, the two regions of
 `router.rs` and `edge-companion-origin-deletion`, whose spans are unchanged.
+
+The fourth adds `edge-origin-deletion-generation`, the decision of what a
+base deletion names (branches), and moves the seven `cap13-mod-*` regions of
+the base edge's `mod.rs` and the five other regions of its `request.rs`,
+whose spans are unchanged.
 
 Both source inventories are refreshed in each commit.
 
@@ -314,5 +374,8 @@ coordinator and assembler tests.
 Third commit: the runtime library run passes 2,756 of 2,756. The revert
 proofs and single edits above ran the edge and coordinator tests of the
 runtime library.
+
+Fourth commit: the runtime library run passes 2,760 of 2,760. The revert
+proof and single edits above ran the base edge tests of the runtime library.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

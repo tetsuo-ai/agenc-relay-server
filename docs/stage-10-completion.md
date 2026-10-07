@@ -363,10 +363,11 @@ program, outside master #35), are recorded in
 An edge's companion origin deletion naming the generation of the last
 declaration its link carried and its next unused sequence, where the
 coordinator fences the origin, a request a new link carries again being
-classified against the coordinator's replay rows, and the resending of an
+classified against the coordinator's replay rows, the resending of an
 origin's unanswered requests once its replayed declaration is acknowledged
-after READY, under its acknowledged generation (D-37, SDK program, outside
-master #35), are recorded in [the origin deletion
+after READY, under its acknowledged generation, and its base origin deletion
+naming a pending update only once a link carried it (D-37, SDK program,
+outside master #35), are recorded in [the origin deletion
 record](stage-10-origin-deletion.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).

@@ -558,6 +558,7 @@ fn restored_origin(record: OriginRecord, row: &FederationOriginRecord) -> Connec
     ConnectionOrigin {
         revoked: false,
         pending_updates: std::collections::VecDeque::new(),
+        update_sent: false,
         origin_id: record.origin_id,
         connection_id: record.connection_id,
         connection_nonce: record.connection_nonce,
