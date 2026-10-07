@@ -16,9 +16,10 @@ its replay rows, a request object that a closed link carried. The third
 resends an origin's unanswered requests when its replayed declaration is
 acknowledged after `EORIGIN READY`, each only under the generation its
 origin is acknowledged at. The fourth makes the base `FORIGIN DEL` name a
-pending update only once a link carried it, also on a later link. No
-specification, profile hash, registry entry, named limit, reply code, wire
-object, table, key, row kind, field or storage generation changed.
+pending update only once a link carried it, also on a later link, and the
+fifth adds a daemon test with a coordinator and two edges. No specification,
+profile hash, registry entry, named limit, reply code, wire object, table,
+key, row kind, field or storage generation changed.
 
 ## The companion deletion names the last declared generation (first commit)
 
@@ -317,6 +318,23 @@ forgetting the record when the link closes fails
 it when the update is acknowledged fails
 `a_deletion_after_an_acknowledged_update_names_that_generation`.
 
+## A daemon test (fifth commit)
+
+`crates/agenc-relay-server/tests/stage_eight_e2ee/origin_deletion.rs`,
+`origin_deletions_name_the_generation_the_coordinator_holds`, runs the
+production coordinator and two production edges of the Stage 08 network with
+both profiles active. Guests, and clients authenticated as one account,
+register on edge A and end their connections, which deletes their base and
+companion origins; the test requires that the coordinator accepts every base
+and companion origin deletion. Connections are paced under the Stage 08
+new-connection rate and the logins stay within the account's OPAQUE attempt
+burst; the test takes about 30 seconds. The unit tests of the first four
+commits pin the rules deterministically.
+
+With the first commit's edge rule reverted the test fails in 8 of 8 runs,
+and with the fourth commit's in 8 of 8; with the whole series it passes in
+16 of 16 runs, eight at a time, and in both workspace runs below.
+
 ## Coverage
 
 The release coverage policy gains `edge-companion-origin-deletion` (first
@@ -345,6 +363,19 @@ the base edge's `mod.rs` and the five other regions of its `request.rs`,
 whose spans are unchanged.
 
 Both source inventories are refreshed in each commit.
+
+A runtime branch report at the tip (`RUSTC_BOOTSTRAP=1 cargo llvm-cov
+nextest -p agenc-relay-runtime --lib --all-features --branch --locked
+--no-fail-fast -E 'not test(/offline::tests::/)'`, 2,760 of 2,760 pass)
+scores every new or re-reviewed region in full:
+`edge-companion-origin-deletion` 2/2 branches,
+`companion-closed-link-request-classification` 23/23 regions,
+`edge-origin-acknowledgement-resend` 2/2 and
+`edge-origin-attachment-settlement` 8/8 branches, and
+`edge-origin-deletion-generation` 2/2 branches. `cap78-sync-origin-del`
+scores 39 of 40 regions, the uncovered one the unchanged `?` on rendering
+the acknowledgement line, and `cap13-mod-link-closed` 33 of 34, the
+uncovered one the unchanged early return for a link other than the live one.
 
 ## Validation
 
@@ -377,5 +408,17 @@ runtime library.
 
 Fourth commit: the runtime library run passes 2,760 of 2,760. The revert
 proof and single edits above ran the base edge tests of the runtime library.
+
+Fifth commit: no production source changed, so the runtime library and both
+coverage policies are as at the fourth commit. `cargo nextest run
+--workspace --all-features --locked --no-fail-fast -E 'not
+(test(/offline::tests::/) | test(/cli_provisioning/))'` passes 4,848 of
+4,848 with 62 skipped, the daemon test among them in 34.1 seconds; the two
+excluded Stage 08 `cli_provisioning` tests fail on the same file system at
+every revision. A first run of the same command passed 4,847:
+`state_core::tests::a_guest_session_registers_and_commands_flow_through_the_router`,
+a load-dependent single-node test this series does not reach, failed once
+there and passes alone in 5 of 5 runs. The daemon revert and repeat runs
+above ran the test binary directly, eight at a time.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.
