@@ -63,7 +63,9 @@ pub fn leaf_capabilities_digest(encoded_capabilities: &[u8]) -> Result<SemanticI
     semantic_id_over(SemanticHashDomain::LeafCapabilities, encoded_capabilities)
 }
 
-/// `resulting_leaf_credential_hash` over `TLS-encode(index, credential)`.
+/// `resulting_leaf_credential_hash` over `TLS-encode(index, credential)`,
+/// where the credential is the leaf's canonical basic `Credential` encoding
+/// ([`crate::mls_outer::EncodedBasicCredential`] reads and checks it).
 pub fn resulting_leaf_credential_hash(
     leaf_index: u32,
     encoded_basic_credential: &[u8],
@@ -77,7 +79,8 @@ pub fn resulting_leaf_credential_hash(
     )
 }
 
-/// `old_credential_hash` over the encoded BasicCredential.
+/// `old_credential_hash` over the leaf's canonical basic `Credential` encoding
+/// ([`crate::mls_outer::EncodedBasicCredential`] reads and checks it).
 pub fn old_credential_hash(encoded_basic_credential: &[u8]) -> Result<SemanticId, E2eeError> {
     semantic_id_over(
         SemanticHashDomain::OldCredentialHash,

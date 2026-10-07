@@ -6,11 +6,14 @@
 //! `KeyPackage`. Ciphertext, encrypted sender data, encrypted group info,
 //! proposals, and every secret are never interpreted. Endpoint-only: content
 //! decryption, tree and path validation, confirmation tags, exporters.
+//! [`EncodedBasicCredential`] is the leaf credential input of the companion's
+//! credential hashes.
 
 use agenc_relay_crypto::SignatureDomain;
 use sha2::{Digest as _, Sha256};
 
 use crate::error::E2eeError;
+use crate::ids::{self, SemanticId};
 use crate::limits::{MLS_VERSION_MLS10, SIGNATURE_SCHEME_ED25519, suite_is_enabled};
 use crate::signature::RoleKey;
 use crate::tls::DecodeBudget;
@@ -128,7 +131,9 @@ pub struct PublicLeafNode {
     pub signature_key: Vec<u8>,
     /// The `BasicCredential.identity` bytes.
     pub credential_identity: Vec<u8>,
-    /// The complete canonical `BasicCredential` encoding.
+    /// The complete canonical encoding of the leaf's basic `Credential`:
+    /// `credential_type` followed by `identity<V>` (see
+    /// [`EncodedBasicCredential`]).
     pub encoded_credential: Vec<u8>,
     /// The complete canonical `Capabilities` encoding.
     pub encoded_capabilities: Vec<u8>,
@@ -140,6 +145,58 @@ pub struct PublicLeafNode {
     pub signature: Vec<u8>,
     /// The `LeafNodeTBS` encoding for a `key_package` source.
     pub tbs: Vec<u8>,
+}
+
+impl PublicLeafNode {
+    /// This leaf's credential as the companion's credential hashes read it,
+    /// checked again because the fields of a leaf are public.
+    pub fn credential(&self) -> Result<EncodedBasicCredential<'_>, E2eeError> {
+        EncodedBasicCredential::parse(&self.encoded_credential)
+    }
+}
+
+/// One leaf's credential in the form the companion's `old_credential_hash`
+/// and `resulting_leaf_credential_hash` hash (Section 2.2,
+/// `encoded_BasicCredential`): the canonical TLS encoding of the leaf's
+/// RFC 9420 `Credential` whose `credential_type` is basic, that is the
+/// `credential_type` (`uint16`, value 1) followed by `identity<V>`. It is
+/// exactly the slice the KeyPackage parser records as
+/// [`PublicLeafNode::encoded_credential`] and the bytes an MLS library
+/// encodes for that leaf's `Credential`. The bare identity, which is the
+/// encoded `ArcCredentialBundle`, and `identity<V>` without its credential
+/// type are not this input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EncodedBasicCredential<'a> {
+    encoded: &'a [u8],
+}
+
+impl<'a> EncodedBasicCredential<'a> {
+    /// Reads `encoded` as exactly one basic `Credential`, with the
+    /// KeyPackage parser's own credential reader: another credential type is
+    /// a profile mismatch, and a short or longer input is refused.
+    pub fn parse(encoded: &'a [u8]) -> Result<Self, E2eeError> {
+        let mut budget = DecodeBudget::new(encoded.len(), 1);
+        let mut reader = MlsReader::new(encoded, &mut budget);
+        read_basic_credential(&mut reader)?;
+        reader.finish()?;
+        Ok(Self { encoded })
+    }
+
+    /// The canonical encoding this value was read from.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &'a [u8] {
+        self.encoded
+    }
+
+    /// `old_credential_hash` of the leaf.
+    pub fn old_credential_hash(&self) -> Result<SemanticId, E2eeError> {
+        ids::old_credential_hash(self.encoded)
+    }
+
+    /// `resulting_leaf_credential_hash` of the leaf at `leaf_index`.
+    pub fn resulting_leaf_credential_hash(&self, leaf_index: u32) -> Result<SemanticId, E2eeError> {
+        ids::resulting_leaf_credential_hash(leaf_index, self.encoded)
+    }
 }
 
 /// The complete public KeyPackage.
@@ -289,12 +346,9 @@ fn parse_leaf_node(reader: &mut MlsReader<'_>) -> Result<PublicLeafNode, E2eeErr
     let tbs_start = reader.position;
     let encryption_key = reader.opaque_v()?.to_vec();
     let signature_key = reader.opaque_v()?.to_vec();
-    let credential_start = reader.position;
-    if reader.u16()? != CREDENTIAL_TYPE_BASIC {
-        return Err(E2eeError::ProfileMismatch);
-    }
-    let credential_identity = reader.opaque_v()?.to_vec();
-    let encoded_credential = reader.slice(credential_start, reader.position)?.to_vec();
+    let (credential_identity, encoded_credential) = read_basic_credential(reader)?;
+    let credential_identity = credential_identity.to_vec();
+    let encoded_credential = encoded_credential.to_vec();
     let capabilities_start = reader.position;
     for _ in 0..5 {
         let _ = reader.opaque_v()?;
@@ -321,6 +375,20 @@ fn parse_leaf_node(reader: &mut MlsReader<'_>) -> Result<PublicLeafNode, E2eeErr
         signature,
         tbs,
     })
+}
+
+/// Reads one RFC 9420 `Credential`, which this profile requires to be of type
+/// basic, and returns its `identity` and the slice the whole `Credential`
+/// occupies: `credential_type` followed by `identity<V>`.
+fn read_basic_credential<'a>(
+    reader: &mut MlsReader<'a>,
+) -> Result<(&'a [u8], &'a [u8]), E2eeError> {
+    let start = reader.position;
+    if reader.u16()? != CREDENTIAL_TYPE_BASIC {
+        return Err(E2eeError::ProfileMismatch);
+    }
+    let identity = reader.opaque_v()?;
+    Ok((identity, reader.slice(start, reader.position)?))
 }
 
 fn parse_extensions(reader: &mut MlsReader<'_>) -> Result<Vec<MlsExtension>, E2eeError> {
