@@ -441,7 +441,9 @@ coordinator reports no unacknowledged base delivery (`STATS FEDERATION`
 second, within the network wait, so that each edge resumes from the cursor
 the coordinator committed (companion Section 12.5). The base side is checked
 directly; the companion side is covered only by that quiet window, since the
-coordinator reports no count of unacknowledged companion events. The first test takes about
+coordinator reports no count of unacknowledged companion events. The [link
+resume record](stage-10-link-resume.md) states why the wait remains: a
+resume no longer needs it. The first test takes about
 five minutes on this host, where the coordinator commits each request's
 result and each guest's registration, origins and close one at a time; the
 other two take about twenty seconds each. The unit tests of the first five

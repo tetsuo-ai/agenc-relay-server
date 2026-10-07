@@ -4,18 +4,19 @@ This record covers part 1 of decision D-44 of the SDK server program
 (2026-10-07, outside master #35), which follows D-43: a federation link
 resumes after an acknowledgement is lost in a link cut or a coordinator
 restart, and local write contention never fails it. The first commit has the
-coordinator take an `ERESUME` cursor that names a retained delivered row past
-its committed acknowledgement as that row's cumulative `EACK`, committed
-before `ERESUME OK`. The second has the edge admit each event at the next
-exact cursor after the events still committing or queued, acknowledge an
-exact duplicate at its installed cursor again without reapplying it, and
-resume from the cursor its last event commit installs. The third keeps the
-coordinator's link traffic and companion batches waiting while any batch is
-open, so local write contention never fails a link. The fourth has the
-coordinator discard a stale partial object at its deadline, which releases
-its quota. No specification,
-profile hash, registry entry, named limit, reply code, wire object, table,
-key, row kind, field or storage generation changed.
+coordinator take an `ERESUME` cursor that names a retained delivered row
+past its committed acknowledgement as that row's cumulative `EACK`,
+committed before `ERESUME OK`. The second has the edge admit each event at
+the next exact cursor after the events still committing or queued,
+acknowledge an exact duplicate at its installed cursor again without
+reapplying it, and resume from the cursor its last event commit installs.
+The third keeps the coordinator's link traffic and companion batches waiting
+while any batch is open, so local write contention never fails a link. The
+fourth has the coordinator discard a stale partial object at its deadline,
+which releases its quota. The fifth adds a daemon test that cuts a link
+while an acknowledgement is in flight. No specification, profile hash,
+registry entry, named limit, reply code, wire object, table, key, row kind,
+field or storage generation changed.
 
 ## Decision: the reading of companion Section 12.5 for a resume cursor
 
@@ -367,6 +368,36 @@ The release coverage policy re-reviews `companion-recent-object-expiry`,
 whose item is now `expire_assemblies`; the other regions of the file move
 with unchanged spans. Both source inventories are refreshed.
 
+## A daemon test cuts a link while an acknowledgement is in flight (fifth commit)
+
+`crates/agenc-relay-server/tests/stage_eight_e2ee/link_faults.rs` runs the
+production coordinator and two production edges of the Stage 08 network
+with both profiles active; edge A dials the coordinator through the relay
+the link faults tests already cut and heal.
+
+| Test | What it drives |
+| --- | --- |
+| `link_faults::a_link_cut_while_acknowledgements_are_in_flight_resumes` | A session on edge A authenticates as an account and attaches a device. The relay then holds what edge A sends for 300 ms before forwarding it. Four times, the session publishes its device's next capability statement, whose completion event the coordinator delivers to edge A; edge A answers the client only after it applied the event and wrote its `EACK`, which the relay still holds. The test cuts the link at once, with no wait, heals it, and requires that edge A links once, that the session is served again over the resumed link, and that no further closure follows. |
+
+The relay forwards edge A's direction through a holding stage
+(`forward_held`, `Relay::hold_outbound`): each chunk waits its delay before
+it is written, and a cut drops what is still held, so every cut loses the
+acknowledgement edge A just wrote. The coordinator then receives the edge's
+`ERESUME` naming the event whose `EACK` it never committed.
+
+The refusal tests keep their wait before the cut (`settled`): a resume no
+longer needs it, and it now serves only their determinism, so that they cut
+a link that carries nothing they do not control and replay only what they
+arranged. With the wait removed from a copy of this commit's tests, the two
+refusal tests passed 12 iterations of 12 confined to two processors.
+
+The test fails at the start commit, built from its own sources with this
+commit's test file, and passes from the first commit on, which carries the
+resume rule. It passes 10 runs of 10 confined to two processors
+(`--stress-count 10` under `taskset -c 0-1`). The edge's admission rules of
+the second commit and the coordinator's contention rules of the third are
+pinned by their unit tests; this scenario delivers one event at a time.
+
 ## Validation
 
 Each commit, Rust 1.98.0, from the worktree root: `cargo clippy --workspace
@@ -379,5 +410,33 @@ The runtime library run is `cargo nextest run -p agenc-relay-runtime --lib
 --all-features --locked --no-fail-fast -E 'not test(/offline::tests::/)'`;
 the ten excluded `offline::tests` fail on this host's root file system,
 which is below its storage reserve, at every revision.
+
+First commit: the runtime library run passes 2,793 of 2,793. The single
+edits above ran the stream, restart, combined barrier, companion refusal and
+synchronization tests.
+
+Second commit: the runtime library run passes 2,801 of 2,801. The single
+edits above ran the edge and registration router tests of the runtime
+library.
+
+Third commit: the runtime library run passes 2,810 of 2,810. The single
+edits above ran the coordinator, combined barrier and companion refusal
+tests.
+
+Fourth commit: the runtime library run passes 2,811 of 2,811. The single
+edit above ran the coordinator's synchronization tests.
+
+Fifth commit: `cargo nextest run -p agenc-relay-server --test
+stage_eight_e2ee --all-features --locked --no-fail-fast -E
+'test(/link_faults::/)'` passes 4 of 4, and the in-flight test passes 10
+iterations of 10 with `--stress-count 10` under `taskset -c 0-1`. The
+earlier-revision runs export each revision with `git archive`, copy in this
+commit's test file, give every source a new modification time so that
+nothing built from another tree in the shared target directory is reused,
+and run the same filter. `cargo nextest run --workspace --all-features
+--locked --no-fail-fast -E 'not (test(/offline::tests::/) |
+test(/cli_provisioning/))'` passes 4,913 of 4,913; the excluded ten
+`offline::tests` and two `cli_provisioning` tests fail on this host's root
+file system, below the storage reserve, at every revision.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.
