@@ -9,9 +9,10 @@ retention, releases an answered request's objects, keeps declarations out of
 it, and answers a request that completes past its peer's ceiling with its
 failed result. The second assembles an edge's coordinator deliveries outside
 the recent-object cache and releases the coordinator's partial objects when
-its link closes. No specification, profile hash, registry entry, named
-limit, reply code, wire object, table, key, row kind, field or storage
-generation changed.
+its link closes. The third refuses a base declaration naming a session or
+account the coordinator removed for that origin alone. No specification,
+profile hash, registry entry, named limit, reply code, wire object, table,
+key, row kind, field or storage generation changed.
 
 ## The coordinator's recent-object cache (first commit)
 
@@ -197,6 +198,95 @@ The release coverage policy gains `edge-delivery-assembly`,
 other regions of the changed files, whose spans are unchanged. Both source
 inventories are refreshed.
 
+## A base declaration naming a removed principal closes only its origin (third commit)
+
+The architecture text this rule implements:
+
+- Section 20.5: a session registration, login or other replacement of the
+  connection's security principal "increments the origin generation and
+  resets its operation sequence to zero only after an acknowledged `FORIGIN
+  UPDATE`".
+- Section 20.7: "A session registration, login, logout, account switch, or
+  companion device attach/detach is represented by the next generation
+  before requests under it are accepted"; "RESET fences all live execution
+  from that edge until it has replayed each origin and receives READY"; and
+  "DEL is durable, permanently rejects later requests, and retains the
+  stated next sequence for replay checking."
+- Section 11.5: a completed credential change "fences all of its
+  sessions", each removed as `security_fenced`; Section 10.3: "A session is
+  removed from all channels in one authoritative transition".
+
+The rules, in `crates/agenc-relay-runtime/src/federation/coordinator/origin.rs`:
+
+- **Structure first.** A declaration is checked against the origin table
+  before the principal it names is classified (`check_structure`,
+  `follows`): an ADD declares generation zero with no predecessor and no
+  principal, an UPDATE repeats the held declaration exactly or declares the
+  generation after it with the held object as its predecessor, and either
+  keeps the binding of the origin it names. A declaration that fails these
+  checks is a violation whatever session it names. The origin's status is
+  left to the table and to the refusal below.
+- **The declaration is refused for its origin alone.** A `FORIGIN ADD` or
+  `UPDATE` whose session is no longer live here, or is no longer
+  authenticated as the declared account, is refused (`principal_of`,
+  `PrincipalFault::Removed`, `refuse`): nothing is acknowledged, and the
+  link stays up. A declaration that names a session of another user or
+  edge, or an invalid account generation, is still a violation.
+- **The closure, in order.** The refusal first writes the origin's existing
+  row, closed at the generation and next sequence the coordinator holds, as
+  a deletion at that point would. The sessions the origin owns then close
+  through the coordinator's session cleanup, one durable batch each, after
+  that row commits (`close_sessions`, shared with `delete`). After a
+  restart, a session whose cleanup had not committed is swept at the edge's
+  next READY with every session of the edge that no live origin binds
+  (`ready`).
+- **The edge's deletion is acknowledged.** The edge keeps the refused
+  declaration pending until its connection ends; its deletion then names
+  the refused generation at sequence zero, and the coordinator acknowledges
+  it without recording anything more, since the refusal closed the origin
+  (`refused_declarations`, `delete`).
+- **A replayed refusal is refused again.** On the next link the edge
+  replays the refused declaration; it is refused again without change, and
+  the closed origin does not hold the link's `FORIGIN READY` back.
+- **Refusals are held in memory until the deletion.** The coordinator
+  records each refusal (`refused_declarations`) and removes it when it
+  acknowledges the edge's deletion. A new incarnation of the edge forgets
+  the refusals of the previous one. After a restart the record starts
+  empty: the edge replays the refused declaration, which is refused again
+  and recorded anew, or, when the connection ended meanwhile, deletes the
+  origin during the reset, which the origin table accepts for a deleted
+  origin; either way the deletion is acknowledged.
+
+| Test | What it pins |
+| --- | --- |
+| `federation::coordinator::tests::refused_declarations::a_declaration_naming_a_removed_session_closes_only_its_origin` | Through the actor loop: a session registers and is closed before the edge declares it; the declaration is not acknowledged, a fresh origin's declaration is, the deletion naming the refused generation is acknowledged, and another origin registers on the same link. |
+| `federation::coordinator::tests::refused_declarations::a_declaration_naming_an_account_its_session_lacks_closes_that_session` | The next generation of a registered origin names an account its live session is not authenticated as; the refusal hides the session, the link keeps serving, and the deletion is acknowledged. |
+| `federation::coordinator::tests::refused_declarations::a_refused_declaration_replayed_on_the_next_link_is_refused_again` | After the refusal the link is lost; the next link replays every origin and the refused declaration, READY arrives, and the deletion is acknowledged. |
+| `federation::coordinator::tests::refused_declarations::a_malformed_declaration_naming_a_removed_session_is_still_a_violation` | An UPDATE that skips a generation and names a closed session is a violation, not a refusal. |
+| `federation::coordinator::tests::refused_declarations::restart::a_refusal_replayed_after_a_restart_is_refused_again_and_its_deletion_acknowledged` | Through real storage, batch by batch: the refusal's origin row commits and the coordinator restarts before the session's cleanup does; the reloaded origin is deleted at the generation and next sequence it held; the replayed refused declaration is refused again and recorded anew, READY follows and sweeps the session, and the deletion after READY is acknowledged and ends the record. |
+| `federation::coordinator::tests::refused_declarations::restart::a_refused_origin_deleted_during_the_reset_after_a_restart_is_acknowledged` | The same restart; the edge deletes the origin during the reset instead of replaying it, the deletion is acknowledged, READY follows, and the session is gone. |
+
+With the coordinator's `origin.rs` and `mod.rs` set back to the second
+commit, and the restart tests left out since they read the refusal record,
+the first three tests fail and the other 326 coordinator tests pass, the
+malformed-declaration test among them. Single edits fail tests as well, one
+for each part of the rule: dropping the refusal fails the first three and
+both restart tests; refusing without closing the origin fails the same
+five; dropping the acknowledgement of a refused generation's deletion fails
+the first three and the first restart test; closing the origin without its
+sessions fails the account test; dropping the account case fails the
+account test and both restart tests; refusing without writing the origin's
+row fails the account test and both restart tests; keeping the refusal
+after the acknowledged deletion fails the first restart test; dropping the
+orphan sweep at READY fails the first restart test; and classifying the
+principal before the structure fails the malformed-declaration test.
+
+The release coverage policy gains `coordinator-declared-principal`,
+`coordinator-declaration-structure`, `coordinator-declaration-succession`
+and `coordinator-refused-declaration-deletion` (branches) and
+`coordinator-refused-declaration` (regions). No reviewed region of the
+changed files changed its span. Both source inventories are refreshed.
+
 ## Validation
 
 Each commit, Rust 1.98.0, from the worktree root: `cargo clippy --workspace
@@ -217,5 +307,9 @@ coordinator, refusal and response read tests.
 
 Second commit: the runtime library run passes 2,772 of 2,772. The revert
 proof and single edits above ran the edge tests of the runtime library.
+
+Third commit: the runtime library run passes 2,778 of 2,778. The revert
+proof and single edits above ran the coordinator tests of the runtime
+library.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

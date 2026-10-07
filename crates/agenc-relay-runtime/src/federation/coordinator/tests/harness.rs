@@ -79,6 +79,8 @@ mod snapshot_refusals;
 
 mod origin_refusals;
 
+mod refused_declarations;
+
 #[path = "snapshot_replay.rs"]
 mod snapshot_replay;
 
@@ -2730,13 +2732,13 @@ async fn an_origin_acknowledgement_whose_batch_storage_refused_retires_the_link(
     coordinator.pending = Some(PendingCommit::OriginAck {
         peer,
         link: LinkId::new(1),
-        frame: FederationFrame::OriginAck {
+        frame: Some(FederationFrame::OriginAck {
             edge_server_id: peer,
             server_incarnation: incarnation,
             origin_id: OriginId::from_bytes([77; 16]),
             generation: 1,
             object_id: None,
-        },
+        }),
         closed_carrier: None,
         _charge: None,
     });
