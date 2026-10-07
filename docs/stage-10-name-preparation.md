@@ -97,3 +97,16 @@ was added, and the panic hook and the supervisor are unchanged.
   combining marks, `Zs` spaces, conjoining jamo, a default-ignorable and a
   control character); every string of up to four characters over a
   sixteen-character alphabet; and seeded random strings.
+
+## Fuzzing
+
+The Stage 02 `client_state` target gained `exercise_display_name`: it
+prepares the input's lossy UTF-8 text as a display name (a prepared name
+must be bounded and prepare to itself) and as a login, and validates a
+`SETNAME` line carrying that text through the post-registration grammar. Its
+seed corpus gained `seed-display-name-spaces`, a `SETNAME` line whose name
+needs spaces collapsed after normalization. The target was built with the
+pinned `nightly-2026-08-24` and cargo-fuzz 0.13.2 offline and passed the
+Stage 02 smoke parameters (10,000 runs, seed 20260824) and a ten-minute
+campaign. The recorded Stage 02 smoke (`conformance/stage-two-fuzz-smoke.toml`)
+and the S10-004 parser campaign are unchanged.
