@@ -388,9 +388,10 @@ before `ERESUME OK` (D-44, SDK program, outside master #35), is recorded in
 [the link resume record](stage-10-link-resume.md).
 A deleted origin's journal row naming the generation and next sequence its
 deletion named, so an edge restarted before the deletion's acknowledgement
-is durable replays the deletion its live link sent, and the restore of
-origin rows written before that rule (D-41 with G-08, SDK program, outside
-master #35), are recorded in [the origin journal
+is durable replays the deletion its live link sent, the restore of origin
+rows written before that rule, the held generation declared with its
+acknowledged principal and daemon tests of such a restart (D-41 with G-08,
+SDK program, outside master #35), are recorded in [the origin journal
 record](stage-10-origin-journal.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).

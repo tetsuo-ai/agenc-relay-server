@@ -13,6 +13,8 @@ deletion of an origin it already deleted that names the next generation at
 sequence zero, an update it never committed, as the deletion it committed.
 The third declares the held generation, in the journal row and on a link,
 with the principal the coordinator holds at it.
+The fourth adds daemon tests in which edge A restarts before its deletion's
+acknowledgement is durable.
 No specification, profile hash, registry entry, named limit, reply code,
 wire object, table, key, row kind, field or storage generation changed.
 
@@ -244,6 +246,43 @@ With the live row's declaration and the declaration a link carries both
 built from the connection's current session and account, as at the second
 commit, the test fails, and so does each of those two edits alone.
 
+## Daemon tests (fourth commit)
+
+`crates/agenc-relay-server/tests/stage_eight_e2ee/origin_journal.rs` runs
+the production coordinator and two production edges of the Stage 08
+network with both profiles active. Edge A dials the coordinator through the
+relay of the link faults tests (`link_faults::Relay`), which now can also
+hold what the coordinator sends edge A for a set delay, so that a cut drops
+it (`Relay::hold_inbound`). In each test a client that authenticated as an
+account before registering, so that its session is an authenticated one,
+registers on edge A and its connection ends. The coordinator closes that
+session once it has committed the origin's deletion, and its count of
+authenticated sessions (`STATS RUNTIME authenticated_sessions`) drops back;
+the link is then cut while the deletion's acknowledgement is still held in
+the relay, edge A is stopped and started again from its database, and the
+link heals. Each test requires that edge A links exactly once more, that no
+link closes in the following five seconds, and that a guest then registers
+on edge A. The relay's holds are the only timing assumption: three seconds
+for what the coordinator sends over a link that is up, and 1.2 seconds for
+each answer of a handshake, within the hello deadline.
+
+| Test | What it drives |
+| --- | --- |
+| `a_restarted_edge_replays_the_deletion_its_live_link_sent` | The client's connection ends as soon as its welcome begins, while the update its registration queued usually still waits for its journal write, so the live link's deletion names generation zero at the next sequence and the ready coordinator commits it. |
+| `a_restarted_edge_replays_the_deletion_of_an_update_the_coordinator_never_read` | The relay holds what edge A sends for two seconds: the update goes out after the welcome and the link is cut before the relay forwards it. The connection ends while the link is down, and the next link replays the deletion, naming the update at sequence zero, which the coordinator takes during the reset at generation zero; until then the session stays the coordinator's, suspended. |
+
+At the start commit `4313f32`, exported with `git archive`, given this
+commit's test files and every source a new modification time, both tests
+fail in 5 of 5 runs. At the first commit `7d92495`, which carries the edge's
+rule and not the coordinator's, exported the same way, the first test passes
+in 5 of 5 runs and the second fails in 5 of 5. The first test cannot choose
+whether the update goes out before the connection ends, since the welcome
+races the update's journal write. At this commit both pass in 5 of 5 runs, and
+in 5 of 5 confined to two processors. The relay now forwards the
+coordinator's direction through the same holding stage as edge A's, with
+no delay unless a test sets one, and the four link faults daemon tests pass
+with it.
+
 ## Coverage
 
 The first commit moves the reviewed region `edge-origin-deletion-generation`
@@ -266,6 +305,16 @@ declaration now names the held principal; moves
 the `cap13-mod-*` regions of `mod.rs` and the regions of `request.rs` below
 `send_origin_declaration`, whose spans are unchanged; and refreshes both
 source inventories.
+
+The fourth changes no production source.
+
+A runtime branch report at the tip (`RUSTC_BOOTSTRAP=1 cargo llvm-cov
+nextest -p agenc-relay-runtime --lib --all-features --branch --locked
+--no-fail-fast -E 'not test(/offline::tests::/)'`, 2,820 of 2,820 pass)
+scores `edge-origin-deletion-generation` 2/2,
+`edge-origin-journal-row` 4/4 and `edge-origin-journal-superseded-row` 6/6
+branches, and the same report of the domain crate (261 of 261 pass) scores
+`origin-table-deleted-origin-deletion` 6/6 branches.
 
 ## Validation
 
@@ -296,3 +345,18 @@ Third commit: the runtime library run passes 2,820 of 2,820 and the domain
 run 261 of 261. The revert proof and single edits above ran the runtime
 library's federation tests on the topic's final tree, where each fails the
 new test and none fails to compile.
+
+Fourth commit: no production source changed, and the runtime library run
+passes 2,820 of 2,820 again. `cargo nextest run -p agenc-relay-server
+--test stage_eight_e2ee --all-features --locked --no-fail-fast -E
+'test(/origin_journal::/)' --stress-count 5` passes 5 of 5 iterations, and
+5 of 5 under `taskset -c 0-1`. `cargo nextest run --workspace
+--all-features --locked --no-fail-fast -E 'not (test(/offline::tests::/) |
+test(/cli_provisioning/))'`, which includes the four link faults daemon
+tests, passes 4,925 of 4,925 with 62 skipped; of the tests that filter
+excludes, exactly the ten `offline::tests` and the two Stage 08
+`cli_provisioning` tests fail, on the same file system at every revision,
+and the other 26 pass. The daemon revert runs above ran the test binary of
+each exported tree.
+
+Not run here: the full stage-nine gate, which cannot finish on this host.

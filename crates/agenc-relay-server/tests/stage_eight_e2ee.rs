@@ -117,6 +117,8 @@ mod loopback_ports;
 mod mixed_profile;
 #[path = "stage_eight_e2ee/origin_deletion.rs"]
 mod origin_deletion;
+#[path = "stage_eight_e2ee/origin_journal.rs"]
+mod origin_journal;
 #[path = "stage_eight_e2ee/recovery_submission.rs"]
 mod recovery_submission;
 #[path = "stage_eight_e2ee/requester_copies.rs"]
