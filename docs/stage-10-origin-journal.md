@@ -11,6 +11,8 @@ The second decides how rows written before this rule restore (G-08):
 additive within storage generation 5, with the coordinator taking a
 deletion of an origin it already deleted that names the next generation at
 sequence zero, an update it never committed, as the deletion it committed.
+The third declares the held generation, in the journal row and on a link,
+with the principal the coordinator holds at it.
 No specification, profile hash, registry entry, named limit, reply code,
 wire object, table, key, row kind, field or storage generation changed.
 
@@ -216,6 +218,32 @@ fail. Single edits fail tests as well:
 - keeping only the exact form fails both restore tests, the acknowledgement
   test and the domain test.
 
+## The held generation's declarations (third commit)
+
+Section 20.7 has `UPDATE` name "the exact previous object", the declaration
+the coordinator acknowledged at the held generation. A connection's session
+and account move to a new principal as soon as it is known, for a
+registration when its result completes, before the session is bound and the
+update queued. The rule, in the edge's `journal.rs` and `request.rs`:
+
+- A live origin's journal row with no pending update holds the declaration
+  of its held generation built from `held_principal`, as a deleted origin's
+  row already does (`journal::row_declaration`).
+- A declaration a link carries for the held generation, the replay on a new
+  link among them, is built the same way (`send_origin_declaration`); a
+  pending update is declared as before.
+- Every declaration and row of the held generation is therefore the object
+  the coordinator acknowledged, and the origin's object identity stays that
+  object's.
+
+| Test | What it pins |
+| --- | --- |
+| `federation::edge::tests::origin_deletion::held_declaration::a_declaration_of_the_held_generation_names_the_acknowledged_object` | Generation zero is acknowledged and the connection's session becomes known while its update is not queued yet: the journal row holds the acknowledged object, and a replay of the origin declares generation zero with that object's identity, which the origin keeps. |
+
+With the live row's declaration and the declaration a link carries both
+built from the connection's current session and account, as at the second
+commit, the test fails, and so does each of those two edits alone.
+
 ## Coverage
 
 The first commit moves the reviewed region `edge-origin-deletion-generation`
@@ -231,6 +259,13 @@ unchanged. Both source inventories are refreshed.
 The second adds `origin-table-deleted-origin-deletion`
 (`repeats_deletion` in the domain's `origin.rs`), an authorization decision
 scored by branches, and refreshes both source inventories.
+
+The third re-reviews and respans `edge-origin-journal-row`, whose live
+declaration now names the held principal; moves
+`edge-origin-journal-superseded-row`, `edge-origin-deletion-generation`,
+the `cap13-mod-*` regions of `mod.rs` and the regions of `request.rs` below
+`send_origin_declaration`, whose spans are unchanged; and refreshes both
+source inventories.
 
 ## Validation
 
@@ -256,3 +291,8 @@ library's federation tests and the domain's origin tests on the topic's
 final tree, where every one fails a test and none fails to compile. The
 generator of `test-data/stage-ten/origin-journal/` ran twice at `4313f32`
 and wrote identical files.
+
+Third commit: the runtime library run passes 2,820 of 2,820 and the domain
+run 261 of 261. The revert proof and single edits above ran the runtime
+library's federation tests on the topic's final tree, where each fails the
+new test and none fails to compile.

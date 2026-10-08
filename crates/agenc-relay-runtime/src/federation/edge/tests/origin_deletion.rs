@@ -14,6 +14,7 @@ use agenc_relay_types::RequestId;
 
 use super::*;
 
+mod held_declaration;
 mod stored_rows;
 
 /// The requests the coordinator executed under generation zero.

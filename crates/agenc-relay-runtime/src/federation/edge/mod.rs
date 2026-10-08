@@ -137,10 +137,12 @@ struct ConnectionOrigin {
     /// generation of the update a link carried for as long as that update is
     /// unacknowledged.
     update_sent: bool,
-    /// The session and account of the declaration at `generation`. The
+    /// The session and account of the declaration at `generation`, which
+    /// every declaration and journal row of that generation names. The
     /// `session` and `account` fields move to a new principal before its
-    /// update is queued, so while an update is pending they name that
-    /// update's principal and this keeps the one the held generation names.
+    /// update is queued, so while an update is pending, or about to be,
+    /// they name that update's principal and this keeps the one the held
+    /// generation names.
     held_principal: Principal,
     origin_id: OriginId,
     connection_id: ConnectionId,

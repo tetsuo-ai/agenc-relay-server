@@ -90,8 +90,9 @@ pub(super) fn origin_record(
 /// The declaration and next operation sequence an origin's row holds; the
 /// row is stored under that declaration's generation. A live origin's row
 /// holds its first pending update at sequence zero, durable before any link
-/// carries it, or else its current declaration with its next operation
-/// sequence. A deleted origin's row holds exactly what its deletion names
+/// carries it, or else the declaration of its held generation, with the
+/// principal the coordinator holds at it, and its next operation sequence.
+/// A deleted origin's row holds exactly what its deletion names
 /// (`ConnectionOrigin::deletion_point`): the update a link carried ahead of
 /// the deletion, or else the declaration at the held generation with its
 /// next operation sequence, never an update no link carried (spec 20.7).
@@ -100,7 +101,7 @@ fn row_declaration(edge: &EdgeFederation, origin: &ConnectionOrigin) -> (OriginR
         return match origin.pending_updates.front() {
             Some(update) => (*update, 0),
             None => (
-                declaration(edge, origin, (origin.session, origin.account)),
+                declaration(edge, origin, origin.held_principal),
                 origin.sequence,
             ),
         };
