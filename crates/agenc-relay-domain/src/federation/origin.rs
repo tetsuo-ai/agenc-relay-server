@@ -221,6 +221,20 @@ pub struct OriginTable {
     request_ids: BTreeMap<RequestId, OperationKey>,
 }
 
+/// Whether a deletion of an origin this coordinator already deleted is the
+/// deletion it committed: exactly the generation and stated next sequence it
+/// holds, or the generation after it at sequence zero. That generation is
+/// the edge's pending update, an update this coordinator never committed,
+/// whether or not a link carried it, since an update of a deleted origin is
+/// refused; no operation ran under it, so such a deletion names
+/// nothing the committed one does not, as a replay after a reset already
+/// takes it, and the stated next sequence stays unchanged (spec 20.5,
+/// 20.7).
+fn repeats_deletion(entry: &OriginEntry, generation: u64, next_sequence: u64) -> bool {
+    (entry.generation == generation && entry.deleted_after == Some(next_sequence))
+        || (next_sequence == 0 && entry.generation.checked_add(1) == Some(generation))
+}
+
 impl OriginTable {
     /// Creates an empty registry.
     #[must_use]
@@ -483,9 +497,7 @@ impl OriginTable {
             .ok_or(OriginError::UnknownOrigin)?;
         let replay = phase == EdgePhase::Resetting;
         if entry.status == OriginStatus::Deleted {
-            return if replay
-                || (entry.generation == generation && entry.deleted_after == Some(next_sequence))
-            {
+            return if replay || repeats_deletion(entry, generation, next_sequence) {
                 Ok(())
             } else {
                 Err(OriginError::Conflict)

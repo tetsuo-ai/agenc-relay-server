@@ -6,7 +6,11 @@
 //! next operation sequence, never an update no link carried. An edge that
 //! restarts before the deletion's acknowledgement is durable therefore
 //! replays the deletion its live link sent, which the coordinator, ready
-//! again with the origin already deleted, accepts.
+//! again with the origin already deleted, accepts. Rows the journal at
+//! `4313f32` wrote, a deleted origin's row naming an update no link carried
+//! and the live row of a pending update, which both name the update at
+//! sequence zero, restore to an edge whose deletion the coordinator
+//! acknowledges, and the origin then retires.
 
 use agenc_relay_federation_wire::{FederationHash32, OriginRecord};
 use agenc_relay_storage::federation_records::{
@@ -322,6 +326,221 @@ async fn a_restarted_deletion_names_what_the_first_one_did() -> TestResult {
         replay(&mut table, key, restored, &update, &frames)?,
         Some((0, EXECUTED)),
         "the restarted edge's deletion names what the first one did"
+    );
+    Ok(())
+}
+
+/// What a coordinator can hold when an edge restarts from rows the journal
+/// wrote before the rule above.
+#[derive(Clone, Copy, Debug)]
+enum Held {
+    /// The live link's deletion named the acknowledged generation.
+    DeletedAtTheAcknowledgedGeneration,
+    /// A link carried the update and the deletion naming it.
+    DeletedAtTheUpdate,
+    /// No deletion reached the coordinator.
+    Live,
+}
+
+fn unhex(text: &str) -> TestResult<Vec<u8>> {
+    let pair = |at: usize| -> TestResult<u8> {
+        Ok(u8::from_str_radix(text.get(at..at + 2).ok_or("hex")?, 16)?)
+    };
+    if !text.len().is_multiple_of(2) {
+        return Err("odd hex".into());
+    }
+    (0..text.len()).step_by(2).map(pair).collect()
+}
+
+/// The origin rows the edge journal at `4313f32` wrote for the state
+/// `name` (`test-data/stage-ten/origin-journal/`), one `<table> <key hex>
+/// <value hex>` per line, the value the plaintext persistent record, and
+/// the update the higher row holds, which must be the one `update`
+/// names: the rows belong to the `bound` fixture's origin.
+fn earlier_rows(name: &str, update: &OriginRecord) -> TestResult<Vec<InitialStorageRecord>> {
+    let text = std::fs::read_to_string(format!(
+        "{}/../../test-data/stage-ten/origin-journal/{name}.rows",
+        env!("CARGO_MANIFEST_DIR")
+    ))?;
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.split(' ');
+        let (Some(table), Some(key), Some(value), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err("a row has three fields".into());
+        };
+        let table = TableId::from_u16(table.parse()?)?;
+        let key = StoredKey::new(unhex(key)?)?;
+        let value = unhex(value)?;
+        let row =
+            FederationOriginRecord::decode(PersistentRecordValue::decode(table, &value)?.body())?;
+        if key == origin_key(EDGE, EDGE_INCARNATION, *update.origin_id.as_bytes(), 1)? {
+            assert_eq!(
+                row.origin_object_id,
+                object_id(update)?,
+                "{name}: the update"
+            );
+        }
+        records.push(InitialStorageRecord::new(table, key, 1, value)?);
+    }
+    assert_eq!(
+        records.len(),
+        2,
+        "{name}: generation zero's row and the update's"
+    );
+    Ok(records)
+}
+
+/// The coordinator's table in the state `held` describes, with the link
+/// lost and the restarted edge's RESET accepted.
+fn held_table(
+    origin: &ConnectionOrigin,
+    update: &OriginRecord,
+    held: Held,
+) -> TestResult<(agenc_relay_domain::federation::OriginTable, OriginKey)> {
+    let (mut table, key) = coordinator_table(origin)?;
+    match held {
+        Held::DeletedAtTheAcknowledgedGeneration => table.delete(key, 0, EXECUTED)?,
+        Held::DeletedAtTheUpdate => {
+            table.update(OriginDeclaration {
+                origin: key,
+                generation: update.generation,
+                previous_object_id: update.previous_origin_object_id,
+                binding: binding(origin),
+                principal: OriginPrincipal {
+                    session: update
+                        .session
+                        .map(|session| (session.session_id, session.user_id)),
+                    account: None,
+                },
+                object_id: object_id(update)?,
+            })?;
+            table.delete(key, 1, 0)?;
+        }
+        Held::Live => {}
+    }
+    table.link_lost(
+        EDGE,
+        EDGE_INCARNATION,
+        agenc_relay_types::MonotonicTick::from_ticks(1),
+    )?;
+    table.reset(EDGE, EDGE_INCARNATION);
+    Ok((table, key))
+}
+
+/// The three states a coordinator can hold.
+const HELD: [Held; 3] = [
+    Held::DeletedAtTheAcknowledgedGeneration,
+    Held::DeletedAtTheUpdate,
+    Held::Live,
+];
+
+/// An origin deleted while an update no link carried was pending, stored
+/// before this rule: its deleted row names the update at sequence zero.
+#[tokio::test]
+async fn a_store_written_before_this_rule_restores_to_an_edge_that_converges() -> TestResult {
+    for held in HELD {
+        Box::pin(earlier_store_converges("deleted-unsent-update", held))
+            .await
+            .map_err(|error| format!("{held:?}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// An edge stopped with an origin's update pending and its connection open:
+/// the origin's live row is the update's, at sequence zero, whether or not
+/// a link carried it, and the restart restores the origin as deleted there.
+#[tokio::test]
+async fn a_live_row_of_a_pending_update_restores_to_an_edge_that_converges() -> TestResult {
+    for held in HELD {
+        Box::pin(earlier_store_converges("live-pending-update", held))
+            .await
+            .map_err(|error| format!("{held:?}: {error}"))?;
+    }
+    Ok(())
+}
+
+async fn earlier_store_converges(store: &str, held: Held) -> TestResult {
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let connection = ConnectionGeneration::new(1);
+    let (edge, _queue) = bound(&mut fixture, connection).await?;
+    let origin = edge.origins.get(&connection).ok_or("origin")?;
+    let origin_id = origin.origin_id;
+    let update = origin.pending_updates.front().copied().ok_or("update")?;
+    let (mut table, key) = held_table(origin, &update, held)?;
+    let mut restart = StateCoreFixture::with_registration_router_and_records(
+        entropy_script(),
+        earlier_rows(store, &update)?,
+    )?;
+    let mut restarted = resync_edge();
+    restart.restore_edge_state(&mut restarted, None)?;
+    let (restored_connection, restored_origin) = restored(&restarted, origin_id)?;
+    assert_eq!(
+        (
+            restored_origin.generation,
+            restored_origin.sequence,
+            restored_origin.deleted,
+            restored_origin.del_acked
+        ),
+        (1, 0, true, false),
+        "an earlier row names the update at sequence zero"
+    );
+    // The coordinator is ready at the RESET when every origin it holds for
+    // the edge is deleted, and otherwise once the deletion is replayed.
+    if !matches!(held, Held::Live) {
+        table.ready(EDGE, EDGE_INCARNATION)?;
+    }
+    let mut relinked = resync_snapshot_link(&mut restarted);
+    restarted.phase = Phase::Origins;
+    request::replay_origin(&mut restarted, restart.context_mut()?, restored_connection);
+    // A live row is first written again as the deletion's row, which goes
+    // out once that write is durable.
+    commit_edge_batches(&mut restarted, &mut restart).await?;
+    let frames = origin_frames(&mut relinked).await?;
+    let restored_origin = restarted
+        .origins
+        .get(&restored_connection)
+        .ok_or("origin")?;
+    let named = replay(&mut table, key, restored_origin, &update, &frames)?
+        .ok_or("the restored origin replayed no deletion")?;
+    assert_eq!(named, (1, 0));
+    if matches!(held, Held::Live) {
+        table.ready(EDGE, EDGE_INCARNATION)?;
+    }
+    // The coordinator acknowledges the deletion at the generation it names;
+    // once that is durable the edge retires the origin.
+    restarted
+        .handle_frame(
+            restart.context_mut()?,
+            FederationFrame::OriginAck {
+                edge_server_id: EDGE,
+                server_incarnation: EDGE_INCARNATION,
+                origin_id,
+                generation: named.0,
+                object_id: None,
+            },
+        )
+        .map_err(|violation| format!("the acknowledgement was refused: {violation:?}"))?;
+    commit_edge_batches(&mut restarted, &mut restart).await?;
+    assert!(
+        !restarted.origins.contains_key(&restored_connection),
+        "the acknowledged origin retires"
+    );
+    // Nothing is left to replay, on the next link or after the next restart.
+    let mut next = resync_snapshot_link(&mut restarted);
+    restarted.phase = Phase::Origins;
+    request::replay_origin(&mut restarted, restart.context_mut()?, restored_connection);
+    assert!(origin_frames(&mut next).await?.is_empty());
+    restart.restart_registration_storage(entropy_script())?;
+    let mut again = resync_edge();
+    restart.restore_edge_state(&mut again, None)?;
+    assert!(
+        again
+            .origins
+            .values()
+            .all(|origin| origin.origin_id != origin_id),
+        "the acknowledged deletion restores nothing"
     );
     Ok(())
 }

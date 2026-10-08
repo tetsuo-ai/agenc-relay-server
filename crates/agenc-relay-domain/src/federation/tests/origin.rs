@@ -378,6 +378,53 @@ fn a_deletion_replayed_after_a_reset_closes_the_origin_this_coordinator_holds()
     Ok(())
 }
 
+/// A deleted origin was deleted at the generation this coordinator holds;
+/// an update of the next generation was never committed, since an update of
+/// a deleted origin is refused. A later deletion naming that update at
+/// sequence zero, an update this coordinator never committed, whether or
+/// not a link carried it, is the deletion already committed: it is
+/// accepted and changes nothing. Every other deletion of the origin still
+/// conflicts (spec 20.5, 20.7).
+#[test]
+fn a_deletion_naming_the_update_a_deleted_origin_never_committed_is_already_committed()
+-> Result<(), OriginError> {
+    let mut table = ready_table()?;
+    table.commit_request(operation(1, 0, 0), request(1))?;
+    table.delete(key(1), 0, 1)?;
+    let held = table.origin(&key(1));
+    table.delete(key(1), 1, 0)?;
+    assert_eq!(table.origin(&key(1)), held, "nothing changes");
+    table.delete(key(1), 0, 1)?;
+    assert_eq!(table.delete(key(1), 1, 1), Err(OriginError::Conflict));
+    assert_eq!(table.delete(key(1), 2, 0), Err(OriginError::Conflict));
+    assert_eq!(table.delete(key(1), 0, 2), Err(OriginError::Conflict));
+    assert_eq!(table.origin(&key(1)), held);
+    // An origin that is not deleted still needs its exact generation.
+    table.add(add(3))?;
+    assert_eq!(
+        table.delete(key(3), 1, 0),
+        Err(OriginError::WrongGeneration)
+    );
+    // Ready again after a reset with every origin deleted, the same holds.
+    table.link_lost(EDGE, INCARNATION, MonotonicTick::from_ticks(1_000))?;
+    table.reset(EDGE, INCARNATION);
+    table.delete(key(3), 0, 0)?;
+    table.ready(EDGE, INCARNATION)?;
+    table.delete(key(1), 1, 0)?;
+    table.delete(key(3), 1, 0)?;
+    assert_eq!(table.origin(&key(1)), held);
+    assert_eq!(table.delete(key(1), 1, 1), Err(OriginError::Conflict));
+    assert_eq!(table.delete(key(3), 0, 1), Err(OriginError::Conflict));
+    // An update the coordinator did commit is named exactly.
+    let mut table = ready_table()?;
+    table.update(update(1, 1, [1; 32], registered(1)))?;
+    table.delete(key(1), 1, 0)?;
+    table.delete(key(1), 1, 0)?;
+    assert_eq!(table.delete(key(1), 2, 0), Ok(()));
+    assert_eq!(table.delete(key(1), 0, 0), Err(OriginError::Conflict));
+    Ok(())
+}
+
 #[test]
 fn operations_issued_before_a_deletion_still_execute_in_order() -> Result<(), OriginError> {
     let mut table = ready_table()?;
