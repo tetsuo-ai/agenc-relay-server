@@ -81,6 +81,8 @@ mod origin_refusals;
 
 mod refused_declarations;
 
+mod deleted_origins;
+
 #[path = "snapshot_replay.rs"]
 mod snapshot_replay;
 

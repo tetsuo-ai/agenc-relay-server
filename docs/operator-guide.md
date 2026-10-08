@@ -145,6 +145,10 @@ On each edge, set `enabled = true` and the same `sequencer_credentials_file`, wi
 
 The coordinator keeps what a live encrypted conversation's restart reads: each conversation's binding package for as long as its route exists, and the device rosters the conversation's binding, leaf proofs and published policies have named, which count toward that conversation's stored-bytes quota. A roster that no live conversation has named is collected once its account has replaced it and the retention window has passed. The coordinator holds every retained encrypted object other than message payloads in memory, up to 256 MiB in total, and refuses new ones with `E2EE_RATE_LIMITED` beyond that; `e2ee.global_disk_bytes`, the logical E2EE storage ceiling, does not raise it.
 
+## Upgrade order
+
+Upgrade and start the coordinator before any edge, whether or not the edge has the encrypted profile enabled. An edge that restarts from a database an earlier release wrote can replay an origin deletion that only a coordinator of this release takes as the deletion it already committed.
+
 ## Upgrade to a new encrypted profile
 
 A release whose encrypted profile hash differs from the running one is a

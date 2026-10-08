@@ -144,6 +144,7 @@ fn fixture_with_options(
             revoked: false,
             pending_updates: std::collections::VecDeque::new(),
             update_sent: false,
+            held_principal: (Some((identity.session_id, identity.user_id)), None),
             origin_id: OriginId::from_bytes([8; 16]),
             connection_id: agenc_relay_types::ConnectionId::from_bytes([7; 16]),
             connection_nonce: [7; 32],
