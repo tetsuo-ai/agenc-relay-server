@@ -14,6 +14,8 @@ use agenc_relay_types::RequestId;
 
 use super::*;
 
+mod stored_rows;
+
 /// The requests the coordinator executed under generation zero.
 const EXECUTED: u64 = 3;
 

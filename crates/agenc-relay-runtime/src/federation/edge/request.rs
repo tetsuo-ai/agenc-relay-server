@@ -366,14 +366,9 @@ fn send_origin_del(
     let Some(origin) = edge.origins.get(&generation) else {
         return;
     };
-    // The DEL names the generation the coordinator holds when it arrives:
-    // that of an update this link already carried ahead of it, with no
-    // operation under it yet, and otherwise the acknowledged generation
-    // with its next operation sequence (spec 20.7).
-    let (declared_generation, next_operation_sequence) = match origin.pending_updates.front() {
-        Some(update) if origin.update_sent => (update.generation, 0),
-        _ => (origin.generation, origin.sequence),
-    };
+    // The DEL names the generation the coordinator holds when it arrives,
+    // which the deleted origin's journal row also records (spec 20.7).
+    let (declared_generation, next_operation_sequence) = origin.deletion_point();
     let frame = agenc_relay_federation_wire::FederationFrame::OriginDel {
         coordinator_server_id: edge.config.coordinator.server_id(),
         server_incarnation: edge.config.incarnation,

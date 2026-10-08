@@ -386,6 +386,11 @@ coordinator taking an `ERESUME` cursor that names a retained delivered row
 past its committed acknowledgement as that row's cumulative `EACK`, committed
 before `ERESUME OK` (D-44, SDK program, outside master #35), is recorded in
 [the link resume record](stage-10-link-resume.md).
+A deleted origin's journal row naming the generation and next sequence its
+deletion named, so an edge restarted before the deletion's acknowledgement
+is durable replays the deletion its live link sent (D-41, SDK program,
+outside master #35), is recorded in [the origin journal
+record](stage-10-origin-journal.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

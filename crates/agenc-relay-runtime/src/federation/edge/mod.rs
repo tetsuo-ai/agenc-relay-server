@@ -137,6 +137,11 @@ struct ConnectionOrigin {
     /// generation of the update a link carried for as long as that update is
     /// unacknowledged.
     update_sent: bool,
+    /// The session and account of the declaration at `generation`. The
+    /// `session` and `account` fields move to a new principal before its
+    /// update is queued, so while an update is pending they name that
+    /// update's principal and this keeps the one the held generation names.
+    held_principal: Principal,
     origin_id: OriginId,
     connection_id: ConnectionId,
     connection_nonce: [u8; 32],
@@ -158,7 +163,24 @@ struct ConnectionOrigin {
     del_acked: bool,
 }
 
+/// An origin generation's session and account, when it names them.
+type Principal = (Option<(SessionId, UserId)>, Option<(AccountId, u64)>);
+
 impl ConnectionOrigin {
+    /// The generation and next operation sequence a deletion of this origin
+    /// names, which the coordinator holds when it arrives (spec 20.7): the
+    /// first pending update's generation at sequence zero once a link
+    /// carried that update ahead of the deletion, and otherwise the held
+    /// generation with its next operation sequence. The deleted origin's
+    /// journal row records the same pair, so a restored edge replays the
+    /// deletion its live link sent.
+    fn deletion_point(&self) -> (u64, u64) {
+        match self.pending_updates.front() {
+            Some(update) if self.update_sent => (update.generation, 0),
+            _ => (self.generation, self.sequence),
+        }
+    }
+
     /// Whether a deletion acknowledgement names this closed origin: at the
     /// generation the edge holds, or at the generation of the update still
     /// in flight, which precedes the DEL on the link.
@@ -1091,6 +1113,14 @@ impl EdgeFederation {
             }
             origin.pending_updates.pop_front();
             origin.update_sent = false;
+            origin.held_principal = (
+                update
+                    .session
+                    .map(|session| (session.session_id, session.user_id)),
+                update
+                    .account
+                    .map(|account| (account.account_id, account.account_session_generation)),
+            );
             origin.generation = generation;
             origin.sequence = 0;
             origin.previous_object_id = update.previous_origin_object_id;
@@ -1203,6 +1233,7 @@ impl EdgeFederation {
             ConnectionOrigin {
                 pending_updates: VecDeque::new(),
                 update_sent: false,
+                held_principal: (None, None),
                 origin_id: OriginId::from_bytes(origin_id),
                 connection_id: ConnectionId::from_bytes(connection_id),
                 connection_nonce: nonce,
