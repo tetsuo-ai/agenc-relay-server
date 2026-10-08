@@ -20,6 +20,7 @@ use super::{
 };
 use crate::RuntimeError;
 use crate::connection::ConnectionGeneration;
+use crate::state_core::durable::AccountServiceDurableWrite;
 use crate::state_core::{StageRefused, StateCoreContext};
 
 const BATCH_ROWS: usize = 64;
@@ -59,34 +60,7 @@ pub(super) fn origin_record(
     generation: ConnectionGeneration,
 ) -> Result<FederationOriginRecord, Violation> {
     let origin = edge.origins.get(&generation).ok_or(Violation::Phase)?;
-    let record = origin
-        .pending_updates
-        .front()
-        .copied()
-        .unwrap_or(OriginRecord {
-            network_id: edge.config.network_id,
-            home_server_id: edge.config.server_id,
-            server_incarnation: edge.config.incarnation,
-            origin_id: origin.origin_id,
-            generation: origin.generation,
-            previous_origin_object_id: origin.previous_object_id,
-            connection_id: origin.connection_id,
-            session: origin.session.map(|(session_id, user_id)| {
-                agenc_relay_federation_wire::OriginSession {
-                    session_id,
-                    user_id,
-                }
-            }),
-            account: origin
-                .account
-                .map(|(account_id, account_session_generation)| {
-                    agenc_relay_federation_wire::OriginAccount {
-                        account_id,
-                        account_session_generation,
-                    }
-                }),
-            connection_nonce: origin.connection_nonce,
-        });
+    let (record, next_sequence) = row_declaration(edge, origin);
     let object = record
         .to_object()
         .and_then(|object| object.encode_canonical())
@@ -94,11 +68,7 @@ pub(super) fn origin_record(
     Ok(FederationOriginRecord {
         origin_object_id: *federation_object_id(object.as_slice()).as_bytes(),
         origin_object: object.as_slice().to_vec(),
-        next_sequence: if origin.pending_updates.is_empty() {
-            origin.sequence
-        } else {
-            0
-        },
+        next_sequence,
         status: if origin.deleted {
             OriginRowStatus::Deleted
         } else {
@@ -115,6 +85,115 @@ pub(super) fn origin_record(
             0
         },
     })
+}
+
+/// The declaration and next operation sequence an origin's row holds; the
+/// row is stored under that declaration's generation. A live origin's row
+/// holds its first pending update at sequence zero, durable before any link
+/// carries it, or else the declaration of its held generation, with the
+/// principal the coordinator holds at it, and its next operation sequence.
+/// A deleted origin's row holds exactly what its deletion names
+/// (`ConnectionOrigin::deletion_point`): the update a link carried ahead of
+/// the deletion, or else the declaration at the held generation with its
+/// next operation sequence, never an update no link carried (spec 20.7).
+fn row_declaration(edge: &EdgeFederation, origin: &ConnectionOrigin) -> (OriginRecord, u64) {
+    if !origin.deleted {
+        return match origin.pending_updates.front() {
+            Some(update) => (*update, 0),
+            None => (
+                declaration(edge, origin, origin.held_principal),
+                origin.sequence,
+            ),
+        };
+    }
+    // The pair `deletion_point` names: the carried update's generation, or
+    // the held generation, which the held declaration carries.
+    let (generation, next_sequence) = origin.deletion_point();
+    match origin.pending_updates.front() {
+        Some(update) if update.generation == generation => (*update, next_sequence),
+        _ => (
+            declaration(edge, origin, origin.held_principal),
+            next_sequence,
+        ),
+    }
+}
+
+/// The origin's declaration at its held generation, naming `principal`.
+fn declaration(
+    edge: &EdgeFederation,
+    origin: &ConnectionOrigin,
+    (session, account): super::Principal,
+) -> OriginRecord {
+    OriginRecord {
+        network_id: edge.config.network_id,
+        home_server_id: edge.config.server_id,
+        server_incarnation: edge.config.incarnation,
+        origin_id: origin.origin_id,
+        generation: origin.generation,
+        previous_origin_object_id: origin.previous_object_id,
+        connection_id: origin.connection_id,
+        session: session.map(
+            |(session_id, user_id)| agenc_relay_federation_wire::OriginSession {
+                session_id,
+                user_id,
+            },
+        ),
+        account: account.map(|(account_id, account_session_generation)| {
+            agenc_relay_federation_wire::OriginAccount {
+                account_id,
+                account_session_generation,
+            }
+        }),
+        connection_nonce: origin.connection_nonce,
+    }
+}
+
+/// The deletion of the durable row a deleted origin's new row supersedes,
+/// when that row is stored above the new one: the row of a pending update
+/// no link carried, which the deletion does not name. A restart restores an
+/// origin's highest generation, so that row is removed in the batch that
+/// writes the deletion's row.
+fn superseded_row(
+    edge: &EdgeFederation,
+    connection: ConnectionGeneration,
+    origin: &ConnectionOrigin,
+    row_generation: u64,
+) -> Result<Option<AccountServiceDurableWrite>, Violation> {
+    if !origin.deleted {
+        return Ok(None);
+    }
+    let Some(body) = edge.journal.durable.get(&Identity::Origin(connection)) else {
+        return Ok(None);
+    };
+    let row = FederationOriginRecord::decode(body).map_err(|_| Violation::Codec)?;
+    let mut budget = DecodeBudget::new(4_096, 64);
+    let durable = SchemaObject::decode_exact("FederationOrigin", &row.origin_object, &mut budget)
+        .and_then(|object| OriginRecord::from_object(&object))
+        .map_err(|_| Violation::Codec)?;
+    if durable.generation <= row_generation {
+        return Ok(None);
+    }
+    AccountServiceDurableWrite::delete(
+        TableId::FederationOrigin,
+        origin_row_key(edge, origin, durable.generation)?,
+    )
+    .map(Some)
+    .map_err(|_| Violation::Codec)
+}
+
+/// The key of `origin`'s row at `generation`.
+fn origin_row_key(
+    edge: &EdgeFederation,
+    origin: &ConnectionOrigin,
+    generation: u64,
+) -> Result<StoredKey, Violation> {
+    origin_key(
+        edge.config.server_id,
+        edge.config.incarnation,
+        *origin.origin_id.as_bytes(),
+        generation,
+    )
+    .map_err(|_| Violation::Codec)
 }
 
 fn request_record(edge: &EdgeFederation, id: RequestId) -> Result<EdgeRequestRecord, Violation> {
@@ -259,19 +338,12 @@ fn stage(edge: &mut EdgeFederation, context: &mut StateCoreContext) -> Result<()
         let (table, kind, key) = match identity {
             Identity::Origin(generation) => {
                 let origin = edge.origins.get(&generation).ok_or(Violation::Phase)?;
+                let row_generation = row_declaration(edge, origin).0.generation;
+                writes.extend(superseded_row(edge, generation, origin, row_generation)?);
                 (
                     TableId::FederationOrigin,
                     ORIGIN_RECORD_KIND,
-                    origin_key(
-                        edge.config.server_id,
-                        edge.config.incarnation,
-                        *origin.origin_id.as_bytes(),
-                        origin
-                            .pending_updates
-                            .front()
-                            .map_or(origin.generation, |update| update.generation),
-                    )
-                    .map_err(|_| Violation::Codec)?,
+                    origin_row_key(edge, origin, row_generation)?,
                 )
             }
             Identity::Request(id) => {
@@ -559,6 +631,14 @@ fn restored_origin(record: OriginRecord, row: &FederationOriginRecord) -> Connec
         revoked: false,
         pending_updates: std::collections::VecDeque::new(),
         update_sent: false,
+        held_principal: (
+            record
+                .session
+                .map(|session| (session.session_id, session.user_id)),
+            record
+                .account
+                .map(|account| (account.account_id, account.account_session_generation)),
+        ),
         origin_id: record.origin_id,
         connection_id: record.connection_id,
         connection_nonce: record.connection_nonce,

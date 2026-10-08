@@ -34,7 +34,7 @@ const ROOT: u8 = 87;
 const DEVICE: u8 = 88;
 
 /// Coordinator link closures and edge A link establishments so far.
-fn link_events(network: &Network) -> (usize, usize) {
+pub(super) fn link_events(network: &Network) -> (usize, usize) {
     (
         network
             .coordinator
@@ -219,12 +219,14 @@ fn account_ready(client: &mut ArcClient, prefix: &str) -> TestResult {
 
 /// A TCP relay edge A dials in place of the coordinator's federation
 /// listener, which the test cuts and heals.
-struct Relay {
+pub(super) struct Relay {
     address: SocketAddr,
     /// Bytes forwarded so far, both directions together.
     traffic: Arc<std::sync::atomic::AtomicU64>,
     /// Milliseconds the relay holds what edge A sends before forwarding it.
     delay: Arc<AtomicU64>,
+    /// Milliseconds the relay holds what the coordinator sends edge A.
+    inbound_delay: Arc<AtomicU64>,
     open: Arc<std::sync::atomic::AtomicBool>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     streams: Arc<std::sync::Mutex<Vec<TcpStream>>>,
@@ -241,10 +243,12 @@ impl Relay {
         let stop = Arc::new(AtomicBool::new(false));
         let traffic = Arc::new(AtomicU64::new(0));
         let delay = Arc::new(AtomicU64::new(0));
+        let inbound_delay = Arc::new(AtomicU64::new(0));
         let streams = Arc::new(std::sync::Mutex::new(Vec::new()));
         let acceptor = {
             let (open, stop, streams) = (open.clone(), stop.clone(), streams.clone());
             let (traffic, delay) = (traffic.clone(), delay.clone());
+            let inbound_delay = inbound_delay.clone();
             thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     let Ok((inbound, _)) = listener.accept() else {
@@ -264,8 +268,8 @@ impl Relay {
                         let (sent, held) = (traffic.clone(), delay.clone());
                         thread::spawn(move || forward_held(from, to, sent, held));
                         let (from, to) = (outbound.try_clone()?, inbound.try_clone()?);
-                        let sent = traffic.clone();
-                        thread::spawn(move || forward(from, to, &sent));
+                        let (sent, held) = (traffic.clone(), inbound_delay.clone());
+                        thread::spawn(move || forward_held(from, to, sent, held));
                         if let Ok(mut live) = streams.lock() {
                             live.push(inbound.try_clone()?);
                             live.push(outbound.try_clone()?);
@@ -280,6 +284,7 @@ impl Relay {
             address,
             traffic,
             delay,
+            inbound_delay,
             open,
             stop,
             streams,
@@ -288,7 +293,7 @@ impl Relay {
     }
 
     /// Closes the relayed link and refuses new ones until healed.
-    fn cut(&self) {
+    pub(super) fn cut(&self) {
         self.open.store(false, Ordering::SeqCst);
         if let Ok(mut live) = self.streams.lock() {
             for stream in live.drain(..) {
@@ -297,7 +302,7 @@ impl Relay {
         }
     }
 
-    fn heal(&self) {
+    pub(super) fn heal(&self) {
         self.open.store(true, Ordering::SeqCst);
     }
 
@@ -307,36 +312,30 @@ impl Relay {
 
     /// Holds what edge A sends for `delay` before forwarding it, so a cut
     /// drops what is still held.
-    fn hold_outbound(&self, delay: Duration) {
+    pub(super) fn hold_outbound(&self, delay: Duration) {
         self.delay.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    /// Holds what the coordinator sends edge A for `delay` before
+    /// forwarding it, so a cut drops what is still held.
+    pub(super) fn hold_inbound(&self, delay: Duration) {
+        self.inbound_delay.store(
             u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             Ordering::SeqCst,
         );
     }
 }
 
-/// Copies `from` to `to`, counting every forwarded byte, and closes `to`
-/// when `from` ends.
-fn forward(mut from: TcpStream, mut to: TcpStream, traffic: &std::sync::atomic::AtomicU64) {
-    let mut buffer = [0_u8; 16 * 1024];
-    while let Ok(read) = from.read(&mut buffer) {
-        let Some(bytes) = buffer.get(..read).filter(|bytes| !bytes.is_empty()) else {
-            break;
-        };
-        if to.write_all(bytes).is_err() {
-            break;
-        }
-        traffic.fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::SeqCst);
-    }
-    let _closed = to.shutdown(std::net::Shutdown::Both);
-}
-
 /// Chunks the relay's holding stage keeps at most; the reader waits beyond.
 const HELD_CHUNKS: usize = 256;
 
-/// Copies `from` to `to` as [`forward`] does, holding each chunk for the
-/// relay's delay first; when `from` ends, what is still held is written only
-/// while `to` stays open, so a cut drops it.
+/// Copies `from` to `to`, counting every forwarded byte, holding each chunk
+/// for the relay's delay in that direction first; when `from` ends, what is
+/// still held is written only while `to` stays open, so a cut drops it, and
+/// `to` is closed.
 fn forward_held(
     mut from: TcpStream,
     mut to: TcpStream,
@@ -382,7 +381,7 @@ impl Drop for Relay {
 }
 
 /// The Stage 08 network whose edge A dials the coordinator through `Relay`.
-fn relayed_network() -> TestResult<(Network, Relay)> {
+pub(super) fn relayed_network() -> TestResult<(Network, Relay)> {
     let coordinator = NodeIdentity::new(20, NodeRole::Coordinator, "core.test")?;
     let edge_a = NodeIdentity::new(40, NodeRole::Edge, "edge-a.test")?;
     let edge_b = NodeIdentity::new(60, NodeRole::Edge, "edge-b.test")?;
@@ -447,7 +446,7 @@ fn run_relayed(
 }
 
 /// Waits until the coordinator has logged `count` link closures.
-fn wait_for_closures(network: &Network, count: usize) -> TestResult {
+pub(super) fn wait_for_closures(network: &Network, count: usize) -> TestResult {
     let deadline = Instant::now() + NETWORK_WAIT;
     while link_events(network).0 < count {
         if Instant::now() >= deadline {

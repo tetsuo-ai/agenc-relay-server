@@ -392,6 +392,13 @@ the RFC 8266 enforcement passes itself and uses the PRECIS dependency only
 for the FreeformClass check and NFKC (D-45, SDK program, outside master
 #35), is recorded in [the name preparation
 record](stage-10-name-preparation.md).
+A deleted origin's journal row naming the generation and next sequence its
+deletion named, so an edge restarted before the deletion's acknowledgement
+is durable replays the deletion its live link sent, the restore of origin
+rows written before that rule, the held generation declared with its
+acknowledged principal and daemon tests of such a restart (D-41 with G-08,
+SDK program, outside master #35), are recorded in [the origin journal
+record](stage-10-origin-journal.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

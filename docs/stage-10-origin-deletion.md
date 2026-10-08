@@ -309,7 +309,11 @@ The rule, in `crates/agenc-relay-runtime/src/federation/edge/request.rs` and
   carried it, and otherwise the acknowledged generation with its next
   operation sequence (`send_origin_del`), so a deletion replayed on a later
   link names what the first one did.
-- The record is in memory; no journal row changes.
+- The record is in memory; no journal row changes here. Since the origin
+  journal topic, a deleted origin's journal row names the same generation
+  and next sequence as its deletion, so a restored edge replays the
+  deletion its live link sent ([the origin journal
+  record](stage-10-origin-journal.md)).
 
 `crates/agenc-relay-runtime/src/federation/edge/tests/origin_deletion.rs`
 drives the real `EdgeFederation` over a live link queue and storage, and
