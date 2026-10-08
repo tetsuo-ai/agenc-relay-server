@@ -10,6 +10,7 @@ use agenc_relay_client_wire::{
     SASL_REQUEST_CHARACTERS, SaslTransport, parse_message, parse_u16_decimal, parse_u32_decimal,
     parse_u64_decimal, split_capability_lines, validate_post_registration_command,
 };
+use agenc_relay_types::{DisplayName, MAX_DISPLAY_NAME_BYTES, NormalizedLogin};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_CAPABILITY_OPERATIONS: usize = 64;
@@ -88,6 +89,7 @@ fuzz_target!(|data: &[u8]| {
     exercise_capability_state(data);
     exercise_registration(data);
     exercise_post_registration_grammar(data);
+    exercise_display_name(data);
     match data.first().copied().unwrap_or_default() % 3 {
         0 => exercise_sasl(data),
         1 => exercise_account_transfer(data),
@@ -109,6 +111,21 @@ fn exercise_post_registration_grammar(data: &[u8]) {
     if let Ok(arbitrary) = std::str::from_utf8(data) {
         exercise_post_registration_line(arbitrary, None);
     }
+}
+
+/// Display-name preparation prepares or refuses every input; a prepared name
+/// is bounded and prepares to itself, and a `SETNAME` line carrying the same
+/// text gets a grammar result.
+fn exercise_display_name(data: &[u8]) {
+    let text = String::from_utf8_lossy(data);
+    if let Ok(prepared) = DisplayName::prepare(&text) {
+        assert!(prepared.as_str().len() <= MAX_DISPLAY_NAME_BYTES);
+        let again = DisplayName::prepare(prepared.as_str());
+        assert!(again.is_ok_and(|again| again.as_str() == prepared.as_str()));
+    }
+    let _login = NormalizedLogin::prepare(&text);
+    let display = text.replace(['\r', '\n', '\0'], "");
+    exercise_post_registration_line(&format!("SETNAME :{display}"), None);
 }
 
 fn exercise_post_registration_line(line: &str, expected: Option<bool>) {

@@ -386,6 +386,12 @@ coordinator taking an `ERESUME` cursor that names a retained delivered row
 past its committed acknowledgement as that row's cumulative `EACK`, committed
 before `ERESUME OK` (D-44, SDK program, outside master #35), is recorded in
 [the link resume record](stage-10-link-resume.md).
+Display-name preparation preparing or refusing every input without
+panicking, with spaces collapsed after normalization: the adapter applies
+the RFC 8266 enforcement passes itself and uses the PRECIS dependency only
+for the FreeformClass check and NFKC (D-45, SDK program, outside master
+#35), is recorded in [the name preparation
+record](stage-10-name-preparation.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
