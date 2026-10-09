@@ -400,10 +400,14 @@ acknowledged principal and daemon tests of such a restart (D-41 with G-08,
 SDK program, outside master #35), are recorded in [the origin journal
 record](stage-10-origin-journal.md).
 A client's ordinary actions and its share of an edge's companion
-resources affecting only that client, beginning with the base and companion
-declarations of a generation naming one principal and a device attachment
-ending with the principal it was made under (D-44, SDK program, outside
-master #35), are recorded in [the edge attachment
+resources affecting only that client: the base and companion declarations
+of a generation naming one principal, a device attachment ending with the
+principal it was made under, every remaining origin mismatch answered for
+its origin alone, an edge's recent-object cache and kept replies bounded
+for each connection and each account, a request's own failure answered
+with its failed result, companion reads and the edge's own batches waiting
+through local write contention, and daemon tests of them (D-44, SDK
+program, outside master #35), are recorded in [the edge attachment
 record](stage-10-edge-attachment.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).

@@ -34,9 +34,12 @@ E2EE edge's that finds a batch open until none is, refuses one that finds an
 event queued, closes the link for a refused batch of the E2EE edge's, keeps
 the base edge's snapshot install and a complete barrier waiting for a free
 slot, and records the audit of the edge's other paths and a limitation. The
-seventh scores the record's regions and closes what that found. No
-specification, profile hash, registry entry, named limit, reply code, wire
-object, table, key, row kind, field or storage generation changed.
+seventh scores the record's regions and closes what that found. The eighth
+adds daemon tests of a session's own actions after a device attach, of two
+sessions of one account at their reply quotas, and of a payload that is no
+wire object, and lists what stays open. No specification, profile hash,
+registry entry, named limit, reply code, wire object, table, key, row kind,
+field or storage generation changed.
 
 ## A generation's declarations name one principal, and an attachment ends with its principal (first commit)
 
@@ -941,3 +944,57 @@ re-reviews and re-spans `edge-companion-origin-facts`,
 `companion-fresh-request-staging`, `edge-reply-kept` and
 `edge-kept-output-reservation` in their reasons; both source inventories
 are refreshed.
+
+## Daemon tests (eighth commit)
+
+`link_faults` in the Stage 08 daemon suite runs the production coordinator
+and two production edges with both profiles active, edge A's link through a
+relay. Three tests are added; each requires that edge A's link neither
+closes nor links again while it runs.
+
+| Test | What it pins |
+| --- | --- |
+| `link_faults::an_attachment_stands_through_the_principal_actions_of_its_session` | A session on edge A authenticates as an account and attaches a device, and its device-requiring `EKEY FETCH MAILBOX BINDING *` is served. Its logout is refused with 904 on the edge, and its login to another account is refused with 904, since the coordinator does not move a session that holds an account to another; after each, the fetch is served again. A second session of the account attaches the device and reauthenticates to the same account, and its fetch is served. |
+| `link_faults::two_sessions_of_one_account_at_their_reply_quota_leave_another_account_served` | Two sessions of one account on edge A submit identity objects whose bodies are no identity in turn, each answered `E2EE_INVALID_FRAGMENT` and kept by the edge, until each is refused `E2EE_RATE_LIMITED`: each was answered exactly 512 times, its connection's quota and half its account's. A session of another account on edge A is then answered for a submission and for `EKEY WHOAMI`. Its duration, about 145 seconds, follows the per-session command pacing. |
+| `link_faults::a_payload_that_is_no_wire_object_is_answered_for_its_request_alone` | A session's `EKEY PUBLISH IDENTITY` whose payload is not a wire object is refused `E2EE_INVALID_FRAGMENT` at edge A's ingress, and the session's next request is answered. |
+
+At the start commit, with this test file, the payload and quota tests fail
+and the attachment test passes. All seven `link_faults` tests pass at this
+commit.
+
+The attachment test settles how the first commit's case arises on an edge.
+A session's own actions do not change the principal of a connection that
+attached a device: an edge refuses a logout, the coordinator refuses a
+login to another account for a session that holds an account, a connection
+has two authentication attempts, and a reauthentication to the same account
+keeps the account and the attachment. A declaration naming a device under
+another principal therefore does not arise from these actions; the first
+commit ends an attachment whenever a declaration names another principal,
+and the coordinator refuses any remaining mismatch for its origin alone.
+
+## What stays open
+
+These belong to later topics and change nothing here:
+
+- **A companion origin is not fenced with its base origin.** When the
+  coordinator closes or fences a base origin or session, for a credential
+  change or a refused base declaration, the companion origin of the same
+  connection is not fenced with it, and companion requests on the link
+  still run under it until the edge's `EORIGIN DEL` arrives. Companion
+  Section 12.5 has losing base continuity fence both profiles.
+- **Back-to-back base updates and the companion's generation.** The base
+  edge advances its acknowledged generation only when no further update is
+  pending, and the companion declares only at that generation, so two base
+  updates sent back to back would have the companion skip a generation,
+  which the coordinator refuses (Section 12.5: an update increments by
+  one). On an edge, authentication runs only before registration and an
+  attach needs the companion generation acknowledged first, so two such
+  updates do not arise today; a test pinning that, or a companion
+  declaration of every acknowledged generation, is open.
+- **Two intermittent runtime tests.**
+  `registration::explicit_names_tests::a_bare_names_across_joined_channels_arrives_in_pages`
+  fails intermittently when the whole runtime library runs in one `cargo
+  test` process and passes under `cargo nextest`, which runs each test in
+  its own process;
+  `state_core::tests::a_guest_session_registers_and_commands_flow_through_the_router`
+  fails intermittently under either runner.

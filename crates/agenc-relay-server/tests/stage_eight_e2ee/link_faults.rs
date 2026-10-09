@@ -9,7 +9,13 @@
 //! to a restarted coordinator. Each declaration is refused for its origin
 //! alone, and the link stays up. Edge A's link is also cut while the
 //! acknowledgement of an event it applied is still in flight, and it resumes
-//! (companion 12.5).
+//! (companion 12.5). A client's own actions affect only that client: after a
+//! device attach, a logout, a login to another account and a
+//! reauthentication leave the attachment and the link as they stand
+//! (companion 11.6); two sessions of one account at their reply quotas on
+//! edge A are refused while another account's session is served (companion
+//! 16); and a payload that is no wire object is refused for its request
+//! alone (companion 11.8, 11.9).
 #![forbid(unsafe_code)]
 
 use std::io::Read;
@@ -760,5 +766,246 @@ fn a_link_cut_while_acknowledgements_are_in_flight_resumes() -> TestResult {
             )));
         }
         Ok(())
+    })
+}
+
+/// Logins of the two accounts of the attachment and budget tests.
+const ATTACHED: &str = "attached-account";
+const OTHER: &str = "other-account";
+
+/// A device-requiring fetch is served: the device of `client`'s session is
+/// attached, and its mailbox is empty. Until the coordinator acknowledges
+/// the declaration that names the device, the edge answers E2EE_SYNCING.
+fn device_served(client: &mut ArcClient, prefix: &str) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for attempt in 0_u32.. {
+        let label = format!("{prefix}{attempt}");
+        client.send(&format!("@label={label} EKEY FETCH MAILBOX BINDING *"))?;
+        let reply = labeled_reply(client, &label)?;
+        if reply.iter().any(|line| line.contains(" EKEY EMPTY ")) {
+            return Ok(());
+        }
+        if Instant::now() > deadline || !reply.iter().any(|line| line.contains("E2EE_SYNCING")) {
+            return Err(failure(format!("the device was not served: {reply:?}")));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(failure("unreachable"))
+}
+
+/// Everything the server sends `client` before the `PONG` of `token`.
+fn synchronized(client: &mut ArcClient, token: &str) -> TestResult<Vec<String>> {
+    client.send_until(&format!("PING :{token}"), " PONG ")
+}
+
+/// Requires that edge A's link neither closed nor linked again since
+/// `before`.
+fn link_held(network: &Network, before: (usize, usize)) -> TestResult {
+    thread::sleep(Duration::from_secs(2));
+    if link_events(network) != before {
+        return Err(failure(format!(
+            "edge A's link changed: {before:?} -> {:?}",
+            link_events(network)
+        )));
+    }
+    Ok(())
+}
+
+/// Companion 11.6 on an edge after a device attach: a logout and a login to
+/// another account, which an edge's session cannot complete, leave the
+/// session's principal and its attachment as they stand, and so does a
+/// reauthentication to the same account on another session that attached
+/// the device. The device-requiring command is served throughout, and the
+/// link stays up. A connection has two authentication attempts, so the
+/// reauthentication is the second session's.
+#[test]
+fn an_attachment_stands_through_the_principal_actions_of_its_session() -> TestResult {
+    run_relayed(|network, _relay, _coordinator| {
+        wait_for_link(&network.edge_a, 0)?;
+        wait_for_link(&network.edge_b, 0)?;
+        wait_for_account_authority(&network.edge_a)?;
+        wait_for_account_authority(&network.edge_b)?;
+        let (mut session, account) = step(
+            "session",
+            authenticated_client(&network.edge_a, "attached", ATTACHED, 71),
+        )?;
+        let other = {
+            let mut creation = ArcClient::connect(&network.edge_b)?;
+            creation.negotiate_sasl()?;
+            create_live_account(&mut creation, &network.edge_b, OTHER, 75)?
+        };
+        let mut keys = Principal::new(ROOT, DEVICE, account)?;
+        account_ready(&mut session, "ready")?;
+        step("attach", publish_and_attach(&mut session, &mut keys))?;
+        step("attached", device_served(&mut session, "m1-"))?;
+        let before = link_events(network);
+        session.send("AUTHENTICATE *")?;
+        let logout = synchronized(&mut session, "logout")?;
+        assert_contains(&logout, " 904 attached ")?;
+        step("after the logout", device_served(&mut session, "m2-"))?;
+        if authenticate_live_account(
+            &mut session,
+            &network.edge_a,
+            OTHER,
+            ACCOUNT_PASSWORD,
+            77,
+            other,
+        )
+        .is_ok()
+        {
+            return Err(failure("a login to another account was accepted"));
+        }
+        let switch = synchronized(&mut session, "switch")?;
+        assert_contains(&switch, " 904 attached ")?;
+        step("after the switch", device_served(&mut session, "m3-"))?;
+        // Another session of the account attaches the device and
+        // reauthenticates to the same account.
+        let mut second = step(
+            "second session",
+            authenticated_session(&network.edge_a, "second", ATTACHED, 79, account),
+        )?;
+        account_ready(&mut second, "ready")?;
+        step("second attach", attach(&mut second, &mut keys))?;
+        step("second attached", device_served(&mut second, "n1-"))?;
+        step(
+            "reauthentication",
+            authenticate_live_account(
+                &mut second,
+                &network.edge_a,
+                ATTACHED,
+                ACCOUNT_PASSWORD,
+                83,
+                account,
+            ),
+        )?;
+        account_ready(&mut second, "again")?;
+        step(
+            "after the reauthentication",
+            device_served(&mut second, "n2-"),
+        )?;
+        link_held(network, before)
+    })
+}
+
+/// Submission `count` of session `session`, distinct from every other: a
+/// wire object of the identity kind whose body is no identity, which the
+/// coordinator answers E2EE_INVALID_FRAGMENT and the edge keeps for its
+/// retries.
+fn malformed_identity(session: u32, count: u32) -> TestResult<Vec<u8>> {
+    let mut body = vec![0x5a; 64];
+    body.get_mut(..8)
+        .ok_or_else(|| failure("body"))?
+        .copy_from_slice(&[session.to_be_bytes(), count.to_be_bytes()].concat());
+    Ok(ArcWireObject::new(ArcWireObjectKind::RootIdentity, body)?.encode()?)
+}
+
+/// Companion 16 on an edge: each connection and each account keeps the
+/// replies of its answered submissions within its own quota, 512 for a
+/// connection and 1,024 for an account. Two sessions of one account submit
+/// in turn until each is refused E2EE_RATE_LIMITED, and a session of
+/// another account on the same edge is still answered. Its duration
+/// follows the per-session command pacing.
+#[test]
+fn two_sessions_of_one_account_at_their_reply_quota_leave_another_account_served() -> TestResult {
+    run_relayed(|network, _relay, _coordinator| {
+        wait_for_link(&network.edge_a, 0)?;
+        wait_for_link(&network.edge_b, 0)?;
+        wait_for_account_authority(&network.edge_a)?;
+        let (mut first, account) = step(
+            "first session",
+            authenticated_client(&network.edge_a, "first", ATTACHED, 81),
+        )?;
+        let mut second = step(
+            "second session",
+            authenticated_session(&network.edge_a, "second", ATTACHED, 87, account),
+        )?;
+        let (mut third, _other) = step(
+            "third session",
+            authenticated_client(&network.edge_a, "third", OTHER, 91),
+        )?;
+        account_ready(&mut first, "r1-")?;
+        account_ready(&mut second, "r2-")?;
+        account_ready(&mut third, "r3-")?;
+        let before = link_events(network);
+        let mut answered = [0_u32; 2];
+        let mut refusals: [Option<Vec<String>>; 2] = [None, None];
+        let mut round = 0_u32;
+        while refusals.iter().any(Option::is_none) {
+            round += 1;
+            if round > 2_000 {
+                return Err(failure(format!("never refused: {answered:?} answered")));
+            }
+            // Idle sessions answer the server's keepalive.
+            if round.is_multiple_of(16) {
+                let _alive = synchronized(&mut third, &format!("k{round}"))?;
+            }
+            for (index, session) in [&mut first, &mut second].into_iter().enumerate() {
+                let (Some(count), Some(refusal)) =
+                    (answered.get_mut(index), refusals.get_mut(index))
+                else {
+                    return Err(failure("session index"));
+                };
+                if refusal.is_some() {
+                    if round.is_multiple_of(16) {
+                        let _alive = synchronized(session, &format!("k{index}-{round}"))?;
+                    }
+                    continue;
+                }
+                let label = format!("s{index}-{round}");
+                let object = malformed_identity(u32::try_from(index)?, *count)?;
+                send_object(session, &label, "EKEY PUBLISH IDENTITY", &object)?;
+                let reply = labeled_reply(session, &label)?;
+                if reply
+                    .iter()
+                    .any(|line| line.contains("E2EE_INVALID_FRAGMENT"))
+                {
+                    *count += 1;
+                } else if reply.iter().any(|line| line.contains("E2EE_SYNCING")) {
+                    thread::sleep(Duration::from_millis(100));
+                } else {
+                    *refusal = Some(reply);
+                }
+            }
+        }
+        for refusal in refusals.iter().flatten() {
+            assert_contains(refusal, "E2EE_RATE_LIMITED")?;
+        }
+        if answered != [512, 512] {
+            return Err(failure(format!(
+                "the sessions were answered {answered:?} times, not 512 each"
+            )));
+        }
+        let object = malformed_identity(9, 0)?;
+        send_object(&mut third, "t1", "EKEY PUBLISH IDENTITY", &object)?;
+        let reply = step("third submission", labeled_reply(&mut third, "t1"))?;
+        assert_contains(&reply, "E2EE_INVALID_FRAGMENT")?;
+        let reply = step("third whoami", whoami(&mut third, "t2"))?;
+        assert_contains(&reply, " EKEY ACCOUNT ")?;
+        link_held(network, before)
+    })
+}
+
+/// Companion 11.8 and 11.9: a client's `EKEY PUBLISH IDENTITY` whose
+/// payload is not a wire object is refused E2EE_INVALID_FRAGMENT at the
+/// edge's ingress, for that request alone; the session is served again and
+/// the link stays up.
+#[test]
+fn a_payload_that_is_no_wire_object_is_answered_for_its_request_alone() -> TestResult {
+    run_relayed(|network, _relay, _coordinator| {
+        wait_for_link(&network.edge_a, 0)?;
+        wait_for_link(&network.edge_b, 0)?;
+        wait_for_account_authority(&network.edge_a)?;
+        let (mut session, _account) = step(
+            "session",
+            authenticated_client(&network.edge_a, "malformed", ATTACHED, 91),
+        )?;
+        account_ready(&mut session, "ready")?;
+        let before = link_events(network);
+        send_object(&mut session, "bad1", "EKEY PUBLISH IDENTITY", &[0x5a; 64])?;
+        let refused = step("malformed", labeled_reply(&mut session, "bad1"))?;
+        assert_contains(&refused, "E2EE_INVALID_FRAGMENT")?;
+        let answered = step("whoami", whoami(&mut session, "after"))?;
+        assert_contains(&answered, " EKEY ACCOUNT ")?;
+        link_held(network, before)
     })
 }
