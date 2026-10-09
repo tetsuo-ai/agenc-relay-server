@@ -121,6 +121,8 @@ mod origin_deletion;
 mod origin_journal;
 #[path = "stage_eight_e2ee/recovery_submission.rs"]
 mod recovery_submission;
+#[path = "stage_eight_e2ee/recreated_routes.rs"]
+mod recreated_routes;
 #[path = "stage_eight_e2ee/requester_copies.rs"]
 mod requester_copies;
 #[path = "stage_eight_e2ee/root_rotation.rs"]

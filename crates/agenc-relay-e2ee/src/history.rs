@@ -1,6 +1,10 @@
 //! Historical public authority: one continuous chain from the independently
 //! pinned genesis binding to a typed terminal (companion Sections 9.3 to
-//! 9.5, 12.2 to 12.4, 13.7.1 to 13.7.2, and 13.8).
+//! 9.5, 12.2 to 12.4, 13.7.1 to 13.7.2, and 13.8). The genesis binding of a
+//! recreated route, at a later semantic incarnation, opens a chain only with
+//! the terminal of the incarnation before it, and only a chain that a valid
+//! close ended yields that terminal for the next incarnation
+//! ([`PriorTerminal`]).
 //!
 //! [`HistoricalChain`] composes [`crate::initial_authority`] and
 //! [`crate::record_authentication`] with the policy, roster, root, binding,
@@ -28,7 +32,7 @@ mod reinit;
 use crate::close::verify_close_approvals;
 use crate::error::E2eeError;
 use crate::ids::{SemanticId, semantic_id_of};
-use crate::initial_authority::InitialAuthority;
+use crate::initial_authority::{InitialAuthority, PriorTerminal};
 use crate::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
 use crate::objects::conversation::{ArcCloseAuthorization, action_bits};
 use crate::objects::reinit::ArcReInitTargetTbs;
@@ -320,7 +324,9 @@ impl HistoricalChain {
     /// binding, principals, policy, and sequencer credential the initial
     /// authority revalidated under the independent pin are the only trusted
     /// inputs; `network_id` and `conversation_id` come from the caller's
-    /// retained state, exactly as for the initial authority.
+    /// retained state, exactly as for the initial authority. A binding at a
+    /// later semantic incarnation opens only when the authority carries the
+    /// close of the incarnation before it (companion 9.4).
     pub fn open(
         network_id: &[u8; 32],
         conversation_id: &SemanticId,
@@ -328,10 +334,11 @@ impl HistoricalChain {
         limits: ChainLimits,
     ) -> Result<Self, E2eeError> {
         let binding = initial.binding();
-        if binding.conversation_id != *conversation_id
-            || binding.generation != 0
-            || binding.route.incarnation != 0
-        {
+        let anchored = match initial.prior_terminal() {
+            None => binding.route.incarnation == 0,
+            Some(prior) => prior.precedes(network_id, conversation_id, &binding.route),
+        };
+        if binding.conversation_id != *conversation_id || binding.generation != 0 || !anchored {
             return Err(E2eeError::InvalidValue);
         }
         let genesis = ArcGroupGenesisTbs {
@@ -469,6 +476,26 @@ impl HistoricalChain {
     #[must_use]
     pub const fn lifecycle(&self) -> &Lifecycle {
         &self.lifecycle
+    }
+
+    /// The terminal a closed lineage reached, which the next semantic
+    /// incarnation of its route names (companion 9.4). Only a close this
+    /// chain adopted ([`Self::close`]: its approvals under the last
+    /// finalized policy, the head finalization of the closing transition
+    /// and the committed close intent, companion 11.5) or the closed state
+    /// it was resumed at ([`Self::resume`]) ends a lineage. A lineage that
+    /// is not closed, including one a ReInit activation ended, has none.
+    pub fn prior_terminal(&self) -> Result<PriorTerminal, E2eeError> {
+        let Lifecycle::Closed { close_id } = self.lifecycle else {
+            return Err(E2eeError::InvalidValue);
+        };
+        Ok(PriorTerminal::closed(
+            self.network_id,
+            self.conversation_id,
+            self.binding.binding_id,
+            self.binding.route.clone(),
+            close_id,
+        ))
     }
 
     /// Whether the lineage reached a terminal and accepts no further record.

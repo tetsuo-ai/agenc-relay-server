@@ -6,10 +6,19 @@
 //! the named objects without their earlier directory history. This does not
 //! establish directory continuity, global root-lock ancestry, later context
 //! adoption, MLS leaf membership, finality or recovery completion.
+//!
+//! An ordinary group at semantic incarnation zero is the genesis of its
+//! semantic route. An ordinary group at a later incarnation is the genesis
+//! of a recreated route: it also needs the terminal of the incarnation
+//! before it, the close its semantic route names, which only a validated
+//! closed chain yields ([`PriorTerminal`], companion 9.4 and 11.5).
 
 #![forbid(unsafe_code)]
 
 mod anchors;
+mod prior;
+
+pub use prior::PriorTerminal;
 
 use crate::context::verify_context_core;
 use crate::error::E2eeError;
@@ -69,6 +78,7 @@ pub struct InitialAuthority {
     sequencer: VerifiedSequencerCredential,
     validation_time: ValidationTime,
     required_operational_policy_id: [u8; 32],
+    prior_terminal: Option<PriorTerminal>,
 }
 
 impl InitialAuthority {
@@ -107,12 +117,21 @@ impl InitialAuthority {
     pub const fn required_operational_policy_id(&self) -> &[u8; 32] {
         &self.required_operational_policy_id
     }
+
+    /// The closed incarnation a recreated route follows; `None` at
+    /// semantic incarnation zero.
+    #[must_use]
+    pub const fn prior_terminal(&self) -> Option<&PriorTerminal> {
+        self.prior_terminal.as_ref()
+    }
 }
 
 /// Revalidates public initial authority without mutating any caller state.
 ///
-/// Only binding generation zero and semantic incarnation zero are supported.
-/// ReInit successors, recreated routes and replacements need preceding terminal
+/// Only binding generation zero and semantic incarnation zero are supported
+/// here: a recreated route, at a later incarnation, needs the terminal of the
+/// incarnation before it ([`authenticate_recreated_authority`]), and
+/// ReInit successors and replacements need their preceding terminal
 /// evidence. An exact trusted pin replaces earlier directory chain traversal;
 /// it does not prove the omitted continuity signatures. In particular, a new
 /// current directory roster cannot replace a roster named by the binding.
@@ -125,6 +144,34 @@ pub fn authenticate_initial_authority(
     evidence: &InitialAuthorityEvidence<'_>,
     budget: &mut DecodeBudget,
 ) -> Result<InitialAuthority, E2eeError> {
+    authenticate(expected, None, evidence, budget)
+}
+
+/// Revalidates the public initial authority of a recreated ordinary route:
+/// a generation-zero binding at semantic incarnation one or later whose
+/// semantic route names, at the incarnation after it, exactly the close
+/// `prior` ended (companion 9.4). The new binding is checked as every
+/// genesis binding is, with its unanimous approvals, root locks and
+/// bootstrap; `prior` comes from the validated chain whose lineage that
+/// close ended ([`crate::history::HistoricalChain::prior_terminal`]), which
+/// adopted the close only under its last finalized policy (companion 11.5).
+/// A binding at incarnation zero, of another route key, a skipped
+/// incarnation, another close, or the closed conversation itself is refused.
+pub fn authenticate_recreated_authority(
+    expected: &ExpectedInitialAuthority,
+    prior: &PriorTerminal,
+    evidence: &InitialAuthorityEvidence<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<InitialAuthority, E2eeError> {
+    authenticate(expected, Some(prior), evidence, budget)
+}
+
+fn authenticate(
+    expected: &ExpectedInitialAuthority,
+    prior: Option<&PriorTerminal>,
+    evidence: &InitialAuthorityEvidence<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<InitialAuthority, E2eeError> {
     if evidence.principals.is_empty() || evidence.principals.len() > MAX_BINDING_PRINCIPALS {
         return Err(E2eeError::LimitExceeded);
     }
@@ -133,7 +180,7 @@ pub fn authenticate_initial_authority(
         ArcWireObjectKind::ConversationBinding,
         budget,
     )?;
-    anchors::binding(expected, &package)?;
+    anchors::binding(expected, prior, &package)?;
     let core = ArcContextCoreTbs::decode_exact(evidence.context_core, budget)?;
     let time = ValidationTime(core.initial_validation_time);
     let principals = anchors::principals(expected, &package, evidence.principals, time, budget)?;
@@ -164,6 +211,7 @@ pub fn authenticate_initial_authority(
         sequencer,
         validation_time: time,
         required_operational_policy_id: core.required_operational_policy_id,
+        prior_terminal: prior.cloned(),
     })
 }
 

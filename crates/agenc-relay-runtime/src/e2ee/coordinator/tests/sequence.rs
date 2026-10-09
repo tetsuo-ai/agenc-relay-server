@@ -48,6 +48,7 @@ mod core_bindings;
 mod leaf_membership;
 mod object_expiry;
 mod owners;
+mod recreated_routes;
 mod retention;
 mod review_reload;
 
@@ -283,6 +284,8 @@ fn assert_certificate_votes(
     Ok(())
 }
 
+/// A Commit of `conversation` at `epoch`: its retained group and concrete
+/// route, the harness's channel unless another conversation is bound.
 fn commit_bytes(
     harness: &Harness,
     conversation: [u8; 32],
@@ -295,18 +298,25 @@ fn commit_bytes(
         .logs
         .get(&conversation)
         .ok_or("the sequencer log")?;
+    let (group, route_binding) = match harness.coordinator.state.conversations.get(&conversation) {
+        Some(state) => (
+            <[u8; 32]>::try_from(state.group_id.as_slice())?,
+            state.route_binding,
+        ),
+        None => (GROUP, channel_route_binding(&NETWORK, &INSTANCE)?),
+    };
     let aad = ArcCommitAad {
         profile_version: 1,
         network_id: NETWORK,
         conversation_id: conversation,
-        route_binding: channel_route_binding(&NETWORK, &INSTANCE)?,
+        route_binding,
         validation_time,
         prior_state_id: *log.accepted_state_id(),
     }
     .encode()?;
     wire_raw(
         ArcWireObjectKind::CommitMls,
-        private_message_at_epoch(&GROUP, epoch, COMMIT_CONTENT_TYPE, &aad)?,
+        private_message_at_epoch(&group, epoch, COMMIT_CONTENT_TYPE, &aad)?,
     )
 }
 

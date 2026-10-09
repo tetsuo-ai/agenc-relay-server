@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::{ExpectedInitialAuthority, InitialPrincipalEvidence, decode_object};
+use super::{ExpectedInitialAuthority, InitialPrincipalEvidence, PriorTerminal, decode_object};
 use crate::error::E2eeError;
 use crate::identity::{
     Interval, ValidationTime, ensure_distinct_device_keys, restore_roster, verify_root_standalone,
@@ -17,7 +17,7 @@ use crate::objects::conversation::{
 };
 use crate::objects::identity::{ArcDeviceRoster, ArcRootIdentity};
 use crate::policy::VerifiedPolicy;
-use crate::route::PrincipalRosters;
+use crate::route::{PrincipalRosters, verify_semantic_route};
 use crate::sequencer::VerifiedSequencerCredential;
 use crate::signature::{RoleKey, SignerRole};
 use crate::tls::{DecodeBudget, TlsDecode};
@@ -25,6 +25,7 @@ use agenc_relay_crypto::SemanticHashDomain;
 
 pub(super) fn binding(
     expected: &ExpectedInitialAuthority,
+    prior: Option<&PriorTerminal>,
     package: &ArcConversationBindingPackage,
 ) -> Result<(), E2eeError> {
     let tbs = &package.binding.tbs;
@@ -33,8 +34,17 @@ pub(super) fn binding(
         || tbs.conversation_id != expected.conversation_id
         || semantic_id_of(SemanticHashDomain::BindingId, tbs)? != expected.binding_id
         || tbs.binding_generation != 0
-        || tbs.semantic_route.semantic_incarnation != 0
     {
+        return Err(E2eeError::InvalidValue);
+    }
+    // Incarnation zero opens its semantic route; a later incarnation opens
+    // only after the exact close of the one before it (companion 9.4).
+    let route = verify_semantic_route(&expected.network_id, &tbs.semantic_route)?;
+    let anchored = match prior {
+        None => route.incarnation == 0,
+        Some(prior) => prior.precedes(&expected.network_id, &expected.conversation_id, &route),
+    };
+    if !anchored {
         return Err(E2eeError::InvalidValue);
     }
     Ok(())

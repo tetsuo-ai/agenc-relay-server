@@ -7,7 +7,9 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use agenc_relay_testkit::e2ee_model::{Action, E2eeModelBounds, Exploration, explore_e2ee};
+use agenc_relay_testkit::e2ee_model::{
+    Action, E2eeModelBounds, Exploration, explore_e2ee, replay_e2ee,
+};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -89,5 +91,67 @@ fn duplicate_stale_reordered_and_conflicting_records_never_advance_the_log() -> 
     // refusal count is at least the number of states times the five
     // adversarial actions that never succeed.
     assert!(report.refusals >= report.states.saturating_sub(1) * 5);
+    Ok(())
+}
+
+/// Past the explored depth, a recreated route runs every operation of a
+/// genesis route: it bootstraps, carries application traffic and Commits,
+/// takes an abort, refuses plaintext and the adversarial records, closes in
+/// turn and is recreated again, while a live route is never recreated and a
+/// closed one never reopens under its own lock (companion 9.4 and 11.3).
+#[test]
+fn a_recreated_route_operates_closes_and_recreates_past_the_explored_depth() -> TestResult {
+    use Action::{
+        Abort, Application, Bind, Candidate, Close, ConflictingCandidate, DuplicateCandidate,
+        Finalize, Plaintext, Recreate, Reopen, ReorderedFinalize, Reserve, StaleCandidate,
+    };
+    let bounds = E2eeModelBounds {
+        conversations: 1,
+        accounts: 1,
+        depth: 0,
+    };
+    let script = [
+        // Incarnation zero: bind, bootstrap, traffic, close.
+        (Reserve(0), true),
+        (Bind(0, 0), true),
+        (Candidate(0), true),
+        (Finalize(0), true),
+        (Application(0), true),
+        (Recreate(0), false),
+        (Close(0), true),
+        (Plaintext(0), false),
+        (Application(0), false),
+        (Reopen(0), false),
+        // Incarnation one on a fresh instance, naming the close.
+        (Recreate(0), true),
+        (Plaintext(0), false),
+        (Application(0), false),
+        (Candidate(0), true),
+        (DuplicateCandidate(0), false),
+        (ConflictingCandidate(0), false),
+        (ReorderedFinalize(0), false),
+        (Finalize(0), true),
+        (Application(0), true),
+        (Candidate(0), true),
+        (Abort(0), true),
+        (Candidate(0), true),
+        (Finalize(0), true),
+        (StaleCandidate(0), false),
+        (Application(0), true),
+        (Recreate(0), false),
+        (Reopen(0), false),
+        (Close(0), true),
+        (Application(0), false),
+        // Incarnation two, naming incarnation one's close.
+        (Recreate(0), true),
+        (Candidate(0), true),
+        (Finalize(0), true),
+        (Application(0), true),
+        (Plaintext(0), false),
+    ];
+    let actions: Vec<Action> = script.iter().map(|(action, _)| *action).collect();
+    let expected: Vec<bool> = script.iter().map(|(_, accepted)| *accepted).collect();
+    let accepted = replay_e2ee(bounds, &actions).map_err(|violation| format!("{violation:?}"))?;
+    assert_eq!(accepted, expected);
     Ok(())
 }
