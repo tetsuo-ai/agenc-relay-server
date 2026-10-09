@@ -32,8 +32,14 @@ fn unhex(text: &str) -> TestResult<Vec<u8>> {
 /// The rows of the store `name`, one `<table> <key hex> <value hex>` per
 /// line.
 fn rows(name: &str) -> TestResult<Vec<Write>> {
+    rows_of("binding-retention", name)
+}
+
+/// The rows of the store `name` of the fixture directory `topic` under
+/// `test-data/stage-ten/`.
+pub(super) fn rows_of(topic: &str, name: &str) -> TestResult<Vec<Write>> {
     let text = std::fs::read_to_string(format!(
-        "{}/../../test-data/stage-ten/binding-retention/{name}.rows",
+        "{}/../../test-data/stage-ten/{topic}/{name}.rows",
         env!("CARGO_MANIFEST_DIR")
     ))?;
     let mut rows = Vec::new();
@@ -54,7 +60,7 @@ fn rows(name: &str) -> TestResult<Vec<Write>> {
 }
 
 /// The harness restarted from `rows`.
-fn restarted_from(rows: Vec<Write>) -> TestResult<Harness> {
+pub(super) fn restarted_from(rows: Vec<Write>) -> TestResult<Harness> {
     let mut source = Harness::new()?;
     source.writes = rows;
     source.reloaded()
