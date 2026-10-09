@@ -480,7 +480,7 @@ async fn a_connection_past_its_recent_share_leaves_the_others_admitted() -> Test
         )?;
         assert!(matches!(completed, Ingest::Complete(_)));
     }
-    let object = vec![0xa5; 100];
+    let object = identity_object(100, 0xa5)?;
     let fragment = fragment_object(&object)?
         .into_iter()
         .next()
@@ -515,7 +515,7 @@ async fn a_submission_refused_before_it_is_sent_releases_its_recent_tuple() -> T
     let mut edge = active_edge(generation)?;
     let capabilities = capabilities()?;
     let facts = facts(&capabilities)?;
-    let object = vec![0xa5; 2 * 2_940 + 100];
+    let object = identity_object(2 * 2_940 + 100, 0xa5)?;
     let fragments = fragment_object(&object)?;
     let first = fragments.first().ok_or("fragment")?;
     let opened = edge.client_line(
@@ -698,6 +698,60 @@ async fn outstanding_requests_are_bounded_per_connection_account_and_edge() -> T
     Ok(())
 }
 
+/// Nothing goes onward before the complete object passes minimal bounded
+/// type parsing (companion 11.8): a payload that is no wire object, or one
+/// of a kind its command does not carry (11.4), is refused
+/// `E2EE_INVALID_FRAGMENT` at ingress, nothing is outstanding and it keeps
+/// no recent-object tuple; a wire object of the command's kind goes out.
+#[tokio::test]
+async fn a_payload_that_is_no_object_of_its_kind_is_refused_at_ingress() -> TestResult {
+    use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
+    use agenc_relay_e2ee::tls::TlsEncode;
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let roster = ArcWireObject::new(ArcWireObjectKind::DeviceRoster, vec![7; 64])?.encode()?;
+    for payload in [vec![0x5a; 64], roster] {
+        let fragment = fragment_object(&payload)?
+            .into_iter()
+            .next()
+            .ok_or("fragment")?;
+        let refused = edge.client_line(
+            core.context_mut()?,
+            &mut base,
+            generation,
+            &line(&fragment)?,
+            &facts,
+        );
+        assert!(
+            refused_with(&refused, "E2EE_INVALID_FRAGMENT"),
+            "{refused:?}"
+        );
+        assert!(edge.pending.is_empty());
+        assert!(
+            !edge
+                .assembler
+                .is_recent(&identity_tuple(generation, &fragment)?)
+        );
+    }
+    let fragment = fragment_object(&identity_object(64, 0x5a)?)?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let _sent = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &line(&fragment)?,
+        &facts,
+    );
+    assert_eq!(edge.pending.len(), 1, "the request went out");
+    Ok(())
+}
+
 /// A closed connection's unanswered requests keep their places in its
 /// account's and the edge's outstanding bounds (companion 16): eight of an
 /// account's refuse it on another connection, and another account's
@@ -819,6 +873,74 @@ async fn outstanding_reservations_count_against_the_reply_quotas_at_fragment_zer
             &facts,
         );
         assert_eq!(edge.pending.len(), 1, "with none outstanding it went out");
+    }
+    Ok(())
+}
+
+/// A recovery element goes onward in each kind an element of a recovery
+/// submission may name, a root identity chain among them (companion
+/// 13.7.4); an object of another kind is refused at ingress.
+#[tokio::test]
+async fn a_recovery_element_goes_out_in_each_kind_an_element_names() -> TestResult {
+    use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
+    use agenc_relay_e2ee::tls::TlsEncode;
+    use agenc_relay_e2ee::wire::tokens::base64url_encode;
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let element = |kind: ArcWireObjectKind, fill: u8| -> TestResult<ParsedMessage> {
+        let object = ArcWireObject::new(kind, vec![fill; 58])?.encode()?;
+        let fragment = fragment_object(&object)?
+            .into_iter()
+            .next()
+            .ok_or("fragment")?;
+        let text = format!(
+            "@+agenc.ag/e2ee={} EGROUP SUBMIT RECOVERY-ELEMENT {} {}",
+            fragment.render(),
+            base64url_encode(&[3; 32]),
+            base64url_encode(&[4; 32]),
+        );
+        Ok(parse_message(FramedLine::new(&text)?)?.ok_or("message")?)
+    };
+    let refused = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &element(ArcWireObjectKind::ApplicationMls, 1)?,
+        &facts,
+    );
+    assert!(
+        refused_with(&refused, "E2EE_INVALID_FRAGMENT"),
+        "{refused:?}"
+    );
+    assert!(edge.pending.is_empty());
+    let kinds = [
+        ArcWireObjectKind::SequencerRecord,
+        ArcWireObjectKind::CloseAuthorization,
+        ArcWireObjectKind::Policy,
+        ArcWireObjectKind::RootIdentity,
+        ArcWireObjectKind::RootIdentityChain,
+        ArcWireObjectKind::DeviceRoster,
+        ArcWireObjectKind::ConversationBinding,
+        ArcWireObjectKind::ReinitAttempt,
+    ];
+    for (fill, kind) in (2..).zip(kinds) {
+        let sent = edge.client_line(
+            core.context_mut()?,
+            &mut base,
+            generation,
+            &element(kind, fill)?,
+            &facts,
+        );
+        assert!(
+            !refused_with(&sent, "E2EE_INVALID_FRAGMENT"),
+            "{kind:?}: {sent:?}"
+        );
+        assert_eq!(edge.pending.len(), 1, "{kind:?} went out");
+        edge.pending.clear();
     }
     Ok(())
 }

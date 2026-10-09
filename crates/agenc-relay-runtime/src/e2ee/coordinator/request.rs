@@ -436,13 +436,15 @@ pub fn decode(
             if *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes() != id {
                 return Err(E2eeReplyCode::HashMismatch);
             }
+            // The payload is the client's object, which the edge relays
+            // whole: one that is not a well-formed wire object leaves the
+            // request without a decoded payload, and the operation that
+            // reads it answers the request with `E2EE_INVALID_FRAGMENT`
+            // (`ops::Exec::payload`), as a failed result.
             let mut budget = DecodeBudget::new(1 << 23, 1 << 16);
-            let (kind, _) =
-                ArcWireObject::peek(bytes).map_err(|_| E2eeReplyCode::InvalidFragment)?;
-            Some(
-                ArcWireObject::decode_kind(bytes, Some(kind), &mut budget)
-                    .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-            )
+            ArcWireObject::peek(bytes).ok().and_then(|(kind, _)| {
+                ArcWireObject::decode_kind(bytes, Some(kind), &mut budget).ok()
+            })
         }
         _ => return Err(E2eeReplyCode::InvalidFragment),
     };

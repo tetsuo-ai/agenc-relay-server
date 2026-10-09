@@ -7,6 +7,7 @@ mod delivery_restart;
 pub(crate) mod edge_peer;
 mod frame_addressing;
 mod inactive_ready;
+mod local_failures;
 mod origin_admission;
 mod origin_mirror;
 mod origin_refusals;

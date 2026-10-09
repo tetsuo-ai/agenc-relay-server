@@ -75,7 +75,8 @@ pub(crate) mod tests;
 /// The largest retained in-memory object set, in bytes, before new objects
 /// are refused with `E2EE_RATE_LIMITED`.
 pub const MAX_RETAINED_OBJECT_BYTES: usize = 256 * 1024 * 1024;
-/// Requests one peer may queue behind an in-flight batch.
+/// Requests one peer may queue behind an in-flight batch, and requests one
+/// peer may hold open waiting for their payloads.
 pub const MAX_QUEUED_COMPANION_REQUESTS: usize = 64;
 
 /// The signing material and identity of the logical sequencer.
@@ -981,7 +982,13 @@ impl CompanionCoordinator {
             refusal: self.refusal_for(&key),
         };
         if open.payload_object_id.is_some() {
-            if self.open.len() >= MAX_QUEUED_COMPANION_REQUESTS {
+            // Each peer has its own payload waits: one peer's never refuse
+            // another's.
+            let waiting = self
+                .open
+                .range((peer, [0; 16])..=(peer, [u8::MAX; 16]))
+                .count();
+            if waiting >= MAX_QUEUED_COMPANION_REQUESTS {
                 return Err(CompanionFault::Ceiling);
             }
             self.open.insert((peer, correlation.request_id), open);

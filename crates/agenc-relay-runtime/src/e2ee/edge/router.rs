@@ -264,6 +264,14 @@ impl E2eeEdge {
                 let Some(bytes) = payload else {
                     return Ok(Vec::new());
                 };
+                // Nothing goes onward before the complete object passes
+                // minimal bounded type parsing: a wire object of a kind its
+                // command carries (companion 11.4, 11.8). The refused
+                // submission keeps no recent-object tuple.
+                if !ArcWireObject::peek(&bytes).is_ok_and(|(kind, _)| carrier.accepts(kind)) {
+                    self.assembler.forget(&submission_key(key, carrier));
+                    return Err(E2eeReplyCode::InvalidFragment.into());
+                }
                 let sent = self
                     .send_request(
                         context,

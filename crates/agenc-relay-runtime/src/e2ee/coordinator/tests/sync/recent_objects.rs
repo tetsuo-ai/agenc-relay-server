@@ -346,3 +346,51 @@ fn a_stale_partial_object_releases_its_peers_quota() -> TestResult {
     assert_eq!(quotas(&sync), (0, 0));
     Ok(())
 }
+
+/// Delivers the request fragments of one request at `count` that names a
+/// payload, from `peer`, without its payload: the request waits for it.
+fn open_payload_wait(sync: &mut Sync, peer: ServerId, count: u64) -> Result<(), CompanionFault> {
+    let payload = count.to_be_bytes();
+    let (correlation, bytes) =
+        request(count, Some(&payload)).map_err(|_| CompanionFault::Protocol)?;
+    for fragment in fragment_object(&bytes).map_err(|_| CompanionFault::Protocol)? {
+        let actions = sync.harness.coordinator.on_frame(
+            LinkId::new(1),
+            peer,
+            CompanionFrame::Request {
+                correlation,
+                object_id: object_id(&bytes),
+                fragment,
+            },
+            NOW_MILLIS,
+            &sync.host,
+            &mut sync.entropy,
+        )?;
+        if !actions.is_empty() {
+            return Err(CompanionFault::Storage);
+        }
+    }
+    Ok(())
+}
+
+/// Each peer holds its own requests waiting for their payloads (companion
+/// 11.8: quotas are reserved per federation peer): one peer at its ceiling
+/// never refuses another peer's request.
+#[test]
+fn payload_waits_are_bounded_per_peer() -> TestResult {
+    let mut sync = Sync::new()?;
+    let other = ServerId::from_bytes([0x77; 16]);
+    let ceiling = u64::try_from(crate::e2ee::coordinator::MAX_QUEUED_COMPANION_REQUESTS)?;
+    for count in 0..ceiling {
+        open_payload_wait(&mut sync, home(), count).map_err(|f| format!("{f:?}"))?;
+    }
+    assert_eq!(
+        open_payload_wait(&mut sync, home(), ceiling).err(),
+        Some(CompanionFault::Ceiling),
+        "the peer past its ceiling"
+    );
+    for count in 0..ceiling {
+        open_payload_wait(&mut sync, other, count).map_err(|f| format!("{f:?}"))?;
+    }
+    Ok(())
+}

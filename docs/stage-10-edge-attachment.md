@@ -20,9 +20,13 @@ account's replies within their own quotas, charged to the process memory
 budget, bounds outstanding requests per connection, per account and for the
 edge, counting a closed connection's unanswered requests until the
 coordinator answers or drops them, and releases a submission's recent tuple
-once it is answered or refused. No specification, profile hash, registry
-entry, named limit, reply code, wire object, table, key, row kind, field or
-storage generation changed.
+once it is answered or refused. The fourth answers a fresh companion request
+the coordinator cannot run or stage for a local reason with its failed
+result, `E2EE_SYNCING` for a target's route state, refuses at the edge's
+ingress a payload that is no wire object of its command's kind, and bounds
+requests waiting for their payloads per peer. No specification, profile
+hash, registry entry, named limit, reply code, wire object, table, key, row
+kind, field or storage generation changed.
 
 ## A generation's declarations name one principal, and an attachment ends with its principal (first commit)
 
@@ -466,3 +470,122 @@ re-reviews and respans `e2ee-assembly-recent-ceiling`,
 `edge-companion-origin-deletion`, `edge-link-down-partial-objects` and
 `edge-origin-acknowledgement-resend`; the other regions of the changed files
 move with unchanged spans. Both source inventories are refreshed.
+
+## A request's own failure is answered with its failed result (fourth commit)
+
+The text these rules implement:
+
+- Companion Section 12.5: "Every opcode permits `failed`. A failed result
+  has `coordinator_state_generation=0`, an empty completion Event ID, empty
+  snapshot token and next cursor, and zero response descriptors; it never
+  consumes or partially commits the requested semantic mutation."
+- Companion Section 12.5: before an append would cross an edge's
+  unacknowledged-event ceiling, the coordinator "rejects the complete
+  mutation with `E2EE_SYNCING`"; Architecture Section 20.8: "Insufficient
+  capacity rejects the whole mutation with the initiating profile's
+  overload result".
+- Companion Section 11.9: `E2EE_INVALID_FRAGMENT` answers a malformed
+  object, `E2EE_RATE_LIMITED` is "Operation exceeded an authenticated
+  quota", and `E2EE_SYNCING` is "Federation route state has not crossed the
+  READY/ACTIVE barrier"; Section 16 refuses storage at the global E2EE disk
+  ceiling.
+- Companion Section 11.8: "No fragment is delivered onward until the whole
+  object passes transport validation and minimal bounded type parsing",
+  and a receiver reserves quota per "federation peer"; Section 11.4 names
+  the object kinds each command carries.
+
+The rules, in `crates/agenc-relay-runtime/src/e2ee/coordinator/execute.rs`,
+`request.rs` and `mod.rs`, `crates/agenc-relay-runtime/src/e2ee/edge/router.rs`
+and `crates/agenc-relay-e2ee/src/wire/carrier.rs`:
+
+- **A local failure of a fresh request is answered.** Once a request is
+  classified fresh against the replay rows and its origin, its operation is
+  run and its batch staged (`Fresh::stage`). When that fails for a reason of
+  this coordinator's own, the request is staged again as its failed result
+  (`run_with_object`), which consumes the request's operation sequence and
+  commits no semantic mutation; the next request follows it, and the link
+  stays up. A target whose route state cannot take the request's events, a
+  delivery stream not past READY/ACTIVE, one at the unacknowledged-event
+  ceiling, one with a barrier open or a full base outbox, refuses the
+  mutation with `E2EE_SYNCING`, and that is the failed result's code. Any
+  other local reason, its clock, a checkpoint plan, entropy, a timer or
+  memory reservation, a storage quota such as the global E2EE disk ceiling,
+  or the staging itself, gives `E2EE_RATE_LIMITED`, the code the link faults
+  record gives a request whose batch storage refused, as the companion's
+  overload result. Only when even the failed result cannot be made, as with
+  a failed clock or plan, does the error stand and retire the link, as
+  before. A malformed request object, a descriptor that contradicts it, an
+  unknown origin, a request under a suspended origin, another generation, or
+  a sequence other than the next remain violations.
+- **A payload that is no wire object of its command's kind is refused at
+  ingress.** The edge sends a client's complete object onward only once it
+  is a wire object of a kind its command carries (`ArcWireObject::peek`,
+  `CarrierCommand::accepts`); otherwise the submission is refused
+  `E2EE_INVALID_FRAGMENT` at ingress, nothing is outstanding, and it keeps
+  no recent-object tuple (`router::accept_line`). The recovery element
+  carrier accepts every kind an element of a recovery submission may name,
+  a root identity chain among them, as the coordinator's check of the
+  submission does (`CarrierCommand::SubmitRecoveryElement`,
+  `recovery::REFERENCE_ELEMENT_KINDS`, companion 13.7.4); its largest
+  object is unchanged.
+- **A malformed payload that still arrives is the request's failure.** A
+  payload that is not a well-formed wire object, which a conforming edge no
+  longer relays, leaves the request without a decoded payload
+  (`request::decode`), and the operation that reads it answers with its
+  failed result `E2EE_INVALID_FRAGMENT` (`ops::Exec::payload`), instead of
+  failing the edge's link. A payload whose hash does not match the
+  request's declaration, which only a faulty edge produces, is still a
+  violation.
+- **Payload waits are bounded per peer.** A request that names a payload
+  waits for it in its peer's own bound of `MAX_QUEUED_COMPANION_REQUESTS`;
+  one peer at its bound never refuses another peer's request
+  (`on_request_fragment`). A peer past its own bound is still a violation of
+  that peer's link: a conforming edge keeps at most 32 requests
+  outstanding, a closed connection's unanswered ones among them (the third
+  commit), so it never reaches it, nor the per-peer queue bound of the same
+  size, which is unchanged.
+
+| Test | What it pins |
+| --- | --- |
+| `federation::coordinator::tests::companion_refusals::a_request_its_storage_quota_refuses_is_answered_with_its_failed_result` | Through real storage, with the global E2EE disk ceiling set to admit one more failed result and not an account result: the `WHOAMI` is answered `E2EE_RATE_LIMITED` at its sequence, the sequence advances, and the link stays up; with no room left the request's error stands and nothing is staged. |
+| `federation::coordinator::tests::companion_refusals::a_payload_that_is_no_wire_object_is_answered_with_its_failed_result` | A `PUBLISH IDENTITY` whose payload is not a wire object is answered `E2EE_INVALID_FRAGMENT` at its sequence, the next request runs at the following one, and the link stays up. |
+| `e2ee::coordinator::tests::sync::recent_objects::payload_waits_are_bounded_per_peer` | A peer with 64 requests waiting for their payloads is refused its next, and another peer still opens 64. |
+| `e2ee::coordinator::tests::sync::local_failures::a_completion_target_not_past_ready_answers_e2ee_syncing` | A `PUBLISH IDENTITY` whose completion targets an edge with no stream past READY is answered with its failed result `E2EE_SYNCING`. |
+| `e2ee::coordinator::tests::sync::local_failures::a_completion_target_at_its_event_ceiling_answers_e2ee_syncing` | The same request whose target's stream is blocked at its unacknowledged-event ceiling is answered `E2EE_SYNCING`. |
+| `e2ee::coordinator::execute::origin_replay::a_target_without_room_for_a_barrier_refuses_the_mutation_with_syncing` | A mutation whose target has base parts and no room for its barrier, an open barrier or a full base outbox, is refused `E2EE_SYNCING` before any copy is sequenced, which `run_with_object` answers with that failed result. |
+| `e2ee::edge::tests::ingress::a_payload_that_is_no_object_of_its_kind_is_refused_at_ingress` | A payload that is no wire object, and a device roster on `PUBLISH IDENTITY`, are refused `E2EE_INVALID_FRAGMENT` at the edge with nothing outstanding and no tuple kept; an identity object goes out. |
+| `e2ee::edge::tests::ingress::a_recovery_element_goes_out_in_each_kind_an_element_names` | An MLS application object on `EGROUP SUBMIT RECOVERY-ELEMENT` is refused `E2EE_INVALID_FRAGMENT`, and an element in each kind an element may name, a root identity chain among them, goes out. |
+| `wire::carrier::tests::the_recovery_element_carrier_accepts_exactly_the_kinds_an_element_names` (`agenc-relay-e2ee`) | The recovery element carrier accepts a kind exactly when an element of a recovery submission may name it. |
+
+With `execute.rs` set back to the third commit, the quota test and both
+route state tests fail; with `request.rs` or the coordinator's `mod.rs` set
+back, the payload test or the payload wait test fails, in turn. Single edits
+fail tests as well: answering only a request that carries a payload fails
+the quota test, and so does staging the retry without its refusal; refusing
+a malformed payload as a violation fails the payload test; counting every
+peer's payload waits fails the wait test; answering a target's route state
+`E2EE_RATE_LIMITED` fails both route state tests, and answering every local
+failure `E2EE_SYNCING` the quota test; relaying a payload without its type
+parsing, or without its kind check, fails the ingress parsing test and the
+recovery element test, and keeping the tuple of a payload refused at ingress
+the ingress parsing test; and leaving the root identity chain out of the
+recovery element carrier fails the recovery element test and the E2EE
+crate's carrier test. The ingress tests that complete a submission send an
+identity object, and the recovery element test an object of each kind an
+element names.
+
+Two lines of the failed result's staging are guards no test can fail. The
+staging clears the cross-profile assignment of the first attempt, which
+only an `at_revision` failure after the assignment leaves in place, since a
+refused staging takes or clears it (`project_next`,
+`clear_projection_intent`), and an assignment needs a base plan the unit
+tests do not build. It also stages the failed result without the object the
+first attempt read, whose exclusion from the resident objects matches no
+row a failed result writes.
+
+The release coverage policy gains `companion-fresh-request-staging`
+(regions), re-reviews and sets `cap79-fresh-object-006-run-with-object` to
+the new extent of `run_with_object`, whose staging moved into
+`Fresh::stage`, and re-reviews and respans `cap74-router-accept-line`; the
+other regions of the changed files move with unchanged spans. Both source
+inventories are refreshed.

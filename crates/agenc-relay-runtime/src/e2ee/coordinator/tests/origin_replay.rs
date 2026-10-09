@@ -433,3 +433,42 @@ fn a_fenced_origin_classifies_a_request_without_a_replay_row_as_fenced() -> Test
     }
     Ok(())
 }
+
+/// A target that already has a barrier open, or whose base outbox cannot
+/// take the barrier's base parts, refuses the whole mutation with
+/// `E2EE_SYNCING` before any copy is sequenced (companion 12.5,
+/// architecture 20.8), which `run_with_object` answers with that failed
+/// result.
+#[test]
+fn a_target_without_room_for_a_barrier_refuses_the_mutation_with_syncing() -> TestResult {
+    let coordinator = coordinator();
+    let mut request = decoded(0, 0)?;
+    request.request.opcode = ArcFederationOpcode::PublishIdentity;
+    let counts =
+        std::collections::BTreeMap::from([(ServerId::from_bytes(HOME), (1_usize, 64_u64))]);
+    let mut entropy = Entropy;
+    let refused = assemble(
+        &coordinator,
+        HOME,
+        ServerId::from_bytes(HOME),
+        &request,
+        Outcome::scalar(request::ResultBody::Stored(
+            agenc_relay_domain::e2ee::projection::StoreKind::Identity,
+            [3; 32],
+        )),
+        1,
+        500,
+        None,
+        BarrierInputs {
+            backing: backing(),
+            base_counts: Some(&counts),
+            base_capacity: &|target, parts, bytes| {
+                assert_eq!((target, parts, bytes), (ServerId::from_bytes(HOME), 1, 64));
+                false
+            },
+            entropy: &mut entropy,
+        },
+    );
+    assert!(matches!(refused, Err(E2eeReplyCode::Syncing)));
+    Ok(())
+}
