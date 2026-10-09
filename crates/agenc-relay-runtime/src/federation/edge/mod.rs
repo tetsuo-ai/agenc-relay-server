@@ -614,6 +614,13 @@ impl EdgeFederation {
         self.fail_link(context, Violation::Companion(CompanionViolation::Witness));
     }
 
+    /// Closes the link after storage refused a batch of the E2EE router's,
+    /// as for a refused batch of the edge's own: the next link resumes
+    /// from the durable companion cursor.
+    pub fn fail_companion_storage(&mut self, context: &mut StateCoreContext) {
+        self.fail_link(context, Violation::Ceiling);
+    }
+
     /// Stages one companion part of a cross-profile barrier handed over by
     /// the E2EE router; a violation closes the link and returns `false`.
     pub fn companion_barrier_part(
@@ -1510,8 +1517,16 @@ impl EdgeFederation {
             None => {}
         }
         completions.extend(events::drain_queued(self, context));
-        journal::continue_write(self, context);
+        self.continue_storage_work(context);
         completions
+    }
+
+    /// Resumes the durable work that waits for a free batch slot: the
+    /// journal's rows, then an install batch that waited for another
+    /// router's batch.
+    fn continue_storage_work(&mut self, context: &mut StateCoreContext) {
+        journal::continue_write(self, context);
+        sync::continue_install(self, context);
     }
 
     fn receipt_pending(&self, context: &StateCoreContext) -> bool {
@@ -1598,6 +1613,12 @@ impl EdgeFederation {
         context: &mut StateCoreContext,
         error: agenc_relay_storage::StorageError,
     ) {
+        if self.commit.is_none() {
+            // Another router's batch: an install that waited for it
+            // continues, as at a receipt.
+            sync::continue_install(self, context);
+            return;
+        }
         if matches!(self.commit, Some(PendingCommit::OrdinaryBatch(_))) {
             // Rejection callbacks drain after the old StateCore batch was
             // removed. A live exclusive batch belongs to a newer receipt.

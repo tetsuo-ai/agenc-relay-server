@@ -1491,3 +1491,103 @@ async fn entries_assemble_whatever_the_client_cache_holds() -> TestResult {
     assert_eq!(fixture.edge.phase(), Phase::AwaitingActive);
     Ok(())
 }
+
+/// A page's END that arrives while another router's batch gathers waits
+/// for it: the page's batch is held and staged once that batch settles, at
+/// its receipt or its refusal, and the transfer goes on.
+#[tokio::test]
+async fn a_page_end_waits_while_another_router_gathers_a_batch() -> TestResult {
+    for refused in [false, true] {
+        let entries = entries(2)?;
+        let mut fixture = Fixture::resuming(true)?;
+        fixture.begin(0, 2, 2, digest_of(&entries)?)?;
+        for (conversation, bytes) in &entries {
+            fixture.entry(0, *conversation, bytes)?;
+        }
+        super::open_other_batch(fixture.core.context_mut()?, &fixture.edge)?;
+        fixture.end(0, None)?;
+        assert!(fixture.edge.held.is_some(), "the page's batch is held");
+        assert!(fixture.edge.commit.is_none());
+        if refused {
+            fixture
+                .core
+                .state_mut()?
+                .reject_fixture_batch_before_submission(
+                    agenc_relay_storage::StorageError::QueueFull,
+                )?;
+            fixture
+                .edge
+                .batch_rejected(fixture.core.context_mut()?, &mut fixture.base);
+            let _outputs = fixture
+                .edge
+                .drain_waiting_events(fixture.core.context_mut()?, &mut fixture.base);
+        } else {
+            fixture.core.context_mut()?.discard_pending_for_test();
+            fixture
+                .edge
+                .batch_applied(fixture.core.context_mut()?, &mut fixture.base);
+        }
+        assert!(fixture.edge.held.is_none(), "refused={refused}");
+        assert!(matches!(
+            fixture.edge.commit,
+            Some(crate::e2ee::edge::PendingCommit::Ready)
+        ));
+        let rows = fixture.commit()?;
+        assert_eq!(
+            marker_of(&rows)?.map(|marker| marker.phase),
+            Some(agenc_relay_storage::e2ee_records::SnapshotPhase::Ready)
+        );
+        assert_eq!(fixture.edge.phase(), Phase::AwaitingActive);
+    }
+    Ok(())
+}
+
+/// No event queues around a held ACTIVE: the coordinator sends the new
+/// generation's events only after the origins replay that follows ACTIVE's
+/// commit, and an event that arrives before it is refused for its
+/// generation and closes the link (companion 12.5), so staging a held batch
+/// ahead of the event queue reorders nothing.
+#[tokio::test]
+async fn no_event_queues_while_active_waits_for_a_slot() -> TestResult {
+    let entries = entries(2)?;
+    let mut fixture = Fixture::resuming(true)?;
+    fixture.transfer(&entries)?;
+    super::open_other_batch(fixture.core.context_mut()?, &fixture.edge)?;
+    fixture.activate(digest_of(&entries)?)?;
+    assert!(fixture.edge.held.is_some(), "the ACTIVE batch is held");
+    let frames = super::event_frames(DELIVERY_GENERATION, 0, [40; 16])?;
+    let _outputs =
+        fixture
+            .edge
+            .handle_frames(fixture.core.context_mut()?, &mut fixture.base, frames);
+    assert!(fixture.edge.queued.is_empty(), "the event did not queue");
+    assert_eq!(fixture.edge.phase(), Phase::Down, "the link closed");
+    assert!(fixture.edge.held.is_none());
+    Ok(())
+}
+
+/// ACTIVE that arrives while another router's batch gathers waits for it in
+/// the same way, and the cut activates at the next receipt.
+#[tokio::test]
+async fn active_waits_while_another_router_gathers_a_batch() -> TestResult {
+    let entries = entries(2)?;
+    let mut fixture = Fixture::resuming(true)?;
+    fixture.transfer(&entries)?;
+    super::open_other_batch(fixture.core.context_mut()?, &fixture.edge)?;
+    fixture.activate(digest_of(&entries)?)?;
+    assert!(fixture.edge.held.is_some(), "the ACTIVE batch is held");
+    fixture.core.context_mut()?.discard_pending_for_test();
+    fixture
+        .edge
+        .batch_applied(fixture.core.context_mut()?, &mut fixture.base);
+    assert!(matches!(
+        fixture.edge.commit,
+        Some(crate::e2ee::edge::PendingCommit::SnapshotActive)
+    ));
+    let rows = fixture.commit()?;
+    assert_eq!(
+        marker_of(&rows)?.map(|marker| marker.phase),
+        Some(agenc_relay_storage::e2ee_records::SnapshotPhase::Active)
+    );
+    Ok(())
+}

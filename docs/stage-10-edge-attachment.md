@@ -29,9 +29,13 @@ landing during a companion storage read from failing the link: a read stays
 current across other routers' commits, its completion waits while a batch is
 open, a read across one of the coordinator's own commits is planned again,
 and a snapshot page read counts as companion work, one companion read at a
-time. No specification, profile hash, registry entry, named limit, reply
-code, wire object, table, key, row kind, field or storage generation
-changed.
+time. The sixth holds a snapshot page, ACTIVE or a witness resolution of the
+E2EE edge's that finds a batch open until none is, refuses one that finds an
+event queued, closes the link for a refused batch of the E2EE edge's, keeps
+the base edge's snapshot install and a complete barrier waiting for a free
+slot, and records the audit of the edge's other paths and a limitation. No
+specification, profile hash, registry entry, named limit, reply code, wire
+object, table, key, row kind, field or storage generation changed.
 
 ## A generation's declarations name one principal, and an attachment ends with its principal (first commit)
 
@@ -710,3 +714,142 @@ which counts the coordinator's own commits; and `cap79-fresh-object-018-run`
 and `-019-run-with-object`, for `companion::run`, which the object read now
 calls. The other regions of the changed files move with unchanged spans.
 Both source inventories are refreshed.
+
+## The edge's own batches wait for a free slot, and a refused one closes the link (sixth commit)
+
+The text these rules implement, companion Section 12.5:
+
+- "The edge admits the complete event and payload, validates the next exact
+  cursor [...] before opening its apply transaction"; "Only after commit
+  does it make frames visible and send EACK".
+- "After a same-incarnation link reconnect and profile negotiation, the edge
+  sends ERESUME with its durable cursor"; the coordinator "retransmits every
+  unacknowledged row byte-for-byte". An `ERESUME` begins a link's companion
+  synchronization, and an event that a refused batch undid is retransmitted
+  only on the next link.
+
+This commit carries the second commit of [the link resume
+record](stage-10-link-resume.md), under which an event waits while the state
+core cannot take its batch, to the edge's other batches, and closes the link
+for a batch of the E2EE router's that storage refused. The rules, in
+`crates/agenc-relay-runtime/src/e2ee/edge/`,
+`crates/agenc-relay-runtime/src/federation/edge/` and
+`crates/agenc-relay-runtime/src/registration.rs`:
+
+- **A batch of the E2EE edge's waits for a free slot.** A snapshot page's
+  `ESTATE END`, `ESTATE ACTIVE` and a witness resolution's `EWITNESS END`
+  stage a batch. The state core hands the E2EE router a companion frame in
+  the step that reads it from the link, while no batch is open, so such a
+  frame meets an open batch only when a role staged earlier in that step;
+  its batch then waits, as an event's does, instead of failing the link. A
+  batch that finds a batch open, the edge's own, one in flight, or one
+  another router gathers, is held (`stage_or_hold`, `HeldBatch`) and
+  staged once no batch is open, at the next receipt or after a refusal
+  (`stage_held`, from `batch_applied` and `drain_waiting_events`). While it
+  is held, events queue behind it (`holds_events`). At most one batch is
+  held: the coordinator sends the frame that stages the next one only after
+  this one's receipt, a page after `EFETCH`, ACTIVE after READY, and a
+  resolution answer after the request it answers; a second one is refused
+  as before. A held batch belongs to its link, and a link loss drops it
+  (`link_down`): the next link carries its frame again.
+- **No event queues ahead of a held batch.** A held batch is staged before
+  the events queued behind a batch (`stage_held` before `drain_queued`),
+  which reorders nothing, since no event is queued when a batch is held. A
+  snapshot page or ACTIVE arrives only on a link whose resume the
+  coordinator answered with a snapshot transfer (a transfer opens only
+  while resuming), and that link carries the new generation's events only
+  after the origin replay that follows ACTIVE's commit; an event that
+  arrives before is refused for its generation and closes the link. A
+  witness resolution is read only while every frame outside the resolution
+  family is dropped. A link loss empties the event queue. A batch that
+  finds an event queued is refused, and the link closes (`stage_or_hold`),
+  so no batch goes ahead of a queued event even if a frame arrives out of
+  that order.
+- **A refused batch of the E2EE edge's closes the link.** When storage
+  refuses a batch the E2EE router staged, an event, a snapshot page, READY,
+  ACTIVE, a migration step or a witness resolution, the event or step is
+  undone as before, and the edge closes its federation link
+  (`E2eeEdge::batch_rejected`, `EdgeFederation::fail_companion_storage`), as
+  the base edge closes it for its own refused batches. The next link's
+  `ERESUME` names the durable cursor, and the coordinator retransmits from
+  there; no `ERESUME` goes out on the link that carried the refused work.
+- **The base edge's snapshot install waits for a free slot.** At an install
+  batch's receipt, roles that settle the receipt before the base edge, such
+  as the registration router retrying a session close, can stage their own
+  batch first. The next batch of an install is staged only while no batch
+  is open (`installed`, `continue_install`); otherwise it waits and is
+  staged at the next receipt (`continue_storage_work`) or at the refusal of
+  the batch it waited for (`batch_rejected_with_error`).
+- **A complete barrier waits for a free slot.** A cross-profile barrier is
+  applied at a receipt, after the other roles settled it. Its transaction
+  is prepared and staged only while no batch is open
+  (`registration::apply_ready_barrier`); it applies at the next receipt or
+  the next frame of the link.
+
+The audit of the edge's other paths for the same pattern:
+
+- **Snapshot.** The base edge's snapshot frames, among them ACTIVE, are
+  handled only from the state core's inbox, which it reads only while no
+  batch is open, and the base edge handles each before any other role of
+  that step. The E2EE edge's migration and stray cleanup steps stage only
+  while no batch is open (`continue_snapshot`).
+- **Witness.** A durable witness violation row is staged by its retry
+  timer only while no batch is open, and waits for the next one otherwise
+  (`try_witness_stage`); a resolution's batch waits as above.
+- **Origin.** The base edge's origin journal stages only while no batch is
+  open and otherwise retries (`journal::continue_write`,
+  `storage_occupied`). The E2EE edge's origin frames stage nothing.
+
+A limitation is recorded, not changed. The edge acknowledges an exact
+duplicate at its installed cursor again ([the link resume
+record](stage-10-link-resume.md)), and two repeats are still refused and
+close the link: a cross-profile part whose position repeats the installed
+cursor, and a duplicate of an event whose commit is still in flight.
+Neither is reachable under the coordinator's resend rules. It retransmits
+only on a new link, and only the rows after the cursor that link's
+`ERESUME` names, which it takes as acknowledged (the link resume record's
+first commit); and the edge sends `ERESUME` only after the receipt of an
+event commit in flight (`link_active`).
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::edge::tests::snapshot::a_page_end_waits_while_another_router_gathers_a_batch` | A page's END that arrives while another router's batch gathers holds the page's batch; at that batch's receipt, or after storage refuses it, the batch stages, READY becomes durable and the edge awaits ACTIVE. |
+| `e2ee::edge::tests::snapshot::active_waits_while_another_router_gathers_a_batch` | ACTIVE that arrives while another router's batch gathers is held and stages at that batch's receipt, and the cut activates. |
+| `e2ee::edge::tests::projection::witness_persistence::resolution::a_resolution_end_waits_while_another_router_gathers_a_batch` | A witness resolution's END that arrives while another router's batch gathers is held with the link up, and an event that arrives then is dropped, not queued; the resolution stages at that batch's receipt, the head installs and `EWITNESS RESOLVED` follows its own receipt. |
+| `e2ee::edge::tests::snapshot::no_event_queues_while_active_waits_for_a_slot` | An event of the new generation that arrives while ACTIVE is held is refused, not queued, and the link closes. |
+| `e2ee::edge::tests::projection::event_admission::a_link_loss_drops_the_held_batch` | A batch held behind another router's batch is dropped at a link loss: that batch's receipt stages nothing of the edge's, and nothing waits. |
+| `e2ee::edge::tests::projection::event_admission::an_event_waits_behind_a_held_batch` | An event that arrives while a batch of the edge's is held queues behind it; the held batch stages first and the event applies at its receipt. |
+| `e2ee::edge::tests::projection::event_admission::a_second_batch_is_refused_while_one_is_held` | A second batch while one is held is refused, and nothing stages the held one while the other router's batch is still open. |
+| `e2ee::edge::tests::projection::event_admission::a_batch_that_finds_an_event_queued_is_refused` | A batch of the edge's that arrives while an event waits behind another router's batch is refused and not held, and the event applies at that batch's receipt. |
+| `e2ee::edge::tests::projection::event_admission::a_held_batch_the_state_core_refuses_closes_the_link` | A held batch the state core refuses once no batch is open closes the link. |
+| `e2ee::edge::tests::projection::event_admission::a_refused_event_batch_closes_the_link` | Storage refuses an event's batch: the event is undone, the federation link closes, the cursor stays at the installed position, and nothing goes out on that link. |
+| `federation::edge::sync::sync_stages::an_install_batch_waits_while_another_router_has_a_batch_open` | At an install batch's receipt where another router's batch gathers, and at a journal receipt then, the next install batch waits with the link up; it stages at that batch's receipt or after storage refuses it. |
+| `federation::edge::tests::restart::rollback::a_ready_barrier_waits_while_another_router_has_a_batch_open` | A complete barrier waits while another router's batch is open: nothing is staged, the link stays up and the route stays unbound; once that batch settles, the barrier applies. |
+
+`E2eeEdge::batch_rejected` now takes the state core and the base edge, and
+its two existing callers among the tests pass them.
+
+Single edits fail tests, each run on the E2EE edge, base edge or
+registration tests: holding a batch only behind the edge's own commit fails
+eight; staging the held batch at no receipt fails five, and at no refusal
+one; letting events pass a held batch fails one, and so does staging or
+holding a batch while an event is queued; letting a second batch replace the
+held one fails one, and so does dropping a held batch the state core refuses
+without closing the link; staging a page's or a resolution's batch at once
+fails one test each, and ACTIVE's two; keeping the link up for a refused
+batch fails one; keeping a held batch across a link loss fails two; staging
+an install batch at a receipt, or continuing one, while another router's
+batch gathers fails one test each, and so does continuing none at a receipt
+or at a refusal; and applying a complete barrier while a batch is open fails
+one. With `federation/edge/sync.rs` set back to the fifth commit, the
+install test fails.
+
+The release coverage policy gains `edge-companion-held-batch` and
+`edge-companion-held-staging` (branches) and
+`edge-companion-refused-batch`, `edge-companion-storage-refusal` and
+`edge-storage-continuation` (regions). It re-reviews and re-spans
+`edge-event-hold`, `edge-link-down-partial-objects`,
+`edge-snapshot-receiver`, `cap13-mod-batch-applied` and
+`cap13-mod-batch-rejected-with-error`, whose reasons now name the held
+batch and the waiting install; the other regions of the changed files move
+with unchanged spans. Both source inventories are refreshed.

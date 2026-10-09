@@ -336,7 +336,9 @@ async fn events_stay_in_order_behind_a_refused_batch() -> TestResult {
         .core
         .state_mut()?
         .reject_fixture_batch_before_submission(agenc_relay_storage::StorageError::QueueFull)?;
-    fixture.companion.batch_rejected();
+    fixture
+        .companion
+        .batch_rejected(fixture.core.context_mut()?, &mut fixture.base);
     let context = fixture.core.context_mut()?;
     let _outputs = fixture
         .companion
@@ -396,5 +398,175 @@ async fn an_event_never_applies_ahead_of_one_still_waiting() -> TestResult {
         fixture.commit().await?;
         assert_eq!(acknowledged(&fixture.sent().await), vec![expected]);
     }
+    Ok(())
+}
+
+/// Storage refuses the event's own batch: the event is undone and the
+/// federation link closes, as for a refused batch of the base edge's, so
+/// the next link resumes from the durable cursor; nothing goes out on the
+/// link that delivered the event.
+#[tokio::test]
+async fn a_refused_event_batch_closes_the_link() -> TestResult {
+    let mut fixture = Fixture::new().await?;
+    assert!(!fixture.deliver(7)?);
+    assert!(matches!(
+        fixture.companion.commit,
+        Some(crate::e2ee::edge::PendingCommit::Event { .. })
+    ));
+    assert!(fixture.base.current_companion_link_id().is_some());
+    fixture
+        .core
+        .state_mut()?
+        .reject_fixture_batch_before_submission(agenc_relay_storage::StorageError::QueueFull)?;
+    fixture
+        .companion
+        .batch_rejected(fixture.core.context_mut()?, &mut fixture.base);
+    assert!(
+        fixture.base.current_companion_link_id().is_none(),
+        "the link closed"
+    );
+    assert_eq!(fixture.companion.phase(), crate::e2ee::edge::Phase::Down);
+    assert!(fixture.companion.commit.is_none());
+    assert_eq!(fixture.companion.delivery.cursor, Some(INSTALLED));
+    assert!(fixture.sent().await.is_empty());
+    Ok(())
+}
+
+/// An event that arrives while a batch of the edge's waits for a free slot
+/// queues behind it: the held batch stages first, and the event applies at
+/// that batch's receipt.
+#[tokio::test]
+async fn an_event_waits_behind_a_held_batch() -> TestResult {
+    let mut fixture = Fixture::new().await?;
+    fixture.stage_other_batch()?;
+    assert!(fixture.hold_step()?);
+    assert!(fixture.companion.held.is_some());
+    // The other batch is gone; the held batch still owns the next one.
+    fixture.core.context_mut()?.discard_pending_for_test();
+    assert!(!fixture.deliver(7)?);
+    assert_eq!(fixture.companion.queued.len(), 1, "the event waits");
+    assert!(fixture.companion.commit.is_none());
+    let _outputs = fixture
+        .companion
+        .batch_applied(fixture.core.context_mut()?, &mut fixture.base);
+    assert!(fixture.companion.held.is_none());
+    assert!(matches!(
+        fixture.companion.commit,
+        Some(crate::e2ee::edge::PendingCommit::SnapshotStep { .. })
+    ));
+    assert_eq!(fixture.companion.queued.len(), 1);
+    fixture.commit().await?;
+    assert!(matches!(
+        fixture.companion.commit,
+        Some(crate::e2ee::edge::PendingCommit::Event { .. })
+    ));
+    fixture.commit().await?;
+    assert_eq!(acknowledged(&fixture.sent().await), vec![7]);
+    Ok(())
+}
+
+impl Fixture {
+    /// Offers a migration step of the edge's while another router's batch
+    /// gathers; reports whether it was held.
+    fn hold_step(&mut self) -> TestResult<bool> {
+        let write = crate::e2ee::edge::events::cursor_write(
+            &self.companion.config,
+            &self.companion.delivery,
+        )
+        .map_err(|code| code.to_string())?;
+        Ok(self
+            .companion
+            .stage_or_hold(
+                self.core.context_mut()?,
+                vec![write],
+                crate::e2ee::edge::PendingCommit::SnapshotStep {
+                    done: false,
+                    switched_through: None,
+                },
+            )
+            .is_ok())
+    }
+}
+
+/// No batch of the edge's goes ahead of a queued event: a batch that finds
+/// an event queued is refused and not held, and the event applies at the
+/// other router's receipt.
+#[tokio::test]
+async fn a_batch_that_finds_an_event_queued_is_refused() -> TestResult {
+    let mut fixture = Fixture::new().await?;
+    fixture.stage_other_batch()?;
+    assert!(!fixture.deliver(7)?);
+    assert_eq!(fixture.companion.queued.len(), 1, "the event waits");
+    assert!(!fixture.hold_step()?, "the batch is refused");
+    assert!(fixture.companion.held.is_none());
+    fixture.commit().await?;
+    assert!(matches!(
+        fixture.companion.commit,
+        Some(crate::e2ee::edge::PendingCommit::Event { .. })
+    ));
+    Ok(())
+}
+
+/// A held batch belongs to the link whose frame made it: a link loss drops
+/// it, so nothing stages it at the receipt of the batch it waited for, and
+/// nothing waits behind it; the next link carries its frame again.
+#[tokio::test]
+async fn a_link_loss_drops_the_held_batch() -> TestResult {
+    let mut fixture = Fixture::new().await?;
+    fixture.stage_other_batch()?;
+    assert!(fixture.hold_step()?);
+    fixture.companion.link_down();
+    assert!(fixture.companion.held.is_none());
+    fixture.commit().await?;
+    assert!(
+        fixture.companion.commit.is_none(),
+        "nothing of the edge's staged"
+    );
+    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
+    assert!(
+        !fixture.companion.holds_events(fixture.core.context_mut()?),
+        "a later event does not wait"
+    );
+    Ok(())
+}
+
+/// Only one batch is held: a second one that finds a batch open is refused
+/// and the first stays held.
+#[tokio::test]
+async fn a_second_batch_is_refused_while_one_is_held() -> TestResult {
+    let mut fixture = Fixture::new().await?;
+    fixture.stage_other_batch()?;
+    assert!(fixture.hold_step()?);
+    assert!(!fixture.hold_step()?, "a second batch is refused");
+    // While the other batch is still open, nothing stages the held one.
+    let _outputs = fixture
+        .companion
+        .drain_waiting_events(fixture.core.context_mut()?, &mut fixture.base);
+    assert!(fixture.companion.held.is_some());
+    assert!(fixture.companion.commit.is_none());
+    Ok(())
+}
+
+/// A held batch the state core refuses once no batch is open closes the
+/// link, as a frame whose batch cannot be staged does.
+#[tokio::test]
+async fn a_held_batch_the_state_core_refuses_closes_the_link() -> TestResult {
+    let mut fixture = Fixture::new().await?;
+    fixture.stage_other_batch()?;
+    assert!(fixture.hold_step()?);
+    fixture.core.context_mut()?.discard_pending_for_test();
+    fixture
+        .core
+        .state_mut()?
+        .step_message(crate::state_core::inbox::StateCoreMessage::Signal(
+            crate::state_core::inbox::SignalEvent::Terminate,
+        ));
+    let _outputs = fixture
+        .companion
+        .batch_applied(fixture.core.context_mut()?, &mut fixture.base);
+    assert!(fixture.companion.held.is_none());
+    assert!(fixture.companion.commit.is_none());
+    assert!(fixture.base.current_companion_link_id().is_none());
+    assert_eq!(fixture.companion.phase(), crate::e2ee::edge::Phase::Down);
     Ok(())
 }

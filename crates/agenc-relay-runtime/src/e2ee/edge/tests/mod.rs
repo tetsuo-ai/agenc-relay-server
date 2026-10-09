@@ -143,6 +143,86 @@ pub(super) fn fill_client_cache(edge: &mut E2eeEdge) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// The frames of one ordinary event for the test edge at `generation` and
+/// `sequence`.
+pub(super) fn event_frames(
+    generation: u64,
+    sequence: u64,
+    id: [u8; 16],
+) -> Result<Vec<agenc_relay_e2ee::federation::frames::CompanionFrame>, Box<dyn std::error::Error>> {
+    use agenc_relay_e2ee::federation::frames::{CompanionFrame, DeliveryPosition};
+    use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
+    use agenc_relay_e2ee::objects::federation::{ArcFederationEvent, ArcFederationEventKind};
+    use agenc_relay_e2ee::tls::{Opaque, TlsEncode};
+    let position = DeliveryPosition {
+        server_id: [2; 16],
+        delivery_generation: generation,
+        delivery_sequence: sequence,
+        event_id: id,
+    };
+    let event = ArcFederationEvent {
+        profile_version: 1,
+        network_id: [1; 32],
+        target_server_id: [2; 16],
+        delivery_generation: generation,
+        coordinator_state_generation: 5,
+        delivery_sequence: sequence,
+        event_id: id,
+        event_kind: ArcFederationEventKind::RequestCompleted,
+        cross_profile_mutation_id: Opaque::new(Vec::new())?,
+        cross_profile_part_index: 0,
+        cross_profile_part_count: 0,
+        conversation_id: Opaque::new(Vec::new())?,
+        route_sequence: 0,
+        origin_id: Opaque::new(Vec::new())?,
+        origin_generation: 0,
+        source_view: Opaque::new(Vec::new())?,
+        request_home_server_id: Opaque::new(Vec::new())?,
+        request_server_incarnation: Opaque::new(Vec::new())?,
+        request_origin_id: Opaque::new(Vec::new())?,
+        request_origin_generation: 0,
+        request_operation_sequence: 0,
+        request_id: Opaque::new(Vec::new())?,
+        payload_object_id: Opaque::new(Vec::new())?,
+        encoded_event_result: Opaque::new(Vec::new())?,
+    };
+    let bytes =
+        ArcWireObject::new(ArcWireObjectKind::FederationEvent, event.encode()?)?.encode()?;
+    let object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
+    Ok(agenc_relay_e2ee::wire::fragment::fragment_object(&bytes)?
+        .into_iter()
+        .map(|fragment| CompanionFrame::Event {
+            position,
+            object_id,
+            fragment,
+        })
+        .collect())
+}
+
+/// Another router's checkpoint gathers in the state core, so a batch of
+/// the edge's could not join it. Its one row repeats `edge`'s durable
+/// cursor unchanged.
+pub(super) fn open_other_batch(
+    context: &mut crate::state_core::StateCoreContext,
+    edge: &E2eeEdge,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let write = super::events::cursor_write(&edge.config, &edge.delivery)
+        .map_err(|code| code.to_string())?
+        .at_revision(plan.resulting_revision().get())?;
+    context
+        .stage_durable_with_account_service(
+            plan,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+            vec![write],
+        )
+        .map_err(|error| format!("other batch: {error:?}"))?;
+    assert_eq!(context.pending_len(), 1);
+    Ok(())
+}
+
 fn edge() -> E2eeEdge {
     E2eeEdge::new(E2eeEdgeConfig {
         network_id: [1; 32],

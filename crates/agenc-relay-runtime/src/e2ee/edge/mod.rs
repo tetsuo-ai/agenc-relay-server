@@ -257,6 +257,10 @@ pub struct E2eeEdge {
     route_objects: BTreeMap<[u8; 32], Vec<u8>>,
     conversations: BTreeMap<[u8; 32], events::Conversation>,
     commit: Option<PendingCommit>,
+    /// A batch of this router's that found a batch open: a snapshot page,
+    /// ACTIVE or a witness resolution. It is staged once no batch is open
+    /// (`stage_held`).
+    held: Option<Box<events::HeldBatch>>,
     /// The record-chain violation the witness found in the current frame,
     /// recorded durably before the link closes.
     witnessed: Option<([u8; 32], agenc_relay_storage::e2ee_records::WitnessRow)>,
@@ -355,6 +359,7 @@ impl E2eeEdge {
             route_objects: BTreeMap::new(),
             conversations: BTreeMap::new(),
             commit: None,
+            held: None,
             witnessed: None,
             witness_failure: witness_failure::WitnessFailure::default(),
             witness_recovery: witness_recovery::WitnessRecovery::default(),
@@ -406,6 +411,7 @@ impl E2eeEdge {
         // A resolution token belongs to one link incarnation (12.5.1).
         self.witness_resolution = None;
         self.snapshot_link_down();
+        self.held = None;
         self.queued.clear();
         self.events_in.clear();
         self.barrier_pending = None;

@@ -411,6 +411,78 @@ async fn a_settled_install_batch_is_the_last_one_of_a_stopping_edge() -> TestRes
     Ok(())
 }
 
+/// Another router's checkpoint gathers in the state core, so a batch of
+/// the edge's could not join it.
+fn open_other_batch(
+    edge: &EdgeFederation,
+    context: &mut crate::state_core::StateCoreContext,
+) -> TestResult {
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let write = edge
+        .peer_row(edge.cursor, plan.resulting_revision().get())
+        .map_err(|violation| format!("peer row: {violation:?}"))?;
+    context
+        .stage_durable_with_account_service(
+            plan,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+            vec![write],
+        )
+        .map_err(|error| format!("other batch: {error:?}"))?;
+    assert_eq!(context.pending_len(), 1);
+    Ok(())
+}
+
+/// The receipt of an install batch at which another router staged its
+/// batch leaves the next install batch waiting, with the link up; that
+/// batch's receipt, or its refusal, stages it.
+#[tokio::test]
+async fn an_install_batch_waits_while_another_router_has_a_batch_open() -> TestResult {
+    for refused in [false, true] {
+        let mut fixture = StateCoreFixture::new(vec![1; 256])?;
+        let mut edge = edge();
+        let _queue = link(&mut edge, HUB_EPOCH);
+        edge.phase = Phase::Snapshot;
+        edge.snapshot = Some(SnapshotInstall {
+            verified: true,
+            staged_end: Some(1),
+            ..installing(sessions(&[20, 21])?)
+        });
+        open_other_batch(&edge, fixture.context_mut()?)?;
+        assert!(installed(&mut edge, fixture.context_mut()?).is_empty());
+        // A journal receipt continues the install the same way.
+        continue_install(&mut edge, fixture.context_mut()?);
+        assert!(edge.live.is_some(), "the link stays up");
+        assert_eq!(edge.counters.violations, 0);
+        assert!(edge.commit.is_none(), "the next batch waits");
+        if refused {
+            fixture
+                .state_mut()?
+                .reject_fixture_batch_before_submission(
+                    agenc_relay_storage::StorageError::QueueFull,
+                )?;
+            edge.batch_rejected_with_error(
+                fixture.context_mut()?,
+                agenc_relay_storage::StorageError::QueueFull,
+            );
+        } else {
+            fixture.commit_staged_batch().await?;
+            assert!(edge.batch_applied(fixture.context_mut()?).is_empty());
+        }
+        assert!(
+            matches!(edge.commit, Some(PendingCommit::SnapshotInstalled)),
+            "refused={refused}"
+        );
+        assert_eq!(
+            edge.snapshot.as_ref().map(|snapshot| snapshot.staged_end),
+            Some(Some(2))
+        );
+        assert!(edge.live.is_some());
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_last_install_batch_sends_ready_and_resyncs_its_clients() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![1; 256])?;
