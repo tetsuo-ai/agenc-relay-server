@@ -956,14 +956,29 @@ fn signed_by(device: u8, tbs: ArcRecoverySubmissionTbs) -> TestResult<(Vec<u8>, 
     Ok((bytes, submission_id))
 }
 
+/// Attaches the principal's device `device` to the origin, as its own
+/// attachment does in the directory.
 fn attach_as(harness: &mut Harness, device: u8) -> TestResult {
+    let digest = agenc_relay_e2ee::ids::account_id_digest(&NETWORK, &harness.account)?;
     let origin = harness
         .coordinator
         .state
         .origins
         .get_mut(&origin_key())
         .ok_or("origin")?;
-    let generation = origin.device.map_or(1, |(_, generation)| generation);
+    let directory = &mut harness.coordinator.state.directory;
+    let challenge = directory
+        .attach_begin(digest, [device; 16], origin.connection_id, NOW)
+        .map_err(|error| format!("{error:?}"))?;
+    let generation = directory
+        .attach_finish(
+            digest,
+            [device; 16],
+            origin.connection_id,
+            challenge.reserved_generation,
+            NOW,
+        )
+        .map_err(|error| format!("{error:?}"))?;
     origin.device = Some(([device; 16], generation));
     Ok(())
 }

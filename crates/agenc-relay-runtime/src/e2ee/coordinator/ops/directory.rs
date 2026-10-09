@@ -460,7 +460,12 @@ pub fn fetch_binding_locks(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 pub fn whoami(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     exec.params().none()?;
     let account = exec.account_id()?;
-    let generation = exec.origin.device.map_or(0, |(_, generation)| generation);
+    // Zero names no current attachment (companion 11.6).
+    let generation = exec
+        .coordinator
+        .state
+        .current_attachment(exec.origin)
+        .map_or(0, |(_, generation)| generation);
     Ok(Outcome::scalar(ResultBody::Account(account, generation)))
 }
 

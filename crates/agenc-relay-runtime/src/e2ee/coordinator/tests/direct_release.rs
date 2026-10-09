@@ -116,10 +116,32 @@ fn remote_key() -> CompanionOriginKey {
 }
 
 /// A second connection on the home edge: the first account of the pair
-/// with an attached device.
+/// with an attached device, the current attachment of a roster-active
+/// device in the directory.
 fn host_remote(harness: &mut Harness) -> TestResult {
+    use agenc_relay_domain::e2ee::directory::{AccountEntry, Attachment, RosterHead};
     let hosted = pair()?.0;
     let digest = agenc_relay_e2ee::ids::account_id_digest(&NETWORK, &hosted)?;
+    harness.coordinator.state.directory.restore_account(
+        digest,
+        AccountEntry {
+            roster: Some(RosterHead {
+                generation: 0,
+                roster_id: [40; 32],
+                root_fingerprint: [41; 32],
+                object_id: [42; 32],
+                active_devices: std::collections::BTreeSet::from([[9; 16]]),
+            }),
+            attachments: std::collections::BTreeMap::from([(
+                [9; 16],
+                Attachment {
+                    session_generation: 1,
+                    challenge: None,
+                },
+            )]),
+            ..AccountEntry::default()
+        },
+    );
     harness.coordinator.state.origins.insert(
         remote_key(),
         CompanionOrigin {
@@ -498,5 +520,47 @@ fn an_interrupted_cut_the_edge_no_longer_hosts_is_retired_not_republished() -> T
     assert!(fresh.iter().any(|line| line.contains(" ESTATE BEGIN ")));
     assert!(fresh.iter().all(|line| !line.contains(" ESTATE ENTRY ")));
     assert_ne!(fresh.first(), first.first());
+    Ok(())
+}
+
+/// A direct standing is held only by a live origin of the edge itself that
+/// holds the current attachment of a device of one of the pair's accounts:
+/// not by one of another edge, a fenced one, or one still suspended once
+/// the edge replayed its origin set.
+#[test]
+fn a_standing_needs_a_live_origin_of_the_edge_with_a_current_attachment() -> TestResult {
+    let (mut harness, _channel, _route) = hosted()?;
+    let (first, second) = pair()?;
+    let accounts = [first, second];
+    let standing = |harness: &Harness, peer: ServerId, replayed: bool| {
+        super::super::direct_release::attached_at(
+            &harness.coordinator.state,
+            &NETWORK,
+            (peer, replayed),
+            &accounts,
+        )
+    };
+    let home = ServerId::from_bytes(HOME);
+    assert!(standing(&harness, home, false));
+    assert!(standing(&harness, home, true));
+    assert!(!standing(&harness, ServerId::from_bytes([12; 16]), false));
+    let remote = harness
+        .coordinator
+        .state
+        .origins
+        .get_mut(&remote_key())
+        .ok_or("remote origin")?;
+    remote.suspended = true;
+    assert!(standing(&harness, home, false), "suspended before a replay");
+    assert!(!standing(&harness, home, true), "not declared again");
+    let remote = harness
+        .coordinator
+        .state
+        .origins
+        .get_mut(&remote_key())
+        .ok_or("remote origin")?;
+    remote.suspended = false;
+    remote.fenced = true;
+    assert!(!standing(&harness, home, false));
     Ok(())
 }

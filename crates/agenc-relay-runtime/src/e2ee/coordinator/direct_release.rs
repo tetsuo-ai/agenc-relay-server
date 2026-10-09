@@ -26,10 +26,10 @@ const RELEASES_PER_PLAN: usize = 16;
 /// Whether `peer` hosts `account` in the base profile.
 pub(super) type HostsBase<'a> = dyn Fn(ServerId, &[u8; 24]) -> bool + 'a;
 
-/// Whether a live companion origin of `peer` holds an attached device of
-/// one of `accounts`. A fenced origin's connection has ended, and so has one
-/// still suspended once the edge `replayed` its origin set after a link
-/// loss: it was not declared again.
+/// Whether a live companion origin of `peer` holds the current attachment
+/// of a device of one of `accounts`. A fenced origin's connection has
+/// ended, and so has one still suspended once the edge `replayed` its
+/// origin set after a link loss: it was not declared again.
 pub(super) fn attached_at(
     state: &CompanionState,
     network_id: &[u8; 32],
@@ -44,7 +44,7 @@ pub(super) fn attached_at(
         origin.home_server_id == *peer.as_bytes()
             && !origin.fenced
             && !(origin.suspended && replayed)
-            && origin.device.is_some()
+            && state.current_attachment(origin).is_some()
             && origin
                 .account_digest
                 .is_some_and(|digest| digests.contains(&digest))

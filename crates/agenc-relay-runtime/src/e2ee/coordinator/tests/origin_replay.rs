@@ -394,3 +394,42 @@ fn origin_sequence_floor_rejects_generation_rollback_and_isolates_incarnations()
     );
     Ok(())
 }
+
+/// A request without a replay row under an origin its deletion or a refused
+/// declaration fenced is classified as fenced, which refuses it for good
+/// (companion 12.5); one under a suspended origin, which a reconnect may
+/// declare again, is still a violation.
+#[test]
+fn a_fenced_origin_classifies_a_request_without_a_replay_row_as_fenced() -> TestResult {
+    let mut coordinator = coordinator();
+    declare(&mut coordinator, 0)?;
+    assert_eq!(
+        request::classify(&coordinator.state, HOME, &decoded(0, 0)?),
+        Classified::Fresh
+    );
+    let origin = coordinator
+        .state
+        .origins
+        .get_mut(&origin_key())
+        .ok_or("origin")?;
+    origin.suspended = true;
+    assert_eq!(
+        request::classify(&coordinator.state, HOME, &decoded(0, 0)?),
+        Classified::Violation
+    );
+    let origin = coordinator
+        .state
+        .origins
+        .get_mut(&origin_key())
+        .ok_or("origin")?;
+    origin.suspended = false;
+    origin.fenced = true;
+    for (generation, sequence) in [(0, 0), (0, 3), (1, 0)] {
+        assert_eq!(
+            request::classify(&coordinator.state, HOME, &decoded(generation, sequence)?),
+            Classified::Fenced,
+            "({generation}, {sequence})"
+        );
+    }
+    Ok(())
+}

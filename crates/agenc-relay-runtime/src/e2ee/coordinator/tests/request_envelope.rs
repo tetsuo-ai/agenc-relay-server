@@ -88,6 +88,9 @@ fn a_payload_must_hash_to_the_identifier_the_request_declares() -> TestResult {
     Ok(())
 }
 
+/// A request under another generation or a suspended origin is a
+/// violation; one under a fenced origin is refused for good without an
+/// answer (`Classified::Fenced`, companion 12.5).
 #[test]
 fn a_request_from_a_fenced_suspended_or_regenerated_origin_is_a_violation() -> TestResult {
     let mut harness = Harness::new()?;
@@ -107,7 +110,10 @@ fn a_request_from_a_fenced_suspended_or_regenerated_origin_is_a_violation() -> T
     let honest = complete_with(&harness, |_, _| {})?;
     let decoded = request::decode(&harness.coordinator, &honest)
         .map_err(|code| format!("decode failed with {code:?}"))?;
-    for (name, fenced, suspended) in [("fenced", true, false), ("suspended", false, true)] {
+    for (name, fenced, suspended, classified) in [
+        ("fenced", true, false, Classified::Fenced),
+        ("suspended", false, true, Classified::Violation),
+    ] {
         let origin = harness
             .coordinator
             .state
@@ -118,7 +124,7 @@ fn a_request_from_a_fenced_suspended_or_regenerated_origin_is_a_violation() -> T
         origin.suspended = suspended;
         assert_eq!(
             request::classify(&harness.coordinator.state, HOME, &decoded),
-            Classified::Violation,
+            classified,
             "{name}"
         );
         let origin = harness

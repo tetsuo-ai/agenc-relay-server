@@ -334,6 +334,11 @@ current generation. The rules, in
   declaration of the accepted state is acknowledged again after the device
   attaches elsewhere (first commit).
 
+[The edge attachment record](stage-10-edge-attachment.md) (second commit)
+replaces the refusal of a superseded attachment: such a declaration is
+mirrored as it stands, with no device authority, and every other
+disagreement of a well-formed declaration is refused for its origin alone.
+
 | Test | What it pins |
 | --- | --- |
 | `e2ee::coordinator::tests::sync::superseded_attachments::a_declaration_naming_a_superseded_attachment_closes_only_its_origin` | The directory is at generation two; the declaration naming generation one is not acknowledged and fences the origin where it stood, a later declaration (a logout still naming the device) is refused alike, and the deletion naming the generation refused last is acknowledged. |

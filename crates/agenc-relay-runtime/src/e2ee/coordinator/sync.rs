@@ -390,7 +390,7 @@ impl CompanionCoordinator {
         }
         let mirrored = match self.mirror_origin(&origin, &bytes, &base) {
             Ok(mirrored) => mirrored,
-            Err(MirrorFault::Superseded) => {
+            Err(MirrorFault::Disagrees) => {
                 return Ok(self.refuse_declaration(peer, origin_key, descriptor.origin_generation));
             }
             Err(MirrorFault::Violation(fault)) => return Err(fault),
@@ -413,8 +413,8 @@ impl CompanionCoordinator {
     /// Refuses a declaration for its origin alone (companion 12.5): nothing
     /// is acknowledged, the origin is fenced at the generation and next
     /// sequence it holds, as a deletion there would, and every later
-    /// declaration of it is refused alike until the edge deletes it, naming
-    /// the generation refused last. The link stays up.
+    /// declaration of it is refused alike until the edge deletes it. The
+    /// link stays up.
     fn refuse_declaration(
         &mut self,
         peer: ServerId,
@@ -542,24 +542,32 @@ impl CompanionCoordinator {
         })
     }
 
-    /// An attached device needs an account and the directory's current
-    /// session generation; absence needs both fields empty. A generation the
-    /// directory has since advanced past names an attachment another
-    /// attachment of the device superseded (companion 11.6).
+    /// A device and a nonzero session generation are named together or not
+    /// at all (companion 12.5); anything else is a violation. A named
+    /// attachment is mirrored when the directory reached its session
+    /// generation for the declared account: the current one, or one another
+    /// attachment of the device superseded since, which stays mirrored as an
+    /// accepted attachment does and holds no device authority
+    /// (`ops::Exec::attached_device`, companion 11.6, 11.9). A device named
+    /// without an account, or at a generation the directory never reached
+    /// for the declared account, names an attachment its principal does not
+    /// hold, and the declaration is refused for its origin.
     fn mirrored_device(
         &self,
         origin: &ArcFederationOrigin,
         account_digest: Option<[u8; 32]>,
     ) -> Result<Option<([u8; 16], u64)>, MirrorFault> {
         let generation = origin.device_session_generation;
-        match (optional16(&origin.attached_device_id)?, account_digest) {
-            (None, _) if generation == 0 => Ok(None),
-            (Some(device), Some(digest)) if generation != 0 => {
-                let current = self.state.directory.session_generation(&digest, &device);
-                match current.cmp(&generation) {
-                    std::cmp::Ordering::Equal => Ok(Some((device, generation))),
-                    std::cmp::Ordering::Greater => Err(MirrorFault::Superseded),
-                    std::cmp::Ordering::Less => Err(CompanionFault::Protocol.into()),
+        match optional16(&origin.attached_device_id)? {
+            None if generation == 0 => Ok(None),
+            Some(device) if generation != 0 => {
+                let reached = account_digest.is_some_and(|digest| {
+                    self.state.directory.session_generation(&digest, &device) >= generation
+                });
+                if reached {
+                    Ok(Some((device, generation)))
+                } else {
+                    Err(MirrorFault::Disagrees)
                 }
             }
             _ => Err(CompanionFault::Protocol.into()),
@@ -646,7 +654,10 @@ impl CompanionCoordinator {
 
     /// EORIGIN DEL (12.5): the edge supplies its next unused sequence under
     /// the generation this coordinator holds, at or above the next sequence
-    /// executed here, and the origin is fenced there for good.
+    /// executed here, and the origin is fenced there for good. A deletion
+    /// naming another generation, or a sequence below the executed one,
+    /// closes that origin alone where it stands: its connection ended, and
+    /// the fence keeps the generation and sequence the coordinator holds.
     pub(super) fn origin_del(
         &mut self,
         peer: ServerId,
@@ -661,23 +672,25 @@ impl CompanionCoordinator {
             server_incarnation: descriptor.server_incarnation,
             origin_id: descriptor.origin_id,
         };
-        // A deletion naming the generation of a refused declaration finds
-        // the origin fenced by that refusal; an origin this coordinator
-        // never learned (its connection ended while the coordinator was
-        // down) has nothing to fence: requests under it are refused already.
-        if self.refused_origins.get(&key) == Some(&descriptor.origin_generation) {
-            self.refused_origins.remove(&key);
-        } else if let Some(origin) = self.state.origins.get_mut(&key) {
-            if origin.generation != descriptor.origin_generation
-                || next_operation_sequence < origin.next_sequence
+        // A refused declaration fenced the origin already; an origin this
+        // coordinator never learned (its connection ended while the
+        // coordinator was down) has nothing to fence: requests under it are
+        // refused already.
+        let refused = self.refused_origins.remove(&key).is_some();
+        if let Some(origin) = self.state.origins.get_mut(&key)
+            && !refused
+        {
+            if origin.generation == descriptor.origin_generation
+                && next_operation_sequence >= origin.next_sequence
             {
-                return Err(CompanionFault::Protocol);
+                origin.next_sequence = next_operation_sequence;
             }
-            origin.next_sequence = next_operation_sequence;
             origin.fenced = true;
             // The connection ended: the edge's direct standings await a
             // hosting check by the next mutation plan (12.5).
             self.state.entitlements.mark_departure(peer);
+            let held = origin.generation;
+            self.state.mailbox_snapshots.close_origin(key, held);
         }
         self.state
             .mailbox_snapshots
@@ -1405,42 +1418,48 @@ fn accept_successor(
     Ok(())
 }
 
-/// The session and account of the object must equal the base principal:
-/// both session fields empty or both present, and an account exactly when
-/// the base is authenticated, with its nonzero session generation.
+/// The session and account of the object must equal the base principal.
+/// Both session fields are empty or both present, and an account is named
+/// exactly with a nonzero session generation (companion 12.5); anything
+/// else is a violation. A well-formed principal other than the base's at
+/// the declared generation is refused for its origin.
 fn mirrored_principal(
     origin: &ArcFederationOrigin,
     base: &BaseOriginView,
-) -> Result<Option<[u8; 24]>, CompanionFault> {
+) -> Result<Option<[u8; 24]>, MirrorFault> {
     let session_id = optional16(&origin.session_id)?;
     let user_id = optional16(&origin.user_id)?;
-    if session_id.is_some() != user_id.is_some() || session_id.zip(user_id) != base.session {
-        return Err(CompanionFault::Protocol);
-    }
     let account: Option<[u8; 24]> = match origin.account_id.as_slice() {
         [] => None,
         bytes => Some(bytes.try_into().map_err(|_| CompanionFault::Protocol)?),
     };
-    let matches = match (account, base.account) {
-        (None, None) => origin.account_session_generation == 0,
+    if session_id.is_some() != user_id.is_some()
+        || account.is_some() != (origin.account_session_generation != 0)
+    {
+        return Err(CompanionFault::Protocol.into());
+    }
+    let account_matches = match (account, base.account) {
+        (None, None) => true,
         (Some(mine), Some((theirs, generation))) => {
-            mine == theirs && generation != 0 && origin.account_session_generation == generation
+            mine == theirs && origin.account_session_generation == generation
         }
         _ => false,
     };
-    if matches {
+    if session_id.zip(user_id) == base.session && account_matches {
         Ok(account)
     } else {
-        Err(CompanionFault::Protocol)
+        Err(MirrorFault::Disagrees)
     }
 }
 
 /// Why a declaration's object is not mirrored.
 enum MirrorFault {
-    /// The device attachment it names is one another attachment of the
-    /// device superseded since: the declaration is refused for its origin.
-    Superseded,
-    /// Any other disagreement: a violation.
+    /// A well-formed declaration whose principal or device attachment the
+    /// coordinator's base origin or directory does not hold, as a logout or
+    /// an account switch leaves behind on an edge that kept the attachment:
+    /// the declaration is refused for its origin alone (companion 11.6).
+    Disagrees,
+    /// A malformed declaration: a violation.
     Violation(CompanionFault),
 }
 

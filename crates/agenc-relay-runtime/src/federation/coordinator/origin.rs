@@ -365,6 +365,15 @@ pub(super) fn delete(
             // it, the session would keep its nickname until the next reset.
             close_sessions(coordinator, context, peer, key);
         }
+        Err(OriginError::Fenced) => {
+            // A fenced origin already rejects every later request for good
+            // (spec 20.7): its deletion is acknowledged for that origin
+            // alone and changes nothing, whatever generation and sequence
+            // it names. Its connection is gone, so its sessions close.
+            close_sessions(coordinator, context, peer, key);
+            let _sent = coordinator.send_frame(context, link, peer, &frame);
+            return Ok(());
+        }
         Err(OriginError::UnknownOrigin)
             if coordinator.peers.get(&peer).is_some_and(|state| {
                 state.incarnation == Some(key.server_incarnation) && state.live.is_some()

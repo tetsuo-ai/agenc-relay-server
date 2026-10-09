@@ -488,6 +488,9 @@ pub enum Classified {
     Replay(Vec<u8>, Vec<Vec<u8>>),
     /// A gap, a reused request identifier, or different bytes at the key.
     Violation,
+    /// A request without a replay row under an origin its deletion or a
+    /// refused declaration fenced: the fence refuses it for good (12.5).
+    Fenced,
 }
 
 /// Classifies a request against the origin's sequence and retained rows.
@@ -520,8 +523,10 @@ pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Cl
     let Some(origin) = state.origins.get(&origin_key) else {
         return Classified::Violation;
     };
-    if origin.fenced
-        || origin.suspended
+    if origin.fenced {
+        return Classified::Fenced;
+    }
+    if origin.suspended
         || origin.generation != decoded.request.origin_generation
         || origin.next_sequence != decoded.request.operation_sequence
         || decoded.request.operation_sequence == u64::MAX

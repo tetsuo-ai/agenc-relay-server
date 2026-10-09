@@ -99,6 +99,10 @@ pub enum Staged {
     ReadResponses(super::response_read::Identity),
     /// A fresh authorized object lookup must complete before its result is staged.
     ReadObject(super::object_read::PendingRequest),
+    /// A request under a fenced origin, refused for good without an
+    /// answer or a durable row: its connection's deletion or a refused
+    /// declaration fenced the origin (companion 12.5, architecture 20.7).
+    Dropped,
 }
 
 /// Everything the owner supplies about the base state for one execution.
@@ -197,12 +201,34 @@ pub(crate) fn run_with_object(
     if decoded.request.home_server_id != home {
         return Err(E2eeReplyCode::InvalidFragment);
     }
-    let classified = request::classify(&coordinator.state, home, &decoded);
+    let classified = match request::classify(&coordinator.state, home, &decoded) {
+        // An origin whose first declaration was refused holds no state, and
+        // its refusal fences it as a deletion would.
+        Classified::Violation
+            if !coordinator
+                .state
+                .replays
+                .contains_key(&request::replay_key(home, &decoded.request))
+                && coordinator
+                    .refused_origins
+                    .contains_key(&CompanionOriginKey {
+                        home_server_id: home,
+                        server_incarnation: decoded.request.server_incarnation,
+                        origin_id: decoded.request.origin_id,
+                    }) =>
+        {
+            Classified::Fenced
+        }
+        classified => classified,
+    };
+    if matches!(classified, Classified::Fenced) {
+        return Ok(Staged::Dropped);
+    }
     if resolved.is_some() && !matches!(classified, Classified::Fresh) {
         return Err(E2eeReplyCode::OperationConflict);
     }
     match classified {
-        Classified::Fresh => {}
+        Classified::Fresh | Classified::Fenced => {}
         Classified::Replay(result, responses) => {
             return Ok(Staged::Replay(replay_lines(
                 coordinator,
@@ -455,12 +481,19 @@ fn base_hosts(context: &StateCoreContext, edge: ServerId, account: &[u8; 24]) ->
         .is_ok_and(|id| standing.is_some_and(|standing| standing.holds_account(id)))
 }
 
-fn attached_origin_edges(coordinator: &CompanionCoordinator, digest: &[u8; 32]) -> Vec<ServerId> {
-    let mut edges: Vec<ServerId> = coordinator
-        .state
+/// The edges hosting an origin of the account `digest` whose attachment is
+/// its device's current one (companion 12.5).
+pub(super) fn attached_origin_edges(
+    coordinator: &CompanionCoordinator,
+    digest: &[u8; 32],
+) -> Vec<ServerId> {
+    let state = &coordinator.state;
+    let mut edges: Vec<ServerId> = state
         .origins
         .values()
-        .filter(|origin| origin.account_digest == Some(*digest) && origin.device.is_some())
+        .filter(|origin| {
+            origin.account_digest == Some(*digest) && state.current_attachment(origin).is_some()
+        })
         .map(|origin| ServerId::from_bytes(origin.home_server_id))
         .collect();
     edges.sort();

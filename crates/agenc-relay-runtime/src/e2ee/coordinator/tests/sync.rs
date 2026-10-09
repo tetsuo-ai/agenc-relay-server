@@ -459,16 +459,11 @@ fn origins_mirror_the_acked_base_declaration() -> TestResult {
         semantic_id_of(SemanticHashDomain::FederationOriginState, &first)?
     );
     assert!(!stored.suspended);
-    // The identical declaration again is accepted without change.
+    // The identical declaration again is accepted without change. A
+    // principal or attachment the base origin or the directory does not
+    // hold is refused for its origin alone (`origin_refusals`,
+    // `superseded_attachments`).
     assert_eq!(frames(&sync.declare(false, 0, &bytes)?)?.len(), 1);
-
-    // A principal that differs from the base is refused: the object names
-    // an account the base origin does not carry.
-    let (_, unauthenticated) = origin_object(0, [0; 32], Some((sync.harness.account, 3)), None)?;
-    assert_eq!(
-        sync.declare(false, 0, &unauthenticated).err(),
-        Some(CompanionFault::Protocol)
-    );
 
     // The base moved to generation one with an account; the companion
     // UPDATE must name the accepted predecessor and mirror the account.
@@ -480,23 +475,6 @@ fn origins_mirror_the_acked_base_declaration() -> TestResult {
     let (_, wrong_previous) = origin_object(1, [9; 32], Some((sync.harness.account, 3)), None)?;
     assert_eq!(
         sync.declare(true, 1, &wrong_previous).err(),
-        Some(CompanionFault::Protocol)
-    );
-    let (_, wrong_generation) =
-        origin_object(1, stored.state_id, Some((sync.harness.account, 4)), None)?;
-    assert_eq!(
-        sync.declare(true, 1, &wrong_generation).err(),
-        Some(CompanionFault::Protocol)
-    );
-    let (_, attached) = origin_object(
-        1,
-        stored.state_id,
-        Some((sync.harness.account, 3)),
-        Some(([7; 16], 1)),
-    )?;
-    // The device is not attached in the directory yet.
-    assert_eq!(
-        sync.declare(true, 1, &attached).err(),
         Some(CompanionFault::Protocol)
     );
     let (_, update) = origin_object(1, stored.state_id, Some((sync.harness.account, 3)), None)?;
@@ -520,18 +498,7 @@ fn origins_mirror_the_acked_base_declaration() -> TestResult {
     assert_eq!(updated.next_sequence, 0);
     assert_eq!(updated.account_id, Some(sync.harness.account));
 
-    // DEL must name the generation in force; then the origin is fenced.
-    assert_eq!(
-        sync.frame(CompanionFrame::OriginDel {
-            coordinator_server_id: COORDINATOR,
-            server_incarnation: INCARNATION,
-            origin_id: ORIGIN,
-            origin_generation: 0,
-            next_operation_sequence: 5,
-        })
-        .err(),
-        Some(CompanionFault::Protocol)
-    );
+    // DEL names the generation in force; then the origin is fenced.
     let acks = frames(&sync.frame(CompanionFrame::OriginDel {
         coordinator_server_id: COORDINATOR,
         server_incarnation: INCARNATION,

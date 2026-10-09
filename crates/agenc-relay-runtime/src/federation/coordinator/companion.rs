@@ -583,6 +583,18 @@ pub(super) fn run_with_object(
         None => execute::run(executor, view, link, peer, complete, &facts_for),
     }
     .map_err(code_violation)?;
+    continue_staged(coordinator, context, (link, peer), &correlation, staged)
+}
+
+/// Continues what one execution staged: a storage read, the batch, a
+/// replayed result, or nothing for a dropped request.
+fn continue_staged(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    (link, peer): (LinkId, ServerId),
+    correlation: &agenc_relay_e2ee::federation::frames::Correlation,
+    staged: Staged,
+) -> Result<(), Violation> {
     match staged {
         Staged::ReadObject(request) => {
             super::object_read::submit(coordinator, context, link, peer, request)
@@ -600,7 +612,15 @@ pub(super) fn run_with_object(
             Ok(())
         }
         Staged::Replay(lines) => {
-            replayed(coordinator, context, (link, peer), &correlation, lines);
+            replayed(coordinator, context, (link, peer), correlation, lines);
+            Ok(())
+        }
+        // The fence refuses the request for good; its objects leave the
+        // recent-object cache, and the link stays up.
+        Staged::Dropped => {
+            if let Some(executor) = coordinator.companion_exec.as_mut() {
+                executor.request_answered(peer, correlation);
+            }
             Ok(())
         }
     }

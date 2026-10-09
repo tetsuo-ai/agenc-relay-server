@@ -597,7 +597,7 @@ fn a_declaration_naming_a_fenced_session_is_refused_for_its_origin() -> TestResu
 }
 
 #[test]
-fn a_superseded_attachment_declared_to_a_restarted_coordinator_is_refused_for_its_origin()
+fn a_superseded_attachment_declared_to_a_restarted_coordinator_holds_no_device_authority()
 -> TestResult {
     run_relayed(|network, relay, coordinator| {
         wait_for_link(&network.edge_a, 0)?;
@@ -633,10 +633,15 @@ fn a_superseded_attachment_declared_to_a_restarted_coordinator_is_refused_for_it
         account_ready(&mut session_b, "ready")?;
         step("edge B attach", attach(&mut session_b, &mut keys))?;
         // Edge A's next link declares its session's attachment again; the
-        // coordinator refuses that origin alone.
+        // coordinator mirrors it as it stands, an attachment edge B's
+        // superseded: the session is served, and its device-requiring
+        // commands are refused with E2EE_DEVICE_REQUIRED.
         heal_and_hold(network, relay, || {
-            let refused = step("edge A whoami", whoami(&mut session_a, "a1"))?;
-            assert_contains(&refused, "E2EE_SYNCING")?;
+            let answered = step("edge A whoami", whoami(&mut session_a, "a1"))?;
+            assert_contains(&answered, " EKEY ACCOUNT ")?;
+            session_a.send("@label=a2 EKEY FETCH MAILBOX BINDING *")?;
+            let refused = step("edge A mailbox", labeled_reply(&mut session_a, "a2"))?;
+            assert_contains(&refused, "E2EE_DEVICE_REQUIRED")?;
             let answered = step("edge B whoami", whoami(&mut session_b, "b1"))?;
             assert_contains(&answered, " EKEY ACCOUNT ")?;
             drop(session_a);

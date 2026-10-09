@@ -75,7 +75,10 @@ The rule at the coordinator, in
   edge supplies is its next unused one, which counts every request the edge
   sent under that generation.
 - The origin is fenced at the stated sequence, which a repeated deletion must
-  not undercut; a lower sequence or another generation is refused.
+  not undercut; a lower sequence or another generation is refused. [The
+  edge attachment record](stage-10-edge-attachment.md) (second commit)
+  replaces that refusal: such a deletion closes its origin alone where it
+  stands.
 
 `crates/agenc-relay-runtime/src/e2ee/edge/tests/origins.rs` drives the real
 `E2eeEdge` and delivers every `EORIGIN` line it queues to the real companion

@@ -86,7 +86,8 @@ impl Store {
                     !origin.fenced
                         && origin.generation == scope.origin_generation
                         && origin.account_digest == Some(scope.target.account_digest)
-                        && origin.device == Some((scope.target.device_id, scope.session_generation))
+                        && state.current_attachment(origin)
+                            == Some((scope.target.device_id, scope.session_generation))
                 })
         });
         self.release_empty();
