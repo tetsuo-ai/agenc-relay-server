@@ -22,9 +22,9 @@ use crate::limits::{
 };
 use crate::mls_outer::PublicKeyPackage;
 use crate::objects::identity::{
-    ArcCredentialBundle, ArcDeviceCapabilities, ArcDeviceCertificate, ArcDeviceCertificateTbs,
-    ArcDeviceEnrollmentTbs, ArcDeviceRoster, ArcDeviceRosterTbs, ArcLeafAuthorization,
-    ArcLeafAuthorizationTbs, ArcRootIdentity, KNOWN_AUTHORIZATION_FLAGS,
+    ArcCredentialBundle, ArcDeviceCapabilities, ArcDeviceCapabilitiesTbs, ArcDeviceCertificate,
+    ArcDeviceCertificateTbs, ArcDeviceEnrollmentTbs, ArcDeviceRoster, ArcDeviceRosterTbs,
+    ArcLeafAuthorization, ArcLeafAuthorizationTbs, ArcRootIdentity, KNOWN_AUTHORIZATION_FLAGS,
 };
 use crate::objects::{ACCOUNT_ID_BYTES, account_id_bytes};
 use crate::signature::{RoleKey, SignerRole};
@@ -369,7 +369,10 @@ enum RosterAdmission<'a> {
 }
 
 /// Verifies one roster under its root and optional predecessor: generation
-/// zero without one, otherwise the generation after it.
+/// zero without one, otherwise the generation after it. Roster generations
+/// are scoped to the root fingerprint (companion 14), so a predecessor that
+/// another root signed is refused; [`roster_predecessor`] selects the one a
+/// roster continues.
 ///
 /// A certificate enrolled for this generation needs an enrollment interval
 /// that covers the roster's `not_before`; one enrolled for an earlier
@@ -382,6 +385,20 @@ pub fn verify_roster(
     predecessor: Option<&VerifiedRoster>,
 ) -> Result<VerifiedRoster, E2eeError> {
     verify_roster_lineage(root, roster, RosterAdmission::Checked(predecessor))
+}
+
+/// The accepted roster a roster signed under `root` continues, from the
+/// account's accepted roster `head` under whichever root signed it
+/// (companion 14: roster generations are scoped to the root fingerprint,
+/// starting at zero). A head of the same root is the predecessor; a head of
+/// an earlier root belongs to that root's lineage, so the roster starts the
+/// lineage of its own root.
+#[must_use]
+pub fn roster_predecessor<'a>(
+    root: &VerifiedRoot,
+    head: Option<&'a VerifiedRoster>,
+) -> Option<&'a VerifiedRoster> {
+    head.filter(|head| head.root_fingerprint == root.fingerprint)
 }
 
 /// Verifies a roster of a root whose roster lineage this caller has never
@@ -464,7 +481,7 @@ fn verify_roster_lineage(
     )?;
     match admission {
         RosterAdmission::Checked(predecessor) => {
-            check_roster_lineage(tbs.roster_generation, &tbs.previous_roster_id, predecessor)?;
+            check_roster_lineage(tbs, predecessor)?;
         }
         RosterAdmission::FirstContact(_) => {
             check_lineage_shape(tbs.roster_generation, &tbs.previous_roster_id)?;
@@ -522,15 +539,19 @@ fn verify_roster_lineage(
     })
 }
 
+/// Generation zero with an all-zero predecessor, or exactly the generation
+/// after a predecessor of the same root that the roster names (companion 8.4
+/// and 14).
 fn check_roster_lineage(
-    generation: u64,
-    previous_id: &[u8; 32],
+    tbs: &ArcDeviceRosterTbs,
     predecessor: Option<&VerifiedRoster>,
 ) -> Result<(), E2eeError> {
+    let (generation, previous_id) = (tbs.roster_generation, &tbs.previous_roster_id);
     match predecessor {
         None if generation == 0 && *previous_id == [0; 32] => Ok(()),
         Some(previous)
-            if previous.generation.checked_add(1) == Some(generation)
+            if previous.root_fingerprint == tbs.root_fingerprint
+                && previous.generation.checked_add(1) == Some(generation)
                 && *previous_id == previous.roster_id =>
         {
             Ok(())
@@ -668,6 +689,9 @@ pub struct VerifiedCapabilities {
     pub generation: u64,
     /// Capability identifier.
     pub capability_id: SemanticId,
+    /// The fingerprint of the root of the roster the statement names, whose
+    /// capability lineage it belongs to (companion 14).
+    pub root_fingerprint: SemanticId,
     /// Validity.
     pub interval: Interval,
     /// Supported suites in declared order.
@@ -677,13 +701,30 @@ pub struct VerifiedCapabilities {
 }
 
 /// Verifies a capability statement for a device active in `roster`. The
-/// statement's signed network must be the roster's.
+/// statement's signed network must be the roster's. Capability generations
+/// are scoped to the root fingerprint and Device ID (companion 14), so a
+/// predecessor of another root or device is refused;
+/// [`capability_predecessor`] selects the one a statement continues.
 pub fn verify_capabilities(
     roster: &VerifiedRoster,
     capabilities: &ArcDeviceCapabilities,
     predecessor: Option<&VerifiedCapabilities>,
 ) -> Result<VerifiedCapabilities, E2eeError> {
     verify_capabilities_lineage(roster, capabilities, Lineage::Checked(predecessor))
+}
+
+/// The accepted statement a capability statement naming `roster` continues,
+/// from the device's accepted statement `head` under whichever root (companion
+/// 14: capability generations are scoped to the root fingerprint and Device
+/// ID, starting at zero). A head of the roster's root is the predecessor; a
+/// head of an earlier root belongs to that root's lineage, so the statement
+/// starts the device's lineage under its own root.
+#[must_use]
+pub fn capability_predecessor<'a>(
+    roster: &VerifiedRoster,
+    head: Option<&'a VerifiedCapabilities>,
+) -> Option<&'a VerifiedCapabilities> {
+    head.filter(|head| head.root_fingerprint == roster.root_fingerprint)
 }
 
 /// Verifies a capability statement of a device whose capability lineage this
@@ -749,12 +790,7 @@ fn verify_capabilities_lineage(
         ensure_canonical(vector, |value| *value)?;
     }
     match lineage {
-        Lineage::Checked(predecessor) => check_capability_lineage(
-            tbs.device_id,
-            tbs.capability_generation,
-            &tbs.previous_capability_id,
-            predecessor,
-        )?,
+        Lineage::Checked(predecessor) => check_capability_lineage(tbs, predecessor)?,
         Lineage::FirstContact => {
             check_lineage_shape(tbs.capability_generation, &tbs.previous_capability_id)?;
         }
@@ -769,6 +805,7 @@ fn verify_capabilities_lineage(
         device_id: tbs.device_id,
         generation: tbs.capability_generation,
         capability_id: semantic_id_of(SemanticHashDomain::CapabilityId, tbs)?,
+        root_fingerprint: tbs.root_fingerprint,
         interval,
         cipher_suites: tbs.cipher_suites.as_slice().to_vec(),
         versions: tbs.versions.as_slice().to_vec(),
@@ -789,16 +826,19 @@ fn statement_names_roster(
         && roster_id == roster.roster_id)
 }
 
+/// Generation zero with an all-zero predecessor, or exactly the generation
+/// after a predecessor of the same device and root that the statement names
+/// (companion 8.5 and 14).
 fn check_capability_lineage(
-    device_id: [u8; 16],
-    generation: u64,
-    previous_id: &SemanticId,
+    tbs: &ArcDeviceCapabilitiesTbs,
     predecessor: Option<&VerifiedCapabilities>,
 ) -> Result<(), E2eeError> {
+    let (generation, previous_id) = (tbs.capability_generation, &tbs.previous_capability_id);
     match predecessor {
         None if generation == 0 && *previous_id == [0; 32] => Ok(()),
         Some(previous)
-            if previous.device_id == device_id
+            if previous.device_id == tbs.device_id
+                && previous.root_fingerprint == tbs.root_fingerprint
                 && previous.generation.checked_add(1) == Some(generation)
                 && *previous_id == previous.capability_id =>
         {

@@ -43,6 +43,7 @@ pub(crate) mod direct_release;
 mod directory_faults;
 mod live_payloads;
 mod request_envelope;
+mod root_lineage;
 mod sequence;
 pub(crate) mod support;
 pub(crate) mod sync;
@@ -730,15 +731,15 @@ fn reload_preserves_published_policies_after_root_rotation() -> TestResult {
     )?;
     let bytes = wire(ArcWireObjectKind::RootIdentity, &root)?;
     ok(harness.run(Op::PublishIdentity, &[], Some(&bytes))?)?;
-    let mut device = DeviceSpec::new(DEVICE);
-    device.target_roster_generation = 1;
+    // The continued root's first roster starts its own lineage at generation
+    // zero (companion 14).
     let roster = support::roster(
         &secret,
         &root,
-        1,
-        support::roster_id(&harness.principal.roster)?,
+        0,
+        [0; 32],
         (100, 100 + 6 * 24 * 3600),
-        vec![certificate(&secret, &root, &device)?],
+        vec![certificate(&secret, &root, &DeviceSpec::new(DEVICE))?],
         Vec::new(),
     )?;
     let bytes = wire(ArcWireObjectKind::DeviceRoster, &roster)?;

@@ -24,6 +24,9 @@ use agenc_relay_e2ee::objects::recovery::{
 use agenc_relay_e2ee::tls::TlsVec;
 use agenc_relay_storage::E2eeRecoveryKind;
 
+#[path = "recovery_submission/expired_roster.rs"]
+mod expired_roster;
+
 /// `close_authorization::finish` at an explicit validation time.
 fn finish_at(
     source: &mut Harness,

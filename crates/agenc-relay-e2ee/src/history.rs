@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod finalization;
+mod liveness;
 mod membership;
 mod reinit;
 
@@ -65,9 +66,11 @@ pub struct RecordReferences<'a> {
     pub attempt_object: Option<&'a [u8]>,
     /// The `policy` object a policy transition installs.
     pub policy_object: Option<&'a [u8]>,
-    /// `root_identity` successors, one per continued root, oldest first.
+    /// `root_identity` successors, at most one per account whose root the
+    /// record continues; an exact repeat is installed once.
     pub root_objects: &'a [&'a [u8]],
-    /// `device_roster` objects a roster transition installs.
+    /// `device_roster` objects a roster transition installs, at most one per
+    /// account; an exact repeat is installed once.
     pub roster_objects: &'a [&'a [u8]],
     /// The `conversation_binding` package a binding transition installs.
     pub binding_object: Option<&'a [u8]>,

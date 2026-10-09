@@ -13,9 +13,10 @@
 //! (`owners`) from the batch that stores the statement until the row's
 //! deletion, so a replaced roster stays retained while a live
 //! conversation's statement names it, and also after a later proof
-//! replaces the proof that named it. A replaced roster that no route row
-//! holds is collected once the retention window has passed, and a first
-//! proof that names it after that is refused.
+//! replaces the proof that named it. A device's capability row also holds
+//! the roster its head names (`owners`). A replaced roster that no route
+//! row and no capability row holds is collected once the retention window
+//! has passed, and a first proof that names it after that is refused.
 //!
 //! For each root a policy names, the roster held is the earliest retained
 //! one of that root, by roster generation, that verifies under the root and

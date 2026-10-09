@@ -3,12 +3,16 @@
 //! 13.1).
 
 use agenc_relay_crypto::{SemanticHashDomain, SignatureDomain};
-use agenc_relay_domain::e2ee::directory::{CapabilityHead, ClaimOutcome, ClaimParameters, Package};
+use std::collections::BTreeSet;
+
+use agenc_relay_domain::e2ee::directory::{
+    CapabilityHead, ClaimOutcome, ClaimParameters, Directory, Package,
+};
 use agenc_relay_domain::e2ee::limits::MAX_BATCH_OBJECTS;
 use agenc_relay_domain::e2ee::projection::{EmptyKind, StoreKind};
 use agenc_relay_e2ee::identity::{
-    ValidationTime, verify_capabilities, verify_key_package_credential, verify_root_identity,
-    verify_roster,
+    ValidationTime, VerifiedRoot, capability_predecessor, roster_predecessor, verify_capabilities,
+    verify_key_package_credential, verify_root_identity, verify_roster,
 };
 use agenc_relay_e2ee::limits::{
     MAX_CAPABILITY_OBJECT, MAX_DEVICE_ATTACH_OBJECT, MAX_IDENTITY_OBJECT, MAX_KEY_PACKAGE_OBJECT,
@@ -154,12 +158,7 @@ pub fn publish_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     if root.tbs.account_id.as_slice() != account_id {
         return Err(E2eeReplyCode::AccountRequired.into());
     }
-    let predecessor = exec
-        .coordinator
-        .state
-        .principals
-        .get(&account_digest)
-        .map(|(root, _)| root);
+    let predecessor = newest_root(exec, &account_digest);
     let verified = verify_root_identity(&exec.coordinator.network_id, &root, predecessor)
         .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
     let object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
@@ -194,19 +193,30 @@ pub fn publish_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     )?);
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
-        let roster = companion
-            .principals
-            .remove(&account_digest)
-            .map(|(_, roster)| roster);
-        if let Some(roster) = roster {
-            companion
-                .principals
-                .insert(account_digest, (verified, roster));
-        } else {
-            companion.pending_roots.insert(account_digest, verified);
-        }
+        // The new root awaits its first roster; until then the account keeps
+        // its current root and roster (companion 8.2 and 14).
+        companion.pending_roots.insert(account_digest, verified);
     }));
     Ok(outcome)
+}
+
+/// The account's newest root: one published after its current roster's
+/// root and awaiting its own first roster, or otherwise the root of its
+/// current roster.
+fn newest_root<'a>(exec: &'a Exec<'_>, account_digest: &[u8; 32]) -> Option<&'a VerifiedRoot> {
+    let state = &exec.coordinator.state;
+    state
+        .pending_roots
+        .get(account_digest)
+        .or_else(|| state.principals.get(account_digest).map(|(root, _)| root))
+}
+
+/// The devices whose capability heads the directory holds for an account.
+fn capability_devices(directory: &Directory, account_digest: &[u8; 32]) -> BTreeSet<[u8; 16]> {
+    directory
+        .account(account_digest)
+        .map(|entry| entry.capabilities.keys().copied().collect())
+        .unwrap_or_default()
 }
 
 /// `fetch_roster`.
@@ -241,19 +251,20 @@ pub fn publish_roster(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     if roster.tbs.account_id.as_slice() != account_id {
         return Err(E2eeReplyCode::AccountRequired.into());
     }
-    let (root, previous) = match (
-        exec.coordinator.state.principals.get(&account_digest),
-        exec.coordinator.state.pending_roots.get(&account_digest),
-    ) {
-        (Some((root, roster)), _) => (root, Some(roster)),
-        (None, Some(root)) => (root, None),
-        (None, None) => return Err(E2eeReplyCode::BindingAuthInvalid.into()),
-    };
-    let verified = verify_roster(root, &roster, previous)
+    let root = newest_root(exec, &account_digest)
+        .ok_or_else(|| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
+    let head = exec
+        .coordinator
+        .state
+        .principals
+        .get(&account_digest)
+        .map(|(_, roster)| roster);
+    let verified = verify_roster(root, &roster, roster_predecessor(root, head))
         .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
     let object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
-    let devices: std::collections::BTreeSet<[u8; 16]> = verified.devices.keys().copied().collect();
+    let devices: BTreeSet<[u8; 16]> = verified.devices.keys().copied().collect();
     let mut directory = exec.coordinator.state.directory.clone();
+    let held = capability_devices(&directory, &account_digest);
     let burned = directory
         .publish_roster(
             account_digest,
@@ -288,11 +299,28 @@ pub fn publish_roster(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
         );
     }
+    // A head the directory no longer holds, of a device that left the roster
+    // or of an earlier root, leaves storage in the same batch.
+    let dropped: Vec<[u8; 16]> = held
+        .difference(&capability_devices(&directory, &account_digest))
+        .copied()
+        .collect();
+    for device in &dropped {
+        let key = DirectoryRow::capability_key(&account_digest, device)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+        outcome.writes.push(
+            crate::state_core::durable::AccountServiceDurableWrite::delete(TableId::E2eeState, key)
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        );
+    }
     let root = *root;
     outcome.effects.push(Box::new(move |companion| {
         companion.directory = directory;
         super::super::roster_snapshots::retain(companion, &verified, object_id);
         companion.pending_roots.remove(&account_digest);
+        for device in dropped {
+            companion.capabilities.remove(&(account_digest, device));
+        }
         companion
             .principals
             .insert(account_digest, (root, verified));
@@ -361,12 +389,12 @@ pub fn publish_capabilities(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .principals
         .get(&account_digest)
         .ok_or_else(|| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
-    let previous = exec
+    let head = exec
         .coordinator
         .state
         .capabilities
         .get(&(account_digest, device_id));
-    let verified = verify_capabilities(roster, &capabilities, previous)
+    let verified = verify_capabilities(roster, &capabilities, capability_predecessor(roster, head))
         .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
     if capabilities.tbs.device_id != device_id {
         return Err(E2eeReplyCode::DeviceRequired.into());

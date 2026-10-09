@@ -399,6 +399,18 @@ rows written before that rule, the held generation declared with its
 acknowledged principal and daemon tests of such a restart (D-41 with G-08,
 SDK program, outside master #35), are recorded in [the origin journal
 record](stage-10-origin-journal.md).
+The historical chain's check of the roots and rosters a finalization uses,
+and of those it installs, against the Commit's canonical validation time,
+with the narrow roster recovery from an expired roster (B-15), and the
+account's roster and capability lineages started at generation zero under
+each root, with the account's roster kept while a new root awaits its
+first roster and attachment counters kept in their account and device
+scope, and each capability head restored against the roster it names,
+which its capability row keeps retained, with only statements naming the
+current roster listed as current, the restore of directory stores
+written before these rules and a daemon test of a root rotation across
+coordinator restarts (B-16 with G-08, SDK program, outside master #35),
+are recorded in [the E2EE lineage record](stage-10-e2ee-lineage.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
