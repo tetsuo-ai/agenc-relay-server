@@ -413,8 +413,12 @@ coordinator restarts (B-16 with G-08, SDK program, outside master #35),
 are recorded in [the E2EE lineage record](stage-10-e2ee-lineage.md).
 The shared verification of an ordinary group's generation-zero binding at a
 later semantic incarnation, anchored at the verified close of the incarnation
-before it (B-14, SDK program, outside master #35), is recorded in [the
-recreated routes record](stage-10-recreated-routes.md).
+before it, and the coordinator's route table keying each incarnation by its
+own lock and each semantic route's lineage by the lock of its incarnation
+zero, so that a closed route binds its next incarnation and a closed direct
+pair is reserved again, live and after a restart alike (B-14, SDK program,
+outside master #35), are recorded in [the recreated routes
+record](stage-10-recreated-routes.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

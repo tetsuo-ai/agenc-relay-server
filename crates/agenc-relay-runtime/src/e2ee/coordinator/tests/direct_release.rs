@@ -98,6 +98,7 @@ fn retain_direct(harness: &mut Harness) -> TestResult<Vec<u8>> {
             AccountId::parse_wire_bytes(&second)?,
         )?),
         lock: SemanticLockId([23; 32]),
+        lineage: SemanticLockId([23; 32]),
         incarnation: 0,
         binding_id: [34; 32],
         binding_generation: 0,

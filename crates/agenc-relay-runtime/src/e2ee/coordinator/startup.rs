@@ -2346,6 +2346,35 @@ fn fill_proofs(conversation: &mut ConversationState, proofs: &[(ProofKeyParts, [
     }
 }
 
+/// The semantic incarnation of a restored route, the close it follows and
+/// its lineage (companion 9.4).
+struct RestoredSemantics {
+    incarnation: u64,
+    predecessor_close_id: Option<[u8; 32]>,
+    lineage: [u8; 32],
+}
+
+/// The semantics of the route `row` stores, taken from the semantic route of
+/// its retained binding, as BIND took them, never from the row: a row that
+/// names another semantic lock, or another close than the binding's, restores
+/// nothing.
+fn restored_semantics(
+    network_id: &[u8; 32],
+    route: &agenc_relay_e2ee::objects::conversation::ArcSemanticRouteTbs,
+    row: &RouteRow,
+) -> Option<RestoredSemantics> {
+    let semantic = agenc_relay_e2ee::route::verify_semantic_route(network_id, route).ok()?;
+    let predecessor_close_id = (semantic.incarnation > 0).then_some(semantic.predecessor_close_id);
+    if row.lock_id != semantic.lock_id || row.predecessor_close_id != predecessor_close_id {
+        return None;
+    }
+    Some(RestoredSemantics {
+        incarnation: semantic.incarnation,
+        predecessor_close_id,
+        lineage: semantic.lineage_lock_id(network_id).ok()?,
+    })
+}
+
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one route is rebuilt from its row, its state object, and its binding package in one pass so the entry, log, lifecycle, and conversation facts agree
 fn restore_route(
     state: &mut CompanionState,
@@ -2368,11 +2397,13 @@ fn restore_route(
         (RecoveryState::Normal, RecoveryGate::Normal)
     };
     let tbs = &package.binding.tbs;
+    let semantic = restored_semantics(network_id, &tbs.semantic_route, row)?;
     let entry = RouteEntry {
         conversation_id: ConversationId(conversation_id),
         target,
         lock: SemanticLockId(row.lock_id),
-        incarnation: u64::from(row.predecessor_close_id.is_some()),
+        lineage: SemanticLockId(semantic.lineage),
+        incarnation: semantic.incarnation,
         binding_id: row.binding_id,
         binding_generation: tbs.binding_generation,
         lifecycle: route_lifecycle(row),
@@ -2430,7 +2461,7 @@ fn restore_route(
             .sequencer_credential_id
             .unwrap_or(tbs.sequencer_credential_id),
         blocked_credential_id: row.blocked_credential_id,
-        predecessor_close_id: row.predecessor_close_id,
+        predecessor_close_id: semantic.predecessor_close_id,
         last_validation_time,
         reinit,
         reinit_facts: Some(

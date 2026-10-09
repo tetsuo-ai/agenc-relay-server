@@ -1,9 +1,12 @@
 //! Bounded explicit-state exploration of the encrypted route model: the
 //! route table, one sequencer log and lifecycle per conversation, and the
 //! plaintext gate, driven by every action a client or a faulty sender can
-//! attempt (companion 12.1 to 12.4, 13.7, 13.8, 17). The explorer walks every
-//! action sequence to the recorded depth, deduplicates states by their
-//! observable shape, and checks the invariants after every transition.
+//! attempt (companion 9.4, 12.1 to 12.4, 13.7, 13.8, 17). The explorer walks
+//! every action sequence to the recorded depth, deduplicates states by their
+//! observable shape, and checks the invariants after every transition. A
+//! closed conversation's semantic route may be recreated at its next
+//! incarnation on a fresh channel instance; each conversation slot then
+//! holds the newest incarnation.
 //!
 //! The model is pure: it uses the domain crate only, and every identifier
 //! is a deterministic function of the action that produced it, so a
@@ -63,6 +66,10 @@ pub enum Action {
     Close(u8),
     /// Bind again after the close under the same lock (a reopen attempt).
     Reopen(u8),
+    /// Reserve a fresh channel instance and bind the next semantic
+    /// incarnation of the closed conversation's route there, under that
+    /// incarnation's lock, naming the close (companion 9.4 and 11.3).
+    Recreate(u8),
 }
 
 /// One conversation's state.
@@ -80,6 +87,8 @@ struct Conversation {
     closed: Option<[u8; 32]>,
     /// Whether a ReInit Commit finalized, closing the old group.
     reinit: bool,
+    /// The semantic incarnation the slot holds.
+    incarnation: u64,
 }
 
 /// The explorable world.
@@ -159,16 +168,32 @@ fn account(index: u8) -> Result<AccountId, Violation> {
     AccountId::parse_wire_bytes(&bytes).map_err(|_| Violation::Model("account"))
 }
 
-fn instance(conversation: u8) -> ChannelInstanceId {
-    ChannelInstanceId::from_bytes([conversation.saturating_add(1); 16])
+/// The identifier byte of a conversation's incarnation: the conversation
+/// index itself at incarnation zero, so the first incarnation keeps its
+/// identifiers.
+fn slot(conversation: u8, incarnation: u64) -> u8 {
+    let step = u8::try_from(incarnation % 16).unwrap_or_default();
+    conversation.wrapping_add(step.wrapping_mul(16))
 }
 
-fn conversation_id(conversation: u8) -> ConversationId {
-    ConversationId(id(1, conversation, 0, 0))
+fn instance_at(conversation: u8, incarnation: u64) -> ChannelInstanceId {
+    ChannelInstanceId::from_bytes([slot(conversation, incarnation).saturating_add(1); 16])
 }
 
-fn lock(conversation: u8) -> SemanticLockId {
-    SemanticLockId(id(2, conversation, 0, 0))
+fn conversation_id_at(conversation: u8, incarnation: u64) -> ConversationId {
+    ConversationId(id(1, slot(conversation, incarnation), 0, 0))
+}
+
+fn lock_at(conversation: u8, incarnation: u64) -> SemanticLockId {
+    SemanticLockId(id(2, slot(conversation, incarnation), 0, 0))
+}
+
+/// The incarnation a conversation slot holds now.
+fn incarnation_of(world: &World, conversation: u8) -> u64 {
+    world
+        .conversations
+        .get(usize::from(conversation))
+        .map_or(0, |state| state.incarnation)
 }
 
 impl World {
@@ -185,6 +210,7 @@ impl World {
                     activated: false,
                     closed: None,
                     reinit: false,
+                    incarnation: 0,
                 })
                 .collect(),
             applications: vec![0; count],
@@ -232,6 +258,7 @@ impl Conversation {
         key.push(u8::from(self.activated));
         key.push(u8::from(self.closed.is_some()));
         key.push(u8::try_from(self.candidates.len()).unwrap_or(u8::MAX));
+        key.extend_from_slice(&self.incarnation.to_be_bytes());
     }
 }
 
@@ -258,11 +285,12 @@ fn step(world: &mut World, action: Action, accounts: u8) -> Result<bool, Violati
     match action {
         Action::Reserve(conversation) => {
             let owner = account(0)?;
+            let incarnation = incarnation_of(world, conversation);
             Ok(world
                 .routes
                 .reserve_channel(
                     ReservationId([conversation; 16]),
-                    instance(conversation),
+                    instance_at(conversation, incarnation),
                     owner,
                     1_000,
                 )
@@ -272,7 +300,15 @@ fn step(world: &mut World, action: Action, accounts: u8) -> Result<bool, Violati
             if who >= accounts {
                 return Ok(false);
             }
-            bind(world, conversation, who, 0, [0; 32])
+            let incarnation = incarnation_of(world, conversation);
+            let binding = Binding {
+                incarnation,
+                predecessor_close_id: [0; 32],
+                lock: lock_at(conversation, incarnation),
+                instance: instance_at(conversation, incarnation),
+                reservation: ReservationId([conversation; 16]),
+            };
+            bind(world, conversation, who, binding)
         }
         Action::Reopen(conversation) => {
             let Some(close_id) = world
@@ -284,31 +320,32 @@ fn step(world: &mut World, action: Action, accounts: u8) -> Result<bool, Violati
             };
             // A reopen under the same lock needs a destroyed instance and the
             // next incarnation; the model offers the old instance again.
-            let bound = bind(world, conversation, 0, 1, close_id)?;
-            if bound
-                && world
-                    .routes
-                    .channel_route(&instance(conversation))
-                    .is_some()
-            {
+            let incarnation = incarnation_of(world, conversation);
+            let old = instance_at(conversation, incarnation);
+            let binding = Binding {
+                incarnation: incarnation.saturating_add(1),
+                predecessor_close_id: close_id,
+                lock: lock_at(conversation, incarnation),
+                instance: old,
+                reservation: ReservationId([conversation; 16]),
+            };
+            let bound = bind(world, conversation, 0, binding)?;
+            if bound && world.routes.channel_route(&old).is_some() {
                 let reopened = world
                     .routes
-                    .channel_route(&instance(conversation))
-                    .is_some_and(|route| route.incarnation == 0);
+                    .channel_route(&old)
+                    .is_some_and(|route| route.incarnation == incarnation);
                 if reopened {
                     return Err(Violation::Reopened(trace()));
                 }
             }
             Ok(bound)
         }
+        Action::Recreate(conversation) => recreate(world, conversation),
         Action::Plaintext(conversation) => {
-            let allowed = world
-                .routes
-                .channel_plaintext_allowed(&instance(conversation));
-            let bound_or_tombstoned = world
-                .routes
-                .channel_route(&instance(conversation))
-                .is_some();
+            let instance = instance_at(conversation, incarnation_of(world, conversation));
+            let allowed = world.routes.channel_plaintext_allowed(&instance);
+            let bound_or_tombstoned = world.routes.channel_route(&instance).is_some();
             if allowed && bound_or_tombstoned {
                 return Err(Violation::PlaintextLeak(trace()));
             }
@@ -377,7 +414,7 @@ fn step(world: &mut World, action: Action, accounts: u8) -> Result<bool, Violati
             };
             let route_open = world
                 .routes
-                .route(&conversation_id(conversation))
+                .route(&conversation_id_at(conversation, state.incarnation))
                 .is_some_and(|route| route.accepts_traffic());
             let allowed = route_open && lifecycle.check_application(log).is_ok();
             if allowed && (!state.activated || state.closed.is_some()) {
@@ -413,45 +450,82 @@ fn closed_group(
     Ok(accepted)
 }
 
-fn bind(
-    world: &mut World,
-    conversation: u8,
-    who: u8,
+/// What one bind attempt names.
+struct Binding {
     incarnation: u64,
     predecessor_close_id: [u8; 32],
-) -> Result<bool, Violation> {
+    lock: SemanticLockId,
+    instance: ChannelInstanceId,
+    reservation: ReservationId,
+}
+
+fn bind(world: &mut World, conversation: u8, who: u8, binding: Binding) -> Result<bool, Violation> {
     let actor = account(who)?;
+    let tag = slot(conversation, binding.incarnation);
     let summary = BindingSummary {
-        conversation_id: conversation_id(conversation),
-        lock: lock(conversation),
-        incarnation,
-        predecessor_close_id,
+        conversation_id: conversation_id_at(conversation, binding.incarnation),
+        lock: binding.lock,
+        lineage: lock_at(conversation, 0),
+        incarnation: binding.incarnation,
+        predecessor_close_id: binding.predecessor_close_id,
         binding_id: id(
             3,
-            conversation,
-            u32::try_from(incarnation).unwrap_or(u32::MAX),
+            tag,
+            u32::try_from(binding.incarnation).unwrap_or(u32::MAX),
             who,
         ),
         binding_generation: 0,
         previous_binding_id: [0; 32],
-        channel_instance_id: Some(instance(conversation)),
+        channel_instance_id: Some(binding.instance),
         conversation_nonce: None,
     };
     let bound = world
         .routes
-        .bind(ReservationId([conversation; 16]), actor, summary, 1)
+        .bind(binding.reservation, actor, summary, 1)
         .is_ok();
     if bound && let Some(state) = world.conversations.get_mut(usize::from(conversation)) {
         state.log = Some(SequencerLog::genesis(
-            conversation_id(conversation).0,
-            id(4, conversation, 0, 0),
+            conversation_id_at(conversation, binding.incarnation).0,
+            id(4, tag, 0, 0),
         ));
         state.lifecycle = Some(Lifecycle::bootstrap());
         state.activated = false;
         state.closed = None;
         state.reinit = false;
+        state.candidates.clear();
+        state.records.clear();
+        state.incarnation = binding.incarnation;
     }
     Ok(bound)
+}
+
+/// Recreates the closed conversation's semantic route: a fresh channel
+/// instance is reserved and bound at the next incarnation, under that
+/// incarnation's lock, naming the close (companion 9.4 and 11.3).
+fn recreate(world: &mut World, conversation: u8) -> Result<bool, Violation> {
+    let Some(state) = world.conversations.get(usize::from(conversation)) else {
+        return Ok(false);
+    };
+    let (Some(close_id), Some(next)) = (state.closed, state.incarnation.checked_add(1)) else {
+        return Ok(false);
+    };
+    let fresh = instance_at(conversation, next);
+    let reservation = ReservationId([slot(conversation, next); 16]);
+    if world
+        .routes
+        .reserve_channel(reservation, fresh, account(0)?, 1_000)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let binding = Binding {
+        incarnation: next,
+        predecessor_close_id: close_id,
+        lock: lock_at(conversation, next),
+        instance: fresh,
+        reservation,
+    };
+    bind(world, conversation, 0, binding)
 }
 
 fn submit_candidate(
@@ -475,14 +549,15 @@ fn submit_candidate(
     let Ok(position) = log.candidate_position(prior_epoch) else {
         return Ok(false);
     };
+    let tag = slot(conversation, state.incarnation);
     let candidate_id = id(
         5,
-        conversation,
+        tag,
         u32::try_from(position.route_sequence).unwrap_or(u32::MAX),
         salt,
     );
     if log
-        .record_candidate(candidate_id, id(6, conversation, 0, salt), position)
+        .record_candidate(candidate_id, id(6, tag, 0, salt), position)
         .is_err()
     {
         return Ok(false);
@@ -515,23 +590,24 @@ fn terminal(
     let Some(log) = state.log.as_mut() else {
         return Ok(false);
     };
-    let Some(slot) = log.candidate().copied() else {
+    let Some(open) = log.candidate().copied() else {
         return Ok(false);
     };
+    let incarnation_tag = slot(conversation, state.incarnation);
     let candidate_id = if reordered {
-        id(5, conversation, 0, 9)
+        id(5, incarnation_tag, 0, 9)
     } else {
-        slot.candidate_id
+        open.candidate_id
     };
     let sequence =
-        u32::try_from(slot.position.route_sequence.saturating_add(1)).unwrap_or(u32::MAX);
+        u32::try_from(open.position.route_sequence.saturating_add(1)).unwrap_or(u32::MAX);
     let tag = match kind {
         Terminal::Finalize => 7,
         Terminal::Abort => 8,
         Terminal::Reinit => 10,
     };
-    let terminal_id = id(tag, conversation, sequence, 0);
-    let resulting_epoch = slot.position.prior_epoch.saturating_add(1);
+    let terminal_id = id(tag, incarnation_tag, sequence, 0);
+    let resulting_epoch = open.position.prior_epoch.saturating_add(1);
     let result = match kind {
         Terminal::Finalize => log.finalize(&candidate_id, terminal_id, resulting_epoch),
         Terminal::Reinit => log.finalize_reinit(&candidate_id, terminal_id, resulting_epoch),
@@ -540,7 +616,7 @@ fn terminal(
     let Ok(position) = result else {
         return Ok(false);
     };
-    if position.route_sequence != slot.position.route_sequence.saturating_add(1) {
+    if position.route_sequence != open.position.route_sequence.saturating_add(1) {
         return Err(Violation::Discontinuity(world.trace.clone()));
     }
     state.records.push(terminal_id);
@@ -568,11 +644,11 @@ fn close(world: &mut World, conversation: u8) -> Result<bool, Violation> {
     if !state.activated {
         return Ok(false);
     }
-    let close_id = id(9, conversation, 0, 0);
+    let close_id = id(9, slot(conversation, state.incarnation), 0, 0);
     let Ok(_position) = log.close(close_id) else {
         return Ok(false);
     };
-    let conversation_key = conversation_id(conversation);
+    let conversation_key = conversation_id_at(conversation, state.incarnation);
     let closed = world
         .routes
         .begin_close(&conversation_key)
@@ -629,6 +705,7 @@ fn actions(bounds: E2eeModelBounds) -> Vec<Action> {
             Action::Application(conversation),
             Action::Close(conversation),
             Action::Reopen(conversation),
+            Action::Recreate(conversation),
         ]);
     }
     all
@@ -664,6 +741,26 @@ fn expand(world: &World, table: &[Action], accounts: u8, result: &mut Exploratio
         }
     }
     Expanded::Successors(successors, advanced)
+}
+
+/// Replays one action sequence from the empty world, past any depth bound,
+/// checking every invariant after each action as the explorer does: whether
+/// each action was accepted, or the first violation. A refused action
+/// leaves the world as it was.
+pub fn replay_e2ee(bounds: E2eeModelBounds, script: &[Action]) -> Result<Vec<bool>, Violation> {
+    let mut world = World::new(bounds);
+    let mut accepted = Vec::with_capacity(script.len());
+    for action in script {
+        let mut next = world.clone();
+        let outcome = step(&mut next, *action, bounds.accounts)?;
+        check(&next)?;
+        if outcome {
+            next.trace.push(*action);
+            world = next;
+        }
+        accepted.push(outcome);
+    }
+    Ok(accepted)
 }
 
 /// Explores every action sequence up to `bounds.depth`.

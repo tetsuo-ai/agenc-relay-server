@@ -121,6 +121,50 @@ pub struct SemanticRoute {
     pub lock_id: SemanticId,
 }
 
+impl SemanticRoute {
+    /// The semantic route lock of this route's incarnation zero on
+    /// `network_id`: one value for every incarnation of the route, by which
+    /// a route table keys the lineage whose later incarnations each name the
+    /// close of the one before (companion 9.4). It is the lock identifier of
+    /// the route's first incarnation, so it adds no identifier of its own.
+    pub fn lineage_lock_id(&self, network_id: &[u8; 32]) -> Result<SemanticId, E2eeError> {
+        let (name, authority, account_a, account_b) = match &self.key {
+            SemanticRouteKey::Channel {
+                canonical_name,
+                authority_root,
+            } => (
+                Opaque::from_slice(canonical_name)?,
+                *authority_root,
+                Opaque::new(Vec::new())?,
+                Opaque::new(Vec::new())?,
+            ),
+            SemanticRouteKey::Direct {
+                account_a,
+                account_b,
+            } => (
+                Opaque::new(Vec::new())?,
+                [0; 32],
+                Opaque::from_slice(account_a)?,
+                Opaque::from_slice(account_b)?,
+            ),
+        };
+        semantic_id_of(
+            SemanticHashDomain::SemanticRouteLock,
+            &ArcSemanticRouteTbs {
+                profile_version: PROFILE_VERSION,
+                network_id: *network_id,
+                kind: self.kind,
+                direct_account_a: account_a,
+                direct_account_b: account_b,
+                canonical_channel_name: name,
+                channel_authority_root_fingerprint: authority,
+                semantic_incarnation: 0,
+                predecessor_close_id: [0; 32],
+            },
+        )
+    }
+}
+
 /// Verifies the shape of a semantic route and computes its lock ID.
 pub fn verify_semantic_route(
     network_id: &[u8; 32],

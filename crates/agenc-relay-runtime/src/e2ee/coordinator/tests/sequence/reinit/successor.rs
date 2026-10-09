@@ -12,6 +12,7 @@ mod declared_recovery;
 mod expiry;
 mod previous_profile;
 pub(in crate::e2ee::coordinator::tests::sequence) mod reconstruction;
+mod recreated;
 mod retention;
 mod row_mismatch;
 mod target_mismatch;

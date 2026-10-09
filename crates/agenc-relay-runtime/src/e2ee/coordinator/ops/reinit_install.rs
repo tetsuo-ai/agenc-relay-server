@@ -151,7 +151,7 @@ pub(super) fn prepare(
     let entry = routes
         .install_successor(
             ConversationId(*old),
-            super::route::binding_summary(&verified),
+            super::route::binding_summary(&verified, network_id)?,
         )
         .map_err(|_| invalid())?;
     let log = SequencerLog::from_activation(conversation_id, activation_id);

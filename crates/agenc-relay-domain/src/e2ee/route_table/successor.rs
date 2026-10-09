@@ -15,12 +15,12 @@ impl RouteTable {
 
     /// Installs the successor of a quorum-activated ReInit in place of its
     /// predecessor's route (companion 13.8): the successor takes the
-    /// predecessor's concrete route, semantic lock and incarnation at the
-    /// next binding generation, continuing the predecessor's binding, and
-    /// the predecessor keeps its entry without the route's indexes. The
-    /// caller has verified the activation and the target its attempt
-    /// carries, whose binding keeps the predecessor's channel instance or
-    /// direct nonce.
+    /// predecessor's concrete route, semantic lock, lineage and
+    /// incarnation at the next binding generation, continuing the
+    /// predecessor's binding, and the predecessor keeps its entry without
+    /// the route's indexes. The caller has verified the activation and the
+    /// target its attempt carries, whose binding keeps the predecessor's
+    /// channel instance or direct nonce.
     // agenc-review: focus owner=domain reviewed=2026-10-05 reason=one atomic route replacement checks the exact lineage, concrete route and index ownership before the successor takes the predecessor's indexes
     pub fn install_successor(
         &mut self,
@@ -55,6 +55,7 @@ impl RouteTable {
             conversation_id: summary.conversation_id,
             target: old.target,
             lock: old.lock,
+            lineage: old.lineage,
             incarnation: old.incarnation,
             binding_id: summary.binding_id,
             binding_generation: summary.binding_generation,
@@ -75,7 +76,10 @@ impl RouteTable {
     }
 
     /// Selects an already-restored successor after the caller rechecks its
-    /// retained activation. Read-back order must not select the old route.
+    /// retained activation. Read-back order must not select the old route,
+    /// and the successor takes each index only as a restore does: a later
+    /// incarnation of its semantic route, bound after a close ended the
+    /// successor, keeps the indexes it holds (companion 9.4 and 13.8).
     pub fn select_restored_successor(
         &mut self,
         predecessor: ConversationId,
@@ -96,10 +100,7 @@ impl RouteTable {
         {
             return Err(RouteConflict::NotSuccessor);
         }
-        let current = self.locks.get(&new.lock).and_then(|id| self.routes.get(id));
-        if current.is_none_or(|entry| entry.binding_generation <= new.binding_generation) {
-            self.insert_route(new);
-        }
+        self.take_indexes(&new);
         Ok(())
     }
 }
