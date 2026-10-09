@@ -123,11 +123,14 @@ impl CarrierCommand {
             Self::SubmitPolicy => &[Policy],
             Self::SubmitMembership => &[ArcWireObjectKind::LeafMembershipProof],
             Self::SubmitRecovery => &[ArcWireObjectKind::RecoverySubmission],
+            // A record, a close, or any kind a reference element may name
+            // (`recovery::REFERENCE_ELEMENT_KINDS`, companion 13.7.4).
             Self::SubmitRecoveryElement => &[
                 ArcWireObjectKind::SequencerRecord,
                 CloseAuthorization,
                 Policy,
                 RootIdentity,
+                RootIdentityChain,
                 DeviceRoster,
                 ConversationBinding,
                 ReinitAttempt,

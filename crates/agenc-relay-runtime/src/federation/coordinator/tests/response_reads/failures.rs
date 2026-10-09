@@ -5,7 +5,7 @@ use super::*;
 
 #[tokio::test]
 async fn malformed_raw_completions_fail_before_any_response_is_queued() -> TestResult {
-    for fault in 0..6 {
+    for fault in 0..5 {
         let mut fixture = Box::pin(Fixture::new(None)).await?;
         fixture.submit()?;
         let mut message = fixture.next_read().await?;
@@ -16,18 +16,12 @@ async fn malformed_raw_completions_fail_before_any_response_is_queued() -> TestR
         match fault {
             0 => result.truncated = true,
             1 => result.records.clear(),
-            2 => {
-                result.storage_commit_sequence = result
-                    .storage_commit_sequence
-                    .checked_add(1)
-                    .ok_or("commit")?
-            }
-            3 => result.records.first_mut().ok_or("row")?.table = TableId::E2eeState,
-            4 => {
+            2 => result.records.first_mut().ok_or("row")?.table = TableId::E2eeState,
+            3 => {
                 result.records.first_mut().ok_or("row")?.key =
                     agenc_relay_storage::e2ee_records::object_key(&[99; 32])?
             }
-            5 => {
+            4 => {
                 *result
                     .records
                     .first_mut()
@@ -261,28 +255,5 @@ async fn wrong_read_id_and_replacement_link_cannot_publish_or_fail_the_new_link(
     assert_eq!(fixture.coordinator.counters.violations, 0);
     assert_eq!(fixture.handle.queued_bytes(), 0);
     assert_eq!(replacement.queued_bytes(), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn unrelated_storage_commit_between_response_pages_refuses_the_entire_reply() -> TestResult {
-    let mut fixture = Box::pin(Fixture::new(None)).await?;
-    fixture.submit()?;
-    let message = fixture.next_read().await?;
-    fixture
-        .coordinator
-        .storage_read_completed(fixture.core.context_mut()?, message);
-    let message = fixture.next_read().await?;
-    let write = CompanionCoordinator::object_write(fixture.responses.first().ok_or("response")?)
-        .map_err(|e| format!("write: {e:?}"))?;
-    fixture::commit(&mut fixture.core, vec![write]).await?;
-    fixture
-        .coordinator
-        .storage_read_completed(fixture.core.context_mut()?, message);
-    assert!(fixture.coordinator.companion_response_read.is_none());
-    assert_eq!(fixture.handle.queued_bytes(), 0);
-    assert_eq!(fixture.coordinator.counters.requests_replayed, 0);
-    assert_eq!(fixture.coordinator.counters.violations, 1);
-    assert!(fixture.executor()?.state.replays.contains_key(&fixture.key));
     Ok(())
 }

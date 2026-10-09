@@ -227,7 +227,9 @@ impl E2eeEdge {
         if !self.pending.contains_key(&correlation.request_id) {
             // A result for a request this edge no longer holds: the
             // requester is gone, and the coordinator's replay row answers a
-            // later retry.
+            // later retry. A closed connection's request is no longer held
+            // by the coordinator either.
+            self.closed_requests.remove(&correlation.request_id);
             return Ok(Vec::new());
         }
         let Some(bytes) =
@@ -356,7 +358,7 @@ impl E2eeEdge {
         if !ready {
             return Ok(Vec::new());
         }
-        let Some(pending) = self.pending.remove(&request_id) else {
+        let Some(mut pending) = self.pending.remove(&request_id) else {
             return Ok(Vec::new());
         };
         let Some(result) = pending.result.clone() else {
@@ -364,7 +366,7 @@ impl E2eeEdge {
         };
         let generation = pending.generation;
         let lines = self.render_answer(context, &pending, &result)?;
-        let mut retry_outputs = self.publish_reply(context, &pending, &lines)?;
+        let mut retry_outputs = self.publish_reply(context, &mut pending, &lines)?;
         let frames = lines
             .iter()
             .map(|line| WireMessage::extension_line(line))

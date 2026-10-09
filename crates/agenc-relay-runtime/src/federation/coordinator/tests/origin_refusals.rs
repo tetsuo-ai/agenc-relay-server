@@ -157,3 +157,97 @@ async fn an_origin_declaration_must_agree_with_its_record_and_this_network() -> 
     }
     Ok(())
 }
+
+/// A deletion of a fenced origin is acknowledged for that origin alone and
+/// changes nothing (Architecture 20.7: the fence already rejects every later
+/// request for good), whatever generation and next sequence it names; the
+/// link stays up, nothing is staged, and the sessions the origin owns are
+/// queued to close, since its connection is gone.
+#[tokio::test]
+async fn a_deletion_of_a_fenced_origin_is_acknowledged_and_changes_nothing() -> TestResult {
+    let (mut fixture, mut coordinator, mut queue) = linked()?;
+    coordinator.inbound(fixture.context_mut()?, frame(1, reset(INCARNATION)));
+    let (carrier, object) = declaration(&origin_record(NETWORK, 0), 0)?;
+    coordinator.inbound(
+        fixture.context_mut()?,
+        FederationInbound {
+            link: LinkId::new(1),
+            peer: PEER,
+            event: LinkEvent::Object { carrier, object },
+            charge: None,
+        },
+    );
+    while fixture.context_mut()?.pending_len() != 0 {
+        fixture.commit_staged_batch().await?;
+        coordinator.batch_applied(fixture.context_mut()?);
+    }
+    let key = OriginKey {
+        home_server_id: PEER,
+        server_incarnation: INCARNATION,
+        origin_id: OriginId::from_bytes([70; 16]),
+    };
+    coordinator.origins.fence(&key)?;
+    // A session the origin's connection registered.
+    let registered = agenc_relay_types::UserId::from_bytes([72; 16]);
+    coordinator
+        .registered_sessions
+        .insert(key, std::collections::BTreeSet::from([registered]));
+    while let Ok(Some(_line)) =
+        tokio::time::timeout(std::time::Duration::from_millis(20), queue.recv()).await
+    {}
+    for (generation, next) in [(0, 0), (1, 0), (0, 5)] {
+        coordinator.inbound(
+            fixture.context_mut()?,
+            frame(
+                1,
+                FederationFrame::OriginDel {
+                    coordinator_server_id: COORDINATOR,
+                    server_incarnation: INCARNATION,
+                    origin_id: key.origin_id,
+                    generation,
+                    next_operation_sequence: next,
+                },
+            ),
+        );
+        assert_eq!(
+            coordinator.counters().violations,
+            0,
+            "({generation}, {next})"
+        );
+        assert!(live(&coordinator)?);
+        assert!(coordinator.pending.is_none());
+        assert_eq!(fixture.context_mut()?.pending_len(), 0);
+        let line = tokio::time::timeout(std::time::Duration::from_secs(1), queue.recv())
+            .await?
+            .ok_or("acknowledgement")?;
+        let acknowledged = parse_frame(line.as_str().trim_end_matches("\r\n"), COORDINATOR_NAME)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(
+            matches!(
+                acknowledged,
+                FederationFrame::OriginAck {
+                    generation: acked,
+                    object_id: None,
+                    ..
+                } if acked == generation
+            ),
+            "({generation}, {next})"
+        );
+        let entry = coordinator.origins.origin(&key).ok_or("origin")?;
+        assert_eq!(
+            (entry.status, entry.generation),
+            (agenc_relay_domain::federation::OriginStatus::Fenced, 0)
+        );
+        // The sessions the origin owns are queued to close.
+        assert!(
+            coordinator
+                .peers
+                .get(&PEER)
+                .ok_or("peer")?
+                .cleanup
+                .contains(&registered),
+            "({generation}, {next})"
+        );
+    }
+    Ok(())
+}

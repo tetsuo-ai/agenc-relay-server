@@ -25,7 +25,8 @@ use crate::wire::fragment::FragmentTag;
 use crate::wire::reply::E2eeReplyCode;
 
 /// Maximum completed submission tuples retained by one assembler, or by one
-/// sender under [`RecentCeiling::PerSender`]. New submissions reserve a slot
+/// sender under [`RecentCeiling::PerSender`] and
+/// [`RecentCeiling::PerSenderRefused`]. New submissions reserve a slot
 /// before allocation; live entries are not evicted.
 pub const MAX_RECENT_OBJECTS: usize = 4_096;
 
@@ -42,6 +43,10 @@ pub enum RecentCeiling {
     /// [`E2eeAssembler::is_recent`] reports once it completes. The receiver
     /// decides the outcome of such a submission from its own records.
     PerSender,
+    /// One ceiling per sender: a new submission past its sender's ceiling is
+    /// refused before any reservation, and every other sender keeps its own
+    /// ceiling, so storage at the ceiling is refused fairly (companion 16).
+    PerSenderRefused,
 }
 
 /// Where a fragment came from.
@@ -432,8 +437,9 @@ impl E2eeAssembler {
 
     /// Opens the assembly of a new submission, or answers its exact copy
     /// from the recent-object cache. Past the ceiling a new submission is
-    /// refused before any reservation under [`RecentCeiling::Shared`], and
-    /// assembles without a recent tuple under [`RecentCeiling::PerSender`].
+    /// refused before any reservation under [`RecentCeiling::Shared`] and
+    /// [`RecentCeiling::PerSenderRefused`], and assembles without a recent
+    /// tuple under [`RecentCeiling::PerSender`].
     fn admit(
         &mut self,
         key: &AssemblyKey,
@@ -450,7 +456,7 @@ impl E2eeAssembler {
             return Ok(Some(Ingest::Recent));
         }
         let records = self.has_recent_capacity(key);
-        if !records && self.ceiling == RecentCeiling::Shared {
+        if !records && self.ceiling != RecentCeiling::PerSender {
             return Err(AssemblyError::ReassemblyLimit);
         }
         self.open_assembly(key, scopes, limit, tag, now, records)?;
@@ -563,7 +569,7 @@ impl E2eeAssembler {
     /// tuple, so finishing several outstanding assemblies cannot exceed the
     /// ceiling: over every sender, or over the sender of `key` alone.
     fn has_recent_capacity(&self, key: &AssemblyKey) -> bool {
-        let per_sender = self.ceiling == RecentCeiling::PerSender;
+        let per_sender = self.ceiling != RecentCeiling::Shared;
         let counted = |sender: &Sender| !per_sender || *sender == key.sender;
         let reserved = self
             .open

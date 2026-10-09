@@ -40,6 +40,7 @@ fn a_result_arriving_during_completion_staging_is_released_at_commit() -> TestRe
     let mut request = pending(1, 0, false);
     let key = (1, 0, [9; 32], [7; 32]);
     request.reply_key = Some(key);
+    reserve_reply(&mut request)?;
     let command = request.command.clone();
     edge.pending.insert([5; 16], request);
     let (prepared, before) = edge

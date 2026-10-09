@@ -51,7 +51,9 @@ The rules, in `crates/agenc-relay-e2ee/src/wire/assembly.rs` and
   submissions reserve. One peer's objects never take another peer's slots.
   The edge's client ingress keeps the shared ceiling
   (`RecentCeiling::Shared`, the default), which refuses a new submission
-  before any reservation.
+  before any reservation. [The edge attachment
+  record](stage-10-edge-attachment.md) (third commit) gives each connection
+  its own ceiling there.
 - **Expiry at the idempotency retention.** A completed object is retained
   until 30 minutes after its last fragment
   (`RECENT_OBJECT_IDEMPOTENCY_RETENTION_SECONDS`). The coordinator forgets
@@ -333,6 +335,11 @@ current generation. The rules, in
 - An attachment the coordinator accepted stays accepted: the identical
   declaration of the accepted state is acknowledged again after the device
   attaches elsewhere (first commit).
+
+[The edge attachment record](stage-10-edge-attachment.md) (second commit)
+replaces the refusal of a superseded attachment: such a declaration is
+mirrored as it stands, with no device authority, and every other
+disagreement of a well-formed declaration is refused for its origin alone.
 
 | Test | What it pins |
 | --- | --- |

@@ -436,7 +436,7 @@ impl E2eeEdge {
             writes.push(write);
         }
         writes.push(witness_delete(conversation)?);
-        self.stage(
+        self.stage_or_hold(
             context,
             writes,
             PendingCommit::WitnessResolved {
@@ -470,7 +470,7 @@ impl E2eeEdge {
                 .encode()
                 .map_err(|_| E2eeReplyCode::InvalidFragment)?,
         )?;
-        self.stage(
+        self.stage_or_hold(
             context,
             vec![write],
             PendingCommit::WitnessConflict { conversation },

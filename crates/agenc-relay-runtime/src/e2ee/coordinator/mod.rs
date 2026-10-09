@@ -75,7 +75,8 @@ pub(crate) mod tests;
 /// The largest retained in-memory object set, in bytes, before new objects
 /// are refused with `E2EE_RATE_LIMITED`.
 pub const MAX_RETAINED_OBJECT_BYTES: usize = 256 * 1024 * 1024;
-/// Requests one peer may queue behind an in-flight batch.
+/// Requests one peer may queue behind an in-flight batch, and requests one
+/// peer may hold open waiting for their payloads.
 pub const MAX_QUEUED_COMPANION_REQUESTS: usize = 64;
 
 /// The signing material and identity of the logical sequencer.
@@ -265,6 +266,26 @@ pub struct CompanionState {
     pub(crate) owners: owners::Ledger,
     /// The recovery submissions and records of pending routes (companion 13.7.4).
     pub recovery: recovery_lineage::Recoveries,
+}
+
+impl CompanionState {
+    /// The device attachment `origin` mirrors when it is the device's
+    /// current one: the directory holds that session generation for the
+    /// origin's account, and the device is roster-active. An origin keeps
+    /// mirroring an attachment another attachment of its device superseded;
+    /// such a connection lacks a current attachment and holds no device
+    /// (companion 11.6, 11.9 `E2EE_DEVICE_REQUIRED`).
+    #[must_use]
+    pub(crate) fn current_attachment(&self, origin: &CompanionOrigin) -> Option<([u8; 16], u64)> {
+        let digest = origin.account_digest?;
+        let (device, session) = origin.device?;
+        let active = self
+            .directory
+            .account(&digest)
+            .is_some_and(|entry| entry.device_active(&device));
+        (active && self.directory.session_generation(&digest, &device) == session)
+            .then_some((device, session))
+    }
 }
 
 /// The root binding locks of one (account, root fingerprint) by sequence.
@@ -515,9 +536,9 @@ pub struct CompanionCoordinator {
     /// The monotonic second the assembler last expired its open assemblies
     /// and recent-object cache at.
     recent_expired_at: u64,
-    /// The generation of the last declaration of each origin that named an
-    /// attachment another attachment of its device superseded; the refusal
-    /// fenced the origin.
+    /// The generation of the last refused declaration of each origin whose
+    /// principal or device attachment the base origin or the directory did
+    /// not hold; the refusal fenced the origin until the edge deletes it.
     refused_origins: BTreeMap<CompanionOriginKey, u64>,
     open: BTreeMap<(ServerId, [u8; 16]), OpenRequest>,
     queued: BTreeMap<ServerId, VecDeque<QueuedCompanion>>,
@@ -814,6 +835,13 @@ impl CompanionCoordinator {
         self.state.origins.insert(key, origin);
     }
 
+    /// Tests: records a refused declaration of `key` at `generation`, as a
+    /// declaration the coordinator refused for its origin does.
+    #[cfg(test)]
+    pub(crate) fn refuse_for_test(&mut self, key: CompanionOriginKey, generation: u64) {
+        self.refused_origins.insert(key, generation);
+    }
+
     /// Handles one admitted companion frame from `peer` on `link`.
     pub(crate) fn on_frame(
         &mut self,
@@ -954,7 +982,13 @@ impl CompanionCoordinator {
             refusal: self.refusal_for(&key),
         };
         if open.payload_object_id.is_some() {
-            if self.open.len() >= MAX_QUEUED_COMPANION_REQUESTS {
+            // Each peer has its own payload waits: one peer's never refuse
+            // another's.
+            let waiting = self
+                .open
+                .range((peer, [0; 16])..=(peer, [u8::MAX; 16]))
+                .count();
+            if waiting >= MAX_QUEUED_COMPANION_REQUESTS {
                 return Err(CompanionFault::Ceiling);
             }
             self.open.insert((peer, correlation.request_id), open);

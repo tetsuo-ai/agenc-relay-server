@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use agenc_relay_client_wire::{CapabilityState, WireMessage};
 use agenc_relay_domain::e2ee::RouteTable;
 use agenc_relay_e2ee::federation::frames::CompanionFrame;
-use agenc_relay_e2ee::wire::assembly::{E2eeAssembler, QuotaLimits, Sender};
+use agenc_relay_e2ee::wire::assembly::{E2eeAssembler, QuotaLimits, RecentCeiling, Sender};
 use agenc_relay_federation_wire::FederationLineText;
 use agenc_relay_types::{ChannelInstanceId, ServerId, UserId};
 
@@ -136,11 +136,20 @@ pub(crate) struct LocalOrigin {
     pub(crate) account: Option<[u8; 24]>,
     /// The attached device and its session generation.
     pub(crate) device: Option<([u8; 16], u64)>,
+    /// The user and account the attachment was made under. A declaration
+    /// whose base principal names another session or account leaves the
+    /// attachment behind (companion 11.6).
+    pub(crate) device_principal: Option<origins::Principal>,
 }
 
 /// One request awaiting its result, its responses, and its completion.
 pub(crate) struct PendingRequest {
     pub(super) reply_key: Option<retry::ReplyKey>,
+    /// The memory a submission's reply is kept in, reserved at its
+    /// largest when the request went out (`retry::reply_reservation`).
+    pub(super) reservation: Option<crate::budget::MemoryPermitBatch>,
+    /// The authenticated account the request was sent under.
+    pub(super) account: [u8; 24],
     pub(super) echo_lines: Vec<String>,
     pub(super) retry_label: Option<Option<String>>,
     pub(crate) generation: ConnectionGeneration,
@@ -230,6 +239,12 @@ pub struct E2eeEdge {
     snapshot_stray_generations: BTreeMap<u64, Vec<[u8; 32]>>,
     origins: BTreeMap<ConnectionGeneration, LocalOrigin>,
     pending: BTreeMap<[u8; 16], PendingRequest>,
+    /// The unanswered requests of closed connections whose origin's
+    /// deletion went out on the live link, by request ID, with their Origin
+    /// ID and account: the coordinator may still hold them queued, so they
+    /// keep their places in the outstanding bounds until a frame of their
+    /// result arrives, the deletion is acknowledged or the link ends.
+    closed_requests: BTreeMap<[u8; 16], ([u8; 16], [u8; 24])>,
     by_completion: BTreeMap<[u8; 16], [u8; 16]>,
     covered: BTreeSet<[u8; 16]>,
     assembler: E2eeAssembler,
@@ -242,6 +257,10 @@ pub struct E2eeEdge {
     route_objects: BTreeMap<[u8; 32], Vec<u8>>,
     conversations: BTreeMap<[u8; 32], events::Conversation>,
     commit: Option<PendingCommit>,
+    /// A batch of this router's that found a batch open: a snapshot page,
+    /// ACTIVE or a witness resolution. It is staged once no batch is open
+    /// (`stage_held`).
+    held: Option<Box<events::HeldBatch>>,
     /// The record-chain violation the witness found in the current frame,
     /// recorded durably before the link closes.
     witnessed: Option<([u8; 32], agenc_relay_storage::e2ee_records::WitnessRow)>,
@@ -324,15 +343,23 @@ impl E2eeEdge {
             snapshot_stray_generations: BTreeMap::new(),
             origins: BTreeMap::new(),
             pending: BTreeMap::new(),
+            closed_requests: BTreeMap::new(),
             by_completion: BTreeMap::new(),
             covered: BTreeSet::new(),
-            assembler: E2eeAssembler::new(QuotaLimits::default()),
+            // Each connection holds its own share of the recent-object
+            // cache: one connection past it never refuses another's
+            // submissions (companion 16).
+            assembler: E2eeAssembler::with_ceiling(
+                QuotaLimits::default(),
+                RecentCeiling::PerSenderRefused,
+            ),
             ingress: BTreeMap::new(),
             retried: BTreeMap::new(),
             routes: RouteTable::new(),
             route_objects: BTreeMap::new(),
             conversations: BTreeMap::new(),
             commit: None,
+            held: None,
             witnessed: None,
             witness_failure: witness_failure::WitnessFailure::default(),
             witness_recovery: witness_recovery::WitnessRecovery::default(),
@@ -384,17 +411,21 @@ impl E2eeEdge {
         // A resolution token belongs to one link incarnation (12.5.1).
         self.witness_resolution = None;
         self.snapshot_link_down();
+        self.held = None;
         self.queued.clear();
         self.events_in.clear();
         self.barrier_pending = None;
+        // The coordinator drops a closed link's queued requests.
+        self.closed_requests.clear();
         for origin in self.origins.values_mut() {
             origin.declared = None;
             origin.acked = None;
         }
     }
 
-    /// A client connection ended: its origin, ingress, and pending
-    /// requests are gone; a result that still arrives is dropped.
+    /// A client connection ended: its origin, ingress, pending requests
+    /// and recent submissions are gone; a result that still arrives is
+    /// dropped.
     pub fn connection_closed(&mut self, generation: ConnectionGeneration) {
         self.replies.disconnect(generation);
         self.retried.remove(&generation);
@@ -402,6 +433,9 @@ impl E2eeEdge {
         if let Some(ingress) = self.ingress.remove(&generation) {
             self.assembler.discard(&ingress.key);
         }
+        self.assembler.forget_recent(|key| {
+            matches!(key.sender, Sender::Connection { connection, .. } if connection == generation.get())
+        });
         self.pending
             .retain(|_, pending| pending.generation != generation);
     }

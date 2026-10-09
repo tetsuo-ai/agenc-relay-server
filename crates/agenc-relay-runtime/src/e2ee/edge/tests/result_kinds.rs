@@ -93,7 +93,10 @@ fn expected(case: &Case, label: &str) -> String {
 }
 
 /// The labeled submission `case` answers, cached for retries under `key`.
-fn submission(case: &Case, key: Option<(u64, u64, [u8; 32], [u8; 32])>) -> PendingRequest {
+fn submission(
+    case: &Case,
+    key: Option<(u64, u64, [u8; 32], [u8; 32])>,
+) -> TestResult<PendingRequest> {
     let mut request = pending(1, 0, false);
     request.label = Some(LABEL.to_owned());
     request.reply_key = key;
@@ -101,7 +104,10 @@ fn submission(case: &Case, key: Option<(u64, u64, [u8; 32], [u8; 32])>) -> Pendi
         kind: case.submit,
         conversation_id: IDS[0],
     }));
-    request
+    if key.is_some() {
+        reserve_reply(&mut request)?;
+    }
+    Ok(request)
 }
 
 /// The `federation_result` object the coordinator sends for `case`, naming
@@ -224,7 +230,7 @@ fn a_result_whose_completion_was_applied_renders_its_own_kind() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     for case in &CASES {
         let mut edge = edge();
-        edge.pending.insert(REQUEST, submission(case, None));
+        edge.pending.insert(REQUEST, submission(case, None)?);
         edge.covered.insert(COMPLETION);
         let outputs = receive(&mut edge, &mut fixture, &result_object(case)?)?;
         assert_only_line(&outputs, case, LABEL)?;
@@ -237,7 +243,7 @@ fn a_completion_after_the_result_renders_its_own_kind() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     for case in &CASES {
         let mut edge = edge();
-        edge.pending.insert(REQUEST, submission(case, None));
+        edge.pending.insert(REQUEST, submission(case, None)?);
         assert!(
             receive(&mut edge, &mut fixture, &result_object(case)?)?.is_empty(),
             "{}: nothing renders before the completion",
@@ -262,7 +268,7 @@ fn a_retried_submission_replays_its_own_kind() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     for case in &CASES {
         let mut edge = edge();
-        let request = submission(case, Some(key));
+        let request = submission(case, Some(key))?;
         let command = request.command.clone();
         edge.pending.insert(REQUEST, request);
         edge.covered.insert(COMPLETION);
@@ -281,7 +287,7 @@ fn a_retried_submission_replays_its_own_kind() -> TestResult {
 fn a_tuple_under_a_kind_that_does_not_own_it_is_refused() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     let mut edge = edge();
-    let request = submission(&CASES[0], None);
+    let request = submission(&CASES[0], None)?;
     for (kind, value) in [
         (K::Aborted, ResultValue::Triple(IDS[0], IDS[1], IDS[2])),
         (K::Bound, ResultValue::Triple(IDS[0], IDS[1], IDS[2])),
@@ -334,7 +340,7 @@ fn only_an_aborted_tuple_names_an_aborted_batch_child() -> TestResult {
         (K::ReinitAborted, false),
     ] {
         let mut edge = edge();
-        let mut request = submission(&CASES[1], None);
+        let mut request = submission(&CASES[1], None)?;
         request.responses.insert(0, object.clone());
         let result = DecodedResult {
             request_object_id: [7; 32],

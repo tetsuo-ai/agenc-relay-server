@@ -1,6 +1,7 @@
 //! A cold ACK prefix read retains its storage buffers until the exact completion drops.
 #![forbid(unsafe_code)]
 
+use super::super::ReadStep;
 use super::{FederationCoordinator, StateCoreContext, Violation};
 use crate::bridge::{StorageReadCompletionMessage, StorageReadId};
 use crate::budget::MemoryPermit;
@@ -17,6 +18,9 @@ const DECODE_BYTES: usize = 8 * 1024 * 1024;
 pub(in super::super) struct Pending {
     id: StorageReadId,
     job: AckReadJob,
+    /// The coordinator's own commits when the read began; every page is
+    /// read against them.
+    own_commits: u64,
     _raw: MemoryPermit,
     _decode: MemoryPermit,
 }
@@ -46,17 +50,25 @@ pub(in super::super) fn submit(
             Err(Violation::Ceiling)
         };
     }
+    // Companion reads run one at a time, so one completion at most waits
+    // for a free batch slot (`parked_read`).
+    if coordinator.replay_io_busy() {
+        return Err(Violation::Ceiling);
+    }
     validate_source(coordinator, context, &request)?;
     let protected = protected_first(coordinator, &request)?;
     let executor = coordinator
         .companion_exec
         .as_ref()
         .ok_or(Violation::Codec)?;
+    // No other router writes companion rows, so the pages are pinned to the
+    // coordinator's own commits rather than to the storage commit.
+    let own_commits = coordinator.own_commits;
     let mut job = request
         .begin(
             executor,
             protected,
-            context.head().storage_commit_sequence,
+            own_commits,
             &context.backing_reservations(),
         )
         .map_err(super::fault_violation)?;
@@ -64,7 +76,7 @@ pub(in super::super) fn submit(
         .next()
         .map_err(super::fault_violation)?
         .ok_or(Violation::Codec)?;
-    coordinator.companion_ack_read = Some(prepare(context, job, plan)?);
+    coordinator.companion_ack_read = Some(prepare(context, job, plan, own_commits)?);
     Ok(())
 }
 
@@ -72,6 +84,7 @@ fn prepare(
     context: &mut StateCoreContext,
     job: AckReadJob,
     plan: ReadPlan,
+    own_commits: u64,
 ) -> Result<Box<Pending>, Violation> {
     let raw = context
         .reserve_output_backing(RAW_BYTES)
@@ -85,6 +98,7 @@ fn prepare(
     Ok(Box::new(Pending {
         id,
         job,
+        own_commits,
         _raw: raw,
         _decode: decode,
     }))
@@ -153,28 +167,41 @@ pub(in super::super) fn completed(
     let Completed { message, pending } = completed;
     drop(message);
     let Pending {
-        job, _raw, _decode, ..
+        job,
+        own_commits,
+        _raw,
+        _decode,
+        ..
     } = *pending;
     drop((_raw, _decode));
-    let result = outcome.and_then(|plan| advance(coordinator, context, job, plan));
+    let result = outcome.and_then(|step| match step {
+        ReadStep::Next(plan) => advance(coordinator, context, job, plan, own_commits),
+        ReadStep::Stale => {
+            let request = job.request().clone();
+            drop(job);
+            submit(coordinator, context, request)
+        }
+    });
     if let Err(error) = result
         && coordinator.link_is_live(link, peer)
         && !context.is_quiescing()
     {
         coordinator.fail_link(context, link, peer, error);
     }
-    if coordinator.companion_ack_read.is_none() {
-        super::drain_queued(coordinator, context);
-        coordinator.drain_backlog(context);
-    }
+    coordinator.companion_read_settled(context);
 }
 
 fn admit(
     coordinator: &FederationCoordinator,
     context: &StateCoreContext,
     completed: &mut Completed,
-) -> Result<Option<ReadPlan>, Violation> {
+) -> Result<ReadStep, Violation> {
     validate_source(coordinator, context, completed.pending.job.request())?;
+    // A commit another router made leaves the read current; one of the
+    // coordinator's own may have changed the rows it reads.
+    if coordinator.own_commits != completed.pending.own_commits {
+        return Ok(ReadStep::Stale);
+    }
     let result = completed
         .message
         .result
@@ -196,12 +223,18 @@ fn admit(
                 .map_err(|_| Violation::Codec)?;
         records.push((record.key.clone(), value));
     }
+    let own_commits = completed.pending.own_commits;
     completed
         .pending
         .job
-        .admit(result.storage_commit_sequence, result.truncated, records)
+        .admit(own_commits, result.truncated, records)
         .map_err(super::fault_violation)?;
-    completed.pending.job.next().map_err(super::fault_violation)
+    completed
+        .pending
+        .job
+        .next()
+        .map(ReadStep::Next)
+        .map_err(super::fault_violation)
 }
 
 fn advance(
@@ -209,9 +242,10 @@ fn advance(
     context: &mut StateCoreContext,
     job: AckReadJob,
     plan: Option<ReadPlan>,
+    own_commits: u64,
 ) -> Result<(), Violation> {
     if let Some(plan) = plan {
-        coordinator.companion_ack_read = Some(prepare(context, job, plan)?);
+        coordinator.companion_ack_read = Some(prepare(context, job, plan, own_commits)?);
         return Ok(());
     }
     let peer = job.request().peer();

@@ -515,7 +515,12 @@ pub(super) fn installed(
             edge.snapshot = None;
             return Vec::new();
         }
-        if let Err(violation) = write_install_rows(edge, context) {
+        // Another router may have staged its batch at this receipt: the
+        // next install batch then waits for it (`continue_install`).
+        if !context.in_flight()
+            && context.pending_len() == 0
+            && let Err(violation) = write_install_rows(edge, context)
+        {
             edge.fail_link(context, violation);
         }
         return Vec::new();
@@ -774,10 +779,13 @@ fn mark_resync(edge: &mut EdgeFederation) {
     }
 }
 
+/// Stages the next install batch once no batch is open: an install never
+/// fails its link because another router's batch was open.
 pub(super) fn continue_install(edge: &mut EdgeFederation, context: &mut StateCoreContext) {
     if edge.phase == Phase::Snapshot
         && edge.commit.is_none()
         && !context.in_flight()
+        && context.pending_len() == 0
         && !super::journal::has_dirty(edge)
         && edge
             .snapshot

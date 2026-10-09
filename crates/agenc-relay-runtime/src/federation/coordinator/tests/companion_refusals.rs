@@ -476,3 +476,188 @@ async fn a_companion_request_waiting_for_a_refused_batch_runs_at_the_refusal() -
     assert_eq!(f.coordinator.counters.violations, 0);
     Ok(())
 }
+
+impl Fixture {
+    /// Delivers the edge's deletion of the origin at generation zero and
+    /// next sequence `next`, and drains its acknowledgement.
+    async fn delete_origin(&mut self, next: u64) -> TestResult {
+        companion::admitted(
+            &mut self.coordinator,
+            self.core.context_mut()?,
+            LinkId::new(1),
+            PEER,
+            CompanionFrame::OriginDel {
+                coordinator_server_id: *COORDINATOR.as_bytes(),
+                server_incarnation: *INCARNATION.as_bytes(),
+                origin_id: self.origin_id,
+                origin_generation: 0,
+                next_operation_sequence: next,
+            },
+        )
+        .map_err(|e| format!("deletion: {e:?}"))?;
+        assert!(self.answers().await?.is_empty());
+        Ok(())
+    }
+}
+
+/// A request under an origin the edge's deletion fenced is refused for good
+/// without an answer or a durable row (companion 12.5: DEL "permanently
+/// fences later requests"); its object leaves the recent-object cache, so a
+/// copy is refused alike, an executed request's copy is still answered from
+/// its replay row, and the link stays up.
+#[tokio::test]
+async fn a_request_under_a_fenced_origin_is_dropped_and_the_link_kept() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    let executed = f.whoami(sequence)?;
+    f.submit(&executed)?;
+    f.commit_pending().await?;
+    let account = Answered::Other(ArcFederationResultKind::Account);
+    assert_eq!(f.answers().await?, vec![(sequence, account)]);
+    f.delete_origin(sequence + 2).await?;
+    let late = f.whoami(sequence + 1)?;
+    for _ in 0..2 {
+        f.submit(&late)?;
+        assert!(f.coordinator.pending.is_none(), "nothing is staged");
+        f.commit_pending().await?;
+        assert!(f.answers().await?.is_empty(), "nothing is answered");
+    }
+    f.submit(&executed)?;
+    f.commit_pending().await?;
+    let account = Answered::Other(ArcFederationResultKind::Account);
+    assert_eq!(f.answers().await?, vec![(sequence, account)]);
+    assert!(f.live());
+    assert_eq!(f.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+/// A request under an origin whose declaration the coordinator refused is
+/// refused alike, also when the origin holds no state here: its first
+/// declaration was the one refused.
+#[tokio::test]
+async fn a_request_under_a_refused_origin_is_dropped_and_the_link_kept() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    let key = crate::e2ee::coordinator::CompanionOriginKey {
+        home_server_id: *PEER.as_bytes(),
+        server_incarnation: *INCARNATION.as_bytes(),
+        origin_id: f.origin_id,
+    };
+    let executor = f.executor_mut()?;
+    executor.state.origins.remove(&key);
+    executor.refuse_for_test(key, 0);
+    f.submit(&f.whoami(sequence)?)?;
+    assert!(f.coordinator.pending.is_none(), "nothing is staged");
+    assert!(f.answers().await?.is_empty(), "nothing is answered");
+    assert!(f.live());
+    assert_eq!(f.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+impl Fixture {
+    /// One `PUBLISH IDENTITY` request of the origin at `sequence` carrying
+    /// `payload`.
+    fn publish_identity(&self, sequence: u64, payload: &[u8]) -> TestResult<CompleteRequest> {
+        let mut complete = self.whoami(sequence)?;
+        let request = ArcFederationRequest {
+            profile_version: 1,
+            network_id: [1; 32],
+            home_server_id: *PEER.as_bytes(),
+            server_incarnation: *INCARNATION.as_bytes(),
+            origin_id: self.origin_id,
+            origin_generation: 0,
+            operation_sequence: sequence,
+            request_id: complete.correlation.request_id,
+            opcode: ArcFederationOpcode::PublishIdentity,
+            encoded_parameters: Opaque::new(Vec::new())?,
+            payload_object_id: Opaque::new(ObjectId::compute(payload).as_bytes().to_vec())?,
+        };
+        complete.request =
+            ArcWireObject::new(ArcWireObjectKind::FederationRequest, request.encode()?)?
+                .encode()?;
+        complete.payload = Some(payload.to_vec());
+        Ok(complete)
+    }
+
+    /// Runs `complete` as the executor runs a complete request.
+    fn execute(&mut self, complete: CompleteRequest) -> Result<(), Violation> {
+        let context = self
+            .core
+            .context_mut()
+            .map_err(|_| Violation::Companion(CompanionViolation::Executor))?;
+        companion::apply(
+            &mut self.coordinator,
+            context,
+            LinkId::new(1),
+            PEER,
+            Action::Execute(complete),
+        )
+    }
+}
+
+/// A client's payload that is not a well-formed wire object is the
+/// client's, not the edge's: the operation answers the request with its
+/// failed result `E2EE_INVALID_FRAGMENT` at its sequence (companion 12.5),
+/// the next request runs at the following sequence, and the link stays up.
+#[tokio::test]
+async fn a_payload_that_is_no_wire_object_is_answered_with_its_failed_result() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    let malformed = f.publish_identity(sequence, &[0xee; 64])?;
+    f.execute(malformed).map_err(|e| format!("{e:?}"))?;
+    f.commit_pending().await?;
+    let failed = Answered::Failed(E2eeReplyCode::InvalidFragment.token().to_owned());
+    assert_eq!(f.answers().await?, vec![(sequence, failed)]);
+    assert_eq!(f.next_sequence()?, sequence + 1);
+    f.submit(&f.whoami(sequence + 1)?)?;
+    f.commit_pending().await?;
+    assert_eq!(
+        f.answers().await?,
+        vec![(
+            sequence + 1,
+            Answered::Other(ArcFederationResultKind::Account)
+        )]
+    );
+    assert!(f.live());
+    assert_eq!(f.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+/// A fresh request this coordinator cannot stage for a local reason, here
+/// the global E2EE disk ceiling (companion 16), is answered with its failed
+/// result `E2EE_RATE_LIMITED` at its sequence, and the link stays up; when
+/// even that result cannot be stored, the request's error stands.
+#[tokio::test]
+async fn a_request_its_storage_quota_refuses_is_answered_with_its_failed_result() -> TestResult {
+    let mut f = Box::pin(Fixture::new()).await?;
+    let sequence = f.next_sequence()?;
+    // One failed result's stored size.
+    let before = f.executor()?.state.owners.total_bytes();
+    let mut refused = f.whoami(sequence)?;
+    refused.refusal = Some(E2eeReplyCode::RateLimited);
+    f.execute(refused).map_err(|e| format!("{e:?}"))?;
+    f.commit_pending().await?;
+    let _answered = f.answers().await?;
+    let stored = f.executor()?.state.owners.total_bytes();
+    let failed_size = stored.checked_sub(before).ok_or("stored size")?;
+    // Room for one more failed result, and not for an account result.
+    f.executor_mut()?
+        .set_global_disk_bytes(stored.checked_add(failed_size).ok_or("limit")?);
+    f.execute(f.whoami(sequence + 1)?)
+        .map_err(|e| format!("{e:?}"))?;
+    f.commit_pending().await?;
+    let failed = Answered::Failed(E2eeReplyCode::RateLimited.token().to_owned());
+    assert_eq!(f.answers().await?, vec![(sequence + 1, failed)]);
+    assert_eq!(f.next_sequence()?, sequence + 2);
+    assert!(f.live());
+    // No room left: the request is not answered and its error stands, and
+    // so does a request that already carries its failed result, as one
+    // whose batch storage refused does.
+    assert!(f.execute(f.whoami(sequence + 2)?).is_err());
+    let mut carried = f.whoami(sequence + 2)?;
+    carried.refusal = Some(E2eeReplyCode::RateLimited);
+    assert!(f.execute(carried).is_err());
+    assert!(f.coordinator.pending.is_none());
+    assert_eq!(f.next_sequence()?, sequence + 2);
+    Ok(())
+}

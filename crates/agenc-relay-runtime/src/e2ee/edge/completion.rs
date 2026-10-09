@@ -85,10 +85,10 @@ impl E2eeEdge {
             };
         }
         if let Some((request_id, lines)) = completion.reply
-            && let Some(pending) = self.pending.remove(&request_id)
+            && let Some(mut pending) = self.pending.remove(&request_id)
         {
             // The same bounded lines were validated before durable admission.
-            match self.publish_reply(context, &pending, &lines) {
+            match self.publish_reply(context, &mut pending, &lines) {
                 Ok(outputs) => return outputs,
                 Err(_) => self.link_down(),
             }
@@ -99,7 +99,7 @@ impl E2eeEdge {
     pub(super) fn publish_reply(
         &mut self,
         context: &StateCoreContext,
-        pending: &PendingRequest,
+        pending: &mut PendingRequest,
         lines: &[String],
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let result = pending
@@ -117,6 +117,12 @@ impl E2eeEdge {
         };
         self.replies
             .remember(pending, reply_lines, context.now().get() / 1_000)?;
+        // The answered submission's reply answers its retries from now on:
+        // its recent-object tuple is released (companion 11.8, 16).
+        if let (Some(key), Some(carrier)) = (pending.reply_key, pending.command.carrier()) {
+            self.assembler
+                .forget(&super::router::submission_key(key, carrier));
+        }
         self.counters.results_rendered = self.counters.results_rendered.saturating_add(1);
         if let (Some(key), Some(label)) = (pending.reply_key, &pending.retry_label) {
             return Ok(self

@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
 //! An origin declaration is mirrored only when every field agrees with the
-//! descriptor, the base origin, and the generation rules.
+//! descriptor, the base origin, and the generation rules. A malformed
+//! declaration is a violation; a well-formed one whose principal or device
+//! attachment the base origin or the directory does not hold is refused for
+//! its origin alone, and the link stays up.
 
 use super::*;
 
@@ -25,6 +28,32 @@ fn assert_refused(mutate: impl FnOnce(&mut ArcFederationOrigin) -> TestResult) -
     );
     assert!(sync.harness.coordinator.state.origins.is_empty());
     Ok(())
+}
+
+/// Declares the generation-zero `bytes` on `sync` and expects the
+/// declaration to be refused for its origin alone: nothing is acknowledged
+/// or mirrored, and the edge's deletion of the origin is acknowledged.
+fn assert_refused_for_origin(mut sync: Sync, bytes: &[u8]) -> TestResult {
+    let refused = sync
+        .declare(false, 0, bytes)
+        .map_err(|fault| format!("the link failed: {fault:?}"))?;
+    assert!(frames(&refused)?.is_empty(), "nothing is acknowledged");
+    assert!(sync.harness.coordinator.state.origins.is_empty());
+    let acknowledged = frames(&delete(&mut sync, 0, 0).map_err(|f| format!("{f:?}"))?)?;
+    assert_eq!(acknowledged.len(), 1, "the deletion is acknowledged");
+    Ok(())
+}
+
+/// A generation-zero origin changed by `mutate`, declared on a reset link
+/// whose base origin is unauthenticated, is refused for its origin alone.
+fn assert_mutation_refused_for_origin(
+    mutate: impl FnOnce(&mut ArcFederationOrigin) -> TestResult,
+) -> TestResult {
+    let mut sync = Sync::new()?;
+    sync.reset()?;
+    let (mut origin, _) = origin_object(0, [0; 32], None, None)?;
+    mutate(&mut origin)?;
+    assert_refused_for_origin(sync, &rewire(&origin)?)
 }
 
 #[test]
@@ -118,15 +147,18 @@ fn an_origin_object_of_another_connection_is_refused() -> TestResult {
 
 #[test]
 fn an_origin_object_whose_session_differs_from_the_base_is_refused() -> TestResult {
+    // A session without its user is malformed.
     assert_refused(|origin| {
         origin.user_id = Opaque::new(Vec::new())?;
         Ok(())
     })?;
-    assert_refused(|origin| {
+    // Another session, or none where the base holds one, is a principal the
+    // base origin does not hold.
+    assert_mutation_refused_for_origin(|origin| {
         origin.session_id = Opaque::new(vec![0x76; 16])?;
         Ok(())
     })?;
-    assert_refused(|origin| {
+    assert_mutation_refused_for_origin(|origin| {
         origin.session_id = Opaque::new(Vec::new())?;
         origin.user_id = Opaque::new(Vec::new())?;
         Ok(())
@@ -135,13 +167,19 @@ fn an_origin_object_whose_session_differs_from_the_base_is_refused() -> TestResu
 
 #[test]
 fn an_origin_object_claiming_an_account_the_base_lacks_is_refused() -> TestResult {
-    assert_refused(|origin| {
+    assert_mutation_refused_for_origin(|origin| {
         origin.account_id = Opaque::new(ACCOUNT.to_vec())?;
         origin.account_session_generation = 1;
         Ok(())
     })?;
+    // An account session generation without an account is malformed, and so
+    // is an account without one.
     assert_refused(|origin| {
         origin.account_session_generation = 1;
+        Ok(())
+    })?;
+    assert_refused(|origin| {
+        origin.account_id = Opaque::new(ACCOUNT.to_vec())?;
         Ok(())
     })
 }
@@ -153,12 +191,14 @@ fn declare_authenticated(account: [u8; 24], generation: u64) -> TestResult<Sync>
     sync.host.origin.as_mut().ok_or("base origin")?.account = Some((ACCOUNT, 3));
     sync.reset()?;
     let (_, bytes) = origin_object(0, [0; 32], Some((account, generation)), None)?;
-    let declared = sync.declare(false, 0, &bytes);
-    if account == ACCOUNT && generation == 3 {
-        declared?;
-    } else {
-        assert_eq!(declared.err(), Some(CompanionFault::Protocol));
-    }
+    let declared = sync
+        .declare(false, 0, &bytes)
+        .map_err(|fault| format!("the link failed: {fault:?}"))?;
+    let acknowledged = frames(&declared)?.len();
+    assert_eq!(
+        acknowledged,
+        usize::from(account == ACCOUNT && generation == 3)
+    );
     Ok(sync)
 }
 
@@ -187,20 +227,18 @@ fn an_origin_object_omitting_the_base_account_is_refused() -> TestResult {
     sync.host.origin.as_mut().ok_or("base origin")?.account = Some((ACCOUNT, 3));
     sync.reset()?;
     let (_, bytes) = origin_object(0, [0; 32], None, None)?;
-    assert_eq!(
-        sync.declare(false, 0, &bytes).err(),
-        Some(CompanionFault::Protocol)
-    );
-    Ok(())
+    assert_refused_for_origin(sync, &bytes)
 }
 
 #[test]
 fn an_attached_device_needs_an_account_and_a_nonzero_generation() -> TestResult {
-    assert_refused(|origin| {
+    // A device without an account names an attachment no principal holds.
+    assert_mutation_refused_for_origin(|origin| {
         origin.attached_device_id = Opaque::new(vec![7; 16])?;
         origin.device_session_generation = 1;
         Ok(())
     })?;
+    // A generation without a device, or a device without one, is malformed.
     assert_refused(|origin| {
         origin.device_session_generation = 1;
         Ok(())
@@ -217,12 +255,7 @@ fn an_attached_device_the_directory_does_not_know_is_refused() -> TestResult {
     sync.host.origin.as_mut().ok_or("base origin")?.account = Some((ACCOUNT, 3));
     sync.reset()?;
     let (_, bytes) = origin_object(0, [0; 32], Some((ACCOUNT, 3)), Some(([7; 16], 1)))?;
-    assert_eq!(
-        sync.declare(false, 0, &bytes).err(),
-        Some(CompanionFault::Protocol)
-    );
-    assert!(sync.harness.coordinator.state.origins.is_empty());
-    Ok(())
+    assert_refused_for_origin(sync, &bytes)
 }
 
 #[test]
@@ -329,14 +362,9 @@ fn fence(sync: &Sync) -> TestResult<(u64, bool)> {
     Ok((origin.next_sequence, origin.fenced))
 }
 
-/// Companion 12.5: "`DEL` supplies the next unused sequence and permanently
-/// fences later requests". The deletion names the generation the
-/// coordinator holds and a next sequence at or above the one executed
-/// there; the origin is fenced at the stated sequence.
-#[test]
-fn a_delete_must_name_the_accepted_generation_and_next_sequence() -> TestResult {
+/// The accepted origin after three requests executed under generation zero.
+fn executed_three() -> TestResult<Sync> {
     let (mut sync, _) = accepted()?;
-    // Three requests executed under generation zero.
     sync.harness
         .coordinator
         .state
@@ -345,17 +373,17 @@ fn a_delete_must_name_the_accepted_generation_and_next_sequence() -> TestResult 
         .next()
         .ok_or("origin")?
         .next_sequence = 3;
-    assert_eq!(
-        delete(&mut sync, 1, 3).err(),
-        Some(CompanionFault::Protocol),
-        "another generation is refused"
-    );
-    assert_eq!(
-        delete(&mut sync, 0, 2).err(),
-        Some(CompanionFault::Protocol),
-        "a sequence below the executed one is refused"
-    );
-    assert_eq!(fence(&sync)?, (3, false));
+    Ok(sync)
+}
+
+/// Companion 12.5: "`DEL` supplies the next unused sequence and permanently
+/// fences later requests". The deletion names the generation the
+/// coordinator holds and a next sequence at or above the one executed
+/// there; the origin is fenced at the stated sequence, which a later
+/// deletion does not undercut.
+#[test]
+fn a_delete_fences_the_accepted_generation_at_the_stated_sequence() -> TestResult {
+    let mut sync = executed_three()?;
     let actions = delete(&mut sync, 0, 5)?;
     assert!(matches!(
         frames(&actions)?.as_slice(),
@@ -366,13 +394,42 @@ fn a_delete_must_name_the_accepted_generation_and_next_sequence() -> TestResult 
         }]
     ));
     assert_eq!(fence(&sync)?, (5, true), "fenced at the stated sequence");
+    assert_eq!(frames(&delete(&mut sync, 0, 4)?)?.len(), 1);
     assert_eq!(
-        delete(&mut sync, 0, 4).err(),
-        Some(CompanionFault::Protocol),
+        fence(&sync)?,
+        (5, true),
         "the fence keeps the stated sequence"
     );
     assert_eq!(frames(&delete(&mut sync, 0, 5)?)?.len(), 1);
     assert_eq!(fence(&sync)?, (5, true));
+    Ok(())
+}
+
+/// A deletion naming another generation, or a sequence below the executed
+/// one, closes that origin alone where it stands: it is acknowledged, the
+/// origin is fenced at the generation and next sequence the coordinator
+/// holds, and the link stays up.
+#[test]
+fn a_mismatched_delete_closes_only_its_origin_where_it_stands() -> TestResult {
+    for (generation, next) in [(1, 3), (0, 2), (2, 9)] {
+        let mut sync = executed_three()?;
+        let actions = delete(&mut sync, generation, next)
+            .map_err(|fault| format!("the link failed: {fault:?}"))?;
+        assert!(
+            matches!(
+                frames(&actions)?.as_slice(),
+                [CompanionFrame::OriginAck {
+                    object_id: None,
+                    origin_generation,
+                    ..
+                }] if *origin_generation == generation
+            ),
+            "({generation}, {next})"
+        );
+        assert_eq!(fence(&sync)?, (3, true), "({generation}, {next})");
+        let held = sync.harness.coordinator.state.origins.values().next();
+        assert_eq!(held.map(|origin| origin.generation), Some(0));
+    }
     Ok(())
 }
 

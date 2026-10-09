@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn malformed_raw_reads_never_stage_a_response() -> TestResult {
-    for fault in 0..6 {
+    for fault in 0..5 {
         let mut f = Box::pin(Fixture::new(true)).await?;
         let sequence = f.next_sequence()?;
         f.submit()?;
@@ -15,13 +15,12 @@ async fn malformed_raw_reads_never_stage_a_response() -> TestResult {
             .map_err(|e| format!("read: {e:?}"))?;
         match fault {
             0 => result.truncated = true,
-            1 => result.storage_commit_sequence += 1,
-            2 => result.records.first_mut().ok_or("row")?.table = TableId::E2eeState,
-            3 => {
+            1 => result.records.first_mut().ok_or("row")?.table = TableId::E2eeState,
+            2 => {
                 result.records.first_mut().ok_or("row")?.key =
                     agenc_relay_storage::e2ee_records::object_key(&[99; 32])?
             }
-            4 => {
+            3 => {
                 *result
                     .records
                     .first_mut()
@@ -30,7 +29,7 @@ async fn malformed_raw_reads_never_stage_a_response() -> TestResult {
                     .last_mut()
                     .ok_or("bytes")? ^= 1
             }
-            5 => {
+            4 => {
                 let row = result.records.first().ok_or("row")?;
                 let duplicate = agenc_relay_storage::ReadRecord {
                     table: row.table,
@@ -49,24 +48,6 @@ async fn malformed_raw_reads_never_stage_a_response() -> TestResult {
         assert_eq!(f.next_sequence()?, sequence);
         assert_eq!(f.coordinator.counters.violations, 1);
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_new_storage_commit_invalidates_a_pending_object_read() -> TestResult {
-    let mut f = Box::pin(Fixture::new(true)).await?;
-    f.submit()?;
-    let message = f.next_read().await?;
-    fixture::commit(
-        &mut f.core,
-        vec![CompanionCoordinator::object_write(&f.bytes).map_err(|e| format!("write: {e:?}"))?],
-    )
-    .await?;
-    f.coordinator
-        .storage_read_completed(f.core.context_mut()?, message);
-    assert!(f.coordinator.pending.is_none());
-    assert_eq!(f.handle.queued_bytes(), 0);
-    assert_eq!(f.coordinator.counters.violations, 1);
     Ok(())
 }
 

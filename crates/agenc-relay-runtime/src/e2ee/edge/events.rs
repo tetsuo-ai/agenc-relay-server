@@ -146,6 +146,13 @@ fn chain_step(event: &ArcFederationEvent) -> Option<ChainStep> {
     Some(step)
 }
 
+/// A batch of the router's that found a batch open, with the work its
+/// receipt settles; its rows take their revision when it is staged.
+pub(super) struct HeldBatch {
+    writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+    pending: PendingCommit,
+}
+
 /// An event whose payload has not arrived.
 #[derive(Clone)]
 pub(crate) struct OpenEvent {
@@ -346,13 +353,15 @@ impl E2eeEdge {
         Ok(true)
     }
 
-    /// Applies the events that waited for a batch the state core refused:
-    /// no receipt follows a refusal, so nothing else would drain them.
+    /// Stages the batch held for a free slot and applies the events that
+    /// waited for a batch the state core refused: no receipt follows a
+    /// refusal, so nothing else would stage or drain them.
     pub fn drain_waiting_events(
         &mut self,
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
     ) -> Vec<ClientOutput> {
+        self.stage_held(context, edge);
         self.drain_queued(context, edge)
     }
 
@@ -374,11 +383,15 @@ impl E2eeEdge {
         )
     }
 
-    /// Whether an event must wait: this profile's own slot is taken, or a
-    /// batch is in flight or gathering for any router, so its plan could
-    /// not be staged now; events drain in order after every commit.
-    fn holds_events(&self, context: &StateCoreContext) -> bool {
-        self.commit.is_some() || context.in_flight() || context.pending_len() != 0
+    /// Whether an event must wait: this profile's own slot is taken or a
+    /// batch of its waits for it, or a batch is in flight or gathering for
+    /// any router, so its plan could not be staged now; events drain in
+    /// order after every commit.
+    pub(crate) fn holds_events(&self, context: &StateCoreContext) -> bool {
+        self.commit.is_some()
+            || self.held.is_some()
+            || context.in_flight()
+            || context.pending_len() != 0
     }
 
     /// The EACK of an applied event goes out on the link that delivered
@@ -1013,6 +1026,48 @@ impl E2eeEdge {
         self.channel_names.get(&channel).cloned()
     }
 
+    /// Stages a batch of this router's, or holds it while a batch is open,
+    /// this router's own or one another router staged: it is staged once
+    /// no batch is open (`stage_held`), so local write contention never
+    /// fails the link. Only one batch is held; the coordinator sends the
+    /// frame that stages the next one only after this one's receipt. No
+    /// such frame arrives while an event waits, and one that finds an
+    /// event queued is refused, so no batch goes ahead of a queued event.
+    pub(super) fn stage_or_hold(
+        &mut self,
+        context: &mut StateCoreContext,
+        writes: Vec<crate::state_core::durable::AccountServiceDurableWrite>,
+        pending: PendingCommit,
+    ) -> Result<(), Refusal> {
+        if !self.queued.is_empty() {
+            return Err(E2eeReplyCode::Syncing.into());
+        }
+        if !self.holds_events(context) {
+            return self.stage(context, writes, pending);
+        }
+        if self.held.is_some() {
+            return Err(E2eeReplyCode::RateLimited.into());
+        }
+        self.held = Some(Box::new(HeldBatch { writes, pending }));
+        Ok(())
+    }
+
+    /// Stages the batch held for a free slot once no batch is open; a
+    /// refusal then is the batch's own, and the link closes as for a frame
+    /// that violated the profile.
+    pub(super) fn stage_held(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
+        if self.commit.is_some() || context.in_flight() || context.pending_len() != 0 {
+            return;
+        }
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        let HeldBatch { writes, pending } = *held;
+        if self.stage(context, writes, pending).is_err() {
+            self.fail_frame(context, edge);
+        }
+    }
+
     /// Stages one event batch beside a checkpoint plan; a busy state core
     /// keeps the event queued.
     pub(super) fn stage(
@@ -1093,16 +1148,21 @@ impl E2eeEdge {
             Some(PendingCommit::Witness) | None => {}
         }
         self.commit_barrier_projection(edge);
+        self.stage_held(context, edge);
         outputs.extend(self.drain_queued(context, edge));
         self.continue_snapshot(context);
         outputs
     }
 
-    /// The batch was rejected: the event must be resynchronized.
-    pub fn batch_rejected(&mut self) {
+    /// Storage refused a batch of this router's: the event or step is
+    /// undone, and the federation link closes, as the base edge closes it
+    /// for its own refused batches, so the next link resumes from the
+    /// durable cursor (companion 12.5).
+    pub fn batch_rejected(&mut self, context: &mut StateCoreContext, edge: &mut EdgeFederation) {
         let projected = self.rollback_projection();
         if self.commit.take().is_some() || projected {
             self.counters.violations = self.counters.violations.saturating_add(1);
+            edge.fail_companion_storage(context);
             self.link_down();
         }
     }

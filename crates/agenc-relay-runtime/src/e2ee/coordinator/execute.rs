@@ -99,6 +99,10 @@ pub enum Staged {
     ReadResponses(super::response_read::Identity),
     /// A fresh authorized object lookup must complete before its result is staged.
     ReadObject(super::object_read::PendingRequest),
+    /// A request under a fenced origin, refused for good without an
+    /// answer or a durable row: its connection's deletion or a refused
+    /// declaration fenced the origin (companion 12.5, architecture 20.7).
+    Dropped,
 }
 
 /// Everything the owner supplies about the base state for one execution.
@@ -197,12 +201,34 @@ pub(crate) fn run_with_object(
     if decoded.request.home_server_id != home {
         return Err(E2eeReplyCode::InvalidFragment);
     }
-    let classified = request::classify(&coordinator.state, home, &decoded);
+    let classified = match request::classify(&coordinator.state, home, &decoded) {
+        // An origin whose first declaration was refused holds no state, and
+        // its refusal fences it as a deletion would.
+        Classified::Violation
+            if !coordinator
+                .state
+                .replays
+                .contains_key(&request::replay_key(home, &decoded.request))
+                && coordinator
+                    .refused_origins
+                    .contains_key(&CompanionOriginKey {
+                        home_server_id: home,
+                        server_incarnation: decoded.request.server_incarnation,
+                        origin_id: decoded.request.origin_id,
+                    }) =>
+        {
+            Classified::Fenced
+        }
+        classified => classified,
+    };
+    if matches!(classified, Classified::Fenced) {
+        return Ok(Staged::Dropped);
+    }
     if resolved.is_some() && !matches!(classified, Classified::Fresh) {
         return Err(E2eeReplyCode::OperationConflict);
     }
     match classified {
-        Classified::Fresh => {}
+        Classified::Fresh | Classified::Fenced => {}
         Classified::Replay(result, responses) => {
             return Ok(Staged::Replay(replay_lines(
                 coordinator,
@@ -237,118 +263,50 @@ pub(crate) fn run_with_object(
         .cloned()
         .ok_or(E2eeReplyCode::OperationConflict)?;
     let facts = facts_for(base_origin_key(&origin));
-    let now = view
-        .context
-        .utc_now()
-        .map(|second| second.get())
-        .map_err(|_| E2eeReplyCode::RateLimited)?;
-    let plan = view
-        .context
-        .domain()
-        .plan_account_service_checkpoint()
-        .map_err(|_| E2eeReplyCode::RateLimited)?;
-    let state_generation = plan.resulting_revision().get();
-    let source_view = source_view_bytes(view.context, facts);
-    let mut pool = EntropyPool::fill(view.context.entropy_mut())?;
-    let prepared = match complete.refusal {
-        // A refused fresh request commits its failed result, which consumes
-        // its operation sequence, and no semantic mutation (12.5).
-        Some(code) => ops::Prepared::Complete(Box::new(Outcome::failed(code, Vec::new()))),
-        None => execute(
-            coordinator,
-            view.context,
-            &view.peers,
-            peer,
-            &origin,
-            &decoded,
-            now,
-            state_generation,
-            facts.user_id,
-            source_view,
-            &mut pool,
-            resolved,
-        ),
+    let mut view = view;
+    let fresh = Fresh {
+        decoded: &decoded,
+        origin: &origin,
+        facts,
+        resolved,
+        peer,
     };
-    let mut outcome = match prepared {
-        ops::Prepared::Complete(outcome) => *outcome,
-        ops::Prepared::Read(request) => {
+    let mut complete = complete;
+    let prepared = match fresh.stage(coordinator, &mut view, complete.refusal) {
+        // A fresh request this coordinator could not run or stage for a
+        // local reason is answered with its failed result, which consumes
+        // its operation sequence and commits no semantic mutation (12.5):
+        // `E2EE_SYNCING` when a target's route state cannot take its events
+        // (a stream not past READY/ACTIVE, the unacknowledged-event ceiling,
+        // an open barrier or a full base outbox; 12.5, 11.9), and
+        // `E2EE_RATE_LIMITED` for any other, its clock, a plan, a
+        // reservation, a quota or the batch itself. When even that result
+        // cannot be made, the error stands.
+        Err(first) if complete.refusal.is_none() => {
+            view.context
+                .set_mutation_context(MutationContext::default());
+            view.context.set_cross_profile(BTreeMap::new());
+            complete.refusal = Some(match first {
+                E2eeReplyCode::Syncing => E2eeReplyCode::Syncing,
+                _ => E2eeReplyCode::RateLimited,
+            });
+            Fresh {
+                resolved: None,
+                ..fresh
+            }
+            .stage(coordinator, &mut view, complete.refusal)?
+        }
+        prepared => prepared?,
+    };
+    let assembled = match prepared {
+        Prepared::Read(request) => {
             return Ok(Staged::ReadObject(super::object_read::PendingRequest {
                 complete,
                 request,
             }));
         }
+        Prepared::Staged(assembled) => assembled,
     };
-    let base_plan = outcome.base_plan.take();
-    if let Some(deadline) = outcome.mailbox_expiry {
-        ops::mailbox_snapshot::reserve_expiry(
-            view.context.timers_mut(),
-            deadline,
-            &mut coordinator.state.mailbox_expiry_armed,
-        )?;
-    }
-    let base_counts = match &base_plan {
-        Some(plan) if plan.resulting_revision().get() == state_generation => Some(
-            view.context
-                .preview_projection(plan)
-                .map_err(|_| E2eeReplyCode::RateLimited)?,
-        ),
-        Some(_) => return Err(E2eeReplyCode::RateLimited),
-        None => None,
-    };
-    let assembled = assemble(
-        coordinator,
-        home,
-        peer,
-        &decoded,
-        outcome,
-        state_generation,
-        now,
-        resolved.and_then(super::object_read::Resolved::uncached_id),
-        BarrierInputs {
-            backing: view.context.backing_reservations(),
-            base_counts: base_counts.as_ref(),
-            base_capacity: &*view.base_capacity,
-            entropy: &mut pool,
-        },
-    )?;
-    let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
-        .map_err(|_| E2eeReplyCode::RateLimited)?;
-    let staged_plan = match base_plan {
-        Some(base_plan) => {
-            view.context.set_mutation_context(MutationContext {
-                actor: facts.user_id,
-                ..MutationContext::default()
-            });
-            view.context.set_cross_profile(
-                assembled
-                    .barriers
-                    .iter()
-                    .map(|barrier| {
-                        (
-                            barrier.target,
-                            CrossProfileAssignment {
-                                mutation_id: barrier.mutation_id,
-                                part_count: barrier.part_count,
-                                companion_scope: barrier.companion_scope,
-                                companion: barrier.companion,
-                            },
-                        )
-                    })
-                    .collect(),
-            );
-            base_plan
-        }
-        None => plan,
-    };
-    let writes = assembled
-        .writes
-        .into_iter()
-        .map(|write| write.at_revision(state_generation))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| E2eeReplyCode::RateLimited)?;
-    view.context
-        .stage_durable_with_account_service(staged_plan, fanout, None, 0, writes)
-        .map_err(|_| E2eeReplyCode::RateLimited)?;
     coordinator.pending = Some(super::sync::PendingWork::Request(Box::new(
         PendingCompanion {
             link,
@@ -365,6 +323,146 @@ pub(crate) fn run_with_object(
         },
     )));
     Ok(Staged::Batch)
+}
+
+/// What one fresh request's preparation leaves the owner.
+enum Prepared {
+    /// The operation reads an object before its result is staged.
+    Read(super::object_read::Request),
+    /// The batch is staged; its assembly awaits the commit.
+    Staged(Box<Assembled>),
+}
+
+/// One fresh request admitted against the replay rows and its origin.
+struct Fresh<'r> {
+    decoded: &'r Decoded,
+    origin: &'r CompanionOrigin,
+    facts: OriginFacts,
+    resolved: Option<&'r super::object_read::Resolved>,
+    peer: ServerId,
+}
+
+impl Fresh<'_> {
+    /// Executes the request, or commits its failed result `refusal`
+    /// instead, and stages its batch; nothing is staged on an error.
+    // agenc-review: focus owner=runtime reviewed=2026-10-09 reason=one fresh request runs authorization, sequencing and atomic staging in order, so a local failure can be answered with the failed result through the same steps
+    fn stage(
+        &self,
+        coordinator: &mut CompanionCoordinator,
+        view: &mut BaseView<'_>,
+        refusal: Option<E2eeReplyCode>,
+    ) -> Result<Prepared, E2eeReplyCode> {
+        let (decoded, peer, resolved) = (self.decoded, self.peer, self.resolved);
+        let home = *peer.as_bytes();
+        let now = view
+            .context
+            .utc_now()
+            .map(|second| second.get())
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        let plan = view
+            .context
+            .domain()
+            .plan_account_service_checkpoint()
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        let state_generation = plan.resulting_revision().get();
+        let source_view = source_view_bytes(view.context, self.facts);
+        let mut pool = EntropyPool::fill(view.context.entropy_mut())?;
+        let prepared = match refusal {
+            // A refused fresh request commits its failed result, which
+            // consumes its operation sequence, and no semantic mutation
+            // (12.5).
+            Some(code) => ops::Prepared::Complete(Box::new(Outcome::failed(code, Vec::new()))),
+            None => execute(
+                coordinator,
+                view.context,
+                &view.peers,
+                peer,
+                self.origin,
+                decoded,
+                now,
+                state_generation,
+                self.facts.user_id,
+                source_view,
+                &mut pool,
+                resolved,
+            ),
+        };
+        let mut outcome = match prepared {
+            ops::Prepared::Complete(outcome) => *outcome,
+            ops::Prepared::Read(request) => return Ok(Prepared::Read(request)),
+        };
+        let base_plan = outcome.base_plan.take();
+        if let Some(deadline) = outcome.mailbox_expiry {
+            ops::mailbox_snapshot::reserve_expiry(
+                view.context.timers_mut(),
+                deadline,
+                &mut coordinator.state.mailbox_expiry_armed,
+            )?;
+        }
+        let base_counts = match &base_plan {
+            Some(plan) if plan.resulting_revision().get() == state_generation => Some(
+                view.context
+                    .preview_projection(plan)
+                    .map_err(|_| E2eeReplyCode::RateLimited)?,
+            ),
+            Some(_) => return Err(E2eeReplyCode::RateLimited),
+            None => None,
+        };
+        let mut assembled = assemble(
+            coordinator,
+            home,
+            peer,
+            decoded,
+            outcome,
+            state_generation,
+            now,
+            resolved.and_then(super::object_read::Resolved::uncached_id),
+            BarrierInputs {
+                backing: view.context.backing_reservations(),
+                base_counts: base_counts.as_ref(),
+                base_capacity: &*view.base_capacity,
+                entropy: &mut pool,
+            },
+        )?;
+        let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        let staged_plan = match base_plan {
+            Some(base_plan) => {
+                view.context.set_mutation_context(MutationContext {
+                    actor: self.facts.user_id,
+                    ..MutationContext::default()
+                });
+                view.context.set_cross_profile(
+                    assembled
+                        .barriers
+                        .iter()
+                        .map(|barrier| {
+                            (
+                                barrier.target,
+                                CrossProfileAssignment {
+                                    mutation_id: barrier.mutation_id,
+                                    part_count: barrier.part_count,
+                                    companion_scope: barrier.companion_scope,
+                                    companion: barrier.companion,
+                                },
+                            )
+                        })
+                        .collect(),
+                );
+                base_plan
+            }
+            None => plan,
+        };
+        let writes = std::mem::take(&mut assembled.writes)
+            .into_iter()
+            .map(|write| write.at_revision(state_generation))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        view.context
+            .stage_durable_with_account_service(staged_plan, fanout, None, 0, writes)
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        Ok(Prepared::Staged(Box::new(assembled)))
+    }
 }
 
 // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=the executor context carries every base fact one handler may consult
@@ -455,12 +553,19 @@ fn base_hosts(context: &StateCoreContext, edge: ServerId, account: &[u8; 24]) ->
         .is_ok_and(|id| standing.is_some_and(|standing| standing.holds_account(id)))
 }
 
-fn attached_origin_edges(coordinator: &CompanionCoordinator, digest: &[u8; 32]) -> Vec<ServerId> {
-    let mut edges: Vec<ServerId> = coordinator
-        .state
+/// The edges hosting an origin of the account `digest` whose attachment is
+/// its device's current one (companion 12.5).
+pub(super) fn attached_origin_edges(
+    coordinator: &CompanionCoordinator,
+    digest: &[u8; 32],
+) -> Vec<ServerId> {
+    let state = &coordinator.state;
+    let mut edges: Vec<ServerId> = state
         .origins
         .values()
-        .filter(|origin| origin.account_digest == Some(*digest) && origin.device.is_some())
+        .filter(|origin| {
+            origin.account_digest == Some(*digest) && state.current_attachment(origin).is_some()
+        })
         .map(|origin| ServerId::from_bytes(origin.home_server_id))
         .collect();
     edges.sort();

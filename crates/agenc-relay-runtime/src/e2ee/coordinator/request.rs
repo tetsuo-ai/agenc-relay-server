@@ -436,13 +436,15 @@ pub fn decode(
             if *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes() != id {
                 return Err(E2eeReplyCode::HashMismatch);
             }
+            // The payload is the client's object, which the edge relays
+            // whole: one that is not a well-formed wire object leaves the
+            // request without a decoded payload, and the operation that
+            // reads it answers the request with `E2EE_INVALID_FRAGMENT`
+            // (`ops::Exec::payload`), as a failed result.
             let mut budget = DecodeBudget::new(1 << 23, 1 << 16);
-            let (kind, _) =
-                ArcWireObject::peek(bytes).map_err(|_| E2eeReplyCode::InvalidFragment)?;
-            Some(
-                ArcWireObject::decode_kind(bytes, Some(kind), &mut budget)
-                    .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-            )
+            ArcWireObject::peek(bytes).ok().and_then(|(kind, _)| {
+                ArcWireObject::decode_kind(bytes, Some(kind), &mut budget).ok()
+            })
         }
         _ => return Err(E2eeReplyCode::InvalidFragment),
     };
@@ -488,6 +490,9 @@ pub enum Classified {
     Replay(Vec<u8>, Vec<Vec<u8>>),
     /// A gap, a reused request identifier, or different bytes at the key.
     Violation,
+    /// A request without a replay row under an origin its deletion or a
+    /// refused declaration fenced: the fence refuses it for good (12.5).
+    Fenced,
 }
 
 /// Classifies a request against the origin's sequence and retained rows.
@@ -520,8 +525,10 @@ pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Cl
     let Some(origin) = state.origins.get(&origin_key) else {
         return Classified::Violation;
     };
-    if origin.fenced
-        || origin.suspended
+    if origin.fenced {
+        return Classified::Fenced;
+    }
+    if origin.suspended
         || origin.generation != decoded.request.origin_generation
         || origin.next_sequence != decoded.request.operation_sequence
         || decoded.request.operation_sequence == u64::MAX

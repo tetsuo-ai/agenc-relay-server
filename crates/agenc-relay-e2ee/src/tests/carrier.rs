@@ -78,6 +78,29 @@ fn every_client_carrier_accepts_exactly_its_matrix_kinds() {
     assert!(!CarrierCommand::SubmitRecovery.is_live());
 }
 
+/// The recovery element carrier accepts exactly the kinds an element of a
+/// recovery submission may name (companion 13.7.4): a sequencer record, a
+/// close authorization, or any kind a reference element names.
+#[test]
+fn the_recovery_element_carrier_accepts_exactly_the_kinds_an_element_names() {
+    use crate::objects::recovery::ArcRecoveryElementKind;
+    use crate::recovery::element_kind_accepts;
+    for kind in ArcWireObjectKind::ALL.iter().copied() {
+        let named = [
+            ArcRecoveryElementKind::RecordElement,
+            ArcRecoveryElementKind::CloseElement,
+            ArcRecoveryElementKind::ReferenceElement,
+        ]
+        .into_iter()
+        .any(|element| element_kind_accepts(element, kind));
+        assert_eq!(
+            CarrierCommand::SubmitRecoveryElement.accepts(kind),
+            named,
+            "{kind:?}"
+        );
+    }
+}
+
 #[test]
 fn response_and_federation_carriers_accept_one_kind() {
     for kind in ArcWireObjectKind::ALL.iter().copied() {
