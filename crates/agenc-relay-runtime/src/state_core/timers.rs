@@ -93,6 +93,8 @@ pub enum TimerKind {
     CompanionWitnessResolution,
     /// Expiry of process-local mailbox cursors and their immutable backing.
     MailboxSnapshotExpiry,
+    /// Expiry of process-local companion listing cursors and their immutable cuts.
+    ListingSnapshotExpiry,
     /// Expiry of process-local base federation directory query backing.
     DirectoryQueryExpiry,
 }

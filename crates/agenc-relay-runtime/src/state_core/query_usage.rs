@@ -212,6 +212,12 @@ impl<'a> QueryReservationPort<'a> {
         self.user
     }
 
+    /// The row ceiling of one immutable snapshot; a ceiling beyond the
+    /// address space admits every row a snapshot can hold.
+    pub(crate) fn snapshot_rows(&self) -> usize {
+        usize::try_from(self.limits.query_snapshot_rows()).unwrap_or(usize::MAX)
+    }
+
     pub(crate) fn reserve_snapshot(
         &self,
         rows: usize,

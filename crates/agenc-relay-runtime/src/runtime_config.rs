@@ -227,6 +227,11 @@ impl RuntimeResourceLimits {
         self.response_batch_bytes
     }
 
+    /// The row ceiling of one immutable query snapshot.
+    pub(crate) const fn query_snapshot_rows(self) -> u64 {
+        self.query_snapshot_rows
+    }
+
     /// These ceilings with another response batch ceiling, for tests.
     #[cfg(test)]
     pub(crate) const fn with_response_batch_bytes(self, response_batch_bytes: usize) -> Self {
