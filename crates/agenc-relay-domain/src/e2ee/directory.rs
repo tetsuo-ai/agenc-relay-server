@@ -283,6 +283,14 @@ impl Directory {
     /// Publishes a roster under the current root; devices leaving the
     /// active set have their published packages burned, and the burned
     /// references are returned.
+    ///
+    /// Roster and capability generations are scoped to the root fingerprint
+    /// (companion 14): a root's first roster has generation zero and every
+    /// later one advances that root's head by exactly one, and a root's
+    /// first roster keeps no capability head of an earlier root, while a
+    /// later one keeps the heads of the devices it keeps active. Attachment
+    /// counters are scoped to the account and device (companion 11.6 and 14)
+    /// and outlive every roster.
     pub fn publish_roster(
         &mut self,
         account_digest: Id,
@@ -300,7 +308,11 @@ impl Directory {
         if root.fingerprint != root_fingerprint {
             return Err(DirectoryError::HeadMismatch);
         }
-        let next = entry.roster.as_ref().map_or(Ok(0), |roster| {
+        let continued = entry
+            .roster
+            .as_ref()
+            .filter(|roster| roster.root_fingerprint == root_fingerprint);
+        let next = continued.map_or(Ok(0), |roster| {
             roster
                 .generation
                 .checked_add(1)
@@ -309,12 +321,13 @@ impl Directory {
         if generation != next {
             return Err(DirectoryError::GenerationGap);
         }
-        entry
-            .capabilities
-            .retain(|device, _| active_devices.contains(device));
-        entry
-            .attachments
-            .retain(|device, _| active_devices.contains(device));
+        if continued.is_some() {
+            entry
+                .capabilities
+                .retain(|device, _| active_devices.contains(device));
+        } else {
+            entry.capabilities.clear();
+        }
         entry.roster = Some(RosterHead {
             generation,
             roster_id,
@@ -367,17 +380,24 @@ impl Directory {
         Ok(())
     }
 
-    /// The capability page of one account: every active device exactly
-    /// once in Device ID order, with its highest object.
+    /// The capability page of one account: every active device whose
+    /// highest statement names the current roster, exactly once in Device ID
+    /// order, with that statement's object. A statement is valid only for
+    /// the highest roster in which its device is active (companion 8.5 and
+    /// 11.6), so a device whose head names an earlier roster is left out
+    /// until it publishes for the current one; the head itself is kept.
     #[must_use]
     pub fn capability_page(&self, account_digest: &Id) -> Vec<(Id16, Id)> {
         self.accounts
             .get(account_digest)
             .map(|entry| {
+                let current = entry.roster.as_ref().map(|roster| roster.roster_id);
                 entry
                     .capabilities
                     .iter()
-                    .filter(|(device, _)| entry.device_active(device))
+                    .filter(|(device, head)| {
+                        entry.device_active(device) && current == Some(head.roster_id)
+                    })
                     .map(|(device, head)| (*device, head.object_id))
                     .collect()
             })

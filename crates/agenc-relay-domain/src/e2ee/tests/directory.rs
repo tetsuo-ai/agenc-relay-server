@@ -71,9 +71,78 @@ fn heads_advance_by_one_and_bind_to_each_other() -> Result<(), DirectoryError> {
     assert_eq!(root.chain, vec![[3; 32], [7; 32]]);
     let crowded: BTreeSet<Id16> = (0..65_u8).map(|index| [index; 16]).collect();
     assert_eq!(
-        directory.publish_roster(ACCOUNT, 1, [4; 32], [6; 32], crowded, [5; 32]),
-        Err(DirectoryError::GenerationGap)
+        directory.publish_roster(ACCOUNT, 0, [4; 32], [6; 32], crowded, [5; 32]),
+        Err(DirectoryError::GenerationGap),
+        "more active devices than an account may hold"
     );
+    Ok(())
+}
+
+#[test]
+fn a_rotated_root_starts_its_roster_and_capability_lineages() -> Result<(), DirectoryError> {
+    const NEXT_ROOT: Id = [6; 32];
+    let mut directory = provisioned()?;
+    let head = CapabilityHead {
+        generation: 0,
+        capability_id: [20; 32],
+        roster_id: [4; 32],
+        object_id: [21; 32],
+    };
+    directory.publish_capability(ACCOUNT, DEVICE_A, head)?;
+    let challenge = directory.attach_begin(ACCOUNT, DEVICE_B, [1; 16], 0)?;
+    directory.attach_finish(ACCOUNT, DEVICE_B, [1; 16], challenge.reserved_generation, 0)?;
+    // Under one root a roster advances the head by exactly one.
+    for generation in [0, 2] {
+        assert_eq!(
+            directory.publish_roster(ACCOUNT, generation, [8; 32], ROOT, BTreeSet::new(), [5; 32]),
+            Err(DirectoryError::GenerationGap),
+            "generation {generation} under the same root"
+        );
+    }
+    directory.publish_root(ACCOUNT, 1, NEXT_ROOT, [7; 32])?;
+    // While the new root's first roster is pending the account keeps its
+    // roster and capability heads.
+    assert!(directory.capability_page(&ACCOUNT) == vec![(DEVICE_A, [21; 32])]);
+    let only_a: BTreeSet<Id16> = [DEVICE_A].into_iter().collect();
+    assert_eq!(
+        directory.publish_roster(ACCOUNT, 1, [9; 32], NEXT_ROOT, only_a.clone(), [10; 32]),
+        Err(DirectoryError::GenerationGap),
+        "the old root's counter does not continue under the new root"
+    );
+    assert_eq!(
+        directory.publish_roster(ACCOUNT, 0, [9; 32], ROOT, only_a.clone(), [10; 32]),
+        Err(DirectoryError::HeadMismatch),
+        "a roster signs under the newest root"
+    );
+    directory.publish_roster(ACCOUNT, 0, [9; 32], NEXT_ROOT, only_a, [10; 32])?;
+    let entry = directory
+        .account(&ACCOUNT)
+        .ok_or(DirectoryError::HeadMismatch)?;
+    assert!(entry.capabilities.is_empty(), "no head of the earlier root");
+    // The new root's capability lineage starts at generation zero.
+    directory.publish_capability(
+        ACCOUNT,
+        DEVICE_A,
+        CapabilityHead {
+            roster_id: [9; 32],
+            capability_id: [22; 32],
+            object_id: [23; 32],
+            ..head
+        },
+    )?;
+    // Device B's attachment counter outlives the roster it left, so its
+    // enrollment under the new root continues it.
+    assert_eq!(directory.session_generation(&ACCOUNT, &DEVICE_B), 1);
+    directory.publish_roster(
+        ACCOUNT,
+        1,
+        [11; 32],
+        NEXT_ROOT,
+        [DEVICE_A, DEVICE_B].into_iter().collect(),
+        [12; 32],
+    )?;
+    let challenge = directory.attach_begin(ACCOUNT, DEVICE_B, [1; 16], 0)?;
+    assert_eq!(challenge.reserved_generation, 2);
     Ok(())
 }
 
@@ -120,9 +189,27 @@ fn capabilities_follow_the_roster_and_page_in_device_order() -> Result<(), Direc
         [DEVICE_A].into_iter().collect(),
         [5; 32],
     )?;
+    // Device A's head names the replaced roster: it stays the head its next
+    // statement continues, but a current page lists only statements naming
+    // the current roster (companion 8.5 and 11.6).
+    assert!(directory.capability_page(&ACCOUNT).is_empty());
+    let entry = directory
+        .account(&ACCOUNT)
+        .ok_or(DirectoryError::HeadMismatch)?;
+    assert_eq!(entry.capabilities.get(&DEVICE_A), Some(&head));
+    directory.publish_capability(
+        ACCOUNT,
+        DEVICE_A,
+        CapabilityHead {
+            generation: 1,
+            capability_id: [22; 32],
+            roster_id: [8; 32],
+            object_id: [23; 32],
+        },
+    )?;
     assert_eq!(
         directory.capability_page(&ACCOUNT),
-        vec![(DEVICE_A, [21; 32])]
+        vec![(DEVICE_A, [23; 32])]
     );
     assert!(directory.capability_page(&[9; 32]).is_empty());
     directory.record_binding_lock(ACCOUNT, ROOT, 0)?;
@@ -336,6 +423,77 @@ fn a_stored_claim_keeps_the_parameters_it_was_made_with() -> Result<(), Director
     assert_eq!(
         directory.stored_claim(&claimant, &[4; 16]),
         Some((target_a, &ClaimOutcome::Unavailable))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_roster_burns_only_its_own_accounts_packages() -> Result<(), DirectoryError> {
+    const OTHER: Id = [30; 32];
+    let mut directory = provisioned()?;
+    directory.publish_root(OTHER, 0, [31; 32], [32; 32])?;
+    directory.publish_roster(
+        OTHER,
+        0,
+        [33; 32],
+        [31; 32],
+        [DEVICE_B].into_iter().collect(),
+        [34; 32],
+    )?;
+    directory.publish_package(b"own".to_vec(), package(DEVICE_B, 40, 1_000), 100)?;
+    directory.publish_package(
+        b"other".to_vec(),
+        Package {
+            account_digest: OTHER,
+            ..package(DEVICE_B, 41, 1_000)
+        },
+        100,
+    )?;
+    // The account's roster revokes device B: only that account's package of
+    // device B is burned.
+    let burned = directory.publish_roster(
+        ACCOUNT,
+        1,
+        [8; 32],
+        ROOT,
+        [DEVICE_A].into_iter().collect(),
+        [5; 32],
+    )?;
+    assert_eq!(burned, vec![b"own".to_vec()]);
+    assert_eq!(
+        directory.revoke_package(&DEVICE_B, b"other"),
+        Ok(()),
+        "the other account's package is still published"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_current_page_lists_no_inactive_device() -> Result<(), DirectoryError> {
+    let mut directory = provisioned()?;
+    let head = CapabilityHead {
+        generation: 0,
+        capability_id: [20; 32],
+        roster_id: [4; 32],
+        object_id: [21; 32],
+    };
+    directory.publish_capability(ACCOUNT, DEVICE_A, head)?;
+    // An entry restored with a head of a device its roster does not keep.
+    let mut entry = directory
+        .account(&ACCOUNT)
+        .cloned()
+        .ok_or(DirectoryError::HeadMismatch)?;
+    entry.capabilities.insert(
+        [12; 16],
+        CapabilityHead {
+            object_id: [22; 32],
+            ..head
+        },
+    );
+    directory.restore_account(ACCOUNT, entry);
+    assert_eq!(
+        directory.capability_page(&ACCOUNT),
+        vec![(DEVICE_A, [21; 32])]
     );
     Ok(())
 }

@@ -133,15 +133,19 @@ fn an_installed_successor_restarts_after_its_principal_rotates_the_account_root(
     )?;
     let bytes = wire(ArcWireObjectKind::RootIdentity, &root)?;
     ok(harness.run(Op::PublishIdentity, &[], Some(&bytes))?)?;
-    let mut device = support::DeviceSpec::new(DEVICE);
-    device.target_roster_generation = 1;
+    // The continued root's first roster starts its own lineage at generation
+    // zero (companion 14).
     let roster = support::roster(
         &secret,
         &root,
-        1,
-        support::roster_id(&harness.principal.roster)?,
+        0,
+        [0; 32],
         (100, 100 + 6 * 24 * 3600),
-        vec![support::certificate(&secret, &root, &device)?],
+        vec![support::certificate(
+            &secret,
+            &root,
+            &support::DeviceSpec::new(DEVICE),
+        )?],
         Vec::new(),
     )?;
     let bytes = wire(ArcWireObjectKind::DeviceRoster, &roster)?;

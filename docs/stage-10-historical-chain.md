@@ -27,13 +27,17 @@ action bit, or a bit without its object, refuses the record.
   controller threshold through `verify_commit_authorization`, and reach the
   old council's derived quorum from device signatures recounted through
   `QuorumLedger`. The committed credential must also cover the Commit's
-  canonical validation time, as must every retained root and roster. A
+  canonical validation time, as must every root and roster the record uses
+  or installs, apart from the narrow roster recovery of companion 8.4
+  ([the E2EE lineage record](stage-10-e2ee-lineage.md)). A
   bootstrap activation additionally needs the resulting council's quorum
   over the same slot and can only install the binding's required operational
   policy; a bootstrap-pending group may finalize only plan Adds, join
   confirmations, and that activation. The finalization then installs, in
-  order, root continuations and roster heads (a reaffirmed roster is accepted
-  as the identical current roster), the policy under the old controller set,
+  order, root continuations and roster heads, at most one of each per
+  account (a reaffirmed roster is accepted as the identical current roster,
+  and an exact repeat of an object is installed once), the policy under the
+  old controller set,
   the sequencer successor under the previous credential's continuity
   signature, the binding successor whose ID the authorization committed, the
   close intent, or the ReInit target digest.
