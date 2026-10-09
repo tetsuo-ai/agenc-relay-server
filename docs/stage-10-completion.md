@@ -401,9 +401,12 @@ SDK program, outside master #35), are recorded in [the origin journal
 record](stage-10-origin-journal.md).
 The historical chain's check of the roots and rosters a finalization uses,
 and of those it installs, against the Commit's canonical validation time,
-with the narrow roster recovery from an expired roster (B-15, SDK program,
-outside master #35), is recorded in [the E2EE lineage
-record](stage-10-e2ee-lineage.md).
+with the narrow roster recovery from an expired roster (B-15), and the
+account's roster and capability lineages started at generation zero under
+each root, with the account's roster kept while a new root awaits its
+first roster and attachment counters kept in their account and device
+scope (B-16, SDK program, outside master #35), are recorded in [the E2EE
+lineage record](stage-10-e2ee-lineage.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

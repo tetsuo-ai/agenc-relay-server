@@ -13,7 +13,8 @@ use crate::authorization::{CandidateBinding, VerifiedAuthorization, verify_commi
 use crate::error::E2eeError;
 use crate::finality::{QuorumLedger, Terminal, VoteSlot, vote_tbs};
 use crate::identity::{
-    AccountIdBytes, ValidationTime, restore_roster, verify_root_identity, verify_roster,
+    AccountIdBytes, ValidationTime, restore_roster, roster_predecessor, verify_root_identity,
+    verify_roster,
 };
 use crate::ids::{SemanticId, proof_set_digest, semantic_id_of};
 use crate::object::{ArcWireObject, ArcWireObjectKind};
@@ -452,12 +453,10 @@ impl HistoricalChain {
                 // An identical current roster is a reaffirmation, re-verified
                 // under its root without a lineage step.
                 restore_roster(root, &roster)?
-            } else if root.generation == previous.root_generation {
-                verify_roster(root, &roster, Some(previous))?
             } else {
                 // A continued root starts its own roster lineage; the
                 // predecessor roster belongs to the retired root.
-                verify_roster(root, &roster, None)?
+                verify_roster(root, &roster, roster_predecessor(root, Some(previous)))?
             };
             transitions
                 .roster_heads

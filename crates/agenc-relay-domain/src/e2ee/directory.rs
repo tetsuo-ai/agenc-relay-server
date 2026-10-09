@@ -283,6 +283,14 @@ impl Directory {
     /// Publishes a roster under the current root; devices leaving the
     /// active set have their published packages burned, and the burned
     /// references are returned.
+    ///
+    /// Roster and capability generations are scoped to the root fingerprint
+    /// (companion 14): a root's first roster has generation zero and every
+    /// later one advances that root's head by exactly one, and a root's
+    /// first roster keeps no capability head of an earlier root, while a
+    /// later one keeps the heads of the devices it keeps active. Attachment
+    /// counters are scoped to the account and device (companion 11.6 and 14)
+    /// and outlive every roster.
     pub fn publish_roster(
         &mut self,
         account_digest: Id,
@@ -300,7 +308,11 @@ impl Directory {
         if root.fingerprint != root_fingerprint {
             return Err(DirectoryError::HeadMismatch);
         }
-        let next = entry.roster.as_ref().map_or(Ok(0), |roster| {
+        let continued = entry
+            .roster
+            .as_ref()
+            .filter(|roster| roster.root_fingerprint == root_fingerprint);
+        let next = continued.map_or(Ok(0), |roster| {
             roster
                 .generation
                 .checked_add(1)
@@ -309,12 +321,13 @@ impl Directory {
         if generation != next {
             return Err(DirectoryError::GenerationGap);
         }
-        entry
-            .capabilities
-            .retain(|device, _| active_devices.contains(device));
-        entry
-            .attachments
-            .retain(|device, _| active_devices.contains(device));
+        if continued.is_some() {
+            entry
+                .capabilities
+                .retain(|device, _| active_devices.contains(device));
+        } else {
+            entry.capabilities.clear();
+        }
         entry.roster = Some(RosterHead {
             generation,
             roster_id,

@@ -889,16 +889,18 @@ fn restore_directory(
     attachments: Vec<(StoredKey, AttachRow)>,
 ) {
     let mut entries: BTreeMap<[u8; 32], AccountEntry> = BTreeMap::new();
-    let mut roots: BTreeMap<[u8; 32], VerifiedRoot> = BTreeMap::new();
+    let mut chains: BTreeMap<[u8; 32], Vec<VerifiedRoot>> = BTreeMap::new();
+    let mut newest: BTreeMap<[u8; 32], VerifiedRoot> = BTreeMap::new();
     let mut later = Vec::new();
     for (key, row) in rows {
         match row {
             identity @ DirectoryRow::Identity { .. } => {
-                if let Some((digest, root, head)) =
+                if let Some((digest, chain, head)) =
                     restore_identity(state, network_id, &key, identity)
                 {
                     entries.entry(digest).or_default().root = Some(head);
-                    roots.insert(digest, root);
+                    newest.insert(digest, chain.newest);
+                    chains.insert(digest, chain.roots);
                 }
             }
             other => later.push((key, other)),
@@ -906,13 +908,11 @@ fn restore_directory(
     }
     for (key, row) in &later {
         if let DirectoryRow::Roster { .. } = row {
-            restore_roster_row(state, &roots, &mut entries, key, row);
+            restore_roster_row(state, &chains, &mut entries, key, row);
         }
     }
-    for (digest, root) in roots {
-        if !state.principals.contains_key(&digest) {
-            state.pending_roots.insert(digest, root);
-        }
+    for (digest, root) in newest {
+        pend_newest_root(state, digest, root);
     }
     for (key, row) in &later {
         match row {
@@ -934,13 +934,32 @@ fn restore_directory(
     super::roster_snapshots::rebuild(state);
 }
 
-/// Re-verifies one root chain oldest first.
+/// A root newer than the root of the account's current roster awaits its
+/// first roster, and so does the root of an account without one, as live
+/// publication leaves them (companion 8.2 and 14).
+fn pend_newest_root(state: &mut CompanionState, digest: [u8; 32], newest: VerifiedRoot) {
+    let current = state
+        .principals
+        .get(&digest)
+        .map(|(root, _)| root.fingerprint);
+    if current != Some(newest.fingerprint) {
+        state.pending_roots.insert(digest, newest);
+    }
+}
+
+/// An account's re-verified root chain, oldest first, and its newest root.
+struct RootChain {
+    roots: Vec<VerifiedRoot>,
+    newest: VerifiedRoot,
+}
+
+/// Re-verifies one root chain oldest first, returning every root of it.
 fn restore_identity(
     state: &CompanionState,
     network_id: &[u8; 32],
     key: &StoredKey,
     row: DirectoryRow,
-) -> Option<([u8; 32], VerifiedRoot, RootHead)> {
+) -> Option<([u8; 32], RootChain, RootHead)> {
     let digest = DirectoryRow::parse_identity_key(key).ok()?;
     let DirectoryRow::Identity {
         root_generation,
@@ -951,7 +970,7 @@ fn restore_identity(
     else {
         return None;
     };
-    let mut verified: Option<VerifiedRoot> = None;
+    let mut chain: Vec<VerifiedRoot> = Vec::new();
     for object_id in &chain_object_ids {
         let root: ArcRootIdentity = decode_object(
             state,
@@ -959,9 +978,9 @@ fn restore_identity(
             ArcWireObjectKind::RootIdentity,
             MAX_IDENTITY_OBJECT,
         )?;
-        verified = Some(verify_root_identity(network_id, &root, verified.as_ref()).ok()?);
+        chain.push(verify_root_identity(network_id, &root, chain.last()).ok()?);
     }
-    let verified = verified.filter(|root| {
+    let newest = *chain.last().filter(|root| {
         root.fingerprint == root_fingerprint && root.generation == root_generation
     })?;
     let head = RootHead {
@@ -969,12 +988,19 @@ fn restore_identity(
         fingerprint: root_fingerprint,
         chain: chain_object_ids,
     };
-    Some((digest, verified, head))
+    let chain = RootChain {
+        roots: chain,
+        newest,
+    };
+    Some((digest, chain, head))
 }
 
+/// Restores an account's current roster under the root that signed it: its
+/// newest root, or an earlier root of its chain while a newer one awaits its
+/// first roster.
 fn restore_roster_row(
     state: &mut CompanionState,
-    roots: &BTreeMap<[u8; 32], VerifiedRoot>,
+    chains: &BTreeMap<[u8; 32], Vec<VerifiedRoot>>,
     entries: &mut BTreeMap<[u8; 32], AccountEntry>,
     key: &StoredKey,
     row: &DirectoryRow,
@@ -990,7 +1016,10 @@ fn restore_roster_row(
         return None;
     };
     let digest = DirectoryRow::parse_roster_key(key).ok()?;
-    let root = roots.get(&digest)?;
+    let root = chains
+        .get(&digest)?
+        .iter()
+        .find(|root| root.fingerprint == *root_fingerprint)?;
     let roster: ArcDeviceRoster = decode_object(
         state,
         object_id,
@@ -998,7 +1027,7 @@ fn restore_roster_row(
         MAX_ROSTER_OBJECT,
     )?;
     let verified = restore_roster(root, &roster).ok()?;
-    if verified.roster_id != *roster_id || root.fingerprint != *root_fingerprint {
+    if verified.roster_id != *roster_id {
         return None;
     }
     entries.entry(digest).or_default().roster = Some(RosterHead {

@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::super::tests::support::{
-    NETWORK, Principal, capabilities, principal, root_fingerprint, roster_id,
+    NETWORK, Principal, capabilities, key, principal, root, root_fingerprint, roster_id,
 };
 use super::*;
 use agenc_relay_e2ee::ids::account_id_digest;
@@ -127,6 +127,58 @@ fn identity_without_a_roster_is_kept_as_a_pending_root() -> TestResult {
         pending.fingerprint,
         root_fingerprint(&fixture.principal.root)?
     );
+    Ok(())
+}
+
+#[test]
+fn a_roster_restores_under_the_root_that_signed_it_beside_a_newer_pending_root() -> TestResult {
+    let mut fixture = fixture()?;
+    // The account published a continued root and not yet its first roster.
+    let next = root(
+        &key(41),
+        &ACCOUNT,
+        1,
+        (0, 2_000_000),
+        Some((&fixture.principal.root_secret, &fixture.principal.root)),
+    )?;
+    let next_object = retain(&mut fixture.state, ArcWireObjectKind::RootIdentity, &next)?;
+    let DirectoryRow::Identity { object_id, .. } = fixture.identity.clone() else {
+        return Err("identity row".into());
+    };
+    fixture.identity = DirectoryRow::Identity {
+        root_generation: 1,
+        root_fingerprint: root_fingerprint(&next)?,
+        object_id: next_object,
+        chain_object_ids: vec![object_id, next_object],
+    };
+    let rows = fixture.rows()?;
+    fixture.restore(rows);
+    let first = root_fingerprint(&fixture.principal.root)?;
+    let (principal_root, roster) = fixture
+        .state
+        .principals
+        .get(&fixture.digest)
+        .ok_or("principal")?;
+    assert_eq!((principal_root.fingerprint, roster.generation), (first, 0));
+    assert_eq!(
+        fixture
+            .state
+            .pending_roots
+            .get(&fixture.digest)
+            .map(|root| root.fingerprint),
+        Some(root_fingerprint(&next)?)
+    );
+    let entry = fixture
+        .state
+        .directory
+        .account(&fixture.digest)
+        .ok_or("entry")?;
+    assert_eq!(entry.root.as_ref().map(|root| root.generation), Some(1));
+    assert_eq!(
+        entry.roster.as_ref().map(|roster| roster.root_fingerprint),
+        Some(first)
+    );
+    assert!(entry.device_active(&[DEVICE; 16]));
     Ok(())
 }
 

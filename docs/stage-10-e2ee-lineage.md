@@ -4,9 +4,12 @@ This record covers the server topic `sdk/b-e2ee-lineage` of the SDK server
 program (items B-15 and B-16, 2026-10-09, outside master #35). The first
 commit checks the roots and rosters a historical finalization uses against
 the Commit's canonical validation time, with the narrow roster recovery of
-companion Section 8.4. No specification, profile hash, registry entry, named
-limit, reply code, wire object, table, key, row kind, field or storage
-generation changed.
+companion Section 8.4. The second starts an account's roster and capability
+lineages at generation zero under each root, keeps the account's roster
+while a new root awaits its first roster, live and after a restart alike,
+and keeps attachment counters in their account and device scope. No
+specification, profile hash, registry entry, named limit, reply code, wire
+object, table, key, row kind, field or storage generation changed.
 
 ## A finalization's roots and rosters are checked per use (first commit)
 
@@ -167,6 +170,114 @@ time after its principal's roster ended, and a coordinator restored as
 | `a_pending_route_refuses_a_roster_recovery_whose_successor_has_expired` | With a continuous successor that ends before the record's time, the finalization is refused with `E2EE_BINDING_AUTH_INVALID` and the head stays at the candidate. |
 | `a_pending_route_refuses_a_recovery_whose_references_carry_two_rosters_of_its_principal` | With the successor and the next roster naming it, each covering the record's time, as reference elements that the chain takes in that order, the finalization is refused with `E2EE_BINDING_AUTH_INVALID` and the head stays at the candidate. |
 
+## Roster and capability lineages start at each root (second commit)
+
+The companion text this rule implements:
+
+- Section 14: "All state-advancing profile generation and sequence counters
+  have one exact scope and advancement rule": `roster_generation` is scoped
+  to the "root fingerprint" and `capability_generation` to the "root
+  fingerprint and Device ID", each starting at 0 and advancing by "exactly
+  +1", while `device_session_generation` is scoped to the "Account ID and
+  Device ID".
+- Section 8.2: "A continuous root rotation issues a new complete roster and
+  new device certificates under the new root".
+- Section 8.4: "Clients persist the highest generation and ID per root. [...]
+  Roster generation zero uses an all-zero predecessor; every successor
+  increments by one and names the previous accepted ID", and "Revocation
+  entries are append-only within a root generation".
+- Section 8.5: "Generation zero has an all-zero predecessor. Every successor
+  increments by one, names the previously accepted ID".
+- Section 11.6: "`session_generation` is a durable nonzero uint64 counter
+  scoped to the Account ID and Device ID. [...] it never wraps or reuses a
+  value after restart".
+
+The rule:
+
+- The shared verifiers scope a lineage to its root
+  (`crates/agenc-relay-e2ee/src/identity.rs`): `roster_predecessor` selects
+  the predecessor a roster continues, the account's accepted roster when the
+  same root signed it and none otherwise, and `capability_predecessor` the
+  predecessor a capability statement continues, the device's accepted
+  statement when it belongs to the root of the roster the new statement
+  names. `verify_roster` and `verify_capabilities` refuse a predecessor of
+  another root, and `VerifiedCapabilities` carries the root fingerprint of
+  its lineage. The historical chain's roster transition selects its
+  predecessor through `roster_predecessor`.
+- The directory (`Directory::publish_roster` in the domain crate) admits a
+  root's first roster at generation zero and each later roster of that root
+  at its head plus one, under the newest root only. A root's first roster
+  keeps no capability head of an earlier root; a later roster keeps the
+  heads of the devices it keeps. Attachment counters outlive every roster.
+- `EKEY PUBLISH IDENTITY` continues the account's newest root, the one that
+  awaits its first roster or else the root of its current roster
+  (`newest_root`), and leaves the new root awaiting its first roster.
+  `EKEY PUBLISH ROSTER` verifies a roster under the newest root against the
+  head of that root only, and its batch deletes the capability row of every
+  head the directory drops, of a device that left the roster or of an
+  earlier root, so storage holds exactly the heads the directory keeps.
+  `EKEY PUBLISH CAPABILITIES` continues only the head of the root of the
+  roster the statement names.
+- Startup re-verifies the account's root chain and keeps every root of it,
+  restores the current roster under the root of the chain that signed it,
+  and leaves a newer root awaiting its first roster
+  (`restore_identity`, `restore_roster_row`, `pend_newest_root`).
+
+Between a root's publication and its first roster, the specification does
+not say which roster governs. The account keeps its current roster, root,
+devices, attachments and capability heads: that roster is still the
+highest accepted roster in which its devices are active (Sections 8.4 and
+11.6), its certificates keep their intervals under a root whose interval
+the new root's `not_before` lies in (Section 8.2), and only a roster under
+the new root can follow it, at generation zero. The alternative, no
+active device until the new roster, would stop every encrypted operation
+of the account between two publications that the root holder makes in
+sequence. A restart rebuilds the same state from the identity and roster
+rows, so live publication and a restart admit and refuse alike, and a
+crash between the root's and the roster's publication, or between the
+roster's and the capabilities', leaves a state from which the next
+publication proceeds.
+
+### Tests
+
+`crates/agenc-relay-runtime/src/e2ee/coordinator/tests/root_lineage.rs`
+publishes through the directory handlers into the harness's store; a
+restart rebuilds the coordinator from every stored row and must hold the
+live state and answer `FETCH IDENTITY`, `ROOT-CHAIN`, `ROSTER` and
+`CAPABILITIES` alike:
+
+| Test | What it pins |
+| --- | --- |
+| `a_rotated_root_starts_its_roster_and_capability_lineages_at_zero` | Under a continued root, a roster continuing the old root's counter and a roster under the old root are refused; the new root's generation-zero roster is stored and its batch deletes the old root's capability head from memory and storage; the device's capability counter continued under the new root is refused and its generation-zero statement stored; the next roster and statement of the new root advance by one; a restart holds the same state. |
+| `a_restart_at_each_step_of_a_rotation_rebuilds_the_live_state` | After the root, the first roster, the first capability statement and the next statement, a restart holds the live state, refuses the old root's counters continued under the new root as the live coordinator does, and stores the next step. |
+| `while_the_new_root_awaits_its_roster_the_account_keeps_its_devices` | Between a root and its first roster the account keeps its roster and capability heads, with the new root pending; live and after a restart, the device continues its statement under that roster and attaches again. |
+| `a_same_root_successor_advances_by_exactly_one` | Live and after a restart, a roster reset, a skipped roster generation and a capability reset, gap and fork are refused, and the exact successors are stored. |
+| `a_device_leaving_the_roster_leaves_no_capability_head` | A same-root roster that revokes a device deletes that device's capability row in its batch and keeps the remaining device's head. |
+| `attachment_counters_outlive_a_rotation` | A device the new root's first roster leaves out keeps its attachment counter, so its enrollment under the new root continues it, live and after a restart. |
+| `a_root_continues_the_root_that_awaits_its_first_roster` | Before any roster, the next root continues the pending root and a second successor of the first root is refused, live and after a restart. |
+| `a_root_recovery_rotates_again_from_the_root_that_awaits_its_roster` | With a continued root still awaiting its roster after a restart, a further continuous rotation is stored, a roster of the abandoned root is refused, and the recovered root's lineages start at zero, live and after the restart alike. |
+
+Also: `startup::directory_tests::a_roster_restores_under_the_root_that_signed_it_beside_a_newer_pending_root`
+(the rows of an account whose newest root awaits its roster restore the
+roster under the earlier root and leave the newest pending);
+`tests::identity::roster_and_capability_lineages_are_scoped_to_their_root`
+in the e2ee crate (both selection helpers, and both verifiers refusing a
+counter continued across roots even with the old head offered as
+predecessor); and, in the domain crate,
+`a_rotated_root_starts_its_roster_and_capability_lineages` (generation zero
+under the new root, no earlier head, attachment counters kept),
+`a_roster_burns_only_its_own_accounts_packages`, and
+`heads_advance_by_one_and_bind_to_each_other`, which now pins the active
+device limit under a new root at generation zero.
+
+Five coordinator tests that rotate the account's root now issue the new
+root's first roster at generation zero with an all-zero predecessor and
+certificates enrolled for it: `reload_preserves_published_policies_after_root_rotation`,
+`named_roster::a_proof_naming_a_predecessor_root_is_admitted_and_survives_a_reload`,
+`named_roster::a_proof_naming_a_retained_roster_without_its_device_is_refused`,
+`named_roster::live_admission_and_reconstruction_agree_on_the_named_roster`
+and `reinit::successor::expiry::an_installed_successor_restarts_after_its_principal_rotates_the_account_root`.
+
 ## Coverage
 
 Release policy (`conformance/release-critical-coverage.toml`):
@@ -186,7 +297,25 @@ Release policy (`conformance/release-critical-coverage.toml`):
   `e2ee-history-resume` only moved and keep the scores they have at the
   start commit (71 of 77 and 67 of 69 regions, and 12 of 12 branches).
 
-Both policies' source inventories are refreshed.
+- Second commit: ten new regions, `identity-roster-predecessor`
+  (`roster_predecessor`) and `identity-capability-predecessor`
+  (`capability_predecessor`), 6 of 6 regions each, and
+  `identity-roster-lineage` (`check_roster_lineage`) and
+  `identity-capability-lineage` (`check_capability_lineage`), 10 of 10 and
+  12 of 12 branches, in the e2ee crate; `directory-roster-root-scope`
+  (`Directory::publish_roster`), 10 of 10 branches, in the domain crate; and
+  `directory-newest-root` (`newest_root`), 12 of 12 regions,
+  `directory-roster-publication` (`publish_roster`), 2 of 2 branches,
+  `startup-directory-identity` (`restore_identity`),
+  `startup-directory-roster` (`restore_roster_row`) and
+  `startup-directory-pending-root` (`pend_newest_root`), 4 of 4, 4 of 4 and
+  2 of 2 branches, in a branch report of the runtime library. The three
+  finalization regions and the startup regions below `restore_directory`
+  only moved; `cap76-startup-rebuild` and
+  `coordinator-roster-snapshot-resolution` keep 91 of 91 regions and 4 of 4
+  branches.
+
+Both policies' source inventories are refreshed at each commit.
 
 ## Revert proofs
 
@@ -214,6 +343,24 @@ Both policies' source inventories are refreshed.
   record rather than by the account, in both transitions, in the root
   transition only or in the roster transition only (each failing a history
   test of two accounts).
+- Second commit: with `identity.rs`, `history/finalization.rs`, the
+  domain's `directory.rs` and the runtime's `ops/directory.rs` and
+  `startup.rs` set back to the first commit, thirteen tests fail: seven of
+  the eight in `root_lineage.rs`, the startup restore test and the five
+  updated rotation tests. The eighth, `a_same_root_successor_advances_by_exactly_one`,
+  pins same-root rules the first commit already had and passes there. With
+  only the domain's `directory.rs` set back, its rotation test fails.
+  Sixteen single-edit mutations each fail at least one test: either
+  selection helper or either lineage check admitting another root, the
+  domain's next generation ignoring the root, its capability heads kept
+  across roots, its attachment counters dropped with a roster, its package
+  burn reaching another account, the new root merged into the principal
+  beside the old roster, the newest root ignoring a pending root, the
+  dropped heads' rows kept or their heads kept in memory, the restored
+  roster looked up under the newest root only, a pending root left only
+  without a roster, the historical chain's roster transition continuing
+  across roots, and the roster handler not selecting through
+  `roster_predecessor`.
 
 ## Validation
 
@@ -247,5 +394,15 @@ in one record; the history tests fail.
 --workspace`, passes 374 of 374 and gives the scores above; the same
 report of `eb2b025`, exported with `git archive`, gives the start commit's
 scores.
+
+Second commit: the e2ee crate passes 375 of 375, the domain crate 263 of
+263 and the runtime library 2,832 of 2,832. The revert proofs and the
+sixteen single edits ran the runtime library's tests of the rotation, the
+startup directory and the updated rotation tests, the domain's directory
+tests, and the e2ee crate's identity and history tests, each as named
+above; none fails to compile. Branch reports of the three crates
+(`RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest --branch` after `cargo llvm-cov
+clean --workspace`, the runtime library with the same filter) pass 375,
+263 and 2,832 tests and give the scores above.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

@@ -50,15 +50,17 @@ impl AccountRoot {
         Ok(Self { seed, root })
     }
 
-    /// This root's roster `generation` continuing `previous` with only the
+    /// This root's roster `generation` following `previous` with only the
     /// `kept` devices active, signed but not published. Under the root that
-    /// signed `previous`, each kept device keeps the certificate `previous`
-    /// lists: a certificate continues unchanged, and a device a roster
-    /// dropped was revoked there and never returns under that root, which
-    /// uses a Device ID once (companion 8.3 and 8.4). The first roster of a
-    /// rotated root issues every kept device a fresh certificate for
-    /// `generation` (companion 8.2), which is how a device dropped under the
-    /// old root becomes roster-active again (companion 13.7.3).
+    /// signed `previous`, it continues `previous` and each kept device keeps
+    /// the certificate `previous` lists: a certificate continues unchanged,
+    /// and a device a roster dropped was revoked there and never returns
+    /// under that root, which uses a Device ID once (companion 8.3 and 8.4).
+    /// The first roster of a rotated root starts that root's own lineage with
+    /// an all-zero predecessor (companion 14) and issues every kept device a
+    /// fresh certificate for `generation` (companion 8.2), which is how a
+    /// device dropped under the old root becomes roster-active again
+    /// (companion 13.7.3).
     fn successor(
         &self,
         generation: u64,
@@ -85,11 +87,16 @@ impl AccountRoot {
             })
             .collect::<Result<Vec<_>, _>>()?;
         certificates.sort_by_key(|certificate| certificate.tbs.device_id);
+        let previous_id = if continued {
+            roster_id(previous)?
+        } else {
+            [0; 32]
+        };
         Ok(roster(
             &secret,
             &self.root,
             generation,
-            roster_id(previous)?,
+            previous_id,
             (100, 100 + 6 * 24 * 3600),
             certificates,
             Vec::new(),
@@ -230,14 +237,14 @@ fn a_proof_naming_a_retained_roster_without_its_device_is_refused() -> TestResul
     let mut harness = Harness::with_devices(&[DEVICE, SECOND_DEVICE])?;
     let conversation = harness.bind_channel()?;
     // Generation one drops device 8, revoking it under the original root,
-    // and the rotated root's first roster, generation two, issues it a new
-    // certificate, so it is roster-active now but was never active in
-    // generation one.
+    // and the rotated root's first roster, its generation zero, issues it a
+    // new certificate, so it is roster-active now but was never active in
+    // the original root's generation one.
     let original = AccountRoot::original(&harness);
     let without = original.successor(1, &harness.principal.roster, &[DEVICE])?;
     publish(&mut harness, &without)?;
     let rotated = AccountRoot::rotated(&mut harness)?;
-    let restored = rotated.successor(2, &without, &[DEVICE, SECOND_DEVICE])?;
+    let restored = rotated.successor(0, &without, &[DEVICE, SECOND_DEVICE])?;
     publish(&mut harness, &restored)?;
     harness.attach_as(SECOND_DEVICE)?;
     let signer = original.naming(&harness, &without);
@@ -324,9 +331,9 @@ fn live_admission_and_reconstruction_agree_on_the_named_roster() -> TestResult {
     publish(&mut harness, &without)?;
     let everyone = [DEVICE, SECOND_DEVICE, THIRD_DEVICE];
     let rotated = AccountRoot::rotated(&mut harness)?;
-    let restored = rotated.successor(2, &without, &everyone)?;
+    let restored = rotated.successor(0, &without, &everyone)?;
     publish(&mut harness, &restored)?;
-    let unpublished = rotated.successor(3, &restored, &everyone)?;
+    let unpublished = rotated.successor(1, &restored, &everyone)?;
     // Admitted live: device 8 names the retained generation-zero roster.
     harness.attach_as(SECOND_DEVICE)?;
     let held = harness.leaf_proof(conversation, SECOND_DEVICE, SECOND_LEAF_SEED, 1)?;
@@ -418,17 +425,15 @@ fn a_proof_naming_a_predecessor_root_is_admitted_and_survives_a_reload() -> Test
     ok(harness.run(Op::PublishIdentity, &[], Some(&bytes))?)?;
     let certificates = [DEVICE, SECOND_DEVICE]
         .into_iter()
-        .map(|seed| {
-            let mut device = support::DeviceSpec::new(seed);
-            device.target_roster_generation = 1;
-            support::certificate(&secret, &root, &device)
-        })
+        .map(|seed| support::certificate(&secret, &root, &support::DeviceSpec::new(seed)))
         .collect::<Result<Vec<_>, _>>()?;
+    // The continued root's first roster starts its own lineage at generation
+    // zero (companion 14).
     let next = roster(
         &secret,
         &root,
-        1,
-        roster_id(&harness.principal.roster)?,
+        0,
+        [0; 32],
         (100, 100 + 6 * 24 * 3600),
         certificates,
         Vec::new(),

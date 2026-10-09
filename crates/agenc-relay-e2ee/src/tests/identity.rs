@@ -1967,3 +1967,101 @@ fn the_current_target_enrollment_interval_includes_both_ends() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn roster_and_capability_lineages_are_scoped_to_their_root() -> TestResult {
+    let account = account_with(&[7])?;
+    let statement = capabilities(7, &account.roster, 0, [0; 32], (100, 200), vec![1, 3])?;
+    let head = verify_capabilities(&account.verified_roster, &statement, None)?;
+    assert_eq!(head.root_fingerprint, account.verified_root.fingerprint);
+    // A continuous rotation to root generation one.
+    let next_secret = key(41);
+    let next_root = root(
+        &next_secret,
+        &ACCOUNT,
+        1,
+        ROOT_INTERVAL,
+        Some((&account.root_secret, &account.root)),
+    )?;
+    let verified_next = verify_root_identity(&NETWORK, &next_root, Some(&account.verified_root))?;
+    // A head continues only under the root that signed it (companion 14).
+    let old_head = Some(&account.verified_roster);
+    assert_eq!(
+        roster_predecessor(&account.verified_root, old_head),
+        old_head
+    );
+    assert_eq!(roster_predecessor(&verified_next, old_head), None);
+    let reissued = certificate(&next_secret, &next_root, &DeviceSpec::new(7))?;
+    let first = roster(
+        &next_secret,
+        &next_root,
+        0,
+        [0; 32],
+        ROSTER_INTERVAL,
+        vec![reissued],
+        Vec::new(),
+    )?;
+    let verified_first = verify_roster(
+        &verified_next,
+        &first,
+        roster_predecessor(&verified_next, old_head),
+    )?;
+    assert_eq!(verified_first.generation, 0);
+    // The old root's counter continued under the new root is refused, also
+    // when the old head is offered as its predecessor.
+    let continued_spec = DeviceSpec {
+        target_roster_generation: 1,
+        ..DeviceSpec::new(7)
+    };
+    let continued = roster(
+        &next_secret,
+        &next_root,
+        1,
+        account.verified_roster.roster_id,
+        ROSTER_INTERVAL,
+        vec![certificate(&next_secret, &next_root, &continued_spec)?],
+        Vec::new(),
+    )?;
+    for predecessor in [None, old_head] {
+        assert_eq!(
+            verify_roster(&verified_next, &continued, predecessor),
+            Err(E2eeError::InvalidValue)
+        );
+    }
+    // A device's capability lineage restarts under the new root as well.
+    assert_eq!(
+        capability_predecessor(&account.verified_roster, Some(&head)),
+        Some(&head)
+    );
+    assert_eq!(capability_predecessor(&verified_first, Some(&head)), None);
+    let fresh = capabilities(7, &first, 0, [0; 32], (100, 200), vec![1, 3])?;
+    let verified_fresh = verify_capabilities(
+        &verified_first,
+        &fresh,
+        capability_predecessor(&verified_first, Some(&head)),
+    )?;
+    assert_eq!(verified_fresh.root_fingerprint, verified_next.fingerprint);
+    let carried = capabilities(7, &first, 1, head.capability_id, (100, 200), vec![1, 3])?;
+    for predecessor in [None, Some(&head)] {
+        assert_eq!(
+            verify_capabilities(&verified_first, &carried, predecessor),
+            Err(E2eeError::InvalidValue)
+        );
+    }
+    // Within the new root, the next statement continues the fresh head.
+    let next = capabilities(
+        7,
+        &first,
+        1,
+        verified_fresh.capability_id,
+        (150, 250),
+        vec![1],
+    )?;
+    let verified_next_statement = verify_capabilities(
+        &verified_first,
+        &next,
+        capability_predecessor(&verified_first, Some(&verified_fresh)),
+    )?;
+    assert_eq!(verified_next_statement.generation, 1);
+    Ok(())
+}
