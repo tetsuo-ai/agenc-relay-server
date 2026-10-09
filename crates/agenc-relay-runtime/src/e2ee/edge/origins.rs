@@ -218,8 +218,14 @@ impl E2eeEdge {
         edge: &mut EdgeFederation,
         origin_id: [u8; 16],
         generation: u64,
-        _state_object: bool,
+        state_object: bool,
     ) -> Result<(), Refusal> {
+        if !state_object {
+            // A deletion is acknowledged after every request ahead of it ran
+            // or was dropped: the closed connection's requests hold no place.
+            self.closed_requests
+                .retain(|_, (origin, _)| *origin != origin_id);
+        }
         let settled = self.acknowledge_origin(origin_id, generation);
         if self.phase == Phase::Active {
             // Only the connections this acknowledgement settled resend, and
@@ -317,16 +323,36 @@ impl E2eeEdge {
             } else {
                 0
             };
-            Some(CompanionFrame::OriginDel {
-                coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
-                server_incarnation: self.config.incarnation,
-                origin_id: origin.origin_id,
-                origin_generation: declared,
-                next_operation_sequence,
-            })
+            Some((
+                origin.origin_id,
+                CompanionFrame::OriginDel {
+                    coordinator_server_id: *self.config.coordinator_server_id.as_bytes(),
+                    server_incarnation: self.config.incarnation,
+                    origin_id: origin.origin_id,
+                    origin_generation: declared,
+                    next_operation_sequence,
+                },
+            ))
         });
-        if let Some(Ok(line)) = deletion.map(|frame| self.line(&frame)) {
-            self.send(context, edge, vec![line]);
+        let line = deletion.map(|(origin_id, frame)| (origin_id, self.line(&frame)));
+        let deleted = match line {
+            Some((origin_id, Ok(line))) => {
+                self.send(context, edge, vec![line]).then_some(origin_id)
+            }
+            _ => None,
+        };
+        if let Some(origin_id) = deleted {
+            // The coordinator runs or drops the connection's requests ahead
+            // of the deletion and may still hold them queued: the unanswered
+            // ones keep their places in the outstanding bounds (companion
+            // 16) until a frame of their result arrives, the deletion is
+            // acknowledged or the link ends.
+            for (request_id, pending) in &self.pending {
+                if pending.generation == generation && pending.result.is_none() {
+                    self.closed_requests
+                        .insert(*request_id, (origin_id, pending.account));
+                }
+            }
         }
         self.connection_closed(generation);
     }

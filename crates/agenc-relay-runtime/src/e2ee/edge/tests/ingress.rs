@@ -246,8 +246,13 @@ async fn the_duplicate_fragments_of_a_retried_object_ride_the_byte_bucket() -> T
     let mut answered = pending(1, 0, true);
     answered.command = command;
     answered.reply_key = Some((generation.get(), 1, *zero.object_id.as_bytes(), scope));
+    reserve_reply(&mut answered)?;
     edge.replies
-        .remember(&answered, vec![":edge.example EKEY STORED".to_owned()], 0)
+        .remember(
+            &mut answered,
+            vec![":edge.example EKEY STORED".to_owned()],
+            0,
+        )
         .map_err(|refusal| refusal.code.to_string())?;
     assert_eq!(
         edge.ingress_charge(generation, &line(one)?),
@@ -388,5 +393,520 @@ async fn a_command_that_needs_a_device_is_refused_before_attachment() -> TestRes
         frame.middle()
     );
     assert!(edge.pending.is_empty());
+    Ok(())
+}
+
+/// The facts of one session authenticated as the test account.
+fn facts<'a>(capabilities: &'a CapabilityState) -> TestResult<SessionFacts<'a>> {
+    Ok(SessionFacts {
+        user_id: USER,
+        account: Some(account_id().to_text().as_bytes().try_into()?),
+        capabilities,
+        nickname: "Sender",
+    })
+}
+
+/// The carrier of an `EKEY PUBLISH IDENTITY` object.
+fn identity_carrier() -> TestResult<agenc_relay_e2ee::wire::carrier::CarrierCommand> {
+    Ok(super::super::router::Resolved::Command(
+        agenc_relay_e2ee::wire::command::ClientCommand::Ekey(EkeyCommand::PublishIdentity),
+    )
+    .carrier()
+    .ok_or("carrier")?)
+}
+
+/// The assembly tuple of an `EKEY PUBLISH IDENTITY` object of `generation`
+/// under the test attachment.
+fn identity_tuple(
+    generation: ConnectionGeneration,
+    fragment: &FragmentTag,
+) -> TestResult<agenc_relay_e2ee::wire::assembly::AssemblyKey> {
+    let command = super::super::router::Resolved::Command(
+        agenc_relay_e2ee::wire::command::ClientCommand::Ekey(EkeyCommand::PublishIdentity),
+    );
+    let carrier = identity_carrier()?;
+    let scope = super::super::router::request_scope(&command).map_err(|e| e.code.to_string())?;
+    Ok(super::super::router::submission_key(
+        (generation.get(), 1, *fragment.object_id.as_bytes(), scope),
+        carrier,
+    ))
+}
+
+/// An `EKEY PUBLISH IDENTITY` payload of `total` encoded bytes: a wire
+/// object of the kind the command carries, filled with `fill`.
+fn identity_object(total: usize, fill: u8) -> TestResult<Vec<u8>> {
+    use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
+    use agenc_relay_e2ee::tls::TlsEncode;
+    Ok(ArcWireObject::new(ArcWireObjectKind::RootIdentity, vec![fill; total - 6])?.encode()?)
+}
+
+fn refused_with(outputs: &[super::super::ClientOutput], code: &str) -> bool {
+    outputs.iter().any(|output| {
+        output
+            .frames
+            .iter()
+            .any(|frame| frame.middle().iter().any(|parameter| parameter == code))
+    })
+}
+
+/// Each connection holds its own share of the recent-object cache (companion
+/// 16: storage at the ceiling is refused fairly): a connection past its
+/// share is refused before any reservation, and another connection's
+/// submission is still admitted.
+#[tokio::test]
+async fn a_connection_past_its_recent_share_leaves_the_others_admitted() -> TestResult {
+    use agenc_relay_e2ee::wire::assembly::{Ingest, MAX_RECENT_OBJECTS, QuotaScopes};
+    let (first, second) = (ConnectionGeneration::new(1), ConnectionGeneration::new(2));
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(first)?;
+    let settled = edge.origins.get(&first).cloned().ok_or("origin")?;
+    edge.origins.insert(second, settled);
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    for index in 0..MAX_RECENT_OBJECTS {
+        let bytes = u64::try_from(index)?.to_be_bytes().to_vec();
+        let fragment = fragment_object(&bytes)?
+            .into_iter()
+            .next()
+            .ok_or("fragment")?;
+        let tuple = identity_tuple(first, &fragment)?;
+        let completed = edge.assembler.ingest(
+            tuple,
+            QuotaScopes::default(),
+            identity_carrier()?.limit(),
+            &fragment,
+            0,
+        )?;
+        assert!(matches!(completed, Ingest::Complete(_)));
+    }
+    let object = vec![0xa5; 100];
+    let fragment = fragment_object(&object)?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let message = line(&fragment)?;
+    let refused = edge.client_line(core.context_mut()?, &mut base, first, &message, &facts);
+    assert!(
+        refused_with(&refused, "E2EE_REASSEMBLY_LIMIT"),
+        "{refused:?}"
+    );
+    assert!(!edge.assembler.is_recent(&identity_tuple(first, &fragment)?));
+    let admitted = edge.client_line(core.context_mut()?, &mut base, second, &message, &facts);
+    assert!(
+        !refused_with(&admitted, "E2EE_REASSEMBLY_LIMIT"),
+        "{admitted:?}"
+    );
+    assert!(
+        edge.assembler
+            .is_recent(&identity_tuple(second, &fragment)?)
+    );
+    assert_eq!(edge.assembler.quotas().reserved_bytes(), 0);
+    Ok(())
+}
+
+/// A completed submission refused before it went out keeps no recent-object
+/// tuple, so its retry is admitted again rather than refused as a duplicate.
+#[tokio::test]
+async fn a_submission_refused_before_it_is_sent_releases_its_recent_tuple() -> TestResult {
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let object = vec![0xa5; 2 * 2_940 + 100];
+    let fragments = fragment_object(&object)?;
+    let first = fragments.first().ok_or("fragment")?;
+    let opened = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &line(first)?,
+        &facts,
+    );
+    assert!(opened.is_empty(), "{opened:?}");
+    // While the object assembles, the connection's reply quota fills with
+    // kept replies.
+    let mut request = pending(1, 0, true);
+    for index in 0..u32::try_from(super::super::retry::CONNECTION_REPLIES)? {
+        let mut object_id = [0; 32];
+        object_id
+            .get_mut(..4)
+            .ok_or("object")?
+            .copy_from_slice(&index.to_be_bytes());
+        request.reply_key = Some((1, 7, object_id, [7; 32]));
+        reserve_reply(&mut request)?;
+        edge.replies
+            .remember(
+                &mut request,
+                vec![":edge.example EKEY STORED IDENTITY x".to_owned()],
+                0,
+            )
+            .map_err(|e| e.code.to_string())?;
+    }
+    let mut refused = Vec::new();
+    for fragment in fragments.iter().skip(1) {
+        refused = edge.client_line(
+            core.context_mut()?,
+            &mut base,
+            generation,
+            &line(fragment)?,
+            &facts,
+        );
+    }
+    assert!(refused_with(&refused, "E2EE_RATE_LIMITED"), "{refused:?}");
+    assert!(edge.pending.is_empty());
+    assert!(
+        !edge
+            .assembler
+            .is_recent(&identity_tuple(generation, first)?),
+        "the refused submission keeps no tuple"
+    );
+    Ok(())
+}
+
+/// A closed connection's recent submissions and its open one leave the
+/// cache with it.
+#[tokio::test]
+async fn a_closed_connection_forgets_its_recent_submissions() -> TestResult {
+    use agenc_relay_e2ee::wire::assembly::{Ingest, QuotaScopes};
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let fragment = fragment_object(&[0xa5; 100])?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let tuple = identity_tuple(generation, &fragment)?;
+    let other = identity_tuple(ConnectionGeneration::new(2), &fragment)?;
+    for key in [&tuple, &other] {
+        let completed = edge.assembler.ingest(
+            key.clone(),
+            QuotaScopes::default(),
+            identity_carrier()?.limit(),
+            &fragment,
+            0,
+        )?;
+        assert!(matches!(completed, Ingest::Complete(_)));
+    }
+    let large = fragment_object(&vec![0x5a; 2 * 2_940 + 100])?;
+    let opening = line(large.first().ok_or("fragment")?)?;
+    let opened = edge.client_line(core.context_mut()?, &mut base, generation, &opening, &facts);
+    assert!(opened.is_empty(), "{opened:?}");
+    assert_eq!(edge.assembler.open_count(), 1);
+    edge.connection_closed(generation);
+    assert!(!edge.assembler.is_recent(&tuple));
+    assert_eq!(edge.assembler.open_count(), 0);
+    assert!(
+        edge.assembler.is_recent(&other),
+        "another connection's stays"
+    );
+    Ok(())
+}
+
+/// Outstanding requests are bounded per connection, per account and for
+/// the edge (companion 16): a connection past its own bound, or an account
+/// past its own over its connections, is refused, while another account's
+/// connection is still admitted until the edge's bound.
+#[tokio::test]
+async fn outstanding_requests_are_bounded_per_connection_account_and_edge() -> TestResult {
+    let generations: Vec<ConnectionGeneration> = (1..=4).map(ConnectionGeneration::new).collect();
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let first = *generations.first().ok_or("first")?;
+    let mut edge = active_edge(first)?;
+    let settled = edge.origins.get(&first).cloned().ok_or("origin")?;
+    for generation in &generations {
+        edge.origins.insert(*generation, settled.clone());
+    }
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let account = facts.account.ok_or("account")?;
+    let outstanding = |edge: &mut E2eeEdge, connection: u64, account: [u8; 24], count: u8| {
+        for sequence in 0..count {
+            let mut request = pending(connection, u64::from(sequence), false);
+            request.account = account;
+            let mut id = [u8::try_from(connection).unwrap_or(u8::MAX); 16];
+            if let Some(last) = id.last_mut() {
+                *last = sequence;
+            }
+            edge.pending.insert(id, request);
+        }
+    };
+    let whoami = parse_message(FramedLine::new("EKEY WHOAMI")?)?.ok_or("message")?;
+    outstanding(&mut edge, 1, account, 4);
+    let refused = edge.client_line(core.context_mut()?, &mut base, first, &whoami, &facts);
+    assert!(refused_with(&refused, "E2EE_RATE_LIMITED"), "{refused:?}");
+    // The account's second connection is admitted until the account holds eight.
+    let second = *generations.get(1).ok_or("second")?;
+    outstanding(&mut edge, 2, account, 3);
+    let admitted = edge.client_line(core.context_mut()?, &mut base, second, &whoami, &facts);
+    assert!(
+        !refused_with(&admitted, "E2EE_RATE_LIMITED"),
+        "{admitted:?}"
+    );
+    assert_eq!(edge.pending.len(), 8);
+    let third = *generations.get(2).ok_or("third")?;
+    let refused = edge.client_line(core.context_mut()?, &mut base, third, &whoami, &facts);
+    assert!(
+        refused_with(&refused, "E2EE_RATE_LIMITED"),
+        "the account's bound: {refused:?}"
+    );
+    // Another account's connection is admitted until the edge holds 32.
+    let other_facts = SessionFacts {
+        account: Some(account_of(40)),
+        ..super::ingress::facts(&capabilities)?
+    };
+    let admitted = edge.client_line(core.context_mut()?, &mut base, third, &whoami, &other_facts);
+    assert!(
+        !refused_with(&admitted, "E2EE_RATE_LIMITED"),
+        "{admitted:?}"
+    );
+    // The test's entropy names every sent request alike, so fill the rest
+    // of the edge's bound by count.
+    let mut connection = 10_u64;
+    while edge.pending.len() < 32 {
+        let room = 32 - edge.pending.len();
+        outstanding(
+            &mut edge,
+            connection,
+            account_of(connection),
+            u8::try_from(room.min(4))?,
+        );
+        connection += 1;
+    }
+    let fourth = *generations.get(3).ok_or("fourth")?;
+    let fresh_facts = SessionFacts {
+        account: Some(account_of(41)),
+        ..super::ingress::facts(&capabilities)?
+    };
+    let refused = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        fourth,
+        &whoami,
+        &fresh_facts,
+    );
+    assert!(
+        refused_with(&refused, "E2EE_RATE_LIMITED"),
+        "the edge's bound: {refused:?}"
+    );
+    Ok(())
+}
+
+/// A closed connection's unanswered requests keep their places in its
+/// account's and the edge's outstanding bounds (companion 16): eight of an
+/// account's refuse it on another connection, and another account's
+/// connection is admitted until the edge holds 32 with them.
+#[tokio::test]
+async fn a_closed_connections_requests_count_against_the_outstanding_bounds() -> TestResult {
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let account = facts.account.ok_or("account")?;
+    for index in 0..8_u8 {
+        edge.closed_requests.insert([index; 16], ([9; 16], account));
+    }
+    let whoami = parse_message(FramedLine::new("EKEY WHOAMI")?)?.ok_or("message")?;
+    let refused = edge.client_line(core.context_mut()?, &mut base, generation, &whoami, &facts);
+    assert!(
+        refused_with(&refused, "E2EE_RATE_LIMITED"),
+        "the account's bound: {refused:?}"
+    );
+    for index in 8..31_u8 {
+        edge.closed_requests
+            .insert([index; 16], ([9; 16], account_of(u64::from(index))));
+    }
+    let other_facts = SessionFacts {
+        account: Some(account_of(40)),
+        ..super::ingress::facts(&capabilities)?
+    };
+    let admitted = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &whoami,
+        &other_facts,
+    );
+    assert!(
+        !refused_with(&admitted, "E2EE_RATE_LIMITED"),
+        "{admitted:?}"
+    );
+    assert_eq!(edge.pending.len(), 1);
+    let refused = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &whoami,
+        &other_facts,
+    );
+    assert!(
+        refused_with(&refused, "E2EE_RATE_LIMITED"),
+        "the edge's bound: {refused:?}"
+    );
+    Ok(())
+}
+
+/// The reservations of a connection's and an account's outstanding
+/// submissions count against their reply quotas at fragment zero
+/// (companion 16): a connection keeping 511 replies is refused while one
+/// submission of its is outstanding, and admitted once none is; a third
+/// connection of an account keeping 1,023 replies over two connections is
+/// refused while one submission of the account is outstanding, and admitted
+/// once none is.
+#[tokio::test]
+async fn outstanding_reservations_count_against_the_reply_quotas_at_fragment_zero() -> TestResult {
+    use super::super::retry::{ACCOUNT_REPLIES, CONNECTION_REPLIES};
+    let generations: Vec<ConnectionGeneration> = (1..=3).map(ConnectionGeneration::new).collect();
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let account = facts.account.ok_or("account")?;
+    let quota = u32::try_from(CONNECTION_REPLIES)?;
+    let submission = line(
+        fragment_object(&identity_object(64, 0x5a)?)?
+            .first()
+            .ok_or("fragment")?,
+    )?;
+    let outstanding = |edge: &mut E2eeEdge, connection: u64| -> TestResult {
+        let mut request = pending(connection, 0, false);
+        request.account = account;
+        request.reply_key = Some((connection, 1, [0xee; 32], [7; 32]));
+        reserve_reply(&mut request)?;
+        edge.pending.insert([0xee; 16], request);
+        Ok(())
+    };
+    for (kept, submitter) in [((quota - 1, 0), 0_usize), ((quota, quota - 1), 2)] {
+        let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+        let mut base = base_edge();
+        let first = *generations.first().ok_or("first")?;
+        let mut edge = active_edge(first)?;
+        let settled = edge.origins.get(&first).cloned().ok_or("origin")?;
+        for generation in &generations {
+            edge.origins.insert(*generation, settled.clone());
+        }
+        keep(&mut edge.replies, 1, account, kept.0)?;
+        keep(&mut edge.replies, 2, account, kept.1)?;
+        assert!(
+            usize::try_from(kept.0 + kept.1)? < ACCOUNT_REPLIES,
+            "the kept replies alone fit"
+        );
+        // The connection's own submission, or the account's on its second
+        // connection, is outstanding.
+        outstanding(&mut edge, if submitter == 0 { 1 } else { 2 })?;
+        let connection = *generations.get(submitter).ok_or("submitter")?;
+        let refused = edge.client_line(
+            core.context_mut()?,
+            &mut base,
+            connection,
+            &submission,
+            &facts,
+        );
+        assert!(refused_with(&refused, "E2EE_RATE_LIMITED"), "{refused:?}");
+        assert_eq!(edge.pending.len(), 1, "nothing more went out");
+        edge.pending.clear();
+        let _sent = edge.client_line(
+            core.context_mut()?,
+            &mut base,
+            connection,
+            &submission,
+            &facts,
+        );
+        assert_eq!(edge.pending.len(), 1, "with none outstanding it went out");
+    }
+    Ok(())
+}
+
+/// A connection at its reply quota is still answered for a request whose
+/// reply is not kept, which reserves nothing (companion 16).
+#[tokio::test]
+async fn a_connection_at_its_reply_quota_is_served_a_request_it_keeps_no_reply_for() -> TestResult {
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let mut request = pending(1, 0, true);
+    request.account = facts.account.ok_or("account")?;
+    for index in 0..u32::try_from(super::super::retry::CONNECTION_REPLIES)? {
+        let mut object_id = [0; 32];
+        object_id
+            .get_mut(..4)
+            .ok_or("object")?
+            .copy_from_slice(&index.to_be_bytes());
+        request.reply_key = Some((1, 1, object_id, [7; 32]));
+        reserve_reply(&mut request)?;
+        edge.replies
+            .remember(
+                &mut request,
+                vec![":edge.example EKEY STORED IDENTITY x".to_owned()],
+                0,
+            )
+            .map_err(|e| e.code.to_string())?;
+    }
+    let fragment = fragment_object(&identity_object(64, 0x5a)?)?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let refused = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &line(&fragment)?,
+        &facts,
+    );
+    assert!(refused_with(&refused, "E2EE_RATE_LIMITED"), "{refused:?}");
+    let whoami = parse_message(FramedLine::new("EKEY WHOAMI")?)?.ok_or("message")?;
+    let served = edge.client_line(core.context_mut()?, &mut base, generation, &whoami, &facts);
+    assert!(!refused_with(&served, "E2EE_RATE_LIMITED"), "{served:?}");
+    assert_eq!(edge.pending.len(), 1, "the request went out");
+    Ok(())
+}
+
+/// A submission whose largest reply the memory budget cannot reserve is
+/// refused `E2EE_RATE_LIMITED` before it goes out (architecture 19.2).
+#[tokio::test]
+async fn a_submission_the_memory_budget_cannot_reserve_for_is_refused() -> TestResult {
+    let generation = ConnectionGeneration::new(1);
+    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let mut base = base_edge();
+    let mut edge = active_edge(generation)?;
+    let capabilities = capabilities()?;
+    let facts = facts(&capabilities)?;
+    let mut held = Vec::new();
+    for chunk in [1_u64 << 20, 4_096] {
+        while let Ok(permit) = core.context_mut()?.reserve_kept_output(chunk) {
+            held.push(permit);
+        }
+    }
+    let fragment = fragment_object(&identity_object(64, 0x5a)?)?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let refused = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &line(&fragment)?,
+        &facts,
+    );
+    assert!(refused_with(&refused, "E2EE_RATE_LIMITED"), "{refused:?}");
+    assert!(edge.pending.is_empty());
+    drop(held);
+    let _sent = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &line(&fragment)?,
+        &facts,
+    );
+    assert_eq!(edge.pending.len(), 1, "with the memory back it goes out");
     Ok(())
 }

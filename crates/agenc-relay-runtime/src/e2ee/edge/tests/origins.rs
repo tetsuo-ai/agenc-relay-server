@@ -784,6 +784,108 @@ async fn an_ended_connection_releases_its_requests_without_a_live_declaration() 
         edge.pending.is_empty(),
         "the ended connection's request is released"
     );
+    assert!(
+        edge.closed_requests.is_empty(),
+        "no deletion went out, so the request keeps no place"
+    );
+    Ok(())
+}
+
+/// A closed connection's unanswered requests keep their places in the
+/// outstanding bounds while the coordinator may still hold them queued
+/// (companion 12.5, 16): a request already answered holds none, another
+/// connection's requests stay its own, and each unanswered one holds its
+/// place until a frame of its result arrives or the origin's deletion is
+/// acknowledged; a link loss releases them all.
+#[tokio::test]
+async fn a_closed_connection_keeps_its_unanswered_requests_until_answered() -> TestResult {
+    let mut fixture = StateCoreFixture::new((0..=u8::MAX).cycle().take(4_096).collect())?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let mut peer = EdgePeer::reset()?;
+    let (connection, other) = (ConnectionGeneration::new(1), ConnectionGeneration::new(2));
+    declared(
+        &mut fixture,
+        &mut base,
+        &mut queue,
+        &mut edge,
+        &mut peer,
+        connection,
+    )
+    .await?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        other,
+        &EdgePeer::facts_of([0x77; 16], 0),
+        0,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let answers = relay(&mut queue, &mut peer).await?;
+    acknowledge(&mut edge, &answers);
+    edge.phase = Phase::Active;
+    for _ in 0..3 {
+        let _sent = whoami(&mut fixture, &mut base, &mut queue, &mut edge, connection).await?;
+    }
+    let _sent = whoami(&mut fixture, &mut base, &mut queue, &mut edge, other).await?;
+    let ids: Vec<[u8; 16]> = edge
+        .pending
+        .iter()
+        .filter(|(_, pending)| pending.generation == connection)
+        .map(|(id, _)| *id)
+        .collect();
+    let [answered, first, second] = ids[..] else {
+        return Err(format!("three requests: {ids:?}").into());
+    };
+    edge.pending.get_mut(&answered).ok_or("pending")?.result =
+        Some(super::super::result::DecodedResult {
+            request_object_id: [7; 32],
+            kind: agenc_relay_e2ee::objects::federation::ArcFederationResultKind::Failed,
+            value: super::super::result::ResultValue::Failed {
+                code: "E2EE_SYNCING".to_owned(),
+                context: Vec::new(),
+            },
+            completion_event_id: None,
+            snapshot_token: None,
+            next_cursor: None,
+            descriptors: Vec::new(),
+        });
+    edge.delete_origin(fixture.context_mut()?, &mut base, connection);
+    assert_eq!(
+        edge.pending.len(),
+        1,
+        "the other connection's request stays"
+    );
+    let held = |edge: &E2eeEdge| edge.closed_requests.keys().copied().collect::<Vec<_>>();
+    assert_eq!(held(&edge), vec![first, second], "the unanswered ones");
+    let fragment = fragment_object(&[0; 16])?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let answer = CompanionFrame::Result {
+        correlation: agenc_relay_e2ee::federation::frames::Correlation {
+            peer_server_id: [3; 16],
+            server_incarnation: [4; 16],
+            origin_id: EdgePeer::facts(0).origin_id,
+            origin_generation: 0,
+            operation_sequence: 0,
+            request_id: first,
+        },
+        object_id: [0; 32],
+        fragment,
+    };
+    let _dropped = edge
+        .on_result_frame(fixture.context_mut()?, answer)
+        .map_err(|error| error.code.to_string())?;
+    assert_eq!(held(&edge), vec![second], "a frame of its result arrived");
+    let answers = relay(&mut queue, &mut peer).await?;
+    assert!(deletion_acknowledged(&answers, 0), "{answers:?}");
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, answers);
+    assert!(held(&edge).is_empty(), "the deletion is acknowledged");
+    edge.delete_origin(fixture.context_mut()?, &mut base, other);
+    assert_eq!(held(&edge).len(), 1);
+    edge.link_down();
+    assert!(held(&edge).is_empty(), "the link ended");
     Ok(())
 }
 

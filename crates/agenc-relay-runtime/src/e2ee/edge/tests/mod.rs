@@ -105,8 +105,8 @@ pub(super) fn rotating_key_set() -> Option<agenc_relay_e2ee::sequencer::Sequence
         .ok()
 }
 
-/// Fills the edge's recent-object cache with completed client submissions,
-/// one per connection, up to its shared ceiling.
+/// Fills one connection's share of the edge's recent-object cache with
+/// completed client submissions, up to its ceiling.
 pub(super) fn fill_client_cache(edge: &mut E2eeEdge) -> Result<(), Box<dyn std::error::Error>> {
     use agenc_relay_e2ee::wire::assembly::{
         AssemblyKey, Direction, Ingest, MAX_RECENT_OBJECTS, QuotaScopes, Sender,
@@ -121,7 +121,7 @@ pub(super) fn fill_client_cache(edge: &mut E2eeEdge) -> Result<(), Box<dyn std::
         let key = AssemblyKey {
             direction: Direction::LocalIngress,
             sender: Sender::Connection {
-                connection: u64::try_from(index)?,
+                connection: 900,
                 session_generation: 1,
             },
             command: CarrierCommand::Tagmsg,
@@ -175,6 +175,8 @@ fn origin(origin_id: [u8; 16], declared: u64, sequence: u64) -> LocalOrigin {
 fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
     PendingRequest {
         reply_key: None,
+        reservation: None,
+        account: account_of(generation),
         echo_lines: Vec::new(),
         retry_label: None,
         generation: ConnectionGeneration::new(generation),
@@ -202,6 +204,54 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
         completion_seen: false,
         rendered: false,
     }
+}
+
+/// The account a test connection's requests are sent under: each
+/// connection its own unless a test says otherwise.
+fn account_of(generation: u64) -> [u8; 24] {
+    let mut account = [b'a'; 24];
+    if let Some(tail) = account.get_mut(16..) {
+        tail.copy_from_slice(&generation.to_be_bytes());
+    }
+    account
+}
+
+/// Reserves the memory `request`'s reply is kept in, as sending it does.
+fn reserve_reply(request: &mut PendingRequest) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge};
+    let bytes = super::retry::reply_reservation(&request.command);
+    let budget = MemoryBudget::new(bytes);
+    request.reservation =
+        Some(budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(bytes)])?)?);
+    Ok(())
+}
+
+/// Keeps `count` one-line replies for `connection` under `account`.
+fn keep(
+    replies: &mut super::retry::Replies,
+    connection: u64,
+    account: [u8; 24],
+    count: u32,
+) -> TestResult {
+    let mut request = pending(connection, 0, true);
+    request.account = account;
+    for index in 0..count {
+        let mut object = [0; 32];
+        object
+            .get_mut(..4)
+            .ok_or("object")?
+            .copy_from_slice(&index.to_be_bytes());
+        request.reply_key = Some((connection, 0, object, [7; 32]));
+        reserve_reply(&mut request)?;
+        replies
+            .remember(
+                &mut request,
+                vec![":edge.example EKEY STORED IDENTITY x".to_owned()],
+                5,
+            )
+            .map_err(|e| e.code.to_string())?;
+    }
+    Ok(())
 }
 
 /// A replayed declaration of the generation already in force keeps the

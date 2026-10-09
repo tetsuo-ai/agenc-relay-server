@@ -740,3 +740,45 @@ fn forgetting_one_object_releases_its_senders_slot() -> TestResult {
     assert!(assembler.is_recent(&again));
     Ok(())
 }
+
+#[test]
+fn a_refusing_per_sender_ceiling_refuses_only_the_sender_past_it() -> TestResult {
+    let mut assembler =
+        E2eeAssembler::with_ceiling(QuotaLimits::default(), RecentCeiling::PerSenderRefused);
+    let mut first = None;
+    for index in 0..MAX_RECENT_OBJECTS {
+        let (key, outcome) = complete_from(&mut assembler, [4; 16], index, 10)?;
+        assert!(matches!(outcome, Ingest::Complete(_)));
+        assert!(assembler.is_recent(&key));
+        first.get_or_insert(key);
+    }
+    // Past its own ceiling the sender is refused before any reservation.
+    let refused = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS, 11);
+    assert!(matches!(
+        refused.err().map(|error| error.downcast::<AssemblyError>()),
+        Some(Ok(error)) if *error == AssemblyError::ReassemblyLimit
+    ));
+    assert_eq!(assembler.quotas().reserved_bytes(), 0);
+    assert_eq!(assembler.open_count(), 0);
+    // An exact copy of its recent object is still answered from the cache.
+    let first = first.ok_or("first object")?;
+    let bytes = 0_u64.to_be_bytes().to_vec();
+    let fragment = fragment_object(&bytes)?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    assert_eq!(
+        assembler.ingest(first.clone(), QuotaScopes::default(), LIVE, &fragment, 11)?,
+        Ingest::Recent
+    );
+    // Another sender keeps its own ceiling.
+    let (other, outcome) = complete_from(&mut assembler, [5; 16], 0, 11)?;
+    assert!(matches!(outcome, Ingest::Complete(_)));
+    assert!(assembler.is_recent(&other));
+    // A forgotten object frees its sender's slot.
+    assert!(assembler.forget(&first));
+    let (key, outcome) = complete_from(&mut assembler, [4; 16], MAX_RECENT_OBJECTS, 12)?;
+    assert!(matches!(outcome, Ingest::Complete(_)));
+    assert!(assembler.is_recent(&key));
+    Ok(())
+}

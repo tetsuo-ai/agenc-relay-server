@@ -27,6 +27,14 @@ use crate::state_core::StateCoreContext;
 pub const E2EE_CAPABILITY: &str = "agenc.ag/e2ee-mls";
 /// The client-only fragment tag key as the client sends it.
 const CLIENT_FRAGMENT_KEY: &str = "+agenc.ag/e2ee";
+/// Requests one connection has outstanding at most.
+const CONNECTION_OUTSTANDING: usize = 4;
+/// Requests one account has outstanding at most over all its connections.
+const ACCOUNT_OUTSTANDING: usize = 8;
+/// Requests the edge has outstanding at most: half of the coordinator's
+/// per-peer bounds on queued requests and on requests waiting for their
+/// payloads, so a conforming edge stays clear of both.
+const EDGE_OUTSTANDING: usize = crate::e2ee::coordinator::MAX_QUEUED_COMPANION_REQUESTS / 2;
 
 /// One client command resolved against the edge's base replica: channel
 /// names became channel instances, and a bound-channel `TAGMSG` became the
@@ -183,7 +191,6 @@ impl E2eeEdge {
             return Err(E2eeReplyCode::Syncing.into());
         }
         let account = facts.account.ok_or(E2eeReplyCode::AccountRequired)?;
-        let _ = account;
         let device = self
             .origins
             .get(&generation)
@@ -245,25 +252,40 @@ impl E2eeEdge {
                         .pending
                         .values()
                         .any(|pending| pending.reply_key == Some(key))
-                    && !self.replies.admits(self.pending.len())
+                    && !self.admits_request(
+                        generation,
+                        &account,
+                        super::retry::reply_reservation(&command),
+                    )
                 {
                     return Err(E2eeReplyCode::RateLimited.into());
                 }
                 let payload = self.ingest(generation, facts, &command, carrier, &tag, context)?;
-                match payload {
-                    Some(bytes) => self
-                        .send_request(
-                            context,
-                            edge,
-                            generation,
-                            account,
-                            label,
-                            command,
-                            Some(bytes),
-                        )
-                        .map(|()| Vec::new()),
-                    None => Ok(Vec::new()),
+                let Some(bytes) = payload else {
+                    return Ok(Vec::new());
+                };
+                let sent = self
+                    .send_request(
+                        context,
+                        edge,
+                        generation,
+                        account,
+                        label,
+                        command,
+                        Some(bytes),
+                    )
+                    .map(|()| Vec::new());
+                // A completed submission refused before it went out keeps no
+                // recent-object tuple, so its retry is admitted again.
+                if sent.is_err()
+                    && !self
+                        .pending
+                        .values()
+                        .any(|pending| pending.reply_key == Some(key))
+                {
+                    self.assembler.forget(&submission_key(key, carrier));
                 }
+                sent
             }
             (Some(_), None) | (None, Some(_)) => Err(E2eeReplyCode::InvalidFragment.into()),
             (None, None) => self
@@ -438,14 +460,25 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         generation: ConnectionGeneration,
-        _account: [u8; 24],
+        account: [u8; 24],
         label: Option<String>,
         command: Resolved,
         payload: Option<Vec<u8>>,
     ) -> Result<(), Refusal> {
-        if !self.replies.admits(self.pending.len()) {
+        // A submission's reply is kept for its retries: its largest size is
+        // reserved now, so keeping it never fails (companion 11.8, 16).
+        let reserve = if payload.is_some() {
+            super::retry::reply_reservation(&command)
+        } else {
+            0
+        };
+        if !self.admits_request(generation, &account, reserve) {
             return Err(E2eeReplyCode::RateLimited.into());
         }
+        let reservation = (reserve != 0)
+            .then(|| context.reserve_kept_output(reserve))
+            .transpose()
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
         let origin = self
             .origins
             .get_mut(&generation)
@@ -532,6 +565,8 @@ impl E2eeEdge {
             request_id,
             PendingRequest {
                 reply_key,
+                reservation,
+                account,
                 echo_lines: Vec::new(),
                 retry_label: None,
                 generation,
@@ -556,6 +591,57 @@ impl E2eeEdge {
         Ok(())
     }
 
+    /// Whether one more outstanding request of `generation` under
+    /// `account` fits: the connection's, the account's and the edge's
+    /// outstanding requests stay within their bounds, a closed connection's
+    /// unanswered requests counting for its account and the edge, and a
+    /// submission whose reply is kept, reserving `reserve` bytes, fits the
+    /// connection's and the account's reply quotas beside what they keep
+    /// and reserve (companion 16). A request whose reply is not kept
+    /// reserves nothing.
+    fn admits_request(
+        &self,
+        generation: ConnectionGeneration,
+        account: &[u8; 24],
+        reserve: u64,
+    ) -> bool {
+        let mut outstanding = (0_usize, 0_usize);
+        let mut reserved = (
+            super::retry::Usage::default(),
+            super::retry::Usage::default(),
+        );
+        // A closed connection's unanswered requests keep their places in
+        // their account's and the edge's bounds.
+        for (_, holder) in self.closed_requests.values() {
+            if holder == account {
+                outstanding.1 = outstanding.1.saturating_add(1);
+            }
+        }
+        for pending in self.pending.values() {
+            let kept = pending.reply_key.map(|_| {
+                pending
+                    .reservation
+                    .as_ref()
+                    .map_or(0, crate::budget::MemoryPermitBatch::total)
+            });
+            if pending.generation == generation {
+                outstanding.0 = outstanding.0.saturating_add(1);
+                reserved.0 = kept.map_or(reserved.0, |bytes| reserved.0.with(bytes));
+            }
+            if pending.account == *account {
+                outstanding.1 = outstanding.1.saturating_add(1);
+                reserved.1 = kept.map_or(reserved.1, |bytes| reserved.1.with(bytes));
+            }
+        }
+        self.pending
+            .len()
+            .saturating_add(self.closed_requests.len())
+            < EDGE_OUTSTANDING
+            && outstanding.0 < CONNECTION_OUTSTANDING
+            && outstanding.1 < ACCOUNT_OUTSTANDING
+            && (reserve == 0 || self.replies.admits(generation, account, reserved, reserve))
+    }
+
     /// Renders one companion frame under the edge's name.
     pub(super) fn line(
         &self,
@@ -566,6 +652,22 @@ impl E2eeEdge {
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
         agenc_relay_federation_wire::FederationLineText::from_rendered(text)
             .map_err(|_| E2eeReplyCode::InvalidFragment.into())
+    }
+}
+
+/// The assembly tuple of the client submission `key` names (11.8).
+pub(super) fn submission_key(key: super::retry::ReplyKey, carrier: CarrierCommand) -> AssemblyKey {
+    let (connection, session_generation, object_id, route) = key;
+    AssemblyKey {
+        direction: Direction::LocalIngress,
+        sender: Sender::Connection {
+            connection,
+            session_generation,
+        },
+        command: carrier,
+        route,
+        scope: None,
+        object_id: agenc_relay_e2ee::ObjectId::from_bytes(object_id),
     }
 }
 

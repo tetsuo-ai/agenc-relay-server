@@ -886,6 +886,18 @@ impl StateCoreContext {
             .ok_or(RuntimeError::InvalidValue)
     }
 
+    /// Charges `bytes` for output its owner keeps once its exact size is
+    /// known, as one batch the owner splits then; what it does not split
+    /// returns to the budget when the batch drops.
+    pub(crate) fn reserve_kept_output(
+        &self,
+        bytes: u64,
+    ) -> Result<MemoryPermitBatch, RuntimeError> {
+        Ok(self
+            .budget
+            .try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(bytes)])?)?)
+    }
+
     /// Reserves all live query ceilings and the maximum backing charge before
     /// the caller allocates its immutable projection.
     pub(crate) fn prepare_query_snapshot(

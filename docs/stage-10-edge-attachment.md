@@ -14,9 +14,15 @@ as it stands, count only a device's current attachment as attached, refuse
 any other disagreement of a well-formed declaration for its origin alone,
 close an origin for a mismatched companion deletion, drop requests under
 fenced or refused origins, and acknowledge a base deletion of a fenced
-origin. No specification, profile hash, registry entry, named limit, reply
-code, wire object, table, key, row kind, field or storage generation
-changed.
+origin. The third gives each connection its own share of the edge's
+client-ingress recent-object cache, keeps each connection's and each
+account's replies within their own quotas, charged to the process memory
+budget, bounds outstanding requests per connection, per account and for the
+edge, counting a closed connection's unanswered requests until the
+coordinator answers or drops them, and releases a submission's recent tuple
+once it is answered or refused. No specification, profile hash, registry
+entry, named limit, reply code, wire object, table, key, row kind, field or
+storage generation changed.
 
 ## A generation's declarations name one principal, and an attachment ends with its principal (first commit)
 
@@ -275,3 +281,188 @@ respans `companion-superseded-attachment`,
 `cap78-mailbox-snapshot-store-publish` and
 `coordinator-refused-declaration-deletion`; the other regions of the changed
 files move with unchanged spans. Both source inventories are refreshed.
+
+## Each connection holds its own share of the edge's companion resources (third commit)
+
+The text these rules implement:
+
+- Companion Section 16: "At the hard ceiling, new storage is refused
+  fairly rather than evicting unexpired objects from a selected account";
+  "Admission may be refused before reservation"; and "A byte-identical
+  retry found in the idempotency cache returns the prior outcome without
+  repeated fanout, KeyPackage consumption, or sequencing".
+- Companion Section 11.8: a receiver reserves quota "against the
+  connection, Account ID, route, federation peer, and process-global
+  reassembly quotas", and "duplicate content addresses use the
+  recent-object idempotency cache rather than consuming a second
+  reservation or causing repeat fanout".
+- Architecture Section 19.2: "All count-scaled or peer-influenced heap
+  storage is allocated through one process-wide `MemoryBudget` authority",
+  and "A configured connection count is therefore a strict upper bound, not
+  a promise that every connection can simultaneously consume every other
+  configured maximum."
+
+The edge keeps two caches of its clients' submissions: the recent-object
+cache of its assembler, which answers a copy of a submission still in
+flight, and its reply cache (`e2ee/edge/retry.rs`), which answers a retry of
+an answered submission from the lines its answer rendered. Both were one
+pool for the whole edge.
+
+### Decision: quotas for each connection and each account
+
+A share of one pool for the whole edge would not keep the other clients
+served: a few connections, of one account or more, could hold every
+share. The reply cache therefore has no pool for the whole edge. Each
+connection and each account has a fixed quota, which no other connection
+changes, and the bound for all of them together is the memory the daemon
+admits its connections against, as for every other count-scaled
+allocation (architecture 19.2). Both quotas apply: one per account alone
+would let one connection hold its account's whole share, and one per
+connection alone would let an account multiply it by its sessions. At its
+quota a connection or account is refused, never evicted: evicting a reply
+would answer a retry of its submission with a second execution instead of
+the prior outcome (Sections 11.8 and 16).
+
+### The rules
+
+In `crates/agenc-relay-e2ee/src/wire/assembly.rs`,
+`crates/agenc-relay-runtime/src/e2ee/edge/` and
+`crates/agenc-relay-runtime/src/state_core/mod.rs`:
+
+- **A recent-object ceiling per connection.** The edge's assembler bounds
+  its recent-object cache per sender (`RecentCeiling::PerSenderRefused`),
+  and a client submission's sender is its connection and attachment
+  session, so each connection has its own `MAX_RECENT_OBJECTS` tuples,
+  counting the slots its open submissions reserve. A connection past its
+  ceiling is refused `E2EE_REASSEMBLY_LIMIT` before any reservation, as the
+  shared ceiling refused before; every other connection keeps its own
+  ceiling. Unlike the coordinator's per-peer ceiling
+  (`RecentCeiling::PerSender`), which assembles past the ceiling without a
+  tuple and answers from the replay rows, the edge refuses: it keeps no
+  durable record of its clients' submissions.
+- **A submission's tuple is released once it is answered or refused.** When
+  a submission's answer is published, its reply answers every retry
+  (`retry::Replies::replay`, checked first at fragment zero), so its tuple
+  leaves the recent-object cache (`completion::publish_reply`). A completed
+  submission refused before it went out (a quota, the memory budget or the
+  origin) keeps no tuple either, so its retry is admitted again
+  (`router::accept_line`). A closed connection's tuples and open submission
+  leave with it (`E2eeEdge::connection_closed`). The recent-object cache
+  therefore holds only submissions in flight.
+- **Each connection and each account keeps its replies within its own
+  quota.** A reply kept for a submission's retries counts against its
+  connection's quota, 512 replies charged at most 4 MiB, and against its
+  account's over all the account's connections on the edge, 1,024 replies
+  charged at most 8 MiB, each with the reservations of its submissions
+  still outstanding (`Replies::admits`, `CONNECTION_REPLIES`,
+  `ACCOUNT_REPLIES`). A connection or account at its quota is refused
+  `E2EE_RATE_LIMITED` for its next submission, which only it sees, and
+  nothing it keeps is evicted, so a retry of its own submission is still
+  answered from its reply. What one connection or account keeps never
+  refuses another account's connection, and a request whose reply is not
+  kept, such as `EKEY WHOAMI` or a fetch, reserves nothing and is not
+  refused for replies.
+- **Kept replies are charged to the memory budget.** A submission reserves
+  its command's largest reply from the process memory budget when it goes
+  out (`reply_reservation`, `StateCoreContext::reserve_kept_output`): a
+  live carrier's echo, one line per fragment of its object, or any other
+  submission's one line (Section 11.7), each at most one physical client
+  line, with its entry. Its kept reply keeps only its own charge and the
+  rest returns to the budget (`Replies::remember`); a kept reply's charge
+  returns at the end of the 30-minute retention or of its connection. A
+  submission the budget cannot reserve for is refused `E2EE_RATE_LIMITED`
+  before it goes out.
+- **Outstanding requests are bounded per connection, per account and for
+  the edge.** A connection has at most 4 requests outstanding, an account at
+  most 8 over its connections, and the edge at most 32, half of the
+  coordinator's per-peer bounds on queued requests and on requests waiting
+  for their payloads, so a conforming edge stays clear of both
+  (`E2eeEdge::admits_request`). A request past a bound is refused
+  `E2EE_RATE_LIMITED`; an outstanding request holds its place only until
+  the coordinator answers it.
+- **A closed connection's requests keep their places until the coordinator
+  is done with them.** A connection that closes with requests unanswered
+  deletes its origin behind them, and the coordinator runs or drops them
+  before it acknowledges the deletion, holding them queued meanwhile. Each
+  keeps its place in its account's and the edge's bounds until a frame of
+  its result arrives, the deletion is acknowledged, or the link ends, when
+  the coordinator drops the link's queued requests
+  (`E2eeEdge::delete_origin`, `closed_requests`). A request already
+  answered keeps none, and so does every request of a connection whose
+  origin no declaration on the live link names: no deletion goes out, and
+  the coordinator holds none of them.
+
+Sizing. A connection's tuples are its submissions in flight, at most its
+four outstanding requests, so the per-connection recent-object ceiling never
+limits a conforming client. A connection's 512 replies allow one answered
+submission every 3.5 seconds over the 30-minute retention, and an account
+twice that over its connections. A short one-line reply is charged 4 KiB and
+the longest 12 KiB, which every outstanding submission other than a live
+carrier reserves, and a live carrier's echo at most 768 KiB, its reservation
+while outstanding. The quotas hold for each connection and each account
+alone, and the memory budget, which an operator sizes to the connections the
+edge admits, bounds all connections together.
+
+| Test | What it pins |
+| --- | --- |
+| `wire::assembly::tests::a_refusing_per_sender_ceiling_refuses_only_the_sender_past_it` (`agenc-relay-e2ee`) | A sender at its ceiling is refused before any reservation, its recent object is still answered from the cache, another sender is admitted, and a forgotten object frees its sender's slot. |
+| `e2ee::edge::tests::ingress::a_connection_past_its_recent_share_leaves_the_others_admitted` | One connection holds its ceiling of tuples: its next submission is refused `E2EE_REASSEMBLY_LIMIT` with nothing reserved, and another connection's submission completes. |
+| `e2ee::edge::tests::retry::an_answered_submission_releases_its_recent_object_tuple` | Publishing a submission's answer releases its tuple, and its reply answers a retry. |
+| `e2ee::edge::tests::ingress::a_submission_refused_before_it_is_sent_releases_its_recent_tuple` | A three-fragment submission whose connection's reply quota fills while it assembles is refused `E2EE_RATE_LIMITED` when it completes, nothing is outstanding, and it keeps no tuple. |
+| `e2ee::edge::tests::ingress::a_closed_connection_forgets_its_recent_submissions` | A closed connection's tuples and its open submission leave the cache, and another connection's tuple stays. |
+| `e2ee::edge::tests::retry::replies_are_kept_within_each_connection_and_account_quota` | A connection keeping 511 replies is admitted, and refused with one submission outstanding; keeping 512 it is refused and nothing it keeps is evicted. The account's second connection is admitted until the account keeps 1,024, then every connection of the account is refused while another account's is admitted; a disconnect releases the account's share of that connection's replies. |
+| `e2ee::edge::tests::retry::a_connection_byte_quota_bounds_its_kept_replies` | A connection whose kept and reserved charges reach 4 MiB is admitted, and refused one byte past it. |
+| `e2ee::edge::tests::retry::an_account_byte_quota_bounds_its_kept_replies_over_its_connections` | An account whose kept and reserved charges over two connections reach 8 MiB is admitted on a third, and refused one byte past it. |
+| `e2ee::edge::tests::retry::an_account_outstanding_reservations_count_against_its_quota` | An account keeping 1,023 replies over two connections is admitted on a third, and refused with one submission outstanding. |
+| `e2ee::edge::tests::ingress::outstanding_reservations_count_against_the_reply_quotas_at_fragment_zero` | A connection keeping 511 replies is refused at fragment zero while a submission of its whose reply is kept is outstanding, and admitted once none is; so is a third connection of an account keeping 1,023 replies over two connections while a submission of the account is outstanding. |
+| `e2ee::edge::tests::retry::expired_and_disconnected_replies_give_their_quota_back` | A connection keeping 512 replies is refused, and admitted again once they expire; neither expiry nor a disconnect leaves a usage of the connection or its account behind. |
+| `e2ee::edge::tests::retry::a_kept_reply_lasts_the_retention_and_is_charged_its_size` | A kept reply keeps only its own charge out of its reservation and the rest returns to the budget; it answers a retry until the retention ends, when its charge returns; a reply its reservation cannot hold is refused. |
+| `e2ee::edge::tests::retry::a_submission_reserves_the_largest_reply_of_its_command` | A live carrier reserves 90 physical lines, another submission one, and a command without an object nothing. |
+| `e2ee::edge::tests::ingress::outstanding_requests_are_bounded_per_connection_account_and_edge` | A connection with four outstanding requests is refused `E2EE_RATE_LIMITED`; the account's second connection is admitted until the account holds eight, then refused; another account's connection is admitted until the edge holds 32, and then refused. |
+| `e2ee::edge::tests::ingress::a_closed_connections_requests_count_against_the_outstanding_bounds` | Eight unanswered requests of an account's closed connection refuse the account on another connection; another account's connection is admitted until the edge holds 32 with them, and then refused. |
+| `e2ee::edge::origins::tests::a_closed_connection_keeps_its_unanswered_requests_until_answered` | Of a closed connection's three requests, the two unanswered ones keep their places, and the answered one and another connection's request keep none; a frame of one's result releases it and the deletion's acknowledgement the other, and a link loss releases the other connection's once it closed. |
+| `e2ee::edge::tests::ingress::a_connection_at_its_reply_quota_is_served_a_request_it_keeps_no_reply_for` | A connection keeping 512 replies is refused its next submission and is still served `EKEY WHOAMI`. |
+| `e2ee::edge::tests::ingress::a_submission_the_memory_budget_cannot_reserve_for_is_refused` | With the memory budget held, a submission is refused `E2EE_RATE_LIMITED` with nothing outstanding; with the memory back it goes out. |
+
+The edge tests' requests name an account for each connection, and a test
+whose request keeps its reply reserves its memory as sending does
+(`reserve_reply`); `fill_client_cache` fills one connection's share to its
+ceiling, and `keep` keeps one connection's replies.
+`e2ee::edge::origins::tests::an_ended_connection_releases_its_requests_without_a_live_declaration`
+now also requires that the ended connection's request keeps no place.
+
+The new and changed signatures of the reply cache and the assembler mean the
+start files do not compile with these tests, so single edits stand in for
+the revert proof, each failing a test: a shared ceiling at the edge fails
+the per-connection test; a refusing per-sender ceiling that counts every
+sender's tuples, or that assembles past the ceiling, fails the assembler
+test; keeping the tuple of an answered or a closed connection's submission
+fails its test, and of a refused one two tests; no account quota fails four
+tests, and no byte quota for an account the account byte test; no connection
+quota fails six, and no byte quota for it the connection byte test; not
+counting the outstanding reservations of a connection in the reply cache
+fails three, and those of an account three; at the edge, counting no kept
+reply's reservation, or none for the connection or for the account, each
+fails the fragment zero test; no outstanding bound for a connection fails
+the outstanding request test, and none for an account or for the edge two
+tests each; a reservation for every request fails the test of a connection
+at its reply quota; ignoring a refused memory reservation fails the memory
+test; a kept reply holding its whole reservation fails the charge test;
+keeping replies past the retention fails two; reserving one line for a live
+carrier fails the reservation test; keeping a connection's usage when its
+reply leaves fails the expiry test; keeping replies past their connection
+fails three; and for a closed connection's requests, keeping no place for
+the unanswered ones, keeping one for an answered request or for a connection
+whose deletion did not go out, keeping it past a frame of its result, past
+the deletion's acknowledgement or past a link loss, or not counting it
+against the account's bound or against the edge's each fails one test.
+
+The release coverage policy gains `edge-reply-quotas` and
+`edge-reply-reservation` (branches) and `edge-request-admission`,
+`edge-closed-connection-submissions`, `edge-reply-kept`,
+`edge-reply-release` and `edge-kept-output-reservation` (regions), and
+re-reviews and respans `e2ee-assembly-recent-ceiling`,
+`e2ee-assembly-recent-admission`, `cap74-router-accept-line`,
+`edge-companion-origin-deletion`, `edge-link-down-partial-objects` and
+`edge-origin-acknowledgement-resend`; the other regions of the changed files
+move with unchanged spans. Both source inventories are refreshed.
