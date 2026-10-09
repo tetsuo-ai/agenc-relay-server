@@ -9,6 +9,10 @@ use crate::federation::coordinator::companion::page_read;
 use agenc_relay_storage::{ReadRecord, StorageError};
 
 fn request(fixture: &Fixture, page: usize) -> TestResult<SnapshotPageRequest> {
+    request_on(fixture, page, LinkId::new(1))
+}
+
+fn request_on(fixture: &Fixture, page: usize, link: LinkId) -> TestResult<SnapshotPageRequest> {
     let owner = fixture
         .coordinator
         .companion_exec
@@ -20,11 +24,7 @@ fn request(fixture: &Fixture, page: usize) -> TestResult<SnapshotPageRequest> {
         .and_then(|stream| stream.owner.clone())
         .ok_or("owner")?;
     Ok(SnapshotPageRequest::for_test(
-        PEER,
-        LinkId::new(1),
-        owner,
-        page,
-        [3; 32],
+        PEER, link, owner, page, [3; 32],
     ))
 }
 
@@ -163,5 +163,135 @@ async fn a_page_read_answered_with_anything_but_its_row_fails_the_link() -> Test
             "the tampered answer failed the link"
         );
     }
+    Ok(())
+}
+
+/// A read of page 0 over link 2, which is not the peer's link: it settles
+/// with no output and no fault.
+fn submit_replaced(fixture: &mut Fixture) -> TestResult {
+    let request = request_on(fixture, 0, LinkId::new(2))?;
+    page_read::submit(
+        &mut fixture.coordinator,
+        fixture.core.context_mut()?,
+        request,
+    )
+    .map_err(|error| format!("page read: {error:?}"))?;
+    Ok(())
+}
+
+fn base_ack(fixture: &Fixture) -> crate::federation::FederationInbound {
+    crate::federation::FederationInbound {
+        link: LinkId::new(1),
+        peer: PEER,
+        event: crate::federation::LinkEvent::Frame(FederationFrame::Ack {
+            coordinator_server_id: COORDINATOR,
+            delivery_sequence: fixture.gate.base().last(),
+            event_id: agenc_relay_types::EventId::from_bytes(fixture.gate.base().final_event_id()),
+        }),
+        charge: None,
+    }
+}
+
+/// A page read is companion work: link traffic that arrives while it is in
+/// flight waits in the backlog and runs once it completes.
+#[tokio::test]
+async fn link_traffic_waits_for_a_page_read_and_runs_at_its_completion() -> TestResult {
+    let mut fixture = Box::pin(Fixture::new()).await?;
+    let _queue = make_live(&mut fixture)?;
+    submit_replaced(&mut fixture)?;
+    let ack = base_ack(&fixture);
+    fixture
+        .coordinator
+        .inbound(fixture.core.context_mut()?, ack);
+    assert_eq!(fixture.coordinator.backlog.len(), 1, "the ACK waits");
+    assert!(fixture.coordinator.pending.is_none());
+    let message = settled(&mut fixture).await?;
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, message);
+    assert!(fixture.coordinator.companion_page_read.is_none());
+    assert!(fixture.coordinator.backlog.is_empty(), "the ACK ran");
+    assert!(matches!(
+        fixture.coordinator.pending,
+        Some(PendingCommit::DeliveryAcknowledged { .. })
+    ));
+    assert!(fixture.coordinator.link_is_live(LinkId::new(1), PEER));
+    assert_eq!(fixture.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+/// A page read's completion waits while a batch is open and continues at
+/// that batch's receipt.
+#[tokio::test]
+async fn a_page_read_completion_waits_for_an_open_batch() -> TestResult {
+    let mut fixture = Box::pin(Fixture::new()).await?;
+    let _queue = make_live(&mut fixture)?;
+    submit_replaced(&mut fixture)?;
+    let message = settled(&mut fixture).await?;
+    let context = fixture.core.context_mut()?;
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let revision = plan.resulting_revision().get();
+    let write = fixture.coordinator.peer_row_at(PEER, revision, None)?;
+    context
+        .stage_durable_with_account_service(
+            plan,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+            vec![write],
+        )
+        .map_err(|error| format!("other batch: {error:?}"))?;
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, message);
+    assert!(fixture.coordinator.parked_read.is_some());
+    assert!(fixture.coordinator.companion_page_read.is_some());
+    fixture.core.commit_staged_batch().await?;
+    fixture
+        .coordinator
+        .batch_applied(fixture.core.context_mut()?);
+    assert!(fixture.coordinator.parked_read.is_none());
+    assert!(fixture.coordinator.companion_page_read.is_none());
+    assert!(fixture.coordinator.link_is_live(LinkId::new(1), PEER));
+    assert_eq!(fixture.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+/// The base request queue waits while a page read is in flight and is
+/// visited once it completes. The queued request here belongs to a link
+/// that is gone, so the visit drops it without running it.
+#[tokio::test]
+async fn the_base_request_queue_waits_for_a_page_read_and_drains_at_its_completion() -> TestResult {
+    let mut fixture = Box::pin(Fixture::new()).await?;
+    let _queue = make_live(&mut fixture)?;
+    submit_replaced(&mut fixture)?;
+    let (inbox, _receiver) = tokio::sync::mpsc::channel(1);
+    let mut edge = super::super::Edge::new(inbox, 50);
+    let origin = super::super::Origin::new(70);
+    super::super::enqueue(
+        &mut fixture.coordinator,
+        &mut edge,
+        &origin,
+        LinkId::new(2),
+        71,
+    )?;
+    let queued = |fixture: &Fixture| -> TestResult<usize> {
+        Ok(fixture
+            .coordinator
+            .peers
+            .get(&PEER)
+            .ok_or("peer")?
+            .queued
+            .len())
+    };
+    request::drain_queued(&mut fixture.coordinator, fixture.core.context_mut()?);
+    assert_eq!(queued(&fixture)?, 1, "the queue waits for the page read");
+    let message = settled(&mut fixture).await?;
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, message);
+    assert_eq!(queued(&fixture)?, 0, "the queue was visited");
+    assert!(fixture.coordinator.link_is_live(LinkId::new(1), PEER));
+    assert_eq!(fixture.coordinator.counters.violations, 0);
     Ok(())
 }

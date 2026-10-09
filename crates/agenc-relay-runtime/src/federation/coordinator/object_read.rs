@@ -20,7 +20,8 @@ pub(super) struct Pending {
     operation: PendingRequest,
     identity: Identity,
     id: StorageReadId,
-    commit: u64,
+    /// The coordinator's own commits when the read was submitted.
+    own_commits: u64,
     link: LinkId,
     base_epoch: u64,
     _metadata: MemoryPermit,
@@ -87,7 +88,6 @@ pub(super) fn submit(
         .map_err(|_| Violation::Ceiling)?;
     let key = agenc_relay_storage::e2ee_records::object_key(&operation.request.object_id)
         .map_err(|_| Violation::Codec)?;
-    let commit = context.head().storage_commit_sequence;
     let id = context
         .submit_storage_read(ReadPlan::exact(TableId::E2eeObject, key))
         .map_err(|_| Violation::Ceiling)?;
@@ -95,7 +95,7 @@ pub(super) fn submit(
         operation,
         identity,
         id,
-        commit,
+        own_commits: coordinator.own_commits,
         link,
         base_epoch,
         _metadata: metadata,
@@ -105,11 +105,16 @@ pub(super) fn submit(
     Ok(())
 }
 
+/// Whether the read is still current once its link is checked: no batch of
+/// the coordinator's own committed since it was submitted. A commit another
+/// router made leaves it current, since no other router writes companion
+/// rows; the completion waits while any batch is open, so none is open
+/// here.
 fn validate(
     coordinator: &FederationCoordinator,
     context: &StateCoreContext,
     pending: &Pending,
-) -> Result<(), Violation> {
+) -> Result<bool, Violation> {
     super::response_read::validate_link(
         coordinator,
         context,
@@ -117,11 +122,5 @@ fn validate(
         pending.identity,
         pending.base_epoch,
     )?;
-    if context.head().storage_commit_sequence != pending.commit
-        || context.in_flight()
-        || context.pending_len() != 0
-    {
-        return Err(Violation::Phase);
-    }
-    Ok(())
+    Ok(coordinator.own_commits == pending.own_commits)
 }

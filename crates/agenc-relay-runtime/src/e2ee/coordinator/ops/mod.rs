@@ -141,23 +141,15 @@ impl Exec<'_> {
             .ok_or_else(|| E2eeReplyCode::AccountRequired.into())
     }
 
-    /// The requester's attached, roster-active device and session.
+    /// The requester's current attachment: its attached, roster-active
+    /// device and session, as the directory holds them
+    /// (`CompanionState::current_attachment`).
     pub fn attached_device(&self) -> Result<([u8; 16], u64), Fail> {
-        let digest = self.account_digest()?;
-        let (device, session) = self
-            .origin
-            .device
-            .ok_or_else(|| Fail::from(E2eeReplyCode::DeviceRequired))?;
-        let active = self
-            .coordinator
+        self.account_digest()?;
+        self.coordinator
             .state
-            .directory
-            .account(&digest)
-            .is_some_and(|entry| entry.device_active(&device));
-        if !active {
-            return Err(E2eeReplyCode::DeviceRequired.into());
-        }
-        Ok((device, session))
+            .current_attachment(self.origin)
+            .ok_or_else(|| E2eeReplyCode::DeviceRequired.into())
     }
 
     /// The payload object, required.

@@ -184,14 +184,10 @@ impl ConnectionOrigin {
     }
 
     /// Whether a deletion acknowledgement names this closed origin: at the
-    /// generation the edge holds, or at the generation of the update still
-    /// in flight, which precedes the DEL on the link.
+    /// generation its deletion named, which the coordinator's
+    /// acknowledgement repeats (spec 20.7).
     fn deletion_acknowledged_at(&self, generation: u64) -> bool {
-        let declared = self
-            .pending_updates
-            .front()
-            .map_or(self.generation, |update| update.generation);
-        self.deleted && (self.generation == generation || declared == generation)
+        self.deleted && self.deletion_point().0 == generation
     }
 }
 
@@ -478,22 +474,26 @@ impl EdgeFederation {
         true
     }
 
-    /// The base origin facts of one connection the companion origin mirrors.
+    /// The base origin facts of one connection the companion origin mirrors:
+    /// the held generation and the principal its acknowledged declaration
+    /// names (`held_principal`), so the base and companion declarations of a
+    /// generation name one session and account even while the connection's
+    /// next principal awaits its update (spec 20.7, companion 12.5).
     #[must_use]
     pub fn origin_facts(&self, generation: ConnectionGeneration) -> Option<BaseOriginFacts> {
         let origin = self.origins.get(&generation)?;
+        let (session, account) = origin.held_principal;
         Some(BaseOriginFacts {
             origin_id: *origin.origin_id.as_bytes(),
             generation: origin.generation,
             acked_generation: origin.acked_generation,
             connection_id: *origin.connection_id.as_bytes(),
             connection_nonce: origin.connection_nonce,
-            session: origin
-                .session
-                .map(|(session, user)| (*session.as_bytes(), *user.as_bytes())),
-            account: origin.account.and_then(|(account, generation)| {
-                let text: [u8; 24] = account.to_text().as_bytes().try_into().ok()?;
-                Some((text, generation))
+            session: session.map(|(session, user)| (*session.as_bytes(), *user.as_bytes())),
+            account: account.and_then(|(account, generation)| {
+                <[u8; 24]>::try_from(account.to_text().as_bytes())
+                    .ok()
+                    .map(|text| (text, generation))
             }),
         })
     }
@@ -613,6 +613,13 @@ impl EdgeFederation {
     /// chain that did not extend (companion 12.5).
     pub fn fail_companion_witness(&mut self, context: &mut StateCoreContext) {
         self.fail_link(context, Violation::Companion(CompanionViolation::Witness));
+    }
+
+    /// Closes the link after storage refused a batch of the E2EE router's,
+    /// as for a refused batch of the edge's own: the next link resumes
+    /// from the durable companion cursor.
+    pub fn fail_companion_storage(&mut self, context: &mut StateCoreContext) {
+        self.fail_link(context, Violation::Ceiling);
     }
 
     /// Stages one companion part of a cross-profile barrier handed over by
@@ -1511,8 +1518,16 @@ impl EdgeFederation {
             None => {}
         }
         completions.extend(events::drain_queued(self, context));
-        journal::continue_write(self, context);
+        self.continue_storage_work(context);
         completions
+    }
+
+    /// Resumes the durable work that waits for a free batch slot: the
+    /// journal's rows, then an install batch that waited for another
+    /// router's batch.
+    fn continue_storage_work(&mut self, context: &mut StateCoreContext) {
+        journal::continue_write(self, context);
+        sync::continue_install(self, context);
     }
 
     fn receipt_pending(&self, context: &StateCoreContext) -> bool {
@@ -1646,7 +1661,11 @@ impl EdgeFederation {
             barrier::rejected(self);
             // Resume starts at the previous committed projection and cursor.
             self.fail_link(context, Violation::Ceiling);
+            return;
         }
+        // Another router's batch: an install that waited for it continues,
+        // as at a receipt.
+        sync::continue_install(self, context);
     }
 
     /// Cancels ordinary retry work when StateCore starts shutdown.

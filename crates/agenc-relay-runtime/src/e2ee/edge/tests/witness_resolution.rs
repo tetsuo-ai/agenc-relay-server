@@ -780,3 +780,61 @@ async fn an_entry_for_another_edge_or_outside_the_declared_set_is_refused() -> T
     frames.extend(entry_frames(5, first)?);
     Box::pin(assert_refused(frames)).await
 }
+
+/// The resolution's END that arrives while another router's batch gathers
+/// waits for it: the resolution's batch is held and staged at that batch's
+/// receipt, the link stays up, and `EWITNESS RESOLVED` follows its own
+/// receipt.
+#[tokio::test]
+async fn a_resolution_end_waits_while_another_router_gathers_a_batch() -> TestResult {
+    let (mut fixture, mut queue) = Box::pin(requesting()).await?;
+    let records = continuation()?;
+    let head = records.last().ok_or("records")?.semantic_id;
+    let object = resolution_object(CONVERSATION, &records, (EXPECTED + 1, head))?;
+    let mut frames = delivery(&records, &object)?;
+    let end = frames.pop().ok_or("end frame")?;
+    feed(&mut fixture, frames)?;
+    crate::e2ee::edge::tests::open_other_batch(fixture.core.context_mut()?, &fixture.companion)?;
+    feed(&mut fixture, vec![end])?;
+    assert!(fixture.companion.held.is_some(), "the resolution is held");
+    assert_eq!(fixture.companion.phase, Phase::Witness);
+    assert_open_and_silent(&mut queue).await?;
+    // While a row is unresolved an event is dropped, never queued ahead of
+    // or behind the held resolution.
+    feed(
+        &mut fixture,
+        crate::e2ee::edge::tests::event_frames(2, 7, [41; 16])?,
+    )?;
+    assert!(fixture.companion.queued.is_empty());
+    assert!(fixture.companion.held.is_some());
+    // The other batch commits; its receipt stages the resolution.
+    fixture.core.commit_staged_batch().await?;
+    assert!(
+        fixture
+            .companion
+            .batch_applied(fixture.core.context_mut()?, &mut fixture.base)
+            .is_empty()
+    );
+    assert!(fixture.companion.held.is_none());
+    assert_open_and_silent(&mut queue).await?;
+    fixture.core.commit_staged_batch().await?;
+    assert!(
+        fixture
+            .companion
+            .batch_applied(fixture.core.context_mut()?, &mut fixture.base)
+            .is_empty()
+    );
+    let resolved = fixture
+        .companion
+        .line(&CompanionFrame::WitnessResolved {
+            coordinator_server_id: COORDINATOR,
+            conversation_id: CONVERSATION,
+            resolution_token: TOKEN,
+            new_head_sequence: EXPECTED + 1,
+            new_head_id: head,
+        })
+        .map_err(|refusal| refusal.code.to_string())?;
+    assert_eq!(next_line(&mut queue).await?, resolved.as_str());
+    assert!(!stored_witness(&mut fixture)?);
+    Ok(())
+}

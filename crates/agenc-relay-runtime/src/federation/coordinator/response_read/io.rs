@@ -17,7 +17,7 @@ pub(super) fn prepare(
     context: &mut StateCoreContext,
     job: Job,
     plan: ReadPlan,
-    commit: u64,
+    own_commits: u64,
     link: LinkId,
     base_epoch: u64,
 ) -> Result<Box<Pending>, Violation> {
@@ -32,7 +32,7 @@ pub(super) fn prepare(
         .map_err(|_| Violation::Ceiling)?;
     Ok(Box::new(Pending {
         id,
-        commit,
+        own_commits,
         link,
         base_epoch,
         job,
@@ -58,34 +58,45 @@ pub(in super::super) fn completed(
     drop(message);
     let Pending {
         job,
-        commit,
+        own_commits,
         link,
         base_epoch,
         _raw,
         _decode,
         ..
     } = *pending;
-    let peer = job.candidate().identity().peer;
+    let identity = job.candidate().identity();
+    let peer = identity.peer;
     drop((_raw, _decode));
-    let result = result
-        .and_then(|plan| super::advance(coordinator, context, job, plan, commit, link, base_epoch));
+    let result = result.and_then(|step| match step {
+        ReadStep::Next(plan) => super::advance(
+            coordinator,
+            context,
+            job,
+            plan,
+            own_commits,
+            link,
+            base_epoch,
+        ),
+        ReadStep::Stale => {
+            drop(job);
+            super::submit(coordinator, context, link, peer, identity)
+        }
+    });
     if let Err(error) = result
         && coordinator.link_is_live(link, peer)
         && !context.is_quiescing()
     {
         coordinator.fail_link(context, link, peer, error);
     }
-    if coordinator.companion_response_read.is_none() && !context.is_quiescing() {
-        companion::drain_queued(coordinator, context);
-        coordinator.drain_backlog(context);
-    }
+    coordinator.companion_read_settled(context);
 }
 
 fn admit(
     coordinator: &FederationCoordinator,
     context: &StateCoreContext,
     completed: &mut Completed,
-) -> Result<Option<ReadPlan>, Violation> {
+) -> Result<ReadStep, Violation> {
     let pending = &mut completed.pending;
     super::validate_link(
         coordinator,
@@ -104,14 +115,16 @@ fn admit(
                 .ok_or(Violation::Codec)?,
         )
         .map_err(companion::fault_violation)?;
+    // A commit another router made leaves the read current; one of the
+    // coordinator's own may have changed the bodies it reads.
+    if coordinator.own_commits != pending.own_commits {
+        return Ok(ReadStep::Stale);
+    }
     let result = completed
         .message
         .result
         .as_ref()
         .map_err(|_| Violation::Ceiling)?;
-    if result.storage_commit_sequence != pending.commit {
-        return Err(Violation::Phase);
-    }
     if result.truncated || result.records.len() != 1 {
         return Err(Violation::Codec);
     }
@@ -131,7 +144,11 @@ fn admit(
     }
     pending
         .job
-        .admit(result.storage_commit_sequence, result.truncated, records)
+        .admit(pending.own_commits, result.truncated, records)
         .map_err(companion::fault_violation)?;
-    pending.job.next().map_err(companion::fault_violation)
+    pending
+        .job
+        .next()
+        .map(ReadStep::Next)
+        .map_err(companion::fault_violation)
 }

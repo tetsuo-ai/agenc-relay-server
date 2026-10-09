@@ -531,7 +531,7 @@ impl E2eeEdge {
             Some(cursor) => PendingCommit::SnapshotPage { cursor },
             None => PendingCommit::Ready,
         };
-        self.stage(context, writes, pending)
+        self.stage_or_hold(context, writes, pending)
     }
 
     /// The marker row write for the current generation.
@@ -633,7 +633,7 @@ impl E2eeEdge {
             self.marker_write(SnapshotPhase::Active, None)?,
             super::events::cursor_write(&self.config, &delivery).map_err(Refusal::from)?,
         ];
-        self.stage(context, writes, PendingCommit::SnapshotActive)
+        self.stage_or_hold(context, writes, PendingCommit::SnapshotActive)
     }
 
     /// The ACTIVE marker committed: the pending projection becomes the live

@@ -3,7 +3,7 @@
 
 mod io;
 
-use super::{FederationCoordinator, SendFailure, Violation, companion};
+use super::{FederationCoordinator, ReadStep, SendFailure, Violation, companion};
 use crate::bridge::StorageReadId;
 use crate::budget::MemoryPermit;
 use crate::e2ee::coordinator::response_read::{Candidate, Identity, Job, Output};
@@ -16,7 +16,9 @@ pub(super) use io::completed;
 
 pub(super) struct Pending {
     id: StorageReadId,
-    commit: u64,
+    /// The coordinator's own commits when the read began; every body is
+    /// read against them.
+    own_commits: u64,
     link: LinkId,
     base_epoch: u64,
     job: Job,
@@ -60,12 +62,22 @@ pub(super) fn submit(
     }
     let candidate = Candidate::capture(executor, identity, &context.backing_reservations())
         .map_err(companion::fault_violation)?;
-    let commit = context.head().storage_commit_sequence;
+    // No other router writes companion rows, so the bodies are pinned to
+    // the coordinator's own commits rather than to the storage commit.
+    let own_commits = coordinator.own_commits;
     let mut job = candidate
-        .begin(commit, &context.backing_reservations())
+        .begin(own_commits, &context.backing_reservations())
         .map_err(companion::fault_violation)?;
     let plan = job.next().map_err(companion::fault_violation)?;
-    advance(coordinator, context, job, plan, commit, link, base_epoch)
+    advance(
+        coordinator,
+        context,
+        job,
+        plan,
+        own_commits,
+        link,
+        base_epoch,
+    )
 }
 
 pub(super) fn validate_link(
@@ -126,21 +138,21 @@ fn advance(
     context: &mut StateCoreContext,
     job: Job,
     plan: Option<ReadPlan>,
-    commit: u64,
+    own_commits: u64,
     link: LinkId,
     base_epoch: u64,
 ) -> Result<(), Violation> {
     let identity = job.candidate().identity();
     validate_link(coordinator, context, link, identity, base_epoch)?;
-    if context.head().storage_commit_sequence != commit
-        || context.in_flight()
-        || context.pending_len() != 0
-    {
-        return Err(Violation::Phase);
-    }
     if let Some(plan) = plan {
-        coordinator.companion_response_read =
-            Some(io::prepare(context, job, plan, commit, link, base_epoch)?);
+        coordinator.companion_response_read = Some(io::prepare(
+            context,
+            job,
+            plan,
+            own_commits,
+            link,
+            base_epoch,
+        )?);
         return Ok(());
     }
     let executor = coordinator

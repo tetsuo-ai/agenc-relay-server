@@ -1,6 +1,7 @@
 //! Complete and recently assembled replies read sealed response bodies before publication.
 #![forbid(unsafe_code)]
 
+mod contention;
 mod failures;
 mod fixture;
 mod validation;

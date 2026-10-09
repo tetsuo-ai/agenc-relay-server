@@ -411,6 +411,16 @@ current roster listed as current, the restore of directory stores
 written before these rules and a daemon test of a root rotation across
 coordinator restarts (B-16 with G-08, SDK program, outside master #35),
 are recorded in [the E2EE lineage record](stage-10-e2ee-lineage.md).
+A client's ordinary actions and its share of an edge's companion
+resources affecting only that client: the base and companion declarations
+of a generation naming one principal, a device attachment ending with the
+principal it was made under, every remaining origin mismatch answered for
+its origin alone, an edge's recent-object cache and kept replies bounded
+for each connection and each account, a request's own failure answered
+with its failed result, companion reads and the edge's own batches waiting
+through local write contention, and daemon tests of them (D-44, SDK
+program, outside master #35), are recorded in [the edge attachment
+record](stage-10-edge-attachment.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

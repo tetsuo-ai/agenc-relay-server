@@ -212,6 +212,174 @@ async fn requests_wait_for_the_declaration_that_carries_a_new_attachment() -> Te
     Ok(())
 }
 
+/// The device the origin's last declaration names.
+fn declared_device(
+    edge: &E2eeEdge,
+    connection: ConnectionGeneration,
+) -> TestResult<Option<[u8; 16]>> {
+    use agenc_relay_e2ee::tls::TlsDecode;
+    let (_, bytes) = edge
+        .origins
+        .get(&connection)
+        .ok_or("origin")?
+        .declaration
+        .clone()
+        .ok_or("declaration")?;
+    let mut budget = agenc_relay_e2ee::tls::DecodeBudget::new(1 << 16, 256);
+    let object = ArcWireObject::decode_kind(
+        &bytes,
+        Some(ArcWireObjectKind::FederationOrigin),
+        &mut budget,
+    )?;
+    let origin = ArcFederationOrigin::decode_exact(object.body(), &mut budget)?;
+    Ok(<[u8; 16]>::try_from(origin.attached_device_id.as_slice()).ok())
+}
+
+/// Opens the connection's one in-progress submission under the attachment
+/// session `session_generation`.
+fn open_submission(
+    edge: &mut E2eeEdge,
+    connection: ConnectionGeneration,
+    session_generation: u64,
+) -> TestResult {
+    use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScopes, Sender};
+    use agenc_relay_e2ee::wire::carrier::CarrierCommand;
+    let fragments = fragment_object(&[7; 4_096])?;
+    assert!(fragments.len() > 1);
+    let first = fragments.into_iter().next().ok_or("fragment")?;
+    let key = AssemblyKey {
+        direction: Direction::LocalIngress,
+        sender: Sender::Connection {
+            connection: connection.get(),
+            session_generation,
+        },
+        command: CarrierCommand::Tagmsg,
+        route: [3; 32],
+        scope: None,
+        object_id: first.object_id,
+    };
+    let opened = edge.assembler.ingest(
+        key.clone(),
+        QuotaScopes::default(),
+        CarrierCommand::Tagmsg.limit(),
+        &first,
+        0,
+    )?;
+    assert_eq!(opened, Ingest::Incomplete);
+    edge.ingress.insert(
+        connection,
+        super::super::Ingress {
+            key,
+            command: super::super::router::Resolved::Command(
+                agenc_relay_e2ee::wire::command::ClientCommand::Edirect([3; 32]),
+            ),
+        },
+    );
+    Ok(())
+}
+
+/// Logout, an account switch and a replaced session each end a device
+/// attachment (companion 11.6: they invalidate it, and submission stops):
+/// the declaration of the next base generation names no device, the
+/// connection holds none, so its device-requiring lines are refused
+/// locally, and its in-progress submission and the retry it answered from
+/// its replies end; a later
+/// declaration naming the first principal again does not bring the
+/// attachment back. A reauthentication to the same account keeps it.
+#[tokio::test]
+async fn a_principal_change_ends_the_attachment_its_declarations_carried() -> TestResult {
+    const ACCOUNT: [u8; 24] = [b'a'; 24];
+    const DEVICE: [u8; 16] = [12; 16];
+    let session = Some(([21; 16], [22; 16]));
+    let principal = |generation, account, session| BaseOriginFacts {
+        session,
+        account,
+        ..facts(generation)
+    };
+    for (case, changed, keeps, submitting) in [
+        (
+            "reauthentication",
+            principal(3, Some((ACCOUNT, 4)), session),
+            true,
+            true,
+        ),
+        ("logout", principal(3, None, session), false, true),
+        (
+            "logout with no submission in progress",
+            principal(3, None, session),
+            false,
+            false,
+        ),
+        (
+            "account switch",
+            principal(3, Some(([b'b'; 24], 1)), session),
+            false,
+            true,
+        ),
+        (
+            "replaced session",
+            principal(3, Some((ACCOUNT, 3)), Some(([23; 16], [24; 16]))),
+            false,
+            true,
+        ),
+    ] {
+        let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+        let (mut base, mut queue) = transport(fixture.context_mut()?);
+        let mut edge = companion();
+        let connection = ConnectionGeneration::new(1);
+        base.connection_opened(fixture.context_mut()?, connection);
+        let authenticated = principal(1, Some((ACCOUNT, 3)), session);
+        for declared in [facts(0), authenticated] {
+            let generation = declared.generation;
+            edge.declare_origin(
+                fixture.context_mut()?,
+                &mut base,
+                connection,
+                &declared,
+                generation,
+            )
+            .map_err(|error| error.code.to_string())?;
+            let _line = next_declaration(&mut queue).await?;
+            edge.acknowledge_origin([9; 16], generation);
+        }
+        edge.device_attached(fixture.context_mut()?, &mut base, connection, DEVICE, 1);
+        let attached = principal(2, Some((ACCOUNT, 3)), session);
+        edge.declare_origin(fixture.context_mut()?, &mut base, connection, &attached, 2)
+            .map_err(|error| error.code.to_string())?;
+        let _line = next_declaration(&mut queue).await?;
+        edge.acknowledge_origin([9; 16], 2);
+        assert_eq!(declared_device(&edge, connection)?, Some(DEVICE), "{case}");
+        if submitting {
+            open_submission(&mut edge, connection, 1)?;
+        }
+        // The connection's last retried object, answered from its replies.
+        edge.retried.insert(connection, [5; 32]);
+        edge.declare_origin(fixture.context_mut()?, &mut base, connection, &changed, 3)
+            .map_err(|error| error.code.to_string())?;
+        let _line = next_declaration(&mut queue).await?;
+        edge.acknowledge_origin([9; 16], 3);
+        let device = edge.origins.get(&connection).ok_or("origin")?.device;
+        if keeps {
+            assert_eq!(device, Some((DEVICE, 1)), "{case}");
+            assert_eq!(declared_device(&edge, connection)?, Some(DEVICE), "{case}");
+            assert!(edge.ingress.contains_key(&connection), "{case}");
+            assert_eq!(edge.assembler.open_count(), 1, "{case}");
+            assert!(edge.retried.contains_key(&connection), "{case}");
+            continue;
+        }
+        assert_eq!(device, None, "{case}");
+        assert_eq!(declared_device(&edge, connection)?, None, "{case}");
+        assert!(!edge.ingress.contains_key(&connection), "{case}");
+        assert_eq!(edge.assembler.open_count(), 0, "{case}");
+        assert!(!edge.retried.contains_key(&connection), "{case}");
+        let restored = principal(4, Some((ACCOUNT, 3)), session);
+        edge.declare_origin(fixture.context_mut()?, &mut base, connection, &restored, 4)
+            .map_err(|error| error.code.to_string())?;
+        assert_eq!(declared_device(&edge, connection)?, None, "{case}");
+    }
+    Ok(())
+}
+
 /// Delivers every companion origin line the edge queued to the real
 /// coordinator and returns its answers; a refusal fails the test with the
 /// coordinator's fault.
@@ -627,6 +795,108 @@ async fn an_ended_connection_releases_its_requests_without_a_live_declaration() 
         edge.pending.is_empty(),
         "the ended connection's request is released"
     );
+    assert!(
+        edge.closed_requests.is_empty(),
+        "no deletion went out, so the request keeps no place"
+    );
+    Ok(())
+}
+
+/// A closed connection's unanswered requests keep their places in the
+/// outstanding bounds while the coordinator may still hold them queued
+/// (companion 12.5, 16): a request already answered holds none, another
+/// connection's requests stay its own, and each unanswered one holds its
+/// place until a frame of its result arrives or the origin's deletion is
+/// acknowledged; a link loss releases them all.
+#[tokio::test]
+async fn a_closed_connection_keeps_its_unanswered_requests_until_answered() -> TestResult {
+    let mut fixture = StateCoreFixture::new((0..=u8::MAX).cycle().take(4_096).collect())?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let mut peer = EdgePeer::reset()?;
+    let (connection, other) = (ConnectionGeneration::new(1), ConnectionGeneration::new(2));
+    declared(
+        &mut fixture,
+        &mut base,
+        &mut queue,
+        &mut edge,
+        &mut peer,
+        connection,
+    )
+    .await?;
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        other,
+        &EdgePeer::facts_of([0x77; 16], 0),
+        0,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let answers = relay(&mut queue, &mut peer).await?;
+    acknowledge(&mut edge, &answers);
+    edge.phase = Phase::Active;
+    for _ in 0..3 {
+        let _sent = whoami(&mut fixture, &mut base, &mut queue, &mut edge, connection).await?;
+    }
+    let _sent = whoami(&mut fixture, &mut base, &mut queue, &mut edge, other).await?;
+    let ids: Vec<[u8; 16]> = edge
+        .pending
+        .iter()
+        .filter(|(_, pending)| pending.generation == connection)
+        .map(|(id, _)| *id)
+        .collect();
+    let [answered, first, second] = ids[..] else {
+        return Err(format!("three requests: {ids:?}").into());
+    };
+    edge.pending.get_mut(&answered).ok_or("pending")?.result =
+        Some(super::super::result::DecodedResult {
+            request_object_id: [7; 32],
+            kind: agenc_relay_e2ee::objects::federation::ArcFederationResultKind::Failed,
+            value: super::super::result::ResultValue::Failed {
+                code: "E2EE_SYNCING".to_owned(),
+                context: Vec::new(),
+            },
+            completion_event_id: None,
+            snapshot_token: None,
+            next_cursor: None,
+            descriptors: Vec::new(),
+        });
+    edge.delete_origin(fixture.context_mut()?, &mut base, connection);
+    assert_eq!(
+        edge.pending.len(),
+        1,
+        "the other connection's request stays"
+    );
+    let held = |edge: &E2eeEdge| edge.closed_requests.keys().copied().collect::<Vec<_>>();
+    assert_eq!(held(&edge), vec![first, second], "the unanswered ones");
+    let fragment = fragment_object(&[0; 16])?
+        .into_iter()
+        .next()
+        .ok_or("fragment")?;
+    let answer = CompanionFrame::Result {
+        correlation: agenc_relay_e2ee::federation::frames::Correlation {
+            peer_server_id: [3; 16],
+            server_incarnation: [4; 16],
+            origin_id: EdgePeer::facts(0).origin_id,
+            origin_generation: 0,
+            operation_sequence: 0,
+            request_id: first,
+        },
+        object_id: [0; 32],
+        fragment,
+    };
+    let _dropped = edge
+        .on_result_frame(fixture.context_mut()?, answer)
+        .map_err(|error| error.code.to_string())?;
+    assert_eq!(held(&edge), vec![second], "a frame of its result arrived");
+    let answers = relay(&mut queue, &mut peer).await?;
+    assert!(deletion_acknowledged(&answers, 0), "{answers:?}");
+    let _outputs = edge.handle_frames(fixture.context_mut()?, &mut base, answers);
+    assert!(held(&edge).is_empty(), "the deletion is acknowledged");
+    edge.delete_origin(fixture.context_mut()?, &mut base, other);
+    assert_eq!(held(&edge).len(), 1);
+    edge.link_down();
+    assert!(held(&edge).is_empty(), "the link ended");
     Ok(())
 }
 

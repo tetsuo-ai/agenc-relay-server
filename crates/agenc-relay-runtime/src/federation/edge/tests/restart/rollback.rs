@@ -257,3 +257,69 @@ async fn refused_barrier_apply_restores_projection_and_retries_the_retained_part
     }
     Ok(())
 }
+
+/// A complete barrier waits while another router's batch is open: nothing
+/// is prepared or staged and the link stays up; once that batch settles,
+/// the barrier applies.
+#[tokio::test]
+async fn a_ready_barrier_waits_while_another_router_has_a_batch_open() -> TestResult {
+    let mut fixture = StateCoreFixture::with_registration_router_and_records(
+        entropy_script(),
+        projected_rows()?,
+    )?;
+    let (mut base, mut companion) = edges();
+    fixture.restore_edge_state(&mut base, Some(&mut companion))?;
+    base.phase = Phase::Active;
+    let (handle, _queue) = link_queue(1 << 20);
+    base.live = Some(LiveLink {
+        link: LinkId::new(99),
+        handle,
+        coordinator_epoch: COORDINATOR_EPOCH,
+        coordinator_incarnation: HUB_INCARNATION,
+    });
+    companion.link_down();
+    assert!(companion.link_active(fixture.context_mut()?, &mut base));
+    companion.handle_frames(
+        fixture.context_mut()?,
+        &mut base,
+        vec![
+            CompanionFrame::ResumeOk {
+                target_server_id: *EDGE.as_bytes(),
+                server_incarnation: *EDGE_INCARNATION.as_bytes(),
+                delivery_generation: 1,
+                next_delivery_sequence: 0,
+            },
+            CompanionFrame::OriginReady {
+                home_server_id: *EDGE.as_bytes(),
+                server_incarnation: *EDGE_INCARNATION.as_bytes(),
+            },
+        ],
+    );
+    assert_eq!(base.barrier_ready(), Some(MUTATION));
+    let context = fixture.context_mut()?;
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let write = base
+        .peer_row(base.cursor, plan.resulting_revision().get())
+        .map_err(|violation| format!("peer row: {violation:?}"))?;
+    context
+        .stage_durable_with_account_service(
+            plan,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+            vec![write],
+        )
+        .map_err(|error| format!("other batch: {error:?}"))?;
+    assert_eq!(context.pending_len(), 1);
+    crate::registration::apply_ready_barrier(fixture.context_mut()?, &mut companion, &mut base);
+    assert!(base.commit.is_none(), "nothing is staged");
+    assert!(base.live.is_some(), "the link stays up");
+    assert!(!companion.channel_bound(&CHANNEL));
+    assert_eq!(base.barrier_ready(), Some(MUTATION));
+    // The other batch settles; the barrier then applies.
+    fixture.context_mut()?.discard_pending_for_test();
+    crate::registration::apply_ready_barrier(fixture.context_mut()?, &mut companion, &mut base);
+    assert!(base.commit.is_some());
+    assert!(companion.channel_bound(&CHANNEL));
+    Ok(())
+}

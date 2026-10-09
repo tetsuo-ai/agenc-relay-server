@@ -126,6 +126,7 @@ fn attached(account: [u8; 24], seed: u8) -> LocalOrigin {
         user_id: Some(UserId::from_bytes([seed; 16])),
         account: Some(account),
         device: Some(([seed; 16], 1)),
+        device_principal: Some((Some(UserId::from_bytes([seed; 16])), Some(account))),
     }
 }
 

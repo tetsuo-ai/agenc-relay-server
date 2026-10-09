@@ -154,3 +154,67 @@ fn mailbox_publication_drops_a_cut_that_expired_while_storage_was_pending() -> T
     assert_eq!(source.query_sessions.queue_snapshot().query_bytes(), 0);
     Ok(())
 }
+
+/// A cut whose origin's attachment another attachment of its device
+/// superseded is dropped at the next publication: that origin holds no
+/// current attachment (companion 11.6, 11.9), as one whose device changed
+/// holds none.
+#[test]
+fn mailbox_publication_drops_the_cut_of_a_superseded_attachment() -> TestResult {
+    let (mut source, _, _, mut entropy) = paged_mailbox()?;
+    let complete = other_request(&mut source)?;
+    let (device, generation) = source
+        .coordinator
+        .state
+        .origins
+        .get(&origin_key())
+        .and_then(|origin| origin.device)
+        .ok_or("attached origin")?;
+    // The other connection attaches the device again.
+    let digest = agenc_relay_e2ee::ids::account_id_digest(&NETWORK, &source.account)?;
+    let directory = &mut source.coordinator.state.directory;
+    let challenge = directory
+        .attach_begin(digest, device, [197; 16], NOW)
+        .map_err(|error| format!("{error:?}"))?;
+    let superseding = directory
+        .attach_finish(
+            digest,
+            device,
+            [197; 16],
+            challenge.reserved_generation,
+            NOW,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(superseding, generation + 1);
+    let other = crate::e2ee::coordinator::CompanionOriginKey {
+        home_server_id: HOME,
+        server_incarnation: INCARNATION,
+        origin_id: [198; 16],
+    };
+    source
+        .coordinator
+        .state
+        .origins
+        .get_mut(&other)
+        .ok_or("other origin")?
+        .device = Some((device, superseding));
+    let port = source.query_sessions.query_reservations(
+        UserId::from_bytes([195; 16]),
+        source.query_limits,
+        source.backing.clone(),
+    );
+    let candidate = ok(evaluate_complete_with_queries(
+        &source,
+        complete,
+        &mut entropy,
+        port,
+    )?)?;
+    assert_eq!(source.query_sessions.queue_snapshot().query_snapshots(), 2);
+    apply(&mut source, candidate);
+    assert_eq!(
+        source.query_sessions.queue_snapshot().query_snapshots(),
+        1,
+        "only the current attachment's cut remains"
+    );
+    Ok(())
+}

@@ -105,8 +105,8 @@ pub(super) fn rotating_key_set() -> Option<agenc_relay_e2ee::sequencer::Sequence
         .ok()
 }
 
-/// Fills the edge's recent-object cache with completed client submissions,
-/// one per connection, up to its shared ceiling.
+/// Fills one connection's share of the edge's recent-object cache with
+/// completed client submissions, up to its ceiling.
 pub(super) fn fill_client_cache(edge: &mut E2eeEdge) -> Result<(), Box<dyn std::error::Error>> {
     use agenc_relay_e2ee::wire::assembly::{
         AssemblyKey, Direction, Ingest, MAX_RECENT_OBJECTS, QuotaScopes, Sender,
@@ -121,7 +121,7 @@ pub(super) fn fill_client_cache(edge: &mut E2eeEdge) -> Result<(), Box<dyn std::
         let key = AssemblyKey {
             direction: Direction::LocalIngress,
             sender: Sender::Connection {
-                connection: u64::try_from(index)?,
+                connection: 900,
                 session_generation: 1,
             },
             command: CarrierCommand::Tagmsg,
@@ -140,6 +140,86 @@ pub(super) fn fill_client_cache(edge: &mut E2eeEdge) -> Result<(), Box<dyn std::
             return Err("a client submission did not complete".into());
         }
     }
+    Ok(())
+}
+
+/// The frames of one ordinary event for the test edge at `generation` and
+/// `sequence`.
+pub(super) fn event_frames(
+    generation: u64,
+    sequence: u64,
+    id: [u8; 16],
+) -> Result<Vec<agenc_relay_e2ee::federation::frames::CompanionFrame>, Box<dyn std::error::Error>> {
+    use agenc_relay_e2ee::federation::frames::{CompanionFrame, DeliveryPosition};
+    use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
+    use agenc_relay_e2ee::objects::federation::{ArcFederationEvent, ArcFederationEventKind};
+    use agenc_relay_e2ee::tls::{Opaque, TlsEncode};
+    let position = DeliveryPosition {
+        server_id: [2; 16],
+        delivery_generation: generation,
+        delivery_sequence: sequence,
+        event_id: id,
+    };
+    let event = ArcFederationEvent {
+        profile_version: 1,
+        network_id: [1; 32],
+        target_server_id: [2; 16],
+        delivery_generation: generation,
+        coordinator_state_generation: 5,
+        delivery_sequence: sequence,
+        event_id: id,
+        event_kind: ArcFederationEventKind::RequestCompleted,
+        cross_profile_mutation_id: Opaque::new(Vec::new())?,
+        cross_profile_part_index: 0,
+        cross_profile_part_count: 0,
+        conversation_id: Opaque::new(Vec::new())?,
+        route_sequence: 0,
+        origin_id: Opaque::new(Vec::new())?,
+        origin_generation: 0,
+        source_view: Opaque::new(Vec::new())?,
+        request_home_server_id: Opaque::new(Vec::new())?,
+        request_server_incarnation: Opaque::new(Vec::new())?,
+        request_origin_id: Opaque::new(Vec::new())?,
+        request_origin_generation: 0,
+        request_operation_sequence: 0,
+        request_id: Opaque::new(Vec::new())?,
+        payload_object_id: Opaque::new(Vec::new())?,
+        encoded_event_result: Opaque::new(Vec::new())?,
+    };
+    let bytes =
+        ArcWireObject::new(ArcWireObjectKind::FederationEvent, event.encode()?)?.encode()?;
+    let object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
+    Ok(agenc_relay_e2ee::wire::fragment::fragment_object(&bytes)?
+        .into_iter()
+        .map(|fragment| CompanionFrame::Event {
+            position,
+            object_id,
+            fragment,
+        })
+        .collect())
+}
+
+/// Another router's checkpoint gathers in the state core, so a batch of
+/// the edge's could not join it. Its one row repeats `edge`'s durable
+/// cursor unchanged.
+pub(super) fn open_other_batch(
+    context: &mut crate::state_core::StateCoreContext,
+    edge: &E2eeEdge,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let write = super::events::cursor_write(&edge.config, &edge.delivery)
+        .map_err(|code| code.to_string())?
+        .at_revision(plan.resulting_revision().get())?;
+    context
+        .stage_durable_with_account_service(
+            plan,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+            vec![write],
+        )
+        .map_err(|error| format!("other batch: {error:?}"))?;
+    assert_eq!(context.pending_len(), 1);
     Ok(())
 }
 
@@ -168,12 +248,15 @@ fn origin(origin_id: [u8; 16], declared: u64, sequence: u64) -> LocalOrigin {
         user_id: None,
         account: None,
         device: None,
+        device_principal: None,
     }
 }
 
 fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
     PendingRequest {
         reply_key: None,
+        reservation: None,
+        account: account_of(generation),
         echo_lines: Vec::new(),
         retry_label: None,
         generation: ConnectionGeneration::new(generation),
@@ -201,6 +284,54 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
         completion_seen: false,
         rendered: false,
     }
+}
+
+/// The account a test connection's requests are sent under: each
+/// connection its own unless a test says otherwise.
+fn account_of(generation: u64) -> [u8; 24] {
+    let mut account = [b'a'; 24];
+    if let Some(tail) = account.get_mut(16..) {
+        tail.copy_from_slice(&generation.to_be_bytes());
+    }
+    account
+}
+
+/// Reserves the memory `request`'s reply is kept in, as sending it does.
+fn reserve_reply(request: &mut PendingRequest) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::budget::{BoundedMemoryCharges, MemoryBudget, MemoryBudgetPort, MemoryCharge};
+    let bytes = super::retry::reply_reservation(&request.command);
+    let budget = MemoryBudget::new(bytes);
+    request.reservation =
+        Some(budget.try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(bytes)])?)?);
+    Ok(())
+}
+
+/// Keeps `count` one-line replies for `connection` under `account`.
+fn keep(
+    replies: &mut super::retry::Replies,
+    connection: u64,
+    account: [u8; 24],
+    count: u32,
+) -> TestResult {
+    let mut request = pending(connection, 0, true);
+    request.account = account;
+    for index in 0..count {
+        let mut object = [0; 32];
+        object
+            .get_mut(..4)
+            .ok_or("object")?
+            .copy_from_slice(&index.to_be_bytes());
+        request.reply_key = Some((connection, 0, object, [7; 32]));
+        reserve_reply(&mut request)?;
+        replies
+            .remember(
+                &mut request,
+                vec![":edge.example EKEY STORED IDENTITY x".to_owned()],
+                5,
+            )
+            .map_err(|e| e.code.to_string())?;
+    }
+    Ok(())
 }
 
 /// A replayed declaration of the generation already in force keeps the

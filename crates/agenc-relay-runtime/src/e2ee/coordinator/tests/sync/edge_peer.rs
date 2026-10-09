@@ -180,6 +180,7 @@ impl EdgePeer {
                     .map_err(|_| CompanionFault::Protocol)
             }
             Classified::Violation => Err(CompanionFault::Protocol),
+            Classified::Fenced => Ok(Vec::new()),
         }
     }
 

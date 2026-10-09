@@ -56,6 +56,17 @@ fn ack(fixture: &mut Fixture, sequence: u64, now: u64) -> TestResult {
 }
 
 async fn pending() -> TestResult<(Fixture, crate::federation::link::LinkQueue)> {
+    let (mut fixture, queue) = Box::pin(prepared()).await?;
+    ack(&mut fixture, 3, 86_500)?;
+    assert!(fixture.coordinator.companion_ack_read.is_some());
+    assert!(!fixture.coordinator.reload_ready());
+    assert!(fixture.coordinator.pending.is_none());
+    Ok((fixture, queue))
+}
+
+/// The edge acknowledged the first two events, and the acknowledged head's
+/// body left the cache: the next acknowledgement reads the prefix.
+async fn prepared() -> TestResult<(Fixture, crate::federation::link::LinkQueue)> {
     let mut fixture = Box::pin(Fixture::seed(true)).await?;
     let (handle, queue) = link_queue(1 << 20);
     fixture.coordinator.peers.get_mut(&PEER).ok_or("peer")?.live = Some(LiveLink {
@@ -94,10 +105,6 @@ async fn pending() -> TestResult<(Fixture, crate::federation::link::LinkQueue)> 
         .get_mut(&PEER)
         .ok_or("stream")?;
     assert_eq!(stream.rows.pop_front().ok_or("old head")?.sequence, 0);
-    ack(&mut fixture, 3, 86_500)?;
-    assert!(fixture.coordinator.companion_ack_read.is_some());
-    assert!(!fixture.coordinator.reload_ready());
-    assert!(fixture.coordinator.pending.is_none());
     Ok((fixture, queue))
 }
 
@@ -322,55 +329,6 @@ async fn refused_cold_ack_transaction_leaves_expired_rows_and_cursor_recoverable
 }
 
 #[tokio::test]
-async fn an_unrelated_commit_between_ack_pages_refuses_mixed_inventory_without_advancing_coverage()
--> TestResult {
-    let (mut fixture, _queue) = Box::pin(pending()).await?;
-    let first = fixture.core.next_storage_read().await?;
-    let pinned = first
-        .result
-        .as_ref()
-        .map_err(|e| format!("first read: {e:?}"))?
-        .storage_commit_sequence;
-    let stream = fixture
-        .coordinator
-        .companion_exec
-        .as_ref()
-        .ok_or("executor")?
-        .state
-        .streams
-        .get(&PEER)
-        .ok_or("stream")?;
-    let existing = &stream.rows.back().ok_or("existing event")?.event;
-    let unchanged_body =
-        CompanionCoordinator::object_write(existing).map_err(|e| format!("object: {e:?}"))?;
-    Box::pin(fixture.commit(vec![unchanged_body])).await?;
-    assert!(fixture.core.context_mut()?.head().storage_commit_sequence > pinned);
-    fixture
-        .coordinator
-        .storage_read_completed(fixture.core.context_mut()?, first);
-    assert!(fixture.coordinator.companion_ack_read.is_some());
-    assert_eq!(finish_reads(&mut fixture).await?, 1);
-    assert_eq!(fixture.coordinator.counters.violations, 1);
-    assert!(fixture.coordinator.pending.is_none());
-    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
-    fixture.restart().await?;
-    assert!(fixture.coordinator.loaded());
-    let stream = fixture
-        .coordinator
-        .companion_exec
-        .as_ref()
-        .ok_or("executor")?
-        .state
-        .streams
-        .get(&PEER)
-        .ok_or("stream")?;
-    assert_eq!(stream.rows.len(), 4);
-    assert_eq!(stream.acked.map(|(sequence, _)| sequence), Some(1));
-    assert_eq!(stream.rows.iter().filter(|row| !row.acked()).count(), 2);
-    Ok(())
-}
-
-#[tokio::test]
 async fn a_replay_cutoff_inside_an_open_barrier_refuses_before_installing_a_stream() -> TestResult {
     use agenc_relay_storage::e2ee_records::delivery_recovery::outbox::replay::{
         ReplayLedgerRow, ReplayOwner, ReplayOwnerFields,
@@ -481,19 +439,178 @@ async fn an_ack_read_whose_stream_or_link_drifted_fails_its_link_without_staging
     Ok(())
 }
 
-/// A staged batch of the coordinator's own holds the completion back.
+/// A page that does not hold the inventory the read expects, here a first
+/// page whose replay owner row is missing, fails the link without staging.
 #[tokio::test]
-async fn an_ack_read_completing_behind_a_staged_batch_fails_its_link() -> TestResult {
+async fn an_ack_page_missing_its_inventory_fails_its_link_without_staging() -> TestResult {
     let (mut fixture, _queue) = Box::pin(pending()).await?;
-    let message = fixture.core.next_storage_read().await?;
-    fixture.coordinator.pending = Some(PendingCommit::Cleanup { peer: PEER });
+    let mut first = fixture.core.next_storage_read().await?;
+    first
+        .result
+        .as_mut()
+        .map_err(|e| format!("first read: {e:?}"))?
+        .records
+        .clear();
     fixture
         .coordinator
-        .storage_read_completed(fixture.core.context_mut()?, message);
+        .storage_read_completed(fixture.core.context_mut()?, first);
     assert!(fixture.coordinator.companion_ack_read.is_none());
     assert!(!fixture.coordinator.link_is_live(LinkId::new(1), PEER));
-    fixture.coordinator.pending = None;
+    assert!(fixture.coordinator.pending.is_none());
+    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
     Ok(())
+}
+
+/// Stages a batch another router could stage; the coordinator's own slot
+/// stays free.
+fn open_other_batch(fixture: &mut Fixture) -> TestResult {
+    let context = fixture.core.context_mut()?;
+    let plan = context.domain().plan_account_service_checkpoint()?;
+    let revision = plan.resulting_revision().get();
+    let write = fixture.coordinator.peer_row_at(PEER, revision, None)?;
+    context
+        .stage_durable_with_account_service(
+            plan,
+            crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())?,
+            None,
+            0,
+            vec![write],
+        )
+        .map_err(|error| format!("other batch: {error:?}"))?;
+    assert!(fixture.coordinator.pending.is_none());
+    Ok(())
+}
+
+/// Stages a batch of the coordinator's own, as its timer-driven base work
+/// can while a companion read is in flight.
+fn open_own_batch(fixture: &mut Fixture) -> TestResult {
+    let context = fixture.core.context_mut()?;
+    fixture
+        .coordinator
+        .stage_rows(
+            context,
+            Vec::new(),
+            PendingCommit::OutboxRequired { peer: PEER },
+            Some(PEER),
+        )
+        .map_err(|error| format!("own batch: {error:?}"))?;
+    assert!(fixture.coordinator.pending.is_some());
+    Ok(())
+}
+
+/// Commits the open batch and runs the coordinator's receipt.
+async fn settle(fixture: &mut Fixture) -> TestResult {
+    fixture.core.commit_staged_batch().await?;
+    fixture
+        .coordinator
+        .batch_applied(fixture.core.context_mut()?);
+    Ok(())
+}
+
+fn acked(fixture: &Fixture) -> TestResult<Option<u64>> {
+    Ok(fixture
+        .coordinator
+        .companion_exec
+        .as_ref()
+        .ok_or("executor")?
+        .state
+        .streams
+        .get(&PEER)
+        .ok_or("stream")?
+        .acked
+        .map(|(sequence, _)| sequence))
+}
+
+/// The completion waited for the open batch: the read still owns its slot
+/// and the link is up.
+fn parked(fixture: &Fixture) -> bool {
+    fixture.coordinator.parked_read.is_some()
+        && fixture.coordinator.companion_ack_read.is_some()
+        && fixture.coordinator.link_is_live(LinkId::new(1), PEER)
+        && fixture.coordinator.counters.violations == 0
+}
+
+/// Commits the staged acknowledgement and checks that it covers the
+/// barrier's companion end with the link up.
+async fn acknowledged(fixture: &mut Fixture) -> TestResult {
+    assert!(matches!(
+        fixture.coordinator.pending,
+        Some(PendingCommit::Companion { .. })
+    ));
+    settle(fixture).await?;
+    assert_eq!(acked(fixture)?, Some(3));
+    assert!(fixture.coordinator.link_is_live(LinkId::new(1), PEER));
+    assert_eq!(fixture.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+/// No other router writes companion rows. A page that completes while
+/// another router's batch is open waits for it, and that batch's commit
+/// leaves the pages already read current: the read continues at the next
+/// commit and its acknowledgement commits.
+#[tokio::test]
+async fn an_ack_read_keeps_its_pages_across_a_commit_of_another_router() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(pending()).await?;
+    let first = fixture.core.next_storage_read().await?;
+    let read_at = first
+        .result
+        .as_ref()
+        .map_err(|e| format!("first read: {e:?}"))?
+        .storage_commit_sequence;
+    open_other_batch(&mut fixture)?;
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, first);
+    assert!(parked(&fixture), "the page waits for the open batch");
+    settle(&mut fixture).await?;
+    assert!(fixture.core.context_mut()?.head().storage_commit_sequence > read_at);
+    assert!(fixture.coordinator.parked_read.is_none());
+    assert_eq!(acked(&fixture)?, Some(1));
+    assert_eq!(finish_reads(&mut fixture).await?, 2, "the remaining pages");
+    acknowledged(&mut fixture).await
+}
+
+/// A batch of the coordinator's own that opens while the read is in flight
+/// holds its completion back without failing the link; its commit may have
+/// changed the rows the read covers, so the prefix is read again from its
+/// first page.
+#[tokio::test]
+async fn an_ack_read_completing_behind_a_batch_of_its_own_reads_again() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(pending()).await?;
+    let first = fixture.core.next_storage_read().await?;
+    open_own_batch(&mut fixture)?;
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, first);
+    assert!(parked(&fixture), "the page waits for the open batch");
+    settle(&mut fixture).await?;
+    assert!(fixture.coordinator.parked_read.is_none());
+    assert!(fixture.coordinator.pending.is_none());
+    assert_eq!(finish_reads(&mut fixture).await?, 3, "every page again");
+    acknowledged(&mut fixture).await
+}
+
+/// A refused batch of the coordinator's own changed nothing: the waiting
+/// page is admitted and the read continues.
+#[tokio::test]
+async fn an_ack_read_completing_behind_a_refused_batch_of_its_own_continues() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(pending()).await?;
+    let first = fixture.core.next_storage_read().await?;
+    open_own_batch(&mut fixture)?;
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, first);
+    assert!(parked(&fixture), "the page waits for the open batch");
+    fixture
+        .core
+        .state_mut()?
+        .reject_fixture_batch_before_submission(agenc_relay_storage::StorageError::QueueFull)?;
+    fixture
+        .coordinator
+        .batch_rejected(fixture.core.context_mut()?);
+    assert!(fixture.coordinator.parked_read.is_none());
+    assert_eq!(finish_reads(&mut fixture).await?, 2, "the remaining pages");
+    acknowledged(&mut fixture).await
 }
 
 #[tokio::test]
@@ -530,5 +647,53 @@ async fn a_queued_base_request_waits_for_a_companion_read_in_flight() -> TestRes
         "the read staged its acknowledgement"
     );
     assert_eq!(fixture.coordinator.counters.violations, 0);
+    Ok(())
+}
+
+/// A snapshot page read of the peer's first page.
+fn submit_page_read(fixture: &mut Fixture) -> TestResult<Result<(), Violation>> {
+    let owner = fixture
+        .coordinator
+        .companion_exec
+        .as_ref()
+        .ok_or("executor")?
+        .state
+        .streams
+        .get(&PEER)
+        .and_then(|stream| stream.owner.clone())
+        .ok_or("owner")?;
+    let request = crate::e2ee::coordinator::sync::SnapshotPageRequest::for_test(
+        PEER,
+        LinkId::new(1),
+        owner,
+        0,
+        [3; 32],
+    );
+    Ok(companion::page_read::submit(
+        &mut fixture.coordinator,
+        fixture.core.context_mut()?,
+        request,
+    ))
+}
+
+/// Companion reads run one at a time, so one completion at most waits for
+/// a free batch slot: a page read is refused while the acknowledgement's
+/// prefix read is in flight, and the prefix read while a page read is.
+#[tokio::test]
+async fn a_companion_read_is_refused_while_another_is_in_flight() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(pending()).await?;
+    assert!(matches!(
+        submit_page_read(&mut fixture)?,
+        Err(Violation::Ceiling)
+    ));
+    assert!(fixture.coordinator.companion_page_read.is_none());
+    let (mut fixture, _queue) = Box::pin(prepared()).await?;
+    assert!(submit_page_read(&mut fixture)?.is_ok());
+    let refused = ack(&mut fixture, 3, 86_500);
+    assert!(
+        refused.is_err_and(|error| error.to_string().contains("Ceiling")),
+        "the prefix read is refused"
+    );
+    assert!(fixture.coordinator.companion_ack_read.is_none());
     Ok(())
 }

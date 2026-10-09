@@ -70,7 +70,7 @@ async fn rejected_event_batch_restores_the_witness_head() -> TestResult {
     let before = companion.conversations.clone();
     assert!(submit(&mut companion, &mut fixture, &ordinary()?)?);
     assert!(companion.commit.is_some());
-    companion.batch_rejected();
+    companion.batch_rejected(fixture.context_mut()?, &mut base_edge());
     assert_eq!(companion.conversations, before);
     Ok(())
 }

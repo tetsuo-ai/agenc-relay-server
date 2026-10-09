@@ -241,59 +241,65 @@ impl crate::e2ee::coordinator::sync::CompanionHost for Host {
     }
 }
 
+/// The cut a deletion releases: a deletion of another origin of the edge
+/// releases nothing; the exact deletion releases the origin's cut, and so
+/// does a deletion naming another generation or a sequence below the one
+/// executed, which closes the origin where it stands.
 #[test]
 fn mailbox_query_origin_close_releases_only_after_the_exact_descriptor_passes() -> TestResult {
     use crate::e2ee::coordinator::sync::OriginDescriptor;
     use crate::e2ee::coordinator::tests::{HOME, INCARNATION, ORIGIN};
-    let (mut source, _, _, _) = paged_mailbox()?;
-    let descriptor = OriginDescriptor {
-        coordinator_server_id: *source.coordinator.server_id.as_bytes(),
-        server_incarnation: INCARNATION,
-        origin_id: ORIGIN,
-        origin_generation: 0,
-        object_id: [0; 32],
-    };
-    let before = source.query_sessions.queue_snapshot();
-    assert_eq!(before.query_snapshots(), 1);
-    // A deletion naming another generation, or a sequence below the one
-    // executed, is refused and releases nothing.
-    let other_generation = OriginDescriptor {
-        origin_generation: 1,
-        ..descriptor
-    };
-    let below = source
-        .sequence
-        .checked_sub(1)
-        .ok_or("an executed request")?;
-    for (refused, next) in [(other_generation, source.sequence), (descriptor, below)] {
-        assert!(
-            source
-                .coordinator
-                .origin_del(
-                    ServerId::from_bytes(HOME),
-                    refused,
-                    next,
-                    &Host(INCARNATION)
-                )
-                .is_err()
-        );
+    for (generation, lower) in [(0, false), (1, false), (0, true)] {
+        let (mut source, _, _, _) = paged_mailbox()?;
+        let descriptor = OriginDescriptor {
+            coordinator_server_id: *source.coordinator.server_id.as_bytes(),
+            server_incarnation: INCARNATION,
+            origin_id: ORIGIN,
+            origin_generation: 0,
+            object_id: [0; 32],
+        };
+        let before = source.query_sessions.queue_snapshot();
+        assert_eq!(before.query_snapshots(), 1);
+        // A deletion of another origin of the edge releases nothing.
+        let other_origin = OriginDescriptor {
+            origin_id: [0x5e; 16],
+            ..descriptor
+        };
+        source.coordinator.origin_del(
+            ServerId::from_bytes(HOME),
+            other_origin,
+            0,
+            &Host(INCARNATION),
+        )?;
         assert_eq!(source.query_sessions.queue_snapshot(), before);
+        let sequence = if lower {
+            source
+                .sequence
+                .checked_sub(1)
+                .ok_or("an executed request")?
+        } else {
+            source.sequence
+        };
+        source.coordinator.origin_del(
+            ServerId::from_bytes(HOME),
+            OriginDescriptor {
+                origin_generation: generation,
+                ..descriptor
+            },
+            sequence,
+            &Host(INCARNATION),
+        )?;
+        let after = source.query_sessions.queue_snapshot();
+        assert_eq!(
+            (
+                after.query_snapshots(),
+                after.query_rows(),
+                after.query_bytes()
+            ),
+            (0, 0, 0),
+            "generation {generation}, lower sequence {lower}"
+        );
     }
-    source.coordinator.origin_del(
-        ServerId::from_bytes(HOME),
-        descriptor,
-        source.sequence,
-        &Host(INCARNATION),
-    )?;
-    let after = source.query_sessions.queue_snapshot();
-    assert_eq!(
-        (
-            after.query_snapshots(),
-            after.query_rows(),
-            after.query_bytes()
-        ),
-        (0, 0, 0)
-    );
     Ok(())
 }
 

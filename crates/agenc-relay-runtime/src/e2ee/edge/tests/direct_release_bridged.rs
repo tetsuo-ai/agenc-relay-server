@@ -45,6 +45,7 @@ fn attached(held: [u8; 24]) -> LocalOrigin {
         user_id: None,
         account: Some(held),
         device: Some(([9; 16], 1)),
+        device_principal: Some((None, Some(held))),
     }
 }
 

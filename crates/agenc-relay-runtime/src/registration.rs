@@ -3748,10 +3748,10 @@ impl RegistrationRouter {
         if let Some(edge) = self.edge.as_mut() {
             edge.batch_rejected_with_error(context, error);
         }
-        if let Some(e2ee) = self.e2ee.as_mut()
+        if let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut())
             && !e2ee.witness_batch_rejected(witness_rejection)
         {
-            e2ee.batch_rejected();
+            e2ee.batch_rejected(context, edge);
         }
         let generation = origin.as_ref().map(StagedOrigin::generation);
         if generation
@@ -3786,8 +3786,9 @@ impl RegistrationRouter {
     }
 
     /// Companion events that waited for a batch the state core refused
-    /// apply now, after every role settled the refusal: no receipt follows
-    /// a refusal, so nothing else would drain them (companion 12.5).
+    /// apply now, after every role settled the refusal, behind the batch
+    /// held for a free slot: no receipt follows a refusal, so nothing else
+    /// would stage or drain them (companion 12.5).
     fn drain_e2ee_events(&mut self, context: &mut StateCoreContext) {
         let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut()) else {
             return;
@@ -4067,7 +4068,9 @@ pub(crate) fn apply_ready_barrier(
     e2ee: &mut crate::e2ee::edge::E2eeEdge,
     edge: &mut crate::federation::edge::EdgeFederation,
 ) {
-    if !e2ee.is_active() {
+    // The barrier's transaction waits while a batch is open, either edge
+    // router's or another router's, and applies once none is.
+    if !e2ee.is_active() || e2ee.holds_events(context) {
         return;
     }
     let Some(mutation_id) = edge.barrier_ready() else {

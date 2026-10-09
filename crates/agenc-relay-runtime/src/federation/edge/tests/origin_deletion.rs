@@ -255,6 +255,61 @@ async fn a_deletion_after_an_acknowledged_update_names_that_generation() -> Test
     Ok(())
 }
 
+/// A deletion's acknowledgement repeats the generation the deletion named
+/// (spec 20.7), and the edge retires the origin only at that generation:
+/// neither at the held generation when the deletion named the update a link
+/// carried, nor at the update's generation when the deletion named the held
+/// one.
+#[tokio::test]
+async fn a_deletion_acknowledgement_names_the_generation_the_deletion_named() -> TestResult {
+    for carried in [false, true] {
+        let mut fixture = StateCoreFixture::new(entropy_script())?;
+        let connection = ConnectionGeneration::new(1);
+        let (mut edge, mut queue) = bound(&mut fixture, connection).await?;
+        if carried {
+            commit_edge_batches(&mut edge, &mut fixture).await?;
+        }
+        // A deletion acknowledgement for an origin this edge did not delete
+        // retires nothing.
+        let origin_id = edge.origins.get(&connection).ok_or("origin")?.origin_id;
+        let acknowledgement = |generation| FederationFrame::OriginAck {
+            edge_server_id: EDGE,
+            server_incarnation: EDGE_INCARNATION,
+            origin_id,
+            generation,
+            object_id: None,
+        };
+        assert_eq!(
+            edge.handle_frame(fixture.context_mut()?, acknowledgement(0))
+                .err(),
+            Some(Violation::Consistency),
+            "carried: {carried}"
+        );
+        edge.connection_closed(fixture.context_mut()?, connection, "");
+        commit_edge_batches(&mut edge, &mut fixture).await?;
+        let named = origin_frames(&mut queue)
+            .await?
+            .iter()
+            .find_map(|frame| match frame {
+                FederationFrame::OriginDel { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .ok_or("deletion")?;
+        assert_eq!(named, u64::from(carried), "carried: {carried}");
+        assert_eq!(
+            edge.handle_frame(fixture.context_mut()?, acknowledgement(1 - named))
+                .err(),
+            Some(Violation::Consistency),
+            "carried: {carried}"
+        );
+        assert!(!edge.origins.get(&connection).ok_or("origin")?.del_acked);
+        edge.handle_frame(fixture.context_mut()?, acknowledgement(named))
+            .map_err(|violation| format!("the acknowledgement was refused: {violation:?}"))?;
+        assert!(edge.origins.get(&connection).ok_or("origin")?.del_acked);
+    }
+    Ok(())
+}
+
 /// After a link loss a closed connection's origin replays only its
 /// deletion, which names the generation of the update the first link
 /// carried (spec 20.7): the edge keeps, across the link loss, its record
