@@ -59,8 +59,11 @@ The rule, in the shared crate:
   finalized policy's controller rule. A holder of retained state resumes
   the chain at its closing state (`HistoricalChain::resume`, which trusts
   that state as it trusts every resumed anchor) and adopts the exact
-  retained close the same way. There is no other constructor: a close
-  that no chain adopted, however well formed, yields no terminal.
+  retained close the same way, or resumes it at its closed state, whose
+  close ID that retained state vouches for and `resume` trusts in the same
+  way. There is no other constructor: a close that no chain adopted, and
+  that no trusted retained state names, yields no terminal, however well
+  formed.
 - `authenticate_initial_authority` keeps accepting only incarnation zero.
   `authenticate_recreated_authority` takes the generation-zero binding of a
   later incarnation with a `PriorTerminal`, and admits it only when the
@@ -80,7 +83,9 @@ So no next incarnation opens while the one before it is live or closing,
 or after a close its controllers never approved: the recreated route's
 own binding, signed by every binding-authorized device of its principals
 and root-locked, pins the close ID, and the terminal it is checked against
-comes only from a chain that verified that close.
+comes only from a chain that verified that close, or from retained state
+resumed at the closed lineage, which its holder trusts as it trusts every
+resumed anchor.
 
 ### Tests
 
