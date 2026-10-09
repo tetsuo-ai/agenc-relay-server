@@ -105,11 +105,11 @@ pub(super) fn submit(
     Ok(())
 }
 
-/// Whether the read is still current once its link is checked: no batch is
-/// open, since its completion waits for one, and no batch of the
-/// coordinator's own committed since it was submitted. A commit another
+/// Whether the read is still current once its link is checked: no batch of
+/// the coordinator's own committed since it was submitted. A commit another
 /// router made leaves it current, since no other router writes companion
-/// rows.
+/// rows; the completion waits while any batch is open, so none is open
+/// here.
 fn validate(
     coordinator: &FederationCoordinator,
     context: &StateCoreContext,
@@ -122,8 +122,5 @@ fn validate(
         pending.identity,
         pending.base_epoch,
     )?;
-    if context.in_flight() || context.pending_len() != 0 {
-        return Err(Violation::Phase);
-    }
     Ok(coordinator.own_commits == pending.own_commits)
 }

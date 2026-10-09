@@ -293,10 +293,10 @@ impl E2eeEdge {
     /// connection's attachment: submission under it stops, so its
     /// in-progress object is discarded (companion 11.6, 11.8).
     fn attachment_ended(&mut self, generation: ConnectionGeneration) {
-        if let Some(origin) = self.origins.get_mut(&generation) {
+        self.origins.entry(generation).and_modify(|origin| {
             origin.device = None;
             origin.device_principal = None;
-        }
+        });
         self.retried.remove(&generation);
         if let Some(ingress) = self.ingress.remove(&generation) {
             self.assembler.discard(&ingress.key);

@@ -296,22 +296,31 @@ async fn a_principal_change_ends_the_attachment_its_declarations_carried() -> Te
         account,
         ..facts(generation)
     };
-    for (case, changed, keeps) in [
+    for (case, changed, keeps, submitting) in [
         (
             "reauthentication",
             principal(3, Some((ACCOUNT, 4)), session),
             true,
+            true,
         ),
-        ("logout", principal(3, None, session), false),
+        ("logout", principal(3, None, session), false, true),
+        (
+            "logout with no submission in progress",
+            principal(3, None, session),
+            false,
+            false,
+        ),
         (
             "account switch",
             principal(3, Some(([b'b'; 24], 1)), session),
             false,
+            true,
         ),
         (
             "replaced session",
             principal(3, Some((ACCOUNT, 3)), Some(([23; 16], [24; 16]))),
             false,
+            true,
         ),
     ] {
         let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
@@ -340,7 +349,9 @@ async fn a_principal_change_ends_the_attachment_its_declarations_carried() -> Te
         let _line = next_declaration(&mut queue).await?;
         edge.acknowledge_origin([9; 16], 2);
         assert_eq!(declared_device(&edge, connection)?, Some(DEVICE), "{case}");
-        open_submission(&mut edge, connection, 1)?;
+        if submitting {
+            open_submission(&mut edge, connection, 1)?;
+        }
         // The connection's last retried object, answered from its replies.
         edge.retried.insert(connection, [5; 32]);
         edge.declare_origin(fixture.context_mut()?, &mut base, connection, &changed, 3)

@@ -112,6 +112,10 @@ async fn the_companion_facts_of_the_held_generation_name_its_acknowledged_princi
     let origin = edge.origins.get_mut(&connection).ok_or("origin")?;
     origin.session = Some(session);
     origin.account = Some((account, 1));
+    assert!(
+        edge.origin_facts(ConnectionGeneration::new(99)).is_none(),
+        "a connection without a base origin has no facts"
+    );
     let facts = edge.origin_facts(connection).ok_or("facts")?;
     assert_eq!(facts.acked_generation, Some(0));
     assert_eq!(

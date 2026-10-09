@@ -491,8 +491,9 @@ impl EdgeFederation {
             connection_nonce: origin.connection_nonce,
             session: session.map(|(session, user)| (*session.as_bytes(), *user.as_bytes())),
             account: account.and_then(|(account, generation)| {
-                let text: [u8; 24] = account.to_text().as_bytes().try_into().ok()?;
-                Some((text, generation))
+                <[u8; 24]>::try_from(account.to_text().as_bytes())
+                    .ok()
+                    .map(|text| (text, generation))
             }),
         })
     }
@@ -1613,12 +1614,6 @@ impl EdgeFederation {
         context: &mut StateCoreContext,
         error: agenc_relay_storage::StorageError,
     ) {
-        if self.commit.is_none() {
-            // Another router's batch: an install that waited for it
-            // continues, as at a receipt.
-            sync::continue_install(self, context);
-            return;
-        }
         if matches!(self.commit, Some(PendingCommit::OrdinaryBatch(_))) {
             // Rejection callbacks drain after the old StateCore batch was
             // removed. A live exclusive batch belongs to a newer receipt.
@@ -1666,7 +1661,11 @@ impl EdgeFederation {
             barrier::rejected(self);
             // Resume starts at the previous committed projection and cursor.
             self.fail_link(context, Violation::Ceiling);
+            return;
         }
+        // Another router's batch: an install that waited for it continues,
+        // as at a receipt.
+        sync::continue_install(self, context);
     }
 
     /// Cancels ordinary retry work when StateCore starts shutdown.

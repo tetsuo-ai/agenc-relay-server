@@ -650,8 +650,13 @@ async fn a_request_its_storage_quota_refuses_is_answered_with_its_failed_result(
     assert_eq!(f.answers().await?, vec![(sequence + 1, failed)]);
     assert_eq!(f.next_sequence()?, sequence + 2);
     assert!(f.live());
-    // No room left: the request is not answered and its error stands.
+    // No room left: the request is not answered and its error stands, and
+    // so does a request that already carries its failed result, as one
+    // whose batch storage refused does.
     assert!(f.execute(f.whoami(sequence + 2)?).is_err());
+    let mut carried = f.whoami(sequence + 2)?;
+    carried.refusal = Some(E2eeReplyCode::RateLimited);
+    assert!(f.execute(carried).is_err());
     assert!(f.coordinator.pending.is_none());
     assert_eq!(f.next_sequence()?, sequence + 2);
     Ok(())

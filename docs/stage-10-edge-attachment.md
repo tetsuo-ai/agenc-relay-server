@@ -33,7 +33,8 @@ time. The sixth holds a snapshot page, ACTIVE or a witness resolution of the
 E2EE edge's that finds a batch open until none is, refuses one that finds an
 event queued, closes the link for a refused batch of the E2EE edge's, keeps
 the base edge's snapshot install and a complete barrier waiting for a free
-slot, and records the audit of the edge's other paths and a limitation. No
+slot, and records the audit of the edge's other paths and a limitation. The
+seventh scores the record's regions and closes what that found. No
 specification, profile hash, registry entry, named limit, reply code, wire
 object, table, key, row kind, field or storage generation changed.
 
@@ -853,3 +854,90 @@ The release coverage policy gains `edge-companion-held-batch` and
 `cap13-mod-batch-rejected-with-error`, whose reasons now name the held
 batch and the waiting install; the other regions of the changed files move
 with unchanged spans. Both source inventories are refreshed.
+
+## The coverage of this record's regions (seventh commit)
+
+A runtime and E2EE library branch report at this commit
+(`RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest -p agenc-relay-runtime -p
+agenc-relay-e2ee --lib --all-features --branch --locked --no-fail-fast`, in
+the program's test environment, 3,100 of 3,100 pass), compared with the
+same report at the start commit (3,038 of 3,038 pass), scores the regions
+the first six commits added or re-reviewed. This commit closes what that
+report found on lines the record's commits wrote, without changing a rule:
+
+- `EdgeFederation::origin_facts` builds the account text without an early
+  return that cannot be taken, and a test asks it for a connection without
+  a base origin.
+- `attachment_ended` clears the attachment through the origin's map entry,
+  and the principal-change test gains a logout with no submission in
+  progress.
+- The fresh object read's validation no longer checks for an open batch,
+  since its completion waits while one is open (fifth commit).
+- The base edge continues a waiting install after the other refusal checks
+  of `batch_rejected_with_error`, where another router's refused batch
+  falls through as before, instead of returning before them.
+- The quota test adds a request that already carries its failed result and
+  still cannot be staged, and a new acknowledgement read test answers its
+  first page without the replay owner it expects
+  (`federation::coordinator::tests::combined_barriers::ack_read::an_ack_page_missing_its_inventory_fails_its_link_without_staging`).
+
+With these, every region the record added scores in full except five,
+which keep their spans and name their scores in their reasons under the
+rule of [the region drift record](stage-10-region-drift.md): none of their
+uncovered entries both is provably unreachable and sits at its span's
+boundary.
+
+- `companion-fenced-request-classification`, 42 of 43 regions: the
+  uncovered one is the unchanged violation for a replay row without a
+  stored result.
+- `companion-fresh-request-staging`, 106 of 146 regions: of the 40
+  uncovered, 10 are error returns of the planning and staging steps
+  `Fresh::stage` took over from `run_with_object`, and 30 lie on two
+  success paths the library tests do not build, a fresh request whose
+  outcome carries a mailbox expiry deadline, and one with a base plan,
+  whose projection preview, mutation context and cross-profile assignment
+  the staging sets. The start commit's report leaves all of them uncovered
+  in `run_with_object` as well: `cap79-fresh-object-006-run-with-object`
+  scored 157 of 204 there, and it and the new region together score 227 of
+  274 here.
+- `edge-companion-held-staging`, 8 of 10 branches: `stage_held` runs at a
+  receipt, after the router's commit was taken, or after a refusal, when
+  nothing is in flight, so the outcomes of its open-batch check for the
+  edge's own commit and for a batch in flight are not reached. The check
+  stays as written, the condition `stage_or_hold` holds under.
+- `edge-reply-kept`, 57 of 58 regions: the uncovered one refuses a charge
+  that cannot be computed, which no reply's length reaches.
+- `edge-kept-output-reservation`, 7 of 8 regions: the uncovered one refuses
+  a charge list that is empty or too long, which one charge never is.
+
+No re-reviewed region holds more uncovered regions than at the start commit:
+`companion-superseded-attachment` rises from 3 of 4 to 6 of 6 branches,
+`cap90-current-base-origin-admission` from 22 to 23 of 24,
+`cap79-fresh-object-010-attached-origin-edges` from 0 of 18 to 22 of 22
+regions, and `cap74-router-accept-line` from 22 uncovered regions to 17, and
+the others keep their uncovered count. In each row's declared metric, the
+uncovered entries that fall on lines the record's commits changed are,
+besides the five above, an error return on reserving the next
+acknowledgement page, in `cap79-replay-089-submit` and
+`cap79-replay-095-advance`, whose lines gained an argument, and the closure
+on an object submission sent in `cap74-router-accept-line`, which the
+library tests do not reach. Counted by regions, eleven more uncovered
+entries fall on changed lines in rows scored by branches or in no row: error
+returns and branches the library tests do not reach, in
+`current_attachment`, `mirrored_device`, `ops::Exec::attached_device`, the
+edge's answer publication, the reply cache's charge and release and the
+coordinator's handling of a dropped request, and the install write at a
+receipt in `federation/edge/sync.rs`, which the start commit's report leaves
+uncovered as well.
+
+Single edits fail tests: continuing no install at another router's refused
+batch fails the install test, keeping the device when an attachment ends
+fails the principal-change test, and changing the account generation of the
+companion facts fails the held-principal test. The release coverage policy
+re-reviews and re-spans `edge-companion-origin-facts`,
+`edge-companion-attachment-ended`, `cap13-mod-batch-rejected-with-error` and
+`cap79-fresh-object-015-validate`, and names the scores of
+`edge-companion-held-staging`, `companion-fenced-request-classification`,
+`companion-fresh-request-staging`, `edge-reply-kept` and
+`edge-kept-output-reservation` in their reasons; both source inventories
+are refreshed.

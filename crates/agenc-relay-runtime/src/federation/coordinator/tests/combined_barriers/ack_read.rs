@@ -439,6 +439,28 @@ async fn an_ack_read_whose_stream_or_link_drifted_fails_its_link_without_staging
     Ok(())
 }
 
+/// A page that does not hold the inventory the read expects, here a first
+/// page whose replay owner row is missing, fails the link without staging.
+#[tokio::test]
+async fn an_ack_page_missing_its_inventory_fails_its_link_without_staging() -> TestResult {
+    let (mut fixture, _queue) = Box::pin(pending()).await?;
+    let mut first = fixture.core.next_storage_read().await?;
+    first
+        .result
+        .as_mut()
+        .map_err(|e| format!("first read: {e:?}"))?
+        .records
+        .clear();
+    fixture
+        .coordinator
+        .storage_read_completed(fixture.core.context_mut()?, first);
+    assert!(fixture.coordinator.companion_ack_read.is_none());
+    assert!(!fixture.coordinator.link_is_live(LinkId::new(1), PEER));
+    assert!(fixture.coordinator.pending.is_none());
+    assert_eq!(fixture.core.context_mut()?.pending_len(), 0);
+    Ok(())
+}
+
 /// Stages a batch another router could stage; the coordinator's own slot
 /// stays free.
 fn open_other_batch(fixture: &mut Fixture) -> TestResult {
