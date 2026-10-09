@@ -582,7 +582,7 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .bind(
             ReservationId(reservation_id),
             owner,
-            binding_summary(&verified),
+            binding_summary(&verified, &exec.coordinator.network_id)?,
             exec.now,
         )
         .map_err(|conflict| match conflict {
@@ -727,11 +727,21 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     Ok(outcome)
 }
 
-/// What the route table admits of a verified binding.
-pub(super) fn binding_summary(verified: &VerifiedBinding) -> BindingSummary {
-    BindingSummary {
+/// What the route table admits of a verified binding: its own semantic
+/// lock, and its route's lineage, the lock of the route's incarnation zero
+/// (companion 9.4).
+pub(super) fn binding_summary(
+    verified: &VerifiedBinding,
+    network_id: &[u8; 32],
+) -> Result<BindingSummary, Fail> {
+    let lineage = verified
+        .route
+        .lineage_lock_id(network_id)
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    Ok(BindingSummary {
         conversation_id: ConversationId(verified.conversation_id),
         lock: SemanticLockId(verified.route.lock_id),
+        lineage: SemanticLockId(lineage),
         incarnation: verified.route.incarnation,
         predecessor_close_id: verified.route.predecessor_close_id,
         binding_id: verified.binding_id,
@@ -741,7 +751,7 @@ pub(super) fn binding_summary(verified: &VerifiedBinding) -> BindingSummary {
             .channel_instance_id
             .map(ChannelInstanceId::from_bytes),
         conversation_nonce: verified.conversation_nonce,
-    }
+    })
 }
 
 /// The retained facts a conversation bound by the verified binding of
@@ -912,7 +922,7 @@ pub fn close(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         sequencer_head_id: close_id,
         route_sequence: position.route_sequence,
         close_id: Some(close_id),
-        predecessor_close_id: None,
+        predecessor_close_id: state.predecessor_close_id,
         recovery_gate: false,
         stored_bytes: state.stored_bytes,
         sequencer_credential_id: Some(state.sequencer_credential_id),

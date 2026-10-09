@@ -1278,10 +1278,13 @@ fn route_entry(state: &ArcFederationRouteState) -> Result<(RouteEntry, Conversat
         }
     };
     Ok((
+        // An edge projects routes and binds none, so its copy keys each
+        // projected lock as its own lineage.
         RouteEntry {
             conversation_id: ConversationId(state.conversation_id),
             target,
             lock: SemanticLockId(state.semantic_route_lock_id),
+            lineage: SemanticLockId(state.semantic_route_lock_id),
             incarnation: 0,
             binding_id: state.binding_id,
             binding_generation: 0,

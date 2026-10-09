@@ -242,6 +242,7 @@ fn a_successor_route_without_a_conversation_fails_startup() {
         conversation_id: ConversationId(NEW),
         target: RouteTarget::Channel(ChannelInstanceId::from_bytes([8; 16])),
         lock: SemanticLockId([2; 32]),
+        lineage: SemanticLockId([2; 32]),
         incarnation: 0,
         binding_id: [1; 32],
         binding_generation: 1,

@@ -2,6 +2,12 @@
 //! state, the semantic lock slots that prevent forks, and the plaintext
 //! downgrade rules (companion Sections 9.4, 11.3 to 11.5, 12.5, and 13.7.1;
 //! architecture Sections 18.1, 18.3, and 18.4).
+//!
+//! A semantic route lock names one incarnation of one semantic route, so
+//! each incarnation holds its own lock slot. The incarnations of one route
+//! share a lineage, keyed by the lock of its incarnation zero: after an
+//! authorized close, the next incarnation binds naming that close, and a
+//! direct pair is reserved again for it (companion 9.4 and 11.4).
 
 use std::collections::BTreeMap;
 
@@ -104,8 +110,11 @@ pub struct RouteEntry {
     pub conversation_id: ConversationId,
     /// Concrete route.
     pub target: RouteTarget,
-    /// Semantic lock.
+    /// Semantic lock of this incarnation.
     pub lock: SemanticLockId,
+    /// The semantic lock of the route's incarnation zero, which every
+    /// incarnation of the semantic route shares.
+    pub lineage: SemanticLockId,
     /// Semantic incarnation.
     pub incarnation: u64,
     /// Current binding identifier.
@@ -125,6 +134,28 @@ impl RouteEntry {
     pub const fn accepts_traffic(&self) -> bool {
         matches!(self.lifecycle, RouteLifecycle::Active)
             && matches!(self.recovery, RecoveryState::Normal)
+    }
+
+    /// The close that ended this route on the live path, an authorized
+    /// `CLOSE` of a normal route, which the next semantic incarnation names
+    /// (companion 9.4). A tombstone a recovery gate installed frees nothing.
+    #[must_use]
+    pub const fn authorized_close(&self) -> Option<[u8; 32]> {
+        match (self.lifecycle, self.recovery) {
+            (RouteLifecycle::Tombstone { close_id }, RecoveryState::Normal) => Some(close_id),
+            _ => None,
+        }
+    }
+
+    /// The order of two entries that compete for one index: the later
+    /// incarnation, then the later binding generation, then a route that
+    /// is not a tombstone.
+    const fn rank(&self) -> (u64, u64, bool) {
+        (
+            self.incarnation,
+            self.binding_generation,
+            !matches!(self.lifecycle, RouteLifecycle::Tombstone { .. }),
+        )
     }
 }
 
@@ -180,8 +211,10 @@ impl std::error::Error for RouteConflict {}
 pub struct BindingSummary {
     /// Conversation identifier.
     pub conversation_id: ConversationId,
-    /// Semantic lock.
+    /// Semantic lock of this incarnation.
     pub lock: SemanticLockId,
+    /// The semantic lock of the route's incarnation zero.
+    pub lineage: SemanticLockId,
     /// Semantic incarnation.
     pub incarnation: u64,
     /// Predecessor close identifier, zero at incarnation zero.
@@ -205,6 +238,8 @@ pub struct RouteTable {
     by_channel: BTreeMap<ChannelInstanceId, ConversationId>,
     by_pair: BTreeMap<DirectPair, ConversationId>,
     locks: BTreeMap<SemanticLockId, ConversationId>,
+    /// The newest incarnation of each semantic route.
+    lineages: BTreeMap<SemanticLockId, ConversationId>,
     reservations: BTreeMap<ReservationId, RouteReservation>,
 }
 
@@ -229,7 +264,7 @@ impl RouteTable {
             .and_then(|conversation| self.routes.get(conversation))
     }
 
-    /// The route bound to a direct pair, live or tombstoned.
+    /// The newest route bound to a direct pair, live or tombstoned.
     #[must_use]
     pub fn direct_route(&self, pair: &DirectPair) -> Option<&RouteEntry> {
         self.by_pair
@@ -280,7 +315,11 @@ impl RouteTable {
     }
 
     /// Reserves a direct route for the pair; only the smaller account
-    /// creates a direct conversation.
+    /// creates a direct conversation. A pair whose newest route an
+    /// authorized close ended is reserved again for the next semantic
+    /// incarnation (companion 11.4: a closed direct binding remains a
+    /// tombstone "until an explicitly approved new semantic generation is
+    /// created"); a live, closing or recovery-gated route keeps the pair.
     pub fn reserve_direct(
         &mut self,
         reservation_id: ReservationId,
@@ -292,7 +331,10 @@ impl RouteTable {
         if owner != pair.smaller() {
             return Err(RouteConflict::BadState);
         }
-        if self.by_pair.contains_key(&pair) || self.target_reserved(&RouteTarget::Direct(pair)) {
+        let held = self
+            .direct_route(&pair)
+            .is_some_and(|route| route.authorized_close().is_none());
+        if held || self.target_reserved(&RouteTarget::Direct(pair)) {
             return Err(RouteConflict::GroupConflict);
         }
         self.insert_reservation(RouteReservation {
@@ -337,8 +379,9 @@ impl RouteTable {
 
     /// Binds a conversation to a reservation atomically. The binding must
     /// name the reserved concrete route, the reservation must be live and
-    /// owned by `actor`, and the semantic lock slot must be free or already
-    /// hold this exact binding lineage's predecessor incarnation.
+    /// owned by `actor`, its semantic lock slot must be free, and its
+    /// incarnation must open the route or follow the close of the route's
+    /// newest incarnation.
     pub fn bind(
         &mut self,
         reservation_id: ReservationId,
@@ -375,6 +418,7 @@ impl RouteTable {
             conversation_id: summary.conversation_id,
             target,
             lock: summary.lock,
+            lineage: summary.lineage,
             incarnation: summary.incarnation,
             binding_id: summary.binding_id,
             binding_generation: 0,
@@ -386,31 +430,39 @@ impl RouteTable {
         Ok(entry)
     }
 
-    /// A semantic lock slot holds at most one lineage; a second live
-    /// binding under the same lock is a fork, and a new incarnation must
-    /// name the tombstoned predecessor's close identifier.
+    // agenc-review: focus owner=domain reviewed=2026-10-09 reason=one decision admits a new semantic incarnation only after the authorized close of the route's newest incarnation, and never into a lock slot another binding holds
+    /// The route's newest incarnation decides a binding (companion 9.4):
+    /// with none, only incarnation zero opens the route, under the lock that
+    /// is its lineage; a live, closing or recovery-gated newest incarnation
+    /// keeps the route, so a second binding is a fork; and after its
+    /// authorized close only the next incarnation, naming that close,
+    /// follows it. A semantic lock names one incarnation of the route, which
+    /// the newest incarnation is or follows, so a second binding under a
+    /// held lock is a fork or a replay of a closed incarnation; and a
+    /// binding the lineage would admit is still refused as a fork when
+    /// another binding holds its lock slot, whatever the lineage index says.
     fn check_lock_slot(&self, summary: &BindingSummary) -> Result<(), RouteConflict> {
-        let Some(existing) = self
-            .locks
-            .get(&summary.lock)
-            .and_then(|id| self.routes.get(id))
-        else {
-            return if summary.incarnation == 0 {
-                Ok(())
-            } else {
-                Err(RouteConflict::NotSuccessor)
-            };
-        };
-        match existing.lifecycle {
-            RouteLifecycle::Tombstone { close_id }
-                if existing.incarnation.checked_add(1) == Some(summary.incarnation)
-                    && summary.predecessor_close_id == close_id =>
-            {
-                Ok(())
+        let newest = self
+            .lineages
+            .get(&summary.lineage)
+            .and_then(|id| self.routes.get(id));
+        let admitted = match newest {
+            None => summary.incarnation == 0 && summary.lineage == summary.lock,
+            Some(newest) => {
+                if !matches!(newest.lifecycle, RouteLifecycle::Tombstone { .. }) {
+                    return Err(RouteConflict::ForkedLineage);
+                }
+                newest.authorized_close() == Some(summary.predecessor_close_id)
+                    && newest.incarnation.checked_add(1) == Some(summary.incarnation)
             }
-            RouteLifecycle::Tombstone { .. } => Err(RouteConflict::NotSuccessor),
-            RouteLifecycle::Active | RouteLifecycle::Closing => Err(RouteConflict::ForkedLineage),
+        };
+        if !admitted {
+            return Err(RouteConflict::NotSuccessor);
         }
+        if self.locks.contains_key(&summary.lock) {
+            return Err(RouteConflict::ForkedLineage);
+        }
+        Ok(())
     }
 
     fn insert_route(&mut self, entry: RouteEntry) {
@@ -423,6 +475,7 @@ impl RouteTable {
             }
         }
         self.locks.insert(entry.lock, entry.conversation_id);
+        self.lineages.insert(entry.lineage, entry.conversation_id);
         self.routes.insert(entry.conversation_id, entry);
     }
 
@@ -485,7 +538,10 @@ impl RouteTable {
     }
 
     /// Removes the tombstone of a channel instance that was destroyed. A
-    /// live route is never removed this way.
+    /// live route is never removed this way. The closed route stays the
+    /// terminal of its semantic route's lineage, holding its lock without
+    /// the instance, so a fresh instance of the route binds only the next
+    /// incarnation naming its close (companion 9.4 and 11.3).
     pub fn destroy_channel_instance(
         &mut self,
         channel_id: &ChannelInstanceId,
@@ -502,10 +558,6 @@ impl RouteTable {
             return Err(RouteConflict::BadState);
         }
         self.by_channel.remove(channel_id);
-        self.routes.remove(&conversation_id);
-        // The semantic lock keeps pointing at the closed lineage only while
-        // the entry exists; a destroyed instance frees the name for a fresh
-        // instance, which then needs a new incarnation under the same lock.
         Ok(())
     }
 
@@ -573,21 +625,52 @@ impl RouteTable {
         self.routes.values()
     }
 
-    /// Restores one entry from durable state without lineage checks.
+    /// Restores one entry from durable state without lineage checks. It
+    /// takes each of its target, lock and lineage indexes unless another
+    /// entry there outranks it ([`Self::take_indexes`]), so the indexes name
+    /// the newest route whatever the order of the restore.
     pub fn restore_entry(&mut self, entry: RouteEntry) {
-        let current = match entry.target {
-            RouteTarget::Channel(channel) => self.channel_route(&channel),
-            RouteTarget::Direct(pair) => self.direct_route(&pair),
+        self.routes.insert(entry.conversation_id, entry);
+        self.take_indexes(&entry);
+    }
+
+    // agenc-review: focus owner=domain reviewed=2026-10-09 reason=one rule gives every index to the newest route whatever the read-back order, so a restart indexes what the live path did
+    /// Points each of `entry`'s target, lock and lineage indexes at it
+    /// unless another entry there outranks it: a later incarnation, a later
+    /// binding generation, or a route that is not a tombstone.
+    fn take_indexes(&mut self, entry: &RouteEntry) {
+        let id = entry.conversation_id;
+        let routes = &self.routes;
+        let takes = |holder: Option<&ConversationId>| {
+            holder.is_none_or(|held| {
+                *held == id
+                    || routes
+                        .get(held)
+                        .is_none_or(|known| entry.rank() >= known.rank())
+            })
         };
-        if current.is_some_and(|known| {
-            known.lock == entry.lock
-                && known.incarnation == entry.incarnation
-                && known.binding_generation > entry.binding_generation
-        }) {
-            self.routes.entry(entry.conversation_id).or_insert(entry);
-            return;
+        let target = match entry.target {
+            RouteTarget::Channel(channel) => takes(self.by_channel.get(&channel)),
+            RouteTarget::Direct(pair) => takes(self.by_pair.get(&pair)),
+        };
+        let lock = takes(self.locks.get(&entry.lock));
+        let lineage = takes(self.lineages.get(&entry.lineage));
+        if target {
+            match entry.target {
+                RouteTarget::Channel(channel) => {
+                    self.by_channel.insert(channel, id);
+                }
+                RouteTarget::Direct(pair) => {
+                    self.by_pair.insert(pair, id);
+                }
+            }
         }
-        self.insert_route(entry);
+        if lock {
+            self.locks.insert(entry.lock, id);
+        }
+        if lineage {
+            self.lineages.insert(entry.lineage, id);
+        }
     }
 
     /// Forgets an edge projection whose entitlement ended, including its
@@ -610,6 +693,9 @@ impl RouteTable {
         }
         if self.locks.get(&entry.lock) == Some(conversation_id) {
             self.locks.remove(&entry.lock);
+        }
+        if self.lineages.get(&entry.lineage) == Some(conversation_id) {
+            self.lineages.remove(&entry.lineage);
         }
     }
 }
