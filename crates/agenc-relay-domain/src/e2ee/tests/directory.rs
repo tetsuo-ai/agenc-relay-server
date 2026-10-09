@@ -189,9 +189,27 @@ fn capabilities_follow_the_roster_and_page_in_device_order() -> Result<(), Direc
         [DEVICE_A].into_iter().collect(),
         [5; 32],
     )?;
+    // Device A's head names the replaced roster: it stays the head its next
+    // statement continues, but a current page lists only statements naming
+    // the current roster (companion 8.5 and 11.6).
+    assert!(directory.capability_page(&ACCOUNT).is_empty());
+    let entry = directory
+        .account(&ACCOUNT)
+        .ok_or(DirectoryError::HeadMismatch)?;
+    assert_eq!(entry.capabilities.get(&DEVICE_A), Some(&head));
+    directory.publish_capability(
+        ACCOUNT,
+        DEVICE_A,
+        CapabilityHead {
+            generation: 1,
+            capability_id: [22; 32],
+            roster_id: [8; 32],
+            object_id: [23; 32],
+        },
+    )?;
     assert_eq!(
         directory.capability_page(&ACCOUNT),
-        vec![(DEVICE_A, [21; 32])]
+        vec![(DEVICE_A, [23; 32])]
     );
     assert!(directory.capability_page(&[9; 32]).is_empty());
     directory.record_binding_lock(ACCOUNT, ROOT, 0)?;
@@ -446,6 +464,36 @@ fn a_roster_burns_only_its_own_accounts_packages() -> Result<(), DirectoryError>
         directory.revoke_package(&DEVICE_B, b"other"),
         Ok(()),
         "the other account's package is still published"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_current_page_lists_no_inactive_device() -> Result<(), DirectoryError> {
+    let mut directory = provisioned()?;
+    let head = CapabilityHead {
+        generation: 0,
+        capability_id: [20; 32],
+        roster_id: [4; 32],
+        object_id: [21; 32],
+    };
+    directory.publish_capability(ACCOUNT, DEVICE_A, head)?;
+    // An entry restored with a head of a device its roster does not keep.
+    let mut entry = directory
+        .account(&ACCOUNT)
+        .cloned()
+        .ok_or(DirectoryError::HeadMismatch)?;
+    entry.capabilities.insert(
+        [12; 16],
+        CapabilityHead {
+            object_id: [22; 32],
+            ..head
+        },
+    );
+    directory.restore_account(ACCOUNT, entry);
+    assert_eq!(
+        directory.capability_page(&ACCOUNT),
+        vec![(DEVICE_A, [21; 32])]
     );
     Ok(())
 }

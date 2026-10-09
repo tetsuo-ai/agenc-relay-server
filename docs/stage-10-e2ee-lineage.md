@@ -7,9 +7,13 @@ the Commit's canonical validation time, with the narrow roster recovery of
 companion Section 8.4. The second starts an account's roster and capability
 lineages at generation zero under each root, keeps the account's roster
 while a new root awaits its first roster, live and after a restart alike,
-and keeps attachment counters in their account and device scope. No
-specification, profile hash, registry entry, named limit, reply code, wire
-object, table, key, row kind, field or storage generation changed.
+and keeps attachment counters in their account and device scope. The third
+restores each capability head against the roster it names, so its lineage
+survives a restart after a roster renewal, keeps that roster retained while
+a head names it, and lists only statements naming the current roster as
+current. No specification, profile hash, registry entry, named limit, reply
+code, wire object, table, key, row kind, field or storage generation
+changed.
 
 ## A finalization's roots and rosters are checked per use (first commit)
 
@@ -278,6 +282,90 @@ certificates enrolled for it: `reload_preserves_published_policies_after_root_ro
 `named_roster::live_admission_and_reconstruction_agree_on_the_named_roster`
 and `reinit::successor::expiry::an_installed_successor_restarts_after_its_principal_rotates_the_account_root`.
 
+## A capability head keeps its lineage across a roster renewal (third commit)
+
+The companion text this rule implements:
+
+- Section 8.5: "A capability object is valid only for the same highest
+  roster in which the signing device is active. [...] Generation zero has
+  an all-zero predecessor. Every successor increments by one, names the
+  previously accepted ID, [...]. Clients durably pin the highest generation
+  and ID per device; rollback, a gap, or two IDs at one generation is a
+  security error."
+- Section 14: `capability_generation` is scoped to the root fingerprint and
+  Device ID, so a renewal of the roster under the same root continues it.
+- Section 11.6: "`FETCH CAPABILITIES` pages the exact current-roster device
+  set in canonical Device-ID order under one immutable snapshot. Every
+  active device appears exactly once, no inactive device appears, and each
+  returned capability object is the highest accepted generation for that
+  device and named roster", and "The client still authenticates every
+  returned object cryptographically."
+
+The rule:
+
+- Startup restores each capability head against the roster it names
+  (`restore_capability_row`, `named_roster` in `startup.rs`): the current
+  roster, or an earlier roster of the current root that the store retains,
+  re-verified under that root, and only for a device the current roster
+  keeps active, as live publication holds heads. The head keeps its
+  generation and identifier whether or not it names the current roster, so
+  the device's next statement continues it after a restart as it does
+  live, and a reset, a gap and a fork are refused alike. The roster index
+  is rebuilt before the capability rows are restored.
+- A current capability page (`Directory::capability_page`, answered by
+  `EKEY FETCH CAPABILITIES`) lists the highest statement of each active
+  device only when it names the current roster: an object naming an
+  earlier roster is not valid for the highest roster (Section 8.5), so a
+  device whose head names one is left out until it publishes for the
+  current roster, while its head is kept. The page therefore lists every
+  active device that has a statement valid for the current roster,
+  exactly once; a client still compares the page with the roster.
+- A device's capability row holds the roster its head names
+  (`owners::hold_capability_rosters`), as a holder not charged to any
+  conversation, so the roster a restart re-verifies the head against stays
+  resident. An account's roster row owns only its current roster, and a
+  replaced roster that nothing else holds is collected once the
+  security-proof window (`SEQUENCER_RECORD_RETENTION`, 30 days) has passed
+  since the account replaced it ([the binding retention
+  record](stage-10-binding-retention.md)); with this rule a replaced roster
+  stays held exactly while a head names it. The device's next statement,
+  which names the current roster, or the deletion of its row when it
+  leaves the roster or its root is replaced, releases the replaced roster
+  to object expiry. Startup derives the same holding from each restored
+  head (`restored_capability_holders`), so a restart of a store this
+  coordinator wrote reconstructs the ownership accounts clean. A roster
+  that already lists as many owners as one owner row can reference
+  (`MAX_RECORD_REFERENCES`) takes no capability-row holder and the
+  publication is admitted, as for route rows: the rows that hold it retain
+  it.
+
+This extends the owner matrix of [the object ownership
+record](stage-10-object-owners.md), which is left as written: a capability
+row owns its statement object and holds the roster its head names. The
+module documentation of `roster_snapshots.rs` and `roster_holds.rs` names
+the capability row beside the route row as a holder of a replaced roster.
+
+### Tests
+
+| Test | What it pins |
+| --- | --- |
+| `root_lineage::a_restart_keeps_a_head_that_names_a_superseded_roster` | After a same-root renewal, the head naming the replaced roster is no current statement; a restart holds it, and live and restarted alike refuse a reset and a gap, store the device's next statement, refuse a fork, and list only the new statement. |
+| `root_lineage::a_capability_page_lists_only_statements_naming_the_current_roster` | With two devices after a renewal, only the device that published for the current roster is listed, live and after a restart; the other's next statement continues its head and is then listed. |
+| `root_lineage::a_device_leaving_the_roster_leaves_no_capability_head` | Now also requires a restart to hold the live state after the revocation. |
+| `retention::capabilities::a_capability_head_holds_the_roster_it_names_until_its_device_moves_on` | The roster row and the capability row hold the current roster; after a renewal the capability row alone holds the replaced roster, which object expiry past every window keeps; a restart reconstructs clean and restores the head against it; the device's next statement retires the replaced roster, expiry collects it, and the next restart restores the new head held by both rows. |
+| `retention::capabilities::a_device_leaving_the_roster_releases_the_roster_its_head_named` | A renewal that drops a device deletes its row; once the remaining device moves on, the replaced roster is collected and a restart restores only the remaining head. |
+| `retention::capabilities::a_capability_row_adds_no_holder_to_a_roster_at_the_reference_ceiling` | A statement naming a roster that as many rows hold as one owner row can reference is admitted, and the roster's owners are unchanged. |
+| `startup::directory_tests::a_capability_head_restores_against_the_earlier_roster_it_names` | A head naming the retained earlier roster restores with its generation and identifier and is not on the current page. |
+| `startup::directory_tests::a_capability_head_restores_nothing_without_its_named_roster_root_or_device` | A head whose named roster the store no longer holds, of a device the current roster dropped, or of an earlier root restores nothing. |
+| `startup::directory_tests::restore_capability_row_refuses_a_row_of_another_directory_kind` | The restore of a capability row given a row of another kind restores nothing. |
+
+The domain test `capabilities_follow_the_roster_and_page_in_device_order`
+now requires a renewed roster's page to leave out the device whose head
+names the replaced roster, while the head stays for its next statement,
+and `a_current_page_lists_no_inactive_device` requires the page of an
+entry restored with a head of a device its roster does not keep to leave
+that device out.
+
 ## Coverage
 
 Release policy (`conformance/release-critical-coverage.toml`):
@@ -314,6 +402,27 @@ Release policy (`conformance/release-critical-coverage.toml`):
   only moved; `cap76-startup-rebuild` and
   `coordinator-roster-snapshot-resolution` keep 91 of 91 regions and 4 of 4
   branches.
+
+- Third commit: six new regions, `retention-owner-capability-rosters`
+  (`hold_capability_rosters`), 2 of 2 branches,
+  `retention-owner-capability-rows` (`capability_holders_in`), 6 of 6,
+  `retention-owner-startup-capability-rosters`
+  (`restored_capability_holders`), 33 of 33 regions,
+  `startup-directory-capability` (`restore_capability_row`) and
+  `startup-directory-named-roster` (`named_roster`), 6 of 6 and 2 of 2
+  branches, in the runtime library, and `directory-current-capability-page`
+  (`Directory::capability_page`), 2 of 2 branches, in the domain crate.
+  `e2ee-owner-reconstruction` and `retention-owner-startup-holdings` are
+  re-spanned from their reviewed first and last lines over the capability
+  holding, with their reasons extended by it; the first scores 36 of 36
+  branches and the second has no branch, as before. `hold_named_rosters`
+  is unchanged and `retention-owner-named-rosters` keeps 4 of 4;
+  `e2ee-owner-batch-derivation` and `e2ee-owner-stage-rows` keep 20 of 24
+  and 10 of 14 on lines this topic does not touch.
+  `coordinator-roster-snapshot-resolution` and the eight
+  `retention-roster-holds-*` regions only moved under the module
+  documentation of `roster_snapshots.rs` and `roster_holds.rs`, which now
+  names the capability row as a holder of a replaced roster.
 
 Both policies' source inventories are refreshed at each commit.
 
@@ -361,6 +470,21 @@ Both policies' source inventories are refreshed at each commit.
   without a roster, the historical chain's roster transition continuing
   across roots, and the roster handler not selecting through
   `roster_predecessor`.
+- Third commit: with the domain's `directory.rs` and the runtime's
+  `startup.rs` and `owners.rs` set back to the second commit, six tests
+  fail: the restart and current-page tests, the revoked device's restart,
+  both retention tests that hold a replaced roster, and the startup
+  restore against an earlier roster; with only the domain's `directory.rs`
+  set back, its page test fails. The ceiling test, the refusals of the
+  startup restore and the restore of a row of another kind pin conditions
+  the second commit already met. Eight single-edit mutations each fail at
+  least one test: the page listing any roster's statement (failing in the
+  domain and the runtime runs), the restore against the current roster
+  only, the restore for
+  a device the roster dropped, the roster index rebuilt after the
+  capability rows, no capability holding in live batches, none derived at
+  startup, a capability row keeping a roster on rewrite, and a capability
+  holder added past the reference ceiling.
 
 ## Validation
 
@@ -404,5 +528,13 @@ above; none fails to compile. Branch reports of the three crates
 (`RUSTC_BOOTSTRAP=1 cargo llvm-cov nextest --branch` after `cargo llvm-cov
 clean --workspace`, the runtime library with the same filter) pass 375,
 263 and 2,832 tests and give the scores above.
+
+Third commit: the e2ee crate passes 375 of 375, the domain crate 264 of
+264 and the runtime library 2,840 of 2,840. The revert proofs and the
+eight single edits ran the runtime library's rotation, retention and
+startup directory tests and the domain's directory tests; none fails to
+compile. Branch reports of the domain crate (264 of 264) and the runtime
+library (2,840 of 2,840), after `cargo llvm-cov clean --workspace`, give
+the scores above.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

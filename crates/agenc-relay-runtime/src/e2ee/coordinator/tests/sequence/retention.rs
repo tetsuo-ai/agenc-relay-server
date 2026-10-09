@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 
+mod capabilities;
 mod earlier_stores;
 mod replaced_candidates;
 mod rosters;

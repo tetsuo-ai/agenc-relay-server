@@ -914,6 +914,9 @@ fn restore_directory(
     for (digest, root) in newest {
         pend_newest_root(state, digest, root);
     }
+    // A capability head restores against the roster it names, which may be
+    // an earlier retained roster (`restore_capability_row`).
+    super::roster_snapshots::rebuild(state);
     for (key, row) in &later {
         match row {
             DirectoryRow::Capability { .. } => {
@@ -931,7 +934,6 @@ fn restore_directory(
     for (digest, entry) in entries {
         state.directory.restore_account(digest, entry);
     }
-    super::roster_snapshots::rebuild(state);
 }
 
 /// A root newer than the root of the account's current roster awaits its
@@ -1041,6 +1043,15 @@ fn restore_roster_row(
     Some(())
 }
 
+/// Restores a device's capability head against the roster it names, which
+/// is the account's current roster or, when the account renewed it under
+/// the same root since the head was published, an earlier roster the store
+/// retains (companion 8.5 and 14): the head keeps its generation and
+/// identifier whether or not it names the current roster. Live publication
+/// holds a head only for a device the current roster keeps active, under
+/// the current root, so a head of another device or an earlier root
+/// restores nothing, as does one whose named roster or object the store
+/// does not hold.
 fn restore_capability_row(
     state: &mut CompanionState,
     entries: &mut BTreeMap<[u8; 32], AccountEntry>,
@@ -1057,10 +1068,7 @@ fn restore_capability_row(
         return None;
     };
     let (digest, device_id) = DirectoryRow::parse_capability_key(key).ok()?;
-    let roster = state
-        .principals
-        .get(&digest)
-        .map(|(_, roster)| roster.clone())?;
+    let roster = named_roster(state, &digest, &device_id, roster_id)?;
     let capabilities: ArcDeviceCapabilities = decode_object(
         state,
         object_id,
@@ -1082,6 +1090,32 @@ fn restore_capability_row(
     );
     state.capabilities.insert((digest, device_id), verified);
     Some(())
+}
+
+/// The roster a capability head of `device_id` names, re-verified under the
+/// account's current root: the current roster itself, or an earlier roster
+/// of that root the store retains. The device must be active in the
+/// current roster.
+fn named_roster(
+    state: &CompanionState,
+    digest: &[u8; 32],
+    device_id: &[u8; 16],
+    roster_id: &[u8; 32],
+) -> Option<VerifiedRoster> {
+    let (root, current) = state.principals.get(digest)?;
+    current.device(device_id)?;
+    if current.roster_id == *roster_id {
+        return Some(current.clone());
+    }
+    let object_id = state.roster_snapshots.get(roster_id)?;
+    let roster: ArcDeviceRoster = decode_object(
+        state,
+        object_id,
+        ArcWireObjectKind::DeviceRoster,
+        MAX_ROSTER_OBJECT,
+    )?;
+    let named = restore_roster(root, &roster).ok()?;
+    (named.roster_id == *roster_id).then_some(named)
 }
 
 fn restore_lock_row(

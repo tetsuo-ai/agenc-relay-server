@@ -23,7 +23,11 @@
 //! statements each restored route holds and keeps every roster whose stored
 //! account records that route row as a holder. An account's roster row owns
 //! only its current roster, so a replaced roster that no live conversation
-//! names retires when the account replaces it. Each object's
+//! names retires when the account replaces it, unless a device's capability
+//! row still holds it: that row holds the roster its head names, against
+//! which a restart re-verifies the head (companion 8.5 and 14), until a
+//! later head names another roster or the row is deleted, and startup
+//! derives the holding from each restored head. Each object's
 //! `owner/v1/` row persists what the rows cannot say: the retention class the
 //! owners imply, the trusted time of acceptance, and the trusted time the last
 //! owner retired. The per-conversation and global disk quotas are charged from
@@ -741,6 +745,7 @@ fn derive(
         }
     }
     dated |= hold_named_rosters(state, network_id, writes, &sizes, &mut touched, now)?;
+    dated |= hold_capability_rosters(state, writes, &sizes, &mut touched, now)?;
     // An object put without any owner is accounted as already retired.
     for id in sizes.staged.keys() {
         if !touched.contains_key(id) && state.owners.account(id).is_none() {
@@ -803,6 +808,65 @@ fn hold_named_rosters(
         dated |= held.is_some();
     }
     Ok(dated)
+}
+
+/// Makes each capability row `writes` stores a holder of the resident
+/// roster its device's head names, not charged to any conversation: a
+/// restart re-verifies the head against that roster (companion 8.5 and
+/// 14). The row holds the roster only while its head names it, so a
+/// rewrite naming the next roster releases the earlier one, as the row's
+/// deletion does. A roster that already lists `MAX_RECORD_REFERENCES`
+/// owners is retained by them and takes no further holder, so naming it
+/// refuses no publication. Returns whether a holder was added, which needs
+/// a trusted time.
+fn hold_capability_rosters(
+    state: &CompanionState,
+    writes: &[Write],
+    sizes: &Sizes<'_>,
+    touched: &mut BTreeMap<[u8; 32], Account>,
+    now: u64,
+) -> Result<bool, Code> {
+    let mut dated = false;
+    for (holder, roster) in capability_holders_in(state, writes)? {
+        let current = touched
+            .get(&roster)
+            .or_else(|| state.owners.account(&roster));
+        if current.is_some_and(|account| account.owners.len() >= MAX_RECORD_REFERENCES) {
+            continue;
+        }
+        let held = account_of(sizes, touched, roster, now)?.map(|account| {
+            account.retention = stronger(account.retention, RetentionClass::SecurityProof);
+            account.retired_at = None;
+            account.owners.insert(holder, None).is_none()
+        });
+        dated |= held.unwrap_or(false);
+    }
+    Ok(dated)
+}
+
+/// The capability rows `writes` stores, each with the resident roster its
+/// head names.
+fn capability_holders_in(
+    state: &CompanionState,
+    writes: &[Write],
+) -> Result<Vec<(OwnerKey, [u8; 32])>, Code> {
+    let mut holders = Vec::new();
+    for write in writes {
+        let Some((TableId::E2eeState, key, encoded)) = write.encoded_record() else {
+            continue;
+        };
+        let value = PersistentRecordValue::decode(TableId::E2eeState, encoded).map_err(invalid)?;
+        if value.record_kind() != DIRECTORY_ROW_KIND {
+            continue;
+        }
+        if let DirectoryRow::Capability { roster_id, .. } =
+            DirectoryRow::decode(value.body()).map_err(invalid)?
+        {
+            let roster = super::roster_holds::named(state, &roster_id);
+            holders.extend(roster.map(|roster| (key.as_bytes().to_vec(), roster)));
+        }
+    }
+    Ok(holders)
 }
 
 /// Charges every touched conversation and the global ceiling before the batch
@@ -1020,6 +1084,9 @@ impl Rebuild {
         for (roster, recorded) in self.recorded_route_holders(state) {
             rosters.entry(roster).or_default().extend(recorded);
         }
+        for (roster, holder) in restored_capability_holders(state) {
+            rosters.entry(roster).or_default().insert(holder, None);
+        }
         for (object, owner, conversation) in packages {
             let entry = self
                 .derived
@@ -1081,6 +1148,24 @@ impl Rebuild {
         }
         held
     }
+}
+
+/// The resident roster each restored capability head names, with that
+/// head's capability row, which holds it (`hold_capability_rosters`).
+fn restored_capability_holders(state: &CompanionState) -> Vec<([u8; 32], OwnerKey)> {
+    state
+        .capabilities
+        .keys()
+        .filter_map(|(digest, device)| {
+            let head = state
+                .directory
+                .account(digest)
+                .and_then(|entry| entry.capabilities.get(device));
+            let roster = head.and_then(|head| super::roster_holds::named(state, &head.roster_id));
+            let holder = DirectoryRow::capability_key(digest, device).ok();
+            roster.zip(holder.map(|key| key.as_bytes().to_vec()))
+        })
+        .collect()
 }
 
 type StoredAccount = (ObjectOwnerRow, BTreeSet<OwnerKey>);

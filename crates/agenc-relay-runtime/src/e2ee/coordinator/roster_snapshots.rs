@@ -4,13 +4,15 @@
 //! credential was authorized under, and that roster stops being the
 //! account's current one at the first rotation. A replaced roster stays
 //! resident while a live conversation's statement names it, held by that
-//! conversation's route row until the row's deletion (`roster_holds`);
-//! object expiry collects one that no route row holds. The snapshot a
-//! statement names is resolved from the resident roster objects and
-//! re-verified under the account's re-verified root chain, and a roster that
-//! is not resident resolves to nothing. Those are the roots and roster
-//! objects startup reconstruction consumes, so live admission and a reload
-//! decide alike.
+//! conversation's route row until the row's deletion (`roster_holds`), and
+//! while a device's capability head names it, held by that device's
+//! capability row until a later head names another roster or the row is
+//! deleted (`owners`); object expiry collects one that neither kind of row
+//! holds. The snapshot a statement names is resolved from the resident
+//! roster objects and re-verified under the account's re-verified root
+//! chain, and a roster that is not resident resolves to nothing. Those are
+//! the roots and roster objects startup reconstruction consumes, so live
+//! admission and a reload decide alike.
 //! Whether the device is still roster-active now is the caller's separate
 //! check: a named snapshot proves who held the key, never who holds it now.
 

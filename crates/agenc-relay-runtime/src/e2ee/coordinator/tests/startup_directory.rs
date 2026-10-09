@@ -3,7 +3,8 @@
 #![forbid(unsafe_code)]
 
 use super::super::tests::support::{
-    NETWORK, Principal, capabilities, key, principal, root, root_fingerprint, roster_id,
+    DeviceSpec, NETWORK, Principal, capabilities, certificate, key, principal, root,
+    root_fingerprint, roster, roster_id,
 };
 use super::*;
 use agenc_relay_e2ee::ids::account_id_digest;
@@ -41,7 +42,12 @@ struct Fixture {
 }
 
 fn fixture() -> TestResult<Fixture> {
-    let principal = principal(40, &ACCOUNT, &[DEVICE])?;
+    fixture_with(&[DEVICE])
+}
+
+/// The fixture of an account whose roster keeps `devices` active.
+fn fixture_with(devices: &[u8]) -> TestResult<Fixture> {
+    let principal = principal(40, &ACCOUNT, devices)?;
     let mut state = CompanionState::default();
     let root_object = retain(&mut state, ArcWireObjectKind::RootIdentity, &principal.root)?;
     let roster_object = retain(
@@ -61,7 +67,7 @@ fn fixture() -> TestResult<Fixture> {
         roster_id: roster_id(&principal.roster)?,
         root_fingerprint: fingerprint,
         object_id: roster_object,
-        active_devices: vec![[DEVICE; 16]],
+        active_devices: devices.iter().map(|seed| [*seed; 16]).collect(),
     };
     Ok(Fixture {
         state,
@@ -355,9 +361,140 @@ fn capability_row_restores_the_device_capability_head() -> TestResult {
     Ok(())
 }
 
+/// Replaces the fixture's roster row with the account's next roster under
+/// `root` (the fixture's root, or a continued one signed by `secret`),
+/// keeping `devices` active, and returns that roster's identifier. The
+/// earlier roster's object stays retained when `retain_earlier` holds.
+fn renew(
+    fixture: &mut Fixture,
+    next_root: Option<&agenc_relay_e2ee::objects::identity::ArcRootIdentity>,
+    devices: &[u8],
+    retain_earlier: bool,
+) -> TestResult<[u8; 32]> {
+    let earlier = roster_id(&fixture.principal.roster)?;
+    let (secret, signing, generation, previous) = match next_root {
+        Some(next) => (key(41), next.clone(), 0, [0; 32]),
+        None => (key(40), fixture.principal.root.clone(), 1, earlier),
+    };
+    let certificates = devices
+        .iter()
+        .map(|seed| certificate(&secret, &signing, &DeviceSpec::new(*seed)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = roster(
+        &secret,
+        &signing,
+        generation,
+        previous,
+        (100, 100 + 6 * 24 * 3600),
+        certificates,
+        Vec::new(),
+    )?;
+    let next_object = retain(&mut fixture.state, ArcWireObjectKind::DeviceRoster, &next)?;
+    if !retain_earlier {
+        let DirectoryRow::Roster { object_id, .. } = fixture.roster.clone() else {
+            return Err("roster row".into());
+        };
+        fixture.state.objects.remove(&object_id);
+    }
+    fixture.roster = DirectoryRow::Roster {
+        roster_generation: generation,
+        roster_id: roster_id(&next)?,
+        root_fingerprint: root_fingerprint(&signing)?,
+        object_id: next_object,
+        active_devices: devices.iter().map(|seed| [*seed; 16]).collect(),
+    };
+    Ok(roster_id(&next)?)
+}
+
+/// Restores the fixture's rows with `row` as device 7's capability row and
+/// returns the restored capability head, if any.
+fn restored_head(fixture: &mut Fixture, row: DirectoryRow) -> TestResult<Option<CapabilityHead>> {
+    let mut rows = fixture.rows()?;
+    rows.push((
+        DirectoryRow::capability_key(&fixture.digest, &[DEVICE; 16])?,
+        row,
+    ));
+    fixture.restore(rows);
+    let head = fixture
+        .state
+        .directory
+        .account(&fixture.digest)
+        .and_then(|entry| entry.capabilities.get(&[DEVICE; 16]).copied());
+    assert_eq!(
+        head.is_some(),
+        fixture
+            .state
+            .capabilities
+            .contains_key(&(fixture.digest, [DEVICE; 16]))
+    );
+    Ok(head)
+}
+
+#[test]
+fn a_capability_head_restores_against_the_earlier_roster_it_names() -> TestResult {
+    let mut fixture = fixture()?;
+    let (row, capability_id) = capability_row(&mut fixture)?;
+    let earlier = roster_id(&fixture.principal.roster)?;
+    renew(&mut fixture, None, &[DEVICE], true)?;
+    let head = restored_head(&mut fixture, row)?.ok_or("restored head")?;
+    // The head keeps its generation and identifier and names the earlier
+    // roster; it is not a current statement.
+    assert_eq!(
+        (head.generation, head.capability_id, head.roster_id),
+        (0, capability_id, earlier)
+    );
+    assert!(
+        fixture
+            .state
+            .directory
+            .capability_page(&fixture.digest)
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_capability_head_restores_nothing_without_its_named_roster_root_or_device() -> TestResult {
+    // The earlier roster the head names is no longer retained.
+    let mut collected = fixture()?;
+    let (row, _) = capability_row(&mut collected)?;
+    renew(&mut collected, None, &[DEVICE], false)?;
+    assert_eq!(restored_head(&mut collected, row)?, None);
+    // The current roster no longer keeps the device.
+    let mut revoked = fixture()?;
+    let (row, _) = capability_row(&mut revoked)?;
+    renew(&mut revoked, None, &[], true)?;
+    assert_eq!(restored_head(&mut revoked, row)?, None);
+    // The head belongs to an earlier root's lineage.
+    let mut rotated = fixture()?;
+    let (row, _) = capability_row(&mut rotated)?;
+    let next = root(
+        &key(41),
+        &ACCOUNT,
+        1,
+        (0, 2_000_000),
+        Some((&rotated.principal.root_secret, &rotated.principal.root)),
+    )?;
+    let next_object = retain(&mut rotated.state, ArcWireObjectKind::RootIdentity, &next)?;
+    let DirectoryRow::Identity { object_id, .. } = rotated.identity.clone() else {
+        return Err("identity row".into());
+    };
+    rotated.identity = DirectoryRow::Identity {
+        root_generation: 1,
+        root_fingerprint: root_fingerprint(&next)?,
+        object_id: next_object,
+        chain_object_ids: vec![object_id, next_object],
+    };
+    renew(&mut rotated, Some(&next), &[DEVICE], true)?;
+    assert_eq!(restored_head(&mut rotated, row)?, None);
+    Ok(())
+}
+
 #[test]
 fn capability_row_naming_another_capability_or_device_is_refused() -> TestResult {
-    let mut fixture = fixture()?;
+    // Both devices are active, so the row filed under device 8 reaches the
+    // comparison with the statement it holds, device 7's.
+    let mut fixture = fixture_with(&[DEVICE, DEVICE + 1])?;
     let (row, _) = capability_row(&mut fixture)?;
     let DirectoryRow::Capability {
         generation,
@@ -448,6 +585,20 @@ fn binding_lock_rows_restore_the_chain_and_the_next_sequence() -> TestResult {
     assert_eq!(chain.keys().copied().collect::<Vec<_>>(), vec![1, 4]);
     let entry = state.directory.account(&[1; 32]).ok_or("entry")?;
     assert_eq!(entry.lock_sequences.get(&[2; 32]), Some(&5));
+    Ok(())
+}
+
+#[test]
+fn restore_capability_row_refuses_a_row_of_another_directory_kind() -> TestResult {
+    let mut fixture = fixture()?;
+    let rows = fixture.rows()?;
+    fixture.restore(rows);
+    let mut entries = BTreeMap::new();
+    let key = DirectoryRow::capability_key(&fixture.digest, &[DEVICE; 16])?;
+    let roster = fixture.roster.clone();
+    assert!(restore_capability_row(&mut fixture.state, &mut entries, &key, &roster).is_none());
+    assert!(entries.is_empty());
+    assert!(fixture.state.capabilities.is_empty());
     Ok(())
 }
 

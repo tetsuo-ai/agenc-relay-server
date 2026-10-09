@@ -444,6 +444,87 @@ fn a_device_leaving_the_roster_leaves_no_capability_head() -> TestResult {
         .map(|(device, _, _)| *device)
         .collect();
     assert_eq!(heads, vec![DEVICE_ID]);
+    restarted_alike(&mut harness)?;
+    Ok(())
+}
+
+#[test]
+fn a_restart_keeps_a_head_that_names_a_superseded_roster() -> TestResult {
+    let (mut harness, first) = provisioned(&[DEVICE])?;
+    let roster = harness.principal.roster.clone();
+    let renewed =
+        AccountRoot::first(&harness).roster(1, support::roster_id(&roster)?, &[(DEVICE, 0)])?;
+    Publication::Roster(&renewed).stored(&mut harness)?;
+    // The head names the replaced roster: no current statement, yet the
+    // head the device's next statement continues (companion 8.5 and 14).
+    let page = [account_param(&harness.account), vec![0]].concat();
+    assert!(fetched(&mut harness, Op::FetchCapabilities, &page)?.is_empty());
+    let restarted = restarted_alike(&mut harness)?;
+    let next = statement(DEVICE, &renewed, 1, capability_id(&first)?)?;
+    let reset = statement(DEVICE, &renewed, 0, [0; 32])?;
+    let gap = statement(DEVICE, &renewed, 2, capability_id(&first)?)?;
+    let fork = capabilities(
+        DEVICE,
+        &renewed,
+        1,
+        capability_id(&first)?,
+        (120, 220),
+        vec![1],
+    )?;
+    let listed = wire(ArcWireObjectKind::DeviceCapabilities, &next)?;
+    for mut coordinator in [harness, restarted] {
+        for refused in [&reset, &gap] {
+            assert!(
+                Publication::Capabilities(DEVICE, refused)
+                    .run(&mut coordinator)?
+                    .is_some()
+            );
+        }
+        Publication::Capabilities(DEVICE, &next).stored(&mut coordinator)?;
+        assert!(
+            Publication::Capabilities(DEVICE, &fork)
+                .run(&mut coordinator)?
+                .is_some()
+        );
+        assert_eq!(
+            fetched(&mut coordinator, Op::FetchCapabilities, &page)?,
+            vec![listed.clone()]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_capability_page_lists_only_statements_naming_the_current_roster() -> TestResult {
+    let (mut harness, first) = provisioned(&[DEVICE, SECOND_DEVICE])?;
+    harness.attach_as(SECOND_DEVICE)?;
+    let roster = harness.principal.roster.clone();
+    let second = statement(SECOND_DEVICE, &roster, 0, [0; 32])?;
+    Publication::Capabilities(SECOND_DEVICE, &second).stored(&mut harness)?;
+    let renewed = AccountRoot::first(&harness).roster(
+        1,
+        support::roster_id(&roster)?,
+        &[(DEVICE, 0), (SECOND_DEVICE, 0)],
+    )?;
+    Publication::Roster(&renewed).stored(&mut harness)?;
+    harness.attach_as(DEVICE)?;
+    let next = statement(DEVICE, &renewed, 1, capability_id(&first)?)?;
+    Publication::Capabilities(DEVICE, &next).stored(&mut harness)?;
+    let page = [account_param(&harness.account), vec![0]].concat();
+    let mut restarted = restarted_alike(&mut harness)?;
+    let following = statement(SECOND_DEVICE, &renewed, 1, capability_id(&second)?)?;
+    for coordinator in [&mut harness, &mut restarted] {
+        // Only device 7's statement names the current roster; device 8's
+        // head, which names the replaced one, is left out of the page and
+        // continued by its next statement.
+        assert_eq!(
+            fetched(coordinator, Op::FetchCapabilities, &page)?,
+            vec![wire(ArcWireObjectKind::DeviceCapabilities, &next)?]
+        );
+        coordinator.attach_as(SECOND_DEVICE)?;
+        Publication::Capabilities(SECOND_DEVICE, &following).stored(coordinator)?;
+        assert_eq!(fetched(coordinator, Op::FetchCapabilities, &page)?.len(), 2);
+    }
     Ok(())
 }
 

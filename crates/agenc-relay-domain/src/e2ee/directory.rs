@@ -380,17 +380,24 @@ impl Directory {
         Ok(())
     }
 
-    /// The capability page of one account: every active device exactly
-    /// once in Device ID order, with its highest object.
+    /// The capability page of one account: every active device whose
+    /// highest statement names the current roster, exactly once in Device ID
+    /// order, with that statement's object. A statement is valid only for
+    /// the highest roster in which its device is active (companion 8.5 and
+    /// 11.6), so a device whose head names an earlier roster is left out
+    /// until it publishes for the current one; the head itself is kept.
     #[must_use]
     pub fn capability_page(&self, account_digest: &Id) -> Vec<(Id16, Id)> {
         self.accounts
             .get(account_digest)
             .map(|entry| {
+                let current = entry.roster.as_ref().map(|roster| roster.roster_id);
                 entry
                     .capabilities
                     .iter()
-                    .filter(|(device, _)| entry.device_active(device))
+                    .filter(|(device, head)| {
+                        entry.device_active(device) && current == Some(head.roster_id)
+                    })
                     .map(|(device, head)| (*device, head.object_id))
                     .collect()
             })
