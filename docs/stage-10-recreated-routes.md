@@ -10,9 +10,11 @@ semantic lock and a semantic route's lineage by the lock of its incarnation
 zero, admits the next incarnation after an authorized close, reserves a
 closed direct pair again, and restores every route's incarnation from its
 retained binding, live and after a restart alike. The third restores route
-stores written before these rules (G-08). No specification, profile hash,
-registry entry, named limit, reply code, wire object, table, key, row kind,
-field or storage generation changed.
+stores written before these rules (G-08). The fourth drives a recreated
+direct conversation through the production daemons, across a coordinator
+restart and an edge restart. No specification, profile hash, registry
+entry, named limit, reply code, wire object, table, key, row kind, field or
+storage generation changed.
 
 ## A recreated route's genesis follows the close before it (first commit)
 
@@ -384,3 +386,41 @@ database this topic's coordinator has run on is therefore unsafe; the
 operator guide already says not to start release candidate 3 on a database
 this release has run on, and going back means restoring a backup taken
 before the upgrade.
+
+## Through the production daemons (fourth commit)
+
+`crates/agenc-relay-server/tests/stage_eight_e2ee/recreated_routes.rs`
+drives the Stage 08 network of production daemons, a coordinator and two
+edges, through the client surface:
+
+| Test | What it pins |
+| --- | --- |
+| `a_closed_direct_conversation_is_recreated_across_coordinator_and_edge_restarts` | Two accounts bind a direct conversation at incarnation zero, activate its bootstrap and exchange application objects both ways; while it is live, plaintext between them is `E2EE_REQUIRED` and another reservation of the pair is `E2EE_GROUP_CONFLICT`. Its closing Commit is finalized and `EGROUP CLOSE` carries both controller roots' approvals, as the fixed direct policy requires; its application objects are then `E2EE_ROUTE_INVALID`. The pair is reserved again, and incarnation one, naming the close and continuing both roots' binding locks, binds, bootstraps and carries traffic both ways, with plaintext and another reservation refused again. After a coordinator restart incarnation one carries traffic both ways, plaintext and another reservation are still refused and incarnation zero still takes no traffic. After the edge restarts and both accounts log in again, plaintext is still refused and incarnation one carries traffic. Incarnation one then closes, and incarnation two, naming that close, binds, bootstraps and carries traffic, with plaintext and another reservation refused. |
+
+Both accounts use one edge; the other stays linked. Incarnation one's
+conversation identifier sorts before incarnation zero's, so a restore in
+identifier order, the coordinator's or the edge's from its rows, meets the
+live incarnation first.
+
+The test passes in 5 of 5 runs and in 3 of 3 confined to two processors.
+Revert proofs, each applied to this commit's tree and run on this test:
+with the topic's production files set back to the start commit, or with
+the start commit's rules restored, the pair's reservation after the close
+is `E2EE_GROUP_CONFLICT` ("a binding already exists"), as before this
+topic. Single edits that fail it: the pair kept by its closed route (the
+same refusal); the lineage looked up by the binding's own lock (incarnation
+one's `EGROUP BIND` is `E2EE_BINDING_AUTH_INVALID`); the restore keeping
+the last entry it reads (after the coordinator restart the pair is reserved
+while incarnation one is live); the restore ranking without liveness (after
+the edge restart plaintext between the accounts is no longer refused); and
+startup restoring every route at incarnation zero, or taking the row's lock
+as the lineage (incarnation two's `EGROUP BIND` is
+`E2EE_BINDING_AUTH_INVALID`). With the first commit's context rule set
+back the test passes: the daemons do not run that check, which only the
+shared crate's genesis authentication (`initial_authority`) uses and its
+own tests pin.
+
+This commit changes no production source. Its Stage 08 evidence (G-07) is
+this daemon test, new evidence for S08-004 and S08-037 with no transcript
+row; no model action or count, transcript row or pinned test changed, and
+no box changes.

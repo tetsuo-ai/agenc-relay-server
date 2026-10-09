@@ -416,10 +416,11 @@ later semantic incarnation, anchored at the verified close of the incarnation
 before it, and the coordinator's route table keying each incarnation by its
 own lock and each semantic route's lineage by the lock of its incarnation
 zero, so that a closed route binds its next incarnation and a closed direct
-pair is reserved again, live and after a restart alike, and the restore of
-route stores written before these rules (B-14 with G-08, SDK program,
-outside master #35), are recorded in [the recreated routes
-record](stage-10-recreated-routes.md).
+pair is reserved again, live and after a restart alike, the restore of
+route stores written before these rules and a daemon test of a direct
+conversation recreated across coordinator and edge restarts (B-14 with
+G-08, SDK program, outside master #35), are recorded in [the recreated
+routes record](stage-10-recreated-routes.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
