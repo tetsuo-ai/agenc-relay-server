@@ -302,6 +302,60 @@ fn the_context_core_seals_the_binding() -> TestResult {
     Ok(())
 }
 
+/// An ordinary new group bootstraps at every semantic incarnation, a route
+/// recreated after a close included, and a binding of a later generation, a
+/// ReInit successor, never does (companion 9.4 and 9.5).
+#[test]
+fn an_ordinary_group_bootstraps_at_every_incarnation_and_a_successor_does_not() -> TestResult {
+    let principals = channel_principals()?;
+    let rosters = principal_rosters(&principals)?;
+    let core_of = |binding: &crate::route::VerifiedBinding, pending: u8| {
+        Ok::<_, E2eeError>(ArcContextCoreTbs {
+            profile_version: 1,
+            mls_version: 1,
+            cipher_suite: 1,
+            group_id: Opaque::from_slice(&binding.group_id)?,
+            network_id: NETWORK,
+            conversation_id: binding.conversation_id,
+            kind: ArcConversationKind::Channel,
+            semantic_route_lock_id: binding.route.lock_id,
+            route_binding: binding.route_binding,
+            initial_validation_time: 100,
+            initial_policy_id: [27; 32],
+            required_operational_policy_id: [28; 32],
+            initial_bootstrap_pending: pending,
+            initial_member_plan_id: binding.initial_member_plan_id,
+            sequencer_credential_id: binding.sequencer_credential_id,
+            encoded_required_capabilities: Opaque::from_slice(&[0, 1])?,
+        })
+    };
+    let mut spec = channel_spec(&principals)?;
+    spec.route.semantic_incarnation = 1;
+    spec.route.predecessor_close_id = [9; 32];
+    for (generation, previous) in [(0, [0; 32]), (1, [5; 32])] {
+        spec.generation = generation;
+        spec.previous_binding_id = previous;
+        let mut binding = verify_binding_package(&NETWORK, &binding_package(&spec)?, &rosters)?;
+        assert_eq!(binding.route.incarnation, 1);
+        let pending = u8::from(generation == 0);
+        let core = core_of(&binding, pending)?;
+        binding.context_core_id = context_core_id(&core)?;
+        assert_eq!(
+            verify_context_core(&NETWORK, &core, &binding),
+            Ok(binding.context_core_id),
+            "generation {generation} at incarnation 1"
+        );
+        let flipped = core_of(&binding, 1 - pending)?;
+        binding.context_core_id = context_core_id(&flipped)?;
+        assert_eq!(
+            verify_context_core(&NETWORK, &flipped, &binding),
+            Err(E2eeError::InvalidValue),
+            "generation {generation} at incarnation 1 with the bootstrap flag flipped"
+        );
+    }
+    Ok(())
+}
+
 /// The context's sequencer continues `previous_sequencer` through the shared
 /// credential chain, so a successor that reuses its predecessor's public key
 /// is refused here too (companion 9.2.1), while one with a fresh key

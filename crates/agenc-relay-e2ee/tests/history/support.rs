@@ -12,7 +12,7 @@ use agenc_relay_e2ee::history::{ChainLimits, HistoricalChain, RecordReferences};
 use agenc_relay_e2ee::ids::{conversation_id, proof_set_digest, semantic_id_of};
 use agenc_relay_e2ee::initial_authority::{
     ExpectedInitialAuthority, InitialAuthority, InitialAuthorityEvidence, InitialPrincipalEvidence,
-    authenticate_initial_authority,
+    PriorTerminal, authenticate_initial_authority, authenticate_recreated_authority,
 };
 use agenc_relay_e2ee::objects::conversation::*;
 use agenc_relay_e2ee::objects::reinit::*;
@@ -60,6 +60,18 @@ pub(super) struct Genesis {
     pub(super) credential: ArcSequencerCredential,
     pub(super) expected: ExpectedInitialAuthority,
     pub(super) conversation: [u8; 32],
+    /// The close of the incarnation this genesis recreates the route of,
+    /// at semantic incarnation one or later.
+    pub(super) prior: Option<PriorTerminal>,
+}
+
+/// The semantic incarnation a genesis opens and the binding locks its
+/// roots continue.
+struct Recreation {
+    incarnation: u64,
+    close_id: [u8; 32],
+    lock_sequence: u64,
+    previous_lock_ids: LockIds,
 }
 
 impl Genesis {
@@ -81,6 +93,63 @@ impl Genesis {
     }
 
     fn with_principals_in(group: [u8; 32], principals: Vec<Principal>) -> Result<Self, E2eeError> {
+        Self::opening(group, principals, None, None)
+    }
+
+    /// The genesis of `previous`'s route at its next semantic incarnation,
+    /// after `prior` closed it (companion 9.4): the same principals and
+    /// route key at the incarnation after `prior`'s, naming its close, in
+    /// `group`, under the roots' next binding locks.
+    pub(super) fn recreated(
+        group: [u8; 32],
+        previous: &Genesis,
+        prior: &PriorTerminal,
+    ) -> Result<Self, E2eeError> {
+        let incarnation = prior
+            .route()
+            .incarnation
+            .checked_add(1)
+            .ok_or(E2eeError::Overflow)?;
+        Self::recreated_at(group, previous, prior, incarnation)
+    }
+
+    /// [`Self::recreated`] at semantic incarnation `incarnation`, which a
+    /// conforming route sets to the one after `prior`'s.
+    pub(super) fn recreated_at(
+        group: [u8; 32],
+        previous: &Genesis,
+        prior: &PriorTerminal,
+        incarnation: u64,
+    ) -> Result<Self, E2eeError> {
+        let principals = vec![
+            principal(40, &ACCOUNT, &[7, 8])?,
+            principal(41, &OTHER, &[9])?,
+        ];
+        let lock_sequence = previous
+            .package
+            .root_binding_locks
+            .as_slice()
+            .first()
+            .ok_or(E2eeError::InvalidValue)?
+            .tbs
+            .root_binding_sequence
+            .checked_add(1)
+            .ok_or(E2eeError::Overflow)?;
+        let recreation = Recreation {
+            incarnation,
+            close_id: *prior.close_id(),
+            lock_sequence,
+            previous_lock_ids: lock_ids(&previous.package)?,
+        };
+        Self::opening(group, principals, Some(recreation), Some(prior.clone()))
+    }
+
+    fn opening(
+        group: [u8; 32],
+        principals: Vec<Principal>,
+        recreation: Option<Recreation>,
+        prior: Option<PriorTerminal>,
+    ) -> Result<Self, E2eeError> {
         let refs = principals.iter().collect::<Vec<_>>();
         let conversation = conversation_id(&NETWORK, &group)?;
         let kind = ArcConversationKind::Channel;
@@ -93,16 +162,35 @@ impl Genesis {
         )?)?;
         let authority = root_fingerprint(&principals.first().ok_or(E2eeError::InvalidValue)?.root)?;
         let credential = sequencer_credential(&key(SEQUENCER_SEED), 0, (0, 1_000_000), None)?;
+        let mut route = channel_route(b"#room", authority)?;
+        // A recreated channel route binds a fresh channel instance (companion
+        // 11.3: the closed one stays a tombstone until it is destroyed).
+        let (instance, lock_sequence, previous_lock_ids) = match recreation {
+            Some(recreation) => {
+                route.semantic_incarnation = recreation.incarnation;
+                route.predecessor_close_id = recreation.close_id;
+                let mut instance = [1; 16];
+                instance[15] = u8::try_from(recreation.incarnation % 200)
+                    .map_err(|_| E2eeError::InvalidValue)?
+                    .saturating_add(1);
+                (
+                    instance,
+                    recreation.lock_sequence,
+                    recreation.previous_lock_ids,
+                )
+            }
+            None => ([1; 16], 0, Vec::new()),
+        };
         let package = binding_package(&BindingSpec {
             principals: &refs,
-            route: channel_route(b"#room", authority)?,
-            channel_instance_id: Some([1; 16]),
+            route,
+            channel_instance_id: Some(instance),
             conversation_nonce: None,
             group_id: group,
             generation: 0,
             previous_binding_id: [0; 32],
-            lock_sequence: 0,
-            previous_lock_ids: Vec::new(),
+            lock_sequence,
+            previous_lock_ids,
             plan_devices: vec![(&ACCOUNT, authority, 7)],
             initial_policy_id: policy_id_of(&bootstrap_policy)?,
             required_operational_policy_id: policy_id_of(&operational_policy)?,
@@ -145,6 +233,7 @@ impl Genesis {
                 binding_id: [0; 32],
             },
             conversation,
+            prior,
         };
         genesis.seal()?;
         Ok(genesis)
@@ -208,17 +297,19 @@ impl Genesis {
                 roster_object: roster,
             })
             .collect::<Vec<_>>();
-        authenticate_initial_authority(
-            &self.expected,
-            &InitialAuthorityEvidence {
-                binding_object: &binding,
-                context_core: &core,
-                initial_policy_object: &policy,
-                sequencer_credential: &credential,
-                principals: &principals,
-            },
-            &mut budget(),
-        )
+        let evidence = InitialAuthorityEvidence {
+            binding_object: &binding,
+            context_core: &core,
+            initial_policy_object: &policy,
+            sequencer_credential: &credential,
+            principals: &principals,
+        };
+        match &self.prior {
+            None => authenticate_initial_authority(&self.expected, &evidence, &mut budget()),
+            Some(prior) => {
+                authenticate_recreated_authority(&self.expected, prior, &evidence, &mut budget())
+            }
+        }
     }
 
     pub(super) fn chain(&self) -> Result<HistoricalChain, E2eeError> {

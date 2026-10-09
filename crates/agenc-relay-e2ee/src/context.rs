@@ -197,8 +197,11 @@ pub fn verify_context_core(
     if !agrees {
         return Err(E2eeError::InvalidValue);
     }
+    // An ordinary new group bootstraps at every semantic incarnation; only a
+    // binding of generation one or later, a ReInit successor, does not
+    // (companion 9.4 and 9.5).
     let pending = boolean(core.initial_bootstrap_pending)?;
-    if pending != (binding.generation == 0 && binding.route.incarnation == 0) {
+    if pending != (binding.generation == 0) {
         return Err(E2eeError::InvalidValue);
     }
     let id = context_core_id(core)?;

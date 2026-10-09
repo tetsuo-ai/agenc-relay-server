@@ -411,6 +411,10 @@ current roster listed as current, the restore of directory stores
 written before these rules and a daemon test of a root rotation across
 coordinator restarts (B-16 with G-08, SDK program, outside master #35),
 are recorded in [the E2EE lineage record](stage-10-e2ee-lineage.md).
+The shared verification of an ordinary group's generation-zero binding at a
+later semantic incarnation, anchored at the verified close of the incarnation
+before it (B-14, SDK program, outside master #35), is recorded in [the
+recreated routes record](stage-10-recreated-routes.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
