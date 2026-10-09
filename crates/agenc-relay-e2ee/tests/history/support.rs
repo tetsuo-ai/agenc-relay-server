@@ -72,6 +72,15 @@ impl Genesis {
             principal(40, &ACCOUNT, &[7, 8])?,
             principal(41, &OTHER, &[9])?,
         ];
+        Self::with_principals_in(group, principals)
+    }
+
+    /// The genesis of `GROUP` bound to `principals`, the first the creator.
+    pub(super) fn with_principals(principals: Vec<Principal>) -> Result<Self, E2eeError> {
+        Self::with_principals_in(GROUP, principals)
+    }
+
+    fn with_principals_in(group: [u8; 32], principals: Vec<Principal>) -> Result<Self, E2eeError> {
         let refs = principals.iter().collect::<Vec<_>>();
         let conversation = conversation_id(&NETWORK, &group)?;
         let kind = ArcConversationKind::Channel;
@@ -237,6 +246,46 @@ impl Genesis {
     pub(super) fn principal(&self, index: usize) -> Result<&Principal, E2eeError> {
         self.principals.get(index).ok_or(E2eeError::InvalidValue)
     }
+}
+
+/// A principal of root `root_seed` at generation zero whose generation-zero
+/// roster spans exactly `roster_interval`, its certificates enrolled for it
+/// as `principal` enrolls them.
+pub(super) fn principal_with_roster(
+    root_seed: u8,
+    account: &[u8; 24],
+    devices: &[u8],
+    roster_interval: (u64, u64),
+) -> Result<Principal, E2eeError> {
+    let root_secret = key(root_seed);
+    let root = root(&root_secret, account, 0, (0, 2_000_000), None)?;
+    let mut certificates = devices
+        .iter()
+        .map(|device| {
+            let spec = DeviceSpec {
+                interval: (0, 2_000_000),
+                enrollment: (roster_interval.0.saturating_sub(10), roster_interval.0),
+                ..DeviceSpec::new(*device)
+            };
+            certificate(&root_secret, &root, &spec)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    certificates.sort_by_key(|certificate| certificate.tbs.device_id);
+    let roster = roster(
+        &root_secret,
+        &root,
+        0,
+        [0; 32],
+        roster_interval,
+        certificates,
+        Vec::new(),
+    )?;
+    Ok(Principal {
+        root_secret,
+        root,
+        roster,
+        devices: devices.to_vec(),
+    })
 }
 
 /// The sequencer's view of the log it signs.

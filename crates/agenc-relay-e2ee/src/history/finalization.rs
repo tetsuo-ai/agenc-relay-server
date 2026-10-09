@@ -3,6 +3,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 use super::{
     ChainStep, HistoricalChain, Lifecycle, OpenCandidate, RecordReferences, ReinitState,
     Transitions,
@@ -10,7 +12,9 @@ use super::{
 use crate::authorization::{CandidateBinding, VerifiedAuthorization, verify_commit_authorization};
 use crate::error::E2eeError;
 use crate::finality::{QuorumLedger, Terminal, VoteSlot, vote_tbs};
-use crate::identity::{ValidationTime, restore_roster, verify_root_identity, verify_roster};
+use crate::identity::{
+    AccountIdBytes, ValidationTime, restore_roster, verify_root_identity, verify_roster,
+};
 use crate::ids::{SemanticId, proof_set_digest, semantic_id_of};
 use crate::object::{ArcWireObject, ArcWireObjectKind};
 use crate::objects::account_id_bytes;
@@ -42,7 +46,7 @@ impl HistoricalChain {
         let core = &proof.core;
         self.check_proof_names_candidate(proof, &open)?;
         check_proof_links(proof)?;
-        super::membership::authenticate_finalization(references, proof)?;
+        let acknowledged = super::membership::authenticate_finalization(references, proof)?;
         if core.old_policy_id != self.policy.policy_id
             || proof.authorization.tbs.old_policy_id != self.policy.policy_id
         {
@@ -71,9 +75,9 @@ impl HistoricalChain {
         }
         let time = ValidationTime(authorization.validation_time);
         // The credential committed for the position also has to cover the
-        // Commit's canonical validation time, and every retained roster
-        // must be live at that time (companion 9.2 and 9.3).
-        if !self.sequencer.covers(time) || !self.rosters_cover(time) {
+        // Commit's canonical validation time (companion 9.2); the roots and
+        // rosters the record uses are checked once its successors are known.
+        if !self.sequencer.covers(time) {
             return Err(E2eeError::InvalidValue);
         }
         if self.bootstrap_pending && !Self::bootstrap_permits(authorization.action_bits) {
@@ -88,8 +92,10 @@ impl HistoricalChain {
             references,
             budget,
         )?;
+        let held = self.principals.clone();
         let transitions =
             self.apply_transitions(&authorization, finalization_id, references, budget)?;
+        self.check_liveness(&held, &authorization, request, &acknowledged, &transitions)?;
         self.candidate = None;
         self.next_candidate_sequence = 0;
         self.epoch = core.resulting_epoch;
@@ -147,12 +153,6 @@ impl HistoricalChain {
         } else {
             Err(E2eeError::InvalidValue)
         }
-    }
-
-    fn rosters_cover(&self, time: ValidationTime) -> bool {
-        self.principals
-            .values()
-            .all(|(root, roster)| root.interval.covers(time) && roster.interval.covers(time))
     }
 
     /// Recounts the old-policy quorum from the device signatures; a
@@ -255,8 +255,9 @@ impl HistoricalChain {
     }
 
     /// A roster proposal always carries the complete roster, even a
-    /// reaffirmation of the stored one (companion 9.3); root and roster
-    /// objects without the roster bit are invalid.
+    /// reaffirmation of the stored one, once per account, and a record
+    /// continues an account's root at most once (companion 9.3 and 13.7.2);
+    /// root and roster objects without the roster bit are invalid.
     fn apply_heads(
         &mut self,
         authorization: &VerifiedAuthorization,
@@ -405,10 +406,14 @@ impl HistoricalChain {
         transitions: &mut Transitions,
         budget: &mut DecodeBudget,
     ) -> Result<(), E2eeError> {
-        for bytes in objects {
+        let mut installed = BTreeMap::new();
+        for &bytes in objects {
             let root: ArcRootIdentity =
                 decode_object(bytes, ArcWireObjectKind::RootIdentity, budget)?;
             let account = account_id_bytes(&root.tbs.account_id)?;
+            if repeats_installed(&mut installed, account, bytes)? {
+                continue;
+            }
             let (previous, _) = self
                 .principals
                 .get(&account)
@@ -430,10 +435,14 @@ impl HistoricalChain {
         transitions: &mut Transitions,
         budget: &mut DecodeBudget,
     ) -> Result<(), E2eeError> {
-        for bytes in objects {
+        let mut installed = BTreeMap::new();
+        for &bytes in objects {
             let roster: ArcDeviceRoster =
                 decode_object(bytes, ArcWireObjectKind::DeviceRoster, budget)?;
             let account = account_id_bytes(&roster.tbs.account_id)?;
+            if repeats_installed(&mut installed, account, bytes)? {
+                continue;
+            }
             let (root, previous) = self
                 .principals
                 .get(&account)
@@ -471,6 +480,23 @@ impl HistoricalChain {
             self.principals.values().map(|(_, roster)| roster),
         )?;
         Ok(())
+    }
+}
+
+/// Whether `object` repeats the root or roster this record already installed
+/// for `account`. A record carries at most one root continuation and one
+/// roster per account (companion 9.3 and 13.7.2), so the roster it installs
+/// is exactly the successor its context head names; a second, different
+/// object for the account is invalid, and an exact repeat, as when two
+/// submitters supply the same reference, is installed once.
+fn repeats_installed<'a>(
+    installed: &mut BTreeMap<AccountIdBytes, &'a [u8]>,
+    account: AccountIdBytes,
+    object: &'a [u8],
+) -> Result<bool, E2eeError> {
+    match installed.insert(account, object) {
+        Some(earlier) if earlier != object => Err(E2eeError::InvalidValue),
+        earlier => Ok(earlier.is_some()),
     }
 }
 

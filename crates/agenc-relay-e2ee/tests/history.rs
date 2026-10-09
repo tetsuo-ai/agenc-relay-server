@@ -31,6 +31,9 @@ mod reinit_faults;
 #[path = "history/open_close_faults.rs"]
 mod open_close_faults;
 
+#[path = "history/roster_recovery.rs"]
+mod roster_recovery;
+
 use agenc_relay_crypto::SemanticHashDomain;
 use agenc_relay_e2ee::history::{
     AlternativeRecord, ChainLimits, ChainStep, HistoricalChain, Lifecycle, RecordReferences,

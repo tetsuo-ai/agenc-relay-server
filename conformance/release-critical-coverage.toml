@@ -10,8 +10,8 @@ minimum_overall_branch_percent = 90.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1049
-reviewed_source_sha256 = "12805bc41ed21b2c0fad55bfed2bc5bca9770a2524bbb7bf653884abdf871002"
+reviewed_source_files = 1051
+reviewed_source_sha256 = "606d515d36c66c9defa1e0ecbcfdd733b5d1c164355c6e5600e9edbe6a939eb5"
 deferred = []
 
 [[region]]
@@ -55,9 +55,9 @@ id = "history-chain-record-adoption"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history.rs"
 item = "advance"
-source_sha256 = "3eb4736745671c3f25325420cbbf6e39f244557dd1ba1b493278813f4471c128"
-start_line = 489
-end_line = 563
+source_sha256 = "24de4cbe06eaa8f636dd72e58a0a22a7e4e004ebc738f87924cfe3554159d50e"
+start_line = 492
+end_line = 566
 span_sha256 = "2b180c4cd1da35ddeba5ce12e9c38bbaf9d05720585a8d81827082a2ce77878f"
 metric = "regions"
 reason = "Every historical sequencer record is authenticated at exactly the next position under the credential the validated history committed, its referenced objects are admitted only for the record kind that names them, and the head advances only after the record's own checks succeed."
@@ -67,10 +67,10 @@ id = "history-finalization-transitions"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history/finalization.rs"
 item = "apply_transitions"
-source_sha256 = "94266af9e908f5c8c13a9326c68321c71eb064fc1fd288557c44041a7b869b6e"
+source_sha256 = "75994a57ecd75cd31a4d8693a3f69028a1b17d0351e0594c49f87d3c502adfb4"
 start_line = 236
-end_line = 400
-span_sha256 = "6dc22f03ac6fe4d6a895b162fcca1c45b14bcb9b608c415704c1b863d5c5249e"
+end_line = 401
+span_sha256 = "a8c9ae29548220ef41dc09205c800a81b202d290c4e2274c8e51f807798bf800"
 metric = "regions"
 reason = "A finalization installs only the transitions its certified action bits commit, each proved by the exact policy, roster, root, binding, or sequencer object supplied for it; an object without its bit or a bit without its object is refused."
 
@@ -79,7 +79,7 @@ id = "history-finalization-quorum"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history/finalization.rs"
 item = "finalization_quorum"
-source_sha256 = "94266af9e908f5c8c13a9326c68321c71eb064fc1fd288557c44041a7b869b6e"
+source_sha256 = "75994a57ecd75cd31a4d8693a3f69028a1b17d0351e0594c49f87d3c502adfb4"
 start_line = 161
 end_line = 202
 span_sha256 = "3d41aeae468d5003ea35b56508c0dcaba8ffb02e77eef3d6adb5c19cc04ecfd8"
@@ -13771,12 +13771,72 @@ id = "history-membership-ack-authentication"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history/membership.rs"
 item = "authenticate_finalization"
-source_sha256 = "7efa1923c4bdf96fc5005db32c083e2b504acda3afe32da312c36400dece9a87"
-start_line = 22
-end_line = 87
-span_sha256 = "74456af692f10f5e183bac3874756b56b7a1efae2670ef416e95276d5cea81a4"
+source_sha256 = "184a26fa1b15dd395aff695d23126e14dada0909aa1229af22e6ceed76cc099d"
+start_line = 27
+end_line = 94
+span_sha256 = "8c6178b9d586c6d267b1f7ee36aa94bd2796f3f08d07cd605252be419a8fb00c"
 metric = "branches"
-reason = "Supplied leaf-membership facts authenticate every embedded historical ACK by a distinct continuing leaf, and bind each ReInit ACK to its signer's plan entry."
+reason = "Supplied leaf-membership facts authenticate every embedded historical ACK by a distinct continuing leaf, return a finalization's identified signing devices for the validation-time check, and bind each ReInit ACK to its signer's plan entry."
+
+[[region]]
+id = "history-liveness-check"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history/liveness.rs"
+item = "check_liveness"
+source_sha256 = "be6106ed484acce53dd7ff17f2e839b417c623bc3787d139491ee51569b4d1c3"
+start_line = 108
+end_line = 138
+span_sha256 = "b2501d73f778185a9cb68fec392f12c2eb000e9573175752adfd779451aba19e"
+metric = "branches"
+reason = "A historical finalization requires every root and roster it installs or reaffirms, and the root and roster held before it by every principal it uses, to cover its canonical validation time; a principal whose roster expired is admitted only through the narrow roster-recovery exception."
+
+[[region]]
+id = "history-liveness-uses"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history/liveness.rs"
+item = "uses"
+source_sha256 = "be6106ed484acce53dd7ff17f2e839b417c623bc3787d139491ee51569b4d1c3"
+start_line = 73
+end_line = 100
+span_sha256 = "ba70f69ee8bd126a7cde0a776debfbe9c1e2fd1e592c2622bbfaee8e521b258e"
+metric = "branches"
+reason = "A finalization uses the principals whose devices approve its authorization, vote on it, or sign an ACK the caller's leaf-membership facts identify, and every principal when it changes the policy or the binding; a principal that signs nothing in the record is not used."
+
+[[region]]
+id = "history-liveness-recovery-candidate"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history/liveness.rs"
+item = "recovery_candidate"
+source_sha256 = "be6106ed484acce53dd7ff17f2e839b417c623bc3787d139491ee51569b4d1c3"
+start_line = 144
+end_line = 150
+span_sha256 = "bb18c8894633da36664881cae5c6917d43ce01cac39f68c4397ea2e0b35e285d"
+metric = "branches"
+reason = "Only a record labelled roster_recovery, whose shape check holds it to the roster bit and the Removes its successor requires, and that continues no root can serve the expired-roster exception."
+
+[[region]]
+id = "history-liveness-recovers"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history/liveness.rs"
+item = "recovers"
+source_sha256 = "be6106ed484acce53dd7ff17f2e839b417c623bc3787d139491ee51569b4d1c3"
+start_line = 159
+end_line = 180
+span_sha256 = "4785e10442111e395c10b8e95b7ebd9bdef0aa8d761d9d1ad0adac66acbec481"
+metric = "branches"
+reason = "A principal whose roster expired signs within the recovery exception only when it approves nothing, now holds a roster that covers the time under a root that does, and every device it voted or acknowledged with is unchanged in that roster."
+
+[[region]]
+id = "history-finalization-one-per-account"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history/finalization.rs"
+item = "repeats_installed"
+source_sha256 = "75994a57ecd75cd31a4d8693a3f69028a1b17d0351e0594c49f87d3c502adfb4"
+start_line = 492
+end_line = 501
+span_sha256 = "0d9e03d47004ef46d5b32b562a9b81e78024bc893a0392efb9f468a38eba1671"
+metric = "branches"
+reason = "A finalization installs at most one root continuation and one roster per account, so the roster it installs is the exact successor its context head names: a second, different root or roster object for an account is refused, and an exact repeat of one, as when two submitters supply the same reference, is installed once."
 
 [[region]]
 id = "leaf-membership-proof-verification"
@@ -13903,9 +13963,9 @@ id = "e2ee-history-resume"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/history.rs"
 item = "resume"
-source_sha256 = "3eb4736745671c3f25325420cbbf6e39f244557dd1ba1b493278813f4471c128"
-start_line = 373
-end_line = 409
+source_sha256 = "24de4cbe06eaa8f636dd72e58a0a22a7e4e004ebc738f87924cfe3554159d50e"
+start_line = 376
+end_line = 412
 span_sha256 = "ae9c89293831884437c539c8b24b78f58cdd3f82bbb3623b83c50b7f9ec9f08e"
 metric = "branches"
 reason = "A chain resumed from a restored head keeps exactly the validated binding, principals, policy, credential and head so every later record is verified as a successor of that state."
