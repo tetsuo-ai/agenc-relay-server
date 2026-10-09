@@ -37,7 +37,10 @@ fn rows(name: &str) -> TestResult<Vec<Write>> {
 
 /// The rows of the store `name` of the fixture directory `topic` under
 /// `test-data/stage-ten/`.
-pub(super) fn rows_of(topic: &str, name: &str) -> TestResult<Vec<Write>> {
+pub(in crate::e2ee::coordinator::tests::sequence) fn rows_of(
+    topic: &str,
+    name: &str,
+) -> TestResult<Vec<Write>> {
     let text = std::fs::read_to_string(format!(
         "{}/../../test-data/stage-ten/{topic}/{name}.rows",
         env!("CARGO_MANIFEST_DIR")
@@ -60,7 +63,9 @@ pub(super) fn rows_of(topic: &str, name: &str) -> TestResult<Vec<Write>> {
 }
 
 /// The harness restarted from `rows`.
-pub(super) fn restarted_from(rows: Vec<Write>) -> TestResult<Harness> {
+pub(in crate::e2ee::coordinator::tests::sequence) fn restarted_from(
+    rows: Vec<Write>,
+) -> TestResult<Harness> {
     let mut source = Harness::new()?;
     source.writes = rows;
     source.reloaded()

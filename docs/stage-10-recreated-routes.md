@@ -9,9 +9,10 @@ incarnation: its route table keys each incarnation's lock slot by its own
 semantic lock and a semantic route's lineage by the lock of its incarnation
 zero, admits the next incarnation after an authorized close, reserves a
 closed direct pair again, and restores every route's incarnation from its
-retained binding, live and after a restart alike. No specification, profile
-hash, registry entry, named limit, reply code, wire object, table, key, row
-kind, field or storage generation changed.
+retained binding, live and after a restart alike. The third restores route
+stores written before these rules (G-08). No specification, profile hash,
+registry entry, named limit, reply code, wire object, table, key, row kind,
+field or storage generation changed.
 
 ## A recreated route's genesis follows the close before it (first commit)
 
@@ -319,3 +320,67 @@ TODO catalog):
 | the coordinator tests above (no transcript row) | none | S08-004, S08-037 |
 
 No box changes.
+
+## Stores written before recreated routes (third commit, G-08)
+
+The decision is additive within storage generation 5 (decision D-06): no
+table, key, row kind, field or object layout changed, and startup writes
+nothing. What changed is what the existing rows may hold and how a restart
+reads them:
+
+- a route row of a later incarnation names the close it follows
+  (`predecessor_close_id`, a field every route row already had), a
+  tombstone row included;
+- one direct pair, or one semantic route, may have several route rows, one
+  per incarnation;
+- startup takes a route's incarnation from its retained binding rather than
+  from that field, and refuses a row that disagrees with the binding.
+
+A store the start commit wrote holds only incarnation zero, since that
+commit admitted no later one, and every one of its route rows names no
+close, as its binding's semantic route does. Such a store restores as the
+start commit restored it: each route at incarnation zero in its own
+lineage. From then on its closed routes are what this topic's rules make
+them: a closed direct pair is reserved again for its next incarnation and a
+closed channel route binds its next incarnation on a fresh instance, each
+naming the stored close (companion 9.4 and 11.4); a live pair keeps the
+pair and its traffic.
+
+The evidence is three stores the start commit's test harness wrote
+(`test-data/stage-ten/recreated-routes/`: a closed channel route, a live
+direct pair and the same pair closed; the generator, its two test-only
+edits and the command are in its README, and two runs wrote byte-identical
+files) and four restore tests in
+`crates/agenc-relay-runtime/src/e2ee/coordinator/tests/sequence/recreated_routes/earlier_stores.rs`:
+
+| Test | What it pins |
+| --- | --- |
+| `stores_written_before_recreated_routes_restore_at_incarnation_zero` | Each store, sealed into a storage fixture and read back as a restart reads it, restores with its route at incarnation zero, its lineage its own lock, current, and naming no close. |
+| `an_earlier_closed_direct_pair_is_reserved_and_bound_again` | After a restart from the closed pair, the pair is reserved again; incarnation zero again is refused; the next incarnation binds naming the stored close in the stored route's lineage, operates, and survives a restart. |
+| `an_earlier_closed_channel_route_binds_its_next_incarnation` | After a restart from the closed channel, its next incarnation binds on a fresh instance naming the stored close, in the stored route's lineage, and operates across a restart. |
+| `an_earlier_live_direct_pair_keeps_its_pair_and_traffic` | After a restart from the live pair, its reservation is still `E2EE_GROUP_CONFLICT` and its traffic flows. |
+
+With the start commit's keying restored, the closed pair's and the closed
+channel's tests fail and the other two pass, pinning behaviour this topic
+does not change; with the pair kept by any route, the closed pair's test
+fails.
+
+The sealed-storage restart of the second commit's tests now binds the
+pair's next incarnation in a conversation whose identifier sorts before the
+closed one's, so the restore meets the next incarnation first and must
+still index it; the restore keeping the last entry it reads, or ranking
+without the incarnation, now also fails the coordinator tests.
+
+Downgrade (scratch check, not committed): the start commit, run on stores
+this topic's coordinator wrote, restores them. A recreated channel route
+keeps both instances' routes current. For a recreated direct pair it
+indexes whichever incarnation its restore reads last, in conversation
+identifier order: with the next incarnation's identifier sorting last it
+indexes the live incarnation, and with it sorting first it indexes the
+closed one, answers `EGROUP QUERY DIRECT` with `EMPTY BINDING` and no
+longer projects the live route, while the live conversation still takes
+application objects by its identifier. Starting an earlier build on a
+database this topic's coordinator has run on is therefore unsafe; the
+operator guide already says not to start release candidate 3 on a database
+this release has run on, and going back means restoring a backup taken
+before the upgrade.

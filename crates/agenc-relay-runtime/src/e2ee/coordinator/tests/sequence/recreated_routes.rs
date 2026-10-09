@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod earlier_stores;
 mod row_mismatch;
 
 use agenc_relay_domain::e2ee::{ConversationId, DirectPair, RouteLifecycle};
@@ -757,6 +758,18 @@ async fn sealed_restart(harness: &Harness) -> TestResult<Harness> {
     Ok(fresh)
 }
 
+/// A group whose conversation identifier sorts before `DIRECT_GROUP`'s, so
+/// a restore in identifier order meets the next incarnation first.
+fn group_sorting_first() -> TestResult<[u8; 32]> {
+    let first = conversation_id(&NETWORK, &DIRECT_GROUP)?;
+    for seed in 40_u8..=250 {
+        if conversation_id(&NETWORK, &[seed; 32])? < first {
+            return Ok([seed; 32]);
+        }
+    }
+    Err("a group that sorts first".into())
+}
+
 #[tokio::test]
 async fn a_recreated_direct_pair_restarts_through_the_sealed_store() -> TestResult {
     let mut harness = Harness::new()?;
@@ -769,8 +782,17 @@ async fn a_recreated_direct_pair_restarts_through_the_sealed_store() -> TestResu
     bind_and_publish(&mut harness, reservation, &first)?;
     operate(&mut harness, first.conversation, None)?;
     let close_id = close(&mut harness, first.conversation, 2)?;
+    // The next incarnation's conversation sorts first, so the restore meets
+    // it before the closed one and must still index it.
     let (reservation, nonce) = ok_reservation(reserve_direct(&mut harness, &peer_account)?)?;
-    let next = direct_group(&harness, &peer, (1, close_id), nonce, SECOND_DIRECT_GROUP)?;
+    let next = direct_group(
+        &harness,
+        &peer,
+        (1, close_id),
+        nonce,
+        group_sorting_first()?,
+    )?;
+    assert!(next.conversation < first.conversation);
     bind_and_publish(&mut harness, reservation, &next)?;
     operate(&mut harness, next.conversation, None)?;
     let live = route_of(&harness, next.conversation)?;
