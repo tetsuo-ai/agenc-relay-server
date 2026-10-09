@@ -21,6 +21,19 @@ use crate::state_core::StateCoreContext;
 #[path = "tests/origins.rs"]
 mod tests;
 
+/// The user and account one declaration names.
+pub(crate) type Principal = (Option<agenc_relay_types::UserId>, Option<[u8; 24]>);
+
+/// The attachment a declaration naming `principal` carries: the
+/// connection's device while the session and account it was attached under
+/// still hold, and none once a logout, an account switch or a replaced
+/// session ended it (companion 11.6: these invalidate the attachment).
+fn attachment(origin: &LocalOrigin, principal: Principal) -> Option<([u8; 16], u64)> {
+    origin
+        .device
+        .filter(|_| origin.device_principal == Some(principal))
+}
+
 impl E2eeEdge {
     /// Declares or re-declares every origin whose acknowledged base
     /// generation is ahead of its companion declaration.
@@ -77,7 +90,22 @@ impl E2eeEdge {
         }
         let previous = self.origins.get(&generation).cloned();
         let previous_state_id = previous.as_ref().map_or([0; 32], |origin| origin.state_id);
-        let device = previous.as_ref().and_then(|origin| origin.device);
+        let principal = (
+            facts
+                .session
+                .map(|(_, user)| agenc_relay_types::UserId::from_bytes(user)),
+            facts.account.map(|(account, _)| account),
+        );
+        let device = previous
+            .as_ref()
+            .and_then(|origin| attachment(origin, principal));
+        if device.is_none()
+            && previous
+                .as_ref()
+                .is_some_and(|origin| origin.device.is_some())
+        {
+            self.attachment_ended(generation);
+        }
         let object = ArcFederationOrigin {
             profile_version: 1,
             network_id: self.config.network_id,
@@ -142,15 +170,13 @@ impl E2eeEdge {
             user_id: None,
             account: None,
             device: None,
+            device_principal: None,
         });
         entry.origin_id = facts.origin_id;
         entry.declared = Some(base_generation);
         entry.state_id = state_id;
         entry.declaration = Some((base_generation, bytes));
-        entry.user_id = facts
-            .session
-            .map(|(_, user)| agenc_relay_types::UserId::from_bytes(user));
-        entry.account = facts.account.map(|(account, _)| account);
+        (entry.user_id, entry.account) = principal;
         if !self.send(context, edge, lines) {
             return Err(E2eeReplyCode::Syncing.into());
         }
@@ -248,11 +274,27 @@ impl E2eeEdge {
     ) {
         if let Some(origin) = self.origins.get_mut(&generation) {
             origin.device = Some((device, session_generation));
+            // The attachment holds while its principal does (companion 11.6).
+            origin.device_principal = Some((origin.user_id, origin.account));
             // The acknowledged declaration predates the device; requests wait
             // for the declaration the advanced base generation carries.
             origin.predates_device = origin.acked;
         }
         edge.advance_origin(context, generation);
+    }
+
+    /// Logout, an account switch or a replaced session ended the
+    /// connection's attachment: submission under it stops, so its
+    /// in-progress object is discarded (companion 11.6, 11.8).
+    fn attachment_ended(&mut self, generation: ConnectionGeneration) {
+        if let Some(origin) = self.origins.get_mut(&generation) {
+            origin.device = None;
+            origin.device_principal = None;
+        }
+        self.retried.remove(&generation);
+        if let Some(ingress) = self.ingress.remove(&generation) {
+            self.assembler.discard(&ingress.key);
+        }
     }
 
     /// A connection ended: its companion origin is deleted at the generation

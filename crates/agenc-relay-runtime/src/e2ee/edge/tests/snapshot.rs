@@ -1305,6 +1305,7 @@ fn hosting_origin(held: [u8; 24], attached: bool) -> LocalOrigin {
         user_id: None,
         account: Some(held),
         device: attached.then_some(([7; 16], 1)),
+        device_principal: attached.then_some((None, Some(held))),
     }
 }
 

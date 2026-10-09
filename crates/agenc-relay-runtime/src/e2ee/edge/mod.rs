@@ -136,6 +136,10 @@ pub(crate) struct LocalOrigin {
     pub(crate) account: Option<[u8; 24]>,
     /// The attached device and its session generation.
     pub(crate) device: Option<([u8; 16], u64)>,
+    /// The user and account the attachment was made under. A declaration
+    /// whose base principal names another session or account leaves the
+    /// attachment behind (companion 11.6).
+    pub(crate) device_principal: Option<origins::Principal>,
 }
 
 /// One request awaiting its result, its responses, and its completion.

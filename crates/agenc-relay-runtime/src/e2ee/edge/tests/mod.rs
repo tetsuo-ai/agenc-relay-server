@@ -168,6 +168,7 @@ fn origin(origin_id: [u8; 16], declared: u64, sequence: u64) -> LocalOrigin {
         user_id: None,
         account: None,
         device: None,
+        device_principal: None,
     }
 }
 

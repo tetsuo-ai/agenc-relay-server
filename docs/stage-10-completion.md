@@ -399,6 +399,12 @@ rows written before that rule, the held generation declared with its
 acknowledged principal and daemon tests of such a restart (D-41 with G-08,
 SDK program, outside master #35), are recorded in [the origin journal
 record](stage-10-origin-journal.md).
+A client's ordinary actions and its share of an edge's companion
+resources affecting only that client, beginning with the base and companion
+declarations of a generation naming one principal and a device attachment
+ending with the principal it was made under (D-44, SDK program, outside
+master #35), are recorded in [the edge attachment
+record](stage-10-edge-attachment.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded
